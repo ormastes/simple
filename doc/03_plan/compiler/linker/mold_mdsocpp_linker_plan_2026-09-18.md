@@ -277,9 +277,12 @@ integration lanes use this real source compiler. The Arm32 backend remains an
 explicit completion gap; remote placement itself is wired. The linker
 relocation layer now recognizes `EM_ARM` and applies the foundational AAELF32
 `NONE`, `ABS32`, `REL32`, `PC24`, `CALL`, and `JUMP24` formulas with checked
-range/alignment and opcode-preserving ARM branch patching. ELF32 parsing,
-Thumb relocations, and ARM executable emission remain before that lane can
-consume the existing LLVM ARM32 object backend.
+range/alignment and opcode-preserving ARM branch patching. Thumb-2 `THM_CALL`,
+`THM_JUMP24`, and absolute/PC-relative `THM_MOVW`/`THM_MOVT` records are also
+encoded with checked signed branch reach and split-immediate preservation.
+ELF32 parsing, the remaining Thumb/data relocation corpus, and ARM executable
+emission remain before that lane can consume the existing LLVM ARM32 object
+backend.
 
 Implemented source slice:
 

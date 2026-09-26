@@ -47,8 +47,14 @@ val R_ARM_NONE: i64 = 0
 val R_ARM_PC24: i64 = 1       # S + A - P, ARM B/BL imm24
 val R_ARM_ABS32: i64 = 2      # S + A
 val R_ARM_REL32: i64 = 3      # S + A - P
+val R_ARM_THM_CALL: i64 = 10  # S + A - P, Thumb-2 BL/BLX
 val R_ARM_CALL: i64 = 28      # S + A - P, ARM BL/BLX imm24
 val R_ARM_JUMP24: i64 = 29    # S + A - P, ARM B imm24
+val R_ARM_THM_JUMP24: i64 = 30
+val R_ARM_THM_MOVW_ABS_NC: i64 = 47
+val R_ARM_THM_MOVT_ABS: i64 = 48
+val R_ARM_THM_MOVW_PREL_NC: i64 = 49
+val R_ARM_THM_MOVT_PREL: i64 = 50
 
 # ============================================================================
 # AArch64 Relocation Types (subset)
@@ -276,6 +282,9 @@ fn patch_u64_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
 fn read_u32_le(bytes: [i64], offset: i64) -> i64:
     bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
 
+fn read_u16_le(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8)
+
 # ============================================================================
 # x86_64 Relocation Application
 # ============================================================================
@@ -395,6 +404,25 @@ fn reloc_apply_arm32(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
             return RelocResult(success: false, offset: offset, value: 0,
                 error: "R_ARM branch displacement exceeds signed 26-bit range")
         return RelocResult(success: true, offset: offset, value: (v >> 2) & 0xffffff, error: "")
+
+    if rtype == R_ARM_THM_CALL or rtype == R_ARM_THM_JUMP24:
+        val v = ((s + a) & -2) - p
+        if v & 0x1 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM branch target is not 2-byte aligned")
+        if v < -16777216 or v >= 16777216:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM branch displacement exceeds signed 25-bit range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_THM_MOVW_ABS_NC or rtype == R_ARM_THM_MOVT_ABS or
+            rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+        var v = s + a
+        if rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+            v = v - p
+        if rtype == R_ARM_THM_MOVT_ABS or rtype == R_ARM_THM_MOVT_PREL:
+            v = v >> 16
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported arm32 reloc type {rtype}")
 
@@ -821,6 +849,30 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
             if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
                 val insn = read_u32_le(bytes, offset)
                 patch_u32_le(bytes, offset, (insn & 0xff000000) | (result.value & 0xffffff))
+            else if rtype == R_ARM_THM_CALL or rtype == R_ARM_THM_JUMP24:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                val sign = (result.value >> 24) & 1
+                val j1 = 1 - (((result.value >> 23) & 1) ^ sign)
+                val j2 = 1 - (((result.value >> 22) & 1) ^ sign)
+                val imm10 = (result.value >> 12) & 0x3ff
+                val imm11 = (result.value >> 1) & 0x7ff
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xf800) | (sign << 10) | imm10)
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0xd000) | (j1 << 13) | (j2 << 11) | imm11)
+                patched
+            else if rtype == R_ARM_THM_MOVW_ABS_NC or rtype == R_ARM_THM_MOVT_ABS or
+                    rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xfbf0) | (((result.value >> 11) & 1) << 10) |
+                    ((result.value >> 12) & 0xf))
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0x8f00) | (((result.value >> 8) & 0x7) << 12) |
+                    (result.value & 0xff))
+                patched
             else:
                 patch_u32_le(bytes, offset, result.value)
         case AArch64:
@@ -949,12 +1001,14 @@ fn reloc_arch_from_machine(machine: i64) -> RelocArch:
 export RelocArch, RelocTarget, RelocResult
 export reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv
 export reloc_patch_bytes, reloc_arch_from_machine
-export patch_u8, patch_u16_le, patch_u32_le, patch_u64_le, read_u32_le
+export patch_u8, patch_u16_le, patch_u32_le, patch_u64_le, read_u16_le, read_u32_le
 export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_GOTPC32
 export R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_GOT32
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
-export R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_CALL, R_ARM_JUMP24
+export R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_THM_CALL
+export R_ARM_CALL, R_ARM_JUMP24, R_ARM_THM_JUMP24
+export R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL
 export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
 export R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC
 export R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G1_NC
