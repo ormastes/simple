@@ -795,10 +795,12 @@ owner-retained feature words to the existing V1 publication receipt check,
 and hashes the resulting V1 receipt with the bound plan/artifact/cache identities
 and both canonical registry bindings. Released registry uses and publication
 without a declared authenticated trust receipt fail before a V2 receipt is
-issued. The publication argument is still a caller-carried value; production
-issuance must consume the live composite-publication owner before this can be
-treated as an authoritative receipt. Emission/cache consumers still need to use
-the V2 identities.
+issued. The raw-publication result is a candidate, not publication authority.
+The activated V2 receipt entry point joins a live publication-activation token,
+projects its retained canonical publication, and checks that its plan digest
+matches the activation projection. Consumers must revalidate the activated
+receipt against both live owners before using it. Emission/cache consumers
+still need to use these V2 identities and the live check.
 
 ### Backend feature receipt boundary
 

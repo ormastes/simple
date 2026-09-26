@@ -427,9 +427,11 @@ generation/digest into artifact and cache identities. Full REQ-015 closure still
 needs consumption of the V2 registry-bound profile and provider-receipt identities
 by emission/cache paths, plus the backend join's canonical named-feature-to-word
 expansion. The V2 receipt constructor now derives identity from live registry
-uses and checked publication fields, but still accepts caller-carried publication;
-it must join the live composite-publication owner for production issuance. Its
-focused unit spec is not yet executed with a source-matched self-hosted runner.
+uses and checked publication fields. A separate activated receipt entry point
+now joins the live publication-activation owner, while the raw-publication
+constructor remains a candidate. Emission/cache consumers must require the
+activated live check. Its focused unit spec is not yet executed with a
+source-matched self-hosted runner.
 The backend join may not compare unrelated
 text and numeric digests or infer equality from the v3 preset name.
 

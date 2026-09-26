@@ -21,8 +21,9 @@ binding before issuing a plan or cache key. The V2 registry build-plan owner
 now rechecks those uses and derives bound identities on projection; emission
 and cache publication still need to consume its projection. Its V2 provider
 receipt rechecks live uses and declared publication trust before binding both
-registry profiles into the receipt hash. Production issuance still needs the
-live composite-publication owner. A copied binding digest alone grants
+registry profiles into the receipt hash. Its activated entry point now joins a
+live publication-activation owner and requires revalidation by consumers; the
+raw-publication receipt remains a candidate. A copied binding digest alone grants
 no build authority. Parser scalar parity, emitted
 and executed ISA evidence, and actual GPU completion remain separate promotion
 gates. Production startup uses cached artifacts and does not compile an

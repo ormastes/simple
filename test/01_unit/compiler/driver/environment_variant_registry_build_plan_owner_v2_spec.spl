@@ -4,6 +4,7 @@ use std.spec.*
 use compiler.driver.canonical_target_registry_owner_v2.*
 use compiler.driver.environment_variant_build_planner_v1.*
 use compiler.driver.environment_variant_registry_build_plan_owner_v2.*
+use compiler.driver.environment_publication_activation_coordinator_v1.*
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
 use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
 use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
@@ -95,7 +96,7 @@ describe "environment variant registry build-plan owner V2":
             input_erbp(baseline, artifact)).unwrap()
         val bound = environment_registry_build_plan_project_v2(owner, registry,
             token).unwrap()
-        val receipt = environment_registry_provider_receipt_v2(owner, registry,
+        val receipt = environment_registry_provider_receipt_candidate_v2(owner, registry,
             token, publication_erbp(), 0).unwrap()
         expect(receipt.plan_identity).to_equal(bound.plan_identity)
         expect(receipt.selected_artifact_identity).to_equal(
@@ -104,7 +105,17 @@ describe "environment variant registry build-plan owner V2":
         expect(receipt.target_profile_binding_digest).to_equal(
             bound.artifacts[0].target_binding.profile_binding_digest)
         expect(receipt.provider_receipt_hash.len() > 0).to_be(true)
-        expect(environment_registry_provider_receipt_v2(owner, registry,
+        val activation_owner = EnvironmentPublicationActivationCoordinatorV1.create()
+        val absent_activation = EnvironmentPublicationActivationCoordinatorTokenV1(
+            token_id: 1u64, owner_identity: activation_owner.owner_identity)
+        expect(environment_registry_activated_provider_receipt_v2(owner, registry,
+            token, activation_owner, absent_activation, 0)).to_equal(
+                Err(EnvironmentRegistryProviderReceiptErrorV2.ActivationRejected))
+        val forged = EnvironmentRegistryActivatedProviderReceiptV2(
+            receipt: receipt, activation_token: absent_activation)
+        expect(environment_registry_activated_provider_receipt_live_v2(owner,
+            registry, token, activation_owner, forged, 0)).to_be(false)
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
             token, publication_erbp(), 1)).to_equal(
                 Err(EnvironmentRegistryProviderReceiptErrorV2.ArtifactIndexInvalid))
         var unauthenticated = publication_erbp()
@@ -113,7 +124,7 @@ describe "environment variant registry build-plan owner V2":
         trust.authentication_status = ENV_ARTIFACT_TRUST_REJECTED_V1
         evidence.trust_receipt = trust
         unauthenticated.admitted_artifacts[0] = evidence
-        expect(environment_registry_provider_receipt_v2(owner, registry,
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
             token, unauthenticated, 0)).to_equal(
                 Err(EnvironmentRegistryProviderReceiptErrorV2.PublicationRejected))
         expect(canonical_target_registry_replace_v2(registry, registry.candidate,
@@ -126,7 +137,7 @@ describe "environment variant registry build-plan owner V2":
             current).unwrap()
         val current_token = environment_registry_build_plan_create_v2(owner, registry,
             input_erbp(current_baseline, current_artifact)).unwrap()
-        val current_receipt = environment_registry_provider_receipt_v2(owner, registry,
+        val current_receipt = environment_registry_provider_receipt_candidate_v2(owner, registry,
             current_token, publication_erbp(), 0).unwrap()
         expect(current_receipt.provider_receipt_hash == receipt.provider_receipt_hash).to_be(false)
         expect(canonical_target_registry_release_v2(registry,
@@ -134,7 +145,7 @@ describe "environment variant registry build-plan owner V2":
         expect(canonical_target_registry_release_v2(registry,
             current_baseline).is_ok()).to_be(true)
         expect(canonical_target_registry_release_v2(registry, artifact).is_ok()).to_be(true)
-        expect(environment_registry_provider_receipt_v2(owner, registry,
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
             token, publication_erbp(), 0)).to_equal(
                 Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected))
         expect(canonical_target_registry_release_v2(registry, baseline).is_ok()).to_be(true)
@@ -171,9 +182,9 @@ describe "environment variant registry build-plan owner V2":
         expect(alias_plan.plan_identity).to_equal(canonical_plan.plan_identity)
         expect(alias_plan.artifacts[0].target_binding.canonical_target_triple).to_equal(
             "x86_64-unknown-linux-gnu")
-        val alias_receipt = environment_registry_provider_receipt_v2(alias_owner,
+        val alias_receipt = environment_registry_provider_receipt_candidate_v2(alias_owner,
             alias_registry, alias_token, publication_erbp(), 0).unwrap()
-        val canonical_receipt = environment_registry_provider_receipt_v2(canonical_owner,
+        val canonical_receipt = environment_registry_provider_receipt_candidate_v2(canonical_owner,
             canonical_registry, canonical_token, publication_erbp(), 0).unwrap()
         expect(alias_receipt.provider_receipt_hash).to_equal(
             canonical_receipt.provider_receipt_hash)

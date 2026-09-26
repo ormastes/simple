@@ -16,6 +16,12 @@ use compiler.driver.environment_variant_build_planner_v1.{
     EnvironmentVariantBuildPlanV1, environment_variant_build_plan_v1}
 use compiler.driver.environment_variant_provider_receipt_v1.{
     EnvironmentVariantProviderReceiptV1, environment_variant_provider_receipt_v1}
+use compiler.driver.environment_publication_activation_coordinator_v1.{
+    EnvironmentPublicationActivationCoordinatorV1,
+    EnvironmentPublicationActivationCoordinatorTokenV1,
+    environment_publication_activation_live_v1,
+    environment_publication_activation_publication_v1,
+    environment_publication_activation_project_v1}
 use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.EnvironmentPublicationAdmissionV1
 
 pub const ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2: u16 = 2u16
@@ -61,8 +67,9 @@ pub enum EnvironmentRegistryProviderReceiptErrorV2:
     ArtifactIndexInvalid
     PublicationRejected
     IdentityMismatch
+    ActivationRejected
 
-pub struct EnvironmentRegistryProviderReceiptV2:
+pub struct EnvironmentRegistryProviderReceiptCandidateV2:
     schema_version: u16
     provider_receipt_hash: text
     plan_identity: EnvironmentDigest256V1
@@ -74,6 +81,10 @@ pub struct EnvironmentRegistryProviderReceiptV2:
     dependency_lock_digest: EnvironmentDigest256V1
     dependency_closure_digest: EnvironmentDigest256V1
     provider_generation: u64
+
+pub struct EnvironmentRegistryActivatedProviderReceiptV2:
+    receipt: EnvironmentRegistryProviderReceiptCandidateV2
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1
 
 pub struct EnvironmentRegistryBuildPlanTokenV2:
     owner_instance: u64
@@ -267,13 +278,13 @@ fn _digest_text_erbp(value: EnvironmentDigest256V1) -> text:
 # Feature words come from the owner's retained request, never a caller copy.
 # Publication is still caller-carried; production issuance needs a live
 # composite-publication owner join.
-pub fn environment_registry_provider_receipt_v2(
+pub fn environment_registry_provider_receipt_candidate_v2(
     owner: EnvironmentRegistryBuildPlanOwnerV2,
     registry: CanonicalTargetRegistryOwnerV2,
     token: EnvironmentRegistryBuildPlanTokenV2,
     publication: EnvironmentPublicationAdmissionV1,
     artifact_index: i64
-) -> Result<EnvironmentRegistryProviderReceiptV2, EnvironmentRegistryProviderReceiptErrorV2>:
+) -> Result<EnvironmentRegistryProviderReceiptCandidateV2, EnvironmentRegistryProviderReceiptErrorV2>:
     val projected = environment_registry_build_plan_project_v2(owner, registry, token)
     if projected.is_err():
         return Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
@@ -306,7 +317,7 @@ pub fn environment_registry_provider_receipt_v2(
                 "|baselineMapping={baseline.mapping_generation}:" + baseline.mapping_digest +
                 "|targetRegistry={target.registry_generation}" +
                 "|targetMapping={target.mapping_generation}:" + target.mapping_digest
-            return Ok(EnvironmentRegistryProviderReceiptV2(
+            return Ok(EnvironmentRegistryProviderReceiptCandidateV2(
                 schema_version: ENV_REGISTRY_PROVIDER_RECEIPT_SCHEMA_V2,
                 provider_receipt_hash: sha256_text(material),
                 plan_identity: plan.plan_identity,
@@ -319,3 +330,47 @@ pub fn environment_registry_provider_receipt_v2(
                 dependency_closure_digest: base_receipt.dependency_closure_digest,
                 provider_generation: base_receipt.provider_generation))
     Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
+
+# The activated path requires the publication coordinator to retain the exact
+# admitted publication. Consumers revalidate this projection before using its
+# receipt hash; copied output alone is not an authority.
+pub fn environment_registry_activated_provider_receipt_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2,
+    token: EnvironmentRegistryBuildPlanTokenV2,
+    activation_owner: EnvironmentPublicationActivationCoordinatorV1,
+    activation_token: EnvironmentPublicationActivationCoordinatorTokenV1,
+    artifact_index: i64
+) -> Result<EnvironmentRegistryActivatedProviderReceiptV2,
+            EnvironmentRegistryProviderReceiptErrorV2>:
+    if not environment_publication_activation_live_v1(activation_owner,
+        activation_token):
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.ActivationRejected)
+    val publication = environment_publication_activation_publication_v1(
+        activation_owner, activation_token)
+    val activation = environment_publication_activation_project_v1(
+        activation_owner, activation_token)
+    if publication.is_err() or activation.is_err():
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.ActivationRejected)
+    val candidate = environment_registry_provider_receipt_candidate_v2(owner, registry,
+        token, publication.unwrap().admission, artifact_index)
+    if candidate.is_err(): return Err(candidate.unwrap_err())
+    val receipt = candidate.unwrap()
+    if receipt.publication_plan_digest != activation.unwrap().publication_plan_digest:
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.IdentityMismatch)
+    Ok(EnvironmentRegistryActivatedProviderReceiptV2(receipt: receipt,
+        activation_token: activation_token))
+
+pub fn environment_registry_activated_provider_receipt_live_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2,
+    token: EnvironmentRegistryBuildPlanTokenV2,
+    activation_owner: EnvironmentPublicationActivationCoordinatorV1,
+    receipt: EnvironmentRegistryActivatedProviderReceiptV2,
+    artifact_index: i64
+) -> bool:
+    val current = environment_registry_activated_provider_receipt_v2(owner,
+        registry, token, activation_owner, receipt.activation_token,
+        artifact_index)
+    if current.is_err(): return false
+    current.unwrap() == receipt
