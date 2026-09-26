@@ -887,83 +887,70 @@ RuntimeValue rt_async_run_until_complete(RuntimeValue future) { (void)future; re
 RuntimeValue rt_async_schedule_await(RuntimeValue future, RuntimeValue callback) { (void)future; (void)callback; return NIL_VALUE; }
 
 
-/* ---- rt_atomic_* (single-core baremetal — no actual contention) ---- */
+/* ---- rt_atomic_* (hardware atomics, also valid after SMP bring-up) ---- */
 
-/* Atomic int: on single-core baremetal, just a boxed i64 */
+/* Keep the established boxed-handle ABI. The x86_64 __atomic builtins lower
+ * to lock-prefixed instructions and do not require libatomic or a host OS. */
 RuntimeValue rt_atomic_int_new(RuntimeValue initial) {
     int64_t *p = (int64_t *)malloc(sizeof(int64_t));
     if (!p) return 0;
-    *p = (int64_t)initial;
+    __atomic_store_n(p, (int64_t)initial, __ATOMIC_SEQ_CST);
     return (RuntimeValue)(uintptr_t)p;
 }
 
 RuntimeValue rt_atomic_int_load(RuntimeValue handle) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
-    return p ? (RuntimeValue)*p : 0;
+    return p ? (RuntimeValue)__atomic_load_n(p, __ATOMIC_SEQ_CST) : 0;
 }
 
 RuntimeValue rt_atomic_int_store(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
-    if (p) *p = (int64_t)value;
+    if (p) __atomic_store_n(p, (int64_t)value, __ATOMIC_SEQ_CST);
     return NIL_VALUE;
 }
 
 RuntimeValue rt_atomic_int_swap(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p = (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_exchange_n(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_compare_exchange(RuntimeValue handle, RuntimeValue current, RuntimeValue new_val) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    if (*p == (int64_t)current) {
-        *p = (int64_t)new_val;
-        return 1;
-    }
-    return 0;
+    int64_t expected = (int64_t)current;
+    return __atomic_compare_exchange_n(p, &expected, (int64_t)new_val, 0,
+                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
 }
 
 RuntimeValue rt_atomic_int_fetch_add(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p += (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_fetch_add(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_fetch_sub(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p -= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_fetch_sub(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_fetch_and(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p &= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_fetch_and(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_fetch_or(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p |= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_fetch_or(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_fetch_xor(RuntimeValue handle, RuntimeValue value) {
     int64_t *p = (int64_t *)(uintptr_t)handle;
     if (!p) return 0;
-    int64_t old = *p;
-    *p ^= (int64_t)value;
-    return (RuntimeValue)old;
+    return (RuntimeValue)__atomic_fetch_xor(p, (int64_t)value, __ATOMIC_SEQ_CST);
 }
 
 RuntimeValue rt_atomic_int_free(RuntimeValue handle) {

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+cc_bin=${CC:-clang}
+
+case "$(uname -s)" in
+    Darwin) strip_flag=-Wl,-dead_strip ;;
+    *) strip_flag=-Wl,--gc-sections ;;
+esac
+
+"$cc_bin" -O2 -pthread -ffunction-sections -fdata-sections "$strip_flag" \
+    "$repo_root/test/01_unit/os/libc/simpleos_x86_baremetal_atomic_contention_test.c" \
+    "$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c" \
+    -o "$work_dir/contention"
+"$work_dir/contention"
+
+"$cc_bin" --target=x86_64-unknown-elf -S -O2 -ffreestanding -nostdlib \
+    -fno-pie -mno-red-zone \
+    "$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/rt_extras.c" \
+    -o "$work_dir/rt_extras.s"
+grep -Eq 'lock[[:space:]]+cmpxchgq' "$work_dir/rt_extras.s"
+grep -Eq 'lock[[:space:]]+xaddq' "$work_dir/rt_extras.s"
+printf 'PASS: x86 bare-metal atomic contention and emitted hardware atomics\n'
