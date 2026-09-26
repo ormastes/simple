@@ -959,8 +959,14 @@ RuntimeValue rt_atomic_int_free(RuntimeValue handle) {
 }
 
 /* Atomic bool */
+static RuntimeValue simpleos_atomic_bool_arg(RuntimeValue value) {
+    if (value == TAGGED_BOOL_FALSE) return 0;
+    if (value == TAGGED_BOOL_TRUE) return 1;
+    return value ? 1 : 0;
+}
+
 RuntimeValue rt_atomic_bool_new(RuntimeValue initial) {
-    return rt_atomic_int_new(initial ? 1 : 0);
+    return rt_atomic_int_new(simpleos_atomic_bool_arg(initial));
 }
 
 RuntimeValue rt_atomic_bool_load(RuntimeValue handle) {
@@ -968,11 +974,30 @@ RuntimeValue rt_atomic_bool_load(RuntimeValue handle) {
 }
 
 RuntimeValue rt_atomic_bool_store(RuntimeValue handle, RuntimeValue value) {
-    return rt_atomic_int_store(handle, value ? 1 : 0);
+    return rt_atomic_int_store(handle, simpleos_atomic_bool_arg(value));
 }
 
 RuntimeValue rt_atomic_bool_swap(RuntimeValue handle, RuntimeValue value) {
-    return rt_atomic_int_swap(handle, value ? 1 : 0) ? 1 : 0;
+    return rt_atomic_int_swap(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_compare_exchange(RuntimeValue handle,
+                                             RuntimeValue current,
+                                             RuntimeValue new_value) {
+    return rt_atomic_int_compare_exchange(handle,
+        simpleos_atomic_bool_arg(current), simpleos_atomic_bool_arg(new_value));
+}
+
+RuntimeValue rt_atomic_bool_fetch_and(RuntimeValue handle, RuntimeValue value) {
+    return rt_atomic_int_fetch_and(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_fetch_or(RuntimeValue handle, RuntimeValue value) {
+    return rt_atomic_int_fetch_or(handle, simpleos_atomic_bool_arg(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_atomic_bool_fetch_not(RuntimeValue handle) {
+    return rt_atomic_int_fetch_xor(handle, 1) ? 1 : 0;
 }
 
 RuntimeValue rt_atomic_bool_free(RuntimeValue handle) {

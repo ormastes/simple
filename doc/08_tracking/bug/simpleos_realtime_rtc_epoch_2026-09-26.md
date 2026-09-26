@@ -33,8 +33,9 @@ The x86 bare-metal atomic source passed a host four-thread contention test for
 fetch-add and CAS and cross-compiled for x86 freestanding; emitted assembly
 contains lock-prefixed `cmpxchgq` and `xaddq`. The repeatable focused gate is
 `sh scripts/check/check-simpleos-x86-baremetal-atomics.shs`. This does not
-replace an SMP guest test. AArch64 and RISC-V 64 atomic provider parity remains
-a separate release gate.
+replace an SMP guest test. AArch64 and RISC-V 64 now have candidate shared
+atomic source providers, but linked and guest parity remain a separate release
+gate.
 
 Relevant hardware behavior is described in the [Linux kernel x86 timekeeping
 documentation](https://docs.kernel.org/virt/kvm/x86/timekeeping.html). QEMU
