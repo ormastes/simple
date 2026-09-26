@@ -1289,6 +1289,21 @@ pub fn compile_function_body<M: Module>(
                         let nil_val = builder.ins().iconst(types::I64, 0);
                         builder.ins().return_(&[nil_val]);
                     }
+                } else if func.return_type == TypeId::ANY {
+                    // A function with no declared return type whose body ends
+                    // in a value-producing expression is inferred `ANY`
+                    // (module_lowering/function.rs `body_produces_value`), and
+                    // a bare `return` inside it is ordinary Simple: leave with
+                    // nil. It must not fall into the fail-fast trap below —
+                    // that `ud2` is what SIGILL'd every stage-2 candidate on
+                    // its first token (`current_core_lexer_save`: `if not
+                    // flag[0]: return` followed by a `-> bool` tail call).
+                    // Tagged nil is the constant 3 (TAG_SPECIAL=0b011 |
+                    // SPECIAL_NIL=0), as in helpers.rs/pattern.rs; the AOT
+                    // ObjectModule backend does not register "rt_value_nil"
+                    // in `runtime_funcs`, so no runtime call here.
+                    let nil_val = builder.ins().iconst(types::I64, 3);
+                    builder.ins().return_(&[nil_val]);
                 } else {
                     builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 }
