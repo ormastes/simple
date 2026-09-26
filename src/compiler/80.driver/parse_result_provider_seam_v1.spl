@@ -444,6 +444,20 @@ pub fn parse_result_seam_request_v1(
         return Err(ParseResultRefusalV1.InvalidRequest)
     match provider.parse(request):
         case Ok(result):
+            # A callable may return a stale or foreign result. Refuse metadata
+            # inconsistent with this provider, generation, source, or dialect
+            # before stamping dialect identity. Executable attestation is a
+            # separate admission gate; matching fields alone do not prove it.
+            if result.schema_version != PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1 or
+               result.provider_id != provider.provider_id or
+               not _same_digest(result.implementation_identity,
+                   provider.implementation_identity) or
+               result.generation != provider.generation or
+               not _same_digest(result.source_identity,
+                   parse_result_source_identity_v1(request.source_text)) or
+               result.source_length != request.source_text.len() as u64 or
+               result.dialect_id != request.dialect_id:
+                return Err(ParseResultRefusalV1.ProviderSchemaMismatch)
             var stamped = result
             stamped.grammar_digest = computed.grammar_digest
             stamped.actions_digest = computed.actions_digest

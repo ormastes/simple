@@ -21,10 +21,12 @@ use compiler.driver.parse_result_provider_seam_v1.{
     PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
     PARSE_DIALECT_SIMPLE_V1,
     ParseRequestV1,
+    ParseNormalizedResultV1,
     ParseResultRefusalV1,
     parse_result_provider_scalar_v1,
     parse_result_provider_simd_v1,
     parse_result_seam_request_v1,
+    parse_result_source_identity_v1,
     parse_result_normalize_module_v1,
     parse_result_normalized_output_same_v1,
     parse_result_parity_evidence_v1
@@ -60,6 +62,16 @@ fn direct_normalized(name: text) -> ParserScalarNormalizedOutputV1:
     val module = parse_and_build_module_scoped(src, name, false)
     val diagnostics = if parser_has_errors(): parser_get_errors() else: []
     parse_result_normalize_module_v1(module, src, name, diagnostics)
+
+fn stale_source_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    val scalar = parse_result_provider_scalar_v1()
+    match scalar.parse(request):
+        case Ok(result):
+            var stale = result
+            stale.source_identity = parse_result_source_identity_v1("different source")
+            Ok(stale)
+        case Err(refusal):
+            Err(refusal)
 
 describe "parse-result provider seam":
     it "returns a fully declared normalized result for every frozen corpus entry":
@@ -204,6 +216,31 @@ describe "parse-result provider seam":
                 dialect_id: PARSE_DIALECT_SIMPLE_V1))
         match wrong_schema:
             case Ok(r):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
+
+    it "refuses stale source, foreign provider, or generation before stamping":
+        # @req REQ-009
+        val request = seam_request("f01_functions.spl", PARSE_DIALECT_SIMPLE_V1)
+        var stale = parse_result_provider_scalar_v1()
+        stale.parse = stale_source_parse
+        match parse_result_seam_request_v1(stale, request):
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
+        var foreign = parse_result_provider_scalar_v1()
+        foreign.provider_id = "parser.foreign.claimed"
+        match parse_result_seam_request_v1(foreign, request):
+            case Ok(result):
+                assert_true(false)
+            case Err(refusal):
+                assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
+        var later_generation = parse_result_provider_scalar_v1()
+        later_generation.generation = 2u64
+        match parse_result_seam_request_v1(later_generation, request):
+            case Ok(result):
                 assert_true(false)
             case Err(refusal):
                 assert_true(refusal == ParseResultRefusalV1.ProviderSchemaMismatch)
