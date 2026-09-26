@@ -1,12 +1,76 @@
 # `native-build` worker dies with SIGILL (`ud2`) at codegen entry, on every build
 
 - **Filed:** 2026-09-26
-- **Status:** OPEN — blocks Stage 2, therefore phase 1 `--stop-after-stage2`, the
-  local-temp MCP redeploy, and every Cortex-M policy-object build
+- **Status:** FIXED 2026-09-26 (hello-world `native-build` exits 0 on cranelift
+  and llvm; see "Resolution"). Two follow-ups stay open, listed there. Was:
+  blocks Stage 2, therefore phase 1 `--stop-after-stage2`, the local-temp MCP
+  redeploy, and every Cortex-M policy-object build
 - **Area:** `80.driver` diagnostics + JIT codegen (cranelift and llvm lanes alike)
 - **Host:** yoon-note, x86_64-unknown-linux-gnu, 7 GiB RAM
 - **Seed:** built 2026-09-26 09:02 from `03553bcb5f6` (= `origin/main` `49389cb10f3`
   plus 13 unrelated Cortex-M files), `Simple Language v1.0.0-rc.1`
+
+## Resolution (2026-09-26) — three stacked defects, two fixed
+
+Bisected with temporary `log_phase`/`print` markers (all reverted) from the
+last marker `aot:format:done` down to the exact statement. The SIGILL was the
+*third* of three defects, each hiding the one beneath it:
+
+1. **Empty static backend table in the interpreted worker** —
+   `src/compiler/70.backend/backend/codegen_factory.spl:27-28`:
+   `active_static_backend_table_v1()` returned `len=0`, so
+   `select_static_backend_v1("cranelift", [])` answered `PLUG-E-NOTFOUND` and the
+   `case Err(...)` arm called `error(...)`. Cause: since the K1 plugin migration
+   (`e0fa5ef45e2`, 2026-09-07) the table is installed only by the compiled CLI
+   entries (`bootstrap_main.spl:439`, `_CliMain/main_and_help.spl:302`); the
+   seed's native-build spawns `simple run src/app/cli/native_build_worker.spl`,
+   whose `main` never installed it. It cannot call the usual
+   `compiler.driver.bootstrap_k1_selected` either: the interpreter resolves that
+   path to the fail-closed stub (`src/compiler/80.driver/bootstrap_k1_selected.spl`,
+   probe printed `policy=unselected install=false`), never to the composition.
+   **Fix:** `src/app/cli/native_build_worker.spl` imports the committed
+   composition by its own path
+   (`compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected`)
+   and runs the same K1 + full-plugin-table preamble as `main_and_help.spl`,
+   failing closed with `PLUG-E-TABLE` + the table diagnostic.
+2. **`--output-format both` hashed the `--source` DIRECTORY** —
+   `src/compiler/80.driver/driver_aot_pipeline.spl` `both` branch used
+   `input_files[0]` as the SMF-manifest source. native-build passes
+   `[source_dirs..., entry]` (`compile_targets.spl:1200-1203`), and `dynload`
+   (the default `build_mode`) selects `Both`, so every default native-build read
+   a directory. Until `ec19563b735` (2026-08-26) that was `rt_file_read_text(dir)
+   ?? ""` (silently hashed ""); the fail-closed `file_read_result` since then
+   turns it into `CodegenError`, worker rc=1. **Fix:** `_driver_entry_source_input`
+   picks the first input that `is_file` — the entry in both producers (plain:
+   dirs precede the entry; `--entry-closure`: BFS root is first).
+3. **The SIGILL itself is in the PARENT's failure relay, not the worker.**
+   `timeout: the monitored command dumped core` names the seed `native-build`
+   process (`native_build_main.spl`, JIT'd), which traps with `ud2` while
+   relaying the worker's failure text (`eprint_bounded` /
+   `native_build_print_failure_hints`, the `rt_eprint_str` frames in the gdb
+   trace). It is data-dependent: the same worker failure produced rc=132 or
+   rc=1 depending only on how much stdout the worker had printed
+   (`SIMPLE_COMPILER_PHASE_PROFILE=1` or extra `print`s flipped it to a clean
+   `error: native-build worker exited with code 1`). The worker's own spilled
+   stderr (`/tmp/native-build-stderr-<pid>-N.log`) always ended cleanly with
+   `error: ...`. **Not fixed** — no longer reachable for a passing build, but any
+   future worker failure can still be reported as SIGILL instead of its message.
+   Open: bisect `native_build_main.spl`'s `code != 0` branch; note
+   `std.nogc_sync_mut.io.process_ops.spl:1910 fn eprint` shadows the prelude
+   `eprint` program-wide (the worker log warns about it).
+
+Also observed, open: in the `both` branch the `case Err(error)` binding printed
+as `<fn:error>` (a `Value::Function` named `error`) — the interpreter resolved
+the arm binding to the builtin. Free-function and `val x = match` probes did NOT
+reproduce it; the binding at that site is renamed `read_error` so a genuine read
+failure now reports its text. The interpreter-side cause is unlocated.
+
+**Proof** (seed `src/compiler_rust/target/bootstrap/simple`, 2026-09-26 09:02):
+```
+native-build --backend cranelift ... hw.spl   rc=0, out.bin prints "hi"
+native-build --backend llvm      ... hw.spl   rc=0, out_llvm.bin prints "hi"
+```
+Instrumentation was reverted; `git status` shows only the two fix files.
 
 ## Symptom
 
@@ -126,14 +190,12 @@ Re-check this record against a newer `main` before investing in it.
 ## Unblock condition
 
 A `native-build` of the three-line hello world above exits 0 on this host.
-
-Next step for whoever picks this up: the fault is at codegen entry, so bisect
-there rather than in the diagnostics. Useful probes, cheapest first — set
-`SIMPLE_COMPILER_PHASE_PROFILE=1` to get `[BOOTSTRAP-PHASE]` deltas across the
-mir->codegen boundary and find the last phase marker before the trap; then run
-the worker generation binary under `gdb` with `set follow-fork-mode child` and
-break on the codegen entry point to get a backtrace with named frames instead of
-two anonymous JIT addresses.
+**Met 2026-09-26** on both backends (see Resolution). Not yet re-verified:
+a full `--stop-after-stage2` run; the Stage-2 entry
+(`app.cli.bootstrap_main` + `SIMPLE_BOOTSTRAP=1`) routes through
+`bootstrap_compile_context_to_native_local`, which the interpreted worker still
+resolves to the stub — re-run the phase-1 script and read its verdict rather
+than assuming this fix covers it.
 
 Do **not** "fix" this by silencing the bootstrap-flat warning — it is not the
 cause (proved above), and it exists to stop a bootstrap-flat count being cited as
