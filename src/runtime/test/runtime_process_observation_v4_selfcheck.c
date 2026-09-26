@@ -190,19 +190,29 @@ int main(int argc, char** argv) {
      * drain both full output pipes while the child waits for stdin. */
     SplArray* input_request=request_bytes(cwd,cwd_pin,cwd_digest,
         "--pov4-input-child",262144);
-    SplArray* malformed_input=rt_array_new(1);
-    assert(rt_array_push(malformed_input,256));
-    SplArray* malformed_start=rt_process_inspection_v1_start_pinned_value(
-        77,cwd_pin,input_request,malformed_input);
-    assert(rt_array_get(tuple_item(malformed_start,3),3)==POV4_STATUS_REJECTED);
-    SplArray* input=rt_array_new(131072);
-    for(int i=0;i<131072;i++) assert(rt_array_push(input,i&255));
     uint8_t expected_input[131072];
     for(int i=0;i<131072;i++) expected_input[i]=(uint8_t)(i&255);
     uint8_t expected_digest[32];
     owned_sha256(expected_input,sizeof(expected_input),expected_digest);
+    SplArray* digest_value=rt_array_new(32);
+    put_bytes(digest_value,expected_digest,32);
+    SplArray* malformed_input=rt_array_new(1);
+    assert(rt_array_push(malformed_input,256));
+    SplArray* malformed_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,input_request,malformed_input,digest_value);
+    assert(rt_array_get(tuple_item(malformed_start,3),3)==POV4_STATUS_REJECTED);
+    SplArray* input=rt_array_new(131072);
+    for(int i=0;i<131072;i++) assert(rt_array_push(input,i&255));
+    uint8_t mismatched_input_digest[32];
+    memcpy(mismatched_input_digest,expected_digest,32);
+    mismatched_input_digest[0]^=1;
+    SplArray* wrong_digest_value=rt_array_new(32);
+    put_bytes(wrong_digest_value,mismatched_input_digest,32);
+    SplArray* wrong_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,input_request,input,wrong_digest_value);
+    assert(rt_array_get(tuple_item(wrong_start,3),3)==POV4_STATUS_REJECTED);
     SplArray* input_start=rt_process_inspection_v1_start_pinned_value(
-        77,cwd_pin,input_request,input);
+        77,cwd_pin,input_request,input,digest_value);
     SplArray* input_words=tuple_item(input_start,3);
     assert(rt_array_get(input_words,3)==POV4_STATUS_RUNNING);
     assert(rt_array_set(input,0,255));
@@ -234,6 +244,35 @@ int main(int argc, char** argv) {
     assert(rt_array_get(tuple_item(input_ack,3),1)==POV4_KIND_ACK);
     SplArray* stale_input_receipt=rt_process_inspection_v1_input_receipt_value(input_ticket);
     assert(rt_array_get(stale_input_receipt,10)==ESTALE);
+
+    /* An early-exiting child leaves a decodable terminal observation but
+     * cannot claim a complete input receipt. */
+    SplArray* early_request=request_bytes(cwd,cwd_pin,cwd_digest,
+        "--pov4-child",1024);
+    expected_input[0]=255;
+    owned_sha256(expected_input,sizeof(expected_input),expected_digest);
+    SplArray* early_digest_value=rt_array_new(32);
+    put_bytes(early_digest_value,expected_digest,32);
+    SplArray* early_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,early_request,input,early_digest_value);
+    SplArray* early_words=tuple_item(early_start,3);
+    assert(rt_array_get(early_words,3)==POV4_STATUS_RUNNING);
+    SplArray* early_ticket=ticket_from(early_words), *early_frozen=NULL;
+    for(int i=0;i<100;i++) {
+        early_frozen=rt_process_observation_v4_collect_value(early_ticket,50000000);
+        early_words=tuple_item(early_frozen,3);
+        if(rt_array_get(early_words,1)==POV4_KIND_FROZEN) break;
+    }
+    assert(early_frozen && rt_array_get(early_words,1)==POV4_KIND_FROZEN);
+    assert(rt_array_get(early_words,3)==POV4_STATUS_TERMINAL);
+    assert(rt_array_get(early_words,10)==POV4_FAIL_STREAM);
+    SplArray* early_receipt=rt_process_inspection_v1_input_receipt_value(early_ticket);
+    assert(rt_array_get(early_receipt,5)==131072);
+    assert(rt_array_get(early_receipt,6)<131072);
+    assert(rt_array_get(early_receipt,10)!=0);
+    SplArray* early_ack=rt_process_observation_v4_ack_collect_value(
+        early_ticket,tuple_item(early_frozen,2));
+    assert(rt_array_get(tuple_item(early_ack,3),1)==POV4_KIND_ACK);
 
     /* A forced post-fork/pre-exec failure returns retained cleanup authority,
      * never a false pre-spawn Rejected receipt. */

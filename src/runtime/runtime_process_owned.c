@@ -3518,7 +3518,8 @@ static SplArray* pov4_freeze_terminal(Pov4Slot* owner) {
             !input->stdin_closed || !input->terminal || !input->reaped ||
             input->runtime_error != 0 ||
             memcmp(input->input_sha256, owner->atomic_input_digest, 32) != 0) {
-            owner->cleanup_only = 1;
+            /* Exec was confirmed. Keep the V4 terminal packet decodable;
+             * inspection authority additionally requires this V1 receipt. */
             owner->words[POV4_FAILURE_PHASE] = POV4_FAIL_STREAM;
             owner->words[POV4_FAILURE_REASON] = POV4_REASON_PROVIDER;
             owner->words[POV4_ERRNO] = input->runtime_error ? input->runtime_error : EIO;
@@ -3728,7 +3729,8 @@ SplArray* rt_process_observation_v4_start_value(SplArray* binding) {
 
 static SplArray* pov4_start_pinned_impl(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
-    SplArray* atomic_input, int atomic_input_mode) {
+    SplArray* atomic_input, SplArray* expected_input_digest,
+    int atomic_input_mode) {
     int64_t started = owned_now_ns(); Pov4Request request;
     if (started < 0)
         return pov4_rejected(EIO, POV4_FAIL_ADMISSION,
@@ -3737,6 +3739,15 @@ static SplArray* pov4_start_pinned_impl(
         return pov4_rejected(errno ? errno : EPROTO, POV4_FAIL_ADMISSION,
             POV4_REASON_INVALID_SCHEMA, started, 0, NULL);
     if (atomic_input_mode) {
+        uint8_t expected_digest[32];
+        if (!expected_input_digest ||
+            rt_array_bytes_validate((int64_t)(uintptr_t)expected_input_digest) != 32 ||
+            rt_array_bytes_copy_checked((int64_t)(uintptr_t)expected_input_digest,
+                expected_digest, 32) != 32) {
+            SplArray* rejected = pov4_rejected(EINVAL, POV4_FAIL_ADMISSION,
+                POV4_REASON_INVALID_REQUEST, started, 1, &request);
+            pov4_request_free(&request); return rejected;
+        }
         int64_t length = atomic_input ?
             rt_array_bytes_validate((int64_t)(uintptr_t)atomic_input) : -1;
         if (length < 0 || (uint64_t)length > RT_OWNED_PROCESS_MAX_INPUT_BYTES) {
@@ -3759,6 +3770,11 @@ static SplArray* pov4_start_pinned_impl(
         request.atomic_input_bound = 1;
         owned_sha256(request.atomic_input, (size_t)length,
             request.atomic_input_digest);
+        if (memcmp(request.atomic_input_digest, expected_digest, 32) != 0) {
+            SplArray* rejected = pov4_rejected(EPROTO, POV4_FAIL_ADMISSION,
+                POV4_REASON_BINDING, started, 1, &request);
+            pov4_request_free(&request); return rejected;
+        }
         uint8_t bound[8 + 32 + 8 + 32];
         static const uint8_t domain[8] = {'P','O','V','5','I','N','P',0};
         memcpy(bound, domain, 8);
@@ -3963,14 +3979,16 @@ static SplArray* pov4_start_pinned_impl(
 
 SplArray* rt_process_observation_v4_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding) {
-    return pov4_start_pinned_impl(executable_handle, cwd_handle, binding, NULL, 0);
+    return pov4_start_pinned_impl(executable_handle, cwd_handle,
+        binding, NULL, NULL, 0);
 }
 
 SplArray* rt_process_inspection_v1_start_pinned_value(
     int64_t executable_handle, int64_t cwd_handle, SplArray* binding,
-    SplArray* atomic_input) {
+    SplArray* atomic_input, SplArray* expected_input_digest) {
     return pov4_start_pinned_impl(
-        executable_handle, cwd_handle, binding, atomic_input, 1);
+        executable_handle, cwd_handle, binding, atomic_input,
+        expected_input_digest, 1);
 }
 
 /* This companion fact is issued only while the same opaque V4 ticket remains
@@ -5394,8 +5412,10 @@ SplArray* rt_process_observation_v4_start_pinned_value(int64_t executable_handle
     (void)executable_handle; (void)cwd_handle; (void)binding; return pov4_unavailable_tuple();
 }
 SplArray* rt_process_inspection_v1_start_pinned_value(int64_t executable_handle,
-        int64_t cwd_handle, SplArray* binding, SplArray* atomic_input) {
-    (void)executable_handle; (void)cwd_handle; (void)binding; (void)atomic_input;
+        int64_t cwd_handle, SplArray* binding, SplArray* atomic_input,
+        SplArray* expected_input_digest) {
+    (void)executable_handle; (void)cwd_handle; (void)binding;
+    (void)atomic_input; (void)expected_input_digest;
     return pov4_unavailable_tuple();
 }
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket) {

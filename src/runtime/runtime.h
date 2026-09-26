@@ -1288,7 +1288,8 @@ SplArray* rt_process_observation_v4_ack_collect_value(SplArray* ticket,
  * to that ticket and to the domain-separated request digest. */
 SplArray* rt_process_inspection_v1_start_pinned_value(
               int64_t executable_handle, int64_t cwd_handle,
-              SplArray* binding, SplArray* atomic_input);
+              SplArray* binding, SplArray* atomic_input,
+              SplArray* expected_input_digest);
 SplArray* rt_process_inspection_v1_input_receipt_value(SplArray* ticket);
 
 /* ===== Process Piped (editor LSP transport) ===== */

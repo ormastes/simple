@@ -1,20 +1,21 @@
 # Parser binary inspection has no single atomic input/process authority
 
-**Status:** source gap; EODL REQ-016 and NFR-012 unqualified.
+**Status:** native inspection V1 process path implemented; Simple owner and
+product admission remain open. EODL REQ-016 and NFR-012 are unqualified.
 
 The selected inspector contract requires one identity-owned process to bind a
 pinned executable, exact argv and environment, one immutable bounded stdin
 input, complete stdout/stderr captures, terminal status, and reap before
 issuing inspection authority.
 
-Current source divides those facts across incompatible owners:
+The original source gap divided those facts across incompatible owners:
 
 - `rt_process_owned_start_pinned_v3` in
   `src/runtime/runtime_process_owned.c` accepts a pinned executable and one
   copied input, and its V3 receipt reports accepted/written input bytes and
   stdin closure. Its process start uses inherited environment and has no exact
   pinned-cwd/environment request contract.
-- `rt_process_observation_v4_start_pinned_value` authenticates executable and
+- The original `rt_process_observation_v4_start_pinned_value` authenticates executable and
   cwd pins plus a canonical exact-environment request, but `Pov4Request` and
   `ProcessObservationRequestV4` contain no stdin input or input digest/count.
   The V4 start path passes no input to its process engine. The fixed V4
@@ -23,6 +24,15 @@ Current source divides those facts across incompatible owners:
 - `parser_external_inspection_tool_owner_start_v1` correctly returns
   `ProcessPortUnavailable`; its join rejects caller-supplied captures. Neither
   V3 nor V4 can be relabeled an authoritative inspection process receipt.
+
+`rt_process_inspection_v1_start_pinned_value` now copies and hashes input before
+spawn, rejects a mismatch with the caller's expected digest, and pumps stdin
+alongside both capture streams under the pinned V4 ticket. Its 75-word sideband
+receipt reports accepted/written bytes, closure, terminal/reap, error, input
+digest, and the domain-separated request digest. Native Linux selfcheck covers
+large simultaneous streams, source mutation, malformed input, digest mismatch,
+early child exit, and stale/legacy tickets. The compiler cannot consume this
+receipt until the Simple lease and two-tool owner are implemented and admitted.
 
 ## Required repair
 

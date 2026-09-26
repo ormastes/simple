@@ -1,7 +1,8 @@
 # Atomic input owner for parser binary inspection
 
-Status: implementation plan for selected EODL REQ-016 / NFR-012; no process
-inspection authority is implemented by this document.
+Status: implementation plan for selected EODL REQ-016 / NFR-012. Native
+inspection V1 start/pump/receipt is implemented and selfchecked on Linux;
+Simple lease, compiler join, and product admission remain open.
 
 ## Boundary to build
 
@@ -48,7 +49,7 @@ the opaque native lease, so a copied receipt cannot forge completion.
 | Step | Owner | Proof before next step |
 |---|---|---|
 | 1. Versioned request/receipt schema | `src/lib/common/process/`, native codec | canonical round trip; malformed, duplicate, oversized and digest-mismatch rejection |
-| 2. Native start and pump | `src/runtime/runtime_process_owned.c` | pinned exact-env child hashes stdin; simultaneous large stdout/stderr cannot deadlock |
+| 2. Native start and pump | `src/runtime/runtime_process_owned.c` | Linux C selfcheck passes pinned exact-env input, simultaneous large streams, mismatch and early-exit negatives; product check pending |
 | 3. Retained Simple process façade | `src/lib/nogc_sync_mut/io/process_ops.spl` | opaque lease, exact collection/ack, no raw process shortcut |
 | 4. Compiler inspector owner | `src/compiler/80.driver/parser_external_inspection_tool_owner_v1.spl` | two tools, distinct argv policy, same input identity, exact output and terminal join |
 | 5. Product admission | EODL SPipe and compiler/MCP gates | negative matrix and representative binary inspection run on admitted self-hosted runtime |
