@@ -7,7 +7,7 @@
 use std.spec.step
 
 use std.spec
-use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id}
+use app.simple_lsp_mcp.json_helpers.{extract_field, extract_id, make_tool_result, make_tool_error}
 
 describe "Simple LSP MCP native JSON extraction":
     # @manual scenario evidence
@@ -23,3 +23,28 @@ describe "Simple LSP MCP native JSON extraction":
         step("preserves numeric and string request identifiers")
         expect(extract_id("{\"jsonrpc\":\"2.0\",\"id\":17}")).to_equal("17")
         expect(extract_id("{\"jsonrpc\":\"2.0\",\"id\":\"request-alpha\"}")).to_equal("\"request-alpha\"")
+
+describe "Simple LSP MCP tool result escaping":
+    """
+    Regression for simple_lsp_mcp_wrapper_probe_expects_imported_symbol_2026-09-26:
+    `make_tool_result` escaped its payload twice (`js(escape_json(content))`),
+    so the JSON emitted by `lsp_symbols` reached the client with every quote
+    preceded by three backslashes instead of one, and the wrapper probe's
+    single-escaped name check could never match ANY symbol.
+    """
+    # @manual scenario evidence
+    it "escapes a JSON payload exactly once in a tool result":
+        # @req REQ-SSPEC-UNIT
+        step("escapes a JSON payload exactly once in a tool result")
+        val payload = "[{\"name\":\"SERVER_NAME\",\"kind\":13}]"
+        val out = make_tool_result("\"3\"", payload)
+        expect(out).to_contain("\"id\":\"3\"")
+        expect(out).to_contain("\"text\":\"[{\\\"name\\\":\\\"SERVER_NAME\\\"")
+        expect(out.contains("\\\\\\\"name\\\\\\\"")).to_equal(false)
+
+    it "escapes a tool error message exactly once":
+        # @req REQ-SSPEC-UNIT
+        step("escapes a tool error message exactly once")
+        val out = make_tool_error("\"4\"", "Missing required argument: \"file\"")
+        expect(out).to_contain("\"text\":\"Missing required argument: \\\"file\\\"\"")
+        expect(out.contains("\\\\\\\"file\\\\\\\"")).to_equal(false)
