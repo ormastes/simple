@@ -1,0 +1,137 @@
+"""One owner for native variant mappings and their in-flight calls.
+
+Callables carry a copied identity, never the native handle or function pointer.
+Retirement revokes new uses under the same lock that admits invocations. An
+already admitted invocation closes the mapping when its last use finishes.
+"""
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{dynlib_admitted_close_v1}
+use std.nogc_sync_mut.sffi.dynamic.{spl_wffi_call_i64}
+
+const _NATIVE_CALLABLE_OWNER_CAPACITY_V1: i64 = 4096
+const _NATIVE_CALLABLE_OWNER_MAX_ID_V1: u64 = 18446744073709551615u64
+
+struct _NativeCallableEntryV1:
+    identity: u64
+    native_handle: i64
+    native_fptr: i64
+    active_uses: i64
+    retiring: bool
+
+struct _NativeCallableStateV1:
+    next_identity: u64
+    entries: [_NativeCallableEntryV1]
+    last_identity: u64
+    last_fptr: i64
+    last_close_handle: i64
+    last_accepted: bool
+
+fn _native_callable_initial_state_v1() -> _NativeCallableStateV1:
+    _NativeCallableStateV1(next_identity: 1u64, entries: [],
+        last_identity: 0u64, last_fptr: 0, last_close_handle: 0,
+        last_accepted: false)
+
+var _native_callable_owner_v1: Mutex = mutex_new(_native_callable_initial_state_v1())
+
+fn _native_callable_index_v1(state: _NativeCallableStateV1, identity: u64) -> i64:
+    var index = 0
+    while index < state.entries.len():
+        if state.entries[index].identity == identity:
+            return index
+        index = index + 1
+    -1
+
+# Zero means the owner refused registration. The caller must close the handle
+# in that case; this owner has not retained it.
+pub(package) fn native_callable_owner_register_v1(handle: i64, fptr: i64) -> u64:
+    if handle <= 0 or fptr <= 0:
+        return 0u64
+    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+        var next = state
+        next.last_identity = 0u64
+        if state.next_identity != 0u64 and
+           state.entries.len() < _NATIVE_CALLABLE_OWNER_CAPACITY_V1:
+            val identity = state.next_identity
+            next.next_identity = if identity == _NATIVE_CALLABLE_OWNER_MAX_ID_V1:
+                0u64
+            else:
+                identity + 1u64
+            next.entries.push(_NativeCallableEntryV1(
+                identity: identity, native_handle: handle, native_fptr: fptr,
+                active_uses: 0, retiring: false))
+            next.last_identity = identity
+        next)
+    updated.last_identity
+
+# The admission and retirement decisions are serialized by the same owner.
+fn _native_callable_acquire_v1(identity: u64) -> i64:
+    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+        var next = state
+        next.last_fptr = 0
+        val index = _native_callable_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if not entry.retiring and entry.active_uses < 9223372036854775807:
+                entry.active_uses = entry.active_uses + 1
+                next.entries[index] = entry
+                next.last_fptr = entry.native_fptr
+        next)
+    updated.last_fptr
+
+fn _native_callable_end_v1(identity: u64):
+    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+        var next = state
+        next.last_close_handle = 0
+        val index = _native_callable_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.active_uses > 0:
+                entry.active_uses = entry.active_uses - 1
+                if entry.retiring and entry.active_uses == 0:
+                    next.last_close_handle = entry.native_handle
+                    next.entries.remove(index)
+                else:
+                    next.entries[index] = entry
+        next)
+    if updated.last_close_handle > 0:
+        unsafe(capabilities: [ffi]):
+            dynlib_admitted_close_v1(updated.last_close_handle)
+
+# The native call occurs outside the owner lock so provider code may re-enter
+# unrelated services. The retained use keeps its mapping live until return.
+pub(package) fn native_callable_owner_invoke_v1(
+    identity: u64, args: [i64]
+) -> Result<i64, text>:
+    val fptr = _native_callable_acquire_v1(identity)
+    if fptr <= 0:
+        return Err("native mapping is retired or unavailable")
+    val result = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_call_i64(fptr, args, args.len())
+    _native_callable_end_v1(identity)
+    Ok(result)
+
+# True means this call made the one live-to-retiring transition. If invocations
+# remain, the last one closes the mapping; no later invocation can start.
+pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:
+    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+        var next = state
+        next.last_accepted = false
+        next.last_close_handle = 0
+        val index = _native_callable_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if not entry.retiring:
+                entry.retiring = true
+                next.last_accepted = true
+                if entry.active_uses == 0:
+                    next.last_close_handle = entry.native_handle
+                    next.entries.remove(index)
+                else:
+                    next.entries[index] = entry
+        next)
+    if updated.last_close_handle > 0:
+        val closed = unsafe(capabilities: [ffi]):
+            dynlib_admitted_close_v1(updated.last_close_handle)
+        return updated.last_accepted and closed
+    updated.last_accepted
