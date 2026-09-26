@@ -6,7 +6,7 @@ use compiler.backend.linker.coff.coff_object.{
     CoffObject, CoffSection, CoffSymbol, COFF_MACHINE_AMD64,
     COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64,
     COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_5,
-    COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL,
+    COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7,
     COFF_SECTION_LNK_INFO, COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT,
     coff_parse_object, coff_symbol_at_table_index,
     coff_apply_amd64_relocation}
@@ -41,6 +41,10 @@ fn _coff_read_u16(section: [u8], offset: i64) -> Result<i64, text>:
     if offset < 0 or offset + 2 > section.len(): return Err("16-bit relocation patch is outside its section")
     Ok((section[offset] as i64) | ((section[offset + 1] as i64) << 8))
 
+fn _coff_read_u8(section: [u8], offset: i64) -> Result<i64, text>:
+    if offset < 0 or offset >= section.len(): return Err("8-bit relocation patch is outside its section")
+    Ok(section[offset] as i64)
+
 fn _coff_read_i32(section: [u8], offset: i64) -> Result<i64, text>:
     val read = _coff_read_u32(section, offset)
     if read.is_err(): return read
@@ -57,7 +61,7 @@ fn _coff_read_u64(section: [u8], offset: i64) -> Result<i64, text>:
     Ok(value)
 
 fn _coff_patch(section: [u8], offset: i64, width: i64, value: i64) -> Result<[u8], text>:
-    if offset < 0 or (width != 2 and width != 4 and width != 8) or offset + width > section.len():
+    if offset < 0 or (width != 1 and width != 2 and width != 4 and width != 8) or offset + width > section.len():
         return Err("COFF relocation patch range is outside its section")
     var result = section
     var i: i64 = 0
@@ -547,6 +551,23 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
                     if value < 0 or value >= 4294967296:
                         return Err("IMAGE_REL_AMD64_SECREL out of range")
                     val result = _coff_patch(patched, relocation.virtual_address, 4, value)
+                    if result.is_err(): return Err(result.unwrap_err())
+                    patched = result.unwrap()
+                    continue
+                if relocation.relocation_type == COFF_REL_AMD64_SECREL7:
+                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol)
+                    if location.is_err(): return Err(location.unwrap_err())
+                    val target = location.unwrap()
+                    val target_section_rva = _coff_output_section_base(objects, rvas, target)
+                    if target_section_rva.is_err(): return Err(target_section_rva.unwrap_err())
+                    val addend = _coff_read_u8(patched, relocation.virtual_address)
+                    if addend.is_err(): return Err(addend.unwrap_err())
+                    val preserved = addend.unwrap() & 0x80
+                    val value = target.rva - target_section_rva.unwrap() + (addend.unwrap() & 0x7f)
+                    if value < 0 or value > 127:
+                        return Err("IMAGE_REL_AMD64_SECREL7 out of 7-bit range")
+                    val result = _coff_patch(patched, relocation.virtual_address, 1,
+                        preserved | value)
                     if result.is_err(): return Err(result.unwrap_err())
                     patched = result.unwrap()
                     continue

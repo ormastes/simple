@@ -170,6 +170,8 @@ and architectural reach before patching only their instruction immediate fields.
 preserving opcode and destination-register bits and rejecting overflow.
 `R_AARCH64_LD_PREL_LO19` now checks literal-load alignment and ±1 MiB reach,
 then patches only the instruction's imm19 field.
+Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
+seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.
