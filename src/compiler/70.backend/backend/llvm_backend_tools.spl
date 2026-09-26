@@ -50,6 +50,20 @@ pub fn llvm_object_code_bytes(obj: LlvmObjectCode) -> [u8]:
 pub fn llvm_object_code_symbols(obj: LlvmObjectCode) -> [CompiledSymbol]:
     obj.symbols
 
+pub fn llvm_llc_opt_flag(opt_level: OptimizationLevel) -> text:
+    """Map compiler optimization policy onto llc's numeric codegen levels.
+
+    Size optimization belongs to the LLVM `opt -Os/-Oz` pipeline. `llc`
+    accepts only `-O0` through `-O3`, so use its normal optimized codegen
+    level after size-oriented IR optimization instead of passing invalid
+    `-Oz`.
+    """
+    match opt_level:
+        case OptimizationLevel.Size: "-O2"
+        case OptimizationLevel.Speed: "-O2"
+        case OptimizationLevel.Aggressive: "-O3"
+        case _: "-O0"
+
 fn extract_symbols_nm(obj_path: text) -> [CompiledSymbol]:
     """Extract defined symbols from an object file using nm.
 
@@ -182,15 +196,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         print "[llvm-bitcode-debug] bitcode {bitcode_path}"
 
     # Determine optimization flag
-    var opt_flag = "-O0"
-    if opt_level == OptimizationLevel.Size:
-        opt_flag = "-Oz"
-    elif opt_level == OptimizationLevel.Speed:
-        opt_flag = "-O2"
-    elif opt_level == OptimizationLevel.Aggressive:
-        opt_flag = "-O3"
-    elif opt_level == OptimizationLevel.Debug:
-        opt_flag = "-O0"
+    val opt_flag = llvm_llc_opt_flag(opt_level)
 
     # Build llc command
     val triple = config.triple.to_text()
@@ -378,13 +384,7 @@ pub fn compile_ir_to_object_path(
                 "LLVM bitcode verify failed (exit {verify_code}):\n{verify_out}{verify_err}",
                 1)
         compile_input_path = bitcode_path
-    var opt_flag = "-O0"
-    if opt_level == OptimizationLevel.Size:
-        opt_flag = "-Oz"
-    elif opt_level == OptimizationLevel.Speed:
-        opt_flag = "-O2"
-    elif opt_level == OptimizationLevel.Aggressive:
-        opt_flag = "-O3"
+    val opt_flag = llvm_llc_opt_flag(opt_level)
     var cpu = config.to_cpu_string()
     if cpu == "x86-64-v1":
         cpu = "x86-64"
@@ -587,13 +587,7 @@ fn compile_ir_to_wasm(llvm_ir: text, config: LlvmTargetConfig, opt_level: Optimi
         return Err("Failed to write LLVM IR to {ir_path}")
 
     # Step 2: Compile IR to wasm object via llc
-    var opt_flag = "-O0"
-    if opt_level == OptimizationLevel.Size:
-        opt_flag = "-Oz"
-    elif opt_level == OptimizationLevel.Speed:
-        opt_flag = "-O2"
-    elif opt_level == OptimizationLevel.Aggressive:
-        opt_flag = "-O3"
+    val opt_flag = llvm_llc_opt_flag(opt_level)
 
     val triple = config.triple.to_text()
     val llc_cmd_str = "{llc} -mtriple={triple} -filetype=obj --function-sections --data-sections {opt_flag} -o {obj_path} {ir_path} 2>&1"

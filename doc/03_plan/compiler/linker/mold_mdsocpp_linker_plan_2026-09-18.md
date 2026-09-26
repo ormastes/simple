@@ -308,6 +308,15 @@ index sections are admitted as allocatable file-backed data. Real QEMU/hardware
 execution receipts, broader object/relocation coverage, and hosted executable
 emission remain open.
 
+The ARM adapter audit found a shared LLVM object-emission blocker before target
+linking: `OptimizationLevel.Size` was passed to `llc` as `-Oz`, although `llc`
+accepts only numeric `-O0` through `-O3` code-generation levels. All three llc
+object paths now use one tested policy (`Size` -> `-O2`; size-oriented IR
+optimization remains owned by `opt -Os/-Oz`). The installed Windows llc then
+reached target selection but reported that its build has no Thumb/ARM target,
+so ARM object/runtime evidence still requires an LLVM distribution with that
+backend plus QEMU/target GDB or hardware.
+
 Implemented source slice:
 
 - raw AMD64/ARM64 COFF object decoding with section, primary/aux symbol, long
