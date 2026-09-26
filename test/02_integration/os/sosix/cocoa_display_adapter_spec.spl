@@ -12,7 +12,7 @@ use os.sosix.host.service_contract.{
     sosix_host_configuration_snapshot_create
 }
 use os.sosix.host.display_surface_state.{sosix_display_surface_state_create}
-use common.ui.draw_ir.{draw_ir_composition}
+use common.ui.draw_ir.{draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect}
 
 describe "SOSIX Cocoa renderer-host boundary":
     it "rejects a non-Cocoa configuration before touching the host display":
@@ -40,4 +40,38 @@ describe "SOSIX Cocoa renderer-host boundary":
         expect(submission.accepted).to_equal(false)
         expect(submission.reason).to_equal("cocoa-not-configured")
         expect(submission.state.next_frame_sequence).to_equal(1)
+        raster.shutdown()
+
+    it "rejects a native present failure without consuming the frame sequence":
+        val surface = SosixCapabilityRef(slot: 41, generation: 2)
+        val request = SosixDisplayRequest(
+            operation: SosixOperationId(slot: 1, generation: 1),
+            api_id: SOSIX_HOST_DISPLAY_PRESENT,
+            surface: surface,
+            surface_generation: 1,
+            frame_sequence: 1,
+            buffer: SosixBufferRef(slot: 42, generation: 1),
+            deadline_ns: 1000
+        )
+        val configuration = sosix_host_configuration_snapshot_create(
+            "cocoa", "queue", "software", false, "")
+        var raster = Engine2dCompositorBackend.create_named(2, 2, "software")
+        # Positive handles pass adapter admission, but no native provider owns
+        # these IDs. A real native rejection must never become a pending fence.
+        val display = HostedCocoaBackend.new(999999999, 999999998, 2, 2)
+        val state = sosix_display_surface_state_create(surface, 2).state
+        val embedding = draw_ir_embedding_config("web", "body", 0, 0, 2, 2, 0, 1000, true)
+        val composition = draw_ir_composition("cocoa-frame-2", "sosix-host", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("fill", 0, 0, 2, 2, 0xFF112233u32)
+            ])
+        ])
+
+        val submission = sosix_cocoa_submit_composition(
+            configuration, raster, display, state, request, composition)
+
+        expect(submission.accepted).to_equal(false)
+        expect(submission.reason).to_equal("cocoa-present-failed")
+        expect(submission.state.next_frame_sequence).to_equal(1)
+        expect(submission.state.inflight_count).to_equal(0)
         raster.shutdown()
