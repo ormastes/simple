@@ -11,6 +11,8 @@ val R_X86_64_TLSLD_TLS: i64 = 20
 val R_X86_64_DTPOFF32_TLS: i64 = 21
 val R_X86_64_GOTTPOFF_TLS: i64 = 22
 val R_X86_64_TPOFF32_TLS: i64 = 23
+val R_X86_64_GOTPC32_TLSDESC_TLS: i64 = 34
+val R_X86_64_TLSDESC_CALL_TLS: i64 = 35
 
 fn _tls_gd_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
     var i: i64 = 0
@@ -43,15 +45,29 @@ fn _tls_has_ld(obj: ElfObject, section: i64) -> bool:
             return true
     false
 
+fn _tls_desc_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + 4 and elf_reloc_type(next) == R_X86_64_TLSDESC_CALL_TLS and
+                elf_reloc_sym(next) == elf_reloc_sym(reloc):
+            return i
+        i = i + 1
+    -1
+
 fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
     val candidate = obj.relocations[index]
-    if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS:
+    if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS and
+            elf_reloc_type(candidate) != R_X86_64_TLSDESC_CALL_TLS:
         return false
     var i: i64 = 0
     while i < obj.relocations.len():
         val r = obj.relocations[i]
         if (elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index) or
                 (elf_reloc_type(r) == R_X86_64_TLSLD_TLS and _tls_ld_pair(obj, r) == index):
+            return true
+        if elf_reloc_type(r) == R_X86_64_GOTPC32_TLSDESC_TLS and _tls_desc_pair(obj, r) == index:
             return true
         i = i + 1
     false
@@ -110,6 +126,27 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
             relocs = relocs.push(ElfRelocation(r_offset: r.r_offset, r_info: info,
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_GOTPC32_TLSDESC_TLS:
+            val pair = _tls_desc_pair(obj, r)
+            if pair < 0:
+                return Err("UnsupportedFeature: R_X86_64_GOTPC32_TLSDESC is not followed by TLSDESC_CALL")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len() or r.r_offset < 3:
+                return Err("malformed R_X86_64_GOTPC32_TLSDESC target")
+            val at = obj.sections[si].sh_addr + r.r_offset - 3
+            if at < 0 or at + 9 > raw.len() or raw[at] != 0x48 or raw[at + 1] != 0x8d or
+                    raw[at + 2] != 0x05 or raw[at + 7] != 0xff or raw[at + 8] != 0x10:
+                return Err("UnsupportedFeature: non-canonical x86_64 TLSDESC instruction sequence")
+            raw[at + 1] = 0x8b
+            raw[at + 7] = 0x66
+            raw[at + 8] = 0x90
+            val info = (elf_reloc_sym(r) << 32) | R_X86_64_GOTTPOFF_TLS
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset, r_info: info,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_TLSDESC_CALL_TLS:
+            if not _tls_is_pair(obj, i):
+                return Err("UnsupportedFeature: unpaired R_X86_64_TLSDESC_CALL")
         else if not _tls_is_pair(obj, i):
             relocs = relocs.push(r)
         i = i + 1
