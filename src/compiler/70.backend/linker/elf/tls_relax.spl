@@ -7,7 +7,10 @@ use compiler.backend.linker.reloc_engine.{RelocArch}
 
 val R_X86_64_PLT32_TLS: i64 = 4
 val R_X86_64_TLSGD_TLS: i64 = 19
+val R_X86_64_TLSLD_TLS: i64 = 20
+val R_X86_64_DTPOFF32_TLS: i64 = 21
 val R_X86_64_GOTTPOFF_TLS: i64 = 22
+val R_X86_64_TPOFF32_TLS: i64 = 23
 
 fn _tls_gd_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
     var i: i64 = 0
@@ -21,6 +24,25 @@ fn _tls_gd_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
         i = i + 1
     -1
 
+fn _tls_ld_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + 5 and elf_reloc_type(next) == R_X86_64_PLT32_TLS:
+            val sym = elf_reloc_sym(next)
+            if sym > 0 and sym < obj.symbols.len() and obj.symbols[sym].name == "__tls_get_addr":
+                return i
+        i = i + 1
+    -1
+
+fn _tls_has_ld(obj: ElfObject, section: i64) -> bool:
+    for r in obj.relocations:
+        if r.target_section_idx == section and elf_reloc_type(r) == R_X86_64_TLSLD_TLS and
+                _tls_ld_pair(obj, r) >= 0:
+            return true
+    false
+
 fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
     val candidate = obj.relocations[index]
     if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS:
@@ -28,7 +50,8 @@ fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
     var i: i64 = 0
     while i < obj.relocations.len():
         val r = obj.relocations[i]
-        if elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index:
+        if (elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index) or
+                (elf_reloc_type(r) == R_X86_64_TLSLD_TLS and _tls_ld_pair(obj, r) == index):
             return true
         i = i + 1
     false
@@ -39,7 +62,8 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
     var i: i64 = 0
     while i < obj.relocations.len():
         val r = obj.relocations[i]
-        if elf_reloc_type(r) == R_X86_64_TLSGD_TLS:
+        val rtype = elf_reloc_type(r)
+        if rtype == R_X86_64_TLSGD_TLS:
             if _tls_gd_pair(obj, r) < 0:
                 return Err("UnsupportedFeature: R_X86_64_TLSGD is not followed by the canonical __tls_get_addr call")
             val si = r.target_section_idx
@@ -61,6 +85,29 @@ fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
                 bi = bi + 1
             val info = (elf_reloc_sym(r) << 32) | R_X86_64_GOTTPOFF_TLS
             relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 8, r_info: info,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_TLSLD_TLS:
+            if _tls_ld_pair(obj, r) < 0:
+                return Err("UnsupportedFeature: R_X86_64_TLSLD is not followed by the canonical __tls_get_addr call")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len() or r.r_offset < 3:
+                return Err("malformed R_X86_64_TLSLD target")
+            val at = obj.sections[si].sh_addr + r.r_offset - 3
+            if at < 0 or at + 12 > raw.len():
+                return Err("truncated R_X86_64_TLSLD instruction sequence")
+            if raw[at] != 0x48 or raw[at + 1] != 0x8d or raw[at + 2] != 0x3d or raw[at + 7] != 0xe8:
+                return Err("UnsupportedFeature: non-canonical x86_64 TLSLD instruction sequence")
+            val replacement: [i64] = [0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0]
+            var bi: i64 = 0
+            while bi < replacement.len():
+                raw[at + bi] = replacement[bi] as u8
+                bi = bi + 1
+        else if rtype == R_X86_64_DTPOFF32_TLS:
+            if not _tls_has_ld(obj, r.target_section_idx):
+                return Err("UnsupportedFeature: R_X86_64_DTPOFF32 without a canonical TLSLD sequence")
+            val info = (elf_reloc_sym(r) << 32) | R_X86_64_TPOFF32_TLS
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset, r_info: info,
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
         else if not _tls_is_pair(obj, i):
