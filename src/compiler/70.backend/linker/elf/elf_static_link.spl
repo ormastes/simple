@@ -21,7 +21,7 @@
 # Limits (reported as errors, never silently degraded):
 #   - targets: x86_64 and aarch64; x86_64 dynamic outputs only via
 #     elf_link_structural (structural parity with ld.lld, never executed here)
-#   - no TLS, no COMMON, no copy relocations / canonical PLTs, no text relocs,
+#   - no TLS, no copy relocations / canonical PLTs, no text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
 #   - single-threaded; no StageReceipts yet
@@ -103,6 +103,13 @@ struct ElfLinkCtx:
     libs: [ElfSharedLib]
     target: RelocArch
     mode: i64
+    common_offsets: {text: i64}
+    common_out: i64
+
+struct ElfCommonPlacement:
+    inputs: ElfStaticInputs
+    offsets: {text: i64}
+    out_idx: i64
 
 # ============================================================================
 # Target
@@ -219,6 +226,38 @@ fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
         sec_off = sec_off.push(offs)
         oi = oi + 1
     Ok(ElfStaticInputs(objects: objects, sec_out: sec_out, sec_off: sec_off, outs: outs))
+
+fn elf_place_common(inputs: ElfStaticInputs, res: SymResolution) -> ElfCommonPlacement:
+    """Append coalesced SHN_COMMON storage to .bss in input-symbol order."""
+    var outs = inputs.outs
+    var k = elf_find_out(outs, ".bss")
+    var offsets: {text: i64} = {}
+    for obj in inputs.objects:
+        for sym in obj.symbols:
+            if sym.name == "" or sym.st_shndx != SHN_COMMON or offsets.has(sym.name) or not res.defined.has(sym.name):
+                continue
+            val e = res.defined[sym.name]
+            if e.section_idx != SHN_COMMON:
+                continue
+            if k < 0:
+                outs = outs.push(elf_out_sec(".bss", SHT_NOBITS_E, SHF_ALLOC | SHF_WRITE, 1, 0, ELF_SEG_RW))
+                k = outs.len() - 1
+            var al = e.offset
+            if al < 1:
+                al = 1
+            val at = align_up(outs[k].size, al)
+            offsets[sym.name] = at
+            var nal = outs[k].align
+            if al > nal:
+                nal = al
+            outs[k] = elf_out_sec(".bss", SHT_NOBITS_E, SHF_ALLOC | SHF_WRITE,
+                nal, at + e.size, ELF_SEG_RW)
+    ElfCommonPlacement(
+        inputs: ElfStaticInputs(objects: inputs.objects, sec_out: inputs.sec_out,
+            sec_off: inputs.sec_off, outs: outs),
+        offsets: offsets,
+        out_idx: k
+    )
 
 fn elf_static_contents(inputs: ElfStaticInputs) -> [[i64]]:
     """Concatenate input section bytes per input-backed output section."""
@@ -371,8 +410,6 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
         return Err("object {oi}: relocation symbol index {sym_idx} out of range")
     val sym = obj.symbols[sym_idx]
     val bind = elf_symbol_binding(sym)
-    if sym.st_shndx == SHN_COMMON:
-        return Err("symbol {sym.name}: SHN_COMMON is unsupported (compile with -fno-common)")
     if bind != STB_LOCAL and sym.name != "":
         val weak = bind == STB_WEAK
         if ctx.res.defined.has(sym.name):
@@ -389,6 +426,8 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
         return Err("undefined symbol: {sym.name}")
     if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF:
         return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "{oi}#{sym_idx}", 0, false))
+    if sym.st_shndx == SHN_COMMON:
+        return Err("local symbol {sym.name}: SHN_COMMON is invalid")
     if sym.st_shndx >= SHN_LORESERVE:
         return Err("symbol {sym.name}: reserved section index {sym.st_shndx} unsupported")
     Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "{oi}#{sym_idx}", 0, false))
@@ -415,6 +454,10 @@ fn elf_in_vaddr(ctx: ElfLinkCtx, lay: ElfLayout, oi: i64, si: i64) -> i64:
 fn elf_entry_addr(ctx: ElfLinkCtx, lay: ElfLayout, e: SymEntry) -> Result<i64, text>:
     if e.section_idx == SHN_ABS:
         return Ok(e.offset)
+    if e.section_idx == SHN_COMMON:
+        if not ctx.common_offsets.has(e.name):
+            return Err("common symbol {e.name} has no .bss allocation")
+        return Ok(lay.plan.vaddrs[lay.in_to_plan[ctx.common_out]] + ctx.common_offsets[e.name])
     val base = elf_in_vaddr(ctx, lay, e.obj_idx, e.section_idx)
     if base < 0:
         return Err("symbol {e.name} is defined in a non-allocatable section")
@@ -664,6 +707,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 if typ != STT_SECTION and sym.name != "":
                     if sym.st_shndx == SHN_ABS:
                         rows = elf_sym_row(rows, sym.name, typ, sym.st_other, SHN_ABS, sym.st_value, sym.st_size)
+                    else if sym.st_shndx == SHN_COMMON:
+                        return Err("local symbol {sym.name}: SHN_COMMON is invalid")
                     else if sym.st_shndx != SHN_UNDEF and sym.st_shndx < SHN_LORESERVE:
                         val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                         if sh > 0:
@@ -678,14 +723,21 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 if bind != STB_WEAK:
                     all_weak[sym.name] = false
                 if elf_sym_hidden(sym) and elf_is_definer(ctx, oi, sym):
-                    val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
+                    var sh: i64 = -1
+                    if sym.st_shndx == SHN_COMMON:
+                        sh = lay.in_to_plan[ctx.common_out] + 1
+                    else:
+                        sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                     if sh > 0 or sym.st_shndx == SHN_ABS:
                         demoted[sym.name] = true
                         val v = elf_entry_addr(ctx, lay, ctx.res.defined[sym.name])?
                         var shn = sh
                         if sym.st_shndx == SHN_ABS:
                             shn = SHN_ABS
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn, v, sym.st_size)
+                        var sz = sym.st_size
+                        if sym.st_shndx == SHN_COMMON:
+                            sz = ctx.res.defined[sym.name].size
+                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn, v, sz)
             si = si + 1
         oi = oi + 1
     for n in order:
@@ -709,11 +761,16 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 if s.name == n and s.st_shndx != SHN_UNDEF and elf_symbol_binding(s) != STB_LOCAL:
                     def_sym = s
             var sh = SHN_ABS
-            if e.section_idx != SHN_ABS:
+            if e.section_idx == SHN_COMMON:
+                sh = lay.in_to_plan[ctx.common_out] + 1
+            else if e.section_idx != SHN_ABS:
                 sh = elf_out_shndx(ctx, lay, e.obj_idx, e.section_idx)
             if sh > 0:
                 val info = (elf_symbol_binding(def_sym) << 4) | elf_symbol_type(def_sym)
-                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh, elf_entry_addr(ctx, lay, e)?, def_sym.st_size)
+                var sz = def_sym.st_size
+                if e.section_idx == SHN_COMMON:
+                    sz = e.size
+                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh, elf_entry_addr(ctx, lay, e)?, sz)
         else:
             var sym_bind = STB_GLOBAL
             if all_weak[n]:
@@ -903,8 +960,10 @@ fn elf_link_mode(req: ElfLinkRequest, structural: bool) -> Result<[i64], text>:
     if not res.defined.has(req.entry):
         return Err("entry symbol not defined: {req.entry}")
 
-    val inputs = elf_static_place(all)?
-    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode)
+    val common = elf_place_common(elf_static_place(all)?, res)
+    val inputs = common.inputs
+    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
+        common_offsets: common.offsets, common_out: common.out_idx)
     var contents = elf_static_contents(inputs)
     val refs = elf_collect_refs(ctx, contents)?
     val sc = elf_reloc_scan(refs, target, mode)?

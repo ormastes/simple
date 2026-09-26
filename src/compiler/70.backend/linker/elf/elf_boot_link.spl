@@ -26,7 +26,7 @@
 # Slice limits (Err, never silently degraded): no section GC (keep-all; KEEP
 # roots are therefore always present), no orphan placement other than .got
 # (an unplaced allocatable input section is an Err), no linker relaxation, no
-# COMMON, no TLS, no dynamic relocations, file patterns other than `*` need
+# TLS, no dynamic relocations, file patterns other than `*` need
 # elf_boot_link_named, EXCLUDE_FILE / SORT are rejected.
 
 use compiler.backend.linker.boot_layout.boot_layout_plan.{
@@ -100,6 +100,8 @@ struct _BootIn:
     out_of: [i64]      # flat -> plan section index / BOOT_UNPLACED / BOOT_DISCARDED
     op_of: [i64]       # flat -> body op index inside that section
     off_of: [i64]      # flat -> offset inside the output section (after layout)
+    common_plan: {text: i64} # coalesced COMMON symbol -> plan output section
+    common_off: {text: i64}  # coalesced COMMON symbol -> offset in that section
 
 # ============================================================================
 # Small helpers
@@ -206,6 +208,9 @@ fn _bl_matches(op: BootOp, file: text, sec_name: text) -> Result<bool, text>:
             return Ok(true)
     Ok(false)
 
+fn _bl_matches_common(op: BootOp) -> bool:
+    op.kind == BOOT_OP_INPUT and op.patterns.contains("COMMON")
+
 fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Result<_BootIn, text>:
     var base: [i64] = []
     var out_of: [i64] = []
@@ -264,7 +269,8 @@ fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Resul
                 return Err("elf_boot_link: section {elf_section_name(obj, si)}: TLS is unsupported")
             si = si + 1
         oi = oi + 1
-    Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of))
+    Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of,
+        common_plan: {}, common_off: {}))
 
 # ============================================================================
 # Symbols
@@ -304,6 +310,13 @@ fn _bl_script_defines(plan: BootLayoutPlan, objects: [ElfObject], res: SymResolu
 fn _bl_obj_sym_addr(ins: _BootIn, outs: [_BootOut], plan_to_out: [i64], e: SymEntry) -> Result<i64, text>:
     if e.section_idx == BOOT_SHN_ABS:
         return Ok(e.offset)
+    if e.section_idx == BOOT_SHN_COMMON:
+        if not ins.common_plan.has(e.name):
+            return Err("elf_boot_link: common symbol {e.name} is not placed by *(COMMON)")
+        val ok = plan_to_out[ins.common_plan[e.name]]
+        if ok < 0:
+            return Err("elf_boot_link: common symbol {e.name} has no output section")
+        return Ok(outs[ok].vma + ins.common_off[e.name])
     val flat = ins.base[e.obj_idx] + e.section_idx
     val k = ins.out_of[flat]
     if k < 0:
@@ -328,7 +341,12 @@ fn _bl_bind_obj_syms(ctx: BootEvalCtx, wanted: [text], res: SymResolution, ins: 
     for w in wanted:
         if res.defined.has(w):
             val e = res.defined[w]
-            if e.section_idx != BOOT_SHN_ABS and e.section_idx < BOOT_SHN_LORESERVE:
+            if e.section_idx == BOOT_SHN_COMMON:
+                if ins.common_plan.has(e.name) and ins.common_plan[e.name] == k:
+                    match _bl_obj_sym_addr(ins, outs, plan_to_out, e):
+                        case Ok(v): c = boot_eval_bind(c, w, v)
+                        case Err(_): pass
+            else if e.section_idx != BOOT_SHN_ABS and e.section_idx < BOOT_SHN_LORESERVE:
                 if ins.out_of[ins.base[e.obj_idx] + e.section_idx] == k:
                     match _bl_obj_sym_addr(ins, outs, plan_to_out, e):
                         case Ok(v): c = boot_eval_bind(c, w, v)
@@ -401,6 +419,20 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
             var any_prog = false
             var any_member = false
             var flags: i64 = SHF_ALLOC
+            var common_align: i64 = 1
+            for bop in sec.body:
+                if _bl_matches_common(bop):
+                    for obj in ins.objects:
+                        for sym in obj.symbols:
+                            if sym.name != "" and res.defined.has(sym.name):
+                                val e = res.defined[sym.name]
+                                if e.section_idx == BOOT_SHN_COMMON and not ins.common_plan.has(sym.name):
+                                    any_member = true
+                                    flags = flags | SHF_WRITE
+                                    if e.offset > common_align:
+                                        common_align = e.offset
+            if common_align > align:
+                align = common_align
             var oi: i64 = 0
             while oi < ins.objects.len():
                 val obj = ins.objects[oi]
@@ -480,6 +512,19 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                                 cur = cur + obj.sections[si].sh_size
                             si = si + 1
                         oi = oi + 1
+                    if _bl_matches_common(bop):
+                        for obj in ins.objects:
+                            for sym in obj.symbols:
+                                if sym.name != "" and res.defined.has(sym.name):
+                                    val e = res.defined[sym.name]
+                                    if e.section_idx == BOOT_SHN_COMMON and not ins.common_plan.has(sym.name):
+                                        var al = e.offset
+                                        if al < 1:
+                                            al = 1
+                                        cur = boot_align_up(addr + cur, al) - addr
+                                        ins.common_plan[sym.name] = k
+                                        ins.common_off[sym.name] = cur
+                                        cur = cur + e.size
                 else if bop.kind == BOOT_OP_PAD:
                     cur = cur + bop.value
                 else if bop.kind == BOOT_OP_ALIGN:
@@ -497,7 +542,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                     if boot_eval(a.expr, _bl_ctx_at(ctx, addr + cur))? == 0:
                         return Err("elf_boot_link: ASSERT failed: {a.message}")
 
-            ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of, off_of: off_of)
+            ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of,
+                off_of: off_of, common_plan: ins.common_plan, common_off: ins.common_off)
             # lld drops an output section with no bytes and no symbol assignment.
             if cur == 0 and not has_sym:
                 dot = addr
@@ -526,6 +572,9 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                 _bl_region_fits(plan, lma_ri, region_cur[lma_ri], sec.name)?
 
     # Synthetic .got: lld's orphan position — after every command, in the last segment.
+    for name in res.defined.keys():
+        if res.defined[name].section_idx == BOOT_SHN_COMMON and not ins.common_plan.has(name):
+            return Err("elf_boot_link: common symbol {name} is not placed by *(COMMON)")
     if got_size > 0:
         val gaddr = boot_align_up(dot, 8)
         outs = outs.push(_BootOut(name: ".got", sh_type: SHT_PROGBITS_E, sh_flags: SHF_ALLOC | SHF_WRITE, align: 8,
@@ -822,10 +871,6 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
         si = si + 1
     # Like ld.lld, an undefined symbol is an error only when a relocation in a
     # placed section refers to it (checked while relocating, below).
-    for obj in parsed:
-        for s in obj.symbols:
-            if s.st_shndx == BOOT_SHN_COMMON:
-                return Err("symbol {s.name}: SHN_COMMON is unsupported (compile with -fno-common)")
     if not res.defined.has(plan.entry) and not script_defined.has(plan.entry):
         return Err("entry symbol not defined: {plan.entry}")
 
@@ -1060,6 +1105,16 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
             sym_values = sym_values.push(e.offset)
             sym_info = sym_info.push(STB_GLOBAL << 4)
             sym_shndx = sym_shndx.push(BOOT_SHN_ABS)
+            continue
+        if e.section_idx == BOOT_SHN_COMMON:
+            if not ins.common_plan.has(name):
+                continue
+            val ok = lay.plan_to_out[ins.common_plan[name]]
+            sym_names = sym_names.push(name)
+            sym_values = sym_values.push(outs[ok].vma + ins.common_off[name])
+            val osym = _bl_obj_symbol(ins.objects[e.obj_idx], name)
+            sym_info = sym_info.push((STB_GLOBAL << 4) | elf_symbol_type(osym))
+            sym_shndx = sym_shndx.push(ok + 1)
             continue
         val flat = ins.base[e.obj_idx] + e.section_idx
         if ins.out_of[flat] < 0:

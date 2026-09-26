@@ -1,4 +1,5 @@
 # @cover src/compiler/70.backend/linker/sym_resolver.spl
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
 # ============================================================================
 # Symbol Resolver Unit Tests
 #
@@ -25,6 +26,7 @@ use compiler.backend.linker.sym_resolver.{
     sym_has_symbol, sym_local_count,
     elf_binding_to_sym, sym_entry_from_elf, is_strong, is_weak
 }
+use compiler.backend.linker.elf.elf_static_link.{elf_static_place, elf_place_common}
 
 # ============================================================================
 # Helper: Build a minimal ElfObject from a symbol list
@@ -205,6 +207,38 @@ describe "SymResolver - strong vs weak":
         val obj_b = make_obj([sym_b])
         val res = sym_resolve_objects([obj_a, obj_b])
         expect(sym_error_count(res)).to_equal(1)
+
+    it "coalesces common definitions using maximum size and alignment":
+        val common_a = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0xfff2,
+            st_value: 8, st_size: 12, name: "shared_data")
+        val common_b = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0xfff2,
+            st_value: 32, st_size: 48, name: "shared_data")
+        val res = sym_resolve_objects([make_obj([common_a]), make_obj([common_b])])
+        expect(sym_error_count(res)).to_equal(0)
+        val e = res.defined["shared_data"]
+        expect(e.section_idx).to_equal(0xfff2)
+        expect(e.offset).to_equal(32)
+        expect(e.size).to_equal(48)
+        expect(e.obj_idx).to_equal(0)
+        val placed = elf_place_common(elf_static_place([make_obj([common_a, common_b])]).unwrap(), res)
+        expect(placed.inputs.outs.len()).to_equal(1)
+        expect(placed.inputs.outs[0].name).to_equal(".bss")
+        expect(placed.inputs.outs[0].sh_type).to_equal(8)
+        expect(placed.inputs.outs[0].align).to_equal(32)
+        expect(placed.inputs.outs[0].size).to_equal(48)
+        expect(placed.offsets["shared_data"]).to_equal(0)
+
+    it "regular strong definition overrides a common definition":
+        val common = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 0xfff2,
+            st_value: 16, st_size: 32, name: "storage")
+        val regular = ElfSymbol(st_name: 0, st_info: 16, st_other: 0, st_shndx: 3,
+            st_value: 7, st_size: 4, name: "storage")
+        val res = sym_resolve_objects([make_obj([common]), make_obj([regular])])
+        expect(sym_error_count(res)).to_equal(0)
+        val e = res.defined["storage"]
+        expect(e.section_idx).to_equal(3)
+        expect(e.offset).to_equal(7)
+        expect(e.obj_idx).to_equal(1)
 
 # ============================================================================
 # Group 8: Local symbols
