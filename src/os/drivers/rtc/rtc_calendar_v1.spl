@@ -1,0 +1,74 @@
+"""Pure x86 CMOS calendar decoding for an RTC configured to UTC.
+
+The caller must establish that the hardware clock uses UTC. A missing or
+invalid century is an error: a two digit year alone cannot identify a Unix
+instant. The hardware reader still needs a shared CMOS index-port owner for
+concurrent access across CPUs.
+"""
+
+use std.common.time_utils.{days_in_month, timestamp_from_components}
+
+pub struct RtcRawCalendarV1:
+    status_b: u8
+    seconds: u8
+    minutes: u8
+    hours: u8
+    day: u8
+    month: u8
+    year: u8
+    century: u8
+
+fn _rtc_calendar_field_v1(raw: u8, binary_mode: bool) -> i64:
+    if binary_mode:
+        return raw as i64
+    val high = (raw >> 4) as i64
+    val low = (raw & 0x0F) as i64
+    if high > 9 or low > 9:
+        return -1
+    high * 10 + low
+
+pub fn rtc_decode_utc_epoch_seconds_v1(raw: RtcRawCalendarV1) -> Result<u64, text>:
+    """Decode one UTC snapshot, refusing ambiguous dates and RTC modes."""
+    if (raw.status_b & 0x80) != 0:
+        return Err("rtc-update-halted")
+    if (raw.status_b & 0x01) != 0:
+        return Err("rtc-dst-mode")
+
+    val binary_mode = (raw.status_b & 0x04) != 0
+    val twenty_four_hour = (raw.status_b & 0x02) != 0
+    val second = _rtc_calendar_field_v1(raw.seconds, binary_mode)
+    val minute = _rtc_calendar_field_v1(raw.minutes, binary_mode)
+    val hour_byte = if twenty_four_hour: raw.hours else: raw.hours & 0x7F
+    val hour_value = _rtc_calendar_field_v1(hour_byte, binary_mode)
+    val day = _rtc_calendar_field_v1(raw.day, binary_mode)
+    val month = _rtc_calendar_field_v1(raw.month, binary_mode)
+    val year_part = _rtc_calendar_field_v1(raw.year, binary_mode)
+    val century = _rtc_calendar_field_v1(raw.century, binary_mode)
+    if second < 0 or second > 59 or minute < 0 or minute > 59 or
+            hour_value < 0 or day < 1 or month < 1 or month > 12 or
+            year_part < 0 or year_part > 99 or century < 0:
+        return Err("rtc-invalid-calendar-field")
+
+    var hour = hour_value
+    if twenty_four_hour:
+        if (raw.hours & 0x80) != 0 or hour > 23:
+            return Err("rtc-invalid-hour")
+    else:
+        if hour < 1 or hour > 12:
+            return Err("rtc-invalid-hour")
+        hour = if hour == 12: 0 else: hour
+        if (raw.hours & 0x80) != 0:
+            hour = hour + 12
+
+    val year = century * 100 + year_part
+    # This unsigned syscall profile admits nonnegative Unix seconds only.
+    # Year 9999 remains representable by time_utils' i64 microsecond value.
+    if year < 1970 or year > 9999:
+        return Err("rtc-century-unavailable-or-out-of-range")
+    if day > days_in_month(year, month):
+        return Err("rtc-invalid-day")
+
+    val micros = timestamp_from_components(year, month, day, hour, minute, second, 0)
+    if micros < 0:
+        return Err("rtc-invalid-epoch")
+    Ok((micros / 1000000).to_u64())

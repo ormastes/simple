@@ -8,7 +8,7 @@ use os.kernel.log.klog.{KernelLog, klog_write}
 use os.kernel.types.task_types.{BlockReason}
 use os.kernel.memory.vmm.{vmm_verify_user_write}
 use os.kernel.boot.mmio.{mmio_write64}
-use os.drivers.rtc.rtc.{rtc_get_seconds, rtc_get_minutes, rtc_get_hours}
+use os.drivers.rtc.rtc.{rtc_read_utc_epoch_seconds_v1}
 use std.common.contracts.sosix.time_v1.{
     sosix_time_ceil_div_u64, sosix_time_ticks_to_ns,
     sosix_time_deadline_from_ticks
@@ -72,13 +72,13 @@ fn _handle_clock_get_time(args: SyscallArgs, scheduler: Scheduler) -> SyscallRes
 
     match clock_id:
         case 0:     # CLOCK_REALTIME
-            val hours = rtc_get_hours().to_u64()
-            val minutes = rtc_get_minutes().to_u64()
-            val secs = rtc_get_seconds().to_u64()
-            val seconds_since_midnight = hours * 3600 + minutes * 60 + secs
-            mmio_write64(out_ptr, seconds_since_midnight)
-            mmio_write64(out_ptr + 8, 0)
-            SyscallResult(value: 0)
+            match rtc_read_utc_epoch_seconds_v1():
+                case Ok(epoch_seconds):
+                    mmio_write64(out_ptr, epoch_seconds)
+                    mmio_write64(out_ptr + 8, 0)
+                    SyscallResult(value: 0)
+                case Err(_):
+                    SyscallResult(value: -5)  # EIO: no trustworthy wall clock
         case 1:     # CLOCK_MONOTONIC
             var sched = scheduler
             val ticks = sched.tick_count()
