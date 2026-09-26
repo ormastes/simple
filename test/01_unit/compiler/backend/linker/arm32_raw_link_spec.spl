@@ -59,6 +59,37 @@ fn arm32_raw_target_object(binding: i64) -> ElfObject:
         arm32_raw_symbol("target", binding, 1, 0, STT_FUNC)
     ], [], [0xaa, 0xbb, 0xcc, 0xdd])
 
+fn arm32_raw_exidx_object() -> ElfObject:
+    val shoff: i64 = 32
+    val text_offset: i64 = 160
+    val exidx_offset: i64 = 164
+    var raw: [i64] = [0; 168]
+    raw[4] = 1
+    raw[shoff + 40 + 32] = 4
+    raw[shoff + 80 + 32] = 4
+    raw[text_offset] = 0x70
+    raw[text_offset + 1] = 0x47
+    raw[exidx_offset] = 0x11
+    raw[exidx_offset + 1] = 0x22
+    raw[exidx_offset + 2] = 0x33
+    raw[exidx_offset + 3] = 0x44
+    val sections = [
+        ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0,
+            sh_addr: 0, sh_size: 0, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 2,
+            sh_addr: text_offset, sh_size: 2, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: 0x70000001, sh_flags: 2,
+            sh_addr: exidx_offset, sh_size: 4, sh_info: 0)
+    ]
+    val empty = elf_make_empty_strtab()
+    ElfObject(
+        header: ElfHeader(e_type: ET_REL, e_machine: EM_ARM, e_entry: 0,
+            e_phoff: 0, e_shoff: shoff, e_shnum: 3, e_shstrndx: 0),
+        sections: sections,
+        symbols: [arm32_raw_blank_symbol(),
+            arm32_raw_symbol("main", STB_GLOBAL, 1, 1, STT_FUNC)],
+        relocations: [], strtab: empty, shstrtab: empty, raw: raw)
+
 describe "ARM32 raw ELF linker":
     it "lays out objects, preserves a Thumb entry, and applies ABS32":
         val linked = elf_arm32_link_parsed([
@@ -103,3 +134,12 @@ describe "ARM32 raw ELF linker":
         ], 0x1002, "target")
         expect(linked.is_err()).to_equal(true)
         expect(linked.unwrap_err()).to_contain("4-byte aligned")
+
+    it "places ARM exception-index sections as file-backed allocatable data":
+        val linked = elf_arm32_link_parsed([arm32_raw_exidx_object()], 0x4000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.entry_addr).to_equal(0x4001)
+        expect(image.bytes.len()).to_equal(8)
+        expect(image.bytes[4]).to_equal(0x11)
+        expect(image.bytes[7]).to_equal(0x44)

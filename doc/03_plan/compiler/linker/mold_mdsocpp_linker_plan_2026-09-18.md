@@ -294,8 +294,19 @@ bits, applies the shared ARM relocation engine, and rejects common symbols,
 unsupported allocatable sections, malformed bounds, undefined strong symbols,
 and duplicate strong definitions. This connects parsed LLVM-style ARM32 objects
 to the raw-image boundary required by remote and bare-metal placement. The
-remaining relocation corpus, compiler-adapter wiring, hosted ARM executable
-emission, and real target execution evidence remain open.
+remaining relocation corpus, hosted ARM executable emission, and real target
+execution evidence remain open.
+
+The compiler-owned ARM32 remote adapter now performs the full source-to-image
+composition: frontend and target-aware MIR lowering, explicit Thumbv7-M
+Cortex-M3 LLVM object emission, ELF32 ARM raw linking at the requested target
+address, entry-placement validation, and checked byte conversion. QEMU ARM,
+STM32H7, and STM32WB integration/system lanes now call this adapter directly;
+the prior STM32H7 fixed `movs r0, #0` compiler stub and stale calls through the
+compiler-independent fail-closed `CompilerBridge` are removed. ARM exception
+index sections are admitted as allocatable file-backed data. Real QEMU/hardware
+execution receipts, broader object/relocation coverage, and hosted executable
+emission remain open.
 
 Implemented source slice:
 
