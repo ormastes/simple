@@ -487,3 +487,12 @@ through the signed 32-bit relocation path while `TPOFF64` remains full-width.
 Initial-exec, imported/dynamic, and unsupported instruction TLS forms remain
 explicit errors. This closes the structural linker slice, but not the open
 SimpleOS x86-64/arm64 full-boot or performance evidence gates.
+
+The SimpleOS internal route now consumes the selected admitted runtime bundle,
+explicit static libraries, and library search paths. Boot linking performs the
+same symbol-driven archive fixpoint used by hosted ELF, including transitive
+members and entry/retained-symbol roots, while preserving archive member names
+in diagnostics. Shared objects remain invalid for a freestanding boot image;
+missing libraries, malformed archives, and incomplete named runtime providers
+fail before publication. `debug` and unmodelled `extra_flags` remain explicit
+unsupported policy rather than being ignored.

@@ -44,6 +44,7 @@ use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
 use compiler.backend.linker.elf.elf_exec_writer.{
     ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image,
     ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PF_R, PF_W, PF_X,
@@ -884,6 +885,31 @@ fn elf_boot_link_configured(objects: [[i64]], plan: BootLayoutPlan, target: Relo
     val im = _elf_boot_link_named(objects, names, plan, target, strip_output, retained_symbols)?
     Ok(im.bytes)
 
+fn elf_boot_link_archives_configured(objects: [[i64]], archives: [[i64]],
+        plan: BootLayoutPlan, target: RelocArch, strip_output: bool,
+        retained_symbols: [text]) -> Result<[i64], text>:
+    """Link root objects plus the symbol-reachable members of static archives."""
+    var roots: [ElfObject] = []
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        val parsed = elf_parse_object(objects[i])
+        if parsed.is_err(): return Err("object object{i}.o: {parsed.unwrap_err()}")
+        roots = roots.push(parsed.unwrap())
+        names = names.push("object{i}.o")
+        i = i + 1
+    var closure_roots = retained_symbols
+    if plan.entry != "" and not closure_roots.contains(plan.entry):
+        closure_roots = closure_roots.push(plan.entry)
+    val closure = elf_archive_closure_retained(roots, archives, closure_roots)?
+    var all = objects
+    for member in closure.members:
+        all = all.push(member.raw)
+        names = names.push("archive{member.archive_idx}({member.name})")
+    val im = _elf_boot_link_named(all, names, plan, target,
+        strip_output, retained_symbols)?
+    Ok(im.bytes)
+
 fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     var names: [text] = []
     var i: i64 = 0
@@ -1327,4 +1353,5 @@ fn _bl_ult(a: i64, b: i64) -> bool:
     b < 0
 
 export ElfBootImage
-export elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured, elf_boot_link_image, elf_boot_link_named
+export elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured, elf_boot_link_archives_configured
+export elf_boot_link_image, elf_boot_link_named

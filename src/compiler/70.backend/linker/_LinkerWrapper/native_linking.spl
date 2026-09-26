@@ -58,7 +58,7 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
 use compiler.backend.linker.elf.elf_static_link.{elf_link_configured, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
-use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_configured}
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_configured}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
@@ -247,11 +247,13 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         val unsupported_field = internal_simpleos_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:simpleos does not honour it)")
+        val provider_error = native_runtime_provider_selection_error_for_config_platform(config, false)
+        if provider_error != "":
+            return Err(link_error_detail("simpleos-runtime-provider-selection", provider_error))
         val native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
         val explicit_target = env_get("SIMPLE_TARGET") ?? ""
         val simpleos_target = if native_target != "": native_target elif explicit_target != "": explicit_target else: "simpleos"
-        return internal_link_simpleos(object_files, output, simpleos_target,
-            config.strip_output, config.retained_symbols)
+        return internal_link_simpleos(object_files, output, simpleos_target, config)
 
     val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
     if trace:
@@ -535,14 +537,6 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
 fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if config.libraries.len() > 0:
-        return "libraries"
-    if config.library_paths.len() > 0:
-        return "library_paths"
-    if config.runtime_path != "":
-        return "runtime_path"
-    if config.runtime_bundle != "":
-        return "runtime_bundle"
     if config.extra_flags.len() > 0:
         return "extra_flags"
     if config.debug:
@@ -597,6 +591,20 @@ fn internal_elf_library_file(name: text, search_paths: [text]) -> text:
         for filename in filenames:
             val candidate = directory + "/" + filename
             if internal_elf_library_kind(candidate) != 0: return candidate
+    ""
+
+fn internal_simpleos_archive_file(name: text, search_paths: [text]) -> text:
+    """Resolve a static archive without admitting hosted shared objects."""
+    if internal_elf_library_kind(name) == 1: return name
+    var base = name
+    if base.starts_with("-l"): base = base.substring(2)
+    var filenames: [text] = [base]
+    if not base.lower().ends_with(".a"):
+        filenames = ["lib" + base + ".a", base + ".a"]
+    for directory in search_paths:
+        for filename in filenames:
+            val candidate = directory + "/" + filename
+            if internal_elf_library_kind(candidate) == 1: return candidate
     ""
 
 fn internal_coff_library_file(name: text, search_paths: [text]) -> text:
@@ -654,7 +662,7 @@ fn internal_link_publish_bytes(output: text, bytes: [u8]) -> bool:
     false
 
 fn internal_link_simpleos(object_files: [text], output: text, target: text,
-        strip_output: bool, retained_symbols: [text]) -> Result:
+        config: NativeLinkConfig) -> Result:
     """Link a SimpleOS kernel through BootLayoutPlan without external lld."""
     var target_arch = RelocArch.X86_64
     var default_script = "src/os/kernel/arch/x86_64/linker.ld"
@@ -671,11 +679,25 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
     for path in object_files:
         if not file_exists(path): return Err("internal engine: input {path} cannot be read")
         objects = objects.push(internal_link_native_read_i64(path))
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
+    var archive_paths = native_runtime_archive_inputs(runtime_dir,
+        config.runtime_bundle)
+    for library in config.libraries:
+        val resolved = internal_simpleos_archive_file(library, config.library_paths)
+        if resolved == "":
+            return Err("internal engine: SimpleOS static library '{library}' was not found")
+        if not archive_paths.contains(resolved): archive_paths = archive_paths.push(resolved)
+    var archives: [[i64]] = []
+    for path in archive_paths:
+        if internal_elf_library_kind(path) != 1:
+            return Err("internal engine: SimpleOS library is not a static archive: {path}")
+        archives = archives.push(internal_link_native_read_i64(path))
     val plan = boot_layout_from_text(file_read(script_path))
     if plan.is_err(): return Err("internal engine: SimpleOS linker script: {plan.unwrap_err()}")
     val boot_plan = plan.unwrap()
-    val linked = elf_boot_link_configured(objects, boot_plan, target_arch,
-        strip_output, retained_symbols)
+    val linked = elf_boot_link_archives_configured(objects, archives, boot_plan,
+        target_arch, config.strip_output, config.retained_symbols)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []
     for b in linked.unwrap(): bytes = bytes.push(b as u8)
