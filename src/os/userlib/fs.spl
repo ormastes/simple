@@ -3,10 +3,15 @@
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
+use os.userlib.ipc_endpoint.{
+    ipc_connect_named_port, ipc_send_owned_v1,
+    IPC_RECV_OWNED_V1, IPC_OWNED_V1_HEADER_BYTES,
+    IPC_OWNED_V1_MAX_PAYLOAD_BYTES, IPC_OWNED_V1_REPLY_HEADER_FLAG
+}
 use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_STAT_NO_FOLLOW, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_READLINK, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
 use os.services.vfs.vfs_positioned_ops.{g_vfs_positioned_fstat}
-use std.fs_driver.error.{FsError}
+use std.fs_driver.error.{FsError, EAGAIN}
 use std.fs_driver.types.{FileStat}
 use os.kernel.types.ipc_types(IpcPort, IpcMessage)
 use std.common.crypto.secure_memory.{secure_zero_u8_slots, secure_set_u8_length}
@@ -143,26 +148,19 @@ pub fn read_file_bytes_direct_owned(path: text, max_len: u64) -> Result<[u8], te
 
 # VFS's named service endpoint and the copied IPC syscall ABI.
 val _VFS_SERVICE_NAME: text = "vfs"
-val _SYS_IPC_SEND: u64 = 20
-val _SYS_IPC_RECV: u64 = 21
 val _SYS_IPC_CREATE_PORT: u64 = 22
-val _SYS_IPC_CONNECT: u64 = 23
 val _SYS_IPC_DESTROY_PORT: u64 = 18
+val _SYS_YIELD: u64 = 1u64
 val _VFS_IPC_REQUEST_FRAME_MAX: u64 = 4100u64
 val _VFS_IPC_REPLY_MAX: u64 = 4096u64
-val _VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
-val _IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 val _VFS_OPEN_READ: u32 = VFS_OPEN_O_RDONLY
 val _VFS_OPEN_WRITE_CREATE_TRUNCATE: u32 = VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT | VFS_OPEN_O_TRUNC
 
-extern fn mmio_read8(addr: u64) -> u8
-extern fn mmio_read32(addr: u64) -> u32
-
-fn _vfs_read_u32_at(addr: u64) -> u32:
-    mmio_read32(addr)
-
-fn _vfs_read_i32_at(addr: u64) -> i32:
-    _vfs_read_u32_at(addr).to_i32()
+fn _vfs_read_u32(bytes: [u8], offset: u64) -> u32:
+    bytes[offset].to_u32() |
+        (bytes[offset + 1u64].to_u32() << 8u32) |
+        (bytes[offset + 2u64].to_u32() << 16u32) |
+        (bytes[offset + 3u64].to_u32() << 24u32)
 
 fn _vfs_destroy_reply_port(reply_port: i64):
     # Frozen IpcDestroyPort consumer interface: syscall 18 takes the caller's
@@ -199,48 +197,60 @@ fn _vfs_text_bytes(value: text) -> [u8]:
     bytes
 
 pub fn vfs_ipc_request_bytes(method: u32, payload: [u8]) -> Result<[u8], text>:
-    """Send one bounded method-prefixed VFS request and return raw reply bytes.
+    """Send one bounded copied VFS request and return reply payload bytes.
 
-    An anonymous reply port belongs to the calling task.  The named ``vfs``
-    source port then makes the server response a raw copied status frame.
+    An anonymous reply port belongs to the calling task. The kernel checks
+    the named service connection and mints one exact reverse-port reply right.
     """
     if payload.len().to_u64() > _VFS_IPC_REQUEST_FRAME_MAX - 4u64:
         return Err("VFS request exceeds IPC bound")
     val reply_port = syscall(_SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
     if reply_port < 0:
         return Err("failed to create VFS reply port")
-    val service_port = syscall(_SYS_IPC_CONNECT, unsafe_addr_of(_VFS_SERVICE_NAME), _VFS_SERVICE_NAME.len(), 0, 0, 0)
-    if service_port < 0:
+    val connected = ipc_connect_named_port(_VFS_SERVICE_NAME)
+    if connected.is_err():
         _vfs_destroy_reply_port(reply_port)
         return Err("failed to connect to VFS service")
+    val service_port = connected.unwrap()
 
-    var request: [u8] = []
-    _vfs_push_u32(request, method)
-    var request_index: u64 = 0u64
-    while request_index < payload.len():
-        request.push(payload[request_index])
-        request_index = request_index + 1u64
-    val request_bytes = unsafe_addr_of(request) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES
-    val sent = syscall(_SYS_IPC_SEND, service_port.to_u64(), reply_port.to_u64(), request_bytes, request.len(), _IPC_COPIED_SERVICE_TAG)
-    if sent < 0:
+    val sent = ipc_send_owned_v1(service_port, method, payload, reply_port.to_u64())
+    if sent.is_err():
         _vfs_destroy_reply_port(reply_port)
-        return Err("VFS send failed with code {sent}")
+        return Err("VFS owned send failed")
 
-    val message_raw = syscall(_SYS_IPC_RECV, reply_port.to_u64(), 0xFFFFFFFFFFFFFFFFu64, 0, 0, 0)
-    if message_raw <= 0:
+    var record: [u8] = []
+    var capacity: u64 = 0u64
+    while capacity < IPC_OWNED_V1_HEADER_BYTES + IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        record.push(0u8)
+        capacity = capacity + 1u64
+    var message_len: i64 = -(EAGAIN as i64)
+    while message_len == -(EAGAIN as i64):
+        message_len = syscall(IPC_RECV_OWNED_V1, reply_port.to_u64(), record.ptr() as u64, record.len() as u64, 0u64, 0u64)
+        if message_len == -(EAGAIN as i64):
+            syscall(_SYS_YIELD, 0u64, 0u64, 0u64, 0u64, 0u64)
+    if message_len < 0:
         _vfs_destroy_reply_port(reply_port)
-        return Err("VFS recv failed with code {message_raw}")
-    val message_addr = message_raw.to_u64()
-    val frame_len = _vfs_read_u32_at(message_addr + 24u64).to_u64()
-    if frame_len < 4u64 or frame_len > _VFS_IPC_REPLY_MAX:
+        return Err("VFS owned receive failed with code {message_len}")
+    val record_len = message_len as u64
+    if record_len < IPC_OWNED_V1_HEADER_BYTES + 4u64 or record_len > record.len() as u64:
         _vfs_destroy_reply_port(reply_port)
         return Err("malformed VFS reply")
-    val reply_addr = message_addr + 32u64
-    val status = _vfs_read_i32_at(reply_addr)
+    val frame_len = _vfs_read_u32(record, 24u64).to_u64()
+    if frame_len < 4u64 or frame_len > _VFS_IPC_REPLY_MAX or record_len != IPC_OWNED_V1_HEADER_BYTES + frame_len:
+        _vfs_destroy_reply_port(reply_port)
+        return Err("malformed VFS reply")
+    if (_vfs_read_u64(record, 0u64) != service_port or
+        _vfs_read_u64(record, 8u64) != reply_port.to_u64() or
+        _vfs_read_u32(record, 16u64) != 0u32 or
+        _vfs_read_u32(record, 20u64) != IPC_OWNED_V1_REPLY_HEADER_FLAG or
+        _vfs_read_u32(record, 28u64) != 0u32):
+        _vfs_destroy_reply_port(reply_port)
+        return Err("VFS reply endpoint or flags mismatch")
+    val status = _vfs_read_u32(record, IPC_OWNED_V1_HEADER_BYTES).to_i32()
     var bytes: [u8] = []
-    var reply_index: u64 = 4u64
-    while reply_index < frame_len:
-        bytes.push(mmio_read8(reply_addr + reply_index))
+    var reply_index: u64 = IPC_OWNED_V1_HEADER_BYTES + 4u64
+    while reply_index < record_len:
+        bytes.push(record[reply_index])
         reply_index = reply_index + 1u64
     if status < 0:
         _vfs_destroy_reply_port(reply_port)

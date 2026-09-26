@@ -25,11 +25,13 @@ and NFR requirements still require user selection.
   fd is also not a MountTable positioned file-object ID. Do not derive
   positioned authority from either number.
 - `VfsService` now has source wiring for bounded syscall 133 reception and
-  retains tagged syscall 20 replies for legacy clients. The source contract
-  checks this transition, but it has no admitted runtime or guest evidence.
-  `os.userlib.fs.vfs_ipc_request_bytes` still uses tagged 20 and legacy 21,
-  as `vfs_ipc_wire_spec.spl` expects. A 132 client and checked 132 reply
-  remain to be implemented before an end-to-end owned-IPC service claim.
+  selects a 132 reply only for an `Async` request that minted a reverse-port
+  permit; zero-flag legacy requests retain tagged syscall 20 replies. The
+  source contract checks this transition, but it has no admitted runtime or
+  guest evidence. `os.userlib.fs.vfs_ipc_request_bytes` now uses 132 for the
+  request and 133 for the checked reply. Kernel `fd_io` still uses tagged 20
+  and legacy 21; the service's zero-flag branch preserves that bridge. The
+  updated wire specs remain unexecuted without an admitted Simple binary.
 - The kernel copied-receive status/header/payload/provenance has one canonical
   `OwnedIpcReceiveResult` type in `ipc_types.spl`, replacing the syscall's
   local `any` view. The 32-byte user wire is unchanged, and the positioned
@@ -108,18 +110,18 @@ assumption needs a serialized transition before multicore release.
    yields in its dedicated loop. The kernel's tagged syscall 20 enqueues
    copied payloads, so the existing client request frame can enter this path.
    Its header flags are zero and mint no owned reply permit; the legacy reply
-   route remains. Verify this bridge in an admitted guest before promotion.
-2. Move `vfs_ipc_request_bytes` to 132 with its existing caller-owned reply
-   port and separate method word. A 132 request carries `Async` and mints the
-   exact reverse-port permit. The service may then use 132's checked reply;
-   the client can migrate its reply receive to 133. During overlap the service
-   must select the reply route from the received header flags, not from an fd,
-   source-port name, or guessed client version.
-3. Reconcile `vfs_service_owned_ipc_contract_spec.spl` and
-   `vfs_ipc_wire_spec.spl` with the transitional behavior. Cover old-client /
+   route remains. The service selects a checked 132 reply for `Async` input.
+   Verify both branches in an admitted guest before promotion.
+2. `vfs_ipc_request_bytes` now calls 132 with its caller-owned reply port and
+   separate method word. A 132 request carries `Async` and mints the exact
+   reverse-port permit. The service chooses the checked 132 reply from that
+   flag; the client receives and validates the 133 header and frame length.
+   It yields on EAGAIN to preserve its synchronous caller API. Admit this
+   round trip and the kernel `fd_io` legacy bridge in a guest before promotion.
+3. The source contracts now reflect both routes. Add executable old-client /
    new-service and new-client / new-service round trips, malformed lengths,
    wrong receiver, missing reply permit, and EAGAIN handling. The 133 path is
-   nonblocking, so the dedicated service loop must yield rather than spin.
+   nonblocking, so the dedicated service loop yields rather than spins.
 4. Only after the copied transport is live should the selected provenance
    ABI feed a task identity to positioned control. Neither the source port nor
    the VFS fd may stand in for that identity.

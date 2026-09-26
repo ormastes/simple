@@ -27,9 +27,10 @@
 
 use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
+use os.kernel.types.ipc_types.{IpcFlags}
 use os.async.os_executor.{OsExecutor}
 use os.userlib.ipc_endpoint.{
-    ipc_create_named_port, ipc_recv_owned_v1_into,
+    ipc_create_named_port, ipc_recv_owned_v1_into, ipc_reply_owned_v1,
     IPC_OWNED_V1_HEADER_BYTES, IPC_OWNED_V1_MAX_PAYLOAD_BYTES
 }
 
@@ -109,6 +110,7 @@ class VfsService:
     executor: OsExecutor
     request_count: u64
     receive_buffer: [u8]
+    reply_owned: bool
 
 impl VfsService:
     static fn new(vfs: VfsManager) -> VfsService:
@@ -118,7 +120,8 @@ impl VfsService:
             running: false,
             executor: OsExecutor.new(),
             request_count: 0,
-            receive_buffer: _vfs_recv_buffer()
+            receive_buffer: _vfs_recv_buffer(),
+            reply_owned: false
         )
 
     static fn with_executor(vfs: VfsManager, executor: OsExecutor) -> VfsService:
@@ -129,7 +132,8 @@ impl VfsService:
             running: false,
             executor: executor,
             request_count: 0,
-            receive_buffer: _vfs_recv_buffer()
+            receive_buffer: _vfs_recv_buffer(),
+            reply_owned: false
         )
 
     me start():
@@ -179,9 +183,13 @@ impl VfsService:
         # IpcMessage layout: src_port(8) | dst_port(8) | method(4) | flags(4) | payload_len(4) | cap_count(4)
         val src_port = _read_u64(msg_addr)
         val method = _read_u32(msg_addr + 16)
+        val flags = _read_u32(msg_addr + 20)
         val payload_len = _read_u32(msg_addr + 24)
         val payload_addr = msg_addr + IPC_OWNED_V1_HEADER_BYTES
 
+        if flags != 0u32 and flags != (IpcFlags.Async as u32):
+            return
+        self.reply_owned = flags == (IpcFlags.Async as u32)
         if payload_len.to_u64() > record_len - IPC_OWNED_V1_HEADER_BYTES:
             return
         if payload_len > VFS_IPC_REQUEST_PAYLOAD_MAX:
@@ -422,14 +430,23 @@ impl VfsService:
     # Reply Helpers
     # ========================================================================
 
-    fn send_u64_reply(dst_port: u64, status: i32, value: u64):
+    me send_transport_reply(dst_port: u64, data: [u8]):
+        """Choose the reply right from the checked request header flags."""
+        if self.reply_owned:
+            val sent = ipc_reply_owned_v1(dst_port, 0u32, data, self.port_id)
+            if sent.is_err():
+                log_raw_println("[vfs-service] Owned IPC reply failed")
+        else:
+            _ipc_send(dst_port, self.port_id, data)
+
+    me send_u64_reply(dst_port: u64, status: i32, value: u64):
         """Send a reply with status + u64 value."""
         var buf: [u8] = []
         _push_i32(buf, status)
         _push_u64(buf, value)
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_bytes_reply(dst_port: u64, status: i32, data: [u8]):
+    me send_bytes_reply(dst_port: u64, status: i32, data: [u8]):
         """Send a reply with status + raw bytes."""
         if data.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
             self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
@@ -440,9 +457,9 @@ impl VfsService:
         while i < data.len():
             buf.push(data[i])
             i = i + 1
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_text_reply(dst_port: u64, status: i32, text_val: text):
+    me send_text_reply(dst_port: u64, status: i32, text_val: text):
         """Send a reply with status + text payload."""
         if text_val.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
             self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
@@ -451,9 +468,9 @@ impl VfsService:
         _push_i32(buf, status)
         for ch in text_val:
             buf.push(ch.to_u8())
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_error_reply(dst_port: u64, status: i32, msg: text):
+    me send_error_reply(dst_port: u64, status: i32, msg: text):
         """Send an error reply with status + error message."""
         var buf: [u8] = []
         _push_i32(buf, status)
@@ -461,7 +478,7 @@ impl VfsService:
         while index < msg.len() and index < VFS_IPC_REPLY_PAYLOAD_MAX:
             buf.push(msg.byte_at(index))
             index = index + 1u64
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
     me stop():
         """Stop the service loop."""
