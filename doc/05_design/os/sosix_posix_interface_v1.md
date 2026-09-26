@@ -1,8 +1,8 @@
 # SOSIX POSIX-compatibility interface V1
 
-Date: 2026-09-26. Status: interface definition + vertical slices 1 (uname)
-and 2 (stdio). SimpleOS program roadmap point 2. AArch64 lanes only; no x86
-surface is defined or implied by this document.
+Date: 2026-09-26. Status: interface definition + vertical slices 1 (uname),
+2 (stdio), and 3 (mmap arena). SimpleOS program roadmap point 2. AArch64
+lanes only; no x86 surface is defined or implied by this document.
 
 SOSIX is the SimpleOS POSIX-compatibility interface layer: the contract that
 lets FreeBSD-style userland sources (and clang's runtime expectations) target
@@ -40,9 +40,9 @@ reserved, returns -ENOSYS. "POSIX name" is the SOSIX-facing name; ids marked
 | 7 | `kill`-family `signal` | pid, sig, -, -, - | wired |
 | 8 | (non-POSIX) `set_priority` | - | wired |
 | 9 | (non-POSIX) `get_parent_pid` | - | wired |
-| 10 | `mmap` (anonymous) | hint, len, prot, flags, - | partial (anon-only; arm64 guest heap is a bump arena) |
-| 11 | `munmap` | addr, len, -, -, - | partial (no-op on the bump arena) |
-| 12 | `mprotect` | addr, len, prot, -, - | partial |
+| 10 | `mmap` (anonymous) | hint, len, prot, flags, - | partial (anon-only; free-list arena `mmap_v1` landed + host-verified, but the arm64 guest still dispatches to the bump arena — case-arm flip pending) |
+| 11 | `munmap` | addr, len, -, -, - | partial (arena `release` frees + coalesces host-side; no-op on the arm64 guest's bump path) |
+| 12 | `mprotect` | addr, len, prot, -, - | partial (arena `protect` flips perms host-side; arm64 guest unchanged) |
 | 13 | (non-POSIX) `spawn_binary` | - | wired |
 | 14 | (non-POSIX) `enter_user_blocking` | - | partial |
 | 15 | `brk` | addr, -, -, -, - | wired |
@@ -157,10 +157,16 @@ listed here is not SOSIX V1 and must be probed or avoided.
   the DebugWrite (id 60) console fallback. The guest toolchain's C stdio
   remains the lane-C1 sysroot's `libsimpleos_c.a`, not the kernel.
 - **malloc**: guest libc dlmalloc arena over anonymous `mmap` (id 10); the
-  arm64 heap is a bump arena — `munmap`/`mprotect` are tolerated no-ops.
+  arm64 heap is still the bump arena on the live dispatch path — the
+  free-list arena (vertical 3) replaces it when the id-10 case arm flips.
 - **string**: guest libc string/memory functions (no kernel involvement).
 - **mmap**: anonymous, private mappings only; `MAP_FIXED` honored only inside
-  the user window; file-backed mappings are a later slice.
+  the user window; file-backed mappings are a later slice. Semantics per the
+  vertical-3 arena (`src/os/services/sosix/mmap_v1.spl`): first-fit at the
+  lowest address (bump-compatible growth), munmap frees + boundary-tag
+  coalesces (idempotent; unmapped pages in the range are skipped), mprotect
+  is all-or-nothing (-EFAULT on any unmapped page), msync is a no-op success
+  (no file-backed writeback yet).
 - **clock**: `clock_gettime` id 50 (CLOCK_REALTIME from RTC, CLOCK_MONOTONIC
   from the scheduler tick); `nanosleep` facade over id 51.
 - **uname**: id 92, `struct utsname` = 5 fields × 65 bytes
@@ -207,10 +213,28 @@ is not plumbed through the guest C-ABI open extern; id 69
 kernel cursor stay POSIX-undefined (one FILE per fd is the supported
 shape).
 
+Delivered as V1 vertical 3 (mmap semantics, roadmap item 2 first half): the
+per-guest-address-space boundary-tag free-list arena
+(`src/os/services/sosix/mmap_v1.spl`) with an injected page-source vtable
+(no kernel imports — host-testable), the kernel-side owner
+(`src/os/kernel/memory/sosix_mmap_v1.spl`: VMM/PMM-backed ops with the W^X
+parity rule + SyscallResult-shaped handlers for the id-10 family), and the
+host-side spec `test/01_unit/os/services/sosix_mmap_v1_spec.spl` (21
+examples: alloc/split/reuse/coalesce, munmap-then-remap-same-span, hint +
+MAP_FIXED, mprotect flips + EFAULT all-or-nothing, msync no-op, ENOMEM
+rollback, invariant walker over I1-I4). NOT YET WIRED: both id-10 case
+arms (the Simple-kernel `case 10/11/12` in `syscall.spl` →
+`_handle_memory_map`, and the R4 lane's C `case 10` → `arm64_user_mmap` in
+`baremetal_stubs.c`) still run the legacy bump paths; flipping them is one
+line per arm plus per-AS arena instantiation at launch, gated on the R4
+lane's QEMU boot cycle. No R4-owned file was touched by this slice.
+
 Recommended next slices, in order:
 
-1. **mmap semantics** — real `munmap`/`mprotect` over a free-list arena
-   (replace the bump allocator), then file-backed `mmap`.
+1. **mmap case-arm flip + file-backed `mmap`** — wire the verified arena
+   into the id-10 family on the arm64 guest (one-line case arms + per-AS
+   arena at launch; R4's QEMU cycle is the gate), then file-backed
+   mappings (VFS read into the page source at map fault or map time).
 2. **termios** — the terminal lane's `tcgetattr`/`tcsetattr`/`isatty` over a
    tty service; clang's driver probes `isatty(1)` for color diagnostics.
    Once `isatty` exists, revisit stdio's unconditional stdout line

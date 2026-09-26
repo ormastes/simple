@@ -1,0 +1,366 @@
+"""SOSIX mmap arena, v1 — per-guest-address-space free-list virtual-memory arena.
+
+Interface slice 3 (doc/05_design/os/sosix_posix_interface_v1.md §6, roadmap
+item "mmap semantics"): the upgrade path for the arm64 guest's anonymous-mmap
+bump allocator (arm64_user_heap_va in baremetal_stubs.c, reset per launch).
+This module is the pure span-bookkeeping core: a boundary-tag free list over
+one guest address space's mmap window. It imports NO kernel modules — every
+page-table contact goes through the injected SosixMmapOpsV1 vtable, so the
+whole arena is host-testable with a fake page source (see
+test/01_unit/os/services/sosix_mmap_v1_spec.spl) and guest-wirable by passing
+the real page ops from the kernel-side owner
+(src/os/kernel/memory/sosix_mmap_v1.spl).
+
+Id map served (doc §1): mmap=10, munmap=11, mprotect=12. msync has no
+allocated id yet; the arena exposes sync() as the no-op success the interface
+doc promises until file-backed writeback lands (a later slice).
+
+Structure invariants (hold after every public call; the spec walks them):
+  I1  every free span is page-aligned and fully inside the window
+      [window_base, window_base + window_pages * PAGE)
+  I2  the free list is sorted ascending by span start
+  I3  free spans are pairwise disjoint AND non-adjacent — two contiguous
+      free spans never coexist (boundary tags: _insert_free coalesces on
+      every free, so a contiguous predecessor/successor pair is impossible)
+  I4  free pages + pages the page source reports as mapped == window_pages
+      (conservation; checked by the spec through the fake)
+
+Allocation policy: first-fit at the lowest address, taken from the FRONT of
+the chosen free span (growth direction matches the bump allocator it
+replaces, so dlmalloc's size-only calls keep a stable layout). A non-zero
+hint is honored when it is page-aligned, fully inside the window, and the
+whole requested range lies inside ONE free span (split around it); with
+SOSIX_MMAP_FLAG_FIXED the hint becomes mandatory (-EINVAL unaligned or
+outside the window, -ENOMEM when the exact span is not free). Without FIXED
+an unusable hint is ignored and first-fit proceeds — the guest libc
+discards the flags word entirely today (src/os/libc/simpleos_libc.c mmap
+passes 0), so hint-driven callers must not rely on FIXED yet.
+
+Semantics parity notes:
+  - prot bits are POSIX PROT_READ=1 / PROT_WRITE=2 / PROT_EXEC=4; mapped
+    pages are always readable (same simplification as
+    os.kernel.ipc.syscall_memory._prot_to_vmflags: PRESENT is unconditional).
+  - W^X policy is NOT enforced here: the arena passes (writable, executable)
+    through to the vtable; the kernel-side owner applies the NX-unless-
+    exec-and-not-write rule when it builds VmFlags.
+  - munmap is idempotent and Linux-tolerant: pages in the range the page
+    source does not report as mapped are skipped, so double-munmap and
+    munmap-over-unmapped-ranges succeed and free only the mapped runs.
+  - mprotect is all-or-nothing: any unmapped page in the range fails the
+    whole call with -EFAULT before any permission is flipped.
+"""
+
+# === Page geometry / prot / flags (numeric ABI parity) =====================
+# PAGE_SIZE parity: os.kernel.memory.vmm. PROT_* parity: guest
+# <sys/mman.h> / POSIX. Flag bit 0 = MAP_FIXED parity: the arg3 comment in
+# os.kernel.ipc.syscall_memory._handle_memory_map ("bit 0=fixed").
+# Duplicated here so this module stays importable from host-side tests
+# without dragging in the kernel import graph; never change one side alone.
+
+pub val SOSIX_MMAP_PAGE: u64 = 4096
+pub val SOSIX_MMAP_PROT_READ: u64 = 1
+pub val SOSIX_MMAP_PROT_WRITE: u64 = 2
+pub val SOSIX_MMAP_PROT_EXEC: u64 = 4
+pub val SOSIX_MMAP_FLAG_FIXED: u64 = 1
+# Sanity bound for one mapping (1 GiB), parity with syscall_memory.spl's
+# _handle_memory_map size cap.
+pub val SOSIX_MMAP_MAX_LEN: u64 = 0x40000000
+export SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ, SOSIX_MMAP_PROT_WRITE
+export SOSIX_MMAP_PROT_EXEC, SOSIX_MMAP_FLAG_FIXED, SOSIX_MMAP_MAX_LEN
+
+# Default window for the arm64 guest wiring (documentation-grade until the
+# id-10 case arm flips): the R4 lane's per-launch heap cursor starts at
+# 0x20000000 (baremetal_stubs.c arm64_user_heap_va init) and must stay below
+# the kernel identity window (kernel image linked at 0x40000000+), giving a
+# 512 MiB VA window. Physical exhaustion surfaces as -ENOMEM from the page
+# source, not from the window size.
+pub val SOSIX_MMAP_ARM64_WINDOW_BASE: u64 = 0x20000000
+pub val SOSIX_MMAP_ARM64_WINDOW_PAGES: u64 = 0x20000
+export SOSIX_MMAP_ARM64_WINDOW_BASE, SOSIX_MMAP_ARM64_WINDOW_PAGES
+
+# Errno numbers used below (os.kernel.errno ABI; names via errno_text_v1).
+val _SOSIX_MMAP_ENOMEM: i64 = 12
+val _SOSIX_MMAP_EFAULT: i64 = 14
+val _SOSIX_MMAP_EINVAL: i64 = 22
+
+pub struct SosixMmapOpsV1:
+    """Page-source vtable the arena rides on (the kernel-contact seam).
+
+    map(page_va, writable, executable) -> 0 | -errno
+        Allocate one zeroed physical page and map it at page_va with the
+        requested permissions. Fails with -ENOMEM when the pool is dry.
+    unmap(page_va) -> 0 | -errno
+        Unmap page_va and return its physical page to the pool. Idempotent
+        is NOT required: the arena only calls it for pages is_mapped
+        reported as mapped.
+    protect(page_va, writable, executable) -> 0 | -errno
+        Flip the permissions of an already-mapped page.
+    is_mapped(page_va) -> bool
+        True when page_va is currently mapped in this address space.
+
+    The arena never calls these on a page outside the window and never
+    calls map on a page it has not first removed from the free list.
+    """
+    map: fn(u64, bool, bool) -> i64
+    unmap: fn(u64) -> i64
+    protect: fn(u64, bool, bool) -> i64
+    is_mapped: fn(u64) -> bool
+
+pub struct SosixMmapSpanV1:
+    """One free extent: page-aligned byte VA + page count (boundary tag)."""
+    start: u64
+    page_count: u64
+
+pub class SosixMmapArenaV1:
+    """One guest address space's mmap window: boundary-tag free list + ops.
+
+    Invariants I1-I4 from the module docstring hold after every public
+    method returns. Construction: use sosix_mmap_arena_new_v1 (window_base
+    MUST be page-aligned — kernel constants are by construction)."""
+    window_base: u64
+    window_pages: u64
+    free: [SosixMmapSpanV1]
+    ops: SosixMmapOpsV1
+
+impl SosixMmapArenaV1:
+    # === introspection (spec walks the invariants through these) ==========
+
+    pub fn window_end() -> u64:
+        self.window_base + self.window_pages * SOSIX_MMAP_PAGE
+
+    pub fn free_span_count() -> u64:
+        self.free.len()
+
+    pub fn free_span_at(index: u64) -> SosixMmapSpanV1:
+        self.free[index]
+
+    pub fn free_pages() -> u64:
+        var total = 0u64
+        var i = 0u64
+        while i < self.free.len():
+            total = total + self.free[i].page_count
+            i = i + 1
+        total
+
+    # === internal free-list machinery (boundary tags) ======================
+
+    fn _in_window(addr: u64, pages: u64) -> bool:
+        """Overflow-safe containment: [addr, addr + pages*PAGE) inside window.
+        Caller has already established addr is page-aligned."""
+        if addr < self.window_base:
+            return false
+        val end = self.window_end()
+        if addr >= end:
+            return false
+        pages * SOSIX_MMAP_PAGE <= end - addr
+
+    fn _find_fit(pages: u64) -> i64:
+        """Index of the lowest-address free span holding `pages`, or -1.
+        The list is address-sorted (I2), so the first fit is the lowest."""
+        var i = 0u64
+        while i < self.free.len():
+            if self.free[i].page_count >= pages:
+                return i as i64
+            i = i + 1
+        -1
+
+    fn _is_free_exact(start: u64, pages: u64) -> bool:
+        """True when [start, start + pages*PAGE) lies wholly inside one free
+        span (the hint/FIXED availability test)."""
+        var i = 0u64
+        while i < self.free.len():
+            val span = self.free[i]
+            if span.start > start:
+                return false
+            val span_end = span.start + span.page_count * SOSIX_MMAP_PAGE
+            if start + pages * SOSIX_MMAP_PAGE <= span_end:
+                return true
+            i = i + 1
+        false
+
+    fn _insert_free(start: u64, pages: u64):
+        """Boundary-tag insert: sorted position, then coalesce with the one
+        possible contiguous predecessor and successor (I3 makes one merge
+        per side sufficient)."""
+        var i = 0u64
+        while i < self.free.len() and self.free[i].start < start:
+            i = i + 1
+        if i > 0:
+            val pred = self.free[i - 1]
+            if pred.start + pred.page_count * SOSIX_MMAP_PAGE == start:
+                start = pred.start
+                pages = pages + pred.page_count
+                self.free.remove(i - 1)
+                i = i - 1
+        if i < self.free.len():
+            val succ = self.free[i]
+            if start + pages * SOSIX_MMAP_PAGE == succ.start:
+                pages = pages + succ.page_count
+                self.free.remove(i)
+        self.free.insert(i, SosixMmapSpanV1(start: start, page_count: pages))
+
+    fn _split_span(index: u64, start: u64, pages: u64):
+        """Remove [start, start + pages*PAGE) from free span `index`,
+        leaving the (up to two) disjoint remainders in its place (I1-I3)."""
+        val span = self.free[index]
+        val span_end = span.start + span.page_count * SOSIX_MMAP_PAGE
+        val right_start = start + pages * SOSIX_MMAP_PAGE
+        val left_pages = (start - span.start) / SOSIX_MMAP_PAGE
+        val right_pages = (span_end - right_start) / SOSIX_MMAP_PAGE
+        self.free.remove(index)
+        if right_pages > 0:
+            self.free.insert(index, SosixMmapSpanV1(start: right_start, page_count: right_pages))
+        if left_pages > 0:
+            self.free.insert(index, SosixMmapSpanV1(start: span.start, page_count: left_pages))
+
+    fn _map_span(start: u64, pages: u64, writable: bool, executable: bool) -> i64:
+        """Map every page of an already-reserved span; on the first failure
+        roll the mapped prefix back and return the span to the free list
+        (coalescing restores the exact pre-alloc shape), then propagate."""
+        var i = 0u64
+        while i < pages:
+            val r = self.ops.map(start + i * SOSIX_MMAP_PAGE, writable, executable)
+            if r < 0:
+                var j = 0u64
+                while j < i:
+                    val _ = self.ops.unmap(start + j * SOSIX_MMAP_PAGE)
+                    j = j + 1
+                self._insert_free(start, pages)
+                return r
+            i = i + 1
+        0
+
+    # === the syscall surface ===============================================
+
+    pub fn alloc(hint: u64, len: u64, prot: u64, flags: u64) -> i64:
+        """mmap: reserve a free span and map it. Returns the page-aligned VA
+        or -errno (negated errno ABI, doc §2)."""
+        if len == 0 or len > SOSIX_MMAP_MAX_LEN:
+            return -_SOSIX_MMAP_EINVAL
+        val pages = (len + SOSIX_MMAP_PAGE - 1) / SOSIX_MMAP_PAGE
+        if pages == 0:
+            return -_SOSIX_MMAP_EINVAL
+        val writable = (prot & SOSIX_MMAP_PROT_WRITE) != 0
+        val executable = (prot & SOSIX_MMAP_PROT_EXEC) != 0
+        val fixed = (flags & SOSIX_MMAP_FLAG_FIXED) != 0
+
+        if hint != 0:
+            if (hint % SOSIX_MMAP_PAGE) != 0:
+                if fixed:
+                    return -_SOSIX_MMAP_EINVAL
+            elif not self._in_window(hint, pages):
+                if fixed:
+                    return -_SOSIX_MMAP_EINVAL
+            elif self._is_free_exact(hint, pages):
+                self._split_span(self._containing_span(hint), hint, pages)
+                val mapped = self._map_span(hint, pages, writable, executable)
+                if mapped < 0:
+                    return mapped
+                return hint as i64
+            elif fixed:
+                return -_SOSIX_MMAP_ENOMEM
+
+        val fit = self._find_fit(pages)
+        if fit < 0:
+            return -_SOSIX_MMAP_ENOMEM
+        val start = self.free[fit as u64].start
+        self._split_span(fit as u64, start, pages)
+        val mapped = self._map_span(start, pages, writable, executable)
+        if mapped < 0:
+            return mapped
+        start as i64
+
+    fn _containing_span(start: u64) -> u64:
+        """Index of the free span containing page `start` (caller has
+        established via _is_free_exact that exactly one exists)."""
+        var i = 0u64
+        while i < self.free.len():
+            val span = self.free[i]
+            val span_end = span.start + span.page_count * SOSIX_MMAP_PAGE
+            if span.start <= start and start < span_end:
+                return i
+            i = i + 1
+        0
+
+    pub fn release(addr: u64, len: u64) -> i64:
+        """munmap: unmap the mapped runs in [addr, addr + len) and return
+        them to the free list (boundary-tag coalesce). Idempotent: pages the
+        page source does not report as mapped are skipped, so freeing the
+        same range twice succeeds and frees nothing the second time."""
+        if len == 0 or len > SOSIX_MMAP_MAX_LEN:
+            return -_SOSIX_MMAP_EINVAL
+        if (addr % SOSIX_MMAP_PAGE) != 0:
+            return -_SOSIX_MMAP_EINVAL
+        val pages = (len + SOSIX_MMAP_PAGE - 1) / SOSIX_MMAP_PAGE
+        if not self._in_window(addr, pages):
+            return -_SOSIX_MMAP_ENOMEM
+
+        var run_start = 0u64
+        var run_pages = 0u64
+        var i = 0u64
+        while i < pages:
+            val va = addr + i * SOSIX_MMAP_PAGE
+            if self.ops.is_mapped(va):
+                val r = self.ops.unmap(va)
+                if r < 0:
+                    if run_pages > 0:
+                        self._insert_free(run_start, run_pages)
+                    return r
+                if run_pages == 0:
+                    run_start = va
+                run_pages = run_pages + 1
+            else:
+                if run_pages > 0:
+                    self._insert_free(run_start, run_pages)
+                    run_pages = 0
+            i = i + 1
+        if run_pages > 0:
+            self._insert_free(run_start, run_pages)
+        0
+
+    pub fn protect(addr: u64, len: u64, prot: u64) -> i64:
+        """mprotect: flip permissions over a fully-mapped range. All-or-
+        nothing — one unmapped page fails the whole call with -EFAULT
+        before any permission moves."""
+        if len == 0 or len > SOSIX_MMAP_MAX_LEN:
+            return -_SOSIX_MMAP_EINVAL
+        if (addr % SOSIX_MMAP_PAGE) != 0:
+            return -_SOSIX_MMAP_EINVAL
+        val pages = (len + SOSIX_MMAP_PAGE - 1) / SOSIX_MMAP_PAGE
+        if not self._in_window(addr, pages):
+            return -_SOSIX_MMAP_ENOMEM
+
+        var i = 0u64
+        while i < pages:
+            if not self.ops.is_mapped(addr + i * SOSIX_MMAP_PAGE):
+                return -_SOSIX_MMAP_EFAULT
+            i = i + 1
+        val writable = (prot & SOSIX_MMAP_PROT_WRITE) != 0
+        val executable = (prot & SOSIX_MMAP_PROT_EXEC) != 0
+        i = 0
+        while i < pages:
+            val r = self.ops.protect(addr + i * SOSIX_MMAP_PAGE, writable, executable)
+            if r < 0:
+                return r
+            i = i + 1
+        0
+
+    pub fn sync(addr: u64, len: u64, flags: u64) -> i64:
+        """msync: no-op success (doc §4: no file-backed writeback yet —
+        anonymous mappings have nothing to write back)."""
+        val _ = addr
+        val _ = len
+        val _ = flags
+        0
+
+pub fn sosix_mmap_arena_new_v1(window_base: u64, window_pages: u64, ops: SosixMmapOpsV1) -> SosixMmapArenaV1:
+    """New arena over [window_base, window_base + window_pages*PAGE), starting
+    as one whole-window free span. window_base MUST be page-aligned."""
+    SosixMmapArenaV1(
+        window_base: window_base,
+        window_pages: window_pages,
+        free: [SosixMmapSpanV1(start: window_base, page_count: window_pages)],
+        ops: ops)
+
+export SosixMmapOpsV1, SosixMmapSpanV1, SosixMmapArenaV1
+export sosix_mmap_arena_new_v1

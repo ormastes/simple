@@ -1,0 +1,367 @@
+# @cover src/os/services/sosix/mmap_v1.spl 80%
+"""SOSIX mmap v1 arena: boundary-tag free-list semantics over a fake page source.
+
+Mirrors the sosix_stdio_v1_spec idiom: the arena takes its page-table contact
+as an ops vtable, so this spec injects an in-memory fake page source and
+exercises alloc/reuse/coalesce/split/munmap-then-remap-same-span/mprotect
+host-side. The invariant walker (_check_invariants) re-verifies the module's
+I1-I4 structure invariants (sorted, disjoint, non-adjacent, conserved) after
+every scenario — a free-list bug cannot hide between examples.
+"""
+
+use std.spec
+use os.services.sosix.mmap_v1.{
+    SosixMmapOpsV1, SosixMmapArenaV1, sosix_mmap_arena_new_v1,
+    SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ, SOSIX_MMAP_PROT_WRITE,
+    SOSIX_MMAP_PROT_EXEC, SOSIX_MMAP_FLAG_FIXED, SOSIX_MMAP_MAX_LEN,
+    SOSIX_MMAP_ARM64_WINDOW_BASE
+}
+
+# === fake page source ======================================================
+# Window-sized page state. The fake owns the "physical" truth: which pages
+# are mapped and with what permissions; the arena only owns span bookkeeping.
+
+val _BASE: u64 = SOSIX_MMAP_ARM64_WINDOW_BASE
+var _pages: u64 = 0
+var _mapped: [bool] = []
+var _writable: [bool] = []
+var _executable: [bool] = []
+var _map_calls: i64 = 0
+var _unmap_calls: i64 = 0
+var _protect_calls: i64 = 0
+var _map_budget: i64 = -1        # successful maps allowed before -ENOMEM (-1 = off)
+var _fail_unmap_va: u64 = 0      # inject an unmap failure at this page (0 = off)
+
+fn _reset(pages: u64):
+    _pages = pages
+    _mapped = []
+    _writable = []
+    _executable = []
+    var i = 0u64
+    while i < pages:
+        _mapped.push(false)
+        _writable.push(false)
+        _executable.push(false)
+        i = i + 1
+    _map_calls = 0
+    _unmap_calls = 0
+    _protect_calls = 0
+    _map_budget = -1
+    _fail_unmap_va = 0
+
+fn _idx(va: u64) -> u64:
+    (va - _BASE) / SOSIX_MMAP_PAGE
+
+fn _mapped_count() -> u64:
+    var n = 0u64
+    var i = 0u64
+    while i < _pages:
+        if _mapped[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _fake_map(va: u64, writable: bool, executable: bool) -> i64:
+    val i = _idx(va)
+    if i >= _pages:
+        return -14
+    if _mapped[i]:
+        return -14
+    if _map_budget == 0:
+        return -12
+    if _map_budget > 0:
+        _map_budget = _map_budget - 1
+    _mapped[i] = true
+    _writable[i] = writable
+    _executable[i] = executable
+    _map_calls = _map_calls + 1
+    0
+
+fn _fake_unmap(va: u64) -> i64:
+    if va == _fail_unmap_va:
+        return -5
+    val i = _idx(va)
+    if i >= _pages:
+        return -14
+    if not _mapped[i]:
+        return 0
+    _mapped[i] = false
+    _unmap_calls = _unmap_calls + 1
+    0
+
+fn _fake_protect(va: u64, writable: bool, executable: bool) -> i64:
+    val i = _idx(va)
+    if i >= _pages or not _mapped[i]:
+        return -14
+    _writable[i] = writable
+    _executable[i] = executable
+    _protect_calls = _protect_calls + 1
+    0
+
+fn _fake_is_mapped(va: u64) -> bool:
+    val i = _idx(va)
+    if i >= _pages:
+        return false
+    _mapped[i]
+
+fn _ops() -> SosixMmapOpsV1:
+    SosixMmapOpsV1(
+        map: _fake_map, unmap: _fake_unmap,
+        protect: _fake_protect, is_mapped: _fake_is_mapped)
+
+fn _arena(pages: u64) -> SosixMmapArenaV1:
+    _reset(pages)
+    sosix_mmap_arena_new_v1(_BASE, pages, _ops())
+
+# === invariant walker (module docstring I1-I4) =============================
+
+fn _check_invariants(arena: SosixMmapArenaV1):
+    val end = _BASE + _pages * SOSIX_MMAP_PAGE
+    var i = 0u64
+    while i < arena.free_span_count():
+        val span = arena.free_span_at(i)
+        # I1: aligned, non-empty, fully inside the window
+        expect(span.start % SOSIX_MMAP_PAGE).to_equal(0)
+        expect(span.page_count > 0).to_be(true)
+        expect(span.start >= _BASE).to_be(true)
+        expect(span.start + span.page_count * SOSIX_MMAP_PAGE <= end).to_be(true)
+        # I2/I3: sorted, disjoint, non-adjacent
+        if i > 0:
+            val prev_end = arena.free_span_at(i - 1).start + arena.free_span_at(i - 1).page_count * SOSIX_MMAP_PAGE
+            expect(span.start > prev_end).to_be(true)
+        i = i + 1
+    # I4: conservation — free pages + fake-mapped pages == window pages
+    expect(arena.free_pages() + _mapped_count()).to_equal(_pages)
+
+# === allocation, split, reuse ==============================================
+
+describe "SOSIX mmap v1 arena — allocation and split":
+    it "first allocation lands at the window base and splits the free span":
+        val a = _arena(16)
+        val va = a.alloc(0, 3 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ | SOSIX_MMAP_PROT_WRITE, 0)
+        expect(va).to_equal(_BASE as i64)
+        expect(a.free_pages()).to_equal(13)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_span_at(0).start).to_equal(_BASE + 3 * SOSIX_MMAP_PAGE)
+        expect(_mapped_count()).to_equal(3)
+        _check_invariants(a)
+
+    it "allocations grow front-to-back like the bump allocator it replaces":
+        val a = _arena(16)
+        val a1 = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        val a2 = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        val a3 = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a1).to_equal(_BASE as i64)
+        expect(a2).to_equal((_BASE + 2 * SOSIX_MMAP_PAGE) as i64)
+        expect(a3).to_equal((_BASE + 4 * SOSIX_MMAP_PAGE) as i64)
+        _check_invariants(a)
+
+    it "lengths round up to whole pages":
+        val a = _arena(16)
+        val va = a.alloc(0, 1, SOSIX_MMAP_PROT_READ, 0)
+        expect(va).to_equal(_BASE as i64)
+        expect(a.free_pages()).to_equal(15)
+        expect(_mapped_count()).to_equal(1)
+        _check_invariants(a)
+
+    it "passes the requested protection bits through to the page source":
+        val a = _arena(16)
+        val va = a.alloc(0, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ | SOSIX_MMAP_PROT_EXEC, 0)
+        expect(va).to_equal(_BASE as i64)
+        expect(_writable[_idx(_BASE)]).to_be(false)
+        expect(_executable[_idx(_BASE)]).to_be(true)
+        val none = a.alloc(0, SOSIX_MMAP_PAGE, 0, 0)
+        expect(none).to_equal((_BASE + SOSIX_MMAP_PAGE) as i64)
+        expect(_writable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(false)
+        expect(_executable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(false)
+        _check_invariants(a)
+
+    it "rejects zero-length and oversize mappings with EINVAL":
+        val a = _arena(16)
+        expect(a.alloc(0, 0, SOSIX_MMAP_PROT_READ, 0)).to_equal(-22)
+        expect(a.alloc(0, SOSIX_MMAP_MAX_LEN + 1, SOSIX_MMAP_PROT_READ, 0)).to_equal(-22)
+        expect(a.free_pages()).to_equal(16)
+        _check_invariants(a)
+
+    it "window exhaustion returns ENOMEM and leaves the arena unchanged":
+        val a = _arena(4)
+        expect(a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        expect(a.alloc(0, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(-12)
+        expect(a.free_pages()).to_equal(0)
+        expect(a.release(_BASE, 4 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_pages()).to_equal(4)
+        expect(a.free_span_count()).to_equal(1)
+        _check_invariants(a)
+
+    it "a page-source ENOMEM rolls back the partial mapping and the free list":
+        val a = _arena(8)
+        _map_budget = 3
+        expect(a.alloc(0, 8 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(-12)
+        expect(_mapped_count()).to_equal(0)
+        expect(a.free_pages()).to_equal(8)
+        expect(a.free_span_count()).to_equal(1)
+        _map_budget = -1
+        expect(a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        _check_invariants(a)
+
+describe "SOSIX mmap v1 arena — reuse, coalesce, munmap-then-remap":
+    it "a freed span is reused first-fit at the lowest address":
+        val a = _arena(16)
+        val first = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        val second = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(first).to_equal(_BASE as i64)
+        expect(second).to_equal((_BASE + 4 * SOSIX_MMAP_PAGE) as i64)
+        expect(a.release(first as u64, 4 * SOSIX_MMAP_PAGE)).to_equal(0)
+        val reused = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(reused).to_equal(_BASE as i64)
+        _check_invariants(a)
+
+    it "munmap then remap of the same size returns the same span":
+        val a = _arena(16)
+        val first = a.alloc(0, 3 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.release(first as u64, 3 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(_mapped_count()).to_equal(0)
+        val again = a.alloc(0, 3 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(again).to_equal(first)
+        expect(_mapped_count()).to_equal(3)
+        _check_invariants(a)
+
+    it "adjacent frees coalesce into one span in either order":
+        val a = _arena(16)
+        val first = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        val second = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.release(second as u64, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.release(first as u64, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_pages()).to_equal(16)
+        _check_invariants(a)
+        val b1 = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        val b2 = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.release(b1 as u64, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.release(b2 as u64, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_pages()).to_equal(16)
+        _check_invariants(a)
+
+    it "munmap of a middle sub-range leaves two fragments that are both usable":
+        val a = _arena(16)
+        val big = a.alloc(0, 8 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(big).to_equal(_BASE as i64)
+        expect(a.release(_BASE + 2 * SOSIX_MMAP_PAGE, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_span_count()).to_equal(2)
+        val one = a.alloc(0, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(one).to_equal((_BASE + 2 * SOSIX_MMAP_PAGE) as i64)
+        val two = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(two).to_equal((_BASE + 8 * SOSIX_MMAP_PAGE) as i64)
+        _check_invariants(a)
+
+    it "double munmap is idempotent and does not corrupt the free list":
+        val a = _arena(16)
+        val first = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.release(first as u64, 4 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.release(first as u64, 4 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_pages()).to_equal(16)
+        val again = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(again).to_equal(first)
+        _check_invariants(a)
+
+    it "munmap over a partially unmapped range frees only the mapped runs":
+        val a = _arena(16)
+        val first = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(first).to_equal(_BASE as i64)
+        expect(a.release(_BASE, 6 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(_mapped_count()).to_equal(0)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_pages()).to_equal(16)
+        _check_invariants(a)
+
+    it "an unmap failure mid-range propagates and frees only completed runs":
+        val a = _arena(8)
+        expect(a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        _fail_unmap_va = _BASE + 2 * SOSIX_MMAP_PAGE
+        expect(a.release(_BASE, 4 * SOSIX_MMAP_PAGE)).to_equal(-5)
+        expect(a.free_pages()).to_equal(6)
+        expect(_mapped_count()).to_equal(2)
+        _fail_unmap_va = 0
+        expect(a.release(_BASE + 2 * SOSIX_MMAP_PAGE, 2 * SOSIX_MMAP_PAGE)).to_equal(0)
+        expect(a.free_span_count()).to_equal(1)
+        expect(a.free_pages()).to_equal(8)
+        _check_invariants(a)
+
+    it "munmap rejects unaligned, zero-length, and out-of-window ranges":
+        val a = _arena(16)
+        val first = a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.release(first as u64 + 1, SOSIX_MMAP_PAGE)).to_equal(-22)
+        expect(a.release(first as u64, 0)).to_equal(-22)
+        expect(a.release(_BASE + 16 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PAGE)).to_equal(-12)
+        expect(a.release(_BASE, SOSIX_MMAP_MAX_LEN + 1)).to_equal(-22)
+        expect(_mapped_count()).to_equal(4)
+        _check_invariants(a)
+
+describe "SOSIX mmap v1 arena — hints and MAP_FIXED":
+    it "a usable hint is honored exactly":
+        val a = _arena(16)
+        expect(a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        val hint = _BASE + 8 * SOSIX_MMAP_PAGE
+        val va = a.alloc(hint, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(va).to_equal(hint as i64)
+        expect(a.free_span_count()).to_equal(2)
+        expect(a.free_span_at(0).start).to_equal(_BASE + 4 * SOSIX_MMAP_PAGE)
+        expect(a.free_span_at(0).page_count).to_equal(4)
+        expect(a.free_span_at(1).start).to_equal(_BASE + 10 * SOSIX_MMAP_PAGE)
+        _check_invariants(a)
+
+    it "an occupied or out-of-window hint falls back to first-fit without FIXED":
+        val a = _arena(16)
+        expect(a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        val occupied = a.alloc(_BASE, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(occupied).to_equal((_BASE + 4 * SOSIX_MMAP_PAGE) as i64)
+        val outside = a.alloc(0x1000, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(outside).to_equal((_BASE + 6 * SOSIX_MMAP_PAGE) as i64)
+        _check_invariants(a)
+
+    it "MAP_FIXED makes the hint mandatory with the documented errnos":
+        val a = _arena(16)
+        expect(a.alloc(0, 4 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)).to_equal(_BASE as i64)
+        expect(a.alloc(_BASE, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, SOSIX_MMAP_FLAG_FIXED)).to_equal(-12)
+        expect(a.alloc(_BASE + 1, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, SOSIX_MMAP_FLAG_FIXED)).to_equal(-22)
+        expect(a.alloc(0x1000, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, SOSIX_MMAP_FLAG_FIXED)).to_equal(-22)
+        val hint = _BASE + 8 * SOSIX_MMAP_PAGE
+        expect(a.alloc(hint, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, SOSIX_MMAP_FLAG_FIXED)).to_equal(hint as i64)
+        _check_invariants(a)
+
+describe "SOSIX mmap v1 arena — mprotect and msync":
+    it "mprotect flips permissions page by page":
+        val a = _arena(16)
+        val va = a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ | SOSIX_MMAP_PROT_WRITE, 0)
+        expect(va).to_equal(_BASE as i64)
+        expect(a.protect(_BASE, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ | SOSIX_MMAP_PROT_EXEC)).to_equal(0)
+        expect(_writable[_idx(_BASE)]).to_be(false)
+        expect(_executable[_idx(_BASE)]).to_be(true)
+        expect(_writable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(false)
+        expect(_executable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(true)
+        expect(a.protect(_BASE, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ | SOSIX_MMAP_PROT_WRITE)).to_equal(0)
+        expect(_writable[_idx(_BASE)]).to_be(true)
+        expect(_executable[_idx(_BASE)]).to_be(false)
+        expect(_writable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(false)
+        expect(a.free_pages()).to_equal(14)
+        _check_invariants(a)
+
+    it "mprotect fails EFAULT on any unmapped page without flipping anything":
+        val a = _arena(16)
+        expect(a.alloc(0, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_READ, 0)).to_equal(_BASE as i64)
+        expect(a.protect(_BASE + SOSIX_MMAP_PAGE, 2 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE)).to_equal(-14)
+        expect(_writable[_idx(_BASE + SOSIX_MMAP_PAGE)]).to_be(false)
+        expect(_protect_calls).to_equal(0)
+        expect(a.protect(_BASE + 16 * SOSIX_MMAP_PAGE, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE)).to_equal(-12)
+        expect(a.protect(_BASE + 1, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE)).to_equal(-22)
+        expect(a.protect(_BASE, 0, SOSIX_MMAP_PROT_WRITE)).to_equal(-22)
+        _check_invariants(a)
+
+    it "msync is a no-op success":
+        val a = _arena(16)
+        val va = a.alloc(0, SOSIX_MMAP_PAGE, SOSIX_MMAP_PROT_WRITE, 0)
+        expect(a.sync(va as u64, SOSIX_MMAP_PAGE, 0)).to_equal(0)
+        expect(a.sync(0, 0, 0)).to_equal(0)
+        _check_invariants(a)
