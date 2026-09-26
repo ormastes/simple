@@ -40,8 +40,12 @@ Run the native fixture with a source-matched pure-Simple runner and verify:
 1. Two independently mapped copies with equal artifact metadata remain distinct lifetimes.
 2. Double release closes the mapping once and gives a defined second result.
 3. Invoke through every retained copy after release returns a typed refusal.
-4. Release concurrent with an in-flight invocation revokes new admissions; the final admitted invocation closes the mapping when it finishes.
+4. Release concurrent with an in-flight invocation revokes new admissions; the final admitted invocation attempts the close when it finishes.
 5. Failed multi-facet bind releases every mapping exactly once, and the successful session retirement path revokes every callable.
+6. If the native close reports failure, the owner retains a revoked mapping
+   record and a later release can retry. Concurrent release during one close
+   attempt cannot unload the same handle a second time; no invocation is
+   admitted while cleanup is pending.
 
 No current source check or metadata receipt proves these outcomes. Do not mark
 the native dynload workstream release-qualified until this gate passes.
