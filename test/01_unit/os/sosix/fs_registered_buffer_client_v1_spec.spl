@@ -36,6 +36,22 @@ describe "SOSIX FS v1 registered-buffer client":
         expect(second.ref_.slot).to_equal(first.ref_.slot)
         expect(second.ref_.generation).to_equal(2)
 
+    it "retires an exhausted slot permanently and allocates a fresh slot":
+        val first = sosix_fs_client_register_buffer_v1(
+            sosix_fs_client_buffer_table_v1(9), 9, [1u8],
+            SOSIX_FS_CLIENT_BUFFER_WRITE_V1)
+        var near = first.table
+        near.entries[0].ref_.generation = 0xffffffffu32
+        val final_ref = SosixBufferRef(slot: 0u32, generation: 0xffffffffu32)
+        val removed = sosix_fs_client_unregister_buffer_v1(near, 9, final_ref)
+        expect(removed.accepted).to_be(true)
+        expect(removed.table.entries[0].ref_.generation).to_equal(0u32)
+        val next = sosix_fs_client_register_buffer_v1(
+            removed.table, 9, [2u8], SOSIX_FS_CLIENT_BUFFER_WRITE_V1)
+        expect(next.accepted).to_be(true)
+        expect(next.ref_.slot).to_equal(1u32)
+        expect(next.table.entries[0].active).to_be(false)
+
     it "rejects stale references and owner substitution":
         val first = sosix_fs_client_register_buffer_v1(
             sosix_fs_client_buffer_table_v1(9), 9, [1u8],
