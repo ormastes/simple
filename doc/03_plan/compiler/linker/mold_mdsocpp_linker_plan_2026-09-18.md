@@ -162,6 +162,8 @@ hosted addresses that do not zero-extend from those fields fail by name.
 AArch64 `ABS32`, `ABS16`, `PREL32`, and `PREL16` now implement the exact
 AAELF64 static-data overflow ranges; this fixes PREL32's former over-wide
 positive bound and replaces ABS32 truncation with a named failure.
+`R_AARCH64_PLT32` now enters PLT discovery and applies a checked signed
+`L + A - P` data relocation, including imported-function PLT addressing.
 
 The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.
