@@ -415,6 +415,9 @@ Implemented source slice:
   nodes, UTF-16 names, leaf records, cycles, reserved fields, and file-backed
   payload ranges, then publish PE data-directory row 2. Malformed resource
   objects cannot produce a loader-visible resource directory;
+- object-only CodeView `.debug$*` streams are discarded from internal PE
+  images instead of being treated as loadable sections. `debug=true` remains a
+  named unsupported policy until PDB and PE debug-directory production exist;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 
