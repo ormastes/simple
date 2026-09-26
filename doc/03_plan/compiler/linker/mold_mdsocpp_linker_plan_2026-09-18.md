@@ -187,6 +187,9 @@ page base explicitly and rejects entries outside the ABI's 32 KiB window.
 `R_AARCH64_LD64_GOTOFF_LO15` shares the checked LDR field encoding but uses the
 exact `.got` start as its base, preserving the ABI distinction when `.got` is
 not page-aligned.
+The complete AArch64 `MOVW_GOTOFF_G0..G3` family now allocates GOT entries,
+applies exact-base offsets, checks the terminal group widths, and preserves
+unchecked MOVK opcodes for `_NC` groups.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 

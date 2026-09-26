@@ -81,6 +81,13 @@ val R_AARCH64_MOVW_UABS_G3: i64 = 269
 val R_AARCH64_MOVW_SABS_G0: i64 = 270
 val R_AARCH64_MOVW_SABS_G1: i64 = 271
 val R_AARCH64_MOVW_SABS_G2: i64 = 272
+val R_AARCH64_MOVW_GOTOFF_G0: i64 = 300
+val R_AARCH64_MOVW_GOTOFF_G0_NC: i64 = 301
+val R_AARCH64_MOVW_GOTOFF_G1: i64 = 302
+val R_AARCH64_MOVW_GOTOFF_G1_NC: i64 = 303
+val R_AARCH64_MOVW_GOTOFF_G2: i64 = 304
+val R_AARCH64_MOVW_GOTOFF_G2_NC: i64 = 305
+val R_AARCH64_MOVW_GOTOFF_G3: i64 = 306
 val R_AARCH64_GOT_LD_PREL19: i64 = 309  # G(GDAT(S+A)) - P, literal-load imm19
 val R_AARCH64_LD64_GOTOFF_LO15: i64 = 310 # G(GDAT(S+A)) - GOT, LDR imm12
 val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP encoding
@@ -435,6 +442,22 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
             (v >> shift) & 0xffff
         return RelocResult(success: true, offset: offset, value: selected, error: "")
 
+    if rtype >= R_AARCH64_MOVW_GOTOFF_G0 and rtype <= R_AARCH64_MOVW_GOTOFF_G3:
+        val v = s + a - p
+        var shift = 0
+        if rtype == R_AARCH64_MOVW_GOTOFF_G1 or rtype == R_AARCH64_MOVW_GOTOFF_G1_NC: shift = 16
+        elif rtype == R_AARCH64_MOVW_GOTOFF_G2 or rtype == R_AARCH64_MOVW_GOTOFF_G2_NC: shift = 32
+        elif rtype == R_AARCH64_MOVW_GOTOFF_G3: shift = 48
+        val checked = rtype == R_AARCH64_MOVW_GOTOFF_G0 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G1 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G2 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G3
+        if checked and (v < 0 or (shift < 48 and (v >> (shift + 16)) != 0)):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_MOVW_GOTOFF_G{shift / 16} overflow")
+        return RelocResult(success: true, offset: offset,
+            value: (v >> shift) & 0xffff, error: "")
+
     if rtype == R_AARCH64_LD_PREL_LO19 or rtype == R_AARCH64_GOT_LD_PREL19 or
             rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
         var literal_name = "R_AARCH64_LD_PREL_LO19"
@@ -660,6 +683,16 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val opcode = if checked and s + a - p >= 0: 0x40000000 else: 0
                 patch_u32_le(bytes, offset,
                     (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_MOVW_GOTOFF_G0 and rtype <= R_AARCH64_MOVW_GOTOFF_G3:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_MOVW_GOTOFF_G0 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G1 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G2 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G3
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
             else if rtype >= R_AARCH64_TLSLE_MOVW_TPREL_G2 and rtype <= R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
                 val insn = read_u32_le(bytes, offset)
                 val checked = rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2 or
@@ -737,6 +770,9 @@ export R_AARCH64_MOVW_SABS_G0, R_AARCH64_MOVW_SABS_G1, R_AARCH64_MOVW_SABS_G2
 export R_AARCH64_MOVW_PREL_G0, R_AARCH64_MOVW_PREL_G0_NC
 export R_AARCH64_MOVW_PREL_G1, R_AARCH64_MOVW_PREL_G1_NC
 export R_AARCH64_MOVW_PREL_G2, R_AARCH64_MOVW_PREL_G2_NC, R_AARCH64_MOVW_PREL_G3
+export R_AARCH64_MOVW_GOTOFF_G0, R_AARCH64_MOVW_GOTOFF_G0_NC
+export R_AARCH64_MOVW_GOTOFF_G1, R_AARCH64_MOVW_GOTOFF_G1_NC
+export R_AARCH64_MOVW_GOTOFF_G2, R_AARCH64_MOVW_GOTOFF_G2_NC, R_AARCH64_MOVW_GOTOFF_G3
 export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
 export R_AARCH64_GOT_LD_PREL19
 export R_AARCH64_LD64_GOTOFF_LO15
