@@ -4412,6 +4412,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "verification_summary=${stage2_tests_summary}"
       echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
       echo "verification_log=${stage2_tests_log}"
+      # Interim seed delegation must stay visible in the admitted receipt.
+      grep '^test_execution' "${stage2_tests_summary}" || echo "test_execution=unrecorded"
     } >"${stage2_tests_evidence}"
     chmod 400 "${stage2_tests_evidence}"
     echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
