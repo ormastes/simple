@@ -840,7 +840,18 @@ fn elf_boot_link_stripped(objects: [[i64]], plan: BootLayoutPlan, target: RelocA
     while i < objects.len():
         names = names.push("object{i}.o")
         i = i + 1
-    val im = _elf_boot_link_named(objects, names, plan, target, true)?
+    val im = _elf_boot_link_named(objects, names, plan, target, true, [])?
+    Ok(im.bytes)
+
+fn elf_boot_link_configured(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch,
+        strip_output: bool, retained_symbols: [text]) -> Result<[i64], text>:
+    """Link with wrapper-owned strip and retained-symbol policy."""
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        names = names.push("object{i}.o")
+        i = i + 1
+    val im = _elf_boot_link_named(objects, names, plan, target, strip_output, retained_symbols)?
     Ok(im.bytes)
 
 fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
@@ -853,10 +864,11 @@ fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch
 
 fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     """As elf_boot_link, with a file name per object for script file patterns."""
-    _elf_boot_link_named(objects, names, plan, target, false)
+    _elf_boot_link_named(objects, names, plan, target, false, [])
 
 fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
-        target: RelocArch, strip_output: bool) -> Result<ElfBootImage, text>:
+        target: RelocArch, strip_output: bool,
+        retained_symbols: [text]) -> Result<ElfBootImage, text>:
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
     var parsed: [ElfObject] = []
@@ -887,6 +899,9 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     # placed section refers to it (checked while relocating, below).
     if not res.defined.has(plan.entry) and not script_defined.has(plan.entry):
         return Err("entry symbol not defined: {plan.entry}")
+    for name in retained_symbols:
+        if name != "" and not res.defined.has(name) and not script_defined.has(name):
+            return Err("retained SimpleOS symbol not found: {name}")
 
     val ins0 = _bl_place(parsed, names, plan)?
 
@@ -1232,4 +1247,4 @@ fn _bl_ult(a: i64, b: i64) -> bool:
     b < 0
 
 export ElfBootImage
-export elf_boot_link, elf_boot_link_stripped, elf_boot_link_image, elf_boot_link_named
+export elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured, elf_boot_link_image, elf_boot_link_named
