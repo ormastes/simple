@@ -2,6 +2,9 @@
 # The caller supplies a unique nonzero instance identity; no global mutable
 # identity allocator is used.
 use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.{
+    TargetCodegenProfileV1, target_codegen_profile_validate_v1}
 use compiler.driver.environment_target_identity_mapping_candidate_v1.*
 use compiler.driver.environment_target_identity_mapping_lookup_v1.*
 use compiler.driver.canonical_target_registry_owner_v1.{
@@ -28,6 +31,7 @@ pub enum CanonicalTargetRegistryErrorV2:
     StaleToken
     Draining
     DuplicateRelease
+    InvalidTargetProfile
 
 pub struct CanonicalTargetAliasV2:
     alias: text
@@ -60,6 +64,20 @@ pub struct CanonicalTargetProjectionV2:
     registry_generation: u64
     registry_digest: text
     binding_digest: text
+    registry_identity: text
+    mapping_generation: u64
+    mapping_digest: text
+    registry_content_digest: text
+
+pub struct CanonicalTargetProfileBindingV2:
+    target_profile_id: u32
+    canonical_target_triple: text
+    registry_generation: u64
+    registry_identity: text
+    mapping_generation: u64
+    mapping_digest: text
+    registry_content_digest: text
+    profile_binding_digest: text
 
 struct _CanonicalTargetResolutionRecordV2:
     token: CanonicalTargetResolutionTokenV2
@@ -68,6 +86,10 @@ struct _CanonicalTargetResolutionRecordV2:
     canonical: text
     state: CanonicalTargetRegistryStateV2
     pin_count: u64
+    registry_identity: text
+    mapping_generation: u64
+    mapping_digest: text
+    registry_content_digest: text
 
 struct _CanonicalTargetUseRecordV2:
     token: CanonicalTargetUseTokenV2
@@ -135,6 +157,17 @@ fn _free_use_head_valid_ctr2(owner: CanonicalTargetRegistryOwnerV2) -> bool:
         return false
     not owner.uses[owner.free_use_head].live
 
+fn _registry_content_digest_ctr2(generation: u64,
+    candidate: EnvironmentTargetIdentityMappingCandidateV1,
+    aliases: [CanonicalTargetAliasV2]) -> text:
+    var rows = [generation.to_text(), candidate.registry_identity,
+        candidate.mapping_generation.to_text(), candidate.mapping_digest,
+        aliases.len().to_text()]
+    for entry in aliases:
+        rows.push(entry.alias.len().to_text() + ":" + entry.alias + ":" +
+            entry.canonical.len().to_text() + ":" + entry.canonical)
+    sha256_text("simple/canonical-target-registry-content/v2\n" + rows.join("\n"))
+
 fn _owner_content_valid_ctr2(owner: CanonicalTargetRegistryOwnerV2) -> bool:
     owner.owner_instance != 0u64 and owner.generation != 0u64 and
         owner.next_serial != 0u64 and _mapping_valid_ctr2(owner.candidate) and
@@ -197,7 +230,11 @@ pub fn canonical_target_registry_resolve_v2(owner: CanonicalTargetRegistryOwnerV
     owner.next_serial = serial + 1u64
     owner.resolutions.push(_CanonicalTargetResolutionRecordV2(token: token, row: row,
         supplied: supplied, canonical: canonical.unwrap(), state: CanonicalTargetRegistryStateV2.Active,
-        pin_count: 0u64))
+        pin_count: 0u64, registry_identity: owner.candidate.registry_identity,
+        mapping_generation: owner.candidate.mapping_generation,
+        mapping_digest: owner.candidate.mapping_digest,
+        registry_content_digest: _registry_content_digest_ctr2(owner.generation,
+            owner.candidate, owner.aliases)))
     Ok(token)
 
 fn _resolution_index_ctr2(owner: CanonicalTargetRegistryOwnerV2,
@@ -264,8 +301,58 @@ pub fn canonical_target_registry_project_v2(owner: CanonicalTargetRegistryOwnerV
                 pointer_width_bits: row.pointer_width_bits,
                 registry_generation: record.token.owner_generation,
                 registry_digest: record.token.registry_digest,
-                binding_digest: record.token.binding_digest))
+                binding_digest: record.token.binding_digest,
+                registry_identity: record.registry_identity,
+                mapping_generation: record.mapping_generation,
+                mapping_digest: record.mapping_digest,
+                registry_content_digest: record.registry_content_digest))
     Err(CanonicalTargetRegistryErrorV2.StaleToken)
+
+fn _digest_words_ctr2(value: EnvironmentDigest256V1) -> text:
+    value.w0.to_text() + ":" + value.w1.to_text() + ":" +
+        value.w2.to_text() + ":" + value.w3.to_text()
+
+pub fn canonical_target_registry_bind_profile_v2(owner: CanonicalTargetRegistryOwnerV2,
+    use_token: CanonicalTargetUseTokenV2, profile: TargetCodegenProfileV1,
+    feature_words: [u64]
+) -> Result<CanonicalTargetProfileBindingV2, CanonicalTargetRegistryErrorV2>:
+    val projected = canonical_target_registry_project_v2(owner, use_token)
+    if projected.is_err(): return Err(projected.unwrap_err())
+    val target = projected.unwrap()
+    if target_codegen_profile_validate_v1(profile, feature_words).is_err() or
+       profile.target_architecture != target.architecture_id or
+       profile.target_abi_id != target.abi_id or
+       profile.target_object_format_id != target.object_format_id or
+       profile.target_endian_id != target.endian_id or
+       profile.target_pointer_width_bits != target.pointer_width_bits:
+        return Err(CanonicalTargetRegistryErrorV2.InvalidTargetProfile)
+    val strict = if profile.strict_requested_features: "1" else: "0"
+    var material = [target.registry_content_digest,
+        target.canonical_target_triple.len().to_text() + ":" + target.canonical_target_triple,
+        target.target_profile_id.to_text(), target.architecture_id.to_text(),
+        target.os_id.to_text(), target.abi_id.to_text(),
+        target.object_format_id.to_text(), target.endian_id.to_text(),
+        target.pointer_width_bits.to_text(), profile.schema_version.to_text(),
+        profile.descriptor_size.to_text(), _digest_words_ctr2(profile.profile_identity),
+        _digest_words_ctr2(profile.target_identity),
+        _digest_words_ctr2(profile.backend_identity),
+        _digest_words_ctr2(profile.semantic_identity),
+        profile.numerical_contract_id.to_text(),
+        strict,
+        profile.requested_features.words.count.to_text()]
+    var index = 0u32
+    while index < profile.requested_features.words.count:
+        material.push(feature_words[(profile.requested_features.words.offset + index) as i64].to_text())
+        index = index + 1u32
+    val digest = sha256_text("simple/canonical-target-profile-binding/v2\n" + material.join("\n"))
+    Ok(CanonicalTargetProfileBindingV2(target_profile_id: target.target_profile_id,
+        canonical_target_triple: target.canonical_target_triple,
+        registry_generation: target.registry_generation,
+        registry_identity: target.registry_identity,
+        mapping_generation: target.mapping_generation,
+        mapping_digest: target.mapping_digest,
+        registry_content_digest: target.registry_content_digest,
+        profile_binding_digest: digest))
 
 pub fn canonical_target_registry_release_v2(owner: CanonicalTargetRegistryOwnerV2,
     use_token: CanonicalTargetUseTokenV2) -> Result<(), CanonicalTargetRegistryErrorV2>:
