@@ -2,7 +2,8 @@ use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
-    coff_link_default_libraries}
+    coff_link_default_libraries, coff_attach_amd64_tls_directory}
+use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
 fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
@@ -269,6 +270,23 @@ fn _cl_weak_calling_object() -> [u8]:
     _cl_u32(bytes, 4)
 
 describe "internal freestanding Windows linker":
+    it "attaches TLS metadata only to a complete file-backed directory":
+        var directory: [u8] = []
+        while directory.len() < 48: directory = directory.push(0)
+        val sections = [PeImageSection(name: ".rdata", virtual_address: 0x2000,
+            virtual_size: 48, data: directory, characteristics: 0x40000040)]
+        val attached = coff_attach_amd64_tls_directory(sections, 0x2008).unwrap()
+        expect(attached[0].tls_directory_offset).to_equal(8)
+        expect(attached[0].tls_directory_size).to_equal(40)
+        expect(coff_attach_amd64_tls_directory(sections, 0x2010).is_err()).to_equal(true)
+
+        val missing_directory = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_object("_start", 1),
+            _cl_set_section_name(_cl_object("tlsdata", 1), ".tls$A")],
+            archives: [], entry: "_start"))
+        expect(missing_directory.is_err()).to_equal(true)
+        expect(missing_directory.unwrap_err()).to_contain("_tls_used")
+
     it "uses .drectve INCLUDE symbols as archive closure roots":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [
             _cl_object("_start", 1), _cl_directive_object(" /INCLUDE:forced")],

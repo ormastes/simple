@@ -395,6 +395,13 @@ Implemented source slice:
   directly through their fallback, while `LIBRARY` prefers an ordinary or
   short-import archive provider for the primary and falls back only when no
   library advertises one; unknown policies remain fail-closed;
+- AMD64 static TLS directory publication from the CRT-defined `_tls_used`
+  memory image: PE data-directory row 9 points at the resolved, relocated
+  40-byte `IMAGE_TLS_DIRECTORY64`; `.tls$*` data without that file-backed
+  directory fails closed instead of producing an image the Windows loader
+  cannot initialize. Dollar-subsection grouping now applies even when the raw
+  COFF name already fits eight bytes, so `.tls$*`, `.CRT$*`, and short
+  `.text$*` names merge and sort under their base output section;
 - host-independent SimpleOS x86_64/arm64 routing through the existing
   `BootLayoutPlan` + `elf_boot_link` engine.
 

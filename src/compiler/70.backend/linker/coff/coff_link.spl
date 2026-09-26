@@ -87,10 +87,10 @@ fn _coff_patch(section: [u8], offset: i64, width: i64, value: i64) -> Result<[u8
     Ok(result)
 
 fn _coff_output_section_name(name: text) -> Result<text, text>:
-    if name.len() > 0 and name.len() <= 8: return Ok(name)
     val groups = name.split("$")
     if groups.len() > 1 and groups[0].len() > 0 and groups[0].len() <= 8:
         return Ok(groups[0])
+    if name.len() > 0 and name.len() <= 8: return Ok(name)
     Err("COFF section name '{name}' cannot be represented in a PE section header")
 
 fn _coff_section_alignment(section: CoffSection) -> i64:
@@ -334,6 +334,28 @@ fn _coff_merge_object_sections(contributions: [PeImageSection]) -> [PeImageSecti
             virtual_size: virtual_end - base, data: data,
             characteristics: characteristics))
     result
+
+fn coff_attach_amd64_tls_directory(sections: [PeImageSection],
+        directory_rva: i64) -> Result<[PeImageSection], text>:
+    """Attach a file-backed IMAGE_TLS_DIRECTORY64 at its resolved symbol RVA."""
+    val directory_size: i64 = 40
+    var result = sections
+    var found = false
+    var index: i64 = 0
+    while index < result.len():
+        val section = result[index]
+        val offset = directory_rva - section.virtual_address
+        if offset >= 0 and offset + directory_size <= section.data.len():
+            if found: return Err("COFF TLS directory overlaps multiple output sections")
+            var updated = section
+            updated.tls_directory_offset = offset
+            updated.tls_directory_size = directory_size
+            result[index] = updated
+            found = true
+        index = index + 1
+    if not found:
+        return Err("COFF _tls_used directory is not 40 file-backed bytes in an output section")
+    Ok(result)
 
 fn _coff_global_symbol_rva(objects: [CoffObject], rvas: [[i64]], name: text) -> Result<i64, text>:
     var found = false
@@ -794,6 +816,17 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
             si = si + 1
         oi = oi + 1
     output_sections = _coff_merge_object_sections(output_sections)
+    var has_tls_data = false
+    for section in output_sections:
+        if section.name == ".tls": has_tls_data = true
+    val tls_directory = _coff_global_symbol_rva(objects, rvas, "_tls_used")
+    if tls_directory.is_ok():
+        val attached = coff_attach_amd64_tls_directory(
+            output_sections, tls_directory.unwrap())
+        if attached.is_err(): return Err(attached.unwrap_err())
+        output_sections = attached.unwrap()
+    elif has_tls_data:
+        return Err("COFF TLS data requires a defined _tls_used directory symbol")
     if common_layout.size > 0:
         output_sections = output_sections.push(PeImageSection(name: ".bss",
             virtual_address: common_layout.virtual_address,
@@ -826,3 +859,4 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
 
 export CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained
 export coff_link_default_libraries
+export coff_attach_amd64_tls_directory
