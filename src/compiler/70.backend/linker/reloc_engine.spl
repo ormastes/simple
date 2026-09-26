@@ -14,7 +14,8 @@
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
-    smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s
+    smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s,
+    smf_reloc_compute_rel_signed
 }
 
 # ============================================================================
@@ -29,6 +30,8 @@ val R_X86_64_GOT32: i64      = 3
 val R_X86_64_PLT32: i64      = 4   # L + A - P (treated as S + A - P for static)
 val R_X86_64_32: i64         = 10  # S + A (truncated u32)
 val R_X86_64_32S: i64        = 11  # S + A (checked signed 32-bit)
+val R_X86_64_PC16: i64       = 13  # S + A - P (checked signed 16-bit)
+val R_X86_64_PC8: i64        = 15  # S + A - P (checked signed 8-bit)
 val R_X86_64_GOTPCREL: i64   = 9   # G + GOT + A - P
 val R_X86_64_GOTPCRELX: i64  = 41  # G + GOT + A - P (relaxable; linker may rewrite to PC32)
 val R_X86_64_REX_GOTPCRELX: i64 = 42  # G + GOT + A - P (relaxable, REX-prefixed)
@@ -116,6 +119,30 @@ fn patch_u32_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
         i = i + 1
     result
 
+fn patch_u16_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(value & 0xff)
+        else if i == offset + 1:
+            result = result.push((value >> 8) & 0xff)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
+fn patch_u8(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(value & 0xff)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
 fn patch_u64_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
     val b0 = value & 0xff
     val b1 = (value >> 8) & 0xff
@@ -181,6 +208,18 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
     if rtype == R_X86_64_PC64:
         val r = smf_reloc_compute_rel64(s, a, p)
         return RelocResult(success: r.ok, offset: offset, value: r.value, error: "")
+
+    if rtype == R_X86_64_PC16:
+        val r = smf_reloc_compute_rel_signed(s, a, p, -32768, 32767)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC16 out of signed 16-bit range (S + A - P)")
+
+    if rtype == R_X86_64_PC8:
+        val r = smf_reloc_compute_rel_signed(s, a, p, -128, 127)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC8 out of signed 8-bit range (S + A - P)")
 
     if rtype == R_X86_64_PLT32:
         val r = smf_reloc_compute(RelocationType.PltRel32, s, a, p)
@@ -361,6 +400,10 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
         case X86_64:
             if rtype == R_X86_64_64 or rtype == R_X86_64_PC64:
                 patch_u64_le(bytes, offset, result.value)
+            else if rtype == R_X86_64_PC16:
+                patch_u16_le(bytes, offset, result.value)
+            else if rtype == R_X86_64_PC8:
+                patch_u8(bytes, offset, result.value)
             else:
                 patch_u32_le(bytes, offset, result.value)
         case AArch64:
@@ -410,8 +453,8 @@ fn reloc_arch_from_machine(machine: i64) -> RelocArch:
 export RelocArch, RelocTarget, RelocResult
 export reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv
 export reloc_patch_bytes, reloc_arch_from_machine
-export patch_u32_le, patch_u64_le, read_u32_le
-export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_GOT32
+export patch_u8, patch_u16_le, patch_u32_le, patch_u64_le, read_u32_le
+export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_PC16, R_X86_64_PC8, R_X86_64_GOT32
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
 export R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
