@@ -21,6 +21,30 @@ describe "MIR method-call strict shared bindings":
 
         expect(source).to_contain("val result_ok_type: HirType? = if method == \"unwrap\" or method == \"unwrap_or\":")
         expect(source).to_contain("val result_err_type: HirType? = if method == \"unwrap_err\":")
-        expect(source).to_contain("val static_method_id: SymbolId? = if static_receiver_name != \"\"")
         expect(source).to_contain("val unresolved_method_id: SymbolId? = if self.struct_method_syms.contains(unresolved_method_key):")
-        expect(source).to_not_contain("var result_ok_type: HirType? = nil")        expect(source).to_not_contain("var result_err_type: HirType? = nil")        expect(source).to_not_contain("var static_method_id: SymbolId? = nil")        expect(source).to_not_contain("var unresolved_method_id: SymbolId? = nil")
+        expect(source).to_not_contain("var result_ok_type: HirType? = nil")
+        expect(source).to_not_contain("var result_err_type: HirType? = nil")
+        expect(source).to_not_contain("var unresolved_method_id: SymbolId? = nil")
+
+    it "resolves a static factory through an ordered owner fallback":
+        # @req REQ-SSPEC-COMPILER
+        # a8a5268c680 (preserve unresolved static factory owner) replaced the
+        # single `val static_method_id = if ...` with an ordered fallback:
+        # exact struct method key, then the receiver symbol's own methods,
+        # then a module-unique static method only for an unnamed receiver.
+        step("resolves a static factory through an ordered owner fallback")
+        val source = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
+
+        val decl_at = source.find("var static_method_id: SymbolId? = nil") ?? -1
+        val exact_at = source.find("if static_receiver_name != \"\" and self.struct_method_syms.contains(static_method_key):") ?? -1
+        val exact_set_at = source.find("static_method_id = Some(self.struct_method_syms[static_method_key])") ?? -1
+        val unique_gate_at = source.find("if static_method_id == nil and static_receiver_name == \"\":") ?? -1
+        val unique_set_at = source.find("static_method_id = self.symbols.lookup_unique_static_method(method)") ?? -1
+        val use_at = source.find("if static_method_id != nil:") ?? -1
+        expect(decl_at).to_be_greater_than(-1)
+        expect(exact_at).to_be_greater_than(decl_at)
+        expect(exact_set_at).to_be_greater_than(exact_at)
+        expect(unique_gate_at).to_be_greater_than(exact_set_at)
+        expect(unique_set_at).to_be_greater_than(unique_gate_at)
+        expect(use_at).to_be_greater_than(unique_set_at)
+        expect(source).to_not_contain("val static_method_id: SymbolId? = if static_receiver_name != \"\"")
