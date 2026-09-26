@@ -264,8 +264,11 @@ and `/ALTERNATENAME:weak=default` rows, deduplicates identical requests, rejects
 conflicting aliases and malformed owned directives, and collects them only from
 sections marked `LNK_INFO`. `/INCLUDE` rows now join explicit retained symbols
 as archive-closure roots and fail by name when no object, archive member, or
-import satisfies them. Native-wrapper `/DEFAULTLIB` discovery and symbol
-resolution through `/ALTERNATENAME` remain the next Windows integration slices.
+import satisfies them. `/ALTERNATENAME` chains now participate in the same
+archive closure, validation, section-relative lookup, and final relocation
+resolution; a real primary definition wins, aliases may target ordinary,
+absolute, common, or imported symbols, and cycles fail closed. Native-wrapper
+`/DEFAULTLIB` discovery remains the next Windows integration slice.
 
 The admitted aggregate producer is
 `src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt

@@ -247,6 +247,27 @@ describe "internal freestanding Windows linker":
         expect(missing.is_err()).to_equal(true)
         expect(missing.unwrap_err()).to_contain("retained COFF symbol not found")
 
+    it "uses .drectve ALTERNATENAME fallbacks for archive closure and relocation":
+        val reference = _cl_set_second_symbol_name(_cl_importing_object(), "weak")
+        val directive = _cl_directive_object(" /ALTERNATENAME:weak=strong")
+        val fallback = coff_link_amd64(CoffLinkRequest(objects: [reference, directive],
+            archives: [_cl_archive(_cl_object("strong", 1))], entry: "_start"))
+        expect(fallback.is_ok()).to_equal(true)
+        expect(pe_inspect(fallback.unwrap()).unwrap().sections[0].virtual_size).to_equal(7)
+
+        val primary = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, directive, _cl_object("weak", 1)],
+            archives: [_cl_archive(_cl_object("strong", 1))], entry: "_start"))
+        expect(primary.is_ok()).to_equal(true)
+        expect(pe_inspect(primary.unwrap()).unwrap().sections[0].virtual_size).to_equal(7)
+
+        val cycle = coff_link_amd64(CoffLinkRequest(objects: [
+            reference, _cl_directive_object(
+                " /ALTERNATENAME:weak=other /ALTERNATENAME:other=weak")],
+            archives: [], entry: "_start"))
+        expect(cycle.is_err()).to_equal(true)
+        expect(cycle.unwrap_err()).to_contain("ALTERNATENAME cycle")
+
     it "retained symbols pull otherwise-unreferenced library members":
         val request = CoffLinkRequest(objects: [_cl_object("_start", 1)],
             archives: [_cl_archive(_cl_object("kept_fn", 1))], entry: "_start")

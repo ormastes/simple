@@ -14,10 +14,11 @@ use compiler.backend.linker.coff.coff_object.{
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PE_AMD64_IMAGE_BASE, PE_SECTION_ALIGNMENT,
     pe_align_up, pe_write_amd64_console}
-use compiler.backend.linker.coff.archive_closure.{coff_archive_closure_retained}
+use compiler.backend.linker.coff.archive_closure.{coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
-use compiler.backend.linker.coff.coff_directives.{coff_collect_directives}
+use compiler.backend.linker.coff.coff_directives.{
+    coff_collect_directives, coff_alternate_name_map, coff_resolve_alternate_name}
 
 struct CoffLinkRequest:
     objects: [[u8]]
@@ -269,7 +270,8 @@ fn _coff_common_layout(objects: [CoffObject], rvas: [[i64]], base_rva: i64) -> C
     var sizes: {text: i64} = {}
     for object in objects:
         for symbol in object.symbols:
-            if symbol.is_external() and not symbol.is_defined() and symbol.value > 0 and
+            if symbol.is_external() and not symbol.is_defined() and not symbol.is_absolute() and
+                    symbol.value > 0 and
                     not defined.has(symbol.name):
                 if not sizes.has(symbol.name) or symbol.value > sizes[symbol.name]:
                     sizes[symbol.name] = symbol.value
@@ -368,7 +370,7 @@ fn _coff_global_symbol_address(objects: [CoffObject], rvas: [[i64]], name: text)
 
 fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_index: i64,
         symbol: CoffSymbol, import_symbols: {text: i64},
-        common_symbols: {text: i64}) -> Result<CoffResolvedAddress, text>:
+        common_symbols: {text: i64}, aliases: {text: text}) -> Result<CoffResolvedAddress, text>:
     if symbol.is_absolute():
         return Ok(CoffResolvedAddress(address: symbol.value, absolute: true))
     if symbol.is_defined():
@@ -377,15 +379,22 @@ fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_
         return Ok(CoffResolvedAddress(
             address: PE_AMD64_IMAGE_BASE + local.unwrap(), absolute: false))
     if not symbol.is_external(): return Err("undefined non-external COFF symbol '{symbol.name}'")
-    if symbol.is_weak_external():
-        val primary = _coff_global_symbol_address(objects, rvas, symbol.name)
-        if primary.is_ok(): return primary
-        val primary_error = primary.unwrap_err()
-        if not primary_error.contains("unresolved external"):
-            return Err(primary_error)
+    if common_symbols.has(symbol.name):
+        return Ok(CoffResolvedAddress(
+            address: PE_AMD64_IMAGE_BASE + common_symbols[symbol.name], absolute: false))
+    if import_symbols.has(symbol.name):
+        return Ok(CoffResolvedAddress(
+            address: PE_AMD64_IMAGE_BASE + import_symbols[symbol.name], absolute: false))
+    val primary = _coff_global_symbol_address(objects, rvas, symbol.name)
+    if primary.is_ok(): return primary
+    val primary_error = primary.unwrap_err()
+    if not primary_error.contains("unresolved external"):
+        return Err(primary_error)
     val resolved_name = coff_symbol_resolution_name(objects[object_index], symbol)
     if resolved_name.is_err(): return Err(resolved_name.unwrap_err())
-    val name = resolved_name.unwrap()
+    val alternate = coff_resolve_alternate_name(resolved_name.unwrap(), aliases)
+    if alternate.is_err(): return Err(alternate.unwrap_err())
+    val name = alternate.unwrap()
     if common_symbols.has(name):
         return Ok(CoffResolvedAddress(
             address: PE_AMD64_IMAGE_BASE + common_symbols[name], absolute: false))
@@ -395,7 +404,7 @@ fn _coff_relocation_symbol_address(objects: [CoffObject], rvas: [[i64]], object_
     _coff_global_symbol_address(objects, rvas, name)
 
 fn _coff_symbol_location(objects: [CoffObject], rvas: [[i64]], object_index: i64,
-        symbol: CoffSymbol) -> Result<CoffSymbolLocation, text>:
+        symbol: CoffSymbol, aliases: {text: text}) -> Result<CoffSymbolLocation, text>:
     if symbol.is_defined():
         val section_index = symbol.section_number - 1
         if section_index < 0 or section_index >= rvas[object_index].len() or
@@ -410,28 +419,29 @@ fn _coff_symbol_location(objects: [CoffObject], rvas: [[i64]], object_index: i64
     var primary_oi: i64 = 0
     var primary_si: i64 = 0
     var primary_rva: i64 = 0
-    if symbol.is_weak_external():
-        var search_oi: i64 = 0
-        while search_oi < objects.len():
-            for candidate in objects[search_oi].symbols:
-                if candidate.name == symbol.name and candidate.is_external() and
-                        candidate.is_absolute():
-                    return Err("section-relative relocation cannot target absolute COFF symbol '{symbol.name}'")
-                if candidate.name == symbol.name and candidate.is_external() and candidate.is_defined():
-                    val section_index = candidate.section_number - 1
-                    if section_index >= 0 and section_index < rvas[search_oi].len() and rvas[search_oi][section_index] > 0:
-                        if primary_found: return Err("duplicate external COFF symbol '{symbol.name}'")
-                        primary_found = true
-                        primary_oi = search_oi
-                        primary_si = section_index
-                        primary_rva = rvas[search_oi][section_index] + candidate.value
-            search_oi = search_oi + 1
-        if primary_found:
-            return Ok(CoffSymbolLocation(object_index: primary_oi,
-                section_index: primary_si, rva: primary_rva))
+    var search_oi: i64 = 0
+    while search_oi < objects.len():
+        for candidate in objects[search_oi].symbols:
+            if candidate.name == symbol.name and candidate.is_external() and
+                    candidate.is_absolute():
+                return Err("section-relative relocation cannot target absolute COFF symbol '{symbol.name}'")
+            if candidate.name == symbol.name and candidate.is_external() and candidate.is_defined():
+                val section_index = candidate.section_number - 1
+                if section_index >= 0 and section_index < rvas[search_oi].len() and rvas[search_oi][section_index] > 0:
+                    if primary_found: return Err("duplicate external COFF symbol '{symbol.name}'")
+                    primary_found = true
+                    primary_oi = search_oi
+                    primary_si = section_index
+                    primary_rva = rvas[search_oi][section_index] + candidate.value
+        search_oi = search_oi + 1
+    if primary_found:
+        return Ok(CoffSymbolLocation(object_index: primary_oi,
+            section_index: primary_si, rva: primary_rva))
     val resolved_name = coff_symbol_resolution_name(objects[object_index], symbol)
     if resolved_name.is_err(): return Err(resolved_name.unwrap_err())
-    name = resolved_name.unwrap()
+    val alternate = coff_resolve_alternate_name(resolved_name.unwrap(), aliases)
+    if alternate.is_err(): return Err(alternate.unwrap_err())
+    name = alternate.unwrap()
     var found = false
     var location = CoffSymbolLocation(object_index: 0, section_index: 0, rva: 0)
     var oi: i64 = 0
@@ -502,7 +512,8 @@ fn _coff_entry_rva(objects: [CoffObject], rvas: [[i64]], requested: text) -> Res
     Err("COFF link request has no defined entry symbol (tried mainCRTStartup, _start, main)")
 
 fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
-        import_symbols: {text: i64}, common_symbols: {text: i64}) -> Result<bool, text>:
+        import_symbols: {text: i64}, common_symbols: {text: i64},
+        aliases: {text: text}) -> Result<bool, text>:
     var definitions: {text: bool} = {}
     var oi: i64 = 0
     while oi < objects.len():
@@ -522,15 +533,18 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
     for object in objects:
         for symbol in object.symbols:
             if symbol.name != "" and symbol.is_external() and not symbol.is_defined() and
-                    symbol.value == 0:
+                    not symbol.is_absolute() and symbol.value == 0:
                 val weak_primary = coff_weak_primary_for_fallback(object, symbol.table_index)
                 if weak_primary != nil and definitions.has(weak_primary ?? "") and
                         not coff_symbol_is_relocated(object, symbol.table_index):
                     continue
                 if definitions.has(symbol.name): continue
+                if import_symbols.has(symbol.name) or common_symbols.has(symbol.name): continue
                 val resolved_name = coff_symbol_resolution_name(object, symbol)
                 if resolved_name.is_err(): return Err(resolved_name.unwrap_err())
-                val name = resolved_name.unwrap()
+                val alternate = coff_resolve_alternate_name(resolved_name.unwrap(), aliases)
+                if alternate.is_err(): return Err(alternate.unwrap_err())
+                val name = alternate.unwrap()
                 if not definitions.has(name) and not import_symbols.has(name) and
                         not common_symbols.has(name):
                     return Err("unresolved external COFF symbol '{name}'")
@@ -558,10 +572,15 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     val directives_result = coff_collect_directives(objects)
     if directives_result.is_err(): return Err(directives_result.unwrap_err())
     val directives = directives_result.unwrap()
+    val aliases_result = coff_alternate_name_map(directives)
+    if aliases_result.is_err(): return Err(aliases_result.unwrap_err())
+    var aliases = aliases_result.unwrap()
+    var alias_count = directives.alternate_names.len()
     var closure_roots = retained_symbols
     for name in directives.includes:
         if not closure_roots.contains(name): closure_roots = closure_roots.push(name)
-    var closure = coff_archive_closure_retained(objects, request.archives, closure_roots)
+    var closure = coff_archive_closure_retained_aliases(
+        objects, request.archives, closure_roots, aliases)
     if closure.is_err(): return Err(closure.unwrap_err())
     var selected = closure.unwrap()
     var roots_changed = true
@@ -571,12 +590,20 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
         for member in selected.members: directive_objects = directive_objects.push(member.object)
         val selected_directives = coff_collect_directives(directive_objects)
         if selected_directives.is_err(): return Err(selected_directives.unwrap_err())
-        for name in selected_directives.unwrap().includes:
+        val more_directives = selected_directives.unwrap()
+        for name in more_directives.includes:
             if not closure_roots.contains(name):
                 closure_roots = closure_roots.push(name)
                 roots_changed = true
+        if more_directives.alternate_names.len() != alias_count:
+            val more_aliases = coff_alternate_name_map(more_directives)
+            if more_aliases.is_err(): return Err(more_aliases.unwrap_err())
+            aliases = more_aliases.unwrap()
+            alias_count = more_directives.alternate_names.len()
+            roots_changed = true
         if roots_changed:
-            closure = coff_archive_closure_retained(objects, request.archives, closure_roots)
+            closure = coff_archive_closure_retained_aliases(
+                objects, request.archives, closure_roots, aliases)
             if closure.is_err(): return Err(closure.unwrap_err())
             selected = closure.unwrap()
     for member in selected.members: objects = objects.push(member.object)
@@ -585,11 +612,24 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
         var found = false
         for object in objects:
             for symbol in object.symbols:
-                if symbol.name == name and symbol.is_external() and symbol.is_defined():
+                if symbol.name == name and symbol.is_external() and
+                        (symbol.is_defined() or symbol.is_absolute()):
                     found = true
         for import_object in selected.imports:
             if import_object.public_name == name or import_object.iat_symbol() == name:
                 found = true
+        if not found:
+            val alternate = coff_resolve_alternate_name(name, aliases)
+            if alternate.is_err(): return Err(alternate.unwrap_err())
+            val target = alternate.unwrap()
+            for object in objects:
+                for symbol in object.symbols:
+                    if symbol.name == target and symbol.is_external() and
+                            (symbol.is_defined() or symbol.is_absolute()):
+                        found = true
+            for import_object in selected.imports:
+                if import_object.public_name == target or import_object.iat_symbol() == target:
+                    found = true
         if not found: return Err("retained COFF symbol not found: {name}")
 
     val rva_result = _coff_section_rvas(objects)
@@ -614,7 +654,7 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     if import_result.is_err(): return Err(import_result.unwrap_err())
     val import_image = import_result.unwrap()
     val symbols_valid = _coff_validate_symbols(objects, rvas,
-        import_image.symbol_rvas, common_layout.symbol_rvas)
+        import_image.symbol_rvas, common_layout.symbol_rvas, aliases)
     if symbols_valid.is_err(): return Err(symbols_valid.unwrap_err())
     val entry = _coff_entry_rva(objects, rvas, request.entry)
     if entry.is_err(): return Err(entry.unwrap_err())
@@ -643,7 +683,7 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
                          relocation.relocation_type == COFF_REL_AMD64_SECREL7):
                     return Err("section-relative relocation cannot target absolute COFF symbol '{relocation_symbol.name}'")
                 if relocation.relocation_type == COFF_REL_AMD64_SECTION:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol)
+                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val section_index = _coff_output_section_index(objects, rvas, location.unwrap())
                     if section_index.is_err(): return Err(section_index.unwrap_err())
@@ -656,7 +696,7 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
                     patched = result.unwrap()
                     continue
                 if relocation.relocation_type == COFF_REL_AMD64_SECREL:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol)
+                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, rvas, target)
@@ -671,7 +711,7 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
                     patched = result.unwrap()
                     continue
                 if relocation.relocation_type == COFF_REL_AMD64_SECREL7:
-                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol)
+                    val location = _coff_symbol_location(objects, rvas, oi, relocation_symbol, aliases)
                     if location.is_err(): return Err(location.unwrap_err())
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, rvas, target)
@@ -689,7 +729,7 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
                     continue
                 val symbol_address_result = _coff_relocation_symbol_address(
                     objects, rvas, oi, relocation_symbol,
-                    import_image.symbol_rvas, common_layout.symbol_rvas)
+                    import_image.symbol_rvas, common_layout.symbol_rvas, aliases)
                 if symbol_address_result.is_err(): return Err(symbol_address_result.unwrap_err())
                 val resolved_address = symbol_address_result.unwrap()
                 val addend_result = if relocation.relocation_type == COFF_REL_AMD64_ADDR64:

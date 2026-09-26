@@ -103,5 +103,28 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
     Ok(CoffDirectives(default_libraries: defaults,
         includes: includes, alternate_names: alternates))
 
+fn coff_resolve_alternate_name(name: text, aliases: {text: text}) -> Result<text, text>:
+    var current = name
+    var visited: {text: bool} = {}
+    while aliases.has(current):
+        if visited.has(current):
+            return Err("COFF /ALTERNATENAME cycle reaches '{current}'")
+        visited[current] = true
+        current = aliases[current]
+    Ok(current)
+
+fn coff_alternate_name_map(directives: CoffDirectives) -> Result<{text: text}, text>:
+    var aliases: {text: text} = {}
+    for alternate in directives.alternate_names:
+        if aliases.has(alternate.weak_name) and
+                aliases[alternate.weak_name] != alternate.default_name:
+            return Err("conflicting COFF /ALTERNATENAME for '{alternate.weak_name}'")
+        aliases[alternate.weak_name] = alternate.default_name
+    for alternate in directives.alternate_names:
+        val resolved = coff_resolve_alternate_name(alternate.weak_name, aliases)
+        if resolved.is_err(): return Err(resolved.unwrap_err())
+    Ok(aliases)
+
 export CoffAlternateName, CoffDirectives
 export coff_parse_directives, coff_collect_directives
+export coff_resolve_alternate_name, coff_alternate_name_map
