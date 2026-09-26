@@ -248,7 +248,10 @@ sections, all standard COMDAT selection modes are handled, undefined and
 duplicate externals are rejected before emission, import-directory sizes are
 descriptor-exact, and AMD64 `ABSOLUTE`/`SECTION`/`SECREL` join the address
 relocations. `ADDR64` sites produce sorted/deduplicated `.reloc` blocks, so
-PE ASLR flags are backed by real `IMAGE_REL_BASED_DIR64` records. Hosted CRT
+PE ASLR flags are backed by real `IMAGE_REL_BASED_DIR64` records. Relocations
+against local `IMAGE_SYM_ABSOLUTE` symbols use the literal symbol value without
+PE image-base adjustment; absolute `ADDR64` sites do not enter `.reloc`, and
+section-relative relocation kinds reject absolute targets by name. Hosted CRT
 completion and native execution evidence
 remain open. The user-expanded completion boundary includes
 Windows x86_64 and therefore supersedes the earlier statement that COFF did not
