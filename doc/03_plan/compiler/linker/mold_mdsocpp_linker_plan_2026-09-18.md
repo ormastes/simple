@@ -151,7 +151,7 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
-Next: remaining TLS relocation models beyond x86_64 local/initial-exec, lld `-O1` string merge, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed.
+Next: remaining TLS relocation models beyond x86_64 local/initial-exec, a full-kernel rung 4 (the real gate markers), the x86_64 dynamic execution proof, and native (non-interpreted) engine speed. Exact `SHF_MERGE|SHF_STRINGS` pooling now matches the lld `-O1` duplicate-string oracle, including section-symbol addend remapping; tail merging and non-string `SHF_MERGE` entities remain explicit follow-up scope.
 
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 
