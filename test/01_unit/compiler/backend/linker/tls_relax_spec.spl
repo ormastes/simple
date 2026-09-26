@@ -25,6 +25,12 @@ fn a64_tls_object(primary: i64, add: i64) -> ElfObject:
         strtab: empty, shstrtab: empty,
         raw: [0, 0, 0, 0x90, 0, 0, 0, 0x91, 0, 0, 0, 0x94])
 
+fn a64_tls_movw_object(primary: i64, low: i64) -> ElfObject:
+    val base = a64_tls_object(primary, low)
+    ElfObject(header: base.header, sections: base.sections, symbols: base.symbols,
+        relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab,
+        raw: [0, 0, 0xa0, 0xd2, 0, 0, 0x80, 0xf2, 0, 0, 0, 0x94])
+
 fn u32_at(bytes: [u8], at: i64) -> i64:
     (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) |
         ((bytes[at + 2] as i64) << 16) | ((bytes[at + 3] as i64) << 24)
@@ -49,6 +55,19 @@ describe "AArch64 TLS relaxation":
         expect(u32_at(obj.raw, 4)).to_equal(0x91004000)
         expect(u32_at(obj.raw, 8)).to_equal(0xd503201f)
         expect(obj.relocations.len()).to_equal(0)
+
+    it "relaxes large-model MOVW TLSGD and TLSLD sequences":
+        val gd = elf_relax_tls([a64_tls_movw_object(515, 516)], RelocArch.AArch64).unwrap()[0]
+        expect(u32_at(gd.raw, 0)).to_equal(0xd53bd040)
+        expect(u32_at(gd.raw, 4)).to_equal(0x91400000)
+        expect(u32_at(gd.raw, 8)).to_equal(0x91000000)
+        expect(elf_reloc_type(gd.relocations[0])).to_equal(549)
+        expect(elf_reloc_type(gd.relocations[1])).to_equal(551)
+        val ld = elf_relax_tls([a64_tls_movw_object(520, 521)], RelocArch.AArch64).unwrap()[0]
+        expect(u32_at(ld.raw, 0)).to_equal(0xd53bd040)
+        expect(u32_at(ld.raw, 4)).to_equal(0x91004000)
+        expect(u32_at(ld.raw, 8)).to_equal(0xd503201f)
+        expect(ld.relocations.len()).to_equal(0)
 
     it "rejects an unpaired TLSGD sequence":
         val base = a64_tls_object(513, 514)

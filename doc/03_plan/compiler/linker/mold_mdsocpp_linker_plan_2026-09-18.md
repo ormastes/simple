@@ -202,6 +202,9 @@ sequences now relax before resolution: TLSGD becomes variant-I local-exec
 MRS/ADD-high/ADD-low with TPREL relocations, while TLSLD becomes the TLS block
 base (`TPIDR_EL0 + 16`) consumed by DTPREL uses. Unpaired, noncanonical, and
 undefined-symbol TLSGD sequences fail closed.
+The equivalent large-model `MOVW_G1`/`MOVW_G0_NC` TLSGD and TLSLD sequences
+share the same checked relaxation, completing both three-instruction address
+materialization forms without synthesizing runtime resolver GOT records.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 

@@ -16,8 +16,12 @@ val R_X86_64_TLSDESC_CALL_TLS: i64 = 35
 val R_AARCH64_CALL26_TLS: i64 = 283
 val R_AARCH64_TLSGD_ADR_PAGE21_TLS: i64 = 513
 val R_AARCH64_TLSGD_ADD_LO12_NC_TLS: i64 = 514
+val R_AARCH64_TLSGD_MOVW_G1_TLS: i64 = 515
+val R_AARCH64_TLSGD_MOVW_G0_NC_TLS: i64 = 516
 val R_AARCH64_TLSLD_ADR_PAGE21_TLS: i64 = 518
 val R_AARCH64_TLSLD_ADD_LO12_NC_TLS: i64 = 519
+val R_AARCH64_TLSLD_MOVW_G1_TLS: i64 = 520
+val R_AARCH64_TLSLD_MOVW_G0_NC_TLS: i64 = 521
 val R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS: i64 = 549
 val R_AARCH64_TLSLE_ADD_TPREL_LO12_NC_TLS: i64 = 551
 
@@ -72,6 +76,16 @@ fn _a64_is_tls_pair_member(obj: ElfObject, index: i64) -> bool:
         if rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS and
                 _a64_tls_pair(obj, r, R_AARCH64_TLSLD_ADD_LO12_NC_TLS):
             if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_ADD_LO12_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        if rtype == R_AARCH64_TLSGD_MOVW_G1_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSGD_MOVW_G0_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSGD_MOVW_G0_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        if rtype == R_AARCH64_TLSLD_MOVW_G1_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSLD_MOVW_G0_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_MOVW_G0_NC_TLS, true) == index or
                     _a64_tls_call_pair(obj, r) == index:
                 return true
         i = i + 1
@@ -224,16 +238,27 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
         val r = obj.relocations[i]
         val rtype = elf_reloc_type(r)
         if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS or
-                rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS:
-            val add_type = if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS:
+                rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS or
+                rtype == R_AARCH64_TLSGD_MOVW_G1_TLS or
+                rtype == R_AARCH64_TLSLD_MOVW_G1_TLS:
+            val is_gd = rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS or
+                rtype == R_AARCH64_TLSGD_MOVW_G1_TLS
+            val is_movw = rtype == R_AARCH64_TLSGD_MOVW_G1_TLS or
+                rtype == R_AARCH64_TLSLD_MOVW_G1_TLS
+            val secondary_type = if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS:
                 R_AARCH64_TLSGD_ADD_LO12_NC_TLS
-            else:
+            elif rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS:
                 R_AARCH64_TLSLD_ADD_LO12_NC_TLS
-            val model = if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS: "TLSGD" else: "TLSLD"
-            if not _a64_tls_pair(obj, r, add_type):
-                return Err("UnsupportedFeature: R_AARCH64_{model}_ADR_PAGE21 is not followed by canonical ADD and __tls_get_addr call relocations")
+            elif rtype == R_AARCH64_TLSGD_MOVW_G1_TLS:
+                R_AARCH64_TLSGD_MOVW_G0_NC_TLS
+            else:
+                R_AARCH64_TLSLD_MOVW_G0_NC_TLS
+            val model = if is_gd: "TLSGD" else: "TLSLD"
+            val form = if is_movw: "MOVW_G1" else: "ADR_PAGE21"
+            if not _a64_tls_pair(obj, r, secondary_type):
+                return Err("UnsupportedFeature: R_AARCH64_{model}_{form} is not followed by its canonical low group and __tls_get_addr call relocations")
             val target_sym = elf_reloc_sym(r)
-            if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS and
+            if is_gd and
                     (target_sym <= 0 or target_sym >= obj.symbols.len() or
                     obj.symbols[target_sym].st_shndx == 0):
                 return Err("UnsupportedFeature: AArch64 TLSGD relaxation requires a defined TLS symbol")
@@ -243,15 +268,19 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
             val at = obj.sections[si].sh_addr + r.r_offset
             if at < 0 or at + 12 > raw.len():
                 return Err("truncated R_AARCH64_{model} instruction sequence")
-            val adrp = _a64_read_u32(raw, at)
-            val add = _a64_read_u32(raw, at + 4)
+            val first = _a64_read_u32(raw, at)
+            val second = _a64_read_u32(raw, at + 4)
             val call = _a64_read_u32(raw, at + 8)
-            if adrp & 0x9f00001f != 0x90000000 or
-                    add & 0xffc003ff != 0x91000000 or
-                    call & 0xfc000000 != 0x94000000:
+            val canonical_address = if is_movw:
+                first & 0xbfe0001f == 0x92a00000 and
+                    second & 0xffe0001f == 0xf2800000
+            else:
+                first & 0x9f00001f == 0x90000000 and
+                    second & 0xffc003ff == 0x91000000
+            if not canonical_address or call & 0xfc000000 != 0x94000000:
                 return Err("UnsupportedFeature: non-canonical AArch64 {model} instruction sequence")
             raw = _a64_write_u32(raw, at, 0xd53bd040) # mrs x0, tpidr_el0
-            if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS:
+            if is_gd:
                 raw = _a64_write_u32(raw, at + 4, 0x91400000) # add x0, x0, #0, lsl #12
                 raw = _a64_write_u32(raw, at + 8, 0x91000000) # add x0, x0, #0
                 val sym = target_sym
