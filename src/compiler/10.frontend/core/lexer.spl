@@ -83,6 +83,23 @@ var lex_token_start_direct: [i64] = [0]
 var lex_token_end_direct: [i64] = [0]
 var lex_cur_no_interp_direct: [bool] = [false]
 
+# Pure, independently testable: returns slot[0], or `default` when slot is
+# empty instead of trapping on an out-of-bounds read.
+fn bool_slot0_or(slot: [bool], default: bool) -> bool:
+    if slot.len() == 0:
+        return default
+    slot[0]
+
+# lex_env_save_enabled is populated by lex_init_with_path (guarded at :123-124
+# before the write at :141), but every READ site below used to index [0]
+# directly. In natively-compiled code a module-level array can be observed
+# empty before that initializer has run for this consumer (the same defect
+# class as doc/08_tracking/bug/simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md),
+# and an unguarded [0] on an empty array traps. Route every read through this
+# accessor instead of duplicating the length guard at each site.
+fn lex_env_save_on() -> bool:
+    bool_slot0_or(lex_env_save_enabled, false)
+
 # ===== Public wrapper API =====
 
 fn lexer_new(source: text) -> Lexer:
@@ -301,7 +318,7 @@ fn lex_cur_kind_get_slot() -> i64:
 
 fn lex_cur_kind_set(value: i64):
     lex_cur_kind_direct[0] = value
-    if lex_env_save_enabled[0]:
+    if lex_env_save_on():
         env_set("SIMPLE_BOOTSTRAP_LEX_CUR_KIND", "{value}")
 
 fn lex_cur_line_get_slot() -> i64:
@@ -309,7 +326,7 @@ fn lex_cur_line_get_slot() -> i64:
 
 fn lex_cur_line_set(value: i64):
     lex_cur_line_direct[0] = value
-    if lex_env_save_enabled[0]:
+    if lex_env_save_on():
         env_set("SIMPLE_BOOTSTRAP_LEX_CUR_LINE", "{value}")
 
 fn lex_cur_col_get_slot() -> i64:
@@ -317,7 +334,7 @@ fn lex_cur_col_get_slot() -> i64:
 
 fn lex_cur_col_set(value: i64):
     lex_cur_col_direct[0] = value
-    if lex_env_save_enabled[0]:
+    if lex_env_save_on():
         env_set("SIMPLE_BOOTSTRAP_LEX_CUR_COL", "{value}")
 
 fn lex_cur_text_get_slot() -> text:
@@ -325,7 +342,7 @@ fn lex_cur_text_get_slot() -> text:
 
 fn lex_cur_text_set(value: text):
     lex_cur_text_direct[0] = value
-    if lex_env_save_enabled[0]:
+    if lex_env_save_on():
         val nul = char_from_code(0)
         if value.contains(nul):
             env_set("SIMPLE_BOOTSTRAP_LEX_CUR_TEXT", "")
@@ -337,7 +354,7 @@ fn lex_cur_suffix_get_slot() -> text:
 
 fn lex_cur_suffix_set(value: text):
     lex_cur_suffix_direct[0] = value
-    if lex_env_save_enabled[0]:
+    if lex_env_save_on():
         env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
@@ -502,7 +519,7 @@ fn current_core_lexer_load() -> CoreLexer:
     lexer
 
 fn current_core_lexer_save(lexer: CoreLexer):
-    if not lex_env_save_enabled[0]:
+    if not lex_env_save_on():
         return
     env_set("SIMPLE_BOOTSTRAP_LEX_POS", "{lexer.pos}")
     env_set("SIMPLE_BOOTSTRAP_LEX_LINE", "{lexer.line}")
@@ -588,7 +605,7 @@ fn lex_next() -> i64:
         kind = 190
     current_core_lexer_slot[0] = loaded
     current_core_lexer_save(loaded)
-    val env_save = lex_env_save_enabled[0]
+    val env_save = lex_env_save_on()
     if env_save:
         lex_cur_kind_set(kind)
         if kind == 3 or kind == 7 or kind == 8:
