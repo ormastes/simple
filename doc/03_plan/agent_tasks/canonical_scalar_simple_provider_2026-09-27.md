@@ -1,6 +1,6 @@
 # Canonical Simple scalar provider — implementation handoff
 
-**Status:** design handoff; no provider admitted. **Merge owner:** root Codex. **Final reviewer:** independent normal/highest-capability review of semantics, manual quality and source-matched evidence. **Sidecar lanes:** N/A for this design-only change; later implementation may split only after the interface and fixtures below are frozen.
+**Status:** design handoff; no provider admitted. **Merge owner:** root Codex. **Final reviewer:** independent normal/highest-capability review of semantics, manual quality and source-matched evidence. **Sidecar lane:** read-only handwritten grammar inventory, reviewed against cited source by the merge owner; no implementation or acceptance authority. Later implementation may split only after the interface and fixtures below are frozen.
 
 ## Frozen interface and evidence names
 
@@ -16,7 +16,7 @@
 
 | Order | Owner surface | Deliverable and gate |
 |---|---|---|
-| 1 | Compiler frontend inventory | Pin independent oracle revision/schema; enumerate every Simple rule, action, transform, recovery and diagnostic branch against retained fixtures. |
+| 1 | Compiler frontend inventory | Pin independent oracle revision/schema; enumerate every Simple rule, lexical mode/checkpoint, speculative rollback effect, action, transform, recovery and diagnostic branch against retained fixtures. The initial read-only inventory in the detail design is a starting sample, not proof of completeness. |
 | 2 | `std.common.structural.parse` | Implement bounded typed grammar/action records and validators; reject malformed version, opcode, offsets, counts and nonprogress cycles before execution. |
 | 3 | `std.nogc_async_mut.structural.parse` | Interpret scalar grammar/actions against snapshot-owned tokens; count, reserve and emit source-ordered output without legacy parser calls. |
 | 4 | Compiler structural adapter | Derive the Simple program from the inventoried existing grammar and bridge generic events to the existing AST/HIR representation. |
