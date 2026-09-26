@@ -3,14 +3,18 @@
 #
 # aarch64 in-guest clang compile bring-up (lane-C1 aarch64 guest milestone).
 #
-# Rungs (single boot covers R2-R5; the guest entry sequences them):
+# Rungs (single boot covers R2-R5 + R6; the guest entry sequences them):
 #   R1  image staged + host-verified (FAT32 root, 8.3 names)
 #   R2  guest boots to the clang-bringup entry (VFS up)
 #   R3  /CLANG.ELF --version prints in-guest
 #   R4a /CLANG.ELF -cc1 ... /HELLO.C -o /HELLO.O     (in-guest compile)
 #   R4b /LLD.ELF -T /SIMPLEOS.LD ... -o /HELLO2.ELF (in-guest link)
 #   R5  /HELLO2.ELF runs, prints HELLO_C_FROM_GUEST_ARM64
-# Final marker: CLANG_IN_GUEST_ARM64_OK
+#   R6a /CLANG.ELF -cc1 -x c++ ... /WITNESS.CPP -o /WITNESS.O (in-guest C++ compile)
+#   R6b /LLD.ELF -T /SIMPLEOS.LD /CRT0.O /WITNESS.O /LIBCXX.A /LIBC.A
+#       /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF       (in-guest C++ link)
+#   R6c /WITNESS2.ELF runs, prints WITNESS_CXX_OK
+# Final marker: CLANG_IN_GUEST_ARM64_OK (R1-R5) + CLANG_IN_GUEST_ARM64_CXX_OK (R6)
 #
 # Toolchain inputs come from the lane-C1 aarch64 build
 # (/home/yoon/llvm-project-simpleos/build-os-llvm): guest-runnable static
@@ -63,6 +67,15 @@ note "compiler: $SEED"
 CLANG_BYTES=$(wc -c < "$GUEST_BIN_DIR/clang-20" | tr -d ' ')
 LLD_BYTES=$(wc -c < "$GUEST_BIN_DIR/lld" | tr -d ' ')
 note "guest clang=${CLANG_BYTES}B lld=${LLD_BYTES}B"
+# R6 C++ witness: host-side cross clang used ONLY to preprocess the witness
+# into the self-contained WITNESS.CPP (roadmap B1 method — the guest FAT32 is
+# root-only 8.3, the 568-header libc++ closure cannot live there). The guest
+# cc1 then parses+codegens the real libc++ TU in-guest.
+HOSTCXX="$LLVM_WORK/host-cross-aarch64/bin/clang++"
+[ -x "$HOSTCXX" ] || fail "host cross clang++ missing: $HOSTCXX"
+[ -f "$SYSROOT_A64/lib/libc++.a" ] || fail "sysroot libc++.a missing"
+[ -f "$SYSROOT_A64/lib/libc++abi.a" ] || fail "sysroot libc++abi.a missing"
+[ -f "$SYSROOT_A64/lib/libclang_rt.builtins-aarch64.a" ] || fail "sysroot builtins archive missing"
 
 # ------------------------------------------------------------------- R1: img --
 note "R1: staging FAT32 image"
@@ -74,8 +87,27 @@ cat > "$STAGE_DIR/stage/HELLO.C" <<'EOF'
 extern int printf(const char *fmt, ...);
 int main(void) { printf("HELLO_C_FROM_GUEST_ARM64\n"); return 0; }
 EOF
-printf '%s\n' "$CLANG_BYTES" > "$STAGE_DIR/clang_size.txt"
-printf '%s\n' "$LLD_BYTES"  > "$STAGE_DIR/lld_size.txt"
+# R6 C++ witness: stage the C++ link archives + preprocess the canonical
+# witness source (scripts/os/fsexec_witness_arm64.cpp) into the self-contained
+# WITNESS.CPP (-E -P; same target/sysroot/flags the guest cc1 compiles with).
+cp "$SYSROOT_A64/lib/libc++.a"                          "$STAGE_DIR/stage/LIBCXX.A"
+cp "$SYSROOT_A64/lib/libc++abi.a"                       "$STAGE_DIR/stage/CXXABI.A"
+cp "$SYSROOT_A64/lib/libclang_rt.builtins-aarch64.a"    "$STAGE_DIR/stage/RTBUILT.A"
+"$HOSTCXX" --target=aarch64-unknown-simpleos --sysroot="$SYSROOT_A64" \
+    -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -O0 -x c++ -E -P \
+    scripts/os/fsexec_witness_arm64.cpp -o "$STAGE_DIR/stage/WITNESS.CPP" \
+    || fail "witness preprocess failed"
+WITNESS_BYTES=$(wc -c < "$STAGE_DIR/stage/WITNESS.CPP" | tr -d ' ')
+LIBCXX_BYTES=$(wc -c < "$STAGE_DIR/stage/LIBCXX.A" | tr -d ' ')
+CXXABI_BYTES=$(wc -c < "$STAGE_DIR/stage/CXXABI.A" | tr -d ' ')
+RTBUILT_BYTES=$(wc -c < "$STAGE_DIR/stage/RTBUILT.A" | tr -d ' ')
+note "R6: witness=${WITNESS_BYTES}B libc++.a=${LIBCXX_BYTES}B libc++abi.a=${CXXABI_BYTES}B builtins=${RTBUILT_BYTES}B"
+printf '%s\n' "$CLANG_BYTES"   > "$STAGE_DIR/clang_size.txt"
+printf '%s\n' "$LLD_BYTES"    > "$STAGE_DIR/lld_size.txt"
+printf '%s\n' "$WITNESS_BYTES" > "$STAGE_DIR/witness_size.txt"
+printf '%s\n' "$LIBCXX_BYTES"  > "$STAGE_DIR/libcxx_size.txt"
+printf '%s\n' "$CXXABI_BYTES"  > "$STAGE_DIR/cxxabi_size.txt"
+printf '%s\n' "$RTBUILT_BYTES" > "$STAGE_DIR/rtbuilt_size.txt"
 
 note "R1: running FAT32 structural-prefix writer (seed interpreter)"
 "$SEED" run scripts/os/fsexec_mkimg_clang_arm64.spl > "$OUT/mkimg.log" 2>&1 \
@@ -86,33 +118,45 @@ note "R1: writer $STATUS"
 
 P1_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload1_start=\([0-9]*\).*/\1/p')
 P2_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload2_start=\([0-9]*\).*/\1/p')
+P3_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload3_start=\([0-9]*\).*/\1/p')
+P4_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload4_start=\([0-9]*\).*/\1/p')
+P5_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload5_start=\([0-9]*\).*/\1/p')
+P6_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload6_start=\([0-9]*\).*/\1/p')
 FAT_SECTORS=$(printf '%s\n' "$STATUS" | sed -n 's/.* fat_sectors=\([0-9]*\).*/\1/p')
 TOTAL=$(printf '%s\n' "$STATUS"    | sed -n 's/.* total_bytes=\([0-9]*\).*/\1/p')
 PREFIX="$STAGE_DIR/fat32-clang-arm64-prefix.bin"
 [ -f "$PREFIX" ] || fail "prefix not written"
-note "R1: assembling image (prefix + CLANG.ELF + LLD.ELF, ${TOTAL} bytes)"
+note "R1: assembling image (prefix + 6 payloads, ${TOTAL} bytes)"
 cp "$PREFIX" "$IMAGE"
 # Data area base: (reserved + num_fats*fat_sectors) * 512; cluster N offset:
 DATA_BASE=$(( (32 + FAT_SECTORS) * 512 ))
-P1_OFF=$(( DATA_BASE + (P1_START - 2) * 32768 ))
-P2_OFF=$(( DATA_BASE + (P2_START - 2) * 32768 ))
-[ $(( P1_OFF % 512 )) -eq 0 ] && [ $(( P2_OFF % 512 )) -eq 0 ] || fail "payload offsets not sector-aligned"
-dd if="$GUEST_BIN_DIR/clang-20" of="$IMAGE" bs=512 seek=$(( P1_OFF / 512 )) conv=notrunc 2>/dev/null
-dd if="$GUEST_BIN_DIR/lld"      of="$IMAGE" bs=512 seek=$(( P2_OFF / 512 )) conv=notrunc 2>/dev/null
+append_payload() {  # $1=start cluster, $2=src file
+    P_OFF=$(( DATA_BASE + ($1 - 2) * 32768 ))
+    [ $(( P_OFF % 512 )) -eq 0 ] || fail "payload offset not sector-aligned: $2"
+    dd if="$2" of="$IMAGE" bs=512 seek=$(( P_OFF / 512 )) conv=notrunc 2>/dev/null
+}
+append_payload "$P1_START" "$GUEST_BIN_DIR/clang-20"
+append_payload "$P2_START" "$GUEST_BIN_DIR/lld"
+append_payload "$P3_START" "$STAGE_DIR/stage/WITNESS.CPP"
+append_payload "$P4_START" "$STAGE_DIR/stage/LIBCXX.A"
+append_payload "$P5_START" "$STAGE_DIR/stage/CXXABI.A"
+append_payload "$P6_START" "$STAGE_DIR/stage/RTBUILT.A"
 truncate -s "$TOTAL" "$IMAGE"
 
 # Host-side path verification: parse the image root directory and check every
 # expected 8.3 entry exists with the right size; spot-check the CLANG.ELF magic.
 note "R1: verifying image root directory (host-side)"
 ROOT_OFF="$DATA_BASE"
-python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
+python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" "$WITNESS_BYTES" "$LIBCXX_BYTES" "$CXXABI_BYTES" "$RTBUILT_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
 import sys
-img, root_off, clang_b, lld_b = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
+(img, root_off) = sys.argv[1], int(sys.argv[2])
+clang_b, lld_b, wit_b, lxx_b, abi_b, rtb_b = (int(x) for x in sys.argv[3:9])
 data = open(img, 'rb').read()
 # FAT 8.3 raw names are 11 space-padded bytes with NO dot; normalize by
 # dropping spaces (CRT0.O -> CRT0O, SIMPLEOS.LD -> SIMPLEOSLD).
 want = {'CRT0O': None, 'SIMPLEOSLD': None, 'LIBCA': None, 'HELLOC': None,
-        'CLANGELF': clang_b, 'LLDELF': lld_b}
+        'CLANGELF': clang_b, 'LLDELF': lld_b,
+        'WITNESSCPP': wit_b, 'LIBCXXA': lxx_b, 'CXXABIA': abi_b, 'RTBUILTA': rtb_b}
 found = {}
 for slot in range(64):
     e = data[root_off + slot*32 : root_off + slot*32 + 32]
@@ -196,9 +240,16 @@ R2=FAIL; grep -q '=== SimpleOS ARM64 in-guest clang bring-up ===' "$OUT/serial.l
 R3=FAIL; grep -q 'rung=R3-clang-version rc=0' "$OUT/serial.log" && R3=PASS
 R4=FAIL; grep -q 'rung=R4b-lld-link rc=0' "$OUT/serial.log" && R4=PASS
 R5=FAIL; grep -q 'rung=R5-run-hello2 rc=0' "$OUT/serial.log" && R5=PASS
-OK=FAIL; grep -q 'CLANG_IN_GUEST_ARM64_OK' "$OUT/serial.log" && OK=PASS
+R6A=FAIL; grep -q 'rung=R6a-cc1-cxx-compile rc=0' "$OUT/serial.log" && R6A=PASS
+R6B=FAIL; grep -q 'rung=R6b-lld-cxx-link rc=0' "$OUT/serial.log" && R6B=PASS
+R6C=FAIL; grep -q 'rung=R6c-run-witness2 rc=0' "$OUT/serial.log" && R6C=PASS
+# The product's own output marker on serial (proves the C++ binary really ran,
+# not just exited 0 — the R5b hollow-green lesson).
+R6M=FAIL; grep -q 'WITNESS_CXX_OK' "$OUT/serial.log" && R6M=PASS
+OK=FAIL; grep -q 'CLANG_IN_GUEST_ARM64_OK' "$OUT/serial.log" && \
+     grep -q 'CLANG_IN_GUEST_ARM64_CXX_OK' "$OUT/serial.log" && OK=PASS
 
-note "rung table: R1=$R1S R2=$R2 R3=$R3 R4=$R4 R5=$R5 FINAL=$OK"
-[ "$OK" = PASS ] && { note "ALL RUNGS PASS"; exit 0; }
+note "rung table: R1=$R1S R2=$R2 R3=$R3 R4=$R4 R5=$R5 R6a=$R6A R6b=$R6B R6c=$R6C R6marker=$R6M FINAL=$OK"
+[ "$OK" = PASS ] && [ "$R6M" = PASS ] && { note "ALL RUNGS PASS (C + C++)"; exit 0; }
 note "rungs missed — see $OUT/serial.log"
 exit 1

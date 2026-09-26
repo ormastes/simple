@@ -4389,7 +4389,11 @@ uint64_t arm64_resume_ctx[13];
  * process's pages are reusable because every page is re-zeroed on allocation
  * and each launch installs a fresh address space. */
 #define ARM64_USER_PAGE_POOL_BASE  0x73000000ULL
-#define ARM64_USER_PAGE_POOL_BYTES 0x0A000000ULL /* 160 MiB */
+#define ARM64_USER_PAGE_POOL_BYTES 0x40000000ULL /* 1 GiB (R6: guest cc1 on
+    the 1.9 MiB preprocessed C++ TU churns past 280 MiB by 40% parsed — the
+    guest bump-arena malloc never returns pages, so the high-water mark, not
+    the host's 92 MiB peak, is the budget. 0x73000000+1 GiB = 0xB3000000,
+    inside the 2 GiB guest). */
 static uint64_t arm64_user_page_pool_off = 0;
 /* Per-launch anonymous mmap cursor (bump, no free). Sits above the image's
  * link range and below the kernel identity window in the user tables. */
@@ -4778,7 +4782,7 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
  * ==========================================================================*/
 
 #define SVC_MAX_FDS 16
-#define SVC_MAX_RAM_FILES 8
+#define SVC_MAX_RAM_FILES 16
 #define SVC_RAM_FILE_MAX (2048u * 1024u)
 #define SVC_O_CREAT 64
 #define SVC_O_ACCMODE 3
@@ -4934,6 +4938,19 @@ static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t
             st[49] = (uint8_t)((size >> 8) & 0xFF);
             st[50] = (uint8_t)((size >> 16) & 0xFF);
             st[51] = (uint8_t)((size >> 24) & 0xFF);
+            /* S_IFIFO, not mode 0 (R6): clang's FileManager builds its
+             * FileEntry from open+fstat, and getBufferForFile only falls back
+             * to the size-probing stream read when the entry is a named pipe
+             * (isNamedPipe -> FileSize=-1 -> getOpenFileImpl's type check ->
+             * getMemoryBufferForStream). With mode 0 the entry was neither
+             * regular nor pipe, clang passed the real size straight to
+             * getBuffer, getOpenFileImpl skipped the type check, and
+             * shouldUseMmap mmap'd the fd — the anonymous-only guest mmap
+             * handed back zeroed pages and cc1 compiled 1.87 MB of NULs
+             * (run-20260926_174206, 323k "null character ignored"). fifo_file
+             * is still non-regular for LLVM's mmap check, so lld's reads are
+             * unchanged. */
+            st[16] = 0x00; st[17] = 0x10;           /* mode = 0x1000 (S_IFIFO) */
         }
         if (!arm64_user_range_accessible(stat_va, sizeof(st), 1)) return -14;
         return svc_user_memcpy_to(stat_va, st, sizeof(st)) == sizeof(st) ? 0 : -14;

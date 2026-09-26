@@ -6,7 +6,12 @@
 #   R4a: /CLANG.ELF -cc1 -triple aarch64-unknown-simpleos -emit-obj /HELLO.C -o /HELLO.O
 #   R4b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /HELLO.O /LIBC.A -o /HELLO2.ELF
 #   R5: /HELLO2.ELF                     (prints HELLO_C_FROM_GUEST_ARM64)
-# Final marker: CLANG_IN_GUEST_ARM64_OK
+#   R6a: /CLANG.ELF -cc1 -x c++ -std=c++17 -fno-exceptions -fno-rtti
+#        -emit-obj /WITNESS.CPP -o /WITNESS.O     (in-guest C++ compile)
+#   R6b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /WITNESS.O
+#        /LIBCXX.A /LIBC.A /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF (C++ link)
+#   R6c: /WITNESS2.ELF                  (prints WITNESS_CXX_OK)
+# Final markers: CLANG_IN_GUEST_ARM64_OK (R1-R5), CLANG_IN_GUEST_ARM64_CXX_OK (R6)
 #
 # Staged by scripts/qemu/check_simpleos_arm64_clang_compile.shs via
 # scripts/os/fsexec_mkimg_clang_arm64.spl (FAT32 root-only, 8.3 names).
@@ -102,4 +107,46 @@ fn spl_start():
         return
 
     serial_println("CLANG_IN_GUEST_ARM64_OK")
+
+    # R6a: in-guest cc1 C++ compile /WITNESS.CPP -> /WITNESS.O
+    # The TU is host-preprocessed (self-contained; the guest FAT32 is root-only
+    # 8.3 so the 568-header libc++ closure cannot live there — roadmap B1
+    # method). -fno-rtti matches the prebuilt guest libc++ (built -fno-rtti);
+    # NO -fno-exceptions: this fork's cc1 option table lacks it ("unknown
+    # argument" — same family as R4a's -nostdlibinc), and it is unnecessary:
+    # the preprocessed TU already resolved libc++ to its no-exceptions form.
+    val rc6a = _rung("R6a-cc1-cxx-compile", "/CLANG.ELF",
+        ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
+         "-ffreestanding", "-O0", "-x", "c++", "-std=c++17",
+         "-fno-rtti",
+         "-emit-obj", "-o", "/WITNESS.O", "/WITNESS.CPP"])
+    if rc6a != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_COMPILE_FAIL rc={rc6a}")
+        rt_qemu_exit_success()
+        return
+
+    # R6b: in-guest lld C++ link -> /WITNESS2.ELF
+    # Archive order: libc++ first, then the C libc (its simpleos_cxxabi.o
+    # satisfies __cxa_pure_virtual + operator new BEFORE libc++abi is
+    # searched — cxa_virtual_cpp.o would collide strong/strong), then
+    # libc++abi (exception runtime + new_handler), then compiler-rt builtins
+    # (strtold's __extenddftf2 in the libcxx compat shims).
+    val rc6b = _rung("R6b-lld-cxx-link", "/LLD.ELF",
+        ["/LLD.ELF", "-flavor", "gnu", "-T", "/SIMPLEOS.LD",
+         "/CRT0.O", "/WITNESS.O", "/LIBCXX.A", "/LIBC.A",
+         "/CXXABI.A", "/RTBUILT.A", "--no-mmap-output-file",
+         "-o", "/WITNESS2.ELF"])
+    if rc6b != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_LINK_FAIL rc={rc6b}")
+        rt_qemu_exit_success()
+        return
+
+    # R6c: run the guest-produced C++ binary (prints WITNESS_CXX_OK)
+    val rc6c = _rung("R6c-run-witness2", "/WITNESS2.ELF", ["/WITNESS2.ELF"])
+    if rc6c != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R6_RUN_FAIL rc={rc6c}")
+        rt_qemu_exit_success()
+        return
+
+    serial_println("CLANG_IN_GUEST_ARM64_CXX_OK")
     rt_qemu_exit_success()

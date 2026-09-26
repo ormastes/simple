@@ -58,8 +58,14 @@ static volatile int allocator_lock = 0;
 /*
  * Track allocated regions so we can determine whether a next-block pointer
  * is still within a valid heap region.  We track each mmap'd region.
+ *
+ * R6 (2026-09-26): 256 was too few — the in-guest cc1 compiling the 1.87 MiB
+ * preprocessed libc++ witness churned through >256 distinct 64 KiB mmap'd
+ * chunks (~16-23 MiB) and _malloc_locked returned NULL at the table cap
+ * (LLVM "out of memory / Buffer allocation failed", rc=134,
+ * run-20260926_184727). 4096 covers a ~256 MiB chunked working set.
  */
-#define MAX_REGIONS 256
+#define MAX_REGIONS 4096
 
 typedef struct {
     char  *base;

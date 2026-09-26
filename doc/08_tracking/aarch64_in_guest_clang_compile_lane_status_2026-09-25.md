@@ -1519,3 +1519,122 @@ R5b is CLOSED — the gate is a REAL green, not a hollow one.
    still present (toolchain 0xb1c8 deref); it is harmless for the current
    binaries (no low-page adrp refs) but should be removed when the
    toolchain next rebuilds the guest binaries.
+
+---
+
+# 2026-09-26 (agent-46) session — R6 in-guest C++ witness: toolchain assembled + cc1 parses the real libc++ TU; R6a blocked by guest cc1 throughput + a guest-dlmalloc region-cap OOM (root-caused, fixed forward)
+
+Boot cycles this session: 4 (run-20260926_173143, _174206, _181241, _184727).
+Kernel rebuilds: 4. Budget: the 4-boot cap is consumed; each boot advanced the
+rung and kept R1-R5 green.
+
+## Scope (roadmap pt 5, first witness step): prove the in-guest C++ toolchain —
+## compile a real C++ translation unit inside SimpleOS (R6a cc1, R6b lld, R6c run)
+
+Witness source: `scripts/os/fsexec_witness_arm64.cpp` (canonical, reviewable) —
+C++17 against libc++ (std::string/std::vector), printf for output, a class with
+virtuals, templates, `int main(int,char**)` (the toolchain's freestanding C++
+mangles main; the crt0 shim branches `main -> _Z4mainiPPc`, the same convention
+as the clang/lld drivers — a no-arg main would mangle to `_Z4mainv` and never be
+reached, the R5b hollow-green trap). The gate preprocesses it ON THE HOST with
+the lane-C1 cross clang into the self-contained `/WITNESS.CPP` (1,866,814 B,
+568-header libc++ closure inlined; the guest FAT32 is root-only 8.3 so the
+header tree cannot live there — the roadmap B1 method). The in-guest cc1 then
+parses+codegens the real libc++ TU with no #include resolution left to do.
+
+Exceptions: NOT ready in the prebuilt runtime — libc++ built -fno-rtti (no
+typeinfo objects emitted), libc++abi built without cxa_exception/cxa_personality,
+libunwind missing the register restore/save asm (`__unw_getcontext` /
+`__libunwind_Registers_arm64_jumpto`). An exceptions-enabled libc++abi was built
+(fork 434fc5a6e1d4) then REVERTED (bae562f21bd6): rebuilding libc++'s
+exception.cpp with LIBCXX_BUILDING_LIBCXXABI removed std::exception's
+out-of-line definitions and broke the guest binary relink (missing key
+function). The witness is therefore -fno-exceptions (matching the prebuilt
+libc++); throw/catch is the documented remaining gap, not exercised.
+
+## Walls hit + fixes (boot-verified unless noted)
+
+1. **cc1 rejects `-fno-exceptions`** (boot 1): this fork's cc1 option table
+   lacks the negative form (exceptions are compiled OUT by default; only the
+   positive `-fexceptions` exists — verified: `-cc1 -fexceptions` emits
+   .eh_frame, the default emits none). Dropped the flag from the R6a cc1 line.
+2. **cc1 mmap'd /WITNESS.CPP → 1.87 MB of NULs** (boot 2, 526,580 "null
+   character ignored" warnings): clang's FileManager builds its FileEntry from
+   open+fstat and `getBufferForFile` passes the cached size straight to
+   `getBuffer`, so `getOpenFileImpl` SKIPS the non-regular type check and
+   `shouldUseMmap` mmaps the fd — the anonymous-only guest mmap hands back
+   zeroed pages. lld was immune (it calls getFile with FileSize=-1 → type
+   check → stream). FIX (boot 3, kernel): the fd-mode fstat (a3=1) now returns
+   S_IFIFO instead of mode 0 — clang's `isNamedPipe()` then forces
+   FileSize=-1 → getOpenFileImpl's type check → fifo_file →
+   getMemoryBufferForStream (read-to-EOF). Still non-regular for LLVM's mmap
+   check, so lld's reads are unchanged. baremetal_stubs.c
+   `arm64_svc_file_stat`. Boot 3: 0 NUL warnings, `[heap] alloc bytes=1866816`
+   (the real file streamed in).
+3. **Guest dlmalloc `MAX_REGIONS 256` → "LLVM ERROR: out of memory / Buffer
+   allocation failed", rc=134** (boot 4, after ~2h of real compiling): the
+   region table (one entry per mmap'd 64 KiB chunk) filled at ~256 chunks
+   (~16-23 MiB) and `_malloc_locked` returned NULL (simpleos_dlmalloc.c:377).
+   FIX (boot-unverified): MAX_REGIONS 256→4096 in src/os/libc/simpleos_dlmalloc.c
+   + guest libc rebuilt + clang-20/lld relinked (fork, flows from the repo
+   source like the R5b fstat fix).
+
+## R6a status: BLOCKED on guest cc1 THROUGHPUT (not correctness)
+
+With the stream read working, the in-guest cc1 genuinely compiles the real
+1.87 MiB libc++ TU — but under TCG it is far slower than the 0.5 s host
+compile: ~50% parsed in ~2 h (heap cursor ~23 MiB at the OOM). The 2 h boot
+timeout expired right after the OOM. With MAX_REGIONS=4096 the OOM is gone,
+but the throughput wall remains: a green R6a needs a SMALLER witness TU (the
+1.87 MiB is dominated by the <vector>/<string> header content, not the
+witness code), a faster guest cc1 (the TCG compute on the template-heavy
+parse), or a multi-hour boot. The C++ frontend itself is proven working
+in-guest: cc1 reads the real libc++ TU via the stream path and parses it
+(emits warnings on real content through line 14761+).
+
+## Landed this session (committed)
+
+- Repo: witness source; stager (payloads 3-6: WITNESS.CPP, LIBCXX.A, CXXABI.A,
+  RTBUILT.A — FAT chains + root dirents + shell-append); gate (R6a/R6b/R6c
+  rungs + WITNESS_CXX_OK marker + 6-payload image verify); entry (R6a cc1
+  -x c++ -std=c++17 -fno-rtti, R6b lld with the archive order libc++.a →
+  libsimpleos_c.a → libc++abi.a → builtins, R6c run); kernel (fd-mode fstat
+  S_IFIFO, user page pool 160 MiB→1 GiB, SVC_MAX_RAM_FILES 8→16);
+  simpleos_dlmalloc MAX_REGIONS 256→4096.
+- Fork `simpleos` (pushed): 434fc5a6e1d4 + bae562f21bd6 (net recipe unchanged;
+  exceptions explored + reverted). Guest clang-20/lld relinked with the
+  MAX_REGIONS=4096 libc.
+- Host-validated (no boot): the witness compiles (-fno-exceptions) and links
+  (305,024 B, crt0→main→_Z4mainiPPc chain correct, no undefined strong syms)
+  against the sysroot; the preprocessed WITNESS.CPP compiles identically.
+
+## Rung table (end of session)
+
+| Rung | Status | Evidence |
+|---|---|---|
+| R1 image staged + host-verified | PASS | all 4 runs (10 root entries, 6 payloads) |
+| R2 guest boots | PASS | all 4 runs |
+| R3 clang --version in guest | PASS | rc=0 all 4 runs |
+| R4a cc1 compile /HELLO.C | PASS | rc=0 all 4 runs |
+| R4b lld link /HELLO2.ELF | PASS | rc=0 all 4 runs |
+| R5 run /HELLO2.ELF | PASS | rc=0 + HELLO_C_FROM_GUEST_ARM64, all 4 runs |
+| R6a cc1 C++ compile /WITNESS.CPP | BLOCKED | cc1 rejects -fno-exceptions (b1) → NUL mmap (b2) → S_IFIFO stream read works (b3) → MAX_REGIONS OOM rc=134 after ~2h real compiling (b4); throughput wall |
+| R6b lld C++ link /WITNESS2.ELF | WIRED, unproven | needs R6a; archive order host-validated |
+| R6c run /WITNESS2.ELF (WITNESS_CXX_OK) | WIRED, unproven | needs R6b; ram-hit bridge is path-generic |
+
+## Exact next actions (owner: this lane)
+
+1. Re-run with the MAX_REGIONS=4096 guest binaries (already relinked) and a
+   much longer BOOT_TIMEOUT (the R6a compile needs hours under TCG), OR shrink
+   the witness TU (drop <vector> or use a smaller libc++ surface) to fit the
+   guest cc1's throughput. The rungs/gate/image are ready either way.
+2. Exceptions (optional, deferred): rebuild libc++ with RTTI (emits the
+   typeinfo objects) + libunwind register restore/save asm, then libc++abi's
+   cxa_exception/cxa_personality (the 434fc5a6e1d4 recipe, WITHOUT the
+   libc++ LIBCXX_BUILDING_LIBCXXABI change that broke std::exception).
+3. Remaining gap to the full self-host (clang-by-clang): the in-guest compile
+   of an LLVM Support .cpp needs (a) the same preprocess-on-host method (the
+   .cpp's full header closure inlined — an LLVM Support TU is several MiB,
+   far past the 1.87 MiB witness, so the guest cc1 throughput wall is the
+   binding constraint for the whole self-host), and (b) the guest dlmalloc +
+   page pool sized for multi-hundred-MiB compiles.
