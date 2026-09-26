@@ -405,3 +405,70 @@ the hang is intermittent (2 hangs, 8 passes) and does not depend on any single
 missing environment variable. A longer timeout would not help: one hang lasted the
 full 600 s. The cause has not been found. The next step is to capture a native stack
 of the stuck `simple.exe` after `[mono]`; it had no child process at the time.
+
+## Site 11 (2026-09-27): the Windows hang is `MirLowering.bind_local` probing a full index — FIXED
+
+Not a deadlock, not a pipe: one thread, CPU-bound (`!runaway`: ~68 s user of
+~86 s elapsed), no child process. Harness: `D:/hang-probe/probe_loop.shs`
+(the gate's exact env/argv, fresh temp dir per run, 6 in parallel, stall
+after 75 s without log growth -> `cdb -pv` stacks + per-frame registers +
+memory dump, then kill by PID).
+
+Stack of every hung run (frames symbolized by matching the exe's `.pdata`
+function sizes against the stage-2 cache objects' unwind tables — no PDB was
+needed; `bind_local` at `+0x574bd0`, 630 B, is unique in its object):
+
+```
+rt_array_get                                  (+0x9d684b)
+MirLowering.bind_local+0x1d6                  (return after rt_array_get)
+MirLowering.lower_stmt_impl
+MirLowering.lower_stmt
+MirLowering.lower_block_expected
+MirLowering.lower_while
+MirLowering.lower_expr ... lower_block_expected
+MirLowering.lower_function_with_gpu_metadata / lower_function
+MirLowering.lower_module
+CompilerDriver.lower_to_mir_with_target_context
+```
+
+The loop is `mir_lowering_types.spl` `bind_local`'s insertion probe,
+`while self.local_symbol_index_slots[bucket] >= 0: bucket = (bucket + 1) % capacity`,
+which has no bound. Memory of 7 hung processes (identical in all 7):
+`local_symbol_index_slots` = 16 slots, **every one occupied**:
+`[2,3,0,1,2,3,4,5,0,1,2,3,4,5,0,1]`; `local_symbol_ids` = `[18..23]` (6
+entries); inserting symbol 24. Three generations of stale slots.
+
+Root cause: `reset_function_local_tracking()`
+(`src/compiler/50.mir/_MirLowering/function_lowering.spl`) clears
+`local_symbol_ids`/`local_symbol_values` but not `local_symbol_index_slots`.
+Stale slots whose value is `< ids.len()` pass `local_symbol_slot`'s `-2`
+drift check, the load-factor check counts `ids.len()` rather than occupied
+buckets, so stale generations accumulate until no bucket is empty. The reset
+line existed (`c7ae61fb922`, 2026-08-24) and was dropped by the stale snapshot
+`4edef8fab8e` ("snapshot current development state", 2026-08-26);
+`test/01_unit/compiler/mir/local_symbol_index_spec.spl` has asserted it ever
+since and was RED on main. Pure-Simple source, lane-independent — not
+Windows-specific. Why only some runs hit it is NOT established: all captured
+hangs carry identical table contents and the same incoming symbol, so
+whatever varies is upstream of this function.
+
+Fix: restore `self.local_symbol_index_slots = []` in the reset, and bound the
+insertion probe (`local_symbol_free_bucket`, `-1` when the table is full ->
+rebuild from the authoritative `local_symbol_ids` and retry). Cost: at most
+one 16-slot rebuild per function, the same cost the first function already
+paid. Spec: `local_symbol_index_spec.spl` (+ `test/unit` mirror) gains a
+replay of the captured table; RED `5 examples, 4 failures` -> GREEN
+`5 examples, 1 failure` (the remaining one is the pre-existing seed gap
+`unknown property or method 'not' on Array` in the scope-restore example).
+
+Measured, 6 in parallel, 240 s cap, gate env/argv, `stage2_module_path_naming.spl`:
+
+| stage-2 compiler | runs | hung (stalled after `[build] phase=monomorphize`) |
+|---|---|---|
+| bootstrap50 reject `ac227642fafa561a` | 66 | 12 (18 %) |
+| rebuilt from `86d0a417301`, no fix (control) | 36 | 10 (28 %) |
+| rebuilt from `86d0a417301` + fix | 36 | **0** |
+
+The fixed build's `bind_local` has no `rt_array_get` loop left: its only
+probing is through `local_symbol_free_bucket`. The gate's 180 s ceiling was
+not changed.

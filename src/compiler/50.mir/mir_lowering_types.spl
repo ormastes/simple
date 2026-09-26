@@ -543,6 +543,21 @@ impl MirLowering:
             slot = slot + 1
         self.local_symbol_index_slots = slots
 
+    fn local_symbol_free_bucket(symbol_id: i64) -> i64:
+        """First empty bucket on symbol_id's probe chain, or -1 when every
+        bucket is occupied. Bounded by capacity so it always terminates."""
+        val capacity = self.local_symbol_index_slots.len()
+        if capacity == 0:
+            return -1
+        var bucket = symbol_id % capacity
+        var probes = 0
+        while probes < capacity:
+            if self.local_symbol_index_slots[bucket] < 0:
+                return bucket
+            bucket = (bucket + 1) % capacity
+            probes = probes + 1
+        -1
+
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
@@ -556,10 +571,13 @@ impl MirLowering:
         if self.local_symbol_index_slots.len() == 0 or
            (self.local_symbol_ids.len() + 1) * 10 >= self.local_symbol_index_slots.len() * 7:
             self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
-        val capacity = self.local_symbol_index_slots.len()
-        var bucket = symbol_id % capacity
-        while self.local_symbol_index_slots[bucket] >= 0:
-            bucket = (bucket + 1) % capacity
+        var bucket = self.local_symbol_free_bucket(symbol_id)
+        if bucket < 0:
+            # No empty bucket: the index has drifted from local_symbol_ids
+            # (the authoritative store). Rebuild from it rather than probe
+            # forever; a rebuilt table always keeps load below 0.7.
+            self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
+            bucket = self.local_symbol_free_bucket(symbol_id)
         val new_slot = self.local_symbol_ids.len()
         self.local_symbol_ids.push(symbol_id)
         self.local_symbol_values.push(local)

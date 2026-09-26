@@ -111,3 +111,31 @@ describe "MIR local symbol index":
                 "val saved_index_slots = self.local_symbol_index_slots").len()).to_equal(2)
             expect(body.split(
                 "self.local_symbol_index_slots = saved_index_slots").len()).to_equal(2)
+
+    it "terminates when stale slots leave no empty bucket":
+        step("The insertion probe must be bounded before it is executed")
+        # Replays the Windows stage-2 route hang (site 11 of
+        # doc/08_tracking/bug/stage2_stage3_route_native_compile_timeout_2026-09-13.md):
+        # cdb dumps of three hung processes all showed ids 18..23, symbol 24
+        # being inserted, and a 16-slot index with every bucket holding a
+        # stale slot below ids.len(). The old unbounded probe spins forever
+        # on that table, so refuse to execute it if that spelling returns.
+        val types_source = rt_file_read_text(
+            "src/compiler/50.mir/mir_lowering_types.spl") ?? ""
+        val bounded = types_source.split(
+            "while self.local_symbol_index_slots[bucket] >= 0:").len() == 1
+        expect(bounded).to_equal(true)
+        if bounded:
+            var lowering = MirLowering.new(SymbolTable.new())
+            var i = 18
+            while i < 24:
+                lowering.bind_local(i, LocalId(id: 100 + i))
+                i = i + 1
+            lowering.local_symbol_index_slots = [2, 3, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1]
+            lowering.bind_local(24, LocalId(id: 124))
+            expect(lowering.local_symbol_ids.len()).to_equal(7)
+            expect(lowering.find_local(24).id).to_equal(124)
+            i = 18
+            while i < 24:
+                expect(lowering.find_local(i).id).to_equal(100 + i)
+                i = i + 1
