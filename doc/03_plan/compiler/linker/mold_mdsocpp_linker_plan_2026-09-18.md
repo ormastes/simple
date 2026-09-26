@@ -193,6 +193,9 @@ unchecked MOVK opcodes for `_NC` groups.
 `R_AARCH64_GOTREL64` and checked signed `GOTREL32` now write direct-symbol
 offsets from the synthesized `_GLOBAL_OFFSET_TABLE_` base without allocating
 unrelated per-symbol GOT entries.
+`R_AARCH64_GOTPCREL32` now allocates the referenced symbol's GOT entry and
+writes its checked signed displacement from the relocation place, preserving
+the ABI-defined addend instead of applying the zero-addend GDAT rule.
 The AArch64 large-model initial-exec `MOVW_GOTTPREL_G1/G0_NC` pair now shares
 the TLS-IE GOT allocation path, computes offsets from the exact `.got` base,
 and applies the ABI's checked MOVZ/MOVN plus unchecked MOVK encodings.
