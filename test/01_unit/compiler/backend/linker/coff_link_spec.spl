@@ -4,7 +4,7 @@ use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
-    coff_validate_resource_sections}
+    coff_validate_resource_sections, coff_validate_export_sections}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
@@ -366,6 +366,35 @@ describe "internal freestanding Windows linker":
             virtual_size: 24, data: cyclic, characteristics: 0x40000040)
         expect(coff_validate_resource_sections(
             [cycle]).unwrap_err()).to_contain("cycle")
+
+    it "validates file-backed PE export tables and ordinals":
+        var exports: [u8] = []
+        exports = _cl_u32(exports, 0)
+        exports = _cl_u32(exports, 0)
+        exports = _cl_u16(exports, 0)
+        exports = _cl_u16(exports, 0)
+        exports = _cl_u32(exports, 0x2028)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 1)
+        exports = _cl_u32(exports, 0x2030)
+        exports = _cl_u32(exports, 0x2034)
+        exports = _cl_u32(exports, 0x2038)
+        exports = exports.push(116).push(0)
+        while exports.len() < 48: exports = exports.push(0)
+        exports = _cl_u32(exports, 0x1000)
+        exports = _cl_u32(exports, 0x203a)
+        exports = _cl_u16(exports, 0)
+        exports = exports.push(120).push(0)
+        val section = PeImageSection(name: ".edata", virtual_address: 0x2000,
+            virtual_size: exports.len(), data: exports, characteristics: 0x40000040)
+        expect(coff_validate_export_sections([section]).unwrap()).to_equal(true)
+        var invalid = exports
+        invalid[56] = 1
+        val bad = PeImageSection(name: ".edata", virtual_address: 0x2000,
+            virtual_size: invalid.len(), data: invalid, characteristics: 0x40000040)
+        expect(coff_validate_export_sections(
+            [bad]).unwrap_err()).to_contain("ordinal")
 
     it "uses .drectve INCLUDE symbols as archive closure roots":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [

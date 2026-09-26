@@ -492,6 +492,74 @@ fn coff_validate_resource_sections(
         return Ok(true)
     Ok(true)
 
+fn _coff_export_range(section: PeImageSection, rva: i64,
+        size: i64, what: text) -> Result<i64, text>:
+    val offset = rva - section.virtual_address
+    if offset < 0 or size < 0 or offset + size < offset or
+            offset + size > section.data.len():
+        return Err("PE .edata {what} is not file-backed in the export section")
+    Ok(offset)
+
+fn _coff_export_c_string(section: PeImageSection, rva: i64,
+        what: text) -> Result<bool, text>:
+    val start = _coff_export_range(section, rva, 1, what)
+    if start.is_err(): return Err(start.unwrap_err())
+    var offset = start.unwrap()
+    while offset < section.data.len():
+        if section.data[offset] == 0: return Ok(true)
+        offset = offset + 1
+    Err("PE .edata {what} is not NUL-terminated")
+
+fn coff_validate_export_sections(
+        sections: [PeImageSection]) -> Result<bool, text>:
+    """Validate IMAGE_EXPORT_DIRECTORY and its file-backed name tables."""
+    for section in sections:
+        if section.name != ".edata": continue
+        if section.data.len() < 40:
+            return Err("PE .edata export directory is truncated")
+        if _coff_read_u32(section.data, 0).unwrap() != 0:
+            return Err("PE .edata export directory reserved field must be zero")
+        val dll_name = _coff_read_u32(section.data, 12).unwrap()
+        val function_count = _coff_read_u32(section.data, 20).unwrap()
+        val name_count = _coff_read_u32(section.data, 24).unwrap()
+        val functions_rva = _coff_read_u32(section.data, 28).unwrap()
+        val names_rva = _coff_read_u32(section.data, 32).unwrap()
+        val ordinals_rva = _coff_read_u32(section.data, 36).unwrap()
+        if function_count == 0:
+            return Err("PE .edata export address table is empty")
+        if name_count > function_count:
+            return Err("PE .edata has more names than export address entries")
+        val named = _coff_export_c_string(section, dll_name, "DLL name")
+        if named.is_err(): return Err(named.unwrap_err())
+        val functions = _coff_export_range(
+            section, functions_rva, function_count * 4, "address table")
+        if functions.is_err(): return Err(functions.unwrap_err())
+        var names_offset: i64 = 0
+        var ordinals_offset: i64 = 0
+        if name_count > 0:
+            val names = _coff_export_range(
+                section, names_rva, name_count * 4, "name pointer table")
+            if names.is_err(): return Err(names.unwrap_err())
+            names_offset = names.unwrap()
+            val ordinals = _coff_export_range(
+                section, ordinals_rva, name_count * 2, "ordinal table")
+            if ordinals.is_err(): return Err(ordinals.unwrap_err())
+            ordinals_offset = ordinals.unwrap()
+        var index: i64 = 0
+        while index < name_count:
+            val name_rva = _coff_read_u32(
+                section.data, names_offset + index * 4).unwrap()
+            val export_name = _coff_export_c_string(
+                section, name_rva, "export name")
+            if export_name.is_err(): return Err(export_name.unwrap_err())
+            val ordinal = _coff_read_u16(
+                section.data, ordinals_offset + index * 2).unwrap()
+            if ordinal >= function_count:
+                return Err("PE .edata name ordinal exceeds the export address table")
+            index = index + 1
+        return Ok(true)
+    Ok(true)
+
 fn _coff_global_symbol_rva(objects: [CoffObject], rvas: [[i64]], name: text) -> Result<i64, text>:
     var found = false
     var address: i64 = 0
@@ -953,6 +1021,8 @@ fn coff_link_amd64_retained(request: CoffLinkRequest,
     output_sections = _coff_merge_object_sections(output_sections)
     val resources_valid = coff_validate_resource_sections(output_sections)
     if resources_valid.is_err(): return Err(resources_valid.unwrap_err())
+    val exports_valid = coff_validate_export_sections(output_sections)
+    if exports_valid.is_err(): return Err(exports_valid.unwrap_err())
     val sorted_exception_table = coff_sort_amd64_exception_table(output_sections)
     if sorted_exception_table.is_err(): return Err(sorted_exception_table.unwrap_err())
     output_sections = sorted_exception_table.unwrap()
@@ -1009,3 +1079,4 @@ export coff_attach_amd64_tls_directory
 export coff_attach_amd64_load_config
 export coff_sort_amd64_exception_table
 export coff_validate_resource_sections
+export coff_validate_export_sections
