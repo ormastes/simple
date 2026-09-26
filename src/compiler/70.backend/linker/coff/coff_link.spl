@@ -13,7 +13,7 @@ use compiler.backend.linker.coff.coff_object.{
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PE_AMD64_IMAGE_BASE, PE_SECTION_ALIGNMENT,
     pe_align_up, pe_write_amd64_console}
-use compiler.backend.linker.coff.archive_closure.{coff_archive_closure}
+use compiler.backend.linker.coff.archive_closure.{coff_archive_closure_retained}
 use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
 use compiler.backend.linker.coff.pe_base_relocation.{pe_build_amd64_base_relocations}
 
@@ -444,6 +444,11 @@ fn _coff_validate_symbols(objects: [CoffObject], rvas: [[i64]],
 
 fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
     """Link AMD64 COFF objects and libraries into a PE32+ console executable."""
+    coff_link_amd64_retained(request, [])
+
+fn coff_link_amd64_retained(request: CoffLinkRequest,
+        retained_symbols: [text]) -> Result<[u8], text>:
+    """Link with `/INCLUDE`-style archive roots."""
     if request.objects.len() == 0: return Err("COFF link request has no objects")
     if request.entry == "": return Err("COFF link request has no entry symbol")
     var objects: [CoffObject] = []
@@ -456,10 +461,21 @@ fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
         objects = objects.push(object)
         input_index = input_index + 1
 
-    val closure = coff_archive_closure(objects, request.archives)
+    val closure = coff_archive_closure_retained(objects, request.archives, retained_symbols)
     if closure.is_err(): return Err(closure.unwrap_err())
     val selected = closure.unwrap()
     for member in selected.members: objects = objects.push(member.object)
+    for name in retained_symbols:
+        if name == "": continue
+        var found = false
+        for object in objects:
+            for symbol in object.symbols:
+                if symbol.name == name and symbol.is_external() and symbol.is_defined():
+                    found = true
+        for import_object in selected.imports:
+            if import_object.public_name == name or import_object.iat_symbol() == name:
+                found = true
+        if not found: return Err("retained COFF symbol not found: {name}")
 
     val rva_result = _coff_section_rvas(objects)
     if rva_result.is_err(): return Err(rva_result.unwrap_err())
@@ -596,4 +612,4 @@ fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
             data: base_relocations.unwrap(), characteristics: 0x42000040))
     pe_write_amd64_console(output_sections, entry.unwrap())
 
-export CoffLinkRequest, coff_link_amd64
+export CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained

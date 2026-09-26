@@ -1,6 +1,6 @@
 use std.spec.*
 use std.spec.step
-use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
+use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
 
 fn _cl_u16(bytes: [u8], value: i64) -> [u8]:
@@ -156,6 +156,20 @@ fn _cl_importing_object() -> [u8]:
     bytes.push(0)
 
 describe "internal freestanding Windows linker":
+    it "retained symbols pull otherwise-unreferenced library members":
+        val request = CoffLinkRequest(objects: [_cl_object("_start", 1)],
+            archives: [_cl_archive(_cl_object("kept_fn", 1))], entry: "_start")
+        val linked = coff_link_amd64_retained(request, ["kept_fn"])
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.sections[0].virtual_size).to_equal(2)
+
+    it "missing retained COFF symbols fail by name":
+        val request = CoffLinkRequest(objects: [_cl_object("_start", 1)], archives: [], entry: "_start")
+        val linked = coff_link_amd64_retained(request, ["missing_kept_fn"])
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("retained COFF symbol not found")
+
     it "links a raw AMD64 object into a PE32+ executable":
         step("Resolve _start, retain its code section, and emit PE headers")
         val linked = coff_link_amd64(CoffLinkRequest(objects: [_cl_object("_start", 1)], archives: [], entry: "_start"))
