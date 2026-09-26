@@ -1,6 +1,9 @@
 # Pure planning contract for baseline and x86-64-v3 parser siblings. It records
-# host execution authority separately and makes no compilation/emission claim.
+# host execution authority separately, binds target identities to the selected
+# canonical triple registry, and makes no compilation/emission claim.
 use std.common.crypto.sha256.{sha256_text, sha256_bytes}
+use compiler.driver.canonical_target_registry_owner_v1.{
+    canonical_target_registry_owner_v1, canonical_target_registry_resolve_v1}
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     EnvironmentDigest256V1, EnvironmentSnapshotV1, ENV_ARCH_X86_64_V1,
     ENV_PLACEMENT_NATIVE_DYNLIB_V1, ENV_PLACEMENT_SMF_V1, ENV_PLACEMENT_JIT_V1}
@@ -23,6 +26,8 @@ pub enum ParserVariantBuildUnsupportedReasonV1:
     BackendMissingExactFeatures
     DuplicateTier
     BaselineRequired
+    UnknownTargetTriple
+    TargetProfileMappingMismatch
 pub struct ParserVariantBuildRequestV1:
     tier: ParserVariantTierV1
     placement: u16
@@ -97,6 +102,7 @@ pub fn parser_variant_build_plan_v1(host: EnvironmentSnapshotV1,
     if not _declared_pvb(host.snapshot_identity) or host.snapshot_generation == 0u64 or
        requests.len() == 0:
         return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+    val registry = canonical_target_registry_owner_v1()
     var artifacts: [ParserVariantArtifactPlanV1] = []; var baseline_seen = false
     for request in requests:
         if request.tier == ParserVariantTierV1.X86_64V4:
@@ -118,9 +124,21 @@ pub fn parser_variant_build_plan_v1(host: EnvironmentSnapshotV1,
                 request.dependency_lock_identity]:
             if not _declared_pvb(identity):
                 return Err(ParserVariantBuildUnsupportedReasonV1.InvalidRequest)
+        val mapped = canonical_target_registry_resolve_v1(registry, request.target_triple)
+        if mapped.is_err():
+            return Err(ParserVariantBuildUnsupportedReasonV1.UnknownTargetTriple)
+        val resolution = mapped.unwrap()
+        val row = resolution.row
+        if request.target_profile.target_architecture != row.architecture_id or
+           request.target_profile.target_abi_id != row.abi_id or
+           request.target_profile.target_object_format_id != row.object_format_id or
+           request.target_profile.target_endian_id != row.endian_id or
+           request.target_profile.target_pointer_width_bits != row.pointer_width_bits:
+            return Err(ParserVariantBuildUnsupportedReasonV1.TargetProfileMappingMismatch)
+        val triple_id = _digest_pvb(resolution.canonical_target_triple)
         for existing in artifacts:
             if existing.tier == request.tier and existing.placement == request.placement and
-               existing.target_triple_identity == _digest_pvb(request.target_triple):
+               existing.target_triple_identity == triple_id:
                 return Err(ParserVariantBuildUnsupportedReasonV1.DuplicateTier)
         val required = _required_mask_pvb(request.tier)
         if request.target_feature_words.len() != 1 or request.target_feature_words[0] != required:
@@ -128,9 +146,10 @@ pub fn parser_variant_build_plan_v1(host: EnvironmentSnapshotV1,
         if required & request.backend_supported_feature_mask != required:
             return Err(ParserVariantBuildUnsupportedReasonV1.BackendMissingExactFeatures)
         if request.tier == ParserVariantTierV1.Baseline: baseline_seen = true
-        val triple_id = _digest_pvb(request.target_triple)
         var material: [i64] = []; _push64_pvb(material, PARSER_VARIANT_BUILD_PLAN_SCHEMA_V1 as u64)
         _push64_pvb(material, request.tier as u64); _push64_pvb(material, request.placement as u64)
+        _push64_pvb(material, resolution.token.mapping_generation)
+        _pushd_pvb(material, _digest_pvb(resolution.token.mapping_digest))
         for identity in [triple_id, request.target_profile.profile_identity,
                 request.target_profile.target_identity, request.target_profile.backend_identity,
                 request.target_profile.semantic_identity, request.parser_abi_identity,
@@ -147,7 +166,7 @@ pub fn parser_variant_build_plan_v1(host: EnvironmentSnapshotV1,
         val cache_id = _hash_pvb([1] + material)
         var artifact_material = [2] + material; _pushd_pvb(artifact_material, cache_id)
         artifacts.push(ParserVariantArtifactPlanV1(tier: request.tier,
-            placement: request.placement, target_triple: request.target_triple,
+            placement: request.placement, target_triple: resolution.canonical_target_triple,
             target_triple_identity: triple_id, required_feature_mask: required,
             artifact_identity: _hash_pvb(artifact_material),
             cache_identity: cache_id, compilation_executed: false))
