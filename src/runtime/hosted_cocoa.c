@@ -137,6 +137,7 @@ typedef struct {
 
 static HandleEntry   g_handles[MAX_HANDLES];
 static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_layer_drained = PTHREAD_COND_INITIALIZER;
 static _Atomic int64_t g_next_handle = 1;
 
 static int64_t next_handle(void) {
@@ -218,7 +219,28 @@ static bool wnd_eq_pop(CocoaWindow *wnd, int64_t *out) {
 typedef struct {
     int64_t   w, h;
     uint32_t *pixels; /* ARGB (0xAARRGGBB) CPU buffer, w*h elements */
+    pthread_mutex_t pixels_mutex;
+    size_t active_calls; /* Protected by g_mutex; free waits for zero. */
 } CocoaLayer;
+
+/* Pin before dropping the handle-table lock. Removal denies new pins, while
+ * layer_free waits for every current caller to finish. Pixel access uses the
+ * per-layer mutex so a slow blur never blocks unrelated windows. */
+static CocoaLayer *layer_pin(int64_t id) {
+    pthread_mutex_lock(&g_mutex);
+    CocoaLayer *layer = (CocoaLayer *)handle_get(id, KIND_LAYER);
+    if (layer && layer->active_calls == SIZE_MAX) layer = NULL;
+    if (layer) layer->active_calls++;
+    pthread_mutex_unlock(&g_mutex);
+    return layer;
+}
+
+static void layer_unpin(CocoaLayer *layer) {
+    pthread_mutex_lock(&g_mutex);
+    layer->active_calls--;
+    if (layer->active_calls == 0) pthread_cond_broadcast(&g_layer_drained);
+    pthread_mutex_unlock(&g_mutex);
+}
 
 /* -------------------------------------------------------------------------
  * ensure_app: promote the process to a regular GUI app on first call.
@@ -365,9 +387,15 @@ int64_t rt_cocoa_layer_create(int64_t win, int64_t w, int64_t h, int64_t fill_co
 
     CocoaLayer *layer = (CocoaLayer *)malloc(sizeof(CocoaLayer));
     if (!layer) { free(pixels); return COCOA_INVALID_HANDLE; }
+    if (pthread_mutex_init(&layer->pixels_mutex, NULL) != 0) {
+        free(pixels);
+        free(layer);
+        return COCOA_INVALID_HANDLE;
+    }
     layer->w      = w;
     layer->h      = h;
     layer->pixels = pixels;
+    layer->active_calls = 0;
 
     int64_t id = next_handle();
 
@@ -375,17 +403,21 @@ int64_t rt_cocoa_layer_create(int64_t win, int64_t w, int64_t h, int64_t fill_co
     bool ok = handle_insert(id, layer, KIND_LAYER);
     pthread_mutex_unlock(&g_mutex);
 
-    if (!ok) { free(pixels); free(layer); return COCOA_INVALID_HANDLE; }
+    if (!ok) {
+        pthread_mutex_destroy(&layer->pixels_mutex);
+        free(pixels);
+        free(layer);
+        return COCOA_INVALID_HANDLE;
+    }
     return id;
 }
 
 bool rt_cocoa_layer_fill_rect(int64_t layer_id, int64_t x, int64_t y,
                                int64_t w, int64_t h, int64_t color) {
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *l = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
-    pthread_mutex_unlock(&g_mutex);
+    CocoaLayer *l = layer_pin(layer_id);
     if (!l) return false;
 
+    pthread_mutex_lock(&l->pixels_mutex);
     uint32_t c  = (uint32_t)color;
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
@@ -398,6 +430,8 @@ bool rt_cocoa_layer_fill_rect(int64_t layer_id, int64_t x, int64_t y,
         for (int64_t xx = x0; xx < x1; xx++)
             row[xx] = c;
     }
+    pthread_mutex_unlock(&l->pixels_mutex);
+    layer_unpin(l);
     return true;
 }
 
@@ -431,11 +465,14 @@ bool rt_cocoa_layer_write_frame(int64_t layer_id, int64_t w, int64_t h,
             ((uint32_t)staged[at + 3] << 24);
         words[i] = value;
     }
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *layer = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
+    CocoaLayer *layer = layer_pin(layer_id);
     bool accepted = layer && layer->w == w && layer->h == h && layer->pixels;
-    if (accepted) memcpy(layer->pixels, words, count * sizeof(uint32_t));
-    pthread_mutex_unlock(&g_mutex);
+    if (accepted) {
+        pthread_mutex_lock(&layer->pixels_mutex);
+        memcpy(layer->pixels, words, count * sizeof(uint32_t));
+        pthread_mutex_unlock(&layer->pixels_mutex);
+    }
+    if (layer) layer_unpin(layer);
     free(staged);
     return accepted;
 }
@@ -443,34 +480,42 @@ bool rt_cocoa_layer_write_frame(int64_t layer_id, int64_t w, int64_t h,
 bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
     if (!is_main_thread()) return false;
 
+    CocoaLayer *l = layer_pin(layer_id);
+    if (!l) return false;
     pthread_mutex_lock(&g_mutex);
-    CocoaLayer  *l   = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
     CocoaWindow *wnd = (CocoaWindow *)handle_get(win,      KIND_WINDOW);
-    if (!l || !wnd || !l->pixels || !wnd->ns_view || l->w <= 0 || l->h <= 0) {
-        pthread_mutex_unlock(&g_mutex);
+    NSImageView *view = wnd && wnd->ns_view
+        ? (NSImageView *)CFRetain((__bridge CFTypeRef)wnd->ns_view) : NULL;
+    pthread_mutex_unlock(&g_mutex);
+    if (!view || !l->pixels || l->w <= 0 || l->h <= 0) {
+        if (view) CFRelease((__bridge CFTypeRef)view);
+        layer_unpin(l);
         return false;
     }
 
     size_t pw = (size_t)l->w;
     size_t ph = (size_t)l->h;
     if (pw > SIZE_MAX / ph || pw > (size_t)INT64_MAX / 4) {
-        pthread_mutex_unlock(&g_mutex);
+        CFRelease((__bridge CFTypeRef)view);
+        layer_unpin(l);
         return false;
     }
     size_t pixel_count = pw * ph;
     if (pixel_count > SIZE_MAX / 4) {
-        pthread_mutex_unlock(&g_mutex);
+        CFRelease((__bridge CFTypeRef)view);
+        layer_unpin(l);
         return false;
     }
     size_t nbytes = pixel_count * 4;
     uint8_t *rgba = (uint8_t *)malloc(nbytes);
     if (!rgba) {
-        pthread_mutex_unlock(&g_mutex);
+        CFRelease((__bridge CFTypeRef)view);
+        layer_unpin(l);
         return false;
     }
-    /* Retain the view and finish reading the layer while both handles are
-     * protected. A concurrent layer_free may run after the unlock. */
-    NSImageView *view = (NSImageView *)CFRetain((__bridge CFTypeRef)wnd->ns_view);
+    /* The layer pin prevents free; its own mutex serializes pixel writers.
+     * Unpin once the converted frame no longer references layer storage. */
+    pthread_mutex_lock(&l->pixels_mutex);
     for (size_t i = 0; i < pixel_count; i++) {
         uint32_t px = l->pixels[i];
         rgba[i*4+0] = (uint8_t)((px >> 16) & 0xff); /* R */
@@ -478,7 +523,8 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
         rgba[i*4+2] = (uint8_t)( px        & 0xff); /* B */
         rgba[i*4+3] = (uint8_t)((px >> 24) & 0xff); /* A */
     }
-    pthread_mutex_unlock(&g_mutex);
+    pthread_mutex_unlock(&l->pixels_mutex);
+    layer_unpin(l);
 
     @autoreleasepool {
         NSBitmapImageRep *bmp = [[NSBitmapImageRep alloc]
@@ -518,30 +564,38 @@ bool rt_cocoa_layer_present(int64_t win, int64_t layer_id) {
 bool rt_cocoa_layer_free(int64_t layer_id) {
     pthread_mutex_lock(&g_mutex);
     CocoaLayer *l = (CocoaLayer *)handle_remove(layer_id, KIND_LAYER);
+    if (l) {
+        while (l->active_calls != 0)
+            pthread_cond_wait(&g_layer_drained, &g_mutex);
+    }
     pthread_mutex_unlock(&g_mutex);
     if (!l) return false;
+    pthread_mutex_destroy(&l->pixels_mutex);
     free(l->pixels);
     free(l);
     return true;
 }
 
 int64_t rt_cocoa_layer_read_pixel(int64_t layer_id, int64_t x, int64_t y) {
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *l = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
-    pthread_mutex_unlock(&g_mutex);
+    CocoaLayer *l = layer_pin(layer_id);
     if (!l) return 0;
-    if (x < 0 || y < 0 || x >= l->w || y >= l->h) return 0;
-    return (int64_t)l->pixels[(size_t)(y * l->w + x)];
+    int64_t result = 0;
+    if (x >= 0 && y >= 0 && x < l->w && y < l->h) {
+        pthread_mutex_lock(&l->pixels_mutex);
+        result = (int64_t)l->pixels[(size_t)(y * l->w + x)];
+        pthread_mutex_unlock(&l->pixels_mutex);
+    }
+    layer_unpin(l);
+    return result;
 }
 
 bool rt_cocoa_layer_blend_rect(int64_t layer_id, int64_t x, int64_t y,
                                 int64_t w, int64_t h,
                                 int64_t color, int64_t alpha) {
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *l = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
-    pthread_mutex_unlock(&g_mutex);
+    CocoaLayer *l = layer_pin(layer_id);
     if (!l) return false;
 
+    pthread_mutex_lock(&l->pixels_mutex);
     uint32_t a   = (uint32_t)(alpha < 0 ? 0 : alpha > 255 ? 255 : alpha);
     uint32_t inv = 255 - a;
     uint32_t sr  = (uint32_t)((color >> 16) & 0xff);
@@ -567,6 +621,8 @@ bool rt_cocoa_layer_blend_rect(int64_t layer_id, int64_t x, int64_t y,
             row[xx] = 0xff000000u | (r << 16) | (g2 << 8) | b;
         }
     }
+    pthread_mutex_unlock(&l->pixels_mutex);
+    layer_unpin(l);
     return true;
 }
 
@@ -576,32 +632,46 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
      * Simple 3-pass box blur over the region [x,y,w,h].
      * Each pass blurs horizontally then vertically.
      */
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *l = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
-    pthread_mutex_unlock(&g_mutex);
+    CocoaLayer *l = layer_pin(layer_id);
     if (!l) return false;
-    if (radius <= 0) return true;
+    if (radius <= 0) {
+        layer_unpin(l);
+        return true;
+    }
 
     int64_t lw = l->w, lh = l->h;
     int64_t x0 = x < 0 ? 0 : (x > lw ? lw : x);
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
     int64_t x1 = clipped_end(x, w, lw);
     int64_t y1 = clipped_end(y, h, lh);
-    if (x1 <= x0 || y1 <= y0) return true;
+    if (x1 <= x0 || y1 <= y0) {
+        layer_unpin(l);
+        return true;
+    }
 
     int64_t rw = x1 - x0;
     int64_t rh = y1 - y0;
-    if ((uint64_t)rw > (uint64_t)SIZE_MAX / (uint64_t)rh) return false;
+    if ((uint64_t)rw > (uint64_t)SIZE_MAX / (uint64_t)rh) {
+        layer_unpin(l);
+        return false;
+    }
     size_t tmp_count = (size_t)rw * (size_t)rh;
-    if (tmp_count > SIZE_MAX / sizeof(uint32_t)) return false;
+    if (tmp_count > SIZE_MAX / sizeof(uint32_t)) {
+        layer_unpin(l);
+        return false;
+    }
     uint32_t *tmp = (uint32_t *)malloc(tmp_count * sizeof(uint32_t));
-    if (!tmp) return false;
+    if (!tmp) {
+        layer_unpin(l);
+        return false;
+    }
 
     int64_t r = radius;
     if (r > rw / 2) r = rw / 2;
     if (r > rh / 2) r = rh / 2;
     if (r < 1) r = 1;
 
+    pthread_mutex_lock(&l->pixels_mutex);
     /* Copy region into tmp. */
     for (int64_t yy = 0; yy < rh; yy++) {
         memcpy(tmp + (size_t)(yy * rw),
@@ -658,16 +728,16 @@ bool rt_cocoa_layer_blur(int64_t layer_id, int64_t x, int64_t y,
                (size_t)(rw) * sizeof(uint32_t));
     }
 
+    pthread_mutex_unlock(&l->pixels_mutex);
     free(tmp);
+    layer_unpin(l);
     return true;
 }
 
 bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
                                 int64_t w, int64_t h,
                                 int64_t color_top, int64_t color_bottom) {
-    pthread_mutex_lock(&g_mutex);
-    CocoaLayer *l = (CocoaLayer *)handle_get(layer_id, KIND_LAYER);
-    pthread_mutex_unlock(&g_mutex);
+    CocoaLayer *l = layer_pin(layer_id);
     if (!l) return false;
 
     int64_t lw = l->w, lh = l->h;
@@ -675,7 +745,10 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
     int64_t y0 = y < 0 ? 0 : (y > lh ? lh : y);
     int64_t x1 = clipped_end(x, w, lw);
     int64_t y1 = clipped_end(y, h, lh);
-    if (y1 <= y0) return true;
+    if (y1 <= y0) {
+        layer_unpin(l);
+        return true;
+    }
 
     int64_t span = y1 - y0;
     int64_t r1 = (color_top  >> 16) & 0xff;
@@ -685,6 +758,7 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
     int64_t g2 = (color_bottom >>  8) & 0xff;
     int64_t b2 =  color_bottom        & 0xff;
 
+    pthread_mutex_lock(&l->pixels_mutex);
     for (int64_t yy = y0; yy < y1; yy++) {
         int64_t  t     = yy - y0;
         uint32_t r     = (uint32_t)((r1 * (span - t) + r2 * t) / span);
@@ -695,6 +769,8 @@ bool rt_cocoa_layer_gradient_v(int64_t layer_id, int64_t x, int64_t y,
         for (int64_t xx = x0; xx < x1; xx++)
             row[xx] = color;
     }
+    pthread_mutex_unlock(&l->pixels_mutex);
+    layer_unpin(l);
     return true;
 }
 

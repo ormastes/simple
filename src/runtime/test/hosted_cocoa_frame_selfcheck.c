@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
+#endif
 
 typedef struct TestBytes {
     int64_t len;
@@ -31,6 +36,34 @@ bool rt_cocoa_layer_write_frame(int64_t, int64_t, int64_t, int64_t);
 int64_t rt_cocoa_layer_read_pixel(int64_t, int64_t, int64_t);
 bool rt_cocoa_layer_present(int64_t, int64_t);
 bool rt_cocoa_layer_free(int64_t);
+bool rt_cocoa_layer_fill_rect(int64_t, int64_t, int64_t, int64_t, int64_t,
+                              int64_t);
+bool rt_cocoa_layer_blend_rect(int64_t, int64_t, int64_t, int64_t, int64_t,
+                               int64_t, int64_t);
+bool rt_cocoa_layer_blur(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+bool rt_cocoa_layer_gradient_v(int64_t, int64_t, int64_t, int64_t, int64_t,
+                                int64_t, int64_t);
+
+#ifdef __APPLE__
+typedef struct TestWorker {
+    int64_t layer;
+    atomic_int iterations;
+} TestWorker;
+
+static void *exercise_layer_until_closed(void *arg) {
+    TestWorker *worker = (TestWorker *)arg;
+    for (int i = 0; i < 20000; i++) {
+        rt_cocoa_layer_fill_rect(worker->layer, 0, 0, 2, 2, 0xFF112233);
+        rt_cocoa_layer_blend_rect(worker->layer, 0, 0, 2, 2, 0xFF334455, 128);
+        rt_cocoa_layer_gradient_v(worker->layer, 0, 0, 2, 2,
+                                   0xFF000000, 0xFFFFFFFF);
+        rt_cocoa_layer_blur(worker->layer, 0, 0, 2, 2, 1);
+        rt_cocoa_layer_read_pixel(worker->layer, 0, 0);
+        atomic_store(&worker->iterations, i + 1);
+    }
+    return NULL;
+}
+#endif
 
 int main(void) {
 #ifdef __APPLE__
@@ -55,7 +88,22 @@ int main(void) {
     assert(!rt_cocoa_layer_write_frame(layer, 3, 2,
         (int64_t)(uintptr_t)&pixels));
     assert(!rt_cocoa_layer_present(999999997, layer));
+    TestWorker worker = {.layer = layer};
+    atomic_init(&worker.iterations, 0);
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, exercise_layer_until_closed,
+                          &worker) == 0);
+    while (atomic_load(&worker.iterations) < 1000) sched_yield();
     assert(rt_cocoa_layer_free(layer));
+    assert(pthread_join(thread, NULL) == 0);
+    assert(!rt_cocoa_layer_fill_rect(layer, 0, 0, 1, 1, 0));
+    assert(!rt_cocoa_layer_blend_rect(layer, 0, 0, 1, 1, 0, 128));
+    assert(!rt_cocoa_layer_gradient_v(layer, 0, 0, 1, 1, 0, 0));
+    assert(!rt_cocoa_layer_blur(layer, 0, 0, 1, 1, 1));
+    assert(!rt_cocoa_layer_write_frame(layer, 2, 2,
+        (int64_t)(uintptr_t)&pixels));
+    assert(rt_cocoa_layer_read_pixel(layer, 0, 0) == 0);
+    assert(!rt_cocoa_layer_free(layer));
 #else
     TestBytes pixels = {.len = 4, .valid = true};
     assert(!rt_cocoa_layer_write_frame(1, 1, 1,
