@@ -215,6 +215,10 @@ Canonical AArch64 TLSDESC `ADRP/LDR/ADD/BLR` sequences for defined TLS symbols
 now relax to variant-I local-exec `MRS/ADD-high/ADD-low/NOP`, removing all four
 descriptor relocations and the resolver call. Incomplete, malformed, or
 undefined-symbol descriptor sequences fail closed.
+Linux AArch64 `TLS_DTPREL64`, `TLS_DTPMOD64`, and `TLS_TPREL64` input records
+now resolve statically for defined TLS symbols using the `PT_TLS` block start,
+main-module ID 1, and variant-I thread-pointer bias respectively. Imported
+records remain fail-closed until loader-relocation emission is implemented.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
