@@ -790,6 +790,15 @@ cannot authorize the copied result. Registry uses remain owned by the caller:
 release the build-plan owner token before releasing those uses. Emission and
 cache publication must consume this V2 owner projection, not the inert V1
 planner result, and still require authenticated backend and exact-byte evidence.
+The V2 provider-receipt constructor reprojects the live plan, supplies the
+owner-retained feature words to the existing V1 publication receipt check,
+and hashes the resulting V1 receipt with the bound plan/artifact/cache identities
+and both canonical registry bindings. Released registry uses and publication
+without a declared authenticated trust receipt fail before a V2 receipt is
+issued. The publication argument is still a caller-carried value; production
+issuance must consume the live composite-publication owner before this can be
+treated as an authoritative receipt. Emission/cache consumers still need to use
+the V2 identities.
 
 ### Backend feature receipt boundary
 

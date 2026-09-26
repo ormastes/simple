@@ -3,6 +3,7 @@
 # sufficient to project a cache or artifact identity from this owner.
 
 use std.common.crypto.sha256.sha256_bytes
+use std.common.crypto.sha256.sha256_text
 use std.common.string_core.text_to_utf8_bytes
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     EnvironmentDigest256V1, EnvironmentFeatureSetV1}
@@ -13,6 +14,9 @@ use compiler.driver.canonical_target_registry_owner_v2.{
 use compiler.driver.environment_variant_build_planner_v1.{
     EnvironmentVariantBuildRequestV1, EnvironmentVariantArtifactPlanV1,
     EnvironmentVariantBuildPlanV1, environment_variant_build_plan_v1}
+use compiler.driver.environment_variant_provider_receipt_v1.{
+    EnvironmentVariantProviderReceiptV1, environment_variant_provider_receipt_v1}
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.EnvironmentPublicationAdmissionV1
 
 pub const ENV_REGISTRY_BUILD_PLAN_SCHEMA_V2: u16 = 2u16
 pub const ENV_REGISTRY_BUILD_PLAN_MAX_RECORDS_V2: i64 = 256
@@ -49,6 +53,27 @@ pub struct EnvironmentRegistryBuildPlanV2:
     baseline_binding: CanonicalTargetProfileBindingV2
     artifacts: [EnvironmentRegistryBoundArtifactV2]
     plan_identity: EnvironmentDigest256V1
+
+pub const ENV_REGISTRY_PROVIDER_RECEIPT_SCHEMA_V2: u16 = 2u16
+
+pub enum EnvironmentRegistryProviderReceiptErrorV2:
+    PlanRejected
+    ArtifactIndexInvalid
+    PublicationRejected
+    IdentityMismatch
+
+pub struct EnvironmentRegistryProviderReceiptV2:
+    schema_version: u16
+    provider_receipt_hash: text
+    plan_identity: EnvironmentDigest256V1
+    selected_artifact_identity: EnvironmentDigest256V1
+    selected_cache_key: EnvironmentDigest256V1
+    baseline_profile_binding_digest: text
+    target_profile_binding_digest: text
+    publication_plan_digest: EnvironmentDigest256V1
+    dependency_lock_digest: EnvironmentDigest256V1
+    dependency_closure_digest: EnvironmentDigest256V1
+    provider_generation: u64
 
 pub struct EnvironmentRegistryBuildPlanTokenV2:
     owner_instance: u64
@@ -234,3 +259,63 @@ pub fn environment_registry_build_plan_release_v2(
     if not found: return Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale)
     owner.records = kept
     Ok(())
+
+fn _digest_text_erbp(value: EnvironmentDigest256V1) -> text:
+    "{value.w0}:{value.w1}:{value.w2}:{value.w3}"
+
+# The V2 receipt identity is issued only from a still-live registry-bound plan.
+# Feature words come from the owner's retained request, never a caller copy.
+# Publication is still caller-carried; production issuance needs a live
+# composite-publication owner join.
+pub fn environment_registry_provider_receipt_v2(
+    owner: EnvironmentRegistryBuildPlanOwnerV2,
+    registry: CanonicalTargetRegistryOwnerV2,
+    token: EnvironmentRegistryBuildPlanTokenV2,
+    publication: EnvironmentPublicationAdmissionV1,
+    artifact_index: i64
+) -> Result<EnvironmentRegistryProviderReceiptV2, EnvironmentRegistryProviderReceiptErrorV2>:
+    val projected = environment_registry_build_plan_project_v2(owner, registry, token)
+    if projected.is_err():
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
+    val plan = projected.unwrap()
+    if artifact_index < 0 or artifact_index >= plan.artifacts.len():
+        return Err(EnvironmentRegistryProviderReceiptErrorV2.ArtifactIndexInvalid)
+    for record in owner.records:
+        if record.token == token:
+            if artifact_index >= record.artifact_words.len():
+                return Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
+            val admitted = environment_variant_provider_receipt_v1(record.base_plan,
+                publication, artifact_index, record.artifact_words[artifact_index])
+            if admitted.is_err():
+                return Err(EnvironmentRegistryProviderReceiptErrorV2.PublicationRejected)
+            val base_receipt: EnvironmentVariantProviderReceiptV1 = admitted.unwrap()
+            val artifact = plan.artifacts[artifact_index]
+            if base_receipt.plan_identity != plan.base_plan_identity or
+               base_receipt.selected_artifact_identity != artifact.base_artifact.artifact_identity:
+                return Err(EnvironmentRegistryProviderReceiptErrorV2.IdentityMismatch)
+            val baseline = plan.baseline_binding
+            val target = artifact.target_binding
+            val material = "simple/environment-registry-provider-receipt/v2" +
+                "|base=" + base_receipt.provider_receipt_hash +
+                "|plan=" + _digest_text_erbp(plan.plan_identity) +
+                "|artifact=" + _digest_text_erbp(artifact.artifact_identity) +
+                "|cache=" + _digest_text_erbp(artifact.cache_key) +
+                "|baseline=" + baseline.profile_binding_digest +
+                "|target=" + target.profile_binding_digest +
+                "|baselineRegistry={baseline.registry_generation}" +
+                "|baselineMapping={baseline.mapping_generation}:" + baseline.mapping_digest +
+                "|targetRegistry={target.registry_generation}" +
+                "|targetMapping={target.mapping_generation}:" + target.mapping_digest
+            return Ok(EnvironmentRegistryProviderReceiptV2(
+                schema_version: ENV_REGISTRY_PROVIDER_RECEIPT_SCHEMA_V2,
+                provider_receipt_hash: sha256_text(material),
+                plan_identity: plan.plan_identity,
+                selected_artifact_identity: artifact.artifact_identity,
+                selected_cache_key: artifact.cache_key,
+                baseline_profile_binding_digest: baseline.profile_binding_digest,
+                target_profile_binding_digest: target.profile_binding_digest,
+                publication_plan_digest: base_receipt.publication_plan_digest,
+                dependency_lock_digest: base_receipt.dependency_lock_digest,
+                dependency_closure_digest: base_receipt.dependency_closure_digest,
+                provider_generation: base_receipt.provider_generation))
+    Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected)
