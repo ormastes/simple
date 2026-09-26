@@ -182,6 +182,13 @@ impl CompilerDriver:
         val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
         var all_object_bytes: [u8] = []
 
+        # Fail closed. An SMF with no code still gets a `main` symbol of size
+        # 0 (smf_writer), and the loader then jumps into it. Zero modules,
+        # a module with functions but no object, or no code in total are
+        # compile errors, never a successful empty artifact.
+        if ctx.mir_modules.keys().len() == 0:
+            return CompileResult.CodegenError(
+                "SMF compile produced no MIR modules; nothing to package")
         for name in ctx.mir_modules.keys():
             smf_log_trace(log, "compiling module for SMF: {name}")
             val compiled = compile_module_with_backend(
@@ -195,11 +202,31 @@ impl CompilerDriver:
                     return CompileResult.CodegenError(
                         "AOT compile error in {name}: {err.to_text()}")
                 case Ok(module):
+                    var module_bytes: [u8] = []
                     if val obj_bytes = module.object_code:
-                        all_object_bytes = all_object_bytes.concat(obj_bytes)
+                        module_bytes = obj_bytes
+                    if module_bytes.len() == 0 and ctx.mir_modules[name].functions.len() > 0:
+                        return CompileResult.CodegenError(
+                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)")
+                    all_object_bytes = all_object_bytes.concat(module_bytes)
                 case _:
                     return CompileResult.CodegenError(
                         "AOT compile error in {name}: backend result not Ok")
+
+        if all_object_bytes.len() == 0:
+            return CompileResult.CodegenError(
+                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)")
+        # extract_code_from_object only understands ELF and passes anything
+        # else through as raw code, so a COFF or Mach-O object would be
+        # loaded and entered at its file header.
+        if all_object_bytes.len() >= 4:
+            val b0 = all_object_bytes[0] as i64
+            val b1 = all_object_bytes[1] as i64
+            val coff = (b0 == 0x64 and b1 == 0x86) or (b0 == 0x64 and b1 == 0xAA)
+            val macho = b0 == 0xCF and b1 == 0xFA and (all_object_bytes[2] as i64) == 0xED and (all_object_bytes[3] as i64) == 0xFE
+            if coff or macho:
+                return CompileResult.CodegenError(
+                    "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target")
 
         val deps = smf_collect_dependency_hashes(ctx)
         val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:

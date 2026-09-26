@@ -1,6 +1,6 @@
 # SMF from `compile` has 0 code bytes on Windows; running it crashes calling `main`
 
-**Status:** open. **Host:** Windows x86_64-pc-windows-msvc, stage-2 self-hosted `simple_cli.exe`
+**Status:** compile side fixed (2026-09-26, fail-closed SMF PR). `compile` now exits 1 when there are 0 modules, an empty object, or a non-ELF (COFF/Mach-O) object; the loader refuses a size-0 symbol. Still open: `simple_cli <any .smf>`, even a garbage file, crashes with 0xC0000005 in about 5 s, before any SMF parsing, so the loader guard is not reached yet. ELF-only SMF packaging means no Windows SMF can be produced at all. **Host:** Windows x86_64-pc-windows-msvc, stage-2 self-hosted `simple_cli.exe`
 (#1606 and later).
 
 ## Symptom
