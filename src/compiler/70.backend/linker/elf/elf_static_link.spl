@@ -21,7 +21,8 @@
 # Limits (reported as errors, never silently degraded):
 #   - targets: x86_64 and aarch64; dynamic execution certification remains a
 #     platform-receipt concern rather than an image-construction restriction
-#   - no TLS or text relocs,
+#   - TLS sections/PT_TLS are emitted; TLS relocation models remain unsupported
+#   - no text relocs,
 #     no section GC, no COMDAT dedup, no symbol versioning
 #     (unversioned references bind to the library's default version)
 #   - single-threaded; no StageReceipts yet
@@ -146,7 +147,11 @@ fn elf_static_page(target: RelocArch) -> i64:
 fn elf_out_name(name: text, sh_type: i64, sh_flags: i64) -> Result<text, text>:
     """Output section an allocatable input section goes to (ld.lld's default rules)."""
     if sh_flags & SHF_TLS != 0:
-        return Err("section {name}: TLS (SHF_TLS) is unsupported")
+        if sh_type == SHT_NOBITS:
+            return Ok(".tbss")
+        if sh_type == SHT_PROGBITS:
+            return Ok(".tdata")
+        return Err("section {name}: unsupported TLS section type {sh_type}")
     if sh_type == SHT_NOTE:
         return Ok(name)
     if sh_type == SHT_INIT_ARRAY:
@@ -217,7 +222,7 @@ fn elf_static_place(objects: [ElfObject]) -> Result<ElfStaticInputs, text>:
                     var st = sec.sh_type
                     if st == SHT_X86_64_UNWIND:
                         st = SHT_PROGBITS_E
-                    outs = outs.push(elf_out_sec(name, st, sec.sh_flags & (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR),
+                    outs = outs.push(elf_out_sec(name, st, sec.sh_flags & (SHF_WRITE | SHF_ALLOC | SHF_EXECINSTR | SHF_TLS),
                         1, 0, elf_seg_of(sec.sh_flags)))
                     k = outs.len() - 1
                 val o = outs[k]
@@ -360,6 +365,8 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
             return 23
         return 24
     if s.sh_type == SHT_NOBITS_E:
+        if n == ".tbss":
+            return 39
         return 40
     if n == ".preinit_array":
         return 30
@@ -377,6 +384,8 @@ fn elf_out_rank(s: ElfOutSec) -> i64:
         return 36
     if n == ".got.plt":
         return 37
+    if n == ".tdata":
+        return 38
     38
 
 fn elf_sort_outs(secs: [ElfOutSec]) -> [ElfOutSec]:

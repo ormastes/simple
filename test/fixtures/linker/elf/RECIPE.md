@@ -19,6 +19,7 @@ clang --target=x86_64-linux-gnu  $CF start_x64.c  -o start_x64.o
 clang --target=x86_64-linux-gnu  $CF lib_x64.c    -o lib_x64.o
 clang --target=x86_64-linux-gnu -c -ffreestanding -fno-pic -fno-stack-protector -fcommon common_x64.c -o common_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector canonical_plt_x64.c -o canonical_plt_x64.o
+clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector tls_sections_x64.c -o tls_sections_x64.o
 ```
 
 Relocations exercised (`llvm-readelf -r`):
@@ -32,6 +33,7 @@ Relocations exercised (`llvm-readelf -r`):
 | lib_x64.o | PC32 (base, scratch) |
 | common_x64.o | R_X86_64_32S (`shared_block`); `SHN_COMMON`, size 48, alignment 32 |
 | canonical_plt_x64.o | R_X86_64_64 (`add_val`) in `.data`, resolved to the executable's canonical PLT entry |
+| tls_sections_x64.o | `.tdata` + `.tbss` with `SHF_TLS`, no TLS relocations (PT_TLS layout fixture) |
 
 The specs depend on the exact byte offsets noted in them (e.g. the CALL26 at
 `_start+0x24`, x86_64 `call` rel32 at `.text+0x1d`); regenerate the specs'

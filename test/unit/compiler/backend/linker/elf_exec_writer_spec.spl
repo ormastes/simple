@@ -13,6 +13,7 @@ use std.io_runtime.{file_read_bytes}
 
 val FIX: text = "test/fixtures/linker/elf"
 val PT_LOAD: i64 = 1
+val PT_TLS: i64 = 7
 
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
@@ -101,6 +102,22 @@ describe "elf_exec_writer - two-object static aarch64 exec":
         expect((insn & 0x3ffffff) * 4).to_equal(0x3c - 0x24)
 
 describe "elf_exec_writer - two-object static x86_64 exec":
+    it "emits PT_TLS spanning initialized .tdata and zero-file-byte .tbss":
+        val r = elf_static_link([load_fixture("tls_sections_x64.o")], [], "_start", RelocArch.X86_64)
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        var tls: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = phdr_off(b, i)
+            if rd32(b, p) == PT_TLS:
+                tls = p
+            i = i + 1
+        expect(tls > 0).to_equal(true)
+        expect(rd64(b, tls + 32)).to_equal(8)
+        expect(rd64(b, tls + 40)).to_equal(16)
+        expect(rd64(b, tls + 48)).to_equal(8)
+
     it "x86_64 exec has RX+RW loads, entry = _start and PLT32 patched as PC32":
         val objs = [load_fixture("start_x64.o"), load_fixture("lib_x64.o")]
         val r = elf_static_link(objs, [], "_start", RelocArch.X86_64)
