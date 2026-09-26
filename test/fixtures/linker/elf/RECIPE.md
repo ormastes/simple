@@ -36,6 +36,8 @@ clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -mtls-dialect=gnu2 tls_import_x64.c -o tls_desc_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_versioned_x64.c -o tls_versioned_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector tls_provider_x64.c -o tls_provider_x64.o
+clang --target=aarch64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector -ftls-model=initial-exec tls_import_a64.c -o tls_import_a64.o
+clang --target=aarch64-linux-gnu -c -O1 -ffreestanding -fPIC -fno-stack-protector tls_provider_a64.c -o tls_provider_a64.o
 ld.lld -shared --soname libtls_x64.so -o libtls_x64.so.1 tls_provider_x64.o
 ld.lld -shared --soname libtls_versioned_x64.so.1 --version-script tls_version_x64.map -o libtls_versioned_x64.so.1 tls_provider_x64.o
 clang --target=x86_64-linux-gnu -c -O1 -ffreestanding -fno-pic -fno-stack-protector -funwind-tables unwind_x64.c -o unwind_x64.o
@@ -66,6 +68,7 @@ Relocations exercised (`llvm-readelf -r`):
 | pc_narrow_{x64,def_x64}.o | cross-object R_X86_64_PC16/PC8 with checked signed widths; ld.lld 23.1 `.data` oracle is `03 00 01 6b` |
 | abs_narrow_{x64,def_x64}.o | cross-object R_X86_64_16/8 against absolute symbols with checked unsigned widths; ld.lld 23.1 `.data` oracle is `34 12 7f` |
 | tls_import_x64.o | R_X86_64_GOTTPOFF (`imported_tls`), bound through a GOT slot carrying R_X86_64_TPOFF64 |
+| tls_import_a64.o | ADR_GOTTPREL_PAGE21 + LD64_GOTTPREL_LO12_NC (`imported_tls`), bound through a variant-I TPREL GOT slot |
 | tls_global_dynamic_x64.o | canonical R_X86_64_TLSGD + `__tls_get_addr` sequence, relaxed to initial-exec/TPOFF64 |
 | tls_local_dynamic_x64.o | canonical R_X86_64_TLSLD + `__tls_get_addr` with DTPOFF32 uses, relaxed to local-exec/TPOFF32 |
 | tls_desc_x64.o | canonical GOTPC32_TLSDESC + TLSDESC_CALL pair, relaxed to GOTTPOFF/TPOFF64 with a two-byte NOP |

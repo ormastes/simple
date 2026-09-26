@@ -52,6 +52,14 @@ SECTIONS {
 }
 """
 
+val TLS_IE_SCRIPT: text = """ENTRY(read_imported_tls)
+SECTIONS {
+    . = 0x400000;
+    .text : { *(.text*) }
+    .tdata : { *(.tdata*) }
+}
+"""
+
 fn load_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("{FIX}/{name}")
     var out: [i64] = []
@@ -205,6 +213,22 @@ describe "elf_boot_link - section placement":
         val text_off = sec_file_off(im, ".text")
         expect(u32_at(b, text_off + 5)).to_equal(0xfffffff0) # initialized_tls - TP
         expect(u32_at(b, text_off + 14)).to_equal(0xfffffff8) # zero_tls - TP
+
+    it "fills a static initial-exec GOT slot with x86-64 TPREL":
+        val im = elf_boot_link_image([
+            load_fixture("tls_import_x64.o"), load_fixture("tls_provider_x64.o")],
+            plan_of(TLS_IE_SCRIPT), RelocArch.X86_64).unwrap()
+        expect(sec_size(im, ".got")).to_equal(8)
+        expect(u64_at(im.bytes, sec_file_off(im, ".got"))).to_equal(-8)
+        expect(sec_size(im, ".tdata")).to_equal(8)
+
+    it "fills a static initial-exec GOT slot with AArch64 variant-I TPREL":
+        val im = elf_boot_link_image([
+            load_fixture("tls_import_a64.o"), load_fixture("tls_provider_a64.o")],
+            plan_of(TLS_IE_SCRIPT), RelocArch.AArch64).unwrap()
+        expect(sec_size(im, ".got")).to_equal(8)
+        expect(u64_at(im.bytes, sec_file_off(im, ".got"))).to_equal(16)
+        expect(sec_size(im, ".tdata")).to_equal(8)
 
     it "places SHN_COMMON through the script COMMON selector as NOBITS storage":
         val script = """ENTRY(_start)
