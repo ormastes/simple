@@ -193,6 +193,10 @@ unchecked MOVK opcodes for `_NC` groups.
 The AArch64 large-model initial-exec `MOVW_GOTTPREL_G1/G0_NC` pair now shares
 the TLS-IE GOT allocation path, computes offsets from the exact `.got` base,
 and applies the ABI's checked MOVZ/MOVN plus unchecked MOVK encodings.
+The complete AArch64 local-dynamic `DTPREL` materialization family now resolves
+defined TLS symbols relative to the `PT_TLS` block start, with MOVW, ADD, and
+naturally scaled LD/ST encodings for 8/16/32/64/128-bit accesses. Imported or
+weak DTPREL references fail closed instead of being assigned a local offset.
 Windows AMD64 COFF now applies `IMAGE_REL_AMD64_SECREL7` with a strict
 seven-bit section-relative bound, completing the standard debug/TLS offset family.
 
