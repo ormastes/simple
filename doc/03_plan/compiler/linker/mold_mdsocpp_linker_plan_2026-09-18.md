@@ -212,6 +212,11 @@ Linux `/usr/local/bin/simple`, Windows
 explicit `--simple-bin` override and rejection of unknown automatic targets.
 The same resolver now owns the real remote-PC adapter command, eliminating its
 previous hardcoded `bin/simple` execution path.
+The remote-PC adapter can now upload a selected local interpreter to an
+explicit staging path and publish it at the target-owned location. Linux and
+SimpleOS use a mode-0755 sibling followed by atomic rename; Windows uses a
+sibling file and fail-fast PowerShell replacement. Upload or publication
+failure is returned as an error rather than running an older remote binary.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
 real source-derived target backend is connected; remote placement is wired,

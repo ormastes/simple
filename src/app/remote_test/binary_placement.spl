@@ -40,4 +40,35 @@ fn remote_simple_test_command(remote_os: text, configured: text,
             _remote_posix_quote(test_path) + " --no-session-daemon --sequential 2>&1")
     Err("remote-test cannot render a command for remote OS '{remote_os}'")
 
-export remote_simple_binary_path, remote_simple_test_command
+fn remote_simple_install_command(remote_os: text, configured: text,
+        staged_path: text) -> Result<text, text>:
+    """Publish an uploaded binary at the target-owned Simple path.
+
+    The caller uploads to `staged_path` first. Publication uses a sibling
+    temporary file so a failed copy or permission change cannot replace a
+    working interpreter with a partial binary.
+    """
+    val binary = remote_simple_binary_path(remote_os, configured)
+    if binary.is_err(): return Err(binary.unwrap_err())
+    val destination = binary.unwrap()
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        val source = _remote_windows_command_value(staged_path)
+        if source.is_err(): return Err(source.unwrap_err())
+        val target = _remote_windows_command_value(destination)
+        if target.is_err(): return Err(target.unwrap_err())
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$src = " + source.unwrap() + "; $dst = " + target.unwrap() + "; " +
+            "$tmp = $dst + '.remote-test-new'; " +
+            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
+            "Copy-Item -LiteralPath $src -Destination $tmp -Force; " +
+            "Move-Item -LiteralPath $tmp -Destination $dst -Force\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        val source = _remote_posix_quote(staged_path)
+        val target = _remote_posix_quote(destination)
+        val temporary = _remote_posix_quote(destination + ".remote-test-new")
+        return Ok("mkdir -p -- $(dirname -- " + target + ") && cp -- " + source + " " +
+            temporary + " && chmod 0755 -- " + temporary + " && mv -f -- " + temporary + " " + target)
+    Err("remote-test cannot render an install command for remote OS '{remote_os}'")
+
+export remote_simple_binary_path, remote_simple_test_command, remote_simple_install_command
