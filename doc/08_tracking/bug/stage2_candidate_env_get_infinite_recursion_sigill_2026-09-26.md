@@ -1,8 +1,9 @@
 # Stage 2 candidate sanity SIGILLs: `env_get` recurses into itself via duplicate co-compiled definitions
 
 - **Filed:** 2026-09-26
-- **Status:** OPEN — blocks Stage 2 admission, therefore Stage 3/Stage 4, the
-  self-hosted CLI, and the native MCP/LSP server artifacts
+- **Status:** FIXED 2026-09-26 — see "Resolution" at the end. The root cause is
+  NOT duplicate `env_get` dispatch; the sections below are kept as the
+  investigation trail and are corrected there.
 - **Area:** cross-module symbol resolution / co-compiled duplicate dispatch
   (interpreter + JIT), `std.env`
 - **Host:** yoon-note, x86_64-unknown-linux-gnu
@@ -124,3 +125,64 @@ Suggested order of attack:
   `__module_init_*`.
 - Stage 2 is under active repair (60 stage2-related commits on `main` in the three
   days before this record); re-check against a newer `main` before investing.
+
+## Resolution (2026-09-26)
+
+**Real cause: a source-level infinite recursion in
+`src/lib/nogc_sync_mut/io_runtime.spl`, introduced the same day by
+`dac914d9306` ("real process exit codes on Windows").** That commit added
+`if host_os() == "windows": return process_run_bounded(...)` to
+`_io_runtime_process_run_raw` (`:36`). On every non-Windows host `host_os()`
+(`:618`) shells out through `shell_output("uname -s")` (`:158`), which runs
+through `_io_runtime_process_run_raw`, which asks `host_os()` again:
+
+```
+host_os -> shell_output -> _io_runtime_process_run_raw -> host_os -> ...
+```
+
+Established with the seed's dispatch probes (`SIMPLE_DEBUG_DUPDISPATCH=1`):
+the 4-frame cycle repeats verbatim up to the trap, and **every hop is a
+`P4-overload` resolution inside `io_runtime.spl` to the correct function**.
+The trapped frame is whichever one lands on depth 1000 — `env_get` in the
+worker (it is the first call inside `host_os`), `host_os` in a bare spec run.
+`env_get` never called itself.
+
+- **Hypothesis (SCV snapshot path duplicating `std.env`) — REFUTED.** The
+  worker's loaded closure (strace of the seed interpreting
+  `src/app/cli/native_build_worker.spl`, 1030 `.spl` opens) contains exactly
+  6 `env_get` definitions in 6 distinct repo files — `io_runtime.spl:372`,
+  `io/env_ops.spl:48`, `compiler/00.common/config.spl:13`,
+  `nogc_async_mut/env/variables.spl:31`, `sffi/system_env_core.spl:9`,
+  `nogc_sync_mut/env/variables.spl:28` — none under a snapshot root
+  (`build/scv_snapshots/` does not exist; `SCV-W-FREEZE-FALLBACK` scans the
+  working tree). The 4 -> 6 count is parent closure (`native_build_main.spl`)
+  vs worker closure, not growth within one closure.
+- **Duplicate-signature warnings are unrelated:** 42 warning lines / 31
+  distinct names before the fix, 36 lines / the byte-identical 31 names
+  after. They are real cross-module collisions but not this defect.
+- **"Fail closed on self-binding dispatch" (item 2 above) is moot for this
+  defect:** no resolution bound a call to its containing function, so no such
+  check could have fired. The alias/facade shape of that trap is already
+  refused in the seed (`interpreter_call/mod.rs:278`, hop back to the calling
+  module).
+- **Not stage-2-specific:** the older seed `bin/simple` traps identically under
+  `SIMPLE_BOOTSTRAP=1`; without it `native-build` never interprets `io_runtime`.
+
+**Fix:** `_io_runtime_process_run_raw` uses the compiled-in `platform_name()`
+(`rt_platform_name`, returns `"windows"` on Windows, no process spawn) instead
+of `host_os()`. `process_run_bounded` (process_ops) does not route back into
+io_runtime, so the Windows branch is cycle-free too.
+
+**Verification:** the reproducer above exits 0 and the produced binary prints
+`hello`; both specs below fail on the unfixed tree with
+`stack overflow: recursion depth 1000 exceeded limit 1000 in function 'host_os'`
+and pass after.
+
+## Specs
+
+- `test/01_unit/lib/io_runtime/shell_output_host_os_no_recursion_spec.spl` —
+  reproducing: `shell_output("uname -s")` and `host_os()` terminate.
+- `test/01_unit/lib/io_runtime/process_run_raw_no_reentry_spec.spl` —
+  generalization: the primitive's body references no spawning helper
+  (`host_os(`/`shell_output(`/`shell_exec(`), `process_run` through it returns a
+  real exit code, `platform_name()` is the spawn-free detector.
