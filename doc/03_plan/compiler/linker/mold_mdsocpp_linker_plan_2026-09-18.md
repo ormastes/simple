@@ -269,8 +269,12 @@ real source-derived target backend is connected. The native RV32 backend now
 exposes a raw instruction-image entry point, distinct from its ELF32 object
 entry point, so the remote compiler adapter can upload source-derived bytes at
 the target-selected code base without leaking container headers into target
-memory. Source-to-MIR composition and the Arm32 backend remain explicit
-completion gaps; remote placement itself is wired.
+memory. The compiler-owned RV32 adapter now composes the canonical frontend,
+HIR and target-specific MIR lowering with that raw backend. It resolves
+internal `R_RISCV_CALL_PLT` AUIPC/JALR pairs against the placed image and fails
+closed on undefined, malformed, or unsupported relocations. RV32 QEMU/GHDL
+integration lanes use this real source compiler. The Arm32 backend remains an
+explicit completion gap; remote placement itself is wired.
 
 Implemented source slice:
 
