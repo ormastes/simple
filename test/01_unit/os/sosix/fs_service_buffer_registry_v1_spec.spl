@@ -103,6 +103,22 @@ describe "SOSIX FS v1 service buffer registration":
         expect(reused.accepted).to_be(true)
         expect(reused.receipt.service_registration_id).to_equal(2)
 
+    it "never reactivates a buffer slot after its generation is exhausted":
+        val final_ref = SosixBufferRef(slot: 4u32, generation: 0xffffffffu32)
+        val registered = sosix_fs_service_register_owned_buffer_v1(
+            _empty_registry(), _facts(42), final_ref,
+            SOSIX_FS_SERVICE_BUFFER_WRITE_V1, [1u8])
+        val retired = sosix_fs_service_retire_buffer_v1(
+            registered.registry, _facts(42), registered.receipt)
+        expect(retired.accepted).to_be(true)
+        expect(retired.registry.buffers[0].ref_.generation).to_equal(0u32)
+        val stale = sosix_fs_service_register_owned_buffer_v1(
+            retired.registry, _facts(42),
+            SosixBufferRef(slot: 4u32, generation: 1u32),
+            SOSIX_FS_SERVICE_BUFFER_WRITE_V1, [2u8])
+        expect(stale.accepted).to_be(false)
+        expect(stale.reason).to_equal("stale-buffer-generation")
+
     it "looks up authoritative bytes and rejects stale read writeback":
         val registered = sosix_fs_service_register_owned_buffer_v1(
             _empty_registry(), _facts(42), SosixBufferRef(slot: 4, generation: 9),

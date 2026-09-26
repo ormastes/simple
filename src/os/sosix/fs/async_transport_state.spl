@@ -60,9 +60,7 @@ export SOSIX_FS_TRANSPORT_COMPLETE, SOSIX_FS_TRANSPORT_CONSUMED
 export SosixFsRequestKey, SosixFsCompletionEvent, SosixFsTransportState
 export SosixFsSubmitTransition, SosixFsStateTransition, SosixFsCompletionTransition
 
-fn _next_nonzero(value: u64) -> u64:
-    val advanced = value + 1
-    if advanced == 0: 1 else: advanced
+val _SOSIX_FS_TRANSPORT_ID_MAX: u64 = 0xffffffffffffffffu64
 
 fn _empty_key(state: SosixFsTransportState) -> SosixFsRequestKey:
     SosixFsRequestKey(
@@ -125,11 +123,21 @@ pub fn sosix_fs_transport_submit(
             key: _empty_key(state),
             state: state
         )
-    val token = if state.next_request_token == 0: 1 else: state.next_request_token
+    # Preserve zero as exhausted; never recycle a request or notification ID.
+    if state.next_request_token == 0 or
+        state.notification_event == _SOSIX_FS_TRANSPORT_ID_MAX:
+        return SosixFsSubmitTransition(
+            accepted: false, reason: "transport-identity-exhausted",
+            key: _empty_key(state), state: state)
+    val token = state.next_request_token
+    val next_token = if token == _SOSIX_FS_TRANSPORT_ID_MAX:
+        0u64
+    else:
+        token + 1u64
     val pending = SosixFsTransportState(
         active_operation_slot: operation.slot,
         active_operation_generation: operation.generation,
-        next_request_token: _next_nonzero(token),
+        next_request_token: next_token,
         active_request_token: token,
         phase: SOSIX_FS_TRANSPORT_PENDING,
         requested_length: requested_length,
@@ -197,7 +205,11 @@ pub fn sosix_fs_transport_complete(
             event: _empty_event(state),
             state: state
         )
-    val event_id = _next_nonzero(state.notification_event)
+    if state.notification_event == _SOSIX_FS_TRANSPORT_ID_MAX:
+        return SosixFsCompletionTransition(
+            accepted: false, reason: "notification-event-exhausted",
+            event: _empty_event(state), state: state)
+    val event_id = state.notification_event + 1u64
     val completed = SosixFsTransportState(
         active_operation_slot: state.active_operation_slot,
         active_operation_generation: state.active_operation_generation,
