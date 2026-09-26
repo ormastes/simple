@@ -57,8 +57,8 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # of an external linker. Same imports link_engine_external.spl uses for its
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
-use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
-use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, elf_link_stripped, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link, elf_boot_link_stripped}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{CoffLinkRequest, coff_link_amd64}
@@ -249,7 +249,7 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         val native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
         val explicit_target = env_get("SIMPLE_TARGET") ?? ""
         val simpleos_target = if native_target != "": native_target elif explicit_target != "": explicit_target else: "simpleos"
-        return internal_link_simpleos(object_files, output, simpleos_target)
+        return internal_link_simpleos(object_files, output, simpleos_target, config.strip_output)
 
     val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
     if trace:
@@ -545,8 +545,6 @@ fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
         return "extra_flags"
     if config.retained_symbols.len() > 0:
         return "retained_symbols"
-    if config.strip_output:
-        return "strip_output"
     if config.debug:
         return "debug"
     ""
@@ -557,7 +555,6 @@ fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # rejecting them prevents a successful link with silently changed policy.
     if config.extra_flags.len() > 0: return "extra_flags"
     if config.retained_symbols.len() > 0: return "retained_symbols"
-    if config.strip_output: return "strip_output"
     if config.debug: return "debug"
     ""
 
@@ -566,7 +563,6 @@ fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # archives itself.  The remaining options still require explicit support.
     if config.extra_flags.len() > 0: return "extra_flags"
     if config.retained_symbols.len() > 0: return "retained_symbols"
-    if config.strip_output: return "strip_output"
     if config.debug: return "debug"
     ""
 
@@ -630,7 +626,7 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
         i = i + 1
     out
 
-fn internal_link_simpleos(object_files: [text], output: text, target: text) -> Result:
+fn internal_link_simpleos(object_files: [text], output: text, target: text, strip_output: bool) -> Result:
     """Link a SimpleOS kernel through BootLayoutPlan without external lld."""
     var target_arch = RelocArch.X86_64
     var default_script = "src/os/kernel/arch/x86_64/linker.ld"
@@ -649,7 +645,11 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text) -> R
         objects = objects.push(internal_link_native_read_i64(path))
     val plan = boot_layout_from_text(file_read(script_path))
     if plan.is_err(): return Err("internal engine: SimpleOS linker script: {plan.unwrap_err()}")
-    val linked = elf_boot_link(objects, plan.unwrap(), target_arch)
+    val boot_plan = plan.unwrap()
+    val linked = if strip_output:
+        elf_boot_link_stripped(objects, boot_plan, target_arch)
+    else:
+        elf_boot_link(objects, boot_plan, target_arch)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []
     for b in linked.unwrap(): bytes = bytes.push(b as u8)
@@ -734,8 +734,9 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     var mode = ELF_LINK_DYNAMIC_EXEC
     if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE
-    val linked = elf_link(ElfLinkRequest(objects: objects, archives: archives, shared: shared,
-        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker))
+    val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
+        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker)
+    val linked = if config.strip_output: elf_link_stripped(request) else: elf_link(request)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []

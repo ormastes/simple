@@ -833,6 +833,16 @@ fn elf_boot_link(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> R
     val im = elf_boot_link_image(objects, plan, target)?
     Ok(im.bytes)
 
+fn elf_boot_link_stripped(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<[i64], text>:
+    """Link a boot image without non-allocated .symtab/.strtab sections."""
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        names = names.push("object{i}.o")
+        i = i + 1
+    val im = _elf_boot_link_named(objects, names, plan, target, true)?
+    Ok(im.bytes)
+
 fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     var names: [text] = []
     var i: i64 = 0
@@ -843,6 +853,10 @@ fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch
 
 fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     """As elf_boot_link, with a file name per object for script file patterns."""
+    _elf_boot_link_named(objects, names, plan, target, false)
+
+fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
+        target: RelocArch, strip_output: bool) -> Result<ElfBootImage, text>:
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
     var parsed: [ElfObject] = []
@@ -1164,21 +1178,24 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
         vaddrs = vaddrs.push(o.vma)
         out_contents = out_contents.push(contents[i])
         i = i + 1
-    val symtab_off = boot_align_up(sg.file_end, 8)
-    secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
-        size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
-    offs = offs.push(symtab_off)
-    vaddrs = vaddrs.push(0)
-    out_contents = out_contents.push(symtab)
-    val strtab_off = symtab_off + symtab.len()
-    secs = secs.push(ElfOutSec(name: ".strtab", sh_type: SHT_STRTAB_E, sh_flags: 0, align: 1,
-        size: strtab.len(), entsize: 0, link: "", info: 0, seg: ELF_SEG_R))
-    offs = offs.push(strtab_off)
-    vaddrs = vaddrs.push(0)
-    out_contents = out_contents.push(strtab)
+    var final_end = sg.file_end
+    if not strip_output:
+        val symtab_off = boot_align_up(sg.file_end, 8)
+        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
+            size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
+        offs = offs.push(symtab_off)
+        vaddrs = vaddrs.push(0)
+        out_contents = out_contents.push(symtab)
+        val strtab_off = symtab_off + symtab.len()
+        secs = secs.push(ElfOutSec(name: ".strtab", sh_type: SHT_STRTAB_E, sh_flags: 0, align: 1,
+            size: strtab.len(), entsize: 0, link: "", info: 0, seg: ELF_SEG_R))
+        offs = offs.push(strtab_off)
+        vaddrs = vaddrs.push(0)
+        out_contents = out_contents.push(strtab)
+        final_end = strtab_off + strtab.len()
 
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
-        file_end: strtab_off + strtab.len())
+        file_end: final_end)
     val bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
 
     var sec_names: [text] = []
@@ -1215,4 +1232,4 @@ fn _bl_ult(a: i64, b: i64) -> bool:
     b < 0
 
 export ElfBootImage
-export elf_boot_link, elf_boot_link_image, elf_boot_link_named
+export elf_boot_link, elf_boot_link_stripped, elf_boot_link_image, elf_boot_link_named
