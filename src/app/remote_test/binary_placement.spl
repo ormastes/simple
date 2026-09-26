@@ -100,6 +100,34 @@ fn remote_simple_test_command(remote_os: text, configured: text,
             _remote_posix_quote(test_path) + " --no-session-daemon --sequential 2>&1")
     Err("remote-test cannot render a command for remote OS '{remote_os}'")
 
+fn remote_simple_stage_guard_command(remote_os: text, configured: text,
+        staged_path: text) -> Result<text, text>:
+    """Render the pre-upload absence guard for staging and publication leaves."""
+    val binary = remote_simple_binary_path(remote_os, configured)
+    if binary.is_err(): return Err(binary.unwrap_err())
+    val destination = binary.unwrap()
+    val staging = _remote_validate_staging_path(remote_os, staged_path, destination)
+    if staging.is_err(): return Err(staging.unwrap_err())
+    val temporary_path = destination + ".remote-test-new"
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        val stage = _remote_windows_command_value(staged_path)
+        if stage.is_err(): return Err(stage.unwrap_err())
+        val temporary = _remote_windows_command_value(temporary_path)
+        if temporary.is_err(): return Err(temporary.unwrap_err())
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$stage = " + stage.unwrap() + "; $tmp = " + temporary.unwrap() + "; " +
+            "if (($null -ne (Get-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue)) -or " +
+            "($null -ne (Get-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue))) " +
+            "{ Write-Error 'remote-test staging or publication path already exists'; exit 73 }\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        val stage = _remote_posix_quote(staged_path)
+        val temporary = _remote_posix_quote(temporary_path)
+        return Ok("if [ -e " + stage + " ] || [ -L " + stage + " ] || [ -e " +
+            temporary + " ] || [ -L " + temporary + " ]; then " +
+            "echo 'remote-test staging or publication path already exists' >&2; exit 73; fi")
+    Err("remote-test cannot render a staging guard for remote OS '{remote_os}'")
+
 fn remote_simple_install_command(remote_os: text, configured: text,
         staged_path: text) -> Result<text, text>:
     """Publish an uploaded binary at the target-owned Simple path.
@@ -124,13 +152,16 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "$tmp = $dst + '.remote-test-new'; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
             "Copy-Item -LiteralPath $src -Destination $tmp -Force; " +
+            "Remove-Item -LiteralPath $src -Force; " +
             "Move-Item -LiteralPath $tmp -Destination $dst -Force\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
         val source = _remote_posix_quote(staged_path)
         val target = _remote_posix_quote(destination)
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
         return Ok("mkdir -p -- $(dirname -- " + target + ") && cp -- " + source + " " +
-            temporary + " && chmod 0755 -- " + temporary + " && mv -f -- " + temporary + " " + target)
+            temporary + " && chmod 0755 -- " + temporary + " && rm -f -- " + source +
+            " && mv -f -- " + temporary + " " + target)
     Err("remote-test cannot render an install command for remote OS '{remote_os}'")
 
-export remote_simple_binary_path, remote_simple_test_command, remote_simple_install_command
+export remote_simple_binary_path, remote_simple_test_command
+export remote_simple_stage_guard_command, remote_simple_install_command

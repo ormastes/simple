@@ -1,7 +1,9 @@
 use std.spec.*
 use std.spec.step
 use app.remote_test.binary_placement.{
-    remote_simple_binary_path, remote_simple_test_command, remote_simple_install_command}
+    remote_simple_binary_path, remote_simple_test_command,
+    remote_simple_stage_guard_command, remote_simple_install_command}
+extern fn rt_file_read_text(path: text) -> text
 
 describe "remote interpreter binary placement":
     it "maps every supported target filesystem to its installed Simple path":
@@ -37,6 +39,7 @@ describe "remote interpreter binary placement":
         val linux = remote_simple_install_command("linux", "auto", "/tmp/simple upload").unwrap()
         expect(linux).to_contain("cp -- '/tmp/simple upload' '/usr/local/bin/simple.remote-test-new'")
         expect(linux).to_contain("chmod 0755 -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
         expect(linux).to_end_with("mv -f -- '/usr/local/bin/simple.remote-test-new' '/usr/local/bin/simple'")
 
         val simpleos = remote_simple_install_command("simpleos", "auto", "/tmp/simple").unwrap()
@@ -44,7 +47,32 @@ describe "remote interpreter binary placement":
 
         val windows = remote_simple_install_command("windows", "auto", "C:\\Temp\\simple upload.exe").unwrap()
         expect(windows).to_contain("$dst = 'C:\\Program Files\\Simple\\simple.exe'")
+        expect(windows).to_contain("Remove-Item -LiteralPath $src -Force")
         expect(windows).to_contain("Move-Item -LiteralPath $tmp -Destination $dst -Force")
+
+    it "renders a pre-upload absence guard for both mutable leaves":
+        val linux = remote_simple_stage_guard_command("linux", "auto", "/tmp/simple upload").unwrap()
+        expect(linux).to_contain("[ -e '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ -L '/usr/local/bin/simple.remote-test-new' ]")
+        expect(linux).to_contain("exit 73")
+
+        val windows = remote_simple_stage_guard_command(
+            "windows", "auto", "C:\\Temp\\simple upload.exe").unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath $stage -Force")
+        expect(windows).to_contain("Get-Item -LiteralPath $tmp -Force")
+        expect(windows).to_contain("exit 73")
+
+    it "applies placement validation before rendering a staging guard":
+        expect(remote_simple_stage_guard_command("linux", "auto", "/usr/local/bin/simple").is_err()).to_equal(true)
+        expect(remote_simple_stage_guard_command("windows", "auto", "relative\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_stage_guard_command("plan9", "auto", "/tmp/simple").is_err()).to_equal(true)
+
+    it "runs the remote staging guard before terminal upload":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val guard = source.index_of("val guard = terminal_execute(self.connection, guard_command, timeout_ms)") ?? -1
+        val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
+        expect(guard).to_be_greater_than(-1)
+        expect(upload).to_be_greater_than(guard)
 
     it "rejects unsafe Windows staging values and unknown automatic targets":
         expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe").is_err()).to_equal(true)

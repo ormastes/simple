@@ -267,6 +267,12 @@ and installed paths must be absolute, and normalized dot segments, separators,
 Windows drive letters, and Windows case are compared before any upload begins.
 This prevents an alias of either the live interpreter or its sibling temporary
 publication file from bypassing the pre-transfer guard.
+The adapter executes a target-specific absence preflight before upload. POSIX
+checks both existence and symlink identity for the staging and publication
+leaves; Windows uses literal `Get-Item` probes so reparse entries are included.
+Any occupied leaf is an error rather than an overwrite or cleanup request.
+Successful publication consumes the uploaded staging leaf after the sibling
+copy is complete and before replacing the live interpreter.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 

@@ -326,6 +326,13 @@ Remote publication now requires absolute staging and installed paths and
 compares lexical canonical forms before upload. Dot segments, repeated
 separators, slash direction, drive-letter case, and Windows path case can no
 longer disguise the live destination or its sibling publication file.
+Before transfer, the adapter now asks the remote host to prove that both the
+upload leaf and sibling publication leaf are absent, including POSIX symlinks
+and Windows reparse entries visible to `Get-Item`. A stale or redirected leaf
+therefore fails before `scp`/terminal upload can follow it.
+After the sibling copy and permission step succeeds, publication removes the
+uploaded staging leaf before the atomic replacement, so a successful install
+does not poison the next absence preflight.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and
