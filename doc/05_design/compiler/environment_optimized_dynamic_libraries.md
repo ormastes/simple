@@ -1069,6 +1069,14 @@ inside the authority owner and return only its opaque token. Raw `BackendSession
 continues temporarily for compatibility callers but cannot support strict V2
 evidence.
 
+The compatibility dynamic lease now unloads its library once and retains a
+cleanup-only state if private staging removal fails. Its adapter and
+`BackendSession` keep close retryable, report the session unavailable for
+compilation, and mark it closed only after cleanup succeeds. This prevents a
+failed close from losing the directory cleanup obligation; it does not supply
+the owner-scoped generation and use-drain authority required for strict V2
+evidence.
+
 Feature confirmation has an additional precondition: the normalized request
 CPU/features must be inputs to the concrete backend target-machine builder.
 Today builtin adapter construction drops both fields and LLVM rebuilds its
