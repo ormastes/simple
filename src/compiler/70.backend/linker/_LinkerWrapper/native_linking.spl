@@ -1607,25 +1607,40 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             if not internal_coff_is_archive(bytes):
                 return Err("internal engine: COFF library '{path}' is not an ar archive")
             archives = archives.push(bytes)
+        val explicit_archives = archives
+        var default_library_files: [text] = []
+        var default_library_iterations: i64 = 0
         var default_libraries_changed = true
         while default_libraries_changed:
+            default_library_iterations = default_library_iterations + 1
+            if default_library_iterations > 64:
+                return Err("internal engine: COFF default-library directives did not converge")
             default_libraries_changed = false
             val dependencies = coff_link_default_libraries(
                 CoffLinkRequest(objects: objects, archives: archives, entry: "auto"),
                 config.retained_symbols)
             if dependencies.is_err():
                 return Err("internal engine: {dependencies.unwrap_err()}")
+            var desired_default_files: [text] = []
             for library in dependencies.unwrap():
                 val path = internal_coff_library_file(library, search_paths)
                 if path == "":
                     return Err("internal engine: COFF /DEFAULTLIB '{library}' was not found")
-                if not library_files.contains(path):
+                if not library_files.contains(path) and not desired_default_files.contains(path):
+                    desired_default_files = desired_default_files.push(path)
+            if desired_default_files.len() != default_library_files.len():
+                default_libraries_changed = true
+            else:
+                for path in desired_default_files:
+                    if not default_library_files.contains(path): default_libraries_changed = true
+            if default_libraries_changed:
+                default_library_files = desired_default_files
+                archives = explicit_archives
+                for path in default_library_files:
                     val bytes = file_read_bytes(path)
                     if not internal_coff_is_archive(bytes):
                         return Err("internal engine: COFF /DEFAULTLIB '{path}' is not an ar archive")
-                    library_files = library_files.push(path)
                     archives = archives.push(bytes)
-                    default_libraries_changed = true
         val linked = coff_link_amd64_retained(
             CoffLinkRequest(objects: objects, archives: archives, entry: "auto"),
             config.retained_symbols)

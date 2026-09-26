@@ -10,6 +10,8 @@ struct CoffAlternateName:
 
 struct CoffDirectives:
     default_libraries: [text]
+    excluded_default_libraries: [text]
+    exclude_all_default_libraries: bool
     includes: [text]
     alternate_names: [CoffAlternateName]
 
@@ -40,6 +42,8 @@ fn _coff_directive_add_unique(values: [text], value: text) -> [text]:
 fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
     val tokens = _coff_directive_tokens(content)?
     var defaults: [text] = []
+    var excluded_defaults: [text] = []
+    var exclude_all_defaults = false
     var includes: [text] = []
     var alternates: [CoffAlternateName] = []
     for token in tokens:
@@ -48,6 +52,12 @@ fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
             val value = token.substring("/defaultlib:".len())
             if value == "": return Err("COFF /DEFAULTLIB requires a library name")
             defaults = _coff_directive_add_unique(defaults, value)
+        elif lower == "/nodefaultlib" or lower == "-nodefaultlib":
+            exclude_all_defaults = true
+        elif lower.starts_with("/nodefaultlib:") or lower.starts_with("-nodefaultlib:"):
+            val value = token.substring("/nodefaultlib:".len())
+            if value == "": return Err("COFF /NODEFAULTLIB requires a library name")
+            excluded_defaults = _coff_directive_add_unique(excluded_defaults, value)
         elif lower.starts_with("/include:") or lower.starts_with("-include:"):
             val value = token.substring("/include:".len())
             if value == "": return Err("COFF /INCLUDE requires a symbol name")
@@ -68,15 +78,21 @@ fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
                     weak_name: parts[0], default_name: parts[1]))
         elif lower.starts_with("/defaultlib") or lower.starts_with("-defaultlib"):
             return Err("malformed COFF /DEFAULTLIB directive")
+        elif lower.starts_with("/nodefaultlib") or lower.starts_with("-nodefaultlib"):
+            return Err("malformed COFF /NODEFAULTLIB directive")
         elif lower.starts_with("/include") or lower.starts_with("-include"):
             return Err("malformed COFF /INCLUDE directive")
         elif lower.starts_with("/alternatename") or lower.starts_with("-alternatename"):
             return Err("malformed COFF /ALTERNATENAME directive")
     Ok(CoffDirectives(default_libraries: defaults,
+        excluded_default_libraries: excluded_defaults,
+        exclude_all_default_libraries: exclude_all_defaults,
         includes: includes, alternate_names: alternates))
 
 fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text>:
     var defaults: [text] = []
+    var excluded_defaults: [text] = []
+    var exclude_all_defaults = false
     var includes: [text] = []
     var alternates: [CoffAlternateName] = []
     for object in objects:
@@ -90,6 +106,9 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
             val parsed = coff_parse_directives(content)?
             for value in parsed.default_libraries:
                 defaults = _coff_directive_add_unique(defaults, value)
+            for value in parsed.excluded_default_libraries:
+                excluded_defaults = _coff_directive_add_unique(excluded_defaults, value)
+            if parsed.exclude_all_default_libraries: exclude_all_defaults = true
             for value in parsed.includes:
                 includes = _coff_directive_add_unique(includes, value)
             for alternate in parsed.alternate_names:
@@ -101,7 +120,28 @@ fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text
                         duplicate = true
                 if not duplicate: alternates = alternates.push(alternate)
     Ok(CoffDirectives(default_libraries: defaults,
+        excluded_default_libraries: excluded_defaults,
+        exclude_all_default_libraries: exclude_all_defaults,
         includes: includes, alternate_names: alternates))
+
+fn _coff_library_key(name: text) -> text:
+    var key = name.trim().lower().replace("\\", "/")
+    val parts = key.split("/")
+    if parts.len() > 0: key = parts[parts.len() - 1]
+    if key.ends_with(".lib"): key = key.substring(0, key.len() - 4)
+    key
+
+fn coff_effective_default_libraries(directives: CoffDirectives) -> [text]:
+    if directives.exclude_all_default_libraries: return []
+    var excluded: [text] = []
+    for name in directives.excluded_default_libraries:
+        val key = _coff_library_key(name)
+        if not excluded.contains(key): excluded = excluded.push(key)
+    var result: [text] = []
+    for name in directives.default_libraries:
+        if not excluded.contains(_coff_library_key(name)):
+            result = _coff_directive_add_unique(result, name)
+    result
 
 fn coff_resolve_alternate_name(name: text, aliases: {text: text}) -> Result<text, text>:
     var current = name
@@ -128,3 +168,4 @@ fn coff_alternate_name_map(directives: CoffDirectives) -> Result<{text: text}, t
 export CoffAlternateName, CoffDirectives
 export coff_parse_directives, coff_collect_directives
 export coff_resolve_alternate_name, coff_alternate_name_map
+export coff_effective_default_libraries

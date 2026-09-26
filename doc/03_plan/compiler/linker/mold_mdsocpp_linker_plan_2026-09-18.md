@@ -276,6 +276,11 @@ from roots plus only the archive members selected by the current closure. The
 native wrapper resolves newly reported libraries, adds their archives, and
 repeats dependency discovery until stable. Directives in unused members are
 not admitted, avoiding false dependencies and missing-library failures.
+`/NODEFAULTLIB:name` suppresses case-insensitively with optional `.lib`, while
+bare `/NODEFAULTLIB` suppresses all implicit defaults. Directive-owned archives
+are recomputed independently of explicit/configured/runtime libraries on each
+closure pass; contradictory selected-member policy fails after a bounded
+convergence limit rather than oscillating indefinitely.
 
 The admitted aggregate producer is
 `src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt
