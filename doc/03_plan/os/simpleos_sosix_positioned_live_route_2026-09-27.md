@@ -27,6 +27,13 @@ and NFR requirements still require user selection.
   `OwnedIpcReceiveResult` type in `ipc_types.spl`, replacing the syscall's
   local `any` view. It does not add sender provenance to the queue or wire;
   the positioned control route remains uninstalled.
+- The existing syscall IDs occupy 132/133 (owned IPC), 134/135 (positioned
+  reads/writes), and 136/137 (PID1 root-service controls). `SyscallId` now
+  names those six existing IDs; none is available for positioned control.
+  The live x86_64 `rt_syscall_dispatch` switch in
+  `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c` handles
+  134/135. A new control trap must be registered in that live switch and its
+  C-ABI shim, not only in the Simple `syscall_handler` compatibility path.
 
 ## Contract and owner placement
 
