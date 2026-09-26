@@ -14,6 +14,7 @@ use std.nogc_sync_mut.io.ssh_sffi.{SshSession, SshChannel, SftpSession, SshExecR
 use std.nogc_sync_mut.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult, make_ssh_config, make_exec_result}
 use std.nogc_sync_mut.terminal.credential.store.{credential_resolve}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 
 # ============================================================================
 # SFFI - Timing
@@ -26,12 +27,11 @@ use std.io_runtime.{time_now_unix_micros}
 # ssh_daemon_baremetal_only_and_duplication_2026-08-05.md, finding 5)
 # ============================================================================
 #
-# ssh_sffi.spl's 30 rt_ssh_*/rt_sftp_* externs have zero definitions in
-# src/runtime/. Under the JIT an unregistered extern returns nil silently, so
-# every operation below always "fails" in a way indistinguishable from a real
-# network/auth failure. This prints an unconditional (never level-gated,
-# always visible) stderr line identifying the true cause, so callers and
-# operators are not misled by a plausible-looking nil/false/empty result.
+# ssh_sffi.spl's rt_ssh_*/rt_sftp_* externs have zero definitions in
+# src/runtime/. Agent, public-key, and no-auth sessions therefore use the
+# host OpenSSH `ssh`/`scp` tools through the bounded process facade. Password
+# auth and interactive channels retain the old SFFI boundary and fail loudly
+# rather than exposing credentials in command arguments.
 
 fn _ssh_sffi_unbacked_warn(op: text):
     """Emit a loud, unconditional stderr diagnostic before an ssh_terminal
@@ -45,6 +45,63 @@ fn _ssh_sffi_unbacked_warn(op: text):
 # ============================================================================
 
 var ssh_conn_id_counter: i64 = 0
+
+fn _openssh_destination(config: TerminalConfig) -> text:
+    if config.username.trim() == "": return config.host
+    config.username + "@" + config.host
+
+fn _openssh_auth_args(config: TerminalConfig) -> Result<[text], text>:
+    if config.host.trim() == "" or config.host.contains("\r") or config.host.contains("\n"):
+        return Err("OpenSSH host is empty or contains a line break")
+    if config.username.contains("\r") or config.username.contains("\n"):
+        return Err("OpenSSH username contains a line break")
+    if config.port <= 0 or config.port > 65535:
+        return Err("OpenSSH port must be in 1..65535")
+    var args: [text] = ["-o", "BatchMode=yes"]
+    if config.auth_method == "pubkey":
+        if config.key_path.trim() == "": return Err("SSH public-key authentication requires key_path")
+        args.push("-i")
+        args.push(config.key_path)
+    elif config.auth_method != "agent" and config.auth_method != "none":
+        return Err("OpenSSH fallback supports agent, pubkey, or none authentication")
+    Ok(args)
+
+fn openssh_execute_args(config: TerminalConfig, command: text) -> Result<[text], text>:
+    val auth = _openssh_auth_args(config)?
+    var args = auth
+    args.push("-p")
+    args.push("{config.port}")
+    args.push("--")
+    args.push(_openssh_destination(config))
+    args.push(command)
+    Ok(args)
+
+fn _openssh_remote_path(config: TerminalConfig, path: text) -> Result<text, text>:
+    if path.trim() == "" or path.contains("\r") or path.contains("\n"):
+        return Err("OpenSSH remote path is empty or contains a line break")
+    Ok(_openssh_destination(config) + ":" + path)
+
+fn openssh_upload_args(config: TerminalConfig, local_path: text,
+        remote_path: text) -> Result<[text], text>:
+    val auth = _openssh_auth_args(config)?
+    var args = auth
+    args.push("-P")
+    args.push("{config.port}")
+    args.push("--")
+    args.push(local_path)
+    args.push(_openssh_remote_path(config, remote_path)?)
+    Ok(args)
+
+fn openssh_download_args(config: TerminalConfig, remote_path: text,
+        local_path: text) -> Result<[text], text>:
+    val auth = _openssh_auth_args(config)?
+    var args = auth
+    args.push("-P")
+    args.push("{config.port}")
+    args.push("--")
+    args.push(_openssh_remote_path(config, remote_path)?)
+    args.push(local_path)
+    Ok(args)
 
 # ============================================================================
 # SSH Terminal Operations
@@ -70,10 +127,17 @@ fn ssh_terminal_connect(config: TerminalConfig) -> TerminalConnection:
         if conn.connected:
             print "SSH connected"
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_connect(host={config.host}, port={config.port})")
-
     ssh_conn_id_counter = ssh_conn_id_counter + 1
     val id = ssh_conn_id_counter
+
+    val probe_args = openssh_execute_args(config, "true")
+    if probe_args.is_ok():
+        val (_out, _err, code) = process_run_bounded("ssh", probe_args.unwrap(), 15000, 65536)
+        return TerminalConnection(id: id, kind: TERM_KIND_SSH, config: config,
+            connected: code == 0, session_handle: if code == 0: -1 else: 0,
+            channel_handle: 0)
+
+    _ssh_sffi_unbacked_warn("ssh_terminal_connect(host={config.host}, port={config.port})")
 
     # Establish TCP + SSH handshake
     val session = ssh_connect(config.host, config.port)
@@ -127,7 +191,8 @@ fn ssh_terminal_connect(config: TerminalConfig) -> TerminalConnection:
         channel_handle: ch_handle
     )
 
-fn ssh_terminal_execute(conn: TerminalConnection, command: text) -> TerminalExecResult:
+fn ssh_terminal_execute(conn: TerminalConnection, command: text,
+        timeout_ms: i64 = 300000) -> TerminalExecResult:
     """Execute a command on the remote SSH server.
 
     Uses ssh_exec (one-shot channel) rather than the interactive shell channel.
@@ -140,10 +205,18 @@ fn ssh_terminal_execute(conn: TerminalConnection, command: text) -> TerminalExec
     Returns:
         TerminalExecResult with exit_code, stdout, stderr, duration_ms
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_execute")
-
     if not conn.connected:
         return make_exec_result(-1, "", "not connected", 0)
+
+    if conn.session_handle == -1:
+        val args = openssh_execute_args(conn.config, command)
+        if args.is_err(): return make_exec_result(-1, "", args.unwrap_err(), 0)
+        val start_us = time_now_unix_micros()
+        val (stdout, stderr, exit_code) = process_run_bounded("ssh", args.unwrap(), timeout_ms, 1048576)
+        val duration_ms = (time_now_unix_micros() - start_us) / 1000
+        return make_exec_result(exit_code, stdout, stderr, duration_ms)
+
+    _ssh_sffi_unbacked_warn("ssh_terminal_execute")
 
     val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
 
@@ -164,10 +237,12 @@ fn ssh_terminal_send(conn: TerminalConnection, data: text) -> bool:
     Returns:
         true if data was written successfully
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_send")
-
     if not conn.connected:
         return false
+    if conn.session_handle == -1:
+        stderr_write("ssh_terminal: interactive send is unavailable in the OpenSSH process fallback\n")
+        return false
+    _ssh_sffi_unbacked_warn("ssh_terminal_send")
     if conn.channel_handle == 0:
         return false
 
@@ -185,10 +260,12 @@ fn ssh_terminal_receive(conn: TerminalConnection, timeout_ms: i64) -> text:
     Returns:
         Text data received, or empty string on timeout/error
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_receive")
-
     if not conn.connected:
         return ""
+    if conn.session_handle == -1:
+        stderr_write("ssh_terminal: interactive receive is unavailable in the OpenSSH process fallback\n")
+        return ""
+    _ssh_sffi_unbacked_warn("ssh_terminal_receive")
     if conn.channel_handle == 0:
         return ""
 
@@ -212,10 +289,16 @@ fn ssh_terminal_upload(conn: TerminalConnection, local_path: text, remote_path: 
     Returns:
         true if upload was successful
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_upload")
-
     if not conn.connected:
         return false
+
+    if conn.session_handle == -1:
+        val args = openssh_upload_args(conn.config, local_path, remote_path)
+        if args.is_err(): return false
+        val (_out, _err, code) = process_run_bounded("scp", args.unwrap(), 300000, 65536)
+        return code == 0
+
+    _ssh_sffi_unbacked_warn("ssh_terminal_upload")
 
     val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
     val sftp = sftp_init(session)
@@ -237,10 +320,16 @@ fn ssh_terminal_download(conn: TerminalConnection, remote_path: text, local_path
     Returns:
         true if download was successful
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_download")
-
     if not conn.connected:
         return false
+
+    if conn.session_handle == -1:
+        val args = openssh_download_args(conn.config, remote_path, local_path)
+        if args.is_err(): return false
+        val (_out, _err, code) = process_run_bounded("scp", args.unwrap(), 300000, 65536)
+        return code == 0
+
+    _ssh_sffi_unbacked_warn("ssh_terminal_download")
 
     val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
     val sftp = sftp_init(session)
@@ -262,10 +351,12 @@ fn ssh_terminal_close(conn: TerminalConnection) -> bool:
     Returns:
         true if disconnection was successful
     """
-    _ssh_sffi_unbacked_warn("ssh_terminal_close")
-
     if not conn.connected:
         return false
+
+    if conn.session_handle == -1: return true
+
+    _ssh_sffi_unbacked_warn("ssh_terminal_close")
 
     # Close interactive shell channel if open
     if conn.channel_handle != 0:
@@ -274,3 +365,5 @@ fn ssh_terminal_close(conn: TerminalConnection) -> bool:
 
     val session = SshSession(handle: conn.session_handle, host: conn.config.host, port: conn.config.port, is_valid: true)
     ssh_disconnect(session)
+
+export openssh_execute_args, openssh_upload_args, openssh_download_args

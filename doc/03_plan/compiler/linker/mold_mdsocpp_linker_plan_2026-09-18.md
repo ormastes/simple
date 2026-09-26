@@ -217,6 +217,11 @@ explicit staging path and publish it at the target-owned location. Linux and
 SimpleOS use a mode-0755 sibling followed by atomic rename; Windows uses a
 sibling file and fail-fast PowerShell replacement. Upload or publication
 failure is returned as an error rather than running an older remote binary.
+The terminal layer now backs agent/public-key remote placement with bounded
+host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
+runtime definitions. Connection probes, command execution, upload, and
+download are functional without a fabricated session; password auth and
+interactive channels remain explicitly fail-closed.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
 real source-derived target backend is connected; remote placement is wired,
