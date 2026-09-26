@@ -13,7 +13,9 @@
 
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
-use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute, smf_reloc_compute_rel64}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s
+}
 
 # ============================================================================
 # x86_64 Relocation Types (elf.h R_X86_64_*)
@@ -26,7 +28,7 @@ val R_X86_64_PC64: i64       = 24  # S + A - P
 val R_X86_64_GOT32: i64      = 3
 val R_X86_64_PLT32: i64      = 4   # L + A - P (treated as S + A - P for static)
 val R_X86_64_32: i64         = 10  # S + A (truncated u32)
-val R_X86_64_32S: i64        = 11  # S + A (truncated s32)
+val R_X86_64_32S: i64        = 11  # S + A (checked signed 32-bit)
 val R_X86_64_GOTPCREL: i64   = 9   # G + GOT + A - P
 val R_X86_64_GOTPCRELX: i64  = 41  # G + GOT + A - P (relaxable; linker may rewrite to PC32)
 val R_X86_64_REX_GOTPCRELX: i64 = 42  # G + GOT + A - P (relaxable, REX-prefixed)
@@ -193,8 +195,10 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
         return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_32 out of unsigned 32-bit range (S + A)")
 
     if rtype == R_X86_64_32S:
-        val v = s + a
-        return RelocResult(success: true, offset: offset, value: v, error: "")
+        val r = smf_reloc_compute_abs32s(s, a)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_32S out of signed 32-bit range (S + A)")
 
     if rtype == R_X86_64_GOTPCREL or rtype == R_X86_64_GOTPCRELX or rtype == R_X86_64_REX_GOTPCRELX:
         # GOTPCRELX / REX_GOTPCRELX share GOTPCREL's formula; relaxation to

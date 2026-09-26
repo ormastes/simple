@@ -17,7 +17,7 @@ use compiler.backend.linker.reloc_engine.{
     reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv,
     reloc_patch_bytes, reloc_arch_from_machine,
     patch_u32_le, patch_u64_le, read_u32_le,
-    R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PLT32,
+    R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_PLT32,
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
     R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26,
     R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC,
@@ -118,6 +118,14 @@ describe "reloc_engine - x86_64 relocations":
         expect(result.success).to_equal(true)
         expect(result.value).to_equal(0x1000)
 
+    it "R_X86_64_PC64 preserves a full-width negative S + A - P delta":
+        # @req REQ-SSPEC-COMPILER
+        step("R_X86_64_PC64 computes a signed 64-bit PC-relative value")
+        val bytes: [i64] = [0, 0, 0, 0, 0, 0, 0, 0]
+        val result = reloc_apply_x86_64(bytes, 0, R_X86_64_PC64, 0x1000, -8, 0x3000)
+        expect(result.success).to_equal(true)
+        expect(result.value).to_equal(-8200)
+
     it "R_X86_64_PLT32 computes S + A - P":
         # @req REQ-SSPEC-UNIT
         step("R_X86_64_PLT32 computes S + A - P")
@@ -141,6 +149,20 @@ describe "reloc_engine - x86_64 relocations":
         val result = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, 0x400, 0, 0)
         expect(result.success).to_equal(true)
         expect(result.value).to_equal(0x400)
+
+    it "R_X86_64_32S accepts both signed boundaries and rejects overflow":
+        # @req REQ-SSPEC-COMPILER
+        step("R_X86_64_32S enforces the signed 32-bit field range")
+        val bytes: [i64] = [0, 0, 0, 0]
+        val min = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, -2147483648, 0, 0)
+        val max = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, 2147483647, 0, 0)
+        val below = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, -2147483649, 0, 0)
+        val above = reloc_apply_x86_64(bytes, 0, R_X86_64_32S, 2147483648, 0, 0)
+        expect(min.success).to_equal(true)
+        expect(max.success).to_equal(true)
+        expect(below.success).to_equal(false)
+        expect(above.success).to_equal(false)
+        expect(above.error).to_contain("signed 32-bit")
 
     it "unsupported x86_64 reloc type returns failure with non-empty error":
         # @req REQ-SSPEC-UNIT
