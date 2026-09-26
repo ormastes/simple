@@ -13,13 +13,67 @@ use std.nogc_sync_mut.sffi.dynamic.{spl_wffi_call_i64}
 const _NATIVE_CALLABLE_OWNER_CAPACITY_V1: i64 = 4096
 const _NATIVE_CALLABLE_OWNER_MAX_ID_V1: u64 = 18446744073709551615u64
 
+pub struct NativeCallableCloseStateV1:
+    active_uses: i64
+    retiring: bool
+    close_in_progress: bool
+
+pub struct NativeCallableCloseDecisionV1:
+    state: NativeCallableCloseStateV1
+    accepted: bool
+    claim_close: bool
+    remove: bool
+
+pub fn native_callable_close_on_retire_v1(
+    state: NativeCallableCloseStateV1
+) -> NativeCallableCloseDecisionV1:
+    """Revoke new uses and claim close only when no admitted use remains."""
+    var next = state
+    var accepted = false
+    var claim = false
+    if not next.retiring:
+        next.retiring = true
+        accepted = true
+    if next.retiring and next.active_uses == 0 and not next.close_in_progress:
+        next.close_in_progress = true
+        claim = true
+        accepted = true
+    NativeCallableCloseDecisionV1(
+        state: next, accepted: accepted, claim_close: claim, remove: false)
+
+pub fn native_callable_close_on_end_use_v1(
+    state: NativeCallableCloseStateV1
+) -> NativeCallableCloseDecisionV1:
+    """Finish one admitted use and claim close once the last use drains."""
+    var next = state
+    var claim = false
+    if next.active_uses > 0:
+        next.active_uses = next.active_uses - 1
+        if next.retiring and next.active_uses == 0 and not next.close_in_progress:
+            next.close_in_progress = true
+            claim = true
+    NativeCallableCloseDecisionV1(
+        state: next, accepted: false, claim_close: claim, remove: false)
+
+pub fn native_callable_close_on_result_v1(
+    state: NativeCallableCloseStateV1, closed: bool
+) -> NativeCallableCloseDecisionV1:
+    """Remove only after successful close; otherwise retain a retryable tombstone."""
+    var next = state
+    var remove = false
+    if next.retiring and next.close_in_progress and next.active_uses == 0:
+        if closed:
+            remove = true
+        else:
+            next.close_in_progress = false
+    NativeCallableCloseDecisionV1(
+        state: next, accepted: false, claim_close: false, remove: remove)
+
 struct _NativeCallableEntryV1:
     identity: u64
     native_handle: i64
     native_fptr: i64
-    active_uses: i64
-    retiring: bool
-    close_in_progress: bool
+    close_state: NativeCallableCloseStateV1
 
 struct _NativeCallableStateV1:
     next_identity: u64
@@ -70,7 +124,8 @@ pub(package) fn native_callable_owner_register_v1(handle: i64, fptr: i64) -> u64
                 identity + 1u64
             next.entries.push(_NativeCallableEntryV1(
                 identity: identity, native_handle: handle, native_fptr: fptr,
-                active_uses: 0, retiring: false, close_in_progress: false))
+                close_state: NativeCallableCloseStateV1(
+                    active_uses: 0, retiring: false, close_in_progress: false)))
             next.last_identity = identity
         next)
     updated.last_identity
@@ -83,8 +138,9 @@ fn _native_callable_acquire_v1(identity: u64) -> i64:
         val index = _native_callable_index_v1(state, identity)
         if index >= 0:
             var entry = state.entries[index]
-            if not entry.retiring and entry.active_uses < 9223372036854775807:
-                entry.active_uses = entry.active_uses + 1
+            if not entry.close_state.retiring and
+               entry.close_state.active_uses < 9223372036854775807:
+                entry.close_state.active_uses = entry.close_state.active_uses + 1
                 next.entries[index] = entry
                 next.last_fptr = entry.native_fptr
         next)
@@ -96,12 +152,12 @@ fn _native_callable_complete_close_v1(identity: u64, closed: bool):
         val index = _native_callable_index_v1(state, identity)
         if index >= 0:
             var entry = state.entries[index]
-            if entry.retiring and entry.close_in_progress and entry.active_uses == 0:
-                if closed:
-                    next.entries.remove(index)
-                else:
-                    entry.close_in_progress = false
-                    next.entries[index] = entry
+            val decision = native_callable_close_on_result_v1(entry.close_state, closed)
+            if decision.remove:
+                next.entries.remove(index)
+            else:
+                entry.close_state = decision.state
+                next.entries[index] = entry
         next)
 
 fn _native_callable_end_v1(identity: u64):
@@ -111,13 +167,11 @@ fn _native_callable_end_v1(identity: u64):
         val index = _native_callable_index_v1(state, identity)
         if index >= 0:
             var entry = state.entries[index]
-            if entry.active_uses > 0:
-                entry.active_uses = entry.active_uses - 1
-                if entry.retiring and entry.active_uses == 0 and
-                   not entry.close_in_progress:
-                    entry.close_in_progress = true
-                    next.last_close_handle = entry.native_handle
-                next.entries[index] = entry
+            val decision = native_callable_close_on_end_use_v1(entry.close_state)
+            entry.close_state = decision.state
+            if decision.claim_close:
+                next.last_close_handle = entry.native_handle
+            next.entries[index] = entry
         next)
     if updated.last_close_handle > 0:
         val closed = unsafe(capabilities: [ffi]):
@@ -147,14 +201,11 @@ pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:
         val index = _native_callable_index_v1(state, identity)
         if index >= 0:
             var entry = state.entries[index]
-            if not entry.retiring:
-                entry.retiring = true
-                next.last_accepted = true
-            if entry.retiring and entry.active_uses == 0 and
-               not entry.close_in_progress:
-                entry.close_in_progress = true
+            val decision = native_callable_close_on_retire_v1(entry.close_state)
+            entry.close_state = decision.state
+            next.last_accepted = decision.accepted
+            if decision.claim_close:
                 next.last_close_handle = entry.native_handle
-                next.last_accepted = true
             next.entries[index] = entry
         next)
     if updated.last_close_handle > 0:

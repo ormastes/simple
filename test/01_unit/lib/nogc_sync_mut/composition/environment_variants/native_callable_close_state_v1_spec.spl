@@ -1,0 +1,52 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.environment_variants.native_callable_owner_v1.{
+    NativeCallableCloseStateV1,
+    native_callable_close_on_retire_v1,
+    native_callable_close_on_end_use_v1,
+    native_callable_close_on_result_v1
+}
+
+describe "native callable close state":
+    it "retains a revoked mapping after failed close and claims one retry":
+        val live = NativeCallableCloseStateV1(
+            active_uses: 0, retiring: false, close_in_progress: false)
+        val first = native_callable_close_on_retire_v1(live)
+        expect(first.accepted).to_equal(true)
+        expect(first.claim_close).to_equal(true)
+        val failed = native_callable_close_on_result_v1(first.state, false)
+        expect(failed.remove).to_equal(false)
+        expect(failed.state.retiring).to_equal(true)
+        expect(failed.state.close_in_progress).to_equal(false)
+
+        val retry = native_callable_close_on_retire_v1(failed.state)
+        expect(retry.accepted).to_equal(true)
+        expect(retry.claim_close).to_equal(true)
+        val completed = native_callable_close_on_result_v1(retry.state, true)
+        expect(completed.remove).to_equal(true)
+
+    it "waits for the last admitted use and denies a competing close claim":
+        val active = NativeCallableCloseStateV1(
+            active_uses: 1, retiring: false, close_in_progress: false)
+        val retired = native_callable_close_on_retire_v1(active)
+        expect(retired.accepted).to_equal(true)
+        expect(retired.claim_close).to_equal(false)
+        val duplicate = native_callable_close_on_retire_v1(retired.state)
+        expect(duplicate.accepted).to_equal(false)
+        expect(duplicate.claim_close).to_equal(false)
+
+        val ended = native_callable_close_on_end_use_v1(duplicate.state)
+        expect(ended.state.active_uses).to_equal(0)
+        expect(ended.claim_close).to_equal(true)
+        val competing = native_callable_close_on_retire_v1(ended.state)
+        expect(competing.accepted).to_equal(false)
+        expect(competing.claim_close).to_equal(false)
+
+    it "ignores close results without a claimed retirement":
+        val live = NativeCallableCloseStateV1(
+            active_uses: 0, retiring: false, close_in_progress: false)
+        val unsolicited = native_callable_close_on_result_v1(live, true)
+        expect(unsolicited.remove).to_equal(false)
+        expect(unsolicited.state.retiring).to_equal(false)
+        val unmatched_end = native_callable_close_on_end_use_v1(live)
+        expect(unmatched_end.claim_close).to_equal(false)
+        expect(unmatched_end.state.active_uses).to_equal(0)
