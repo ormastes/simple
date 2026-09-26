@@ -169,7 +169,12 @@ int main(void) {
         rt_hosted_safe_artifact_read_v1;
     assert(rt_value_nil() == 3 && !rt_is_none(0));
     expect_none(read_abi(-1, (const uint8_t*)"missing", 7, 32));
+#if defined(__APPLE__)
+    /* /tmp is a symlink on macOS; the provider intentionally rejects it. */
+    char directory[] = "/private/tmp/simple-safe-artifact-v1-XXXXXX";
+#else
     char directory[] = "/tmp/simple-safe-artifact-v1-XXXXXX";
+#endif
     char moved[256], symlink_root[256], path[256];
     assert(mkdtemp(directory));
     int test_root = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -210,9 +215,17 @@ int main(void) {
         expect_none(read_artifact(root, invalid[i], 32));
     expect_none(rt_hosted_safe_artifact_read_v1(root, (const uint8_t*)"source\0x", 8, 32));
 
+#if defined(__APPLE__)
+    fault("openat", EINTR, 0, 1);
+#else
     fault("openat2", EINTR, 0, 1);
+#endif
     expect_bytes(read_artifact(root, "source", 32), payload, sizeof(payload));
+#if defined(__APPLE__)
+    assert(faults[0].observed == 3);
+#else
     assert(faults[0].observed == 2);
+#endif
     fault("read", EINTR, 0, 32);
     expect_none(read_artifact(root, "source", 32));
     assert(faults[0].observed == 32);
@@ -222,7 +235,11 @@ int main(void) {
     expect_none(read_artifact(root, "source", 32));
     fault("close", EINTR, 0, 1);
     expect_none(read_artifact(root, "source", 32));
+#if defined(__APPLE__)
+    assert(faults[0].observed == 2);
+#else
     assert(faults[0].observed == 1);
+#endif
     const char* allocation_ops[] = {"read-allocation", "array-allocation", "array-store"};
     for (size_t i = 0; i < sizeof(allocation_ops) / sizeof(allocation_ops[0]); ++i) {
         fault(allocation_ops[i], ENOMEM, 0, 1);
@@ -257,9 +274,17 @@ int main(void) {
     assert(publish(root, "zero", empty, 0) == 0);
     expect_bytes(read_artifact(root, "zero", 0), payload, 0);
     rt_array_free((SplArray*)(uintptr_t)empty);
+#if defined(__APPLE__)
+    fault("openat", ENOSYS, 0, 1);
+#else
     fault("openat2", ENOSYS, 0, 1);
+#endif
     assert(publish(root, "unsupported-lookup", bytes, 32) == -3);
+#if defined(__APPLE__)
+    fault("openat", EOPNOTSUPP, 2, 1);
+#else
     fault("openat", EOPNOTSUPP, 0, 1);
+#endif
     assert(publish(root, "unsupported-stage", bytes, 32) == -3);
     const char* failed_ops[] = {"write", "fdatasync", "fsync", "linkat"};
     for (size_t i = 0; i < sizeof(failed_ops) / sizeof(failed_ops[0]); ++i) {
