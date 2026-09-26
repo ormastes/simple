@@ -957,7 +957,7 @@ pub(crate) fn exec_function_with_bound_args(
 #[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values plus one extra param
 pub(crate) fn exec_function_with_values_and_writeback(
     func: &FunctionDef,
-    args: &[Value],
+    args: Vec<Value>,
     original_args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -1719,7 +1719,7 @@ fn exec_function_inner(
 #[allow(clippy::too_many_arguments)] // reason: mirrors exec_function_with_values_inner plus one extra param
 fn exec_function_with_values_and_writeback_inner(
     func: &FunctionDef,
-    args: &[Value],
+    args: Vec<Value>,
     original_args: &[Argument],
     outer_env: &mut Env,
     functions: &mut HashMap<String, Arc<FunctionDef>>,
@@ -1744,7 +1744,7 @@ fn exec_function_with_values_and_writeback_inner(
     let self_mode = SelfMode::IncludeSelf;
     let bound = bind_args_with_values(
         &func.params,
-        args,
+        &args,
         outer_env,
         functions,
         classes,
@@ -1752,6 +1752,13 @@ fn exec_function_with_values_and_writeback_inner(
         impl_methods,
         self_mode,
     )?;
+    // The pre-evaluated argument vector holds its own handle on every
+    // argument. Kept alive across the body, it pins a parked receiver's field
+    // Arc (strong_count > 1), so each `me` push deep-copies the backing Vec —
+    // O(n^2) for every cross-module call, since imported functions dispatch
+    // through this overload path. The callee's bound copies are all it needs.
+    // Record: doc/08_tracking/bug/seed_receiver_multi_hop_cow_clone_2026-08-22.md
+    drop(args);
 
     crate::layout_recorder::record_function_return();
 

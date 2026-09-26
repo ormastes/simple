@@ -197,3 +197,56 @@ fn multi_hop_mutation_is_visible_to_the_owning_frame() {
     let src = "class W:\n    parts: [text]\n\n    static fn create() -> W:\n        W(parts: [])\n\n    me put(v: text):\n        self.parts.push(v)\n\nfn h0(w: W):\n    w.put(\"c\")\n\nfn h1(w: W):\n    w.put(\"b\")\n    h0(w)\n\nfn main() -> i32:\n    val w = W.create()\n    w.put(\"a\")\n    h1(w)\n    if w.parts.len() != 3:\n        return 1\n    if w.parts[0] != \"a\":\n        return 2\n    if w.parts[1] != \"b\":\n        return 3\n    if w.parts[2] != \"c\":\n        return 4\n    return 0\n";
     assert_eq!(run_program(src), Ok(0));
 }
+
+/// Same shape as `me_method_field_push_is_linear_at_every_hop_depth`, but the
+/// class and the hop chain live in an IMPORTED module — the exact layout of
+/// `test/01_unit/compiler/interpreter/receiver_hop_depth_linear_spec.spl`
+/// (fixture `test/fixtures/interpreter_receiver_hop_depth/shapes.spl`).
+///
+/// Imported functions are registered once per export-unpacking site, so every
+/// call inside the module dispatches through the Priority-4 overload path
+/// (`exec_function_with_values_and_writeback`). That path evaluated the
+/// arguments into a caller-owned `Vec<Value>` and kept it alive for the whole
+/// callee body, so a parked receiver's field Arc stayed shared and every push
+/// deep-copied the backing Vec: measured under the seed on 2026-09-27,
+/// 5k -> 20k pushes through 3 hops cost 11-15x (quadratic), against 3-5x for
+/// the identical single-file program.
+fn run_program_with_module(main_src: &str, module_name: &str, module_src: &str) -> Result<i32, String> {
+    let dir = tempdir().unwrap();
+    fs::write(dir.path().join(format!("{module_name}.spl")), module_src).unwrap();
+    let main_path = dir.path().join("main.spl");
+    fs::write(&main_path, main_src).unwrap();
+    interpreter::clear_module_cache();
+    interpreter::clear_interpreter_state();
+    let module =
+        simple_compiler::pipeline::module_loader::load_module_with_imports(&main_path, &mut HashSet::new()).unwrap();
+    interpreter::set_current_file(Some(main_path.to_path_buf()));
+    let result = interpreter::evaluate_module(&module.items);
+    interpreter::set_current_file(None);
+    result.map_err(|e| format!("{e:?}"))
+}
+
+fn measure_cross_module_elems_cloned(n: usize) -> u64 {
+    enable_counters();
+    simple_compiler::set_execution_limit(HIGH_LIMIT);
+    let module_src = "class W:\n    parts: [text]\n\n    static fn create() -> W:\n        W(parts: [])\n\n    me put(v: i64):\n        self.parts.push(\"{v}\")\n\nfn hop0(w: W, v: i64):\n    w.put(v)\n\nfn hop1(w: W, v: i64):\n    hop0(w, v)\n\nfn hop2(w: W, v: i64):\n    hop1(w, v)\n\nfn fill_hops(n: i64) -> i64:\n    val w = W.create()\n    var i = 0\n    while i < n:\n        hop2(w, i)\n        i = i + 1\n    w.parts.len()\n";
+    let main_src = format!(
+        "use shapes.{{fill_hops}}\n\nfn main() -> i32:\n    if fill_hops({n}) != {n}:\n        return 1\n    return 0\n"
+    );
+    let before = perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed);
+    let result = run_program_with_module(&main_src, "shapes", module_src);
+    assert_eq!(result, Ok(0), "cross-module fixture must push exactly {n} lines");
+    perf_counters::SELF_FIELD_ARR_COW_ELEMS_CLONED.load(Ordering::Relaxed) - before
+}
+
+#[test]
+fn cross_module_me_method_field_push_through_hops_does_not_copy() {
+    let _guard = counter_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let n = 2_000usize;
+    let cloned = measure_cross_module_elems_cloned(n);
+    eprintln!("[hop-xmod] n={n} elements cloned={cloned}");
+    assert_eq!(
+        cloned, 0,
+        "an imported 3-hop receiver copied {cloned} elements at n={n} — the overload path's evaluated-argument vector is pinning the field Arc"
+    );
+}
