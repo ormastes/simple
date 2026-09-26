@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use std.common.structural.parse.parse_types.{
+    PARSE_NO_ID,
+    PARSE_OUTPUT_TOKENS,
+    PARSE_MODE_CPU_REFERENCE,
+    PARSE_REJECT_LEX_PROGRAM_MALFORMED,
+    PARSE_SCHEMA_ID,
+    ParseLexProgram,
+    parse_capacity_manifest,
+    parse_dialect_lexical,
+    parse_lex_program,
+    parse_lex_program_valid,
+    parse_request,
+    parse_source_blob_from_text
+}
+use std.common.structural.parse.parse_cpu_reference.{parse_run_cpu_reference}
+
+fn one_state_program(transition: [u32], flags: [u16]) -> ParseLexProgram:
+    parse_lex_program(
+        1u32, 1, 1, 0u32,
+        [0u8 for _ in 0..256], transition,
+        [1u16], flags)
+
+fn with_schema(program: ParseLexProgram, schema_id: u32) -> ParseLexProgram:
+    ParseLexProgram(
+        schema_id: schema_id,
+        program_id: program.program_id,
+        class_count: program.class_count,
+        state_count: program.state_count,
+        start_state: program.start_state,
+        byte_class: program.byte_class,
+        transition: program.transition,
+        state_token_kind: program.state_token_kind,
+        state_flags: program.state_flags)
+
+describe "structural parse lexical program admission":
+    it "accepts a bounded in-domain transition and the absent sentinel":
+        expect(parse_lex_program_valid(one_state_program([0u32], [0u16]))).to_equal(true)
+        expect(parse_lex_program_valid(one_state_program([PARSE_NO_ID], [0u16]))).to_equal(true)
+
+    it "rejects schema, transition target and unknown flag bits":
+        expect(parse_lex_program_valid(with_schema(
+            one_state_program([0u32], [0u16]), PARSE_SCHEMA_ID + 1u32))).to_equal(false)
+        expect(parse_lex_program_valid(one_state_program([1u32], [0u16]))).to_equal(false)
+        expect(parse_lex_program_valid(one_state_program([0u32], [2u16]))).to_equal(false)
+
+    it "rejects overflowing count products before multiplication":
+        val huge = parse_lex_program(
+            1u32, 9223372036854775807, 9223372036854775807,
+            0u32, [0u8 for _ in 0..256], [0u32], [1u16], [0u16])
+        expect(parse_lex_program_valid(huge)).to_equal(false)
+
+    it "rejects an invalid transition before scalar execution indexes state arrays":
+        val dialect = parse_dialect_lexical(1u32, one_state_program([1u32], [0u16]))
+        val request = parse_request(
+            parse_source_blob_from_text("a"), 0u32,
+            PARSE_OUTPUT_TOKENS, 0u32, PARSE_MODE_CPU_REFERENCE,
+            parse_capacity_manifest(16, 16, 16))
+        val result = parse_run_cpu_reference(dialect, request)
+        expect(result.ok).to_equal(false)
+        expect(result.receipt.fallback_reason).to_equal(PARSE_REJECT_LEX_PROGRAM_MALFORMED)
+        expect(result.receipt.item_count_out).to_equal(0)
