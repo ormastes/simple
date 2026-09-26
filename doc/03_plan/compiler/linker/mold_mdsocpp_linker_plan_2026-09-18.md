@@ -285,7 +285,9 @@ section tables, decodes ELF32 symbols, and canonicalizes both REL and RELA
 records into the same symbol/type representation used by ELF64. Implicit REL
 addends are decoded from ARM data words, ARM branch immediates, Thumb-2 branch
 pairs, and split Thumb MOVW/MOVT instructions during object admission; malformed
-fields and unsupported ARM REL types fail closed. The remaining relocation
+fields and unsupported ARM REL types fail closed. ARM-state MOVW/MOVT, V4BX,
+and signed PREL31 compact-unwind references are also decoded and applied, with
+PREL31 preserving its high compact-model flag bit. The remaining relocation
 corpus and ARM executable emission remain before that lane can consume the
 existing LLVM ARM32 object backend end to end.
 

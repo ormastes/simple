@@ -27,6 +27,8 @@ use compiler.backend.linker.reloc_engine.{
     R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL,
     R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_THM_CALL,
     R_ARM_CALL, R_ARM_JUMP24, R_ARM_THM_JUMP24,
+    R_ARM_V4BX, R_ARM_PREL31,
+    R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL,
     R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL,
     R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16,
     R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PLT32,
@@ -209,6 +211,37 @@ describe "reloc_engine - ARM32 relocations":
         expect(low.value).to_equal(0x4678)
         expect(high.success).to_equal(true)
         expect(high.value).to_equal(0x1234)
+
+    it "applies PREL31 while preserving the compact-unwind flag bit":
+        val base: [i64] = [0, 0, 0, 0x80]
+        val patched = reloc_patch_bytes(
+            RelocArch.Arm32, base, 0, R_ARM_PREL31, 0x1800, 0, 0x1000)
+        val too_far = reloc_apply_arm32(
+            base, 0, R_ARM_PREL31, 0x40000000, 0, 0)
+
+        expect(patched).to_equal([0x00, 0x08, 0x00, 0x80])
+        expect(too_far.success).to_equal(false)
+
+    it "patches ARM-state MOVW and MOVT split immediates":
+        val movw: [i64] = [0, 0, 0, 0xe3]
+        val movt: [i64] = [0, 0, 0x40, 0xe3]
+        val low = reloc_patch_bytes(
+            RelocArch.Arm32, movw, 0, R_ARM_MOVW_ABS_NC, 0x1234, 0, 0)
+        val high = reloc_patch_bytes(
+            RelocArch.Arm32, movt, 0, R_ARM_MOVT_ABS, 0x12345678, 0, 0)
+        val relative = reloc_apply_arm32(
+            movw, 0, R_ARM_MOVW_PREL_NC, 0x2234, 0, 0x1000)
+
+        expect(low).to_equal([0x34, 0x02, 0x01, 0xe3])
+        expect(high).to_equal([0x34, 0x02, 0x41, 0xe3])
+        expect(relative.value).to_equal(0x1234)
+
+    it "leaves V4BX marker instructions unchanged":
+        val bx: [i64] = [0x1e, 0xff, 0x2f, 0xe1]
+        val patched = reloc_patch_bytes(
+            RelocArch.Arm32, bx, 0, R_ARM_V4BX, 0, 0, 0)
+
+        expect(patched).to_equal(bx)
 
 # ============================================================================
 # x86_64 relocations

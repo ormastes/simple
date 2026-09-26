@@ -51,6 +51,12 @@ val R_ARM_THM_CALL: i64 = 10  # S + A - P, Thumb-2 BL/BLX
 val R_ARM_CALL: i64 = 28      # S + A - P, ARM BL/BLX imm24
 val R_ARM_JUMP24: i64 = 29    # S + A - P, ARM B imm24
 val R_ARM_THM_JUMP24: i64 = 30
+val R_ARM_V4BX: i64 = 40       # linker marker; instruction bytes are unchanged
+val R_ARM_PREL31: i64 = 42     # (S + A - P) in signed low 31 bits
+val R_ARM_MOVW_ABS_NC: i64 = 43
+val R_ARM_MOVT_ABS: i64 = 44
+val R_ARM_MOVW_PREL_NC: i64 = 45
+val R_ARM_MOVT_PREL: i64 = 46
 val R_ARM_THM_MOVW_ABS_NC: i64 = 47
 val R_ARM_THM_MOVT_ABS: i64 = 48
 val R_ARM_THM_MOVW_PREL_NC: i64 = 49
@@ -414,6 +420,25 @@ fn reloc_apply_arm32(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
             return RelocResult(success: false, offset: offset, value: 0,
                 error: "R_ARM_THM branch displacement exceeds signed 25-bit range")
         return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_V4BX:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_ARM_PREL31:
+        val v = s + a - p
+        if v < -1073741824 or v >= 1073741824:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_PREL31 out of signed 31-bit range")
+        return RelocResult(success: true, offset: offset, value: v & 0x7fffffff, error: "")
+
+    if rtype == R_ARM_MOVW_ABS_NC or rtype == R_ARM_MOVT_ABS or
+            rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+        var v = s + a
+        if rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+            v = v - p
+        if rtype == R_ARM_MOVT_ABS or rtype == R_ARM_MOVT_PREL:
+            v = v >> 16
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     if rtype == R_ARM_THM_MOVW_ABS_NC or rtype == R_ARM_THM_MOVT_ABS or
             rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
@@ -846,9 +871,20 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
             else:
                 patch_u32_le(bytes, offset, result.value)
         case Arm32:
-            if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
+            if rtype == R_ARM_V4BX:
+                bytes
+            else if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
                 val insn = read_u32_le(bytes, offset)
                 patch_u32_le(bytes, offset, (insn & 0xff000000) | (result.value & 0xffffff))
+            else if rtype == R_ARM_PREL31:
+                val word = read_u32_le(bytes, offset)
+                patch_u32_le(bytes, offset, (word & 0x80000000) | (result.value & 0x7fffffff))
+            else if rtype == R_ARM_MOVW_ABS_NC or rtype == R_ARM_MOVT_ABS or
+                    rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+                val insn = read_u32_le(bytes, offset)
+                patch_u32_le(bytes, offset,
+                    (insn & 0xfff0f000) | (((result.value >> 12) & 0xf) << 16) |
+                    (result.value & 0xfff))
             else if rtype == R_ARM_THM_CALL or rtype == R_ARM_THM_JUMP24:
                 val high_half = read_u16_le(bytes, offset)
                 val low_half = read_u16_le(bytes, offset + 2)
@@ -1008,6 +1044,8 @@ export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
 export R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_THM_CALL
 export R_ARM_CALL, R_ARM_JUMP24, R_ARM_THM_JUMP24
+export R_ARM_V4BX, R_ARM_PREL31
+export R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL
 export R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL
 export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
 export R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC
