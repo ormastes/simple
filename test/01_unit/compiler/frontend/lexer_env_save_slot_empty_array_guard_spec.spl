@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproducing + generalization spec for
+# doc/08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md
+#
+# `lex_env_save_enabled` is a module-level `var ... : [bool] = [false]`. In a
+# natively-compiled binary a module-level value lands in `.bss` and is filled by
+# a generated `__module_init_*` that a given consumer may never call (the same
+# defect class as
+# doc/08_tracking/bug/simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md),
+# so an unguarded `lex_env_save_enabled[0]` can index an EMPTY array. That is
+# frame #0 of the Stage 2 admission SIGILL:
+#
+#   #0 compiler.frontend.core.lexer.current_core_lexer_save
+#   #1 compiler.frontend.core.lexer.lex_next
+#   #3 compiler.frontend.core.parser.parser_advance
+#
+# `lex_init_with_path` already carried a defensive `len() == 0` re-init for this
+# same array before writing it, which is direct evidence the empty case was hit
+# here before -- but no READ site had the same guard.
+#
+# This is a SOURCE-GUARD spec, deliberately. The guard lives on module-private
+# functions (`bool_slot0_or`, `lex_env_save_on` are not `pub`), so a behavioural
+# spec cannot import them; and every `use core.lexer` spec in this directory is
+# vacuous under `simple run` (`outcome=ERROR declared>=N executed=0` -- a
+# pre-existing condition, measured 2026-09-26 on
+# lexer_dead_stream_forward_progress_spec.spl too). A source guard runs for real
+# and fails if the unguarded pattern comes back, which is what this needs to pin.
+
+use std.spec.step
+
+use std.io_runtime.{read_file_text}
+
+val LEXER_PATH = "src/compiler/10.frontend/core/lexer.spl"
+
+# Every line that indexes the slot directly, excluding comments.
+fn direct_slot_index_lines(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("#"):
+            continue
+        if trimmed.contains("lex_env_save_enabled[0]"):
+            out = out.push(trimmed)
+    out
+
+describe "lexer env-save slot is never read through an unguarded index":
+
+    """The Stage 2 admission probe died with SIGILL inside
+    current_core_lexer_save, which read `lex_env_save_enabled[0]` with no length
+    check. Reading slot 0 of a module-level array that a native binary may never
+    have initialised is an out-of-bounds read, so every read must go through the
+    length-checked accessor."""
+
+    it "routes every slot read through the length-checked accessor":
+        step("read the lexer source")
+        val source = read_file_text(LEXER_PATH)
+        assert_true(source.len() > 0)
+
+        step("collect direct `[0]` index sites")
+        val direct = direct_slot_index_lines(source)
+
+        # The only admissible direct uses are inside the initialiser, which
+        # re-seeds the array when empty before touching it: the assignment
+        # itself, and the immediately-following read that publishes the value.
+        # Anything else is an unguarded read of a possibly-empty array.
+        var unguarded: [text] = []
+        for line in direct:
+            if line.starts_with("lex_env_save_enabled[0] ="):
+                continue
+            if line.contains("core_token_env_save_set(lex_env_save_enabled[0])"):
+                continue
+            unguarded = unguarded.push(line)
+
+        assert_equal(unguarded.len(), 0)
+
+    it "keeps the length-checked accessor available":
+        step("read the lexer source")
+        val source = read_file_text(LEXER_PATH)
+
+        step("the guard helpers exist")
+        assert_true(source.contains("fn bool_slot0_or("))
+        assert_true(source.contains("fn lex_env_save_on("))
+
+        step("the accessor checks length before indexing")
+        assert_true(source.contains(".len()"))
+
+    it "still seeds the slot defensively before writing it":
+        step("read the lexer source")
+        val source = read_file_text(LEXER_PATH)
+
+        step("the initialiser re-seeds an empty array")
+        assert_true(source.contains("lex_env_save_enabled.len() == 0"))
+        assert_true(source.contains("lex_env_save_enabled = [false]"))

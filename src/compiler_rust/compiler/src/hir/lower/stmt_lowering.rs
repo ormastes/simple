@@ -1703,6 +1703,37 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
+        // An or-pattern whose alternatives destructure a payload must bind per
+        // alternative. Binding from the FIRST alternative only (the previous
+        // behaviour) emitted that alternative's extraction shape for every
+        // alternative: `case Array(inner, _) | Optional(inner):` read the
+        // one-field `Optional` payload -- which IS the inner value -- through
+        // `rt_tuple_get(payload, 0)`, so the runtime rejected the non-array
+        // handle and `inner` became nil (native stage-2 CLI, MIR pre-scan of
+        // `env_get_opt -> text?`, 0xC0000005). `bind_subpattern` already
+        // guards each alternative's bindings by its own discriminant test and
+        // derives the extraction from that alternative's arity.
+        if let Pattern::Or(alternatives) = arm_pattern {
+            let destructures = alternatives.iter().any(|alt| {
+                matches!(
+                    alt,
+                    Pattern::Enum { payload: Some(_), .. }
+                        | Pattern::Tuple(_)
+                        | Pattern::Array(_)
+                        | Pattern::Struct { .. }
+                )
+            });
+            if destructures {
+                let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+                let subject_ref = HirExpr {
+                    kind: HirExprKind::Local(subject_idx),
+                    ty: subject_ty,
+                };
+                let mut or_binding_stmts = Vec::new();
+                self.bind_subpattern(&subject_ref, arm_pattern, &binding_type_map, ctx, &mut or_binding_stmts);
+                return or_binding_stmts;
+            }
+        }
         let binding_pattern: &Pattern = match arm_pattern {
             Pattern::Or(alternatives) => alternatives.first().unwrap_or(arm_pattern),
             other => other,

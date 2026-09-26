@@ -5,6 +5,7 @@ use std.env.platform.{get_temp_dir}
 use std.nogc_async_mut.io.{file_remove}
 use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
 use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_NATIVE}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
 use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at, sosix_sync_fs_write_at}
 use std.nogc_async_mut.sosix.file_driver.{SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO}
@@ -23,6 +24,36 @@ fn scratch_path(name: text) -> text:
     path
 
 describe "SOSIX reference file driver on the host filesystem":
+    it "rejects a forged file or buffer generation before touching the host file":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Register one file and buffer, then write a known value")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("generation"))
+        val source = driver.buffer_from("safe")
+        val initial = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 4u64, 0u64)
+        expect(initial.error.kind).to_equal(0u8)
+
+        step("Reject a file reference with the same slot and a different generation")
+        val sink = driver.buffer_from("....")
+        val forged_file = SosixCapabilityRef(slot: file.slot, generation: file.generation + 1u32)
+        val bad_read = sosix_sync_fs_read_at(fs, driver, forged_file, sink, 0u64, 0u64, 4u64, 0u64)
+        expect(bad_read.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_read.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+        expect(driver.buffer_bytes(sink)).to_equal("....")
+
+        step("Reject a buffer reference with the same slot and a different generation")
+        val forged_buffer = SosixBufferRef(slot: source.slot, generation: source.generation + 1u32)
+        val bad_write = sosix_sync_fs_write_at(fs, driver, file, forged_buffer, 0u64, 0u64, 4u64, 0u64)
+        expect(bad_write.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_write.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+        expect(driver.buffer_bytes(forged_buffer)).to_equal("")
+
+        step("The valid reference still reads the original bytes")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 4u64, 0u64)
+        expect(read.error.kind).to_equal(0u8)
+        expect(driver.buffer_bytes(sink)).to_equal("safe")
+
     it "writes bytes through the ring and reads the same bytes back through the ring":
         # @req REQ-SOSIX-FS-HOST-FILE
         step("Register a host path and a source buffer with the driver")

@@ -13,6 +13,7 @@ pub enum LexicalRoutingIssueErrorV1:
     BlockTooWide
     StateNotAdmitted
     InvalidTable
+    ExecutionEvidenceMissing
 pub enum LexicalRoutingVerifyErrorV1:
     ProviderNotAdmitted
     GenerationStale
@@ -24,6 +25,7 @@ pub enum LexicalRoutingVerifyErrorV1:
     BlockTooWide
     StateNotAdmitted
     InvalidTable
+    ExecutionEvidenceMissing
 
 # scalar_resolution is always true: no provider resolves lexical state. It is a
 # field rather than an invariant so a receipt claiming otherwise can be refused.
@@ -53,8 +55,12 @@ fn _verify_err_lrr(e: LexicalCandidateErrorV1) -> LexicalRoutingVerifyErrorV1:
 pub fn lexical_routing_receipt_issue_v1(bytes: [u8], input: LexicalBlockStateV1,
     provider: LexicalRoutingProviderV1, provider_admitted: bool, generation: u64
 ) -> Result<LexicalRoutingReceiptV1, LexicalRoutingIssueErrorV1>:
-    if provider == LexicalRoutingProviderV1.ParserLexicalAvx2 and not provider_admitted:
-        return Err(LexicalRoutingIssueErrorV1.ProviderNotAdmitted)
+    if provider == LexicalRoutingProviderV1.ParserLexicalAvx2:
+        if not provider_admitted:
+            return Err(LexicalRoutingIssueErrorV1.ProviderNotAdmitted)
+        # This function executes scalar classification. A caller-supplied
+        # admission flag cannot prove that native bytes ran.
+        return Err(LexicalRoutingIssueErrorV1.ExecutionEvidenceMissing)
     val masks = match lexical_candidate_masks_scalar_v1(bytes):
         case Err(e): return Err(_issue_err_lrr(e))
         case Ok(m): m
@@ -70,8 +76,10 @@ pub fn lexical_routing_receipt_issue_v1(bytes: [u8], input: LexicalBlockStateV1,
 pub fn lexical_routing_receipt_verify_v1(receipt: LexicalRoutingReceiptV1, bytes: [u8],
     input: LexicalBlockStateV1, provider_admitted: bool, current_generation: u64
 ) -> Result<bool, LexicalRoutingVerifyErrorV1>:
-    if receipt.provider == LexicalRoutingProviderV1.ParserLexicalAvx2 and not provider_admitted:
-        return Err(LexicalRoutingVerifyErrorV1.ProviderNotAdmitted)
+    if receipt.provider == LexicalRoutingProviderV1.ParserLexicalAvx2:
+        if not provider_admitted:
+            return Err(LexicalRoutingVerifyErrorV1.ProviderNotAdmitted)
+        return Err(LexicalRoutingVerifyErrorV1.ExecutionEvidenceMissing)
     if receipt.generation != current_generation:
         return Err(LexicalRoutingVerifyErrorV1.GenerationStale)
     if not receipt.scalar_resolution:

@@ -6,6 +6,15 @@ use app.cli.environment_variant_policy_handoff_owner_v1.{
     environment_variant_policy_handoff_extract_v1,
     environment_variant_policy_handoff_owner_error_label_v1
 }
+# The worker is interpreted (`simple run`), and the interpreter resolves
+# `compiler.driver.bootstrap_k1_selected` to the fail-closed stub
+# (src/compiler/80.driver/bootstrap_k1_selected.spl), never to the committed
+# composition, so the composition is named by its own path here.
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1,
+    selected_k1_backend_table_diagnostic_v1}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_full_static_backends_for_k1_policy_v1}
 
 extern fn rt_exit(code: i64)
 
@@ -57,6 +66,14 @@ fn native_build_entry_args() -> [text]:
 fn main() -> i64:
     if (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") != "1":
         print "error: native_build_worker.spl is an internal entrypoint"
+        rt_exit(1)
+    # Same preamble as the full CLI (main_and_help.spl). Without it the static
+    # backend table is empty, CodegenFactory.create answers PLUG-E-NOTFOUND
+    # through error() -- a ud2/SIGILL whose message the worker relay drops
+    # (native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
+    if not install_selected_k1_backend_table_v1() or
+            not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
+        print "error: PLUG-E-TABLE: native-build worker backend composition refused: {selected_k1_backend_table_diagnostic_v1()}"
         rt_exit(1)
     val opened = match environment_variant_policy_handoff_extract_v1(
         native_build_entry_args()):

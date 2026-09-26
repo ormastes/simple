@@ -134,3 +134,54 @@ so a legal NTFS path longer than 260 characters still fails with
 failure recorded above. Proposed fix 1 (long-path-correct opens in the consumer)
 is therefore still open; the validation helpers assume callers already produced
 extended-form paths, and this caller does not.
+
+## 2026-09-26: BROADER THAN FILED — a NORMAL published generation is 10 chars from the limit
+
+This record was written from the quarantine symptom (a `.rejected.*` leaf at 268
+chars). That framing understates the defect. The quarantine name was not the
+cause; it was merely the first path long enough to cross the line.
+
+Measured on a fresh worktree of `origin/main`, the failure reproduced on an
+ordinary, successfully published generation — no quarantine involved:
+
+```
+stage3-materialized-consumer: Exception calling "Run" with "0" argument(s):
+  "api.open:C:\Users\User\dev\simple-phase1-wt\src\compiler_rust\target\bootstrap.generations\
+   f7494e6157785f795864fe783303672bfd22b0972e22ba6140c6d5783c50ef64-ae29ae74daa56c999477441834f4b3cc635af99ffdc3113a5608d2c5254fa274\
+   deps\libspl_hosted_runtime-1812b80203687942.rlib:win32=3"
+ERROR — source, Git state, configuration, seed, or checker changed during preflight
+```
+
+Note the reported verdict blames "source, Git state, configuration, seed, or
+checker changed during preflight". That is misleading: nothing changed. The
+audit simply could not open a file, twice, and the surrounding logic attributes
+an unreadable path to a concurrent mutation. This wording cost real
+investigation time and is worth fixing on its own.
+
+Path lengths, measured:
+
+| location | length | margin to 260 |
+|---|---|---|
+| worktree `C:\Users\User\dev\simple-phase1-wt\...` | **260** | **0 — fails** |
+| main checkout `C:\Users\User\dev\simple\...` | 250 | **10** |
+| short worktree `C:\p1\...` | 231 | 29 |
+
+The generation leaf is structurally long and fixed: `bootstrap.generations\` +
+`<64 hex>-<64 hex>` (129) + `\deps\libspl_hosted_runtime-<16 hex>.rlib`, i.e.
+**~176 characters below the repo root before any checkout path**. So:
+
+**Any checkout whose path is ~10 characters longer than
+`C:\Users\User\dev\simple` cannot complete a bootstrap on Windows.** The
+existing checkout works by a 10-character accident. `C:\Users\Developer\dev\simple`
+(+5), `C:\Users\User\dev\simple-main` (+5), or a CI agent workspace such as
+`C:\actions-runner\_work\simple\simple` would all fail, on a clean tree, with no
+quarantine present — and the failure would be reported as a spurious
+"changed during preflight".
+
+This makes proposed fix 1 (long-path-correct `Open()`) not a hardening nicety
+but a prerequisite for Windows bootstrap on any path that is not already short.
+Shortening the quarantine leaf (proposed fix 2) does **not** address this case at
+all, since no quarantine is involved.
+
+Workaround, verified: run the bootstrap from a short checkout path. `C:\p1`
+buys 29 characters of headroom and got past this point.

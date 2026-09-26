@@ -418,11 +418,15 @@ bounded pure-Simple codec now decodes exact `SHT_GROUP` bytes plus
 `sh_link`/`sh_info`, validates member/signature identity and executable-group
 uniqueness, and passes 4/4 focused tests. Actual tool authority remains open.
 
-User decision gate: select the target-ID mapping policy in
-`doc/02_requirements/feature/environment_optimized_dynamic_libraries_options.md`.
-The parser backend join must bind the chosen registry version/digest and a
-canonical named-feature-to-word expansion; it may not compare unrelated text
-and numeric digests or infer equality from the v3 preset name.
+The target-ID mapping decision is recorded as Option B in
+`doc/02_requirements/feature/environment_optimized_dynamic_libraries.md`:
+the repository-owned canonical target-triple registry. Its V1/V2 owners exist.
+The parser variant planner now canonicalizes registered aliases, checks its
+numeric target profile against the selected registry row, and binds the mapping
+generation/digest into artifact and cache identities. Full REQ-015 closure still
+needs registry-bound profile and receipt identities, plus the backend join's
+canonical named-feature-to-word expansion. That join may not compare unrelated
+text and numeric digests or infer equality from the v3 preset name.
 
 Implementation lanes:
 

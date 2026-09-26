@@ -8,8 +8,9 @@ provider would make the acceptance meaningless.
 use std.spec.*
 use std.env.platform.{get_temp_dir}
 use std.nogc_async_mut.io.{file_remove}
-use std.nogc_async_mut.io.{file_write_text_at}
+use std.nogc_async_mut.io.{file_read_text_at, file_write_text_at}
 use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_NATIVE}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
 use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
 use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at, sosix_sync_fs_write_at}
@@ -40,6 +41,24 @@ fn scratch_path(name: text) -> text:
     path
 
 describe "SOSIX Linux io_uring provider":
+    it "rejects forged file and buffer generations before native submission":
+        val driver = setup_linux_uring_driver()
+        val fs = setup_fs()
+        val path = scratch_path("generation")
+        val file = driver.open_path(path)
+        val buffer = driver.buffer_from("safe")
+        val forged_file = SosixCapabilityRef(slot: file.slot, generation: file.generation + 1u32)
+        val forged_buffer = SosixBufferRef(slot: buffer.slot, generation: buffer.generation + 1u32)
+        val bad_file = sosix_sync_fs_write_at(fs, driver, forged_file, buffer, 0u64, 0u64, 4u64, 0u64)
+        val bad_buffer = sosix_sync_fs_write_at(fs, driver, file, forged_buffer, 0u64, 0u64, 4u64, 0u64)
+        expect(bad_file.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_buffer.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_file.error.native_code).to_equal(-22)
+        expect(bad_buffer.error.native_code).to_equal(-22)
+        expect(driver.buffer_bytes(forged_buffer)).to_equal("")
+        expect(file_read_text_at(path, 0, 1).is_err()).to_equal(true)
+        driver.close()
+
     it "selects the exact Linux io_uring backend":
         val driver = setup_linux_uring_driver()
         require_io_uring_backend(driver)

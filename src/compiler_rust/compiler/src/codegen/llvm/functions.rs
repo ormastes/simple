@@ -115,8 +115,25 @@ fn build_vreg_types(
 
     let mut types_map = VRegTypes::new();
 
+    // Seed VReg(i) with param i's type ONLY when no instruction defines that
+    // VReg. MIR that reaches params through their locals (LocalAddr + Load)
+    // reuses v0/v1/... as ordinary temps; seeding them unconditionally left a
+    // LocalAddr dest (a pointer; no arm below) typed F64, so its spill slot was
+    // `double`, the address was unusable, and the Load through it lowered to
+    // `0.0`. Any function with >= 2 f64 params read its first param as 0.0 and
+    // LLVM folded the resulting poison branch to `unreachable` -> `int3`
+    // (the stage-2 test runner's `system_exceeds_threshold(f64, f64)`: exit
+    // 133 after exactly 20 specs on Windows, 2026-09-25).
+    let defined: std::collections::HashSet<crate::mir::VReg> = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter().flat_map(|inst| inst.defs()))
+        .collect();
     for (i, param) in func.params.iter().enumerate() {
-        types_map.insert(crate::mir::VReg(i as u32), param.ty);
+        let vreg = crate::mir::VReg(i as u32);
+        if !defined.contains(&vreg) {
+            types_map.insert(vreg, param.ty);
+        }
     }
 
     for block in &func.blocks {
@@ -4862,6 +4879,44 @@ mod tests {
         assert!(ir.contains("define i32 @heap_init_shape(i32 %0, i32 %1)"));
         assert!(ir.contains("icmp slt i32"));
         assert!(ir.contains("br i1"));
+        backend.verify().unwrap();
+    }
+
+    /// Two f64 params reached through their locals: MIR reuses v0/v1 as temps
+    /// (v1 = LocalAddr a). Seeding v1 with param b's F64 type made the address
+    /// slot `double`, and the Load through it lowered to `store double 0.0` --
+    /// `a > b` compared 0.0 with b (2026-09-25, runner exit 133 at spec 20).
+    #[test]
+    fn two_f64_params_via_local_addr_load_the_real_first_param() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("two_f64_params").unwrap();
+
+        let mut func = MirFunction::new(
+            "gt2".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        for name in ["a", "b"] {
+            func.params.push(MirLocal {
+                name: name.to_string(),
+                ty: crate::hir::TypeId::F64,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        let insts = &mut func.blocks[0].instructions;
+        insts.push(MirInst::LocalAddr { dest: VReg(1), local_index: 0 });
+        insts.push(MirInst::Load { dest: VReg(0), addr: VReg(1), ty: crate::hir::TypeId::F64 });
+        insts.push(MirInst::LocalAddr { dest: VReg(3), local_index: 1 });
+        insts.push(MirInst::Load { dest: VReg(2), addr: VReg(3), ty: crate::hir::TypeId::F64 });
+        insts.push(MirInst::BinOp { dest: VReg(4), op: crate::hir::BinOp::Gt, left: VReg(0), right: VReg(2) });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(4)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("store double 0.000000e+00"), "first param lowered to 0.0:\n{ir}");
+        assert!(ir.contains("fcmp ogt double"), "{ir}");
         backend.verify().unwrap();
     }
 

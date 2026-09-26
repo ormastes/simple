@@ -219,6 +219,8 @@ impl SosixHostedFs:
 
     me expire(operation: SosixOperationId, now_ns: u64) -> SosixOperationTransition:
         val slot = operation.slot.to_i64()
+        if slot >= self.slots.len():
+            return SosixOperationTransition(accepted: false, reason: "invalid-operation-slot", slot: sosix_operation_slot_new())
         val transition = sosix_operation_expire_deadline(self.slots[slot], operation, now_ns)
         if transition.accepted:
             self.slots[slot] = transition.slot
@@ -226,6 +228,8 @@ impl SosixHostedFs:
 
     me cancel(operation: SosixOperationId) -> SosixOperationTransition:
         val slot = operation.slot.to_i64()
+        if slot >= self.slots.len():
+            return SosixOperationTransition(accepted: false, reason: "invalid-operation-slot", slot: sosix_operation_slot_new())
         val transition = sosix_operation_cancel(self.slots[slot], operation)
         if transition.accepted:
             self.slots[slot] = transition.slot
@@ -235,6 +239,10 @@ impl SosixHostedFs:
     me release(operation: SosixOperationId) -> SosixOperationTransition:
         """Refused until the ring retired the lease: a timed-out slot still owns its buffer."""
         val slot = operation.slot.to_i64()
+        if slot >= self.slots.len():
+            return SosixOperationTransition(accepted: false, reason: "invalid-operation-slot", slot: sosix_operation_slot_new())
+        if self.slots[slot].generation != operation.generation:
+            return sosix_operation_release(self.slots[slot], operation)
         if not self.retired[slot]:
             return SosixOperationTransition(accepted: false, reason: "lease-not-retired", slot: self.slots[slot])
         val transition = sosix_operation_release(self.slots[slot], operation)
@@ -242,10 +250,19 @@ impl SosixHostedFs:
             self.slots[slot] = transition.slot
         transition
 
+    fn _operation_is_current(operation: SosixOperationId) -> bool:
+        val slot = operation.slot.to_i64()
+        if slot >= self.slots.len():
+            return false
+        val state = self.slots[slot]
+        state.generation == operation.generation and state.state != SOSIX_OPERATION_FREE
+
     fn result_of(operation: SosixOperationId) -> Result<SosixCompletion, SosixError>?:
+        if not self._operation_is_current(operation):
+            return nil
         val slot = operation.slot.to_i64()
         val state = self.slots[slot]
-        if state.generation != operation.generation or not sosix_operation_is_terminal(state):
+        if not sosix_operation_is_terminal(state):
             return nil
         val typed = sosix_completion_from_slot(operation, self.api_ids[slot], state)
         if state.status < 0:
@@ -253,12 +270,16 @@ impl SosixHostedFs:
         Ok(typed.completion)
 
     fn future_of(operation: SosixOperationId) -> Future<Result<SosixCompletion, SosixError>>:
+        if not self._operation_is_current(operation):
+            return Future.from_value(Err(sosix_error_new(SOSIX_ERROR_INVALID_CAPABILITY)))
         if val ready = self.result_of(operation):
             return Future.from_value(ready)
         Future.pending<Result<SosixCompletion, SosixError>>()
 
     fn poll(operation: SosixOperationId) -> TaskPollResult<Result<SosixCompletion, SosixError>>:
         """Consumer view: Ready(result) or Pending(the exact ring token that will wake it)."""
+        if not self._operation_is_current(operation):
+            return TaskPollResult.Ready(Err(sosix_error_new(SOSIX_ERROR_INVALID_CAPABILITY)))
         val slot = operation.slot.to_i64()
         match poll_future_compat(self.future_of(operation), self.tokens[slot]):
             case Ok(receipt): receipt.poll_result

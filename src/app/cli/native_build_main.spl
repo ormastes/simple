@@ -5,6 +5,20 @@ use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_s
 use app.io.cli_ops.{_cli_self_exe_via_pid_query}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+# Unambiguous, non-builtin stderr write for the worker-failure relay path
+# (eprint_bounded / native_build_print_failure_hints / the `code != 0` branch
+# below). `eprint` is a compiler builtin that a co-compiled `fn eprint` in
+# std.nogc_sync_mut.io.process_ops shadows program-wide under the interpreter
+# but NOT under native/JIT codegen (see doc/08_tracking/bug/
+# stdlib_eprint_shadows_prelude_builtin_program_wide_2026-08-17.md and
+# doc/08_tracking/bug/eprint_loses_newline_on_jit_and_llvm_backend_2026-08-17.md
+# for two prior `eprint`-dispatch defects with this exact shape) -- a real
+# native-build worker failure has been observed to SIGILL this JIT'd relay
+# code instead of printing the worker's error text
+# (doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md,
+# defect 3). `stderr_write` calls `rt_stderr_write` directly with no builtin
+# name to mis-resolve, so the relay path no longer depends on that dispatch.
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 
 use std.io_runtime.{get_args}
 use std.io_runtime.{file_exists, file_delete}
@@ -428,7 +442,7 @@ fn eprint_bounded(output: text):
     if output.len() == 0:
         return
     if output.len() <= OUTPUT_LIMIT:
-        eprint output
+        stderr_write(output + "\n")
         return
     # OVER THE LIMIT. A plain head+tail print DISCARDS THE MIDDLE, so a
     # `grep -c` over this output can report 0 for a diagnostic that actually
@@ -437,7 +451,7 @@ fn eprint_bounded(output: text):
     # truncating we re-emit every diagnostic line found in the FULL text,
     # and we make the truncation itself impossible to overlook.
     val omitted = output.len() - OUTPUT_LIMIT
-    eprint "!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!"
+    stderr_write("!!!!!! NATIVE-BUILD STDERR TRUNCATED !!!!!!\n")
     # Truncation must never make evidence UNRECOVERABLE. Spill the FULL stream
     # to a file first and name the path, so a head+tail print is a convenience
     # view rather than the only surviving copy. Best-effort: a failed spill is
@@ -485,33 +499,48 @@ fn eprint_bounded(output: text):
         native_build_stderr_spill_seq = native_build_stderr_spill_seq + 1
         spill_path = "{spill_root}/native-build-stderr-{getpid()}-{native_build_stderr_spill_seq}.log"
     if file_write(spill_path, output):
-        eprint "[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}"
+        stderr_write("[native-build] FULL stderr ({output.len()} bytes) saved to: {spill_path}\n")
     else:
-        eprint "[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives."
-    eprint "[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE."
-    eprint "[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable."
+        stderr_write("[native-build] WARNING: could not save full stderr to {spill_path}; only the excerpt below survives.\n")
+    stderr_write("[native-build] TRUNCATED: {omitted} of {output.len()} bytes of worker stderr were dropped from the MIDDLE.\n")
+    stderr_write("[native-build] Raw head+tail below is INCOMPLETE -- counting over it is unreliable.\n")
     val diags = native_build_collect_diagnostics(output)
     if diags.len() > 0:
-        eprint "[native-build] BEGIN PRESERVED DIAGNOSTICS ({diags.len()} line(s), from the full stream)"
+        stderr_write("[native-build] BEGIN PRESERVED DIAGNOSTICS ({diags.len()} line(s), from the full stream)\n")
         for line in diags:
-            eprint line
-        eprint "[native-build] END PRESERVED DIAGNOSTICS"
+            stderr_write(line + "\n")
+        stderr_write("[native-build] END PRESERVED DIAGNOSTICS\n")
     else:
-        eprint "[native-build] PRESERVED DIAGNOSTICS: none matched in the full stream."
+        stderr_write("[native-build] PRESERVED DIAGNOSTICS: none matched in the full stream.\n")
     val head_len = OUTPUT_LIMIT / 2
     val tail_len = OUTPUT_LIMIT - head_len
-    eprint output[0:head_len]
-    eprint "[stderr truncated by native-build entry: {omitted} bytes omitted from the middle]"
-    eprint output[output.len() - tail_len:output.len()]
-    eprint "!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!"
+    stderr_write(output[0:head_len] + "\n")
+    stderr_write("[stderr truncated by native-build entry: {omitted} bytes omitted from the middle]\n")
+    stderr_write(output[output.len() - tail_len:output.len()] + "\n")
+    stderr_write("!!!!!! END NATIVE-BUILD TRUNCATED STDERR !!!!!!\n")
 
 fn native_build_output_has_nil_field_id(stdout: text, stderr: text) -> bool:
     stdout.contains("undefined field 'id'") or stderr.contains("undefined field 'id'")
 
 fn native_build_print_failure_hints(stdout: text, stderr: text):
     if native_build_output_has_nil_field_id(stdout, stderr):
-        eprint "hint: nil `.id` field access usually lost the MIR/HIR context above."
-        eprint "      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names."
+        stderr_write("hint: nil `.id` field access usually lost the MIR/HIR context above.\n")
+        stderr_write("      Rerun with SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1 to print phase and function names.\n")
+
+fn native_build_last_diagnostic_line(output: text) -> text:
+    """The single most useful line to show FIRST, before any bulk relay.
+
+    A real worker failure has been observed to SIGILL partway through the bulk
+    stderr relay below (see the comment on the `stderr_ops` import above), which
+    can lose the worker's own error text entirely if that text is only ever
+    printed as part of the bulk dump. Extracting and printing the last matching
+    diagnostic line immediately -- via the unambiguous `stderr_write`, not the
+    bulk path -- means the essential fact survives even if the detailed dump
+    that follows does not.
+    """
+    val diags = native_build_collect_diagnostics(output)
+    if diags.len() > 0: return diags[diags.len() - 1]
+    ""
 
 
 # ===== Parse sharding =======================================================
@@ -872,8 +901,8 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         if output_ok:
             file_delete(output_path)
         env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
-        eprint "error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence."
-        eprint "  The worker reported success, but strict mode forbids publishing or caching a fabricated binary."
+        stderr_write("error: SIMPLE_NO_STUB_FALLBACK=1 rejected native-build output containing unresolved-symbol stub evidence.\n")
+        stderr_write("  The worker reported success, but strict mode forbids publishing or caching a fabricated binary.\n")
         return 1
     val _warm_promoted = native_build_warm_receipt_finish(
         warm_receipt, stdout, code == 0, output_ok)
@@ -884,19 +913,28 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         # helper, a killed sibling, etc.) but left no output file, fail loudly
         # here immediately instead of letting the caller silently proceed with a
         # stale/missing binary.
+        stderr_write("error: native-build worker exited 0 but produced no output binary: {output_path}\n")
+        stderr_write("  Treating a successful-looking exit with a missing output file as a hard failure.\n")
         eprint_bounded(stderr)
         native_build_print_failure_hints(stdout, stderr)
-        eprint "error: native-build worker exited 0 but produced no output binary: {output_path}"
-        eprint "  Treating a successful-looking exit with a missing output file as a hard failure."
         return 1
     if code != 0:
+        # Front-load the single most important fact -- via the unambiguous
+        # stderr_write, before the bulk relay below -- so it survives even if
+        # the bulk dump does not reach the terminal (see the stderr_ops import
+        # comment above and defect 3 of
+        # doc/08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
+        val last_diag = native_build_last_diagnostic_line(stderr)
+        stderr_write("error: native-build worker exited with code {code}.\n")
+        if last_diag != "":
+            stderr_write("  worker error: {last_diag}\n")
         eprint_bounded(stderr)
         # On Windows process_run_timeout_live degrades to a captured (non-live)
         # run, so on failure the worker's stdout — which carries the [build]
         # step log and the real error line — would otherwise be discarded.
         # Bounded, failure-path only.
         if stdout.trim() != "":
-            eprint "--- worker stdout (bounded) ---"
+            stderr_write("--- worker stdout (bounded) ---\n")
             eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
@@ -907,45 +945,44 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             # child's signal status to -1 (rt_process_wait's Rust twin does
             # `status.code().unwrap_or(-1)`, discarding WTERMSIG), so the number
             # alone cannot tell a SIGSEGV from a failed wait. Say which.
-            eprint "error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure."
-            eprint "  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:"
-            eprint "    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings"
-            eprint "    apport-unpack /var/crash/<report>.crash /tmp/u"
+            stderr_write("error: native-build worker CRASHED -- the child dumped core (see the 'dumped core' line above). NOT a timeout, NOT a kill, NOT a compile failure.\n")
+            stderr_write("  For a backtrace, let the crash reporter keep cores for unpackaged binaries, then re-run:\n")
+            stderr_write("    printf '[main]\\nunpackaged=true\\n' > ~/.config/apport/settings\n")
+            stderr_write("    apport-unpack /var/crash/<report>.crash /tmp/u\n")
             # `bt` alone is not enough: measured 2026-09-05 on a real compiler
             # SIGSEGV, the PC lands in a non-executable mimalloc heap mapping
             # with no symbol and an unwindable-to-garbage stack. The registers
             # and the PC's mapping are what identify the fault.
-            eprint "    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'"
-            eprint "    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address"
+            stderr_write("    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'\n")
+            stderr_write("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
         elif code < -128:
             # -(128+signo) from rt_process_wait: the wrapper really was killed,
             # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL
             # (an out-of-memory reaper), 143 = SIGTERM.
             val signo = 0 - code - 128
-            eprint "error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure."
+            stderr_write("error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure.\n")
             if signo == 11 or signo == 6:
-                eprint "  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash)."
+                stderr_write("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
             elif signo == 9 or signo == 15:
-                eprint "  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom')."
+                stderr_write("  hint: check for an out-of-memory reaper (earlyoom/systemd-oomd: 'journalctl -t earlyoom').\n")
         elif code == -1 and not stderr.contains("[TIMEOUT:"):
             # -1 without the wrapper's [TIMEOUT:] marker is NOT a timeout: the
             # wrapper died by a signal (status.code() is None) or the wait
             # itself failed. Say so instead of blaming --timeout (run6, 2026-08-21:
             # reported "timed out after 569328s" at 2742 s of wall).
-            eprint "error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated."
+            stderr_write("error: native-build worker wrapper exited abnormally (signal or wait failure, code -1) before producing a binary; its process group has been terminated.\n")
         elif code == -1:
             val secs = native_build_timeout_ms(args) / 1000
-            eprint "error: native-build worker timed out after {secs}s before producing a binary."
-            eprint "  The interpreted worker loads the whole compiler + LLVM import graph before any"
-            eprint "  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget."
-            eprint "  Read the last '[build] N/6' progress line to see which phase ran out of time."
-            eprint "  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,"
-            eprint "  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads."
-            eprint "  Options: shrink --source, keep build/native_cache warm, pass --low-memory,"
-            eprint "  use --backend llvm-lib (in-process LLVM C API), or raise --timeout."
+            stderr_write("error: native-build worker timed out after {secs}s before producing a binary.\n")
+            stderr_write("  The interpreted worker loads the whole compiler + LLVM import graph before any\n")
+            stderr_write("  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget.\n")
+            stderr_write("  Read the last '[build] N/6' progress line to see which phase ran out of time.\n")
+            stderr_write("  Steps 4 (mir, driver_pipeline_lowering.spl:262) and 5 (native_compile,\n")
+            stderr_write("  driver_build/parallel.spl:480) are both SEQUENTIAL regardless of --threads.\n")
+            stderr_write("  Options: shrink --source, keep build/native_cache warm, pass --low-memory,\n")
+            stderr_write("  use --backend llvm-lib (in-process LLVM C API), or raise --timeout.\n")
         else:
-            eprint "error: native-build worker exited with code {code}."
-            eprint "  interpreter: {simple_bin} (exit code {code})"
+            stderr_write("  interpreter: {simple_bin} (exit code {code})\n")
     code as i64
 
 fn native_build_has_help(args: [text]) -> bool:

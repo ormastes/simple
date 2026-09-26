@@ -1,0 +1,114 @@
+"""Parser sibling plans use canonical target mapping rather than caller spelling."""
+
+use std.spec.*
+use compiler.driver.parser_variant_build_plan_v1.*
+use compiler.driver.host_environment_snapshot_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
+use std.nogc_sync_mut.composition.environment_variants.feature_registry_v1.*
+
+fn d(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn host() -> EnvironmentSnapshotV1:
+    compiler_host_environment_snapshot_from_facts_v1(
+        CompilerHostPlatformAuthorityV1(
+            execution_architecture: ENV_ARCH_X86_64_V1, os_id: 1u32, abi_id: 1u32,
+            object_format_id: 1u32, endian_id: 1u16, pointer_width_bits: 64u16,
+            snapshot_identity: d(1u64), snapshot_generation: 2u64,
+            execution_domain_identity: d(3u64), loader_permission_bits: 1u64,
+            allowed_effect_bits: 1u64, numerical_contract_id: 1u32,
+            resource_layout_digest: d(4u64)),
+        CompilerHostVectorFactsV1(
+            hardware_feature_bits: 1u64, os_usable_feature_bits: 1u64,
+            policy_allowed_feature_bits: 1u64,
+            vector_state_mode: ENV_VECTOR_FIXED_V1, vector_length_bits: 128u32)).unwrap().snapshot
+
+fn target_profile() -> TargetCodegenProfileV1:
+    TargetCodegenProfileV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: d(10u64), target_identity: d(11u64),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        target_abi_id: 1u32, target_object_format_id: 1u32,
+        target_endian_id: 1u16, target_pointer_width_bits: 64u16,
+        requested_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        strict_requested_features: true,
+        backend_identity: d(12u64), semantic_identity: d(13u64),
+        numerical_contract_id: 1u32)
+
+fn request(tier: ParserVariantTierV1, placement: u16, triple: text
+) -> ParserVariantBuildRequestV1:
+    val feature = if tier == ParserVariantTierV1.Baseline:
+        ENV_FEATURE_X86_64_BASELINE_V1
+    else:
+        ENV_FEATURE_X86_64_V3_V1
+    val required = environment_feature_registry_lookup_v1(feature).unwrap().feature_mask
+    ParserVariantBuildRequestV1(
+        tier: tier, placement: placement, target_triple: triple,
+        target_profile: target_profile(), target_feature_words: [required],
+        backend_supported_feature_mask: required,
+        parser_abi_identity: d(20u64), parser_schema_identity: d(21u64),
+        grammar_identity: d(22u64), program_identity: d(23u64),
+        optimization_policy_identity: d(24u64), backend_identity: d(25u64),
+        toolchain_identity: d(26u64), source_ir_identity: d(27u64),
+        dependency_lock_identity: d(28u64))
+
+describe "parser variant build plan canonical target binding":
+    it "gives aliases the same canonical artifact and cache identity":
+        val canonical = parser_variant_build_plan_v1(host(), [request(
+            ParserVariantTierV1.Baseline, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            "x86_64-unknown-linux-gnu")]).unwrap()
+        val alias = parser_variant_build_plan_v1(host(), [request(
+            ParserVariantTierV1.Baseline, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            "amd64-unknown-linux-gnu")]).unwrap()
+        expect(alias.artifacts[0].target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(alias.artifacts[0].artifact_identity).to_equal(
+            canonical.artifacts[0].artifact_identity)
+        expect(alias.artifacts[0].cache_identity).to_equal(
+            canonical.artifacts[0].cache_identity)
+        expect(alias.plan_identity).to_equal(canonical.plan_identity)
+        expect(parser_variant_build_plan_v1(host(), [
+            request(ParserVariantTierV1.Baseline, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+                "x86_64-unknown-linux-gnu"),
+            request(ParserVariantTierV1.Baseline, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+                "amd64-unknown-linux-gnu")])).to_equal(
+            Err(ParserVariantBuildUnsupportedReasonV1.DuplicateTier))
+
+    it "rejects unknown triples and numeric target-profile substitutions":
+        val unknown = request(ParserVariantTierV1.Baseline,
+            ENV_PLACEMENT_NATIVE_DYNLIB_V1, "x86_64-pc-windows-msvc")
+        expect(parser_variant_build_plan_v1(host(), [unknown])).to_equal(
+            Err(ParserVariantBuildUnsupportedReasonV1.UnknownTargetTriple))
+        var mismatched = request(ParserVariantTierV1.Baseline,
+            ENV_PLACEMENT_NATIVE_DYNLIB_V1, "x86_64-unknown-linux-gnu")
+        var profile = mismatched.target_profile
+        profile.target_abi_id = 2u32
+        mismatched.target_profile = profile
+        expect(parser_variant_build_plan_v1(host(), [mismatched])).to_equal(
+            Err(ParserVariantBuildUnsupportedReasonV1.TargetProfileMappingMismatch))
+
+    it "keeps the baseline requirement while allowing a JIT sibling":
+        val baseline = request(ParserVariantTierV1.Baseline,
+            ENV_PLACEMENT_NATIVE_DYNLIB_V1, "x86_64-unknown-linux-gnu")
+        val jit = request(ParserVariantTierV1.X86_64V3Avx2,
+            ENV_PLACEMENT_JIT_V1, "amd64-unknown-linux-gnu")
+        expect(parser_variant_build_plan_v1(host(), [jit])).to_equal(
+            Err(ParserVariantBuildUnsupportedReasonV1.BaselineRequired))
+        val admitted = parser_variant_build_plan_v1(host(), [baseline, jit])
+        expect(admitted.is_ok()).to_be(true)
+
+    it "keeps host provenance separate from generated target artifacts":
+        val baseline = request(ParserVariantTierV1.Baseline,
+            ENV_PLACEMENT_NATIVE_DYNLIB_V1, "x86_64-unknown-linux-gnu")
+        val first = parser_variant_build_plan_v1(host(), [baseline]).unwrap()
+        var other_host = host()
+        other_host.snapshot_identity = d(90u64)
+        other_host.snapshot_generation = 3u64
+        val second = parser_variant_build_plan_v1(other_host, [baseline]).unwrap()
+        expect(first.artifacts[0].artifact_identity).to_equal(
+            second.artifacts[0].artifact_identity)
+        expect(first.plan_identity).to_equal(second.plan_identity)
+        expect(first.host_environment_identity == second.host_environment_identity).to_be(false)

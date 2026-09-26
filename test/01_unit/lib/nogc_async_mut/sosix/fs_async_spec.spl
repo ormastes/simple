@@ -2,7 +2,7 @@
 
 use std.spec.*
 use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
-use std.common.contracts.sosix.operation_v1.{SOSIX_OPERATION_TIMED_OUT, SOSIX_OPERATION_FREE, SOSIX_OPERATION_COMPLETED}
+use std.common.contracts.sosix.operation_v1.{SosixOperationId, SOSIX_OPERATION_TIMED_OUT, SOSIX_OPERATION_FREE, SOSIX_OPERATION_COMPLETED}
 use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
 use std.common.contracts.sosix.error_v1.{
     SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER, SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE
@@ -112,6 +112,42 @@ describe "SOSIX hosted positioned read over SimpleRing":
         expect(fs.service_one(0, 4u64)).to_be(true)
         expect(fs.pump()).to_equal(1)
         expect(check_single_wake(fs, first)).to_equal("ready")
+
+    it "rejects an out-of-range operation before indexing ring storage":
+        # @req REQ-SOSIX-FS-ASYNC
+        val fs = setup_sosix_software_ring(1)
+        val invalid = SosixOperationId(slot: 4294967295u32, generation: 1)
+        expect(fs.cancel(invalid).reason).to_equal("invalid-operation-slot")
+        expect(fs.expire(invalid, 10u64).reason).to_equal("invalid-operation-slot")
+        expect(fs.release(invalid).reason).to_equal("invalid-operation-slot")
+        match fs.poll(invalid):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Err(error): expect(error.kind).to_equal(SOSIX_ERROR_INVALID_CAPABILITY)
+                    case Ok(_): fail("invalid operation reported success")
+            case TaskPollResult.Pending(_): fail("invalid operation waited on a ring token")
+        expect(fs.occupancy()).to_equal(0u64)
+
+    it "does not let a stale operation wait on or release a reused slot":
+        # @req REQ-SOSIX-FS-ASYNC
+        val fs = setup_sosix_software_ring(1)
+        val old = submit_read(fs, 8u64, 0u64)
+        expect(fs.service_one(0, 8u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(fs.release(old.operation).accepted).to_be(true)
+        val current = submit_read(fs, 8u64, 0u64)
+        expect(current.accepted).to_be(true)
+        expect(fs.cancel(old.operation).reason).to_equal("stale-generation")
+        expect(fs.expire(old.operation, 10u64).reason).to_equal("stale-generation")
+        expect(fs.release(old.operation).reason).to_equal("stale-generation")
+        match fs.poll(old.operation):
+            case TaskPollResult.Ready(result):
+                match result:
+                    case Err(error): expect(error.kind).to_equal(SOSIX_ERROR_INVALID_CAPABILITY)
+                    case Ok(_): fail("stale operation reported success")
+            case TaskPollResult.Pending(_): fail("stale operation waited on the new token")
+        expect(check_single_wake(fs, current)).to_equal("pending-on-own-token")
+        expect(fs.occupancy()).to_equal(1u64)
 
     it "cannot release a timed-out slot until the ring retires the lease":
         step("Expire the deadline while the provider still owns the submission")
