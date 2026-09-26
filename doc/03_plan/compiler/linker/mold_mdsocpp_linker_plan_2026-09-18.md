@@ -283,9 +283,11 @@ encoded with checked signed branch reach and split-immediate preservation.
 The shared ELF object parser now accepts little-endian ELF32 headers and
 section tables, decodes ELF32 symbols, and canonicalizes both REL and RELA
 records into the same symbol/type representation used by ELF64. Implicit REL
-addend extraction, the remaining Thumb/data relocation corpus, and ARM
-executable emission remain before that lane can consume the existing LLVM
-ARM32 object backend end to end.
+addends are decoded from ARM data words, ARM branch immediates, Thumb-2 branch
+pairs, and split Thumb MOVW/MOVT instructions during object admission; malformed
+fields and unsupported ARM REL types fail closed. The remaining relocation
+corpus and ARM executable emission remain before that lane can consume the
+existing LLVM ARM32 object backend end to end.
 
 Implemented source slice:
 

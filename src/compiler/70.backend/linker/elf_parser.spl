@@ -11,7 +11,7 @@ use compiler.backend.linker.elf_inspect.{
     ELF32_HEADER_SIZE, ELF32_SHDR_SIZE, ELF64_HEADER_SIZE, ELF64_SHDR_SIZE,
     SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
-    EM_X86_64, EM_AARCH64, EM_RISCV
+    EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 }
 use std.string_core.{char_from_code}
 
@@ -167,6 +167,44 @@ fn elf_is_32(bytes: [u8]) -> bool:
 
 fn elf_signed_u32(value: i64) -> i64:
     if value >= 2147483648: value - 4294967296 else: value
+
+fn elf_sign_extend(value: i64, bits: i64) -> i64:
+    val sign = 1 << (bits - 1)
+    val modulus = 1 << bits
+    if value & sign != 0: value - modulus else: value
+
+fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
+    reloc: ElfRelocation) -> Result<i64, text>:
+    val at = target.sh_addr + reloc.r_offset
+    val rtype = elf_reloc_type(reloc)
+    if reloc.r_offset < 0 or reloc.r_offset + 4 > target.sh_size or at < 0 or at + 4 > bytes.len():
+        return Err("ARM REL relocation field extends beyond its target section")
+
+    val word = elf_read_u32_le(bytes, at)
+    if rtype == 0:
+        return Ok(0)
+    if rtype == 2 or rtype == 3:
+        return Ok(elf_signed_u32(word))
+    if rtype == 1 or rtype == 28 or rtype == 29:
+        return Ok(elf_sign_extend((word & 0xffffff) << 2, 26))
+    if rtype == 10 or rtype == 30:
+        val high = elf_read_u16_le(bytes, at)
+        val low = elf_read_u16_le(bytes, at + 2)
+        val sign = (high >> 10) & 1
+        val i1 = 1 - (((low >> 13) & 1) ^ sign)
+        val i2 = 1 - (((low >> 11) & 1) ^ sign)
+        val encoded = (sign << 24) | (i1 << 23) | (i2 << 22) |
+            ((high & 0x3ff) << 12) | ((low & 0x7ff) << 1)
+        return Ok(elf_sign_extend(encoded, 25))
+    if rtype >= 47 and rtype <= 50:
+        val high = elf_read_u16_le(bytes, at)
+        val low = elf_read_u16_le(bytes, at + 2)
+        val immediate = ((high & 0xf) << 12) | (((high >> 10) & 1) << 11) |
+            (((low >> 12) & 0x7) << 8) | (low & 0xff)
+        if rtype == 48 or rtype == 50:
+            return Ok(immediate << 16)
+        return Ok(immediate)
+    Err("unsupported ARM REL implicit-addend relocation type {rtype}")
 
 # ============================================================================
 # Section Lookup
@@ -450,7 +488,19 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
             val rela_relocs = elf_parse_relocations(bytes, sections[sec_i], sec_i)
             var k: i64 = 0
             while k < rela_relocs.len():
-                relocations = relocations.push(rela_relocs[k])
+                var reloc = rela_relocs[k]
+                if elf32 and header.e_machine == EM_ARM and sections[sec_i].sh_type == SHT_REL:
+                    if reloc.target_section_idx < 0 or reloc.target_section_idx >= sections.len():
+                        return Err("ARM REL relocation names an invalid target section")
+                    val addend = elf_arm_rel_addend(
+                        bytes, sections[reloc.target_section_idx], reloc)?
+                    reloc = ElfRelocation(
+                        r_offset: reloc.r_offset,
+                        r_info: reloc.r_info,
+                        r_addend: addend,
+                        section_idx: reloc.section_idx,
+                        target_section_idx: reloc.target_section_idx)
+                relocations = relocations.push(reloc)
                 k = k + 1
         sec_i = sec_i + 1
 
@@ -481,6 +531,7 @@ export elf_symbol_binding
 export elf_symbol_type
 export elf_reloc_sym
 export elf_reloc_type
+export elf_arm_rel_addend
 export elf_find_section_by_type
 export elf_defined_symbols
 export elf_undefined_symbols

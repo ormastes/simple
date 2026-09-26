@@ -20,6 +20,7 @@ use compiler.backend.linker.elf_parser.{
     elf_symbol_type,
     elf_reloc_sym,
     elf_reloc_type,
+    elf_arm_rel_addend,
     elf_find_section_by_type,
     elf_defined_symbols,
     elf_undefined_symbols,
@@ -249,6 +250,56 @@ describe "ELF Parser - ELF32 symbols and relocations":
         expect(elf_reloc_type(records[0])).to_equal(10)
         expect(records[0].r_addend).to_equal(0)
         expect(records[0].target_section_idx).to_equal(3)
+
+    it "extracts ARM and Thumb branch implicit addends":
+        val target = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6,
+            sh_addr: 0, sh_size: 4, sh_info: 0)
+        val arm = ElfRelocation(
+            r_offset: 0, r_info: 28, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+        val thumb = ElfRelocation(
+            r_offset: 0, r_info: 10, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+
+        val arm_addend = elf_arm_rel_addend([0x40, 0, 0, 0xeb], target, arm)
+        val thumb_forward = elf_arm_rel_addend([0x00, 0xf0, 0x80, 0xf8], target, thumb)
+        val thumb_backward = elf_arm_rel_addend([0xff, 0xf7, 0x80, 0xff], target, thumb)
+
+        expect(arm_addend.unwrap()).to_equal(0x100)
+        expect(thumb_forward.unwrap()).to_equal(0x100)
+        expect(thumb_backward.unwrap()).to_equal(-256)
+
+    it "extracts split Thumb MOVW and MOVT implicit addends":
+        val target = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6,
+            sh_addr: 0, sh_size: 4, sh_info: 0)
+        val movw = ElfRelocation(
+            r_offset: 0, r_info: 47, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+        val movt = ElfRelocation(
+            r_offset: 0, r_info: 48, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+
+        expect(elf_arm_rel_addend([0x41, 0xf2, 0x34, 0x20], target, movw).unwrap()).to_equal(0x1234)
+        expect(elf_arm_rel_addend([0xc1, 0xf2, 0x34, 0x20], target, movt).unwrap()).to_equal(0x12340000)
+
+    it "rejects malformed and unsupported ARM implicit addends":
+        val target = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6,
+            sh_addr: 0, sh_size: 2, sh_info: 0)
+        val malformed = ElfRelocation(
+            r_offset: 0, r_info: 28, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+        val unsupported = ElfRelocation(
+            r_offset: 0, r_info: 99, r_addend: 0,
+            section_idx: 2, target_section_idx: 1)
+
+        expect(elf_arm_rel_addend([0, 0], target, malformed).is_err()).to_equal(true)
+        val full_target = ElfSectionHeader(
+            sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 6,
+            sh_addr: 0, sh_size: 4, sh_info: 0)
+        expect(elf_arm_rel_addend([0, 0, 0, 0], full_target, unsupported).is_err()).to_equal(true)
 
     it "returns error on bad magic bytes":
         val bad_bytes: [i64] = [
