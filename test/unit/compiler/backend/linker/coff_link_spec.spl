@@ -155,6 +155,51 @@ fn _cl_importing_object() -> [u8]:
         i = i + 1
     bytes.push(0)
 
+fn _cl_weak_calling_object() -> [u8]:
+    # CALL rel32 weak; weak aliases strong through its auxiliary record.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 76)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 6)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 66)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xe8).push(0).push(0).push(0).push(0).push(0xc3)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "weak")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(105).push(1)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_name(bytes, "")
+    bytes = bytes.push(0).push(0)
+    bytes = _cl_name(bytes, "strong")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
 describe "internal freestanding Windows linker":
     it "retained symbols pull otherwise-unreferenced library members":
         val request = CoffLinkRequest(objects: [_cl_object("_start", 1)],
@@ -198,6 +243,18 @@ describe "internal freestanding Windows linker":
             _cl_object("helper", 1)], archives: [], entry: "_start"))
         expect(duplicate.is_err()).to_equal(true)
         expect(duplicate.unwrap_err()).to_contain("duplicate external COFF symbol 'helper'")
+
+    it "resolves weak aliases and prefers a primary weak-name definition":
+        step("Link a relocation through its strong fallback")
+        val fallback = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_weak_calling_object(), _cl_object("strong", 1)],
+            archives: [], entry: "_start"))
+        expect(fallback.is_ok()).to_equal(true)
+        step("Provide the weak name directly without its fallback")
+        val primary = coff_link_amd64(CoffLinkRequest(objects: [
+            _cl_weak_calling_object(), _cl_object("weak", 1)],
+            archives: [], entry: "_start"))
+        expect(primary.is_ok()).to_equal(true)
 
     it "rejects an empty request":
         expect(coff_link_amd64(CoffLinkRequest(objects: [], archives: [], entry: "_start")).is_err()).to_equal(true)
