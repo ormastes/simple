@@ -1431,14 +1431,21 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
          * is bounded by the 160 MiB user page pool. */
         case 11: return 0;
         case 12: return 0;
-        /* close: route pure C like open/read/write/stat above — NOT through
-         * the spl_arm64_net_close_direct strong shim. close was the last
-         * file syscall still entering Simple-compiled code during the R4a
-         * guest run, and the run faulted (kernel control-flow corruption)
-         * right after the first close (run-20260926_071701 / _074234). The
-         * clang-bring-up lane opens no net fds; re-enable a net-close path
-         * only with a C-side net fd table (see the strong-shim note above). */
-        case 33: return arm64_svc_file_close(a0);
+        /* The C file table owns only 3..SVC_MAX_FDS-1 (currently 15), while
+         * the direct network owner issues 100..INT32_MAX-1. Keep file close
+         * entirely in C; enter the Simple network owner only for its disjoint
+         * descriptor range. A forged or stale network number returns EBADF.
+         * The earlier all-fd strong-shim close fault remains a guest gate for
+         * this narrower route; source separation alone is not admission. */
+        case 33:
+            if (a0 >= 100U && a0 < 2147483647U) {
+                if (rt_arm64_virtio_net_ready() > 0 && spl_arm64_net_close_direct) {
+                    int64_t net_rc = spl_arm64_net_close_direct(a0, 0, 0, 0, 0, 0);
+                    return net_rc == -4096 ? -9 : net_rc;
+                }
+                return -9;
+            }
+            return arm64_svc_file_close(a0);
         /* unlink(39)/ftruncate(43)/rename(44): the guest lld's
          * FileOutputBuffer commit does create-temp + write + ftruncate +
          * rename(temp -> output); unimplemented they return -ENOSYS and lld

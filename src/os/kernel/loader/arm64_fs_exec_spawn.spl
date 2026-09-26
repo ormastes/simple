@@ -4,6 +4,7 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_adopt_authenticated_v1}
+use os.kernel.loader.fs_exec_launch_caps_v1.{fs_exec_launch_caps_with_launch_v1}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1}
 use os.kernel.loader.executable_load_plan_v1.{ExecutableLoadConsumerV1}
@@ -26,7 +27,7 @@ use os.kernel.log.klog.{KernelLog}
 use os.services.netstack.netstack_init.{net_arm64_task_teardown}
 use os.kernel.types.task_types.{TaskId}
 use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_pid, wait_collect_result_status}
-use os.kernel.types.capability_types.{CapabilityKind, CapabilitySet, CapabilityToken}
+use os.kernel.types.capability_types.{CapabilitySet}
 
 @cfg(arm64)
 use os.services.vfs.arm_fs_exec_vfs.{arm_fs_exec_stream_payload_resident_v1}
@@ -39,58 +40,11 @@ extern fn serial_println(msg: text)
 @cfg(arm64)
 extern fn rt_arm_payload_elf64_ring3_enter(size: u64, argv: [text]) -> i64
 
-fn _arm64_launch_token(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
-    CapabilityToken(kind: kind, generation: token_id, owner: owner,
-        token_id: token_id, parent_token_id: 0u64, depth: 0)
-
-fn _arm64_add_file_token(tokens: [CapabilityToken], kind: CapabilityKind,
-        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
-    tokens.push(_arm64_launch_token(kind, owner, next_id))
-    (tokens, next_id + 1u64)
-
-fn _arm64_add_server_persistence_path(tokens: [CapabilityToken], path: text,
-        owner: u64, next_id: u64) -> ([CapabilityToken], u64):
-    var result = _arm64_add_file_token(tokens,
-        CapabilityKind.FileRead(path_prefix: path), owner, next_id)
-    result = _arm64_add_file_token(result.0,
-        CapabilityKind.FileWrite(path_prefix: path), owner, result.1)
-    _arm64_add_file_token(result.0,
-        CapabilityKind.FileCreate(path_prefix: path), owner, result.1)
-
-pub fn arm64_fs_exec_launch_caps(path: text, argv: [text], owner: u64) -> CapabilitySet:
-    """Build the pledged, non-delegable authority for one payload launch."""
-    var tokens: [CapabilityToken] = []
-    var next_id: u64 = 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.NetConnect(port: 0), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.NetListen(port: 0), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.FileExec(path_prefix: path), owner, next_id))
-    next_id = next_id + 1u64
-    tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: path), owner, next_id))
-    next_id = next_id + 1u64
-    # Absolute argv entries are the only additional filesystem inputs known at
-    # launch. Flags and other scalar arguments must not turn into path grants.
-    for arg in argv:
-        if arg.starts_with("/") and arg != path:
-            tokens.push(_arm64_launch_token(CapabilityKind.FileRead(path_prefix: arg), owner, next_id))
-            next_id = next_id + 1u64
-    # The server payload consumes two immutable mounted inputs and the exact
-    # canonical database/WAL names. File capabilities use component-aware
-    # prefix matching, so granting each complete filename does not authorize a
-    # sibling or the filesystem root.
-    if path == "/SERVERS.ELF":
-        var added = _arm64_add_file_token(tokens,
-            CapabilityKind.FileRead(path_prefix: "/SYS/SERVER.HTM"), owner, next_id)
-        added = _arm64_add_file_token(added.0,
-            CapabilityKind.FileRead(path_prefix: "/SYS/SRVDB.KEY"), owner, added.1)
-        for db_path in [
-            "/SERVER.SDN", "/SERVER.SDN.lock", "/SERVER.SDN.tmp",
-            "/SERVER.SDN.wal", "/SERVER.SDN.wal.lock", "/SERVER.SDN.wal.tmp"
-        ]:
-            added = _arm64_add_server_persistence_path(added.0, db_path, owner, added.1)
-        tokens = added.0
-    CapabilitySet(caps: tokens, is_pledged: true)
+pub fn arm64_fs_exec_launch_caps_with_launch_v1(
+    path: text, argv: [text], envp: [text], owner: u64
+) -> CapabilitySet:
+    """Use the shared exact service recipe for the authenticated ARM64 launch."""
+    fs_exec_launch_caps_with_launch_v1(path, argv, envp, owner)
 
 pub fn arm64_fs_exec_spawn(path: text, argv: [text], envp: [text]) -> i64:
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
@@ -117,7 +71,8 @@ pub fn arm64_fs_exec_spawn_ring3(path: text, argv: [text], envp: [text]) -> i64:
     # The shim has a fresh canonical capability owner, so explicitly install a
     # least-privilege record for the scheduler-owned task before making it live.
     launch_ipc.cap_manager.init_task(
-        launch_id, arm64_fs_exec_launch_caps(path, argv, launch_id.id))
+        launch_id, arm64_fs_exec_launch_caps_with_launch_v1(
+            path, argv, envp, launch_id.id))
     val launch_log = KernelLog.new(256)
     shim_init(prepared.scheduler, launch_ipc, launch_log)
     val rc = dispatch_fs_exec_user_handoff(Architecture.Arm64, prepared.pid as u64, prepared.scheduler)
