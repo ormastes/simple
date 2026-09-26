@@ -149,6 +149,9 @@ non-following stat and explicit unsupported readlink. This is a compatibility
 bridge, not the required canonical NVFS root. A release guest must route the
 catalogue VFS and positioned file authority to the admitted NVFS image and
 prove persistence across a cold reboot.
+The single-owner cutover and its FD/catalogue ordering are specified in
+`doc/04_architecture/os/storage/simpleos_nvfs_root_owner_cutover.md` and
+`doc/03_plan/os/simpleos_nvfs_root_owner_cutover.md`.
 
 ## Contract and owner placement
 
