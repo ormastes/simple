@@ -1,6 +1,6 @@
 # `find_llc` resolves a nonexistent `llc-20` on Windows
 
-**Status:** open. **Host:** Windows x86_64-pc-windows-msvc, stage-2 self-hosted `simple_cli.exe`.
+**Status:** fixed (2026-09-26, fail-closed SMF PR): LLVM 23 prefix dirs are consulted, the POSIX probes are skipped on Windows, and `where` works now that `process_run` returns real exit codes. **Host:** Windows x86_64-pc-windows-msvc, stage-2 self-hosted `simple_cli.exe`.
 
 ## Symptom
 

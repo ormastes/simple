@@ -10,6 +10,7 @@ use compiler.backend.backend.io_compat.{backend_shell_tuple}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_read_bytes, file_exists}
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.io_runtime.{host_os}
 
 extern fn rt_env_get(key: text) -> text
 
@@ -66,9 +67,13 @@ fn _env_tool_dirs() -> [text]:
     val explicit = rt_env_get("SIMPLE_LLVM_BIN") ?? ""
     if explicit != "":
         dirs.push(explicit)
-    val prefix = rt_env_get("LLVM_SYS_180_PREFIX") ?? ""
-    if prefix != "":
-        dirs.push(prefix + "/bin")
+    # LLVM 23 is the Windows toolchain authority: the MSVC bootstrap env
+    # exports LLVM_SYS_231_PREFIX / SIMPLE_LLVM_WIN_ROOT_23 and unsets the
+    # LLVM 18 prefix.
+    for prefix_var in ["LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_WIN_ROOT_23", "LLVM_SYS_180_PREFIX"]:
+        val prefix = rt_env_get(prefix_var) ?? ""
+        if prefix != "":
+            dirs.push(prefix + "/bin")
     dirs
 
 fn _find_tool(candidates: [text]) -> text:
@@ -89,12 +94,16 @@ fn _find_tool(candidates: [text]) -> text:
             for path in [dir + "/" + candidate, dir + "/" + candidate + ".exe"]:
                 if file_exists(path) and _tool_runs(path):
                     return path
+    val on_windows = host_os() == "windows"
     for candidate in candidates:
-        if file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
+        # /usr/bin and the POSIX `command -v` probe are meaningless under
+        # cmd.exe; on Windows only `where` below applies.
+        if not on_windows and file_exists("/usr/bin/{candidate}") and _tool_runs("/usr/bin/{candidate}"):
             return "/usr/bin/{candidate}"
-        val (out, err, code) = backend_shell_tuple("command -v {candidate} >/dev/null 2>&1")
-        if code == 0 and _tool_runs(candidate):
-            return candidate
+        if not on_windows:
+            val (out, err, code) = backend_shell_tuple("command -v {candidate} >/dev/null 2>&1")
+            if code == 0 and _tool_runs(candidate):
+                return candidate
         # Windows fallback: `where` can list several installs and the FIRST
         # can be broken (mingw64 llc missing its own DLLs) while a later one
         # works (e.g. an LLVM MSVC release install). Try each resolved path
@@ -128,13 +137,7 @@ fn find_llc() -> text:
     Returns the command name if found, otherwise empty string.
     Bootstrap-safe: Returns text (not text?) with "" for not found.
     """
-    # Temporary trace: this lookup is the Stage 2 blocker and its failure message
-    # ("llc not found") carries no detail about WHY. Prints the configured tool
-    # dirs and the resolved answer. Remove once the lookup is fixed.
-    val _dirs = _env_tool_dirs()
-    val _resolved = _find_tool(["llc-20", "llc-19", "llc-18", "llc-17", "llc-16", "llc"])
-    print "find_llc: env_dirs={_dirs.len()} first={if _dirs.len() > 0: _dirs[0] else: "<none>"} resolved=[{_resolved}]"
-    _resolved
+    _find_tool(["llc-20", "llc-19", "llc-18", "llc-17", "llc-16", "llc"])
 
 fn find_llvm_as() -> text:
     """Find the LLVM textual-IR assembler for replayable bitcode debugging."""
