@@ -1,20 +1,43 @@
 use std.spec.*
 use std.io_runtime.{file_read}
+use compiler.driver.driver_source_loading.{_driver_text_bucket_set_new, _driver_text_bucket_set_add, _driver_text_bucket_set_has}
 
+# Retargeted 2026-09-26 to what main holds:
+# - f3acf376613 replaced newline-delimited text buckets with an exact
+#   Dict<text, bool> set (no `bucket.contains("\n" + marker)` scan);
+# - a9e474e9c9b replaced `closure_scanned_paths` with the single
+#   `closure_queued_paths` physical-queue set;
+# - 5409b246adc moved native-build's `discovered` set into
+#   native_build_closure.spl;
+# - 04eabbf50b3 dropped the always-miss content-keyed import-path memo cache
+#   (callers already dedup by path); the spec now pins that it stays gone.
 describe "entry-closure bucket count contract":
     it "bounds persistent bucket copies while retaining exact bucket sets":
-        val native_build = file_read("src/app/io/_CliCompile/compile_targets.spl")
-        val driver = file_read("src/compiler/80.driver/driver.spl")
+        val native_build = file_read("src/app/io/_CliCompile/native_build_closure.spl")
+        val pipeline = file_read("src/compiler/80.driver/driver_source_pipeline_loading.spl")
         val loading = file_read("src/compiler/80.driver/driver_source_loading.spl")
 
         expect(native_build).to_contain("var discovered = _driver_text_bucket_set_new(512)")
-        expect(driver).to_contain("var seen_sources = _driver_text_bucket_set_new(512)")
-        expect(driver).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(512)")
-        expect(driver).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(512)")
-        expect(driver).to_contain("var closure_scanned_paths = _driver_text_bucket_set_new(512)")
+        expect(pipeline).to_contain("var seen_sources = _driver_text_bucket_set_new(512)")
+        expect(pipeline).to_contain("var closure_loaded_mods = _driver_text_bucket_set_new(512)")
+        expect(pipeline).to_contain("var closure_seen_mods = _driver_text_bucket_set_new(512)")
+        expect(pipeline).to_contain("var closure_queued_paths = _driver_text_bucket_set_new(512)")
+        expect(pipeline.contains("var closure_scanned_paths")).to_equal(false)
         expect(loading).to_contain("var seen = _driver_text_bucket_set_new(512)")
-        expect(loading).to_contain("bucket.starts_with(marker) or bucket.contains(\"\\n\" + marker)")
-        expect(loading).to_contain("var _driver_entry_import_module_paths_cache: Dict<text, [text]> = {}")
-        expect(loading).to_contain("val cache_key = (if include_lazy: \"stage4:\" else: \"ordinary:\") + content")
-        expect(loading).to_contain("if _driver_entry_import_module_paths_cache.contains_key(cache_key):")
-        expect(loading).to_contain("_driver_entry_import_module_paths_cache[cache_key] = module_paths")
+        expect(loading).to_contain("pub fn _driver_text_bucket_set_new(bucket_count: i64) -> Dict<text, bool>:")
+        expect(loading).to_contain("fn _driver_text_bucket_set_has(buckets: Dict<text, bool>, key: text) -> bool:")
+        expect(loading.contains("bucket.contains(\"\\n\" + marker)")).to_equal(false)
+        expect(loading).to_contain("Dropped rather than rekeyed")
+        expect(loading.contains("_driver_entry_import_module_paths_cache")).to_equal(false)
+        expect(loading).to_contain("        return _driver_entry_import_module_paths_text_fallback(content)")
+
+    it "keeps bucket-set membership exact for prefix-colliding keys":
+        var buckets = _driver_text_bucket_set_new(1)
+        buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+        buckets = _driver_text_bucket_set_add(buckets, "std.alphabet")
+        buckets = _driver_text_bucket_set_add(buckets, "std.alpha")
+
+        expect(_driver_text_bucket_set_has(buckets, "std.alpha")).to_be(true)
+        expect(_driver_text_bucket_set_has(buckets, "std.alphabet")).to_be(true)
+        expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
+        expect(_driver_text_bucket_set_has(buckets, "alpha")).to_be(false)
