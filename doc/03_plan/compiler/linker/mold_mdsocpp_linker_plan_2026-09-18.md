@@ -190,6 +190,9 @@ not page-aligned.
 The complete AArch64 `MOVW_GOTOFF_G0..G3` family now allocates GOT entries,
 applies exact-base offsets, checks the terminal group widths, and preserves
 unchecked MOVK opcodes for `_NC` groups.
+`R_AARCH64_GOTREL64` and checked signed `GOTREL32` now write direct-symbol
+offsets from the synthesized `_GLOBAL_OFFSET_TABLE_` base without allocating
+unrelated per-symbol GOT entries.
 The AArch64 large-model initial-exec `MOVW_GOTTPREL_G1/G0_NC` pair now shares
 the TLS-IE GOT allocation path, computes offsets from the exact `.got` base,
 and applies the ABI's checked MOVZ/MOVN plus unchecked MOVK encodings.

@@ -41,6 +41,7 @@ use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_o
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_apply, reloc_patch_bytes,
     R_AARCH64_MOVW_GOTOFF_G0, R_AARCH64_MOVW_GOTOFF_G3,
+    R_AARCH64_GOTREL64, R_AARCH64_GOTREL32,
     R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC,
     R_AARCH64_LD64_GOTOFF_LO15, R_AARCH64_LD64_GOTPAGE_LO15}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
@@ -1199,7 +1200,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val sc = elf_reloc_scan(refs, target, mode)?
     var need_got_base = false
     for r in refs:
-        if r.name == "_GLOBAL_OFFSET_TABLE_":
+        if r.name == "_GLOBAL_OFFSET_TABLE_" or
+                (elf_target_is_a64(target) and
+                (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)):
             need_got_base = true
     val copies = elf_place_copies(common.inputs, sc)
     val inputs = copies.inputs
@@ -1338,6 +1341,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         val ref_value = elf_ref_value(ctx, lay, r)?
         var s = ref_value.address
         var a = ref_value.addend
+        if a64 and (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32):
+            p = gotplt_v
         if r.rclass == RC_TLS_LD:
             if r.kind != SYMREF_DEFINED:
                 return Err("AArch64 local-dynamic DTPREL relocation requires a local TLS definition: {r.name}")
