@@ -282,7 +282,7 @@ impl IpcManager:
         live.waiters = []
         self.ports[slot] = nil
         var permit_index = 0
-        while permit_index < self.reply_permits.len():
+        while permit_index < self.reply_permits.len() as i32:
             val permit = self.reply_permits[permit_index]
             if permit != nil:
                 val present = permit
@@ -357,33 +357,54 @@ impl IpcManager:
         val live = state
         Some(live.name)
 
+    fn _free_reply_permit_slot() -> i32:
+        if self.reply_permits.len() < MAX_REPLY_PERMITS as i64:
+            return self.reply_permits.len() as i32
+        var i = 0
+        while i < self.reply_permits.len() as i32:
+            if self.reply_permits[i] == nil:
+                return i
+            i = i + 1
+        -1
+
+    me _store_reply_permit(slot: i32, owner_id: u64, source_port: u64, destination_port: u64):
+        val permit = IpcReplyPermit(
+            owner_task_id: owner_id,
+            source_port: source_port,
+            destination_port: destination_port
+        )
+        if slot == self.reply_permits.len() as i32:
+            self.reply_permits.push(permit)
+        else:
+            self.reply_permits[slot] = permit
+
+    fn _reply_permit_slot(owner_id: u64, source_port: u64, destination_port: u64) -> i32:
+        var i = 0
+        while i < self.reply_permits.len() as i32:
+            val permit = self.reply_permits[i]
+            if permit != nil:
+                val present = permit
+                if (present.owner_task_id == owner_id and
+                    present.source_port == source_port and
+                    present.destination_port == destination_port):
+                    return i
+            i = i + 1
+        -1
+
     me grant_reply_permit(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
         """Record one exact reply right after the kernel accepts a request.
 
         The caller must supply a scheduler-authenticated task and prove that
-        the request was delivered; this ledger does not authenticate either.
+        the request was accepted; this ledger does not authenticate either.
         """
         if not self.port_is_owned_by(source_port, owner.id):
             return false
         if self._find_port_by_id(destination_port) < 0:
             return false
-        var i = 0
-        while i < self.reply_permits.len():
-            if self.reply_permits[i] == nil:
-                self.reply_permits[i] = IpcReplyPermit(
-                    owner_task_id: owner.id,
-                    source_port: source_port,
-                    destination_port: destination_port
-                )
-                return true
-            i = i + 1
-        if self.reply_permits.len() >= MAX_REPLY_PERMITS as i64:
+        val slot = self._free_reply_permit_slot()
+        if slot < 0:
             return false
-        self.reply_permits.push(IpcReplyPermit(
-            owner_task_id: owner.id,
-            source_port: source_port,
-            destination_port: destination_port
-        ))
+        self._store_reply_permit(slot, owner.id, source_port, destination_port)
         true
 
     fn reply_permit_allows(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
@@ -391,17 +412,7 @@ impl IpcManager:
             return false
         if self._find_port_by_id(destination_port) < 0:
             return false
-        var i = 0
-        while i < self.reply_permits.len():
-            val permit = self.reply_permits[i]
-            if permit != nil:
-                val present = permit
-                if (present.owner_task_id == owner.id and
-                    present.source_port == source_port and
-                    present.destination_port == destination_port):
-                    return true
-            i = i + 1
-        false
+        self._reply_permit_slot(owner.id, source_port, destination_port) >= 0
 
     me consume_reply_permit(owner: TaskId, source_port: u64, destination_port: u64) -> bool:
         """Consume exactly one live right; a failed lookup leaves all rights."""
@@ -409,18 +420,11 @@ impl IpcManager:
             return false
         if self._find_port_by_id(destination_port) < 0:
             return false
-        var i = 0
-        while i < self.reply_permits.len():
-            val permit = self.reply_permits[i]
-            if permit != nil:
-                val present = permit
-                if (present.owner_task_id == owner.id and
-                    present.source_port == source_port and
-                    present.destination_port == destination_port):
-                    self.reply_permits[i] = nil
-                    return true
-            i = i + 1
-        false
+        val slot = self._reply_permit_slot(owner.id, source_port, destination_port)
+        if slot < 0:
+            return false
+        self.reply_permits[slot] = nil
+        true
 
     fn next_owned_payload_len(receiver_task: TaskId, port: IpcPort) -> i64:
         """Preflight a copied receive without consuming or exposing the FIFO head.
@@ -463,6 +467,8 @@ impl IpcManager:
           -5 = header payload_len does not match the supplied bytes
           -6 = destination payload-byte budget exhausted
           -7 = capability count/transfer is unsupported on this path
+          -8 = reply has no exact one-use permit
+          -9 = reply-permit budget exhausted before request enqueue
         """
         if payload.len() > MAX_OWNED_PAYLOAD_BYTES:
             return IPC_OWNED_PAYLOAD_TOO_LARGE
@@ -490,6 +496,18 @@ impl IpcManager:
         if payload_bytes > MAX_OWNED_QUEUE_BYTES - port_state.queue.owned_payload_bytes:
             return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
 
+        val is_reply = header.flags == (IpcFlags.Reply as u32)
+        val is_request = header.flags == (IpcFlags.Async as u32)
+        val reply_slot = if is_reply:
+            self._reply_permit_slot(sender_task.id, claimed_source_port, header.dst_port)
+        else:
+            -1
+        if is_reply and reply_slot < 0:
+            return -8
+        val new_permit_slot = if is_request: self._free_reply_permit_slot() else: -1
+        if is_request and new_permit_slot < 0:
+            return -9
+
         val owned = QueuedIpcMessage(
             header: header,
             payload: _copy_owned_payload(payload),
@@ -497,10 +515,17 @@ impl IpcManager:
         )
         if not port_state.queue.push(owned):
             return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
+        self.ports[destination_slot] = port_state
+        if is_reply:
+            self.reply_permits[reply_slot] = nil
+        if is_request:
+            self._store_reply_permit(
+                new_permit_slot, port_state.port.owner,
+                header.dst_port, claimed_source_port
+            )
         # K1 has no dispatcher-authenticated sender identity; record zero until
         # K2 supplies the actual current task.
         replay_hook_ipc_send(0, header.dst_port as i64, header.payload_len as i64)
-        self.ports[destination_slot] = port_state
         0
 
     me recv_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcReceiveResult:

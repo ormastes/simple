@@ -59,8 +59,10 @@ the receive transaction. The current `ipc_owned_syscall_v1_spec.spl` and
 `ipc_endpoint_namespace_spec.spl` reference further names missing from their
 source owners, including the 132/133 handlers, header encoder, endpoint
 inspection helpers, and reply-permit methods. Endpoint inspection and a
-bounded exact-pair reply-permit ledger now exist; no trap handler grants or
-consumes those permits yet. The handler and encoder imports remain unresolved,
+bounded exact-pair reply-permit ledger now exist. Accepted copied requests
+mint one permit and accepted copied replies consume one inside the queue owner;
+the live 132/133 traps still do not reach that owner. The handler and encoder
+imports remain unresolved,
 so these tests are not passing evidence. Implement and execute those contracts
 before using owned IPC for positioned control. The queue's `send_owned` owner
 check receives a `TaskId` argument; only the trap shim may supply it from
