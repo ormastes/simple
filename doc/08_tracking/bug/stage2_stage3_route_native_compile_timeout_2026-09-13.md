@@ -379,3 +379,29 @@ collision — `fresh_local()` emits `%t{n}` by construction. `defined_locals`
 already records the first definition and is simply never used to refuse the
 second. Full evidence and the `module_logical_name_from_path` hypothesis:
 `doc/10_metrics/infra/macos_bootstrap_chain_2026-09-12.md` § Run 23.
+
+## 2026-09-26: reproduced on Windows MSVC, and it is INTERMITTENT there
+
+Lane: `bootstrap-windows.sh --full-bootstrap --stop-after-stage2`, worktree at
+`origin/main` `2ac548f7563` plus 7aaeabbee29, `x86_64-pc-windows-msvc`, LLVM 23.1.1.
+Same verdict as above, `stage2 failed the positional pure-Simple Stage-3 route
+(status 124)`. The route log stops right after
+`[mono] generic_fns=0 call_sites=0 specializations=0 unresolved=0`.
+
+Replaying the probe by hand with the rejected Stage 2 binary, using the same env and
+argv as `check-bootstrap-stage2-struct-receiver.shs:116-142` (fixture
+`scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl`,
+`--threads 1 --mode dynload --runtime-bundle core-c-bootstrap`):
+
+| env | runs | result |
+|---|---|---|
+| full interactive env | 1 | rc=0, 28 s |
+| `env -i` + stage allowlist (PATH, LLVM_SYS_231_PREFIX, CC, INCLUDE, LIB, LIBPATH) | 1 | **rc=124 at 600 s** (hang, no output after `[mono]`) |
+| same `env -i`, plus one of SystemRoot/windir, TEMP/TMP, ComSpec, USERPROFILE | 4 (parallel) | rc=0, 59 s each |
+| same bare `env -i` | 3 (parallel) | rc=0, 63-65 s each |
+
+The very next full bootstrap run from the same tree passed this step. So on Windows
+the hang is intermittent (2 hangs, 8 passes) and does not depend on any single
+missing environment variable. A longer timeout would not help: one hang lasted the
+full 600 s. The cause has not been found. The next step is to capture a native stack
+of the stuck `simple.exe` after `[mono]`; it had no child process at the time.
