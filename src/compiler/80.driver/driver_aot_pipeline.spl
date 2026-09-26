@@ -24,7 +24,7 @@ use compiler.common.driver_core_types.{
     driver_output_format_is_both,
     driver_output_format_is_self_contained
 }
-use std.io_runtime.{env_get_opt, file_read_result, hash_text}
+use std.io_runtime.{env_get_opt, file_read_result, hash_text, is_file}
 
 fn native_build_cache_dir() -> text:
     val dir = env_get_opt("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
@@ -55,6 +55,18 @@ fn _driver_default_output(input_files: [text]) -> text:
         "build/native/{_driver_default_stem(input_files[0])}"
     else:
         "build/native/out"
+
+# The SMF manifest row is keyed by the ENTRY source. native-build passes its
+# `--source` DIRECTORIES before the entry (compile_targets.spl) and
+# `--entry-closure` passes the BFS closure with the entry first, so in every
+# producer the entry is the first input that is a regular file. Reading
+# input_files[0] hashed a directory and, once the read failed closed
+# (ec19563b735), turned every default native-build into a CodegenError.
+fn _driver_entry_source_input(input_files: [text]) -> text:
+    for path in input_files:
+        if is_file(path):
+            return path
+    input_files[0]
 
 impl CompilerDriver:
     me aot_compile() -> CompileResult:
@@ -178,7 +190,7 @@ impl CompilerDriver:
             val native_result = self.compile_to_native(output)
             if not native_result.is_success():
                 return native_result
-            val source_path = self.ctx.options.input_files[0]
+            val source_path = _driver_entry_source_input(self.ctx.options.input_files)
             val smf_cache_path = source_to_cache_path(source_path, native_build_cache_dir(), ".smf")
             val smf_result = self.compile_to_smf(smf_cache_path)
             if smf_result.is_success():
@@ -186,7 +198,7 @@ impl CompilerDriver:
                 val source_result = file_read_result(source_path)
                 val src = match source_result:
                     case Ok(content): content
-                    case Err(error): return CompileResult.CodegenError(error)
+                    case Err(read_error): return CompileResult.CodegenError(read_error)
                 val src_hash = hash_text(src)
                 update_smf_manifest_entry(
                     source_path,
