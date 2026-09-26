@@ -12,6 +12,8 @@ val COFF_RELOCATION_SIZE: i64 = 10
 
 val COFF_STORAGE_CLASS_EXTERNAL: i64 = 2
 val COFF_STORAGE_CLASS_STATIC: i64 = 3
+val COFF_STORAGE_CLASS_WEAK_EXTERNAL: i64 = 105
+val COFF_WEAK_SEARCH_ALIAS: i64 = 3
 val COFF_SECTION_CNT_UNINITIALIZED_DATA: i64 = 0x00000080
 val COFF_SECTION_LNK_INFO: i64 = 0x00000200
 val COFF_SECTION_LNK_REMOVE: i64 = 0x00000800
@@ -59,9 +61,16 @@ struct CoffSymbol:
     storage_class: i64
     auxiliary_count: i64
     table_index: i64
+    weak_default_index: i64
+    weak_characteristics: i64
 
     fn is_defined() -> bool: self.section_number > 0
-    fn is_external() -> bool: self.storage_class == COFF_STORAGE_CLASS_EXTERNAL
+    fn is_external() -> bool:
+        self.storage_class == COFF_STORAGE_CLASS_EXTERNAL or
+            self.storage_class == COFF_STORAGE_CLASS_WEAK_EXTERNAL
+
+    fn is_weak_external() -> bool:
+        self.storage_class == COFF_STORAGE_CLASS_WEAK_EXTERNAL
 
 struct CoffObject:
     machine: i64
@@ -206,10 +215,20 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         val auxiliary_count = data[base + 17] as i64
         if symbol_index + auxiliary_count >= symbol_count:
             return Err("COFF symbol {symbol_index} auxiliary records exceed table size {symbol_count}")
+        var weak_default_index: i64 = -1
+        var weak_characteristics: i64 = 0
+        if storage_class == COFF_STORAGE_CLASS_WEAK_EXTERNAL:
+            if section_number != 0 or auxiliary_count != 1:
+                return Err("weak external COFF symbol '{name_result.unwrap()}' must be undefined with one auxiliary record")
+            weak_default_index = _coff_u32(data, base + COFF_SYMBOL_SIZE)
+            weak_characteristics = _coff_u32(data, base + COFF_SYMBOL_SIZE + 4)
+            if weak_default_index < 0 or weak_default_index >= symbol_count:
+                return Err("weak external COFF symbol '{name_result.unwrap()}' fallback index is out of bounds")
         symbols = symbols.push(CoffSymbol(name: name_result.unwrap(), value: value,
             section_number: section_number, symbol_type: symbol_type,
             storage_class: storage_class, auxiliary_count: auxiliary_count,
-            table_index: symbol_index))
+            table_index: symbol_index, weak_default_index: weak_default_index,
+            weak_characteristics: weak_characteristics))
         if storage_class == COFF_STORAGE_CLASS_EXTERNAL and section_number > 0 and
                 section_number <= section_count and comdat_keys[section_number - 1] == "":
             comdat_keys[section_number - 1] = name_result.unwrap()
@@ -263,6 +282,20 @@ fn coff_symbol_at_table_index(object: CoffObject, table_index: i64) -> Result<Co
         if symbol.table_index == table_index: return Ok(symbol)
     Err("COFF symbol-table index {table_index} names an auxiliary or missing record")
 
+fn coff_symbol_resolution_name(object: CoffObject, symbol: CoffSymbol) -> Result<text, text>:
+    """Return the strong name used to satisfy an undefined weak external."""
+    if not symbol.is_weak_external(): return Ok(symbol.name)
+    if symbol.weak_characteristics != COFF_WEAK_SEARCH_ALIAS:
+        return Err("weak external COFF symbol '{symbol.name}' uses unsupported search policy {symbol.weak_characteristics}")
+    val fallback = coff_symbol_at_table_index(object, symbol.weak_default_index)
+    if fallback.is_err(): return Err("weak external COFF symbol '{symbol.name}': {fallback.unwrap_err()}")
+    val target = fallback.unwrap()
+    if target.name == "" or target.table_index == symbol.table_index:
+        return Err("weak external COFF symbol '{symbol.name}' has an invalid fallback")
+    if target.is_weak_external():
+        return Err("weak external COFF symbol '{symbol.name}' cannot alias another weak external")
+    Ok(target.name)
+
 fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
         addend: i64, place_address: i64, image_base: i64) -> CoffRelocationValue:
     """Compute one AMD64 COFF relocation, rejecting truncation and unknown types."""
@@ -289,11 +322,12 @@ fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
 
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
 export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
-export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC
+export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC, COFF_STORAGE_CLASS_WEAK_EXTERNAL
+export COFF_WEAK_SEARCH_ALIAS
 export COFF_SECTION_CNT_UNINITIALIZED_DATA, COFF_SECTION_LNK_INFO
 export COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT
 export COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_ADDR32NB
 export COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_1, COFF_REL_AMD64_REL32_2
 export COFF_REL_AMD64_REL32_3, COFF_REL_AMD64_REL32_4, COFF_REL_AMD64_REL32_5
 export COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7
-export coff_parse_object, coff_symbol_at_table_index, coff_apply_amd64_relocation
+export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name, coff_apply_amd64_relocation

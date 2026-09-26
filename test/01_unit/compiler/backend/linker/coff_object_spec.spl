@@ -3,7 +3,7 @@ use std.spec.step
 use compiler.backend.linker.coff.coff_object.{
     COFF_MACHINE_AMD64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_REL32,
     COFF_REL_AMD64_REL32_5, coff_parse_object, coff_symbol_at_table_index,
-    coff_apply_amd64_relocation}
+    coff_symbol_resolution_name, coff_apply_amd64_relocation}
 
 fn _push_u16(bytes: [u8], value: i64) -> [u8]:
     var result = bytes.push((value & 0xff) as u8)
@@ -123,6 +123,30 @@ fn _minimal_comdat_object() -> [u8]:
     bytes = bytes.push(2).push(0)
     _push_u32(bytes, 4)
 
+fn _weak_external_object(fallback_index: i64, characteristics: i64 = 3) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 20)
+    bytes = _push_u32(bytes, characteristics)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_fixed(bytes, "weak", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = bytes.push(105).push(1)
+    bytes = _push_u32(bytes, fallback_index)
+    bytes = _push_u32(bytes, 3)
+    bytes = _push_fixed(bytes, "", 10)
+    bytes = _push_fixed(bytes, "strong", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
+    _push_u32(bytes, 4)
+
 describe "raw COFF object parser":
     it "decodes an AMD64 section, symbol, and relocation":
         step("Parse the raw object form emitted by LLVM on Windows")
@@ -160,6 +184,28 @@ describe "raw COFF object parser":
         expect(section.comdat_selection).to_equal(1)
         expect(section.comdat_checksum).to_equal(0x1234)
         expect(section.comdat_key).to_equal("function")
+
+    it "decodes a weak external and resolves its strong fallback":
+        step("Follow the bounded auxiliary-record tag index")
+        val parsed = coff_parse_object(_weak_external_object(2))
+        expect(parsed.is_ok()).to_equal(true)
+        val object = parsed.unwrap()
+        val weak = coff_symbol_at_table_index(object, 0).unwrap()
+        expect(weak.is_weak_external()).to_equal(true)
+        expect(weak.weak_characteristics).to_equal(3)
+        expect(coff_symbol_resolution_name(object, weak).unwrap()).to_equal("strong")
+
+    it "rejects a weak-external fallback outside the symbol table":
+        val parsed = coff_parse_object(_weak_external_object(9))
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("fallback index is out of bounds")
+
+    it "rejects a weak search policy that is not an alias":
+        val object = coff_parse_object(_weak_external_object(2, 1)).unwrap()
+        val weak = coff_symbol_at_table_index(object, 0).unwrap()
+        val resolved = coff_symbol_resolution_name(object, weak)
+        expect(resolved.is_err()).to_equal(true)
+        expect(resolved.unwrap_err()).to_contain("unsupported search policy")
 
     it "rejects linked PE input instead of confusing it with an object":
         val parsed = coff_parse_object([0x4d as u8, 0x5a as u8])
