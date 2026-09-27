@@ -31,7 +31,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   directional evidence (5,152-byte ELF). A same-wrapper, same-root C user
   object probe is 9,168 bytes versus the historical Simple ELF's 13,944;
   it still misses the 1.05x C ceiling by 4,061 bytes and is not completion
-  evidence. Review argv and forced runtime roots with exact closure proof.
+  evidence. A controlled link without the historical builder's unnecessary
+  `rt_function_not_found`/`rt_string_bytes` roots is 6,584 bytes, still 1,477
+  bytes over the ceiling; current Stage4 already derives symbol roots from
+  the final object closure, so this is attribution, not an unmade linker fix.
+  Review argv and startup/runtime roots with exact closure proof.
 
 ## Target 6 — persistent compile index
 
