@@ -1,7 +1,7 @@
 # Relocation-graph section garbage collection for internal ELF executable links.
 
 use compiler.backend.linker.elf_parser.{
-    ElfObject, elf_section_name, elf_reloc_sym, elf_symbol_binding,
+    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_symbol_binding,
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL
 }
 use compiler.backend.linker.sym_resolver.{SymResolution}
@@ -32,6 +32,119 @@ fn _gc_mark_name(res: SymResolution, live: [[bool]],
         return (live, work_obj, work_sec, commons)
     val marked = _gc_mark(live, work_obj, work_sec, e.obj_idx, e.section_idx)
     (marked.get(0), marked.get(1), marked.get(2), common_live)
+
+fn _gc_mark_reloc_target(obj: ElfObject, oi: i64, reloc: ElfRelocation, res: SymResolution,
+        live: [[bool]], work_obj: [i64], work_sec: [i64], common_live: {text: bool}) -> ([[bool]], [i64], [i64], {text: bool}):
+    val sym_idx = elf_reloc_sym(reloc)
+    if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+        return (live, work_obj, work_sec, common_live)
+    val sym = obj.symbols[sym_idx]
+    if elf_symbol_binding(sym) == STB_LOCAL:
+        if sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON_GC:
+            val marked = _gc_mark(live, work_obj, work_sec, oi, sym.st_shndx)
+            return (marked.get(0), marked.get(1), marked.get(2), common_live)
+        return (live, work_obj, work_sec, common_live)
+    _gc_mark_name(res, live, work_obj, work_sec, common_live, sym.name)
+
+fn _gc_reloc_target_live(obj: ElfObject, oi: i64, reloc: ElfRelocation, res: SymResolution,
+        live: [[bool]]) -> bool:
+    val sym_idx = elf_reloc_sym(reloc)
+    if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+        return false
+    val sym = obj.symbols[sym_idx]
+    var target_obj = oi
+    var target_sec = sym.st_shndx
+    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "" and res.defined.has(sym.name):
+        val e = res.defined[sym.name]
+        target_obj = e.obj_idx
+        target_sec = e.section_idx
+    if target_sec == SHN_UNDEF or target_sec == SHN_COMMON_GC:
+        return false
+    target_obj >= 0 and target_obj < live.len() and target_sec > 0 and
+        target_sec < live[target_obj].len() and live[target_obj][target_sec]
+
+fn _gc_u32(raw: [u8], off: i64) -> i64:
+    (raw[off] as i64) | ((raw[off + 1] as i64) << 8) |
+        ((raw[off + 2] as i64) << 16) | ((raw[off + 3] as i64) << 24)
+
+fn _gc_eh_record(offsets: [i64], ends: [i64], at: i64) -> i64:
+    """Index of the ascending .eh_frame record containing byte at, or -1."""
+    var lo: i64 = 0
+    var hi: i64 = offsets.len() - 1
+    while lo <= hi:
+        val mid = (lo + hi) / 2
+        if at < offsets[mid]:
+            hi = mid - 1
+        elif at >= ends[mid]:
+            lo = mid + 1
+        else:
+            return mid
+    -1
+
+fn _gc_mark_eh_frame(obj: ElfObject, oi: i64, res: SymResolution, live: [[bool]],
+        work_obj: [i64], work_sec: [i64], common_live: {text: bool}) -> ([[bool]], [i64], [i64], {text: bool}):
+    """Follow .eh_frame edges like lld: an FDE whose pc_begin target is live
+    keeps its other targets (the LSDA) and its CIE's (the personality)."""
+    var eh_si: i64 = -1
+    var si: i64 = 1
+    while si < obj.sections.len():
+        if elf_section_name(obj, si) == ".eh_frame":
+            eh_si = si
+        si = si + 1
+    if eh_si < 0 or not live[oi][eh_si]:
+        return (live, work_obj, work_sec, common_live)
+    val sec = obj.sections[eh_si]
+    var offsets: [i64] = []
+    var ends: [i64] = []
+    var cie_offsets: [i64] = []
+    var off: i64 = 0
+    while off + 4 <= sec.sh_size:
+        val length = _gc_u32(obj.raw, sec.sh_addr + off)
+        if length == 0:
+            off = off + 4
+            continue
+        if length == 0xffffffff or length < 4 or off + 4 + length > sec.sh_size:
+            break  # the strict .eh_frame_hdr builder reports malformed records
+        val id = _gc_u32(obj.raw, sec.sh_addr + off + 4)
+        offsets = offsets.push(off)
+        ends = ends.push(off + 4 + length)
+        cie_offsets = cie_offsets.push(if id == 0: -1 else: off + 4 - id)
+        off = off + 4 + length
+    var record_at: {i64: i64} = {}
+    var keep: [bool] = []
+    var ri: i64 = 0
+    while ri < offsets.len():
+        record_at[offsets[ri]] = ri
+        keep = keep.push(false)
+        ri = ri + 1
+    for reloc in obj.relocations:
+        if reloc.target_section_idx != eh_si:
+            continue
+        val fi = _gc_eh_record(offsets, ends, reloc.r_offset)
+        if fi >= 0 and cie_offsets[fi] >= 0 and reloc.r_offset == offsets[fi] + 8 and
+                _gc_reloc_target_live(obj, oi, reloc, res, live):
+            keep[fi] = true
+            if record_at.has(cie_offsets[fi]):
+                keep[record_at[cie_offsets[fi]]] = true
+    var next_live = live
+    var next_obj = work_obj
+    var next_sec = work_sec
+    var next_commons = common_live
+    for reloc in obj.relocations:
+        if reloc.target_section_idx != eh_si:
+            continue
+        val ki = _gc_eh_record(offsets, ends, reloc.r_offset)
+        if ki < 0 or not keep[ki]:
+            continue
+        if cie_offsets[ki] >= 0 and reloc.r_offset == offsets[ki] + 8:
+            continue  # pc_begin: the function itself is not kept by its FDE
+        val marked = _gc_mark_reloc_target(obj, oi, reloc, res,
+            next_live, next_obj, next_sec, next_commons)
+        next_live = marked.get(0)
+        next_obj = marked.get(1)
+        next_sec = marked.get(2)
+        next_commons = marked.get(3)
+    (next_live, next_obj, next_sec, next_commons)
 
 fn _gc_glob(pat: text, value: text) -> bool:
     var pi: i64 = 0
@@ -106,33 +219,37 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         oi = oi + 1
 
     var wi: i64 = 0
-    while wi < work_obj.len():
-        oi = work_obj[wi]
-        val si = work_sec[wi]
-        val obj = objects[oi]
-        if elf_section_name(obj, si) == ".eh_frame":
-            wi = wi + 1
-            continue
-        for reloc in obj.relocations:
-            if reloc.target_section_idx != si:
+    var scanning = true
+    while scanning:
+        while wi < work_obj.len():
+            oi = work_obj[wi]
+            val si = work_sec[wi]
+            val obj = objects[oi]
+            if elf_section_name(obj, si) == ".eh_frame":
+                wi = wi + 1
                 continue
-            val sym_idx = elf_reloc_sym(reloc)
-            if sym_idx <= 0 or sym_idx >= obj.symbols.len():
-                continue
-            val sym = obj.symbols[sym_idx]
-            if elf_symbol_binding(sym) == STB_LOCAL:
-                if sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON_GC:
-                    val marked = _gc_mark(live, work_obj, work_sec, oi, sym.st_shndx)
-                    live = marked.get(0)
-                    work_obj = marked.get(1)
-                    work_sec = marked.get(2)
-            else:
-                val marked = _gc_mark_name(res, live, work_obj, work_sec, commons, sym.name)
+            for reloc in obj.relocations:
+                if reloc.target_section_idx != si:
+                    continue
+                val marked = _gc_mark_reloc_target(obj, oi, reloc, res,
+                    live, work_obj, work_sec, commons)
                 live = marked.get(0)
                 work_obj = marked.get(1)
                 work_sec = marked.get(2)
                 commons = marked.get(3)
-        wi = wi + 1
+            wi = wi + 1
+        # .eh_frame is a root whose edges are conditional on the FDE's
+        # function being live; newly kept LSDAs/personalities can reach more.
+        val before = work_obj.len()
+        oi = 0
+        while oi < objects.len():
+            val eh = _gc_mark_eh_frame(objects[oi], oi, res, live, work_obj, work_sec, commons)
+            live = eh.get(0)
+            work_obj = eh.get(1)
+            work_sec = eh.get(2)
+            commons = eh.get(3)
+            oi = oi + 1
+        scanning = work_obj.len() > before
     ElfSectionGc(live: live, common_live: commons)
 
 fn elf_gc_undefined(objects: [ElfObject], live: [[bool]], res: SymResolution) -> [text]:
