@@ -14,6 +14,17 @@ ownership gap before any driver cutover.
 | Persistent generation | `compiler_entrypoint/admission.spl` is the only production caller of `package_module_index_publish_v1`; it publishes an empty snapshot-binding generation. | Publish a validated graph generation from the cold builder after artifact production, and preserve one immutable generation for each request. |
 | Warm compatibility markers | `driver_source_pipeline_loading.spl` reads producer, root-generation, and variant-digest environment markers. No production owner sets those three markers. | Set markers from the admitted graph generation and configuration variant, then remove the binding-only cold fallback when the full route is qualified. |
 
+The existing AOT SMF writer is not that typed section producer.
+`driver_aot_smf_output.spl` concatenates backend object bytes from the
+current MIR modules into one executable SMF. `smf_writer.spl` lays out code,
+template, dependency, driver-manifest, and launch-metadata sections plus one
+`main` symbol. It does not emit per-module exported symbols, public types,
+layouts, or constants for `PackageExportSmfV1`. Its `note.sdn` section also
+uses a zero extent in the table, while the TLDR section-directory validator
+requires a positive extent. The cold producer must issue typed export bytes
+from HIR and validate their own bounded section directory; treating the AOT
+image as a package TLDR would bind unrelated or absent semantic facts.
+
 The isolated archive reader now validates digest bytes and canonicalizes
 dependency digests with the shared heap sort. This removes native text
 comparison and quadratic sorting from that admission step. It does not

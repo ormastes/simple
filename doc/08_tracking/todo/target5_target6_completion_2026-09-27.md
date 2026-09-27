@@ -54,6 +54,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   lookup table.
   The concrete producer/receipt ownership gap is mapped in
   `doc/09_report/compiler/target6_cold_graph_producer_boundary_2026-09-27.md`.
+  The executable AOT SMF writer cannot supply typed export sections or
+  per-module receipts; emit those from HIR rather than deriving placeholder
+  digests from the combined code image.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.
