@@ -90,6 +90,9 @@ static int rt_msvc_ftruncate(int fd, long long length) {
 }
 #define ftruncate rt_msvc_ftruncate
 
+#endif
+
+#if defined(_WIN32)
 #ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME 0
 #endif
@@ -100,7 +103,7 @@ static int rt_msvc_ftruncate(int fd, long long length) {
  * 1970); CLOCK_MONOTONIC from QueryPerformanceCounter, the only genuinely
  * monotonic Windows source. Any other clock id is refused rather than silently
  * answered with the wrong timebase. */
-static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
+static int rt_windows_clock_gettime(int clock_id, struct timespec* ts) {
     if (!ts) return -1;
     if (clock_id == CLOCK_REALTIME) {
         FILETIME ft;
@@ -123,7 +126,7 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
     }
     return -1;
 }
-#define clock_gettime rt_msvc_clock_gettime
+#define clock_gettime rt_windows_clock_gettime
 #endif
 /* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
  * defines it, while glibc/libc++ still do. Defining it only when absent keeps
@@ -2959,7 +2962,11 @@ static void rt_win_set_binary_stdio(void) {
      * had already broken inventory generations. Make binary the process
      * default, which is the POSIX and Rust-std contract every caller assumes;
      * an explicit "t" still opts into translation. */
+#if defined(_MSC_VER)
     _set_fmode(_O_BINARY);
+#else
+    _fmode = _O_BINARY;
+#endif
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);

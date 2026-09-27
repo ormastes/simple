@@ -3170,6 +3170,17 @@ pub(crate) fn is_system_symbol(sym: &str) -> bool {
     }
 }
 
+pub(crate) fn is_system_symbol_for_target(sym: &str, target: simple_common::target::Target) -> bool {
+    if target.os == simple_common::target::TargetOS::Windows {
+        let name = sym.strip_prefix('_').unwrap_or(sym);
+        return is_windows_system_name(sym)
+            || is_windows_system_name(name)
+            || is_windows_system_prefix(sym)
+            || is_windows_system_prefix(name);
+    }
+    is_system_symbol(sym)
+}
+
 /// Return true for libgcc/compiler-rt low-level helper names.
 ///
 /// Freestanding links must resolve these from compiler-rt/libgcc, not from the
@@ -3236,7 +3247,6 @@ pub(crate) fn is_compiler_rt_builtin_symbol(sym: &str) -> bool {
         .any(|prefix| sym.starts_with(prefix) || name.starts_with(prefix))
 }
 
-#[cfg(target_os = "windows")]
 fn is_windows_system_name(name: &str) -> bool {
     matches!(
         name,
@@ -3264,6 +3274,8 @@ fn is_windows_system_name(name: &str) -> bool {
             | "strstr"
             | "strchr"
             | "strrchr"
+            | "wcscmp"
+            | "wcscpy"
             | "strtol"
             | "strtoul"
             | "strtod"
@@ -3304,6 +3316,7 @@ fn is_windows_system_name(name: &str) -> bool {
             | "exit"
             | "_exit"
             | "abort"
+            | "raise"
             | "atexit"
             | "getenv"
             | "system"
@@ -3356,6 +3369,7 @@ fn is_windows_system_name(name: &str) -> bool {
             | "trunc"
             | "truncf"
             | "_hypot"
+            | "hypot"
             | "qsort"
             | "bsearch"
             | "abs"
@@ -3426,7 +3440,6 @@ fn is_windows_system_name(name: &str) -> bool {
     )
 }
 
-#[cfg(target_os = "windows")]
 fn is_windows_system_prefix(name: &str) -> bool {
     name.starts_with("__imp_")
         || name.starts_with("__mingw_")
@@ -3811,6 +3824,7 @@ fn is_known_system_name(name: &str) -> bool {
             | "exit"
             | "_exit"
             | "abort"
+            | "raise"
             | "atexit"
             | "getenv"
             | "setenv"
