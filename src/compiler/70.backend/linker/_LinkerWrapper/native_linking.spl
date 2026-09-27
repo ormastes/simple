@@ -62,11 +62,12 @@ use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64_retained_policy,
-    coff_link_arm64_retained_policy,
+    CoffLinkRequest, coff_link_amd64_retained_image_policy,
+    coff_link_arm64_retained_image_policy,
     coff_link_default_libraries, coff_link_arm64_default_libraries}
 use compiler.backend.linker.coff.pe_image_writer.{
-    PeImagePolicy, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE}
+    PeImagePolicy, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE,
+    PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -562,6 +563,7 @@ struct InternalSimpleOsFlags:
 struct InternalCoffFlags:
     policy: PeImagePolicy
     entry: text
+    image_base: i64
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -774,6 +776,7 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     """Project modeled case-insensitive MSVC flags into typed COFF policy."""
     var policy = PeImagePolicy.default()
     var entry = ""
+    var image_base: i64 = 0
     var saw_subsystem = false
     var saw_stack = false
     var saw_heap = false
@@ -805,6 +808,14 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             if entry != "" and entry != selected:
                 return Err("conflicting internal COFF /ENTRY flags")
             entry = selected
+        elif normalized.starts_with("/base:"):
+            val selected = _internal_coff_number(flag.substring(6))?
+            if selected <= 0 or selected % 0x10000 != 0 or
+                    selected > 0x7fffffff00000000:
+                return Err("internal COFF /BASE must be a positive 64 KiB-aligned address with 4 GiB headroom")
+            if image_base != 0 and image_base != selected:
+                return Err("conflicting internal COFF /BASE flags")
+            image_base = selected
         elif normalized.starts_with("/subsystem:"):
             val name = normalized.substring(11)
             var subsystem: i64 = 0
@@ -833,7 +844,7 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             saw_heap = true
         else:
             return Err("unsupported internal COFF flag '{flag}'")
-    Ok(InternalCoffFlags(policy: policy, entry: entry))
+    Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:
     """Return the PE image policy projected from modeled internal COFF flags."""
@@ -1897,6 +1908,9 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
         val coff_flags = internal_coff_flags(config.extra_flags, target_arch)?
         val selected_entry = if coff_flags.entry != "": coff_flags.entry else: "auto"
+        var selected_image_base = PE_AMD64_IMAGE_BASE
+        if arm64_target: selected_image_base = PE_ARM64_IMAGE_BASE
+        if coff_flags.image_base != 0: selected_image_base = coff_flags.image_base
         var objects: [[u8]] = []
         var archives: [[u8]] = []
         for path in object_files:
@@ -1982,11 +1996,13 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         val link_request = CoffLinkRequest(
             objects: objects, archives: archives, entry: selected_entry)
         val linked = if arm64_target:
-            coff_link_arm64_retained_policy(
-                link_request, config.retained_symbols, coff_flags.policy)
+            coff_link_arm64_retained_image_policy(
+                link_request, config.retained_symbols, coff_flags.policy,
+                selected_image_base)
         else:
-            coff_link_amd64_retained_policy(
-                link_request, config.retained_symbols, coff_flags.policy)
+            coff_link_amd64_retained_image_policy(
+                link_request, config.retained_symbols, coff_flags.policy,
+                selected_image_base)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")

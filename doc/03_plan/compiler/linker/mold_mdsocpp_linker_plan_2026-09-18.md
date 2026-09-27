@@ -720,7 +720,10 @@ instead of ignoring it. `/ENTRY:symbol` is carried unchanged into archive
 closure, selected-member default-library discovery, and final relocation, so a
 custom CRT entry is not replaced by the automatic entry heuristic. Identical
 entry requests deduplicate; empty, conflicting, whitespace/control-bearing
-entries fail closed. Decimal and `0x` values
+entries fail closed. `/BASE:address` now drives symbol addresses, address-based
+relocations, and the emitted PE32+ image base through one value; it requires a
+positive 64 KiB-aligned address with 4 GiB headroom, deduplicates equivalent
+decimal/hex spellings, and rejects conflicting or unsafe bases. Decimal and `0x` values
 are bounds-checked, identical duplicate policy is harmless, and conflicting,
 zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
 before publication. The PE writer validates the policy and emits its subsystem,

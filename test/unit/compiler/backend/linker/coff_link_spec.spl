@@ -2,7 +2,8 @@ use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
-    coff_link_amd64_retained_policy, coff_link_arm64,
+    coff_link_amd64_retained_policy, coff_link_amd64_retained_image_policy,
+    coff_link_arm64,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
     coff_sort_arm64_exception_table,
@@ -371,9 +372,10 @@ describe "internal freestanding Windows linker":
             subsystem: PE_SUBSYSTEM_WINDOWS,
             stack_reserve: 0x200000, stack_commit: 0x2000,
             heap_reserve: 0x300000, heap_commit: 0x3000)
-        val image = coff_link_amd64_retained_policy(CoffLinkRequest(
+        val image = coff_link_amd64_retained_image_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
-            [], policy).unwrap()
+            [], policy, 0x180000000).unwrap()
+        expect(_cl_read_u64(image, 0xb0)).to_equal(0x180000000)
         expect(image[0xdc] as i64).to_equal(PE_SUBSYSTEM_WINDOWS)
         expect(_cl_read_u64(image, 0xe0)).to_equal(0x200000)
         expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
@@ -390,6 +392,12 @@ describe "internal freestanding Windows linker":
             [], invalid)
         expect(linked.is_err()).to_equal(true)
         expect(linked.unwrap_err()).to_contain("stack commit")
+
+        val bad_base = coff_link_amd64_retained_image_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], PeImagePolicy.default(), 0x180001000)
+        expect(bad_base.is_err()).to_equal(true)
+        expect(bad_base.unwrap_err()).to_contain("image base")
     it "attaches TLS metadata only to a complete file-backed directory":
         var directory: [u8] = []
         while directory.len() < 48: directory = directory.push(0)
