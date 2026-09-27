@@ -949,3 +949,12 @@ MinGW target to runtime C compilation and the final compiler-driver link, and
 rejects a non-Clang `SIMPLE_CC` override. CI pins `SIMPLE_CC=clang` on the
 Windows Stage 2 invocation so the chosen driver is visible and reproducible;
 `x86_64-w64-mingw32-gcc` is no longer an admitted Windows bootstrap driver.
+
+Exact-head run `36303267955` was assigned to a self-hosted `ubuntu-latest`
+runner whose `sudo` requires a password, so its MinGW seed stopped during
+package installation before Clang selection or compilation. Tool provisioning
+is now capability-based: preinstalled Clang/LLD/LLVM and MinGW sysroot tools
+skip package mutation; missing tools use noninteractive `sudo -n` and fail with
+the setup error rather than hanging or prompting. GCC remains only the package
+that supplies the MinGW sysroot/binutils on Debian; it is never selected as the
+compiler driver.
