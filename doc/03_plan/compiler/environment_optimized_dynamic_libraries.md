@@ -347,6 +347,27 @@ Prerequisite split:
 - 6A.1c: builtin LLVM/Cranelift producers report backend-confirmed acceptance.
 - 6A.1d: parser evidence owner consumes the live token and exact bytes.
 
+### Mainline source audit (2026-09-28)
+
+At `origin/main` commit `3e9bc64d6bf`, the Stage 6A.1 acceptance envelope is
+not present in the checked-in source.
+`src/compiler/70.backend/backend_plugin/session.spl` still exposes the V1
+`BackendSession` and its ordinary `CodegenOutput`/`CompiledModule` results;
+`src/compiler/70.backend/backend_plugin/loader.spl` returns that raw session.
+The builtin adapter reads the request target and optimization, but its
+constructor does not carry `BackendPluginRequestV1.features` into an owned
+target context or return backend-confirmed accepted features. No
+`BackendPluginTargetContextV2`,
+`AcceptedExact` result, or `ParserBackendTargetEvidenceOwnerV1` definition is
+present under `src/` at this commit.
+
+The “Implemented checkpoint” paragraphs below are not verified by this pinned
+mainline source. Treat 6A.1a–d as open on main: first land an owner-issued
+session generation and compile-use lifetime, then the V2 result envelope,
+backend-confirmed LLVM/Cranelift
+configuration, and a live-token parser evidence join. Recheck this audit after
+each merge before advancing inspection or execution claims.
+
 Implemented checkpoint: the strict loader-to-owner path and real builtin LLVM
 object producer now issue V2 `Unknown` evidence with exact byte lifetime. This
 does not satisfy 6A.1c confirmation; the next gate is backend-authored LLVM
