@@ -101,11 +101,12 @@ fn _coff_output_section_name(name: text) -> Result<text, text>:
     if name.len() > 0 and name.len() <= 8: return Ok(name)
     Err("COFF section name '{name}' cannot be represented in a PE section header")
 
-fn _coff_section_alignment(section: CoffSection) -> i64:
+fn _coff_section_alignment(section: CoffSection) -> Result<i64, text>:
     val encoded = (section.characteristics >> 20) & 0xf
-    if encoded <= 1: return 1
-    if encoded > 14: return 1
-    1 << (encoded - 1)
+    if encoded == 15:
+        return Err("COFF section '{section.name}' uses reserved alignment encoding 15")
+    if encoded <= 1: return Ok(1)
+    Ok(1 << (encoded - 1))
 
 fn _coff_section_is_image_input(section: CoffSection) -> bool:
     if (section.characteristics &
@@ -243,7 +244,9 @@ fn _coff_section_rvas(objects: [CoffObject]) -> Result<[[i64]], text>:
                 while si < objects[oi].sections.len():
                     val section = objects[oi].sections[si]
                     if accepted[oi][si] and section.name == subsection:
-                        group_offset = pe_align_up(group_offset, _coff_section_alignment(section))
+                        val alignment = _coff_section_alignment(section)
+                        if alignment.is_err(): return Err(alignment.unwrap_err())
+                        group_offset = pe_align_up(group_offset, alignment.unwrap())
                         result[oi][si] = next_rva + group_offset
                         val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
                         group_offset = group_offset + logical_size

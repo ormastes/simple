@@ -441,7 +441,10 @@ Implemented source slice:
   excludes bigobj members despite their shared `0/0xffff` signature. Sections
   using `IMAGE_SCN_LNK_NRELOC_OVFL` decode the first relocation record as the
   extended count marker, validate its reserved fields, and expose only the real
-  relocation rows downstream;
+  relocation rows downstream. Merged `$` subsections preserve each input
+  section's encoded power-of-two alignment, including zero-filled padding in
+  the PE image, and reject the reserved alignment encoding rather than silently
+  weakening it;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
 - ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,
