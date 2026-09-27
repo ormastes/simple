@@ -43,6 +43,7 @@ pub enum SimpleOsReleaseEvidenceErrorV1:
     ReplayDetected
     ConsumeContextMismatch
     CanonicalTooLarge
+    DuplicateReceipt
 
 pub struct SimpleOsReleaseTimedReceiptV1:
     receipt_id: text
@@ -203,6 +204,19 @@ fn _release_timed_ends_before_v1(
 ) -> bool:
     first.duration_ms <= second.observed_at_unix_ms and
         first.observed_at_unix_ms <= second.observed_at_unix_ms - first.duration_ms
+
+fn _release_receipts_unique_v1(manifest: SimpleOsReleaseEvidenceManifestV1) -> bool:
+    val receipts: [SimpleOsReleaseTimedReceiptV1] = [
+        manifest.boot, manifest.sosix_filesystem.timed,
+        manifest.version.timed, manifest.run.timed, manifest.build.timed,
+        manifest.native_execute.timed, manifest.persistence.write_receipt,
+        manifest.persistence.reboot_receipt, manifest.persistence.read_receipt]
+    for first in 0..receipts.len():
+        for second in (first + 1)..receipts.len():
+            if receipts[first].receipt_id == receipts[second].receipt_id or
+               receipts[first].receipt_digest == receipts[second].receipt_digest:
+                return false
+    true
 
 fn _release_workflow_valid_v1(
     value: SimpleOsReleaseGuestWorkflowEvidenceV1,
@@ -392,6 +406,8 @@ pub fn simpleos_release_evidence_validate_v1(
            persistence.read_receipt,
            manifest.started_at_unix_ms, manifest.finished_at_unix_ms):
         return SimpleOsReleaseEvidenceErrorV1.InvalidPersistenceEvidence
+    if not _release_receipts_unique_v1(manifest):
+        return SimpleOsReleaseEvidenceErrorV1.DuplicateReceipt
     if persistence.marker_value_digest != persistence.observed_marker_digest or
        persistence.write_state_id != manifest.derived_state.state_id or
        persistence.write_state_digest != manifest.derived_state.final_state_digest or
