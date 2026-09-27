@@ -230,7 +230,7 @@ pub(crate) fn instantiate_class(
                 impl_methods,
                 self_mode,
                 &injected,
-            )?;
+            ).map_err(|e| super::arg_binding::name_callee(e, new_method))?;
             for (name, val) in bound {
                 local_env.insert(name, val);
             }
@@ -311,7 +311,7 @@ pub(crate) fn instantiate_class(
             enums,
             impl_methods,
             self_mode,
-        )?;
+        ).map_err(|e| super::arg_binding::name_callee(e, init_method))?;
         for (name, val) in bound {
             local_env.insert(name, val);
         }

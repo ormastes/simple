@@ -166,6 +166,32 @@ fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Option<Value> 
     }
 }
 
+/// Name the callee (and, when the debug call stack is live, the calling
+/// `.spl` frames) in a binder error. The arity diagnostic alone carried NO
+/// location — "function expects 7 argument(s), but 8 were provided" inside a
+/// native-build of the self-hosted compiler took a whole lane to place. Every
+/// binder call site holds the `FunctionDef`, so the name is free; the caller
+/// chain is populated only under `SIMPLE_DEBUG_FIELD_ACCESS=1`.
+pub(crate) fn name_callee(err: CompileError, func: &FunctionDef) -> CompileError {
+    match err {
+        CompileError::SemanticWithContext(mut e) => {
+            let stack = crate::interpreter::debug_call_stack_snapshot();
+            let callers = if stack.is_empty() {
+                " (set SIMPLE_DEBUG_FIELD_ACCESS=1 for the calling frames)".to_string()
+            } else {
+                let tail = &stack[stack.len().saturating_sub(4)..];
+                format!(" (call stack: {})", tail.join(" -> "))
+            };
+            e.message = format!(
+                "in call to `{}` (declared at line {}): {}{}",
+                func.name, func.span.line, e.message, callers
+            );
+            CompileError::SemanticWithContext(e)
+        }
+        other => other,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn bind_args(
     params: &[Parameter],

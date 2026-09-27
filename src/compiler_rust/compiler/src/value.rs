@@ -2067,6 +2067,24 @@ impl Value {
         }
     }
 
+    /// Owned form of [`Value::unwrap_option_payload`]: peel a single-payload
+    /// `Option::Some(x)` down to `x`, returning any other value unchanged.
+    ///
+    /// Field WRITES need it where field reads already see through the
+    /// wrapper: `var s = table.get(id)` on a `-> T?` method holds
+    /// `Option::Some(obj)`, and `s.name = ...` used to be rejected as
+    /// "cannot assign field on non-object value" while `s.name` read fine.
+    pub fn into_option_payload(self) -> Value {
+        match self {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload: Some(inner),
+            } if enum_name == enum_names::OPTION && variant == enum_names::SOME => *inner,
+            other => other,
+        }
+    }
+
     /// Equality with nullable (`T?`) semantics — the single source of truth for
     /// `==`/`!=` on values that may be Option-wrapped.
     ///

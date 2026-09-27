@@ -1,6 +1,6 @@
 // Core function execution logic
 
-use super::arg_binding::{bind_args, bind_args_with_values};
+use super::arg_binding::{bind_args, bind_args_with_values, name_callee};
 use super::async_support::{is_async_function, wrap_in_promise};
 use super::macros::*;
 use crate::error::CompileError;
@@ -1028,7 +1028,7 @@ pub(crate) fn exec_function_with_values_and_self(
             enums,
             impl_methods,
             self_mode,
-        )?;
+        ).map_err(|e| name_callee(e, func))?;
 
         outer_env.release_scope();
         let result = execute_function_body(
@@ -1074,7 +1074,7 @@ pub(crate) fn exec_function_with_captured_env(
             enums,
             impl_methods,
             self_mode,
-        )?;
+        ).map_err(|e| name_callee(e, func))?;
 
         let parked = park_written_back_arguments(func, args, outer_env, classes, self_mode);
         outer_env.release_scope();
@@ -1679,7 +1679,7 @@ fn exec_function_inner(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
 
     // Record function return for layout call graph tracking
     crate::layout_recorder::record_function_return();
@@ -1751,7 +1751,7 @@ fn exec_function_with_values_and_writeback_inner(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
     // The pre-evaluated argument vector holds its own handle on every
     // argument. Kept alive across the body, it pins a parked receiver's field
     // Arc (strong_count > 1), so each `me` push deep-copies the backing Vec —
@@ -1812,7 +1812,7 @@ fn exec_function_with_values_inner(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| name_callee(e, func))?;
     exec_function_with_bound_args_inner(func, bound, outer_env, functions, classes, enums, impl_methods)
 }
 
