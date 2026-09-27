@@ -444,6 +444,18 @@ locking, retries, or an extra provider call.
 - **Detail:** `.claude/skills/spipe.md` §"Sabotage discipline" / §"Census
   discipline".
 
+## PR CI: where the required checks live
+
+- The ruleset-required context "Code Idiom & Structural Ratchet Gates" is the
+  `fast-gates` job in `.github/workflows/required-gates.yml` (workflow "Required
+  Gates", moved out of `repo-hygiene.yml` on 2026-09-27). "SPipe Self Review
+  Admission" is `review-admission.yml`. Nothing else runs on a PR by default.
+- Every other PR workflow triggers only on `pull_request: types: [labeled]` and
+  runs only when the label is `ci:full`; all heavy lanes still run on push to
+  `main`. `push:` triggers are `main`-only (plus `cache-branch-ci`, var-gated).
+- Detail and trade-offs: `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
+  § "PR-path CI is required checks only"; landing loop: `.claude/rules/vcs.md`.
+
 ## Maintenance
 
 Add a compact entry here when repeated ambiguity causes an agent to choose the
