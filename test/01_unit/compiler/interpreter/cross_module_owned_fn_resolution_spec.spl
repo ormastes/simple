@@ -38,6 +38,7 @@ use compiler.core.interpreter.eval_tables.{
 
 val MOD_A: text = "src/fixture/mod_a.spl"
 val MOD_B: text = "src/fixture/mod_b.spl"
+val MOD_FACADE: text = "src/fixture/facade.spl"
 val SPEC_FILE: text = "test/fixture/who_spec.spl"
 
 fn setup_collision() -> (i64, i64):
@@ -77,6 +78,34 @@ describe "(module path, name)-keyed function resolution":
         # The spec imported `who` from mod_a only; the flat table would have
         # served mod_b's. The caller-aware route must win.
         expect(func_resolve_for_caller(SPEC_FILE, "who")).to_equal(pair.0)
+
+    it "binds an aliased import to the original callable without exposing its old name":
+        val pair = setup_collision()
+        func_import_binding_register(SPEC_FILE, "who:chosen", MOD_A)
+        expect(func_import_binding_lookup(SPEC_FILE, "chosen")).to_equal(MOD_A)
+        expect(func_import_binding_lookup(SPEC_FILE, "who")).to_equal("")
+        expect(func_resolve_for_caller(SPEC_FILE, "chosen")).to_equal(pair.0)
+        expect(func_resolve_for_caller(SPEC_FILE, "who")).to_equal(-1)
+
+    it "follows two aliased re-export hops using each source name":
+        val pair = setup_collision()
+        func_import_binding_register(MOD_FACADE, "who:forwarded", MOD_A)
+        func_import_binding_register(SPEC_FILE, "forwarded:public", MOD_FACADE)
+        expect(func_resolve_for_caller(SPEC_FILE, "public")).to_equal(pair.0)
+
+    it "replaces the source and owner together when a local alias is rebound":
+        setup_collision()
+        val replacement = decl_fn("elsewhere", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(MOD_B, "elsewhere", replacement)
+        func_import_binding_register(SPEC_FILE, "who:chosen", MOD_A)
+        func_import_binding_register(SPEC_FILE, "elsewhere:chosen", MOD_B)
+        expect(func_resolve_for_caller(SPEC_FILE, "chosen")).to_equal(replacement)
+
+    it "keeps malformed alias encodings literal instead of binding another name":
+        setup_collision()
+        func_import_binding_register(SPEC_FILE, "who:", MOD_A)
+        expect(func_import_binding_lookup(SPEC_FILE, "who:")).to_equal(MOD_A)
+        expect(func_import_binding_lookup(SPEC_FILE, "who")).to_equal("")
 
     it "a caller with no route falls back to the flat table (-1 sentinel)":
         setup_collision()
