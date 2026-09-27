@@ -323,7 +323,7 @@ pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
         _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
     };
     let flags = args[1].as_int()? as libc::c_int;
-    let mode = args[2].as_int()? as libc::mode_t;
+    let mode = args[2].as_int()? as libc::mode_t as libc::c_uint;
     let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
     Ok(Value::Int(i64::from(fd)))
 }
@@ -3046,10 +3046,8 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
             ok = before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
                 before.st_mode == after.st_mode && before.st_size == after.st_size &&
                 before.st_mtime == after.st_mtime && before.st_ctime == after.st_ctime;
-            #[cfg(any(target_os = "linux", target_os = "android"))]
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
             { ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec; }
-            #[cfg(target_os = "macos")]
-            { ok = ok && before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec; }
         }
         if fd >= 0 && unsafe { libc::close(fd) } != 0 { ok = false }
         if ok {
