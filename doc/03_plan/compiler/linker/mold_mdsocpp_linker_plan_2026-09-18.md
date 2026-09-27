@@ -401,6 +401,10 @@ Between upload and publication, the adapter hashes the selected local binary
 and requires the remote staging file to match that lowercase SHA-256. Linux
 and SimpleOS use `sha256sum`; Windows uses `Get-FileHash`. Missing hash tools,
 read failures, malformed local digests, or byte mismatches stop publication.
+Both that digest step and the publication command recheck that the upload leaf
+is still a regular non-symlink/non-reparse file before reading it. A swapped
+directory, POSIX symlink, or Windows reparse entry therefore fails before its
+target can be hashed or copied into the publication sibling.
 The publication command carries the same digest and re-hashes the sibling copy
 after mode changes but before rename. A copy mismatch removes that sibling and
 leaves the installed interpreter untouched.

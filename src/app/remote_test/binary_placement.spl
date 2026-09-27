@@ -246,6 +246,10 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
         val stage = _remote_windows_command_value(staged_path)
         if stage.is_err(): return Err(stage.unwrap_err())
         return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$item = Get-Item -LiteralPath " + stage.unwrap() + " -Force -ErrorAction SilentlyContinue; " +
+            "if (($null -eq $item) -or $item.PSIsContainer -or (($item.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test uploaded Simple is not a regular non-reparse file'; exit 74 }; " +
             "$actual = (Get-FileHash -LiteralPath " + stage.unwrap() + " -Algorithm SHA256).Hash.ToLowerInvariant(); " +
             "if ($actual -ne '" + digest + "') { Write-Error 'remote-test uploaded Simple SHA-256 mismatch'; exit 74 }\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
@@ -254,7 +258,9 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
                 not _remote_path_has_file_leaf(staged_path, false):
             return Err("remote POSIX Simple staging path must be an exact absolute file path")
         val stage = _remote_posix_quote(staged_path)
-        return Ok("actual=$(sha256sum -- " + stage + ") || exit 74; actual=${actual%% *}; " +
+        return Ok("if [ -L " + stage + " ] || [ ! -f " + stage + " ]; then " +
+            "echo 'remote-test uploaded Simple is not a regular file' >&2; exit 74; fi; " +
+            "actual=$(sha256sum -- " + stage + ") || exit 74; actual=${actual%% *}; " +
             "if [ \"$actual\" != '" + digest + "' ]; then " +
             "echo 'remote-test uploaded Simple SHA-256 mismatch' >&2; exit 74; fi")
     Err("remote-test cannot verify an uploaded binary for remote OS '{remote_os}'")
@@ -362,6 +368,10 @@ fn remote_simple_install_command(remote_os: text, configured: text,
         return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
             "$src = " + source.unwrap() + "; $dst = " + target.unwrap() + "; " +
             "$tmp = $dst + '.remote-test-new'; " +
+            "$sourceItem = Get-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue; " +
+            "if (($null -eq $sourceItem) -or $sourceItem.PSIsContainer -or " +
+            "(($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test staging path is not a regular non-reparse file'; exit 75 }; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
             "$input = [System.IO.File]::OpenRead($src); try { " +
             "$output = [System.IO.File]::Open($tmp, [System.IO.FileMode]::CreateNew, " +
@@ -385,7 +395,9 @@ fn remote_simple_install_command(remote_os: text, configured: text,
         val target = _remote_posix_quote(destination)
         val parent = _remote_posix_quote(_remote_posix_parent(destination))
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
-        return Ok("mkdir -p -- " + parent + " && (set -C; : > " + temporary +
+        return Ok("if [ -L " + source + " ] || [ ! -f " + source + " ]; then " +
+            "echo 'remote-test staging path is not a regular file' >&2; exit 75; fi; " +
+            "mkdir -p -- " + parent + " && (set -C; : > " + temporary +
             ") && cp -- " + source + " " + temporary + " && chmod 0755 -- " + temporary +
             " && { actual=$(sha256sum -- " +
             temporary + ") || { rm -f -- " + temporary + "; exit 75; }; " +
