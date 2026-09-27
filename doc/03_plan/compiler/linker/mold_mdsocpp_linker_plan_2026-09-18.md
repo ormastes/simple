@@ -796,6 +796,9 @@ and command-line defaults without removing explicitly supplied libraries.
 The production `allow_duplicate_definitions` policy now reaches internal COFF
 as deterministic `/FORCE:MULTIPLE` semantics: the first external definition
 in input/archive order wins and later definitions become references to it.
+An explicit case-insensitive `/FORCE:MULTIPLE` selects the same typed path.
+Bare `/FORCE` and `/FORCE:UNRESOLVED` remain fail-closed because emitting an
+image with unresolved references is not an admitted internal-linker policy.
 Strict COFF APIs still reject duplicates unless that policy is explicitly set.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`

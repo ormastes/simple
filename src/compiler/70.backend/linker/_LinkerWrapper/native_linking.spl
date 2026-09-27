@@ -571,6 +571,7 @@ struct InternalCoffFlags:
     nodefault_libraries: [text]
     nodefault_all: bool
     include_symbols: [text]
+    force_multiple: bool
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -840,6 +841,7 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var nodefault_libraries: [text] = []
     var nodefault_all = false
     var include_symbols: [text] = []
+    var force_multiple = false
     for flag in extra_flags:
         val normalized = flag.lower()
         val dynamic_base = _internal_coff_switch(normalized, "/dynamicbase")
@@ -1019,6 +1021,8 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
                 return Err("internal COFF /INCLUDE requires a nonempty symbol without controls or whitespace")
             if not include_symbols.contains(symbol):
                 include_symbols = include_symbols.push(symbol)
+        elif normalized == "/force:multiple":
+            force_multiple = true
         elif (normalized == "/nologo" or normalized == "/debug:none" or
                 normalized == "/incremental:no" or normalized == "/manifest:no"):
             # The internal linker is quiet, emits no debug/PDB or manifest
@@ -1044,7 +1048,8 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
         opt_ref: saw_opt_ref == 1, opt_icf: saw_opt_icf == 1,
         default_libraries: default_libraries,
         nodefault_libraries: nodefault_libraries,
-        nodefault_all: nodefault_all, include_symbols: include_symbols))
+        nodefault_all: nodefault_all, include_symbols: include_symbols,
+        force_multiple: force_multiple))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:
     """Return the PE image policy projected from modeled internal COFF flags."""
@@ -2234,12 +2239,12 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             coff_link_arm64_retained_image_policy_options(
                 link_request, retained_symbols, coff_flags.policy,
                 selected_image_base, coff_flags.opt_ref, coff_flags.opt_icf,
-                config.allow_duplicate_definitions)
+                config.allow_duplicate_definitions or coff_flags.force_multiple)
         else:
             coff_link_amd64_retained_image_policy_options(
                 link_request, retained_symbols, coff_flags.policy,
                 selected_image_base, coff_flags.opt_ref, coff_flags.opt_icf,
-                config.allow_duplicate_definitions)
+                config.allow_duplicate_definitions or coff_flags.force_multiple)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")
