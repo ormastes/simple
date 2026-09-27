@@ -1,0 +1,58 @@
+#!/bin/sh
+# Exercise the production sanity function without running a compiler build.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+python3 - "$root" <<'PY'
+import pathlib, subprocess, sys, tempfile
+root = pathlib.Path(sys.argv[1])
+source = (root / 'scripts/bootstrap/bootstrap-from-scratch.sh').read_text()
+start = source.index('bootstrap_stage_sanity() (')
+end = source.index('\nbootstrap_native_build_main()', start)
+function = source[start:end]
+harness = r'''
+repo_root=$1
+backend=llvm
+probe_mode=$2
+bootstrap_stage3_hash_file() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+bootstrap_stage3_hash_stream() { shasum -a 256 | cut -d ' ' -f 1; }
+bootstrap_stage3_canonical_version() { printf 'test-version\n'; }
+run_timeout() {
+    shift
+    case "$2" in
+      --version) printf 'simple-bootstrap test-version\n'; return 0;;
+      run) printf "unknown command 'run'\n"; return 1;;
+    esac
+    return 2
+}
+candidate_frontend_smoke() {
+    case "$probe_mode" in
+      long) head -c 70000 /dev/zero | tr '\000' x; return 1;;
+      empty) return 1;;
+      success) printf 'frontend passed\n'; return 0;;
+    esac
+}
+bootstrap_stage_sanity "$3" "$4" "$5" "$5" /usr/bin:/bin
+'''
+with tempfile.TemporaryDirectory(prefix='sanity-log-retention-') as tmp:
+    work = pathlib.Path(tmp)
+    script = work / 'harness.sh'
+    script.write_text(function + harness)
+    candidate = work / 'candidate'
+    candidate.write_text('fixture identity')
+    for mode in ('long', 'empty', 'success'):
+        receipt = work / (mode + '.env')
+        result = subprocess.run(['sh', str(script), str(root), mode, str(candidate), str(receipt), str(work)], capture_output=True)
+        assert result.returncode == (0 if mode == 'success' else 1), (mode, result.returncode, result.stderr)
+        assert ('status=pass' if mode == 'success' else 'status=fail') in receipt.read_text()
+        durable = pathlib.Path(str(receipt) + '.frontend-failure.log')
+        if mode == 'long':
+            assert durable.read_bytes() == b'x' * 70000
+            assert result.stderr.count(b'x' * 65536) == 1
+            assert b'x' * 65537 not in result.stderr
+        elif mode == 'empty':
+            assert b'frontend smoke log is empty' in result.stderr
+        else:
+            assert not durable.exists()
+            assert not list(work.glob('success.env.tmp.*.frontend'))
+print('PASS: long failure retained with bounded stderr; empty failure diagnosed; success cleaned')
+PY
