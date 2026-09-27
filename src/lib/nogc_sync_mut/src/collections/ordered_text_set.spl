@@ -1,0 +1,235 @@
+# codex-impl
+# AVL storage for the ordered branch of AdaptiveTextSet.
+
+struct OrderedTextNode:
+    key: text
+    value: text
+    left: i64
+    right: i64
+    height: i64
+
+struct OrderedTextEntry:
+    key: text
+    value: text
+
+class OrderedTextSet:
+    """Ordered text keys with logarithmic comparison paths for updates and lookup."""
+    nodes: [OrderedTextNode]
+    free_nodes: [i64]
+    root: i64
+    count: i64
+
+    static fn new() -> OrderedTextSet:
+        OrderedTextSet(nodes: [], free_nodes: [], root: -1, count: 0)
+
+    fn len() -> i64:
+        self.count
+
+    fn tree_height() -> i64:
+        self.height_at(self.root)
+
+    fn allocated_slots() -> i64:
+        self.nodes.len()
+
+    fn height_at(idx: i64) -> i64:
+        if idx < 0:
+            return 0
+        self.nodes[idx].height
+
+    me update_height(idx: i64):
+        var node = self.nodes[idx]
+        val left_height = self.height_at(node.left)
+        val right_height = self.height_at(node.right)
+        if left_height > right_height:
+            node.height = left_height + 1
+        else:
+            node.height = right_height + 1
+        self.nodes[idx] = node
+
+    me rotate_left(idx: i64) -> i64:
+        val pivot = self.nodes[idx].right
+        var node = self.nodes[idx]
+        var pivot_node = self.nodes[pivot]
+        node.right = pivot_node.left
+        pivot_node.left = idx
+        self.nodes[idx] = node
+        self.nodes[pivot] = pivot_node
+        self.update_height(idx)
+        self.update_height(pivot)
+        pivot
+
+    me rotate_right(idx: i64) -> i64:
+        val pivot = self.nodes[idx].left
+        var node = self.nodes[idx]
+        var pivot_node = self.nodes[pivot]
+        node.left = pivot_node.right
+        pivot_node.right = idx
+        self.nodes[idx] = node
+        self.nodes[pivot] = pivot_node
+        self.update_height(idx)
+        self.update_height(pivot)
+        pivot
+
+    me rebalance(idx: i64) -> i64:
+        self.update_height(idx)
+        val node = self.nodes[idx]
+        val balance = self.height_at(node.left) - self.height_at(node.right)
+        if balance > 1:
+            val left = self.nodes[node.left]
+            if self.height_at(left.left) < self.height_at(left.right):
+                var changed = self.nodes[idx]
+                changed.left = self.rotate_left(changed.left)
+                self.nodes[idx] = changed
+            return self.rotate_right(idx)
+        if balance < -1:
+            val right = self.nodes[node.right]
+            if self.height_at(right.right) < self.height_at(right.left):
+                var changed = self.nodes[idx]
+                changed.right = self.rotate_right(changed.right)
+                self.nodes[idx] = changed
+            return self.rotate_left(idx)
+        idx
+
+    me allocate_node(key: text, value: text) -> i64:
+        val node = OrderedTextNode(key: key, value: value, left: -1, right: -1, height: 1)
+        if self.free_nodes.len() > 0:
+            val idx = self.free_nodes[self.free_nodes.len() - 1]
+            self.free_nodes.pop()
+            self.nodes[idx] = node
+            return idx
+        val idx = self.nodes.len()
+        self.nodes.push(node)
+        idx
+
+    me insert_at(idx: i64, key: text, value: text) -> i64:
+        if idx < 0:
+            return self.allocate_node(key, value)
+        var node = self.nodes[idx]
+        if key < node.key:
+            node.left = self.insert_at(node.left, key, value)
+        else:
+            node.right = self.insert_at(node.right, key, value)
+        self.nodes[idx] = node
+        self.rebalance(idx)
+
+    fn contains_key(key: text) -> bool:
+        var idx = self.root
+        while idx >= 0:
+            val node = self.nodes[idx]
+            if key == node.key:
+                return true
+            if key < node.key:
+                idx = node.left
+            else:
+                idx = node.right
+        false
+
+    me insert(key: text) -> bool:
+        """Return false for an existing key; preserve sorted set semantics."""
+        self.insert_with_value(key, "")
+
+    me insert_with_value(key: text, value: text) -> bool:
+        """Insert one key with a payload; preserve the old value if it exists."""
+        if self.contains_key(key):
+            return false
+        self.root = self.insert_at(self.root, key, value)
+        self.count = self.count + 1
+        true
+
+    me put_value(key: text, value: text) -> bool:
+        """Insert or replace a payload; report whether the key was new."""
+        var idx = self.root
+        while idx >= 0:
+            var node = self.nodes[idx]
+            if key == node.key:
+                node.key = key
+                node.value = value
+                self.nodes[idx] = node
+                return false
+            if key < node.key:
+                idx = node.left
+            else:
+                idx = node.right
+        self.root = self.insert_at(self.root, key, value)
+        self.count = self.count + 1
+        true
+
+    fn get_value(key: text) -> text?:
+        var idx = self.root
+        while idx >= 0:
+            val node = self.nodes[idx]
+            if key == node.key:
+                return Some(node.value)
+            if key < node.key:
+                idx = node.left
+            else:
+                idx = node.right
+        nil
+
+    fn min_node_at(idx: i64) -> OrderedTextNode:
+        var current = idx
+        while self.nodes[current].left >= 0:
+            current = self.nodes[current].left
+        self.nodes[current]
+
+    me remove_at(idx: i64, key: text) -> i64:
+        var node = self.nodes[idx]
+        if key < node.key:
+            node.left = self.remove_at(node.left, key)
+            self.nodes[idx] = node
+            return self.rebalance(idx)
+        if key > node.key:
+            node.right = self.remove_at(node.right, key)
+            self.nodes[idx] = node
+            return self.rebalance(idx)
+        if node.left < 0 or node.right < 0:
+            val child = if node.left >= 0: node.left else: node.right
+            self.free_nodes.push(idx)
+            return child
+        val successor = self.min_node_at(node.right)
+        node.key = successor.key
+        node.value = successor.value
+        node.right = self.remove_at(node.right, successor.key)
+        self.nodes[idx] = node
+        self.rebalance(idx)
+
+    me remove(key: text) -> bool:
+        if not self.contains_key(key):
+            return false
+        self.root = self.remove_at(self.root, key)
+        self.count = self.count - 1
+        true
+
+    fn keys() -> [text]:
+        """Return an in-order snapshot independent of tree shape."""
+        var values: [text] = []
+        var stack: [i64] = []
+        var idx = self.root
+        while idx >= 0 or stack.len() > 0:
+            while idx >= 0:
+                stack.push(idx)
+                idx = self.nodes[idx].left
+            val next = stack[stack.len() - 1]
+            stack.pop()
+            values.push(self.nodes[next].key)
+            idx = self.nodes[next].right
+        values
+
+    fn entries() -> [OrderedTextEntry]:
+        """Return an in-order snapshot of key/value pairs."""
+        var values: [OrderedTextEntry] = []
+        var stack: [i64] = []
+        var idx = self.root
+        while idx >= 0 or stack.len() > 0:
+            while idx >= 0:
+                stack.push(idx)
+                idx = self.nodes[idx].left
+            val next = stack[stack.len() - 1]
+            stack.pop()
+            val node = self.nodes[next]
+            values.push(OrderedTextEntry(key: node.key, value: node.value))
+            idx = node.right
+        values
+
+export OrderedTextSet
+export OrderedTextEntry
