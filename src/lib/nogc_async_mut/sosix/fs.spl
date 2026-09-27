@@ -27,7 +27,8 @@ use std.common.contracts.sosix.file_operation_v1.{
 }
 use std.common.contracts.sosix.error_v1.{
     SOSIX_ERROR_UNSUPPORTED, SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER,
-    SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE, SOSIX_NATIVE_DOMAIN_POSIX,
+    SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE, SOSIX_ERROR_IDENTITY_EXHAUSTED,
+    SOSIX_NATIVE_DOMAIN_POSIX,
     SosixError, sosix_error_new, sosix_error_from_status
 }
 use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError, RingTelemetry}
@@ -116,8 +117,11 @@ impl SosixHostedFs:
             if probe.reason == "unsupported-api":
                 return _rejected(SOSIX_ERROR_UNSUPPORTED)
             return _rejected(SOSIX_ERROR_INVALID_BUFFER)
+        # Never wrap a task identity to zero or reuse an earlier key. A failed
+        # reservation has not published an identity and may retry the same key.
+        if self.next_task_key == 0u64 or self.next_task_key == 0xffffffffffffffffu64:
+            return _rejected(SOSIX_ERROR_IDENTITY_EXHAUSTED)
         val task_key = self.next_task_key
-        self.next_task_key = self.next_task_key + 1u64
         val reserved = self.ring.reserve(self.owner_id, task_key)
         match reserved:
             case Err(_): _rejected(SOSIX_ERROR_QUEUE_FULL)
@@ -134,6 +138,7 @@ impl SosixHostedFs:
                         self.ring.release(self.owner_id, reservation)
                         _rejected(SOSIX_ERROR_QUEUE_FULL)
                     case Ok(token):
+                        self.next_task_key = task_key + 1u64
                         self.slots[slot] = begun.slot
                         self.tokens[slot] = token
                         self.retired[slot] = false

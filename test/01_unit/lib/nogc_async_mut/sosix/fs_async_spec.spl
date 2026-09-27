@@ -5,7 +5,8 @@ use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
 use std.common.contracts.sosix.operation_v1.{SosixOperationId, SOSIX_OPERATION_TIMED_OUT, SOSIX_OPERATION_FREE, SOSIX_OPERATION_COMPLETED}
 use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
 use std.common.contracts.sosix.error_v1.{
-    SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER, SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE
+    SOSIX_ERROR_INVALID_CAPABILITY, SOSIX_ERROR_INVALID_BUFFER, SOSIX_ERROR_QUEUE_FULL,
+    SOSIX_ERROR_NATIVE, SOSIX_ERROR_IDENTITY_EXHAUSTED
 }
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsSubmit}
 
@@ -112,6 +113,47 @@ describe "SOSIX hosted positioned read over SimpleRing":
         expect(fs.service_one(0, 4u64)).to_be(true)
         expect(fs.pump()).to_equal(1)
         expect(check_single_wake(fs, first)).to_equal("ready")
+
+    it "does not consume a task key when the ring rejects a reservation":
+        # @req REQ-SOSIX-FS-ASYNC
+        val fs = setup_sosix_software_ring(1)
+        val first = submit_read(fs, 4u64, 0u64)
+        expect(first.accepted).to_be(true)
+        expect(fs.next_task_key).to_equal(2u64)
+        val full = submit_read(fs, 4u64, 0u64)
+        expect(full.error.kind).to_equal(SOSIX_ERROR_QUEUE_FULL)
+        expect(fs.next_task_key).to_equal(2u64)
+        expect(fs.service_one(0, 4u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(fs.release(first.operation).accepted).to_be(true)
+        val second = submit_read(fs, 4u64, 0u64)
+        expect(second.accepted).to_be(true)
+        expect(fs.next_task_key).to_equal(3u64)
+
+    it "rejects task identity exhaustion before touching the ring":
+        # @req REQ-SOSIX-FS-ASYNC
+        val fs = setup_sosix_software_ring(1)
+        fs.next_task_key = 0xffffffffffffffffu64 - 1u64
+        val last = submit_read(fs, 4u64, 0u64)
+        expect(last.accepted).to_be(true)
+        expect(fs.next_task_key).to_equal(0xffffffffffffffffu64)
+        val exhausted = submit_read(fs, 4u64, 0u64)
+        expect(exhausted.accepted).to_be(false)
+        expect(exhausted.error.kind).to_equal(SOSIX_ERROR_IDENTITY_EXHAUSTED)
+        expect(fs.next_task_key).to_equal(0xffffffffffffffffu64)
+        expect(fs.occupancy()).to_equal(1u64)
+        expect(fs.service_one(0, 4u64)).to_be(true)
+        expect(fs.pump()).to_equal(1)
+        expect(fs.release(last.operation).accepted).to_be(true)
+        expect(submit_read(fs, 4u64, 0u64).error.kind).to_equal(
+            SOSIX_ERROR_IDENTITY_EXHAUSTED)
+        expect(fs.occupancy()).to_equal(0u64)
+
+        val corrupt = setup_sosix_software_ring(1)
+        corrupt.next_task_key = 0u64
+        expect(submit_read(corrupt, 4u64, 0u64).error.kind).to_equal(
+            SOSIX_ERROR_IDENTITY_EXHAUSTED)
+        expect(corrupt.telemetry().reservations).to_equal(0u64)
 
     it "rejects an out-of-range operation before indexing ring storage":
         # @req REQ-SOSIX-FS-ASYNC
