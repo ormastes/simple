@@ -156,10 +156,35 @@ routes. A focused `reexport_physical_cache_spec.spl` case supplies a missing
 indexed owner and a valid imported declaration, and checks that the declaration
 is found while the walk remains invalid for negative caching.
 
-This fix has not passed a source-matched Stage 2/3 bootstrap. The admitted
+At the time of this note, the fix had not passed a source-matched Stage 2/3
+bootstrap. The admitted
 Stage 2 compiler does not expose `test`; the older installed release test
 runner cannot parse the current `module_surface_types.spl`, so the new case is
 not yet executable in this lane. Another macOS Stage 2 run was active in a
 separate worktree when this fix was prepared, so no competing bootstrap was
 started. The 1797-error Stage 3 log predates this change and is not evidence
 that the fix clears those errors.
+
+## Source-matched verdict and residual Stage 2 spread defect
+
+A first Stage 2 build with the indexed-origin fallback compiled three objects
+and reused 767, but its positional hello-world sanity timed out at
+`native_compile 0/1`. A five-second standalone probe of the rejected binary
+sampled 2,060 frames in `lower_mir_storage_project_fields_v1`, including 1,926
+in `rt_range`; the current source had no explicit `for` loops in that function.
+Its remaining `MirFunction(..function, blocks: blocks)` spread emitted an
+`rt_range` call with a tagged aggregate value as its end bound. Replacing the
+spread with a mutable local function and `function.blocks = blocks` removed the
+`rt_range` relocation from the rebuilt function object. The second source-
+matched Stage 2 build passed full trust-root admission, including positional
+sanity and receiver proof. Its admitted candidate SHA-256 was
+`cc73ebabcc846a45aa3ec20817ee8723a64ef177068a00e475520cf4e4fa06cf`.
+
+The corresponding planner admission passed and the canonical Stage 3 resume
+completed HIR collection. It again reported exactly 117 poisoned modules and
+1797 errors across 717 sources. The first `env_get_opt`, `process_run`,
+`char_code`, and `MirInstKind` failures remained. The indexed-origin fallback
+is valid as a narrow resolver fix, but it did not repair this HIR population.
+Stage 3 and the full macOS bootstrap remain unadmitted. This was the second
+verify/fix cycle in this session; do not repeat the same run without a new
+root-cause fix.
