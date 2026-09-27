@@ -44,3 +44,47 @@ import-origin backport therefore has not yet received a Stage 3 verdict on
 this final commit. The three-cycle verify/fix cap is exhausted for this
 session. Next diagnosis should inspect `CompileOptions` transfer and
 `CompilerConfig.from_env()` under this exact admitted Stage 2 binary.
+
+## Fourth admission boundary: compiled MC/DC default transport
+
+A fresh, separately admitted Stage 2 binary reproduced the budget failure on
+a small in-process native-build command with no `SIMPLE_MCDC_*` environment
+variables. An instrumented error reported `owner=37526561537, global=0`,
+instead of the source defaults of 1048576 and 67108864. Setting both budgets
+explicitly in the environment let the same binary reach source loading. This
+isolates the failure to the compiled default configuration path, not the Stage
+3 source graph or a shell override.
+
+`CompilerConfig.from_env()` now writes the two scalar defaults in its own
+frame immediately after receiving `CompilerConfig.default()`, before applying
+environment values; CLI overrides still follow in `CompileContext.create()`.
+The diagnostic Stage 2 binary passed admission and crossed the MC/DC gate
+without overrides. Its tiny hello-world native-build later exited 139 after
+HIR, which is a separate downstream failure and not a Stage 3 verdict.
+
+Canonical Stage 3 requires a planner admission bound to a Stage 2 artifact
+under `build/bootstrap`; the producer correctly rejected the isolated
+`build/bootstrap-mcdc-diag` tree. The fix needs canonical Stage 2 admission,
+planner receipt, and Stage 3 resume before Mac bootstrap can be called green.
+
+## Canonical cold Stage 2 boundary
+
+The committed scalar-default fix passed the isolated diagnostic Stage 2
+admission. Rebuilding it under canonical `build/bootstrap` produced a Stage 2
+binary, but sanity rejected it: the positional two-line hello-world smoke
+timed out at `native_compile 0/1`. The first canonical attempt used an older
+incremental object cache. Eleven object names shared with the isolated cache
+had different contents, so that cache was preserved under a quarantine name
+and the canonical Stage 2 build was repeated from an empty scope.
+
+The fresh canonical build reported `770 compiled, 0 cached, 0 failed` and
+still timed out at the same `native_compile 0/1` smoke point. This rules out
+reuse of the quarantined objects as the sole cause. The rejected cold binary
+hash was `1a5b99ed8171e848e98e5b03c8ec7c401d78e7607db5258902de702b467029bc`;
+the isolated admitted binary hash was
+`be68e408350e30d63dd7ed62a03db6b92577450f681351ef4d04fbc6bbef6206`.
+The source was the same committed fix, but the build paths and cache histories
+differed. A path-dependent or cold-versus-warm native codegen defect remains
+possible; the available evidence does not identify which one. The third
+verify/fix cycle for this boundary is complete, so no further bootstrap retry
+was started in this session. Stage 3 and the Mac release gates remain unpassed.
