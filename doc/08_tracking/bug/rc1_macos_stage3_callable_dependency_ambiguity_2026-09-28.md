@@ -31,3 +31,16 @@ fatal was `HirModule` in `compiler.backend.backend.env` at source 10/717.
 other frontend, HIR, and backend owners. Those small source declarations are
 backported with the resolver. A third source-matched admission run is required;
 the second Stage 3 run was stopped while collecting the new first error.
+
+## Third admission boundary
+
+Commit `445b8117ab5` passed full Stage 2 trust-root admission, including the
+positional frontend smoke and receiver check. Its canonical Stage 3 resume
+stopped before HIR with `MC/DC global byte budget must be at least the owner
+byte budget`. The Stage 3 log contains only that error; the shell environment
+and command transcript contain no MC/DC budget override. The source defaults
+are 1 MiB owner and 64 MiB global in `compiler/common/config.spl`. The HIR
+import-origin backport therefore has not yet received a Stage 3 verdict on
+this final commit. The three-cycle verify/fix cap is exhausted for this
+session. Next diagnosis should inspect `CompileOptions` transfer and
+`CompilerConfig.from_env()` under this exact admitted Stage 2 binary.
