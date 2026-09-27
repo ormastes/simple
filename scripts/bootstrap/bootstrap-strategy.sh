@@ -19,7 +19,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 
 usage() {
     cat <<'EOF'
-usage: bootstrap-strategy.sh --strategy=adhoc|normal|full --output=DIR -- ENGINE_ARGS...
+usage: bootstrap-strategy.sh --strategy=adhoc|normal|full --output=DIR [--stage4-bootstrap-receipt=PATH] -- ENGINE_ARGS...
 
 The arguments after -- are the original bootstrap-from-scratch.sh arguments.
 adhoc delegates unchanged. normal/full create a generation lease and run the
@@ -30,10 +30,12 @@ EOF
 
 strategy=normal
 output_arg=build/bootstrap
+stage4_receipt=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strategy=*) strategy=${1#*=} ;;
         --output=*) output_arg=${1#*=} ;;
+        --stage4-bootstrap-receipt=*) stage4_receipt=${1#*=} ;;
         --) shift; break ;;
         --help|-h) usage; exit 0 ;;
         *) echo "bootstrap-scheduler-error: unknown supervisor option: $1" >&2; exit 2 ;;
@@ -67,6 +69,7 @@ receipt=
 backend=llvm
 mode=dynload
 no_mcp=0
+resume_stage3=0
 for original_arg in "$@"; do
     case "$original_arg" in
         --full-cli) wants_full_cli=1 ;;
@@ -77,10 +80,12 @@ for original_arg in "$@"; do
         --mode=*) mode=${original_arg#*=} ;;
         --backend=*) backend=${original_arg#*=} ;;
         --bootstrap-receipt=*) receipt=${original_arg#*=} ;;
+        --resume-stage3-from-admitted=*) resume_stage3=1 ;;
         --no-mcp) no_mcp=1 ;;
     esac
 done
 [ -n "$receipt" ] || receipt=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
+[ -n "$stage4_receipt" ] || stage4_receipt=$receipt
 # Preserve the stage engine's canonical receipt preflight and exit code. The
 # supervisor must not turn an authorization refusal into a scheduler failure.
 if [ -z "$receipt" ]; then
@@ -188,6 +193,10 @@ if [ "$qualification_cpu" -eq 0 ] || [ "$memory_enforcement" = none ] ||
     qualification_cpu=$cpu_total
     critical_cpu=$cpu_total
 fi
+engine_jobs=$critical_cpu
+# The admitted Stage 3 continuation pins its native recompile to one thread.
+# Pass the same value through the stage-engine option preflight.
+if [ "$resume_stage3" -eq 1 ]; then engine_jobs=1; fi
 
 runtime_graph_tmp="$generation_dir/graph.env.tmp.$$"
 {
@@ -271,7 +280,7 @@ event task-start stage-engine building
         push @out, "--jobs=$jobs";
         exec "/bin/sh", $engine, @out;
         die "exec stage engine failed: $!";
-    ' "$critical_cpu" "$engine" "$@" \
+    ' "$engine_jobs" "$engine" "$@" \
         >"$generation_dir/stage-engine.log" 2>&1
     rc=$?
     done_tmp="$engine_done.tmp.$$"
@@ -658,16 +667,16 @@ verify_continuation_evidence() {
 # speculation. It begins only after the qualified Stage-2/3 lineage above.
 continuation_status=not-requested
 if [ "$wants_full_cli" -eq 1 ]; then
-    [ -n "$receipt" ] || {
-        echo 'bootstrap-scheduler-error: Stage-4 continuation requires --bootstrap-receipt' >&2
+    [ -n "$stage4_receipt" ] || {
+        echo 'bootstrap-scheduler-error: Stage-4 continuation requires --stage4-bootstrap-receipt' >&2
         exit 64
     }
     continuation_status=failed
     continuation_started=$(date +%s)
     set -- --strategy="$strategy" --output="$output_arg" \
         --resume-stage4-from-admitted="$output_arg" \
-        --bootstrap-receipt="$receipt" --backend="$backend" \
-        --mode=dynload --jobs="$critical_cpu" --full-cli
+        --bootstrap-receipt="$stage4_receipt" --backend="$backend" \
+        --mode=dynload --jobs=1 --full-cli
     [ "$no_mcp" -eq 0 ] || set -- "$@" --no-mcp
     # Stage 4 is always a build-only quarantine invocation. Publication cannot
     # occur inside this long-running child because the supervisor must recheck

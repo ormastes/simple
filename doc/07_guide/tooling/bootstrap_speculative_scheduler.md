@@ -25,6 +25,16 @@ The supervisor deliberately leaves the engine's missing/malformed planner
 receipt preflight untouched. No receipt means no scheduler generation and no
 compiler execution.
 
+For an admitted Stage 3 resume followed by a full CLI build, first finish the
+receipt-free `--full-bootstrap --stop-after-stage2` trust root. Produce separate
+planner receipts for `//bootstrap:stage3` and `//bootstrap:stage4` from that
+Stage 2 compiler. Pass the Stage 3 receipt to the engine with
+`--resume-stage3-from-admitted=build/bootstrap`, and pass the Stage 4 receipt
+to the supervisor as `--stage4-bootstrap-receipt=PATH`. The supervisor uses
+one engine job for the admitted Stage 3 and Stage 4 continuations. The
+multiplatform workflow follows this route for its Linux full CLI job; its
+other jobs stop after the admitted Stage 3 continuation.
+
 ## Scheduling contract
 
 The immutable graph authority is
