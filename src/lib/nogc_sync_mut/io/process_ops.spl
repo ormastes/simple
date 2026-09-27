@@ -19,8 +19,14 @@ use std.common.process.observation_v4.{
     ProcessObservationReceiptV4, ProcessObservationFrozenReceiptV4,
     ProcessObservationCleanupFrozenReceiptV4, ProcessObservationPacketV4,
     ProcessObservationPacketKindV4, ProcessObservationStatusV4,
+    ProcessObservationFailurePhaseV4, ProcessObservationStreamStateV4,
     canonical_encode_process_observation_request_v4,
-    decode_process_observation_v4
+    decode_process_observation_v4, freeze_process_observation_receipt_v4,
+    freeze_process_observation_cleanup_receipt_v4
+}
+use std.common.process.inspection_v1.{
+    ProcessInspectionInputReceiptV1, PROCESS_INSPECTION_V1_MAX_INPUT_BYTES,
+    decode_process_inspection_input_v1, process_inspection_input_complete_v1
 }
 
 # Extern fn declarations (runtime resolves at file level)
@@ -83,6 +89,10 @@ extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: 
 extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native V4 exact frozen digest acknowledgement", capabilities: [ffi])
 extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native exact pinned inspection start copies and binds stdin before spawn", capabilities: [ffi])
+extern fn rt_process_inspection_v1_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8], input: [u8], expected_digest: [u8]) -> ([u8], [u8], [u8], [i64])
+@unsafe(reason: "native same-ticket input delivery and digest receipt", capabilities: [ffi])
+extern fn rt_process_inspection_v1_input_receipt_value(ticket: [i64]) -> [i64]
 
 pub const OWNED_PROCESS_V3_START_WORDS: i64 = 4
 pub const OWNED_PROCESS_V3_POLL_WORDS: i64 = 17
@@ -1206,6 +1216,128 @@ pub fn process_observation_owner_start_pinned_v4(
         lease: ProcessObservationLeaseV4(ticket: ticket, active: active,
             frozen_kind: ProcessObservationPacketKindV4.Unknown,
             acknowledged: false)))
+
+# The inspector's process observation and stdin fact come from one native
+# ticket. Only methods on this retained lease may certify a terminal capture.
+pub class ProcessInspectionLeaseV1:
+    observation: ProcessObservationLeaseV4
+    expected_input_len: i64
+    expected_input_digest: [u8]
+    expected_request_digest: [u8]
+
+    pub fn input_receipt(self) -> Result<ProcessInspectionInputReceiptV1, text>:
+        if not self.observation.active or self.observation.acknowledged:
+            return Err("process inspection V1 lease is inactive")
+        val words = unsafe(capabilities: [ffi]):
+            rt_process_inspection_v1_input_receipt_value(self.observation.ticket)
+        val input = decode_process_inspection_input_v1(words)?
+        val ticket = self.observation.ticket
+        if ticket.len() != 5 or input.request_id_high != ticket[1] or
+                input.request_id_low != ticket[2] or
+                input.ticket_high != ticket[3] or input.ticket_low != ticket[4] or
+                input.input_bytes_accepted != self.expected_input_len or
+                input.input_digest != self.expected_input_digest or
+                self.expected_request_digest.len() != 32 or
+                input.request_digest != self.expected_request_digest:
+            return Err("process inspection V1 input receipt does not match its retained lease")
+        Ok(input)
+
+    me fn collect_observation(self, caller_wait_ns: i64
+    ) -> Result<ProcessObservationReceiptV4, text>:
+        self.observation.collect(caller_wait_ns)
+
+    pub me fn terminal_capture(self, caller_wait_ns: i64
+    ) -> Result<ProcessObservationFrozenReceiptV4?, text>:
+        val receipt = self.observation.collect(caller_wait_ns)?
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            return Err("process inspection V1 has only cleanup authority")
+        if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen:
+            return Ok(nil)
+        val input = self.input_receipt()?
+        if not process_inspection_input_complete_v1(input,
+                self.expected_input_len, self.expected_input_digest):
+            return Err("process inspection V1 stdin was not written and closed completely")
+        if receipt.packet.failure_phase != ProcessObservationFailurePhaseV4.Unknown or
+                receipt.packet.errno_value != 0 or receipt.packet.exit_code != 0 or
+                receipt.packet.signal_number != 0 or
+                receipt.packet.stdout.state != ProcessObservationStreamStateV4.Eof or
+                receipt.packet.stderr.state != ProcessObservationStreamStateV4.Eof or
+                receipt.packet.stdout.seen_bytes != receipt.packet.stdout.retained_bytes or
+                receipt.packet.stderr.seen_bytes != receipt.packet.stderr.retained_bytes:
+            return Err("process inspection V1 terminal capture is incomplete or failed")
+        val frozen = freeze_process_observation_receipt_v4(receipt)?
+        Ok(Some(frozen))
+
+    pub me fn cancel(self, caller_wait_ns: i64
+    ) -> Result<ProcessObservationReceiptV4, text>:
+        self.observation.cancel(caller_wait_ns)
+
+    pub me fn acknowledge_current(self) -> Result<ProcessObservationReceiptV4, text>:
+        val receipt = self.observation.collect(0)?
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen:
+            val frozen = freeze_process_observation_receipt_v4(receipt)?
+            return self.observation.acknowledge(frozen)
+        if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
+            val cleanup = freeze_process_observation_cleanup_receipt_v4(receipt)?
+            return self.observation.acknowledge_cleanup(cleanup)
+        Err("process inspection V1 has no frozen snapshot to acknowledge")
+
+pub struct ProcessInspectionStartV1:
+    receipt: ProcessObservationReceiptV4
+    lease: ProcessInspectionLeaseV1
+
+pub fn process_inspection_owner_start_pinned_v1(
+    executable: OwnedExecutablePin,
+    cwd: OwnedCwdPinV4,
+    request: ProcessObservationRequestV4,
+    input: [u8],
+    expected_input_digest: [u8]
+) -> Result<ProcessInspectionStartV1, text>:
+    val input_length = input.len()
+    if input_length > PROCESS_INSPECTION_V1_MAX_INPUT_BYTES or
+            expected_input_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+        return Err("process inspection V1 input size or digest is invalid")
+    val bound = _process_observation_bound_request_v4(executable, cwd, request)?
+    val encoded = canonical_encode_process_observation_request_v4(bound)?
+    val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        rt_process_inspection_v1_start_pinned_value(
+            executable.handle, cwd.handle, encoded, input, expected_input_digest)
+    val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+    var ticket: [i64] = []
+    var active = false
+    if receipt.packet.status == ProcessObservationStatusV4.Running or
+            receipt.packet.status == ProcessObservationStatusV4.CleanupPending or
+            receipt.packet.status == ProcessObservationStatusV4.ProviderFailed:
+        if receipt.packet.ticket_high <= 0 or receipt.packet.ticket_low <= 0 or
+                receipt.packet.request_id_high <= 0 or receipt.packet.request_id_low <= 0:
+            return Err("process inspection V1 start returned invalid ticket authority")
+        ticket = [PROCESS_OBSERVATION_V4_VERSION,
+            receipt.packet.request_id_high, receipt.packet.request_id_low,
+            receipt.packet.ticket_high, receipt.packet.ticket_low]
+        active = true
+    var copied_digest: [u8] = []
+    for value in expected_input_digest: copied_digest.push(value)
+    var initial_request_digest: [u8] = []
+    if active:
+        val initial_words = unsafe(capabilities: [ffi]):
+            rt_process_inspection_v1_input_receipt_value(ticket)
+        val initial = decode_process_inspection_input_v1(initial_words)
+        if initial.is_ok():
+            val fact = initial.unwrap()
+            if fact.request_id_high == ticket[1] and
+                    fact.request_id_low == ticket[2] and
+                    fact.ticket_high == ticket[3] and fact.ticket_low == ticket[4] and
+                    fact.input_bytes_accepted == input_length and
+                    fact.input_digest == copied_digest:
+                initial_request_digest = fact.request_digest
+    Ok(ProcessInspectionStartV1(receipt: receipt,
+        lease: ProcessInspectionLeaseV1(
+            observation: ProcessObservationLeaseV4(ticket: ticket, active: active,
+                frozen_kind: ProcessObservationPacketKindV4.Unknown,
+                acknowledged: false),
+            expected_input_len: input_length,
+            expected_input_digest: copied_digest,
+            expected_request_digest: initial_request_digest)))
 
 # ============================================================================
 # Process Execution

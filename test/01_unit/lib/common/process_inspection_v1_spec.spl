@@ -1,0 +1,75 @@
+# @cover src/lib/common/process/inspection_v1.spl 80%
+"""Input completion must be bound to the same opaque process ticket."""
+
+use std.spec.*
+use std.common.process.inspection_v1.{
+    decode_process_inspection_input_v1, process_inspection_input_complete_v1
+}
+
+fn _input_words() -> [i64]:
+    var words: [i64] = [0; 75]
+    words[0] = 1
+    words[1] = 11
+    words[2] = 12
+    words[3] = 13
+    words[4] = 14
+    words[5] = 3
+    words[6] = 3
+    words[7] = 1
+    words[8] = 1
+    words[9] = 1
+    var index = 0
+    while index < 32:
+        words[11 + index] = index
+        words[43 + index] = 31 - index
+        index = index + 1
+    words
+
+fn _expected_digest() -> [u8]:
+    var result: [u8] = []
+    var index = 0
+    while index < 32:
+        result.push(index as u8)
+        index = index + 1
+    result
+
+describe "process inspection V1 input receipt":
+    it "requires exact input delivery and closure":
+        val receipt = decode_process_inspection_input_v1(_input_words()).unwrap()
+        expect(receipt.ticket_high).to_equal(13)
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            _expected_digest())).to_equal(true)
+        expect(process_inspection_input_complete_v1(receipt, 4,
+            _expected_digest())).to_equal(false)
+        var wrong_digest = _expected_digest()
+        wrong_digest[0] = 255u8
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            wrong_digest)).to_equal(false)
+
+    it "rejects an early child exit as inspection authority":
+        var early = _input_words()
+        early[6] = 1
+        early[10] = 32
+        val receipt = decode_process_inspection_input_v1(early).unwrap()
+        expect(process_inspection_input_complete_v1(receipt, 3,
+            _expected_digest())).to_equal(false)
+
+    it "rejects malformed ticket, state, and digest bytes":
+        var missing_ticket = _input_words()
+        missing_ticket[3] = 0
+        expect(decode_process_inspection_input_v1(missing_ticket).is_err()).to_equal(true)
+        var impossible_state = _input_words()
+        impossible_state[7] = 0
+        expect(decode_process_inspection_input_v1(impossible_state).is_err()).to_equal(true)
+        var bad_digest = _input_words()
+        bad_digest[43] = 256
+        expect(decode_process_inspection_input_v1(bad_digest).is_err()).to_equal(true)
+        var short_words = _input_words()
+        short_words.pop()
+        expect(decode_process_inspection_input_v1(short_words).is_err()).to_equal(true)
+        var over_written = _input_words()
+        over_written[6] = 4
+        expect(decode_process_inspection_input_v1(over_written).is_err()).to_equal(true)
+        var no_reap = _input_words()
+        no_reap[9] = 0
+        expect(decode_process_inspection_input_v1(no_reap).is_err()).to_equal(true)
