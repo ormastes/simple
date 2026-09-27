@@ -35,6 +35,16 @@ val COFF_REL_AMD64_SECTION: i64 = 0x000a
 val COFF_REL_AMD64_SECREL: i64 = 0x000b
 val COFF_REL_AMD64_SECREL7: i64 = 0x000c
 
+val COFF_REL_ARM64_ABSOLUTE: i64 = 0x0000
+val COFF_REL_ARM64_ADDR32: i64 = 0x0001
+val COFF_REL_ARM64_ADDR32NB: i64 = 0x0002
+val COFF_REL_ARM64_BRANCH26: i64 = 0x0003
+val COFF_REL_ARM64_PAGEBASE_REL21: i64 = 0x0004
+val COFF_REL_ARM64_REL21: i64 = 0x0005
+val COFF_REL_ARM64_PAGEOFFSET_12A: i64 = 0x0006
+val COFF_REL_ARM64_PAGEOFFSET_12L: i64 = 0x0007
+val COFF_REL_ARM64_SECREL: i64 = 0x0008
+
 struct CoffRelocation:
     virtual_address: i64
     symbol_index: i64
@@ -346,6 +356,89 @@ fn coff_apply_amd64_relocation(relocation_type: i64, symbol_address: i64,
     CoffRelocationValue(success: false, value: 0, width: 0,
         error: "unsupported AMD64 COFF relocation type {relocation_type}")
 
+fn _coff_arm64_sign_extend(value: i64, bits: i64) -> i64:
+    val sign = 1 << (bits - 1)
+    val modulus = 1 << bits
+    if value & sign != 0: value - modulus else: value
+
+fn _coff_arm64_patch_adr(instruction: i64, value: i64) -> CoffRelocationValue:
+    if value < -1048576 or value >= 1048576:
+        return CoffRelocationValue(success: false, value: 0, width: 4,
+            error: "ARM64 COFF ADR/ADRP relocation exceeds signed 21-bit range")
+    val encoded = value & 0x1fffff
+    val patched = (instruction & 0x9f00001f) |
+        ((encoded & 3) << 29) | (((encoded >> 2) & 0x7ffff) << 5)
+    CoffRelocationValue(success: true, value: patched, width: 4, error: "")
+
+fn coff_apply_arm64_relocation(relocation_type: i64, symbol_address: i64,
+        instruction: i64, place_address: i64, image_base: i64) -> CoffRelocationValue:
+    """Apply one ARM64 COFF relocation to a 32-bit word or instruction."""
+    if relocation_type == COFF_REL_ARM64_ABSOLUTE:
+        return CoffRelocationValue(success: true, value: instruction, width: 0, error: "")
+    if relocation_type == COFF_REL_ARM64_ADDR32 or
+            relocation_type == COFF_REL_ARM64_ADDR32NB:
+        val base = if relocation_type == COFF_REL_ARM64_ADDR32NB: image_base else: 0
+        val value = symbol_address + instruction - base
+        if value < 0 or value >= 4294967296:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "ARM64 COFF 32-bit address relocation is out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_BRANCH26:
+        if instruction & 0x7c000000 != 0x14000000:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH26 does not name B or BL")
+        val addend = _coff_arm64_sign_extend((instruction & 0x3ffffff) << 2, 28)
+        val value = symbol_address + addend - place_address
+        if value & 3 != 0 or value < -134217728 or value >= 134217728:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH26 is unaligned or out of range")
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xfc000000) | ((value >> 2) & 0x3ffffff),
+            width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_PAGEBASE_REL21:
+        if instruction & 0x9f000000 != 0x90000000:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_PAGEBASE_REL21 does not name ADRP")
+        val encoded = ((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2)
+        val addend_pages = _coff_arm64_sign_extend(encoded, 21)
+        val target_page = (symbol_address & -4096) + (addend_pages << 12)
+        val place_page = place_address & -4096
+        return _coff_arm64_patch_adr(instruction,
+            (target_page - place_page) >> 12)
+    if relocation_type == COFF_REL_ARM64_REL21:
+        if instruction & 0x9f000000 != 0x10000000:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_REL21 does not name ADR")
+        val encoded = ((instruction >> 29) & 3) | (((instruction >> 5) & 0x7ffff) << 2)
+        val addend = _coff_arm64_sign_extend(encoded, 21)
+        return _coff_arm64_patch_adr(instruction,
+            symbol_address + addend - place_address)
+    if relocation_type == COFF_REL_ARM64_PAGEOFFSET_12A:
+        if instruction & 0x7f000000 != 0x11000000 or instruction & 0x400000 != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_PAGEOFFSET_12A requires ADD/ADDS with unshifted immediate")
+        val addend = (instruction >> 10) & 0xfff
+        val page_offset = (symbol_address + addend) & 0xfff
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xffc003ff) | (page_offset << 10),
+            width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_PAGEOFFSET_12L:
+        if instruction & 0x3b000000 != 0x39000000 or
+                instruction & 0x04000000 != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_PAGEOFFSET_12L requires scalar unsigned-immediate load/store")
+        val scale = 1 << ((instruction >> 30) & 3)
+        val addend = ((instruction >> 10) & 0xfff) * scale
+        val page_offset = (symbol_address + addend) & 0xfff
+        if page_offset % scale != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_PAGEOFFSET_12L target is misaligned")
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xffc003ff) | ((page_offset / scale) << 10),
+            width: 4, error: "")
+    CoffRelocationValue(success: false, value: 0, width: 0,
+        error: "unsupported ARM64 COFF relocation type {relocation_type}")
+
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
 export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
 export COFF_STORAGE_CLASS_EXTERNAL, COFF_STORAGE_CLASS_STATIC, COFF_STORAGE_CLASS_WEAK_EXTERNAL
@@ -356,7 +449,11 @@ export COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64, COFF_REL_AMD64_ADDR32, CO
 export COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_1, COFF_REL_AMD64_REL32_2
 export COFF_REL_AMD64_REL32_3, COFF_REL_AMD64_REL32_4, COFF_REL_AMD64_REL32_5
 export COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7
+export COFF_REL_ARM64_ABSOLUTE, COFF_REL_ARM64_ADDR32, COFF_REL_ARM64_ADDR32NB
+export COFF_REL_ARM64_BRANCH26, COFF_REL_ARM64_PAGEBASE_REL21, COFF_REL_ARM64_REL21
+export COFF_REL_ARM64_PAGEOFFSET_12A, COFF_REL_ARM64_PAGEOFFSET_12L, COFF_REL_ARM64_SECREL
 export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name
 export coff_weak_primary_for_fallback
 export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
 export coff_apply_amd64_relocation
+export coff_apply_arm64_relocation

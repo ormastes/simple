@@ -435,6 +435,12 @@ Implemented source slice:
   name, BSS, and relocation bounds checks;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
+- ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,
+  `PAGEOFFSET_12A`, and `PAGEOFFSET_12L` relocation patching with opcode,
+  alignment, and range validation. A reproducible real Clang ARM64 COFF object
+  pins the compiler-emitted relocation census. Production ARM64 PE routing,
+  machine-specific image emission, `SECREL` resolution, and the ARM64 8-byte
+  exception-table format remain open and are not certified by this slice;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;
 - AMD64 multi-object symbol resolution, static `.lib` fixpoint extraction,

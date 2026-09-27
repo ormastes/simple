@@ -2,8 +2,15 @@ use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_object.{
     COFF_MACHINE_AMD64, COFF_REL_AMD64_ADDR32, COFF_REL_AMD64_REL32,
-    COFF_REL_AMD64_REL32_5, coff_parse_object, coff_symbol_at_table_index,
-    coff_symbol_resolution_name, coff_apply_amd64_relocation}
+    COFF_MACHINE_ARM64, COFF_REL_AMD64_REL32_5, coff_parse_object, coff_symbol_at_table_index,
+    coff_symbol_resolution_name, coff_apply_amd64_relocation,
+    COFF_REL_ARM64_ADDR32NB, COFF_REL_ARM64_BRANCH26,
+    COFF_REL_ARM64_PAGEBASE_REL21, COFF_REL_ARM64_REL21,
+    COFF_REL_ARM64_PAGEOFFSET_12A, COFF_REL_ARM64_PAGEOFFSET_12L,
+    coff_apply_arm64_relocation}
+use std.io_runtime.{file_read_bytes}
+
+val COFF_OBJECT_FIX: text = "test/fixtures/linker/coff"
 
 fn _push_u16(bytes: [u8], value: i64) -> [u8]:
     var result = bytes.push((value & 0xff) as u8)
@@ -148,6 +155,23 @@ fn _weak_external_object(fallback_index: i64, characteristics: i64 = 3) -> [u8]:
     _push_u32(bytes, 4)
 
 describe "raw COFF object parser":
+    it "parses the reproducible LLVM Windows ARM64 relocation census":
+        val parsed = coff_parse_object(
+            file_read_bytes("{COFF_OBJECT_FIX}/windows_arm64_relocs.obj"))
+        expect(parsed.is_ok()).to_equal(true)
+        val object = parsed.unwrap()
+        expect(object.machine).to_equal(COFF_MACHINE_ARM64)
+        var kinds: [i64] = []
+        for section in object.sections:
+            for relocation in section.relocations:
+                if not kinds.contains(relocation.relocation_type):
+                    kinds = kinds.push(relocation.relocation_type)
+        expect(kinds.contains(COFF_REL_ARM64_BRANCH26)).to_equal(true)
+        expect(kinds.contains(COFF_REL_ARM64_PAGEBASE_REL21)).to_equal(true)
+        expect(kinds.contains(COFF_REL_ARM64_PAGEOFFSET_12A)).to_equal(true)
+        expect(kinds.contains(COFF_REL_ARM64_PAGEOFFSET_12L)).to_equal(true)
+        expect(kinds.contains(COFF_REL_ARM64_ADDR32NB)).to_equal(true)
+
     it "decodes an AMD64 section, symbol, and relocation":
         step("Parse the raw object form emitted by LLVM on Windows")
         val parsed = coff_parse_object(_minimal_amd64_object(0))
@@ -232,3 +256,34 @@ describe "raw COFF object parser":
         val unsupported = coff_apply_amd64_relocation(0x7fff, 0, 0, 0, 0)
         expect(unsupported.success).to_equal(false)
         expect(unsupported.error).to_contain("unsupported")
+
+    it "patches the LLVM Windows ARM64 relocation census":
+        val image_base = 0x140000000
+        val address = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_ADDR32NB, image_base + 0x1234, 4, 0, image_base)
+        val branch = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_BRANCH26, 0x1100, 0x94000000, 0x1000, image_base)
+        val page = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEBASE_REL21, 0x12345000, 0x90000008, 0x1000, image_base)
+        val adr = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_REL21, 0x1100, 0x10000000, 0x1000, image_base)
+        val add = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEOFFSET_12A, 0x12345234, 0x91000000, 0, image_base)
+        val load = coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEOFFSET_12L, 0x12345234, 0xb9400108, 0, image_base)
+        expect(address.value).to_equal(0x1238)
+        expect(branch.value).to_equal(0x94000040)
+        expect(page.value).to_equal(0x90091a28)
+        expect(adr.value).to_equal(0x10000800)
+        expect(add.value).to_equal(0x9108d000)
+        expect(load.value).to_equal(0xb9423508)
+
+    it "rejects malformed and overflowing Windows ARM64 instructions":
+        expect(coff_apply_arm64_relocation(
+            COFF_REL_ARM64_BRANCH26, 0x9000000, 0x94000000, 0, 0).success).to_equal(false)
+        expect(coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEBASE_REL21, 0, 0xd503201f, 0, 0).success).to_equal(false)
+        expect(coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEOFFSET_12A, 0x123, 0x91400000, 0, 0).success).to_equal(false)
+        expect(coff_apply_arm64_relocation(
+            COFF_REL_ARM64_PAGEOFFSET_12L, 0x235, 0xb9400108, 0, 0).success).to_equal(false)
