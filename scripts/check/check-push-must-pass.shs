@@ -983,6 +983,11 @@ run_conflict_tree_union() {
             _has_new=1
         else
             set -- "$@" "$_remote_sha"
+            if ! git -C "$ROOT" merge-base --is-ancestor "$_remote_sha" "$_local_sha"; then
+                _rebased_base=$(rebased_push_published_base "$_local_sha") ||
+                    die "cannot verify published main as the base of rebased ref $_local_ref"
+                set -- "$@" "$_rebased_base"
+            fi
         fi
     done < "$_ref_file"
     if [ "$_has_new" -eq 1 ]; then
@@ -991,6 +996,31 @@ run_conflict_tree_union() {
         set -- "$@" "--remotes=$_push_remote"
     fi
     run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
+}
+
+# A non-fast-forward PR update replaces a branch built on an old main with a
+# branch built on current main. The old branch head excludes none of the main
+# commits merged since then, so old..new can exceed the 64-commit guard bound
+# even when the new branch adds one commit. Only use main as an exclusion after
+# asking the push remote for its actual main SHA and computing the unique
+# common ancestor with the new tip. That ancestor is published even when main
+# advances after the PR was rebased. A stale tracking ref, unrelated history,
+# ambiguous merge base, or unavailable remote remains a refusal. The entire
+# tip-side range from that published base is checked by every range guard.
+rebased_push_published_base() {
+    _rebased_tip=$1
+    _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_rebased_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    _rebased_line=$(git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" refs/heads/main 2>/dev/null) || return 1
+    _rebased_sha=${_rebased_line%%[[:space:]]*}
+    _rebased_ref=${_rebased_line#*[[:space:]]}
+    [ "$_rebased_ref" = refs/heads/main ] || return 1
+    git -C "$ROOT" rev-parse --verify --quiet "$_rebased_sha^{commit}" >/dev/null || return 1
+    _rebased_base=$(git -C "$ROOT" merge-base --all "$_rebased_sha" "$_rebased_tip") || return 1
+    [ -n "$_rebased_base" ] || return 1
+    [ "$(printf '%s\n' "$_rebased_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    [ "$_rebased_base" != "$_rebased_tip" ] || return 1
+    printf '%s\n' "$_rebased_base"
 }
 
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
@@ -1130,6 +1160,61 @@ if [ "${1:-}" = --self-test ]; then
     _rc=$?
     [ "$_rc" -eq 2 ] || die "unmatched dispatch-arm row did not return 2 (got $_rc)"
 
+    # A force-with-lease PR update can replace an old branch commit with one
+    # commit on top of much newer main. The remote branch's old SHA is not a
+    # usable range base: it leaves every intervening main commit in the walk.
+    # Resolve the published merge base from the actual remote main instead.
+    _saved_root=$ROOT
+    _saved_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    _rebased_repo="$_tmp/rebased/repo"
+    mkdir -p "$_rebased_repo"
+    git init -q --bare "$_tmp/rebased/remote.git" || die "rebased fixture remote init failed"
+    git -C "$_rebased_repo" init -q -b main || die "rebased fixture repo init failed"
+    git -C "$_rebased_repo" config user.email test@example.com
+    git -C "$_rebased_repo" config user.name Test
+    git -C "$_rebased_repo" remote add origin "$_tmp/rebased/remote.git"
+    git -C "$_rebased_repo" commit -q --allow-empty -m base || die "rebased fixture base failed"
+    git -C "$_rebased_repo" push -q origin main || die "rebased fixture initial push failed"
+    git -C "$_rebased_repo" switch -q -c old
+    git -C "$_rebased_repo" commit -q --allow-empty -m old || die "rebased fixture old branch failed"
+    _rebased_old=$(git -C "$_rebased_repo" rev-parse HEAD)
+    git -C "$_rebased_repo" push -q origin old || die "rebased fixture old push failed"
+    git -C "$_rebased_repo" switch -q main
+    _rebased_i=0
+    while [ "$_rebased_i" -lt 65 ]; do
+        git -C "$_rebased_repo" commit -q --allow-empty -m "main-$_rebased_i" || die "rebased fixture main commit failed"
+        _rebased_i=$((_rebased_i + 1))
+    done
+    _rebased_expected=$(git -C "$_rebased_repo" rev-parse HEAD)
+    git -C "$_rebased_repo" push -q origin main || die "rebased fixture advanced main push failed"
+    git -C "$_rebased_repo" switch -q -c replacement
+    git -C "$_rebased_repo" commit -q --allow-empty -m replacement || die "rebased fixture replacement failed"
+    _rebased_tip=$(git -C "$_rebased_repo" rev-parse HEAD)
+    ROOT=$_rebased_repo
+    MUST_CHECK_PUSH_REMOTE=origin
+    _rebased_actual=$(rebased_push_published_base "$_rebased_tip") || die "published rebase base rejected"
+    [ "$_rebased_actual" = "$_rebased_expected" ] || die "published rebase base was not current main"
+    [ "$(git -C "$ROOT" rev-list --count "$_rebased_old..$_rebased_tip")" -gt 64 ] || die "rebased fixture did not exceed old-head history bound"
+    [ "$(git -C "$ROOT" rev-list --count "$_rebased_actual..$_rebased_tip")" -eq 1 ] || die "published rebase range did not isolate replacement commit"
+    mkdir -p "$ROOT/scripts/check"
+    cp "$_saved_root/scripts/check/check-no-conflict-tree-push.shs" "$ROOT/scripts/check/" || die "rebased fixture guard copy failed"
+    printf 'refs/heads/replacement %s refs/heads/old %s\n' "$_rebased_tip" "$_rebased_old" > "$_tmp/rebased/refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000
+        MUST_CHECK_BUDGET_SPENT_MS=0
+        MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/refs"
+    ) || die "rebased outgoing union rejected a one-commit replacement"
+    git -C "$ROOT" switch -q main
+    git -C "$ROOT" commit -q --allow-empty -m later-main || die "rebased fixture later main failed"
+    git -C "$ROOT" push -q origin main || die "rebased fixture later main push failed"
+    [ "$(rebased_push_published_base "$_rebased_tip")" = "$_rebased_expected" ] || die "main advancing after rebase changed the published base"
+    MUST_CHECK_PUSH_REMOTE=missing-remote
+    rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1 && die "missing remote accepted as rebase authority"
+    ROOT=$_saved_root
+    MUST_CHECK_PUSH_REMOTE=$_saved_remote
+
     # Committed-dispatcher-newer-than-running-script fixture (Opus review
     # 2026-09-25, MUST finding #1): replays the exact incident shape --
     # load_committed_dispatcher redefines run_manifest_push_gates from the
@@ -1187,7 +1272,7 @@ if [ "${1:-}" = --self-test ]; then
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 24 ledger/budget/dispatcher fixtures checked"
+    echo "push-must-check: PASS — 28 ledger/budget/dispatcher/rebase fixtures checked"
     exit 0
 fi
 
@@ -1286,16 +1371,16 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     _predecessor=$_remote_sha
     if [ "$_predecessor" = "$ZERO" ]; then
         _predecessor=$(git -C "$ROOT" merge-base "$_local_sha" origin/main 2>/dev/null) || die "cannot derive new-ref base"
+    elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
+        _predecessor=$(rebased_push_published_base "$_local_sha") ||
+            die "cannot verify published main as the base of rebased ref $_local_ref"
     fi
     ALLOW_UNPROMOTED_LEDGER=0
     if ledger_is_unpromoted_at_rev "$_predecessor"; then
         ALLOW_UNPROMOTED_LEDGER=1
     fi
     validate_ledger_text "$_manifest" "$_ledger" "$_fp" || die "ledger is malformed stale or has a non-passing push-blocking row"
-    _range="$_remote_sha..$_local_sha"
-    if [ "$_remote_sha" = "$ZERO" ]; then
-        _range="$_predecessor..$_local_sha"
-    fi
+    _range="$_predecessor..$_local_sha"
     run_manifest_push_gates "$_manifest" "$_range" "$_local_sha"
     _gates_rc=$?
     if [ "$_gates_rc" -ne 0 ]; then
