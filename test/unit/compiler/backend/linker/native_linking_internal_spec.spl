@@ -20,7 +20,15 @@
 use std.spec.step
 use std.spec.*
 
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig}
+use compiler.backend.linker.linker_wrapper.{
+    link_to_native, link_simpleos_internal, NativeLinkConfig,
+    internal_coff_flags, internal_coff_policy, internal_elf_runpath,
+    internal_elf_bind_now, internal_elf_hash_style, internal_elf_strip_all,
+    internal_elf_as_needed, internal_elf_gc_sections,
+    internal_elf_library_needed_name,
+    internal_coff_retained_symbols, internal_coff_selected_default_libraries,
+    internal_simpleos_flags, internal_coff_runtime_is_msvc}
+use compiler.backend.linker.msvc.{msvc_lib_arch_dir}
 use compiler.backend.linker.smf_writer.{SmfWriter}
 use std.io_runtime.{file_read_bytes, file_write_bytes, shell}
 
@@ -35,7 +43,248 @@ fn with_env(key: text, value: text, block: fn()):
 
 val HELLO_A64_OBJ: text = "test/fixtures/linker/elf/hello_libc_a64.o"
 
+describe "native_linking - internal ELF RUNPATH flags":
+    it "preserves explicit DSO paths and names searched DSO inputs by leaf":
+        expect(internal_elf_library_needed_name(
+            "test/fixtures/linker/elf/libadd_x64.so.1",
+            "test/fixtures/linker/elf/libadd_x64.so.1")).to_equal(
+            "test/fixtures/linker/elf/libadd_x64.so.1")
+        expect(internal_elf_library_needed_name(
+            "add_x64", "/opt/simple/lib/libadd_x64.so.1")).to_equal(
+            "libadd_x64.so.1")
+
+    it "normalizes supported direct and compiler-driver rpath spellings":
+        val parsed = internal_elf_runpath([
+            "-rpath", "$ORIGIN", "-Wl,-rpath,/opt/simple/lib",
+            "--eh-frame-hdr", "--build-id", "--build-id=sha1",
+            "--gc-sections", "-z", "relro", "-Wl,-z,now",
+            "--hash-style=gnu", "--strip-all", "-s", "--as-needed",
+            "--no-undefined", "-z", "defs", "-Wl,-z,noexecstack",
+            "-rpath", "$ORIGIN"])
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap()).to_equal("$ORIGIN:/opt/simple/lib")
+        expect(internal_elf_bind_now(["-z", "relro", "-znow"])).to_equal(true)
+        expect(internal_elf_bind_now(["-Wl,-z,relro"])).to_equal(false)
+        expect(internal_elf_hash_style(["--hash-style=gnu"]).unwrap()).to_equal("gnu")
+        expect(internal_elf_hash_style([]).unwrap()).to_equal("both")
+        expect(internal_elf_strip_all(["--strip-all"])).to_equal(true)
+        expect(internal_elf_strip_all(["-s"])).to_equal(true)
+        expect(internal_elf_strip_all([])).to_equal(false)
+        expect(internal_elf_as_needed(["--as-needed"]).unwrap()).to_equal(true)
+        expect(internal_elf_as_needed(["--no-as-needed"]).unwrap()).to_equal(false)
+        expect(internal_elf_gc_sections([]).unwrap()).to_equal(true)
+        expect(internal_elf_gc_sections(["--gc-sections"]).unwrap()).to_equal(true)
+        expect(internal_elf_gc_sections(["--no-gc-sections"]).unwrap()).to_equal(false)
+        expect(internal_elf_gc_sections(["-Wl,--no-gc-sections"]).unwrap()).to_equal(false)
+
+    it "rejects malformed or unrelated extra flags":
+        expect(internal_elf_runpath(["-rpath"]).is_err()).to_equal(true)
+        expect(internal_elf_runpath(["-rpath", ""]).is_err()).to_equal(true)
+        expect(internal_elf_runpath(["--build-id=uuid"]).is_err()).to_equal(true)
+        expect(internal_elf_runpath(["--no-gc-sections"]).is_ok()).to_equal(true)
+        expect(internal_elf_runpath(["-z", "lazy"]).is_err()).to_equal(true)
+        expect(internal_elf_runpath(["-z", "execstack"]).is_err()).to_equal(true)
+        expect(internal_elf_runpath(["--allow-shlib-undefined"]).is_err()).to_equal(true)
+        expect(internal_elf_hash_style(["--hash-style=none"]).is_err()).to_equal(true)
+        expect(internal_elf_hash_style([
+            "--hash-style=gnu", "--hash-style=sysv"]).is_err()).to_equal(true)
+        expect(internal_elf_as_needed([
+            "--as-needed", "--no-as-needed"]).is_err()).to_equal(true)
+        expect(internal_elf_gc_sections([
+            "--gc-sections", "--no-gc-sections"]).is_err()).to_equal(true)
+
+describe "native_linking - internal COFF optional-header flags":
+    it "projects case-insensitive subsystem, stack, and heap flags":
+        val parsed = internal_coff_policy([
+            "/MaChInE:X64", "/SuBsYsTeM:WiNdOwS,6.2", "/STACK:0x200000,8192",
+            "/HEAP:3145728", "/heap:3145728", "/DYNAMICBASE:NO",
+            "/HIGHENTROPYVA:NO", "/NXCOMPAT:NO", "/LARGEADDRESSAWARE:NO",
+            "/TSAWARE:NO", "/FIXED", "/NOLOGO", "/DEBUG:NONE",
+            "/INCREMENTAL:NO", "/MANIFEST:NO", "/ALIGN:8192",
+            "/FILEALIGN:0x400", "/OSVERSION:10.1", "/VERSION:2.3",
+            "/OPT:REF", "/opt:ref"], "x86_64")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().subsystem).to_equal(2)
+        expect(parsed.unwrap().stack_reserve).to_equal(0x200000)
+        expect(parsed.unwrap().stack_commit).to_equal(8192)
+        expect(parsed.unwrap().heap_reserve).to_equal(3145728)
+        expect(parsed.unwrap().heap_commit).to_equal(0x1000)
+        expect(parsed.unwrap().dynamic_base).to_equal(false)
+        expect(parsed.unwrap().high_entropy_va).to_equal(false)
+        expect(parsed.unwrap().nx_compat).to_equal(false)
+        expect(parsed.unwrap().large_address_aware).to_equal(false)
+        expect(parsed.unwrap().terminal_server_aware).to_equal(false)
+        expect(parsed.unwrap().fixed_image).to_equal(true)
+        expect(parsed.unwrap().section_alignment).to_equal(8192)
+        expect(parsed.unwrap().file_alignment).to_equal(1024)
+        expect(parsed.unwrap().os_version_major).to_equal(10)
+        expect(parsed.unwrap().os_version_minor).to_equal(1)
+        expect(parsed.unwrap().image_version_major).to_equal(2)
+        expect(parsed.unwrap().image_version_minor).to_equal(3)
+        expect(parsed.unwrap().subsystem_version_major).to_equal(6)
+        expect(parsed.unwrap().subsystem_version_minor).to_equal(2)
+        val ref_enabled = internal_coff_flags(["/OPT:REF"], "x86_64").unwrap()
+        val ref_disabled = internal_coff_flags(["/OPT:NOREF"], "x86_64").unwrap()
+        expect(ref_enabled.opt_ref).to_equal(true)
+        expect(ref_disabled.opt_ref).to_equal(false)
+        val optimized = internal_coff_flags(["/OPT:REF,ICF"], "x86_64").unwrap()
+        expect(optimized.opt_ref).to_equal(true)
+        expect(optimized.opt_icf).to_equal(true)
+        val icf_disabled = internal_coff_flags(["/OPT:NOICF"], "x86_64").unwrap()
+        expect(icf_disabled.opt_icf).to_equal(false)
+
+    it "projects command-line default libraries, exclusions, and include roots":
+        val parsed = internal_coff_flags([
+            "/DEFAULTLIB:Runtime.lib", "/defaultlib:runtime.LIB",
+            "/DEFAULTLIB:Explicit.lib", "/NODEFAULTLIB:RUNTIME",
+            "/nodefaultlib:legacy.lib", "/INCLUDE:forced_symbol",
+            "/include:forced_symbol", "/EXPORT:api=implementation,@7",
+            "/export:api=implementation,@7"], "x86_64").unwrap()
+        expect(parsed.default_libraries.len()).to_equal(2)
+        expect(parsed.default_libraries[0]).to_equal("Runtime.lib")
+        expect(parsed.nodefault_libraries.len()).to_equal(2)
+        expect(parsed.nodefault_libraries).to_contain("runtime")
+        expect(parsed.nodefault_libraries).to_contain("legacy")
+        expect(parsed.nodefault_all).to_equal(false)
+        expect(parsed.include_symbols.len()).to_equal(1)
+        expect(parsed.include_symbols[0]).to_equal("forced_symbol")
+        expect(parsed.exports.len()).to_equal(1)
+        expect(parsed.exports[0].public_name).to_equal("api")
+        expect(parsed.exports[0].internal_name).to_equal("implementation")
+        expect(internal_coff_retained_symbols(
+            parsed, ["configured_root", "forced_symbol"])).to_equal(
+                ["configured_root", "forced_symbol", "implementation"])
+        expect(internal_coff_selected_default_libraries(
+            parsed, ["runtime.lib", "Legacy.LIB", "embedded.lib"])).to_equal(
+                ["Explicit.lib", "embedded.lib"])
+
+        val all_suppressed = internal_coff_flags(
+            ["/NODEFAULTLIB", "/FoRcE:MuLtIpLe"], "arm64").unwrap()
+        expect(all_suppressed.nodefault_all).to_equal(true)
+        expect(all_suppressed.force_multiple).to_equal(true)
+        expect(internal_coff_selected_default_libraries(
+            all_suppressed, ["runtime.lib"])).to_equal([])
+
+    it "projects an exact entry symbol for closure and final resolution":
+        val parsed = internal_coff_flags([
+            "/MACHINE:X64", "/ENTRY:customCRTStartup",
+            "/ENTRY:customCRTStartup", "/BASE:0x180000000",
+            "/base:6442450944"], "amd64")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().entry).to_equal("customCRTStartup")
+        expect(parsed.unwrap().image_base).to_equal(0x180000000)
+
+    it "rejects malformed, conflicting, overflowing, and unmodeled flags":
+        expect(internal_coff_policy(["/STACK:4096,8192"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/HEAP:0"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/SUBSYSTEM:NATIVE"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/SUBSYSTEM:CONSOLE", "/SUBSYSTEM:WINDOWS"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/STACK:4096", "/STACK:8192"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/STACK:0x8000000000000000"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/MACHINE:ARM64"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/MACHINE:X86"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ENTRY:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ENTRY:bad name"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/ENTRY:first", "/ENTRY:second"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/BASE:0x180001000"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/BASE:0x180000000", "/BASE:0x190000000"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/DYNAMICBASE:NO", "/HIGHENTROPYVA"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/NXCOMPAT", "/NXCOMPAT:NO"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/FIXED", "/DYNAMICBASE"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/FIXED", "/FIXED:NO"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/DEBUG"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/INCREMENTAL"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/MANIFEST"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/OPT:REF", "/OPT:NOREF"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/OPT:ICF", "/OPT:NOICF"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/OPT:ICF=2"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/DEFAULTLIB:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/NODEFAULTLIB:bad name"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/INCLUDE:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/FORCE"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/FORCE:UNRESOLVED"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/EXPORT:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/EXPORT:api=one", "/EXPORT:api=two"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ALIGN:4097"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/FILEALIGN:256"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/OSVERSION:6."], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/VERSION:65536"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/SUBSYSTEM:CONSOLE,6.0", "/SUBSYSTEM:CONSOLE,6.1"],
+            "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/ALIGN:4096", "/FILEALIGN:8192"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ALIGN:1024"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/ALIGN:512", "/FILEALIGN:512"], "x86_64").is_ok()).to_equal(true)
+        expect(internal_coff_policy([
+            "/ALIGN:4096", "/ALIGN:8192"], "x86_64").is_err()).to_equal(true)
+
+describe "native_linking - internal COFF runtime and SDK flavor":
+    it "selects GNU runtime archives for MinGW and MSVC .lib archives otherwise":
+        expect(internal_coff_runtime_is_msvc("windows-mingw", false)).to_equal(false)
+        expect(internal_coff_runtime_is_msvc("windows-mingw", true)).to_equal(false)
+        expect(internal_coff_runtime_is_msvc("windows-msvc", true)).to_equal(true)
+        expect(internal_coff_runtime_is_msvc("windows", false)).to_equal(true)
+        expect(internal_coff_runtime_is_msvc("windows", true)).to_equal(false)
+
+    it "discovers MSVC CRT and SDK libraries for the target architecture":
+        expect(msvc_lib_arch_dir("x86_64")).to_equal("x64")
+        expect(msvc_lib_arch_dir("amd64")).to_equal("x64")
+        expect(msvc_lib_arch_dir("aarch64")).to_equal("arm64")
+        expect(msvc_lib_arch_dir("arm64")).to_equal("arm64")
+
+describe "native_linking - internal SimpleOS linker flags":
+    it "projects script and defsym spellings into typed boot policy":
+        val parsed = internal_simpleos_flags([
+            "-T", "board.ld", "-nostdlib", "-static", "--start-group",
+            "--end-group", "--wrap=target", "--wrap", "target",
+            "--no-gc-sections", "--gc-sections", "--defsym=LOAD_BIAS=0x2000",
+            "--defsym", "STACK_SIZE=64K", "--defsym=STACK_SIZE=64K"])
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().script).to_equal("board.ld")
+        expect(parsed.unwrap().defsym_names).to_equal(["LOAD_BIAS", "STACK_SIZE"])
+        expect(parsed.unwrap().defsym_exprs).to_equal(["0x2000", "64K"])
+        expect(parsed.unwrap().gc_sections).to_equal(true)
+        expect(parsed.unwrap().nostdlib).to_equal(true)
+        expect(parsed.unwrap().static_link).to_equal(true)
+        expect(parsed.unwrap().archive_group).to_equal(true)
+        expect(parsed.unwrap().wraps).to_equal(["target"])
+
+    it "rejects malformed, conflicting, and unmodeled boot flags":
+        expect(internal_simpleos_flags(["-T"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["-Tone.ld", "--script=two.ld"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--defsym=NAME="]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--defsym=bad name=1"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags([
+            "--defsym=NAME=1", "--defsym=NAME=2"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--end-group"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--start-group"]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--wrap="]).is_err()).to_equal(true)
+        expect(internal_simpleos_flags(["--wrap", "bad name"]).is_err()).to_equal(true)
+
 describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
+    it "exposes a host-independent SimpleOS production facade":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        val result = link_simpleos_internal(
+            ["test/fixtures/linker/elf/deliberately-missing.o"],
+            "/tmp/simpleos_internal_missing", "simpleos-aarch64", cfg)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("input")
+        expect(result.unwrap_err()).to_contain("cannot be read")
+
     # Host requirement: aarch64 Linux with glibc (crt_discovery finds
     # Scrt1.o/crti.o/crtn.o and libc.so.6 next to them) -- same requirement
     # as link_engine_external_spec.spl's internal-engine specs.
@@ -65,17 +314,31 @@ describe "native_linking - link_to_native SIMPLE_LINKER=internal routing":
             expect(result.unwrap_err()).to_contain("cannot be read")
         )
 
-    it "rejects a config field the internal engine would silently ignore (libraries), naming it":
+    it "consumes the configured library list and names a missing library":
         # @req REQ-LINKER-B3-INTERNAL-ROUTING
-        step("SIMPLE_LINKER=internal + libraries=[m] -> named 'unsupported config field' error, not a silent drop")
+        step("SIMPLE_LINKER=internal resolves libraries itself instead of rejecting or silently dropping them")
         with_env("SIMPLE_LINKER", "internal", fn():
             var cfg = NativeLinkConfig.default()
-            cfg.libraries = ["m"]
+            cfg.libraries = ["simple_linker_deliberately_missing_library"]
             val result = link_to_native(
                 ["test/fixtures/linker/elf/hello_libc_a64.o"],
                 "/tmp/native_linking_internal_spec_libs_out", cfg)
             expect(result.is_err()).to_equal(true)
-            expect(result.unwrap_err()).to_contain("unsupported config field 'libraries'")
+            expect(result.unwrap_err()).to_contain("library 'simple_linker_deliberately_missing_library' was not found")
+        )
+
+    it "resolves a versioned shared library behind a GNU ld script":
+        # @req REQ-LINKER-B3-INTERNAL-ROUTING
+        step("libraries=[m] skips the libm.so text script, links ET_DYN libm, and executes")
+        with_env("SIMPLE_LINKER", "internal", fn():
+            var cfg = NativeLinkConfig.default()
+            cfg.libraries = ["m"]
+            val out = "/tmp/native_linking_internal_spec_libm_out"
+            val result = link_to_native([HELLO_A64_OBJ], out, cfg)
+            expect(result.is_ok()).to_equal(true)
+            val run = shell("'{out}'")
+            expect(run.exit_code).to_equal(42)
+            expect(run.stdout).to_equal("hi from libc\n")
         )
 
     it "SIMPLE_LINKER unset still resolves through the external path unchanged":

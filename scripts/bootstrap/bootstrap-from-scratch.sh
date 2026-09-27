@@ -1506,7 +1506,14 @@ SIMPLE_K1_COMPOSITION_SHA256_BEFORE=${k1_composition_sha256_before}
 export SIMPLE_K1_COMPOSITION_SHA256_BEFORE
 
 . "${bootstrap_entry_dir}/bootstrap-jobs.shs"
+. "${bootstrap_entry_dir}/bootstrap-build-jobs-policy.shs"
 bootstrap_select_jobs "${jobs}" "${bootstrap_early_repo_root}/config/bootstrap.sdn" || exit 1
+bootstrap_jobs_before_memory_clamp=${selfhost_jobs}
+selfhost_jobs=$(bootstrap_build_jobs_memory_clamp "${selfhost_jobs}") || exit 1
+jobs=$(bootstrap_build_jobs_memory_clamp "${jobs}") || exit 1
+if [ "${selfhost_jobs}" -lt "${bootstrap_jobs_before_memory_clamp}" ]; then
+  job_source="${job_source}+memory"
+fi
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus}, source: ${job_source})"
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
 {
@@ -2298,7 +2305,14 @@ seed_inputs_hash() {
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
     "${repo_root}" \
-    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"
+    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}" || return 1
+  # Every phase writes the same observation path, so a `post` run destroys the
+  # `pre` categories at exactly the moment the pre/post comparison below needs
+  # them -- the refusal could say only THAT an input changed, never WHICH.
+  # Keep one copy per phase; they are ~20 lines each.
+  cp -f "${seed_fingerprint_observation_details}" \
+    "${seed_fingerprint_observation_details}.${seed_fingerprint_phase}" \
+    2>/dev/null || :
 }
 seed_stale=0
 rust_rebuilt=0
@@ -2625,8 +2639,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   #   - simple_abi_cflags: forwarded as CFLAGS (SIMPLE_ABI_VERSION defines).
   #   - mingw_linker/cc/ar/cflags/rustflags: the resolved Windows-GNU C
   #     toolchain and its per-target RUSTFLAGS.
-  #   - CXX/AR/LD/LLVM_CONFIG: forwarded verbatim into the Cargo environment
-  #     by run_rust_authority_env whenever ambiently set.
+  #   - CXX (non-Windows only), AR/LD/LLVM_CONFIG: forwarded verbatim into the
+  #     Cargo environment by run_rust_authority_env whenever ambiently set.
   #   - rust_llvm_prefix (LLVM_SYS_231_PREFIX) and rust_llvm_link_kind
   #     (static vs dynamic-c-api): which LLVM install/link mode Cargo builds
   #     LLVM-dependent crates against.
@@ -2637,7 +2651,9 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   #     compiled objects depend on.
   #   - a sha256 of src/compiler_rust/.cargo/config.toml's contents (registry
   #     replacement, vendor directory, any [build] settings it carries).
-  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${CXX:-};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
+  rust_authority_cxx=${CXX:-}
+  if [ "${os}" = windows ]; then rust_authority_cxx=; fi
+  rust_authority_toolchain_extra="cc=${cc_abs};mingw_linker=${mingw_linker:-};mingw_cc=${mingw_cc:-};mingw_ar=${mingw_ar:-};mingw_cflags=${mingw_cflags:-};mingw_rustflags=${mingw_rustflags:-};abi_cflags=${simple_abi_cflags:-};cxx=${rust_authority_cxx};ar_env=${AR:-};ld_env=${LD:-};llvm_config_env=${LLVM_CONFIG:-};llvm_sys_231_prefix=${rust_llvm_prefix:-};llvm_link_kind=${rust_llvm_link_kind:-};rustflags=${RUSTFLAGS:-};darwin_rustflags=${CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS:-};encoded_rustflags=${CARGO_ENCODED_RUSTFLAGS:-};sdkroot=${SDKROOT:-${rust_llvm_sdkroot:-}};include=${windows_include:-};lib=${windows_lib:-};cargo_config_sha256=${rust_authority_cargo_config_sha256}"
   rust_authority_config_key=$(
     bootstrap_authority_rust_build_config_key \
       "${rust_authority_rustc_version}" "${rust_authority_cargo_version}" \
@@ -2721,7 +2737,7 @@ prepare_rust_authority_workspace() {
 run_rust_authority_env() {
   rust_env_log=$1
   shift
-  if [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
+  if [ "${os}" != windows ] && [ "${CXX+x}" = x ]; then set -- "CXX=$CXX" "$@"; fi
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
   if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
@@ -2927,6 +2943,15 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   }
   if [ "${seed_inputs_fingerprint_after}" != "${seed_inputs_fingerprint}" ]; then
     echo "error: Rust inputs changed during full bootstrap; refusing to publish a stale seed" >&2
+    echo "  pre=${seed_inputs_fingerprint}" >&2
+    echo "  post=${seed_inputs_fingerprint_after}" >&2
+    if [ -f "${seed_fingerprint_observation_details}.pre" ] &&
+      [ -f "${seed_fingerprint_observation_details}.post" ]; then
+      echo "  categories that differ:" >&2
+      diff "${seed_fingerprint_observation_details}.pre" \
+        "${seed_fingerprint_observation_details}.post" |
+        grep -E '^[<>] category_' | sed 's/^/    /' >&2
+    fi
     exit 1
   fi
   seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
@@ -3311,8 +3336,45 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_tool_authority_snapshot \
     "$(absolute_path "${tool_authority_before}")" "${PATH}" \
     "${repo_root}" || {
-    echo "error: could not bind bootstrap tool authority" >&2
-    exit 1
+    # Bounded retry, for the same reason bootstrap_stage3_native_metadata_probe
+    # already retries: the snapshot runs ~15 `env -i <tool> --version` probes,
+    # and on MSYS a fork/exec can transiently fail under memory pressure --
+    # `env` itself exits 125 without the tool ever running. Measured
+    # 2026-09-26: a bind that aborted phase 1 succeeded in full on the very
+    # next call, with cargo-version probes reporting shell-status=125 just
+    # before it. A transient fork failure must not abort a 15-minute run.
+    #
+    # Retrying is safe: the snapshot truncates its own `.tmp.$$` and only
+    # renames it over the receipt once every probe has succeeded, so a failed
+    # attempt leaves no partial authority behind.
+    #
+    # The snapshot has ~20 distinct `return 1` sites (PATH canonicality,
+    # rustc/cargo resolution, the clang admission, per-tool abs_path/file
+    # probes) and its bare failure message names none of them -- which sent
+    # two separate investigations looking at PATH. So the final attempt runs
+    # under xtrace and reports the last commands that ran.
+    tool_authority_bound=0
+    for tool_authority_attempt in 2 3; do
+      sleep 2
+      if bootstrap_stage3_tool_authority_snapshot         "$(absolute_path "${tool_authority_before}")" "${PATH}"         "${repo_root}"; then
+        echo "warning: bootstrap tool authority bound on attempt ${tool_authority_attempt}" >&2
+        tool_authority_bound=1
+        break
+      fi
+    done
+    [ "${tool_authority_bound}" -eq 1 ] || {
+      tool_authority_trace="${log_dir}/tool-authority-bind.trace"
+      (
+        set -x
+        bootstrap_stage3_tool_authority_snapshot           "$(absolute_path "${tool_authority_before}")" "${PATH}"           "${repo_root}"
+      ) >"${tool_authority_trace}" 2>&1 || {
+        echo "error: could not bind bootstrap tool authority" >&2
+        echo "  last commands (${tool_authority_trace}):" >&2
+        tail -n 15 "${tool_authority_trace}" | sed 's/^/  /' >&2
+        exit 1
+      }
+      echo "warning: bootstrap tool authority bound on the traced attempt" >&2
+    }
   }
   bootstrap_step_mark tool-authority-before
   bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
@@ -3442,6 +3504,14 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   esac
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
+      "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
+      "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
+      "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "MIMALLOC_ARENA_EAGER_COMMIT=0" \
+      "MIMALLOC_PURGE_DELAY=0" \
+      "MIMALLOC_PURGE_DECOMMITS=1" \
+      "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
+      "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \
       "LIBRARY_PATH=${bootstrap_link_library_path}" \
       "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
@@ -3580,6 +3650,9 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
       "SIMPLE_LLVM_PATH=${SIMPLE_LLVM_PATH:-}" \
       "MIMALLOC_EAGER_COMMIT=${MIMALLOC_EAGER_COMMIT:-0}" \
+      "MIMALLOC_ARENA_EAGER_COMMIT=0" \
+      "MIMALLOC_PURGE_DELAY=0" \
+      "MIMALLOC_PURGE_DECOMMITS=1" \
       "LLVM_SYS_231_PREFIX=${LLVM_SYS_231_PREFIX:-}" \
       "PATH=${stage_build_path}" \
       "RUST_LOG=${stage_build_rust_log}" \

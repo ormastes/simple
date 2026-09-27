@@ -1,4 +1,14 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
+## Resolved by ruling 2026-09-27 — copy is the specified behaviour (not a defect)
+
+Owner ruling 2026-09-27: classes are value types
+(`doc/07_guide/language/capability_library_authoring.md:33`, "`val b = a`
+copies"). The interpreter's copy-on-`get` is therefore correct, and the
+in-tree `caches.set(id, cache)` write-backs in `host_compositor_entry.spl` are
+the required idiom, not a workaround. Gate retargeted to value semantics:
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl`
+(interpreter engine 16/16). The JIT engine still aliases — filed separately as
+`doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md`.
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

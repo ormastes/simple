@@ -13,7 +13,10 @@
 
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
-use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute}
+use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
+    smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s,
+    smf_reloc_compute_rel_signed, smf_reloc_compute_abs_unsigned
+}
 
 # ============================================================================
 # x86_64 Relocation Types (elf.h R_X86_64_*)
@@ -22,13 +25,63 @@ use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{smf_reloc_compute}
 val R_X86_64_NONE: i64       = 0
 val R_X86_64_64: i64         = 1   # S + A
 val R_X86_64_PC32: i64       = 2   # S + A - P
+val R_X86_64_PC64: i64       = 24  # S + A - P
+val R_X86_64_GOTOFF64: i64   = 25  # S + A - GOT (64-bit)
+val R_X86_64_GOTPC32: i64    = 26  # GOT + A - P (S is the synthesized GOT base)
 val R_X86_64_GOT32: i64      = 3
+val R_X86_64_GOT64: i64      = 27  # G + A (64-bit GOT-entry offset)
+val R_X86_64_GOTPCREL64: i64 = 28  # G + GOT + A - P (64-bit)
+val R_X86_64_GOTPC64: i64    = 29  # GOT + A - P (64-bit)
+val R_X86_64_GOTPLT64: i64   = 30  # G + A; requests a PLT for global functions
+val R_X86_64_PLTOFF64: i64   = 31  # L + A - GOT (64-bit)
+val R_X86_64_SIZE32: i64     = 32  # Z + A (checked unsigned 32-bit)
+val R_X86_64_SIZE64: i64     = 33  # Z + A (64-bit)
 val R_X86_64_PLT32: i64      = 4   # L + A - P (treated as S + A - P for static)
 val R_X86_64_32: i64         = 10  # S + A (truncated u32)
-val R_X86_64_32S: i64        = 11  # S + A (truncated s32)
+val R_X86_64_32S: i64        = 11  # S + A (checked signed 32-bit)
+val R_X86_64_16: i64         = 12  # S + A (checked unsigned 16-bit)
+val R_X86_64_PC16: i64       = 13  # S + A - P (checked signed 16-bit)
+val R_X86_64_8: i64          = 14  # S + A (checked unsigned 8-bit)
+val R_X86_64_PC8: i64        = 15  # S + A - P (checked signed 8-bit)
+val R_X86_64_DTPMOD64: i64   = 16  # TLS module identifier (64-bit word)
+val R_X86_64_DTPOFF64: i64   = 17  # Offset from TLS block start (64-bit word)
+val R_X86_64_TPOFF64: i64    = 18  # Offset from thread pointer (64-bit word)
 val R_X86_64_GOTPCREL: i64   = 9   # G + GOT + A - P
 val R_X86_64_GOTPCRELX: i64  = 41  # G + GOT + A - P (relaxable; linker may rewrite to PC32)
 val R_X86_64_REX_GOTPCRELX: i64 = 42  # G + GOT + A - P (relaxable, REX-prefixed)
+val R_X86_64_CODE_4_GOTPCRELX: i64 = 43  # G + GOT + A - P (4-byte prefix, unrelaxed)
+val R_X86_64_CODE_4_GOTTPOFF: i64 = 44   # IE TLS GOT slot + A - P (4-byte prefix)
+val R_X86_64_CODE_6_GOTTPOFF: i64 = 50   # IE TLS GOT slot + A - P (6-byte prefix)
+
+# ============================================================================
+# ARM32 Relocation Types (AAELF32 subset)
+# ============================================================================
+
+val R_ARM_NONE: i64 = 0
+val R_ARM_PC24: i64 = 1       # S + A - P, ARM B/BL imm24
+val R_ARM_ABS32: i64 = 2      # S + A
+val R_ARM_REL32: i64 = 3      # S + A - P
+val R_ARM_ABS16: i64 = 5      # S + A, signed-or-unsigned 16-bit data
+val R_ARM_ABS8: i64 = 8       # S + A, signed-or-unsigned 8-bit data
+val R_ARM_THM_CALL: i64 = 10  # S + A - P, Thumb-2 BL/BLX
+val R_ARM_THM_PC8: i64 = 11   # S + A - Pa, Thumb literal/ADR imm8 * 4
+val R_ARM_CALL: i64 = 28      # S + A - P, ARM BL/BLX imm24
+val R_ARM_JUMP24: i64 = 29    # S + A - P, ARM B imm24
+val R_ARM_THM_JUMP24: i64 = 30
+val R_ARM_TARGET1: i64 = 38    # bare-metal default: R_ARM_ABS32
+val R_ARM_V4BX: i64 = 40       # linker marker; instruction bytes are unchanged
+val R_ARM_PREL31: i64 = 42     # (S + A - P) in signed low 31 bits
+val R_ARM_MOVW_ABS_NC: i64 = 43
+val R_ARM_MOVT_ABS: i64 = 44
+val R_ARM_MOVW_PREL_NC: i64 = 45
+val R_ARM_MOVT_PREL: i64 = 46
+val R_ARM_THM_MOVW_ABS_NC: i64 = 47
+val R_ARM_THM_MOVT_ABS: i64 = 48
+val R_ARM_THM_MOVW_PREL_NC: i64 = 49
+val R_ARM_THM_MOVT_PREL: i64 = 50
+val R_ARM_THM_PC12: i64 = 54  # S + A - Pa, signed Thumb-2 literal imm12
+val R_ARM_THM_JUMP11: i64 = 102 # S + A - P, Thumb-1 unconditional B imm11
+val R_ARM_THM_JUMP8: i64 = 103  # S + A - P, Thumb-1 conditional B imm8
 
 # ============================================================================
 # AArch64 Relocation Types (subset)
@@ -36,20 +89,102 @@ val R_X86_64_REX_GOTPCRELX: i64 = 42  # G + GOT + A - P (relaxable, REX-prefixed
 
 val R_AARCH64_NONE: i64      = 0
 val R_AARCH64_ABS64: i64     = 257  # S + A
-val R_AARCH64_ABS32: i64     = 258  # S + A (u32)
+val R_AARCH64_ABS32: i64     = 258  # S + A (checked signed-or-unsigned 32-bit)
+val R_AARCH64_ABS16: i64     = 259  # S + A (checked signed-or-unsigned 16-bit)
 val R_AARCH64_LDST8_ABS_LO12_NC: i64 = 278   # (S+A) & 0xfff, into imm12 (byte, unscaled)
+val R_AARCH64_TSTBR14: i64      = 279  # S + A - P, TBZ/TBNZ imm14
+val R_AARCH64_CONDBR19: i64     = 280  # S + A - P, conditional branch imm19
 val R_AARCH64_JUMP26: i64    = 282  # S + A - P (bits 27:2), B — same formula as CALL26
 val R_AARCH64_CALL26: i64    = 283  # S + A - P (bits 27:2), BL
 val R_AARCH64_LDST16_ABS_LO12_NC: i64 = 284  # ((S+A) & 0xfff) >> 1, into imm12 (2-byte scaled)
 val R_AARCH64_LDST32_ABS_LO12_NC: i64 = 285  # ((S+A) & 0xfff) >> 2, into imm12 (4-byte scaled)
+val R_AARCH64_LD_PREL_LO19: i64 = 273  # S + A - P, literal-load imm19
+val R_AARCH64_ADR_PREL_LO21: i64 = 274  # S + A - P, split immlo[1:0]/immhi[20:2]
 val R_AARCH64_ADR_PREL_PG_HI21: i64 = 275  # (Page(S+A) - Page(P)) >> 12, split immlo[1:0]/immhi[20:2]
+val R_AARCH64_ADR_PREL_PG_HI21_NC: i64 = 276
 val R_AARCH64_ADD_ABS_LO12_NC: i64 = 277   # (S+A) & 0xfff, into imm12
 val R_AARCH64_LDST64_ABS_LO12_NC: i64 = 286  # ((S+A) & 0xfff) >> 3, into imm12 (8-byte scaled)
+val R_AARCH64_MOVW_PREL_G0: i64 = 287
+val R_AARCH64_MOVW_PREL_G0_NC: i64 = 288
+val R_AARCH64_MOVW_PREL_G1: i64 = 289
+val R_AARCH64_MOVW_PREL_G1_NC: i64 = 290
+val R_AARCH64_MOVW_PREL_G2: i64 = 291
+val R_AARCH64_MOVW_PREL_G2_NC: i64 = 292
+val R_AARCH64_MOVW_PREL_G3: i64 = 293
 val R_AARCH64_LDST128_ABS_LO12_NC: i64 = 299 # ((S+A) & 0xfff) >> 4, into imm12 (16-byte scaled)
 val R_AARCH64_PREL64: i64    = 260  # S + A - P (64-bit data)
 val R_AARCH64_PREL32: i64    = 261  # S + A - P (32-bit data, e.g. .eh_frame)
+val R_AARCH64_PREL16: i64    = 262  # S + A - P (checked signed 16-bit)
+val R_AARCH64_MOVW_UABS_G0: i64 = 263
+val R_AARCH64_MOVW_UABS_G0_NC: i64 = 264
+val R_AARCH64_MOVW_UABS_G1: i64 = 265
+val R_AARCH64_MOVW_UABS_G1_NC: i64 = 266
+val R_AARCH64_MOVW_UABS_G2: i64 = 267
+val R_AARCH64_MOVW_UABS_G2_NC: i64 = 268
+val R_AARCH64_MOVW_UABS_G3: i64 = 269
+val R_AARCH64_MOVW_SABS_G0: i64 = 270
+val R_AARCH64_MOVW_SABS_G1: i64 = 271
+val R_AARCH64_MOVW_SABS_G2: i64 = 272
+val R_AARCH64_MOVW_GOTOFF_G0: i64 = 300
+val R_AARCH64_MOVW_GOTOFF_G0_NC: i64 = 301
+val R_AARCH64_MOVW_GOTOFF_G1: i64 = 302
+val R_AARCH64_MOVW_GOTOFF_G1_NC: i64 = 303
+val R_AARCH64_MOVW_GOTOFF_G2: i64 = 304
+val R_AARCH64_MOVW_GOTOFF_G2_NC: i64 = 305
+val R_AARCH64_MOVW_GOTOFF_G3: i64 = 306
+val R_AARCH64_GOTREL64: i64 = 307
+val R_AARCH64_GOTREL32: i64 = 308
+val R_AARCH64_GOT_LD_PREL19: i64 = 309  # G(GDAT(S+A)) - P, literal-load imm19
+val R_AARCH64_LD64_GOTOFF_LO15: i64 = 310 # G(GDAT(S+A)) - GOT, LDR imm12
 val R_AARCH64_ADR_GOT_PAGE: i64 = 311      # Page(G(GDAT(S+A))) - Page(P), ADRP encoding
 val R_AARCH64_LD64_GOT_LO12_NC: i64 = 312  # G(GDAT(S+A)) & 0xff8, LDR imm12 (8-byte scaled)
+val R_AARCH64_LD64_GOTPAGE_LO15: i64 = 313 # G(GDAT(S+A)) - Page(GOT), LDR imm12
+val R_AARCH64_PLT32: i64       = 314  # L + A - P (checked signed 32-bit data)
+val R_AARCH64_GOTPCREL32: i64  = 315  # G(GDAT(S)) - P + A (checked signed 32-bit data)
+val R_AARCH64_TLSLD_MOVW_DTPREL_G2: i64 = 523
+val R_AARCH64_TLSLD_MOVW_DTPREL_G1: i64 = 524
+val R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC: i64 = 525
+val R_AARCH64_TLSLD_MOVW_DTPREL_G0: i64 = 526
+val R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC: i64 = 527
+val R_AARCH64_TLSLD_ADD_DTPREL_HI12: i64 = 528
+val R_AARCH64_TLSLD_ADD_DTPREL_LO12: i64 = 529
+val R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC: i64 = 530
+val R_AARCH64_TLSLD_LDST8_DTPREL_LO12: i64 = 531
+val R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC: i64 = 532
+val R_AARCH64_TLSLD_LDST16_DTPREL_LO12: i64 = 533
+val R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC: i64 = 534
+val R_AARCH64_TLSLD_LDST32_DTPREL_LO12: i64 = 535
+val R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC: i64 = 536
+val R_AARCH64_TLSLD_LDST64_DTPREL_LO12: i64 = 537
+val R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC: i64 = 538
+val R_AARCH64_TLSIE_MOVW_GOTTPREL_G1: i64 = 539
+val R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC: i64 = 540
+val R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21: i64 = 541
+val R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC: i64 = 542
+val R_AARCH64_TLSIE_LD_GOTTPREL_PREL19: i64 = 543
+val R_AARCH64_TLSLE_MOVW_TPREL_G2: i64 = 544
+val R_AARCH64_TLSLE_MOVW_TPREL_G1: i64 = 545
+val R_AARCH64_TLSLE_MOVW_TPREL_G1_NC: i64 = 546
+val R_AARCH64_TLSLE_MOVW_TPREL_G0: i64 = 547
+val R_AARCH64_TLSLE_MOVW_TPREL_G0_NC: i64 = 548
+val R_AARCH64_TLSLE_ADD_TPREL_HI12: i64 = 549
+val R_AARCH64_TLSLE_ADD_TPREL_LO12: i64 = 550
+val R_AARCH64_TLSLE_ADD_TPREL_LO12_NC: i64 = 551
+val R_AARCH64_TLSLE_LDST8_TPREL_LO12: i64 = 552
+val R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC: i64 = 553
+val R_AARCH64_TLSLE_LDST16_TPREL_LO12: i64 = 554
+val R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC: i64 = 555
+val R_AARCH64_TLSLE_LDST32_TPREL_LO12: i64 = 556
+val R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC: i64 = 557
+val R_AARCH64_TLSLE_LDST64_TPREL_LO12: i64 = 558
+val R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC: i64 = 559
+val R_AARCH64_TLSLE_LDST128_TPREL_LO12: i64 = 570
+val R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC: i64 = 571
+val R_AARCH64_TLSLD_LDST128_DTPREL_LO12: i64 = 572
+val R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC: i64 = 573
+val R_AARCH64_TLS_DTPMOD64: i64 = 1028
+val R_AARCH64_TLS_DTPREL64: i64 = 1029
+val R_AARCH64_TLS_TPREL64: i64 = 1030
 
 # ============================================================================
 # RISC-V Relocation Types (subset)
@@ -70,6 +205,7 @@ val R_RISCV_LO12_I: i64      = 27  # S + A (bits 11:0)
 
 enum RelocArch:
     X86_64
+    Arm32
     AArch64
     Riscv32
     Riscv64
@@ -113,6 +249,30 @@ fn patch_u32_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
         i = i + 1
     result
 
+fn patch_u16_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(value & 0xff)
+        else if i == offset + 1:
+            result = result.push((value >> 8) & 0xff)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
+fn patch_u8(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    var result: [i64] = []
+    var i = 0
+    while i < bytes.len():
+        if i == offset:
+            result = result.push(value & 0xff)
+        else:
+            result = result.push(bytes[i])
+        i = i + 1
+    result
+
 fn patch_u64_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
     val b0 = value & 0xff
     val b1 = (value >> 8) & 0xff
@@ -149,6 +309,9 @@ fn patch_u64_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
 fn read_u32_le(bytes: [i64], offset: i64) -> i64:
     bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
 
+fn read_u16_le(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8)
+
 # ============================================================================
 # x86_64 Relocation Application
 # ============================================================================
@@ -165,15 +328,39 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
     if rtype == R_X86_64_NONE:
         return RelocResult(success: true, offset: offset, value: 0, error: "")
 
-    if rtype == R_X86_64_64:
+    if rtype == R_X86_64_64 or rtype == R_X86_64_GOT64 or
+            rtype == R_X86_64_GOTPLT64 or
+            rtype == R_X86_64_DTPMOD64 or
+            rtype == R_X86_64_DTPOFF64 or rtype == R_X86_64_TPOFF64:
         val r = smf_reloc_compute(RelocationType.Abs64, s, a, p)
         return RelocResult(success: r.ok, offset: offset, value: r.value, error: "")
 
-    if rtype == R_X86_64_PC32:
+    if rtype == R_X86_64_PC32 or rtype == R_X86_64_GOTPC32:
         val r = smf_reloc_compute(RelocationType.Rel32, s, a, p)
         if r.ok:
             return RelocResult(success: true, offset: offset, value: r.value, error: "")
-        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC32 out of signed 32-bit range (S + A - P)")
+        var name = "R_X86_64_PC32"
+        if rtype == R_X86_64_GOTPC32:
+            name = "R_X86_64_GOTPC32"
+        return RelocResult(success: false, offset: offset, value: 0, error: "{name} out of signed 32-bit range (S + A - P)")
+
+    if rtype == R_X86_64_PC64 or rtype == R_X86_64_GOTOFF64 or
+            rtype == R_X86_64_GOTPCREL64 or
+            rtype == R_X86_64_GOTPC64 or rtype == R_X86_64_PLTOFF64:
+        val r = smf_reloc_compute_rel64(s, a, p)
+        return RelocResult(success: r.ok, offset: offset, value: r.value, error: "")
+
+    if rtype == R_X86_64_PC16:
+        val r = smf_reloc_compute_rel_signed(s, a, p, -32768, 32767)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC16 out of signed 16-bit range (S + A - P)")
+
+    if rtype == R_X86_64_PC8:
+        val r = smf_reloc_compute_rel_signed(s, a, p, -128, 127)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_PC8 out of signed 8-bit range (S + A - P)")
 
     if rtype == R_X86_64_PLT32:
         val r = smf_reloc_compute(RelocationType.PltRel32, s, a, p)
@@ -187,11 +374,34 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
             return RelocResult(success: true, offset: offset, value: r.value, error: "")
         return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_32 out of unsigned 32-bit range (S + A)")
 
-    if rtype == R_X86_64_32S:
-        val v = s + a
-        return RelocResult(success: true, offset: offset, value: v, error: "")
+    if rtype == R_X86_64_GOT32:
+        val r = smf_reloc_compute_abs32s(s, a)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "R_X86_64_GOT32 out of signed 32-bit range (G + A)")
 
-    if rtype == R_X86_64_GOTPCREL or rtype == R_X86_64_GOTPCRELX or rtype == R_X86_64_REX_GOTPCRELX:
+    if rtype == R_X86_64_32S:
+        val r = smf_reloc_compute_abs32s(s, a)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_32S out of signed 32-bit range (S + A)")
+
+    if rtype == R_X86_64_16:
+        val r = smf_reloc_compute_abs_unsigned(s, a, 65535)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_16 out of unsigned 16-bit range (S + A)")
+
+    if rtype == R_X86_64_8:
+        val r = smf_reloc_compute_abs_unsigned(s, a, 255)
+        if r.ok:
+            return RelocResult(success: true, offset: offset, value: r.value, error: "")
+        return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_8 out of unsigned 8-bit range (S + A)")
+
+    if rtype == R_X86_64_GOTPCREL or rtype == R_X86_64_GOTPCRELX or
+            rtype == R_X86_64_REX_GOTPCRELX or
+            rtype == R_X86_64_CODE_4_GOTPCRELX:
         # GOTPCRELX / REX_GOTPCRELX share GOTPCREL's formula; relaxation to
         # PC32 (mov -> lea) is the linker's decision, made before this call.
         # Wire-4 rule (design §4): S here must be the GOT-entry address (S == G),
@@ -202,6 +412,129 @@ fn reloc_apply_x86_64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: 
         return RelocResult(success: false, offset: offset, value: 0, error: "R_X86_64_GOTPCREL[X] out of signed 32-bit range (G + A - P)")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported x86_64 reloc type {rtype}")
+
+# ============================================================================
+# ARM32 Relocation Application
+# ============================================================================
+
+# reason: positional linker reloc_engine API
+fn reloc_apply_arm32(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
+    if rtype == R_ARM_NONE:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_ARM_ABS32:
+        val v = s + a
+        if v < -2147483648 or v >= 4294967296:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_ABS32 out of range: (S + A) must be in [-2^31, 2^32)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_ARM_REL32:
+        val v = s + a - p
+        if v < -2147483648 or v >= 2147483648:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_REL32 out of signed 32-bit range (S + A - P)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_ARM_ABS16:
+        val v = s + a
+        if v < -32768 or v >= 65536:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_ABS16 out of range: (S + A) must fit signed or unsigned 16-bit")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
+
+    if rtype == R_ARM_ABS8:
+        val v = s + a
+        if v < -128 or v >= 256:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_ABS8 out of range: (S + A) must fit signed or unsigned 8-bit")
+        return RelocResult(success: true, offset: offset, value: v & 0xff, error: "")
+
+    if rtype == R_ARM_TARGET1:
+        val v = s + a
+        if v < -2147483648 or v >= 4294967296:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_TARGET1 out of range under bare-metal ABS32 policy")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
+        val v = s + a - p
+        if v & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM branch target is not 4-byte aligned")
+        if v < -33554432 or v >= 33554432:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM branch displacement exceeds signed 26-bit range")
+        return RelocResult(success: true, offset: offset, value: (v >> 2) & 0xffffff, error: "")
+
+    if rtype == R_ARM_THM_CALL or rtype == R_ARM_THM_JUMP24:
+        val v = ((s + a) & -2) - p
+        if v & 0x1 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM branch target is not 2-byte aligned")
+        if v < -16777216 or v >= 16777216:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM branch displacement exceeds signed 25-bit range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_THM_PC8:
+        val v = s + a - (p & -4)
+        if v & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM_PC8 target is not 4-byte aligned from aligned place")
+        if v < 0 or v > 1020:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM_PC8 displacement exceeds unsigned 10-bit range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_THM_PC12:
+        val v = s + a - (p & -4)
+        if v < -4095 or v > 4095:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM_PC12 displacement exceeds signed-magnitude 12-bit range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_THM_JUMP11 or rtype == R_ARM_THM_JUMP8:
+        val v = ((s + a) & -2) - p
+        if v & 0x1 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM narrow branch target is not 2-byte aligned")
+        val lower = if rtype == R_ARM_THM_JUMP11: -2048 else: -256
+        val upper = if rtype == R_ARM_THM_JUMP11: 2048 else: 256
+        if v < lower or v >= upper:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_THM narrow branch displacement is out of range")
+        return RelocResult(success: true, offset: offset, value: v, error: "")
+
+    if rtype == R_ARM_V4BX:
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
+
+    if rtype == R_ARM_PREL31:
+        val v = s + a - p
+        if v < -1073741824 or v >= 1073741824:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_ARM_PREL31 out of signed 31-bit range")
+        return RelocResult(success: true, offset: offset, value: v & 0x7fffffff, error: "")
+
+    if rtype == R_ARM_MOVW_ABS_NC or rtype == R_ARM_MOVT_ABS or
+            rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+        var v = s + a
+        if rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+            v = v - p
+        if rtype == R_ARM_MOVT_ABS or rtype == R_ARM_MOVT_PREL:
+            v = v >> 16
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
+
+    if rtype == R_ARM_THM_MOVW_ABS_NC or rtype == R_ARM_THM_MOVT_ABS or
+            rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+        var v = s + a
+        if rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+            v = v - p
+        if rtype == R_ARM_THM_MOVT_ABS or rtype == R_ARM_THM_MOVT_PREL:
+            v = v >> 16
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
+
+    RelocResult(success: false, offset: offset, value: 0, error: "unsupported arm32 reloc type {rtype}")
 
 # ============================================================================
 # AArch64 Relocation Application (scaffold)
@@ -218,7 +551,15 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
 
     if rtype == R_AARCH64_ABS32:
         val v = s + a
+        if v < -2147483648 or v >= 4294967296:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ABS32 out of range: (S + A) must be in [-2^31, 2^32)")
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_ABS16:
+        val v = s + a
+        if v < -32768 or v >= 65536:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ABS16 out of range: (S + A) must be in [-2^15, 2^16)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
         # AAELF64: BL (CALL26) and B (JUMP26) share the formula and imm26
@@ -233,17 +574,155 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CALL26/JUMP26 branch offset out of range: (S + A - P) must be in [-2^27, 2^27)")
         return RelocResult(success: true, offset: offset, value: (v >> 2) & 0x3ffffff, error: "")
 
-    if rtype == R_AARCH64_PREL32:
-        # AAELF64 PREL32: -2^31 <= S + A - P < 2^32; reject rather than mask.
+    if rtype == R_AARCH64_TSTBR14 or rtype == R_AARCH64_CONDBR19:
         val v = s + a - p
-        if v < -2147483648 or v >= 4294967296:
-            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL32 out of range: (S + A - P) must be in [-2^31, 2^32)")
+        if v & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TSTBR14/CONDBR19 target not 4-byte aligned")
+        if rtype == R_AARCH64_TSTBR14 and (v < -32768 or v >= 32768):
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TSTBR14 branch offset out of range [-2^15, 2^15)")
+        if rtype == R_AARCH64_CONDBR19 and (v < -1048576 or v >= 1048576):
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_CONDBR19 branch offset out of range [-2^20, 2^20)")
+        return RelocResult(success: true, offset: offset, value: v >> 2, error: "")
+
+    if rtype == R_AARCH64_PREL32:
+        # AAELF64 PREL32: -2^31 <= S + A - P < 2^31; reject rather than mask.
+        val v = s + a - p
+        if v < -2147483648 or v >= 2147483648:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL32 out of range: (S + A - P) must be in [-2^31, 2^31)")
         return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_PLT32:
+        val v = s + a - p
+        if v < -2147483648 or v >= 2147483648:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PLT32 out of signed 32-bit range (L + A - P)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_PREL16:
+        val v = s + a - p
+        if v < -32768 or v >= 32768:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_PREL16 out of signed 16-bit range (S + A - P)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
 
     if rtype == R_AARCH64_PREL64:
         return RelocResult(success: true, offset: offset, value: s + a - p, error: "")
 
-    if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
+    if rtype == R_AARCH64_TLS_DTPREL64 or rtype == R_AARCH64_TLS_TPREL64:
+        return RelocResult(success: true, offset: offset, value: s + a, error: "")
+
+    if rtype == R_AARCH64_TLS_DTPMOD64:
+        return RelocResult(success: true, offset: offset, value: s, error: "")
+
+    if rtype == R_AARCH64_GOTREL64:
+        return RelocResult(success: true, offset: offset, value: s + a - p, error: "")
+
+    if rtype == R_AARCH64_GOTREL32:
+        val v = s + a - p
+        if v < -0x80000000 or v >= 0x80000000:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_GOTREL32 out of signed 32-bit range (S + A - GOT)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype == R_AARCH64_GOTPCREL32:
+        val v = s + a - p
+        if v < -0x80000000 or v >= 0x80000000:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_GOTPCREL32 out of signed 32-bit range (G + A - P)")
+        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
+
+    if rtype >= R_AARCH64_MOVW_UABS_G0 and rtype <= R_AARCH64_MOVW_UABS_G3:
+        val v = s + a
+        var shift = 0
+        if rtype == R_AARCH64_MOVW_UABS_G1 or rtype == R_AARCH64_MOVW_UABS_G1_NC: shift = 16
+        elif rtype == R_AARCH64_MOVW_UABS_G2 or rtype == R_AARCH64_MOVW_UABS_G2_NC: shift = 32
+        elif rtype == R_AARCH64_MOVW_UABS_G3: shift = 48
+        val checked = rtype == R_AARCH64_MOVW_UABS_G0 or
+            rtype == R_AARCH64_MOVW_UABS_G1 or
+            rtype == R_AARCH64_MOVW_UABS_G2 or
+            rtype == R_AARCH64_MOVW_UABS_G3
+        if checked and (v < 0 or (shift < 48 and (v >> (shift + 16)) != 0)):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_MOVW_UABS_G{shift / 16} overflow")
+        return RelocResult(success: true, offset: offset,
+            value: (v >> shift) & 0xffff, error: "")
+
+    if rtype >= R_AARCH64_MOVW_SABS_G0 and rtype <= R_AARCH64_MOVW_SABS_G2:
+        val v = s + a
+        val shift = (rtype - R_AARCH64_MOVW_SABS_G0) * 16
+        val limit = 1 << (shift + 16)
+        if v < 0 - limit or v >= limit:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_MOVW_SABS_G{shift / 16} overflow")
+        val selected = if v < 0: ((~v) >> shift) & 0xffff else: (v >> shift) & 0xffff
+        return RelocResult(success: true, offset: offset, value: selected, error: "")
+
+    if rtype >= R_AARCH64_MOVW_PREL_G0 and rtype <= R_AARCH64_MOVW_PREL_G3:
+        val v = s + a - p
+        var shift = 0
+        if rtype == R_AARCH64_MOVW_PREL_G1 or rtype == R_AARCH64_MOVW_PREL_G1_NC: shift = 16
+        elif rtype == R_AARCH64_MOVW_PREL_G2 or rtype == R_AARCH64_MOVW_PREL_G2_NC: shift = 32
+        elif rtype == R_AARCH64_MOVW_PREL_G3: shift = 48
+        val checked = rtype == R_AARCH64_MOVW_PREL_G0 or
+            rtype == R_AARCH64_MOVW_PREL_G1 or
+            rtype == R_AARCH64_MOVW_PREL_G2 or
+            rtype == R_AARCH64_MOVW_PREL_G3
+        if checked and shift < 48:
+            val limit = 1 << (shift + 16)
+            if v < 0 - limit or v >= limit:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "R_AARCH64_MOVW_PREL_G{shift / 16} overflow")
+        val selected = if checked and v < 0:
+            ((~v) >> shift) & 0xffff
+        else:
+            (v >> shift) & 0xffff
+        return RelocResult(success: true, offset: offset, value: selected, error: "")
+
+    if rtype >= R_AARCH64_MOVW_GOTOFF_G0 and rtype <= R_AARCH64_MOVW_GOTOFF_G3:
+        val v = s + a - p
+        var shift = 0
+        if rtype == R_AARCH64_MOVW_GOTOFF_G1 or rtype == R_AARCH64_MOVW_GOTOFF_G1_NC: shift = 16
+        elif rtype == R_AARCH64_MOVW_GOTOFF_G2 or rtype == R_AARCH64_MOVW_GOTOFF_G2_NC: shift = 32
+        elif rtype == R_AARCH64_MOVW_GOTOFF_G3: shift = 48
+        val checked = rtype == R_AARCH64_MOVW_GOTOFF_G0 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G1 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G2 or
+            rtype == R_AARCH64_MOVW_GOTOFF_G3
+        if checked and (v < 0 or (shift < 48 and (v >> (shift + 16)) != 0)):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_MOVW_GOTOFF_G{shift / 16} overflow")
+        return RelocResult(success: true, offset: offset,
+            value: (v >> shift) & 0xffff, error: "")
+
+    if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
+            rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
+        val v = s + a - p
+        if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1:
+            if v < -0x100000000 or v >= 0x100000000:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 overflow")
+            val selected = if v < 0: ((~v) >> 16) & 0xffff else: (v >> 16) & 0xffff
+            return RelocResult(success: true, offset: offset, value: selected, error: "")
+        return RelocResult(success: true, offset: offset, value: v & 0xffff, error: "")
+
+    if rtype == R_AARCH64_LD_PREL_LO19 or rtype == R_AARCH64_GOT_LD_PREL19 or
+            rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
+        var literal_name = "R_AARCH64_LD_PREL_LO19"
+        if rtype == R_AARCH64_GOT_LD_PREL19: literal_name = "R_AARCH64_GOT_LD_PREL19"
+        elif rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19: literal_name = "R_AARCH64_TLSIE_LD_GOTTPREL_PREL19"
+        val delta = s + a - p
+        if delta & 0x3 != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "{literal_name} target not 4-byte aligned")
+        if delta < -1048576 or delta >= 1048576:
+            return RelocResult(success: false, offset: offset, value: 0, error: "{literal_name} delta out of range [-2^20, 2^20)")
+        return RelocResult(success: true, offset: offset, value: delta >> 2, error: "")
+
+    if rtype == R_AARCH64_ADR_PREL_LO21:
+        val delta = s + a - p
+        if delta < -1048576 or delta >= 1048576:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ADR_PREL_LO21 delta out of signed 21-bit range (S + A - P)")
+        return RelocResult(success: true, offset: offset, value: delta, error: "")
+
+    if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_PREL_PG_HI21_NC or rtype == R_AARCH64_ADR_GOT_PAGE or
+            rtype == R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
         # ADR_GOT_PAGE: the caller passes S = the GOT-entry address (G) and
         # A = 0, so the ADRP page formula below is shared verbatim.
         # Page(S+A) - Page(P), right-shifted 12 to a signed 21-bit page count.
@@ -255,7 +734,8 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         # AAELF64: the field is a signed 21-bit page count (raw byte delta
         # Page(S+A)-Page(P) in [-2^32, 2^32)). Reject rather than silently
         # mask immlo/immhi on overflow.
-        if page_delta_pages < -1048576 or page_delta_pages > 1048575:
+        if rtype != R_AARCH64_ADR_PREL_PG_HI21_NC and
+                (page_delta_pages < -1048576 or page_delta_pages > 1048575):
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_ADR_PREL_PG_HI21 page delta out of signed 21-bit range (Page(S+A) - Page(P)) >> 12")
         return RelocResult(success: true, offset: offset, value: page_delta_pages, error: "")
 
@@ -263,7 +743,108 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12, error: "")
 
-    if rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC:
+    if rtype >= R_AARCH64_TLSLD_MOVW_DTPREL_G2 and
+            rtype <= R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC:
+        var shift: i64 = 0
+        if rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G2: shift = 32
+        elif rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G1 or
+                rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC: shift = 16
+        val checked = rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G2 or
+            rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G1 or
+            rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G0
+        if checked:
+            val limit = 1 << (shift + 16)
+            if s < 0 - limit or s >= limit:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "R_AARCH64_TLSLD_MOVW_DTPREL_G* overflow")
+        val selected = if checked and s < 0: ((~s) >> shift) & 0xffff else: (s >> shift) & 0xffff
+        return RelocResult(success: true, offset: offset, value: selected, error: "")
+
+    if rtype == R_AARCH64_TLSLD_ADD_DTPREL_HI12:
+        if s < 0 or s >= 0x1000000:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_TLSLD_ADD_DTPREL_HI12 out of unsigned 24-bit range")
+        return RelocResult(success: true, offset: offset, value: (s >> 12) & 0xfff, error: "")
+
+    if rtype == R_AARCH64_TLSLD_ADD_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC:
+        if rtype == R_AARCH64_TLSLD_ADD_DTPREL_LO12 and (s < 0 or s >= 0x1000):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_TLSLD_ADD_DTPREL_LO12 out of unsigned 12-bit range")
+        return RelocResult(success: true, offset: offset, value: s & 0xfff, error: "")
+
+    if (rtype >= R_AARCH64_TLSLD_LDST8_DTPREL_LO12 and
+            rtype <= R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC) or
+            rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC:
+        val checked = rtype == R_AARCH64_TLSLD_LDST8_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_LDST16_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_LDST32_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_LDST64_DTPREL_LO12 or
+            rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12
+        if checked and (s < 0 or s >= 0x1000):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_TLSLD_LDST*_DTPREL_LO12 out of unsigned 12-bit range")
+        var shift: i64 = 0
+        if rtype == R_AARCH64_TLSLD_LDST16_DTPREL_LO12 or rtype == R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC: shift = 1
+        elif rtype == R_AARCH64_TLSLD_LDST32_DTPREL_LO12 or rtype == R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC: shift = 2
+        elif rtype == R_AARCH64_TLSLD_LDST64_DTPREL_LO12 or rtype == R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC: shift = 3
+        elif rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12 or rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC: shift = 4
+        val alignment = 1 << shift
+        if s & (alignment - 1) != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "R_AARCH64_TLSLD_LDST*_DTPREL_LO12 target is not naturally aligned")
+        return RelocResult(success: true, offset: offset, value: (s & 0xfff) >> shift, error: "")
+
+    if rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12:
+        if s < 0 or s >= 0x1000000:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_ADD_TPREL_HI12 TPREL out of unsigned 24-bit range")
+        return RelocResult(success: true, offset: offset, value: (s >> 12) & 0xfff, error: "")
+
+    if rtype >= R_AARCH64_TLSLE_MOVW_TPREL_G2 and rtype <= R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
+        if s < 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_MOVW_TPREL_G* requires a non-negative TPREL")
+        var shift: i64 = 0
+        var checked_limit: i64 = 0x10000
+        if rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2:
+            shift = 32
+            checked_limit = 0x1000000000000
+        elif rtype == R_AARCH64_TLSLE_MOVW_TPREL_G1 or rtype == R_AARCH64_TLSLE_MOVW_TPREL_G1_NC:
+            shift = 16
+            checked_limit = 0x100000000
+        val checked = rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2 or
+            rtype == R_AARCH64_TLSLE_MOVW_TPREL_G1 or
+            rtype == R_AARCH64_TLSLE_MOVW_TPREL_G0
+        if checked and s >= checked_limit:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_MOVW_TPREL_G* value exceeds checked group range")
+        return RelocResult(success: true, offset: offset, value: (s >> shift) & 0xffff, error: "")
+
+    if rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:
+        if rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 and (s < 0 or s >= 0x1000):
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_ADD_TPREL_LO12 TPREL out of unsigned 12-bit range")
+        return RelocResult(success: true, offset: offset, value: s & 0xfff, error: "")
+
+    if rtype >= R_AARCH64_TLSLE_LDST8_TPREL_LO12 and rtype <= R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC or
+            rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC:
+        val checked = rtype == R_AARCH64_TLSLE_LDST8_TPREL_LO12 or
+            rtype == R_AARCH64_TLSLE_LDST16_TPREL_LO12 or
+            rtype == R_AARCH64_TLSLE_LDST32_TPREL_LO12 or
+            rtype == R_AARCH64_TLSLE_LDST64_TPREL_LO12 or
+            rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12
+        if checked and (s < 0 or s >= 0x1000):
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_LDST*_TPREL_LO12 TPREL out of unsigned 12-bit range")
+        var shift: i64 = 0
+        if rtype == R_AARCH64_TLSLE_LDST16_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC: shift = 1
+        elif rtype == R_AARCH64_TLSLE_LDST32_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC: shift = 2
+        elif rtype == R_AARCH64_TLSLE_LDST64_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC: shift = 3
+        elif rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC: shift = 4
+        val alignment = 1 << shift
+        if s & (alignment - 1) != 0:
+            return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_TLSLE_LDST*_TPREL_LO12 target is not naturally aligned")
+        return RelocResult(success: true, offset: offset, value: (s & 0xfff) >> shift, error: "")
+
+    if rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or
+            rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
         # LD64_GOT_LO12_NC: S = GOT-entry address (G), A = 0 — same encoding.
         # 64-bit LDR/STR (unsigned offset) requires 8-byte alignment; the
         # AAELF64 relocation is only valid when (S+A) is 8-byte aligned.
@@ -296,6 +877,20 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
             return RelocResult(success: false, offset: offset, value: 0, error: "R_AARCH64_LDST128_ABS_LO12_NC target not 16-byte aligned: (S + A) & 0xf != 0")
         val lo12 = (s + a) & 0xfff
         return RelocResult(success: true, offset: offset, value: lo12 >> 4, error: "")
+
+    if rtype == R_AARCH64_LD64_GOTOFF_LO15 or rtype == R_AARCH64_LD64_GOTPAGE_LO15:
+        val got_offset = s + a - p
+        val name = if rtype == R_AARCH64_LD64_GOTOFF_LO15:
+            "R_AARCH64_LD64_GOTOFF_LO15"
+        else:
+            "R_AARCH64_LD64_GOTPAGE_LO15"
+        if got_offset < 0 or got_offset > 32767:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "{name} GOT offset exceeds unsigned 15-bit range")
+        if got_offset & 0x7 != 0:
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "{name} GOT entry is not 8-byte aligned")
+        return RelocResult(success: true, offset: offset, value: got_offset >> 3, error: "")
 
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported aarch64 reloc type {rtype}")
 
@@ -330,11 +925,53 @@ fn reloc_apply_riscv(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
 # Unified dispatch
 # ============================================================================
 
+fn reloc_patch_width(arch: RelocArch, rtype: i64) -> i64:
+    match arch:
+        case X86_64:
+            if rtype == R_X86_64_NONE: return 0
+            if rtype == R_X86_64_64 or rtype == R_X86_64_PC64 or
+                    rtype == R_X86_64_GOTOFF64 or rtype == R_X86_64_GOTPCREL64 or
+                    rtype == R_X86_64_GOTPC64 or rtype == R_X86_64_PLTOFF64 or
+                    rtype == R_X86_64_GOT64 or rtype == R_X86_64_GOTPLT64 or
+                    rtype == R_X86_64_SIZE64 or
+                    rtype == R_X86_64_DTPMOD64 or
+                    rtype == R_X86_64_DTPOFF64 or rtype == R_X86_64_TPOFF64:
+                return 8
+            if rtype == R_X86_64_16 or rtype == R_X86_64_PC16: return 2
+            if rtype == R_X86_64_8 or rtype == R_X86_64_PC8: return 1
+            4
+        case Arm32:
+            if rtype == R_ARM_NONE or rtype == R_ARM_V4BX: return 0
+            if rtype == R_ARM_ABS8: return 1
+            if rtype == R_ARM_ABS16 or rtype == R_ARM_THM_JUMP11 or
+                    rtype == R_ARM_THM_JUMP8 or rtype == R_ARM_THM_PC8:
+                return 2
+            4
+        case AArch64:
+            if rtype == R_AARCH64_NONE: return 0
+            if rtype == R_AARCH64_ABS64 or rtype == R_AARCH64_PREL64 or
+                    rtype == R_AARCH64_GOTREL64 or rtype == R_AARCH64_TLS_DTPREL64 or
+                    rtype == R_AARCH64_TLS_DTPMOD64 or rtype == R_AARCH64_TLS_TPREL64:
+                return 8
+            if rtype == R_AARCH64_ABS16 or rtype == R_AARCH64_PREL16: return 2
+            4
+        case Riscv32:
+            if rtype == R_RISCV_NONE: 0 else: 4
+        case Riscv64:
+            if rtype == R_RISCV_NONE: 0
+            else if rtype == R_RISCV_64: 8
+            else: 4
+
+fn reloc_patch_range_valid(byte_len: i64, offset: i64, width: i64) -> bool:
+    offset >= 0 and width >= 0 and offset <= byte_len and width <= byte_len - offset
+
 # reason: positional linker reloc_engine API
 fn reloc_apply(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
     match arch:
         case X86_64:
             reloc_apply_x86_64(bytes, offset, rtype, s, a, p)
+        case Arm32:
+            reloc_apply_arm32(bytes, offset, rtype, s, a, p)
         case AArch64:
             reloc_apply_aarch64(bytes, offset, rtype, s, a, p)
         case Riscv32:
@@ -350,18 +987,173 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
 
     match arch:
         case X86_64:
-            if rtype == R_X86_64_64:
+            if rtype == R_X86_64_64 or rtype == R_X86_64_PC64 or
+                    rtype == R_X86_64_GOTOFF64 or
+                    rtype == R_X86_64_GOTPCREL64 or
+                    rtype == R_X86_64_GOTPC64 or
+                    rtype == R_X86_64_PLTOFF64 or
+                    rtype == R_X86_64_GOT64 or rtype == R_X86_64_GOTPLT64 or
+                    rtype == R_X86_64_DTPMOD64 or
+                    rtype == R_X86_64_DTPOFF64 or
+                    rtype == R_X86_64_TPOFF64:
                 patch_u64_le(bytes, offset, result.value)
+            else if rtype == R_X86_64_16 or rtype == R_X86_64_PC16:
+                patch_u16_le(bytes, offset, result.value)
+            else if rtype == R_X86_64_8 or rtype == R_X86_64_PC8:
+                patch_u8(bytes, offset, result.value)
+            else:
+                patch_u32_le(bytes, offset, result.value)
+        case Arm32:
+            if rtype == R_ARM_V4BX:
+                bytes
+            else if rtype == R_ARM_ABS16:
+                patch_u16_le(bytes, offset, result.value)
+            else if rtype == R_ARM_ABS8:
+                patch_u8(bytes, offset, result.value)
+            else if rtype == R_ARM_PC24 or rtype == R_ARM_CALL or rtype == R_ARM_JUMP24:
+                val insn = read_u32_le(bytes, offset)
+                patch_u32_le(bytes, offset, (insn & 0xff000000) | (result.value & 0xffffff))
+            else if rtype == R_ARM_PREL31:
+                val word = read_u32_le(bytes, offset)
+                patch_u32_le(bytes, offset, (word & 0x80000000) | (result.value & 0x7fffffff))
+            else if rtype == R_ARM_MOVW_ABS_NC or rtype == R_ARM_MOVT_ABS or
+                    rtype == R_ARM_MOVW_PREL_NC or rtype == R_ARM_MOVT_PREL:
+                val insn = read_u32_le(bytes, offset)
+                patch_u32_le(bytes, offset,
+                    (insn & 0xfff0f000) | (((result.value >> 12) & 0xf) << 16) |
+                    (result.value & 0xfff))
+            else if rtype == R_ARM_THM_CALL or rtype == R_ARM_THM_JUMP24:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                val sign = (result.value >> 24) & 1
+                val j1 = 1 - (((result.value >> 23) & 1) ^ sign)
+                val j2 = 1 - (((result.value >> 22) & 1) ^ sign)
+                val imm10 = (result.value >> 12) & 0x3ff
+                val imm11 = (result.value >> 1) & 0x7ff
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xf800) | (sign << 10) | imm10)
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0xd000) | (j1 << 13) | (j2 << 11) | imm11)
+                patched
+            else if rtype == R_ARM_THM_JUMP11:
+                val half = read_u16_le(bytes, offset)
+                patch_u16_le(bytes, offset,
+                    (half & 0xf800) | ((result.value >> 1) & 0x7ff))
+            else if rtype == R_ARM_THM_JUMP8:
+                val half = read_u16_le(bytes, offset)
+                patch_u16_le(bytes, offset,
+                    (half & 0xff00) | ((result.value >> 1) & 0xff))
+            else if rtype == R_ARM_THM_PC8:
+                val half = read_u16_le(bytes, offset)
+                patch_u16_le(bytes, offset,
+                    (half & 0xff00) | ((result.value >> 2) & 0xff))
+            else if rtype == R_ARM_THM_PC12:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                val magnitude = if result.value < 0: -result.value else: result.value
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xff7f) | (if result.value >= 0: 0x80 else: 0))
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0xf000) | (magnitude & 0xfff))
+                patched
+            else if rtype == R_ARM_THM_MOVW_ABS_NC or rtype == R_ARM_THM_MOVT_ABS or
+                    rtype == R_ARM_THM_MOVW_PREL_NC or rtype == R_ARM_THM_MOVT_PREL:
+                val high_half = read_u16_le(bytes, offset)
+                val low_half = read_u16_le(bytes, offset + 2)
+                var patched = patch_u16_le(bytes, offset,
+                    (high_half & 0xfbf0) | (((result.value >> 11) & 1) << 10) |
+                    ((result.value >> 12) & 0xf))
+                patched = patch_u16_le(patched, offset + 2,
+                    (low_half & 0x8f00) | (((result.value >> 8) & 0x7) << 12) |
+                    (result.value & 0xff))
+                patched
             else:
                 patch_u32_le(bytes, offset, result.value)
         case AArch64:
-            if rtype == R_AARCH64_ABS64 or rtype == R_AARCH64_PREL64:
+            if rtype == R_AARCH64_ABS64 or rtype == R_AARCH64_PREL64 or
+                    rtype == R_AARCH64_GOTREL64 or
+                    rtype == R_AARCH64_TLS_DTPREL64 or
+                    rtype == R_AARCH64_TLS_DTPMOD64 or
+                    rtype == R_AARCH64_TLS_TPREL64:
                 patch_u64_le(bytes, offset, result.value)
+            else if rtype >= R_AARCH64_MOVW_SABS_G0 and rtype <= R_AARCH64_MOVW_SABS_G2:
+                val insn = read_u32_le(bytes, offset)
+                val opcode = if s + a < 0: 0 else: 0x40000000
+                patch_u32_le(bytes, offset,
+                    (insn & 0x9fe0001f) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_MOVW_UABS_G0 and rtype <= R_AARCH64_MOVW_UABS_G3:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_MOVW_UABS_G0 or
+                    rtype == R_AARCH64_MOVW_UABS_G1 or
+                    rtype == R_AARCH64_MOVW_UABS_G2 or
+                    rtype == R_AARCH64_MOVW_UABS_G3
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_MOVW_PREL_G0 and rtype <= R_AARCH64_MOVW_PREL_G3:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_MOVW_PREL_G0 or
+                    rtype == R_AARCH64_MOVW_PREL_G1 or
+                    rtype == R_AARCH64_MOVW_PREL_G2 or
+                    rtype == R_AARCH64_MOVW_PREL_G3
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s + a - p >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_MOVW_GOTOFF_G0 and rtype <= R_AARCH64_MOVW_GOTOFF_G3:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_MOVW_GOTOFF_G0 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G1 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G2 or
+                    rtype == R_AARCH64_MOVW_GOTOFF_G3
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
+                    rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s + a - p >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_TLSLD_MOVW_DTPREL_G2 and
+                    rtype <= R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G2 or
+                    rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G1 or
+                    rtype == R_AARCH64_TLSLD_MOVW_DTPREL_G0
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype >= R_AARCH64_TLSLE_MOVW_TPREL_G2 and rtype <= R_AARCH64_TLSLE_MOVW_TPREL_G0_NC:
+                val insn = read_u32_le(bytes, offset)
+                val checked = rtype == R_AARCH64_TLSLE_MOVW_TPREL_G2 or
+                    rtype == R_AARCH64_TLSLE_MOVW_TPREL_G1 or
+                    rtype == R_AARCH64_TLSLE_MOVW_TPREL_G0
+                val keep = if checked: 0x9fe0001f else: 0xffe0001f
+                val opcode = if checked and s + a >= 0: 0x40000000 else: 0
+                patch_u32_le(bytes, offset,
+                    (insn & keep) | opcode | ((result.value & 0xffff) << 5))
+            else if rtype == R_AARCH64_ABS16 or rtype == R_AARCH64_PREL16:
+                patch_u16_le(bytes, offset, result.value)
             else if rtype == R_AARCH64_CALL26 or rtype == R_AARCH64_JUMP26:
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xfc000000) | (result.value & 0x3ffffff)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_GOT_PAGE:
+            else if rtype == R_AARCH64_TSTBR14:
+                val insn = read_u32_le(bytes, offset)
+                val patched = (insn & 0xfff8001f) | ((result.value & 0x3fff) << 5)
+                patch_u32_le(bytes, offset, patched)
+            else if rtype == R_AARCH64_CONDBR19 or rtype == R_AARCH64_LD_PREL_LO19 or
+                    rtype == R_AARCH64_GOT_LD_PREL19 or rtype == R_AARCH64_TLSIE_LD_GOTTPREL_PREL19:
+                val insn = read_u32_le(bytes, offset)
+                val patched = (insn & 0xff00001f) | ((result.value & 0x7ffff) << 5)
+                patch_u32_le(bytes, offset, patched)
+            else if rtype == R_AARCH64_ADR_PREL_LO21 or rtype == R_AARCH64_ADR_PREL_PG_HI21 or rtype == R_AARCH64_ADR_PREL_PG_HI21_NC or rtype == R_AARCH64_ADR_GOT_PAGE or rtype == R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21:
                 # immlo (2 bits) -> insn[30:29], immhi (19 bits) -> insn[23:5].
                 # Keep-mask 0x9f00001f preserves op(31), fixed bits(28:24), Rd(4:0).
                 val insn = read_u32_le(bytes, offset)
@@ -369,7 +1161,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
                 val immhi = (result.value >> 2) & 0x7ffff
                 val patched = (insn & 0x9f00001f) | (immlo << 29) | (immhi << 5)
                 patch_u32_le(bytes, offset, patched)
-            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC:
+            else if rtype == R_AARCH64_ADD_ABS_LO12_NC or (rtype >= R_AARCH64_TLSLD_ADD_DTPREL_HI12 and rtype <= R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC) or rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12 or rtype == R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC or rtype == R_AARCH64_TLSLE_ADD_TPREL_HI12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12 or rtype == R_AARCH64_TLSLE_ADD_TPREL_LO12_NC or (rtype >= R_AARCH64_TLSLE_LDST8_TPREL_LO12 and rtype <= R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC) or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12 or rtype == R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC or rtype == R_AARCH64_LDST64_ABS_LO12_NC or rtype == R_AARCH64_LDST8_ABS_LO12_NC or rtype == R_AARCH64_LDST16_ABS_LO12_NC or rtype == R_AARCH64_LDST32_ABS_LO12_NC or rtype == R_AARCH64_LDST128_ABS_LO12_NC or rtype == R_AARCH64_LD64_GOT_LO12_NC or rtype == R_AARCH64_LD64_GOTOFF_LO15 or rtype == R_AARCH64_LD64_GOTPAGE_LO15 or rtype == R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC:
                 # imm12 -> insn[21:10]; keep-mask 0xffc003ff clears exactly that field.
                 val insn = read_u32_le(bytes, offset)
                 val patched = (insn & 0xffc003ff) | ((result.value & 0xfff) << 10)
@@ -387,6 +1179,8 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
 fn reloc_arch_from_machine(machine: i64) -> RelocArch:
     if machine == 62:
         RelocArch.X86_64
+    else if machine == 40:
+        RelocArch.Arm32
     else if machine == 183:
         RelocArch.AArch64
     else if machine == 243:
@@ -399,15 +1193,68 @@ fn reloc_arch_from_machine(machine: i64) -> RelocArch:
 # ============================================================================
 
 export RelocArch, RelocTarget, RelocResult
-export reloc_apply, reloc_apply_x86_64, reloc_apply_aarch64, reloc_apply_riscv
-export reloc_patch_bytes, reloc_arch_from_machine
-export patch_u32_le, patch_u64_le, read_u32_le
-export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_GOT32
+export reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv
+export reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid, reloc_arch_from_machine
+export patch_u8, patch_u16_le, patch_u32_le, patch_u64_le, read_u16_le, read_u32_le
+export R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64, R_X86_64_GOTPC32
+export R_X86_64_GOTOFF64
+export R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_GOT32, R_X86_64_GOT64
+export R_X86_64_GOTPCREL64, R_X86_64_GOTPC64, R_X86_64_GOTPLT64, R_X86_64_PLTOFF64
+export R_X86_64_SIZE32, R_X86_64_SIZE64
+export R_X86_64_DTPMOD64, R_X86_64_DTPOFF64, R_X86_64_TPOFF64
 export R_X86_64_PLT32, R_X86_64_32, R_X86_64_32S, R_X86_64_GOTPCREL
 export R_X86_64_GOTPCRELX, R_X86_64_REX_GOTPCRELX
-export R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
-export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_CALL26, R_AARCH64_JUMP26
-export R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
+export R_X86_64_CODE_4_GOTPCRELX
+export R_X86_64_CODE_4_GOTTPOFF, R_X86_64_CODE_6_GOTTPOFF
+export R_ARM_NONE, R_ARM_PC24, R_ARM_ABS32, R_ARM_REL32, R_ARM_ABS16, R_ARM_ABS8, R_ARM_THM_CALL, R_ARM_THM_PC8
+export R_ARM_CALL, R_ARM_JUMP24, R_ARM_THM_JUMP24
+export R_ARM_TARGET1, R_ARM_V4BX, R_ARM_PREL31
+export R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL
+export R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL
+export R_ARM_THM_PC12
+export R_ARM_THM_JUMP11, R_ARM_THM_JUMP8
+export R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PREL64, R_AARCH64_PLT32
+export R_AARCH64_MOVW_UABS_G0, R_AARCH64_MOVW_UABS_G0_NC
+export R_AARCH64_MOVW_UABS_G1, R_AARCH64_MOVW_UABS_G1_NC
+export R_AARCH64_MOVW_UABS_G2, R_AARCH64_MOVW_UABS_G2_NC, R_AARCH64_MOVW_UABS_G3
+export R_AARCH64_MOVW_SABS_G0, R_AARCH64_MOVW_SABS_G1, R_AARCH64_MOVW_SABS_G2
+export R_AARCH64_MOVW_PREL_G0, R_AARCH64_MOVW_PREL_G0_NC
+export R_AARCH64_MOVW_PREL_G1, R_AARCH64_MOVW_PREL_G1_NC
+export R_AARCH64_MOVW_PREL_G2, R_AARCH64_MOVW_PREL_G2_NC, R_AARCH64_MOVW_PREL_G3
+export R_AARCH64_MOVW_GOTOFF_G0, R_AARCH64_MOVW_GOTOFF_G0_NC
+export R_AARCH64_MOVW_GOTOFF_G1, R_AARCH64_MOVW_GOTOFF_G1_NC
+export R_AARCH64_MOVW_GOTOFF_G2, R_AARCH64_MOVW_GOTOFF_G2_NC, R_AARCH64_MOVW_GOTOFF_G3
+export R_AARCH64_GOTREL64, R_AARCH64_GOTREL32
+export R_AARCH64_GOTPCREL32
+export R_AARCH64_ADR_GOT_PAGE, R_AARCH64_LD64_GOT_LO12_NC
+export R_AARCH64_GOT_LD_PREL19
+export R_AARCH64_LD64_GOTOFF_LO15
+export R_AARCH64_LD64_GOTPAGE_LO15
+export R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC
+export R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16, R_AARCH64_CALL26, R_AARCH64_JUMP26
+export R_AARCH64_TSTBR14, R_AARCH64_CONDBR19
+export R_AARCH64_LD_PREL_LO19, R_AARCH64_ADR_PREL_LO21, R_AARCH64_ADR_PREL_PG_HI21
+export R_AARCH64_ADR_PREL_PG_HI21_NC
+export R_AARCH64_TLSLD_MOVW_DTPREL_G2, R_AARCH64_TLSLD_MOVW_DTPREL_G1, R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC
+export R_AARCH64_TLSLD_MOVW_DTPREL_G0, R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC
+export R_AARCH64_TLSLD_ADD_DTPREL_HI12, R_AARCH64_TLSLD_ADD_DTPREL_LO12, R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC
+export R_AARCH64_TLSLD_LDST8_DTPREL_LO12, R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC
+export R_AARCH64_TLSLD_LDST16_DTPREL_LO12, R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC
+export R_AARCH64_TLSLD_LDST32_DTPREL_LO12, R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC
+export R_AARCH64_TLSLD_LDST64_DTPREL_LO12, R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC
+export R_AARCH64_TLSLD_LDST128_DTPREL_LO12, R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC
+export R_AARCH64_TLS_DTPREL64, R_AARCH64_TLS_DTPMOD64, R_AARCH64_TLS_TPREL64
+export R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21, R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC
+export R_AARCH64_TLSIE_LD_GOTTPREL_PREL19
+export R_AARCH64_TLSLE_MOVW_TPREL_G2, R_AARCH64_TLSLE_MOVW_TPREL_G1, R_AARCH64_TLSLE_MOVW_TPREL_G1_NC
+export R_AARCH64_TLSLE_MOVW_TPREL_G0, R_AARCH64_TLSLE_MOVW_TPREL_G0_NC
+export R_AARCH64_TLSLE_ADD_TPREL_HI12, R_AARCH64_TLSLE_ADD_TPREL_LO12, R_AARCH64_TLSLE_ADD_TPREL_LO12_NC
+export R_AARCH64_TLSLE_LDST8_TPREL_LO12, R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC
+export R_AARCH64_TLSLE_LDST16_TPREL_LO12, R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC
+export R_AARCH64_TLSLE_LDST32_TPREL_LO12, R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC
+export R_AARCH64_TLSLE_LDST64_TPREL_LO12, R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC
+export R_AARCH64_TLSLE_LDST128_TPREL_LO12, R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC
+export R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
 export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
 export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I

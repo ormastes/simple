@@ -735,7 +735,7 @@ pub(crate) fn evaluate_call(
                 if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
                     return core::exec_function_with_values_and_writeback(
                         &func,
-                        &evaluated_args,
+                        evaluated_args,
                         args,
                         env,
                         functions,
@@ -754,7 +754,7 @@ pub(crate) fn evaluate_call(
                     }
                     return core::exec_function_with_values_and_writeback(
                         &func,
-                        &evaluated_args,
+                        evaluated_args,
                         args,
                         env,
                         functions,

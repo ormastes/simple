@@ -508,7 +508,11 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # 180 name here only, so every Stage 2 run refused pre-exec with
     # "missing: LLVM_SYS_180_PREFIX". This list and bootstrap_run_stage2_native
     # must name the same set.
-    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT LLVM_SYS_231_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    # Keep the four mimalloc controls together and ordered exactly as the
+    # Stage 2 invocation.  On Windows the arena/decommit settings bound
+    # committed pages; omitting their names makes the fail-closed transcript
+    # guard refuse the build before the compiler can start.
+    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT MIMALLOC_ARENA_EAGER_COMMIT MIMALLOC_PURGE_DELAY MIMALLOC_PURGE_DECOMMITS LLVM_SYS_231_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *apple-darwin*)
             printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
@@ -1232,6 +1236,10 @@ bootstrap_stage3_rust_toolchain_trace() {
 # Native metadata commands are read-only. Recorded Windows launch failures have
 # not reproduced in focused probes of the same installed executable and PATH.
 # Permit one immediate second launch with identical argv and clean environment.
+# Native Windows process creation can return shell status 125 for several
+# consecutive launches even when the executable remains byte-identical; that
+# transient class (and only it) gets up to three additional bounded attempts.
+# Any other non-zero status retains the two-attempt contract.
 # Bind the executable's bytes around each launch; publish only successful stdout
 # and retain both attempt statuses/stderr when recovery is needed. This helper
 # must not wrap builds or other commands with side effects.
@@ -1257,7 +1265,16 @@ bootstrap_stage3_native_metadata_probe() (
     bootstrap_stage3_probe_tmp=$(mktemp -d \
         "${TMPDIR:-/tmp}/bootstrap-native-probe.XXXXXX") || return 1
     trap 'rm -rf -- "$bootstrap_stage3_probe_tmp"' EXIT HUP INT TERM
-    for bootstrap_stage3_probe_attempt in 1 2; do
+    # Attempts 3..5 exist only for shell-status=125, which is `env` itself
+    # failing to exec -- on MSYS a fork/exec transiently fails under memory
+    # pressure and the tool never runs. Measured 2026-09-26 on
+    # DESKTOP-5A4V03J (~4.8 GiB free): cargo-fingerprint-version returned 125
+    # on BOTH attempts and aborted a 12-minute fingerprint stage, and the same
+    # class aborted the Stage 4 tool-authority bind minutes earlier. A genuine
+    # tool failure still gets exactly the original two attempts (see the
+    # `case` at the end of this loop), so this widens only the transient
+    # class and cannot mask a real non-zero exit.
+    for bootstrap_stage3_probe_attempt in 1 2 3 4 5; do
         bootstrap_stage3_probe_current=$(
             bootstrap_stage3_hash_file "$bootstrap_stage3_probe_tool"
         ) || return 1
@@ -1271,7 +1288,7 @@ bootstrap_stage3_native_metadata_probe() (
             >"$bootstrap_stage3_probe_tmp/stdout" \
             2>"$bootstrap_stage3_probe_tmp/stderr" || bootstrap_stage3_probe_status=$?
         if [ "$bootstrap_stage3_probe_status" -ne 0 ] ||
-            [ "$bootstrap_stage3_probe_attempt" -eq 2 ]; then
+            [ "$bootstrap_stage3_probe_attempt" -eq 5 ]; then
             printf 'bootstrap-native-metadata-probe=%s attempt=%s shell-status=%s\n' \
                 "$bootstrap_stage3_probe_label" "$bootstrap_stage3_probe_attempt" \
                 "$bootstrap_stage3_probe_status" >&2
@@ -1290,6 +1307,10 @@ bootstrap_stage3_native_metadata_probe() (
             cat "$bootstrap_stage3_probe_tmp/stdout"
             return $?
         fi
+        case "$bootstrap_stage3_probe_status" in
+            125) sleep 1 ;;
+            *) [ "$bootstrap_stage3_probe_attempt" -lt 2 ] || break ;;
+        esac
     done
     return "$bootstrap_stage3_probe_status"
 )
@@ -2330,7 +2351,16 @@ bootstrap_stage3_tool_authority_snapshot() (
     # clang.exe, ...), so a separate literal "clang" entry here would request
     # the same path twice -- and the receipt writer below rejects a
     # duplicate path (receipt.duplicate-path). Dropped as redundant.
+    bootstrap_stage3_portable_authority_tools=
+    if [ ! -r /proc/self/stat ]; then
+        command -v python3 >/dev/null 2>&1 || {
+            bootstrap_stage3_provenance_fail "portable-authority-python3-required"
+            return 1
+        }
+        bootstrap_stage3_portable_authority_tools=python3
+    fi
     for bootstrap_stage3_tool_name in \
+        $bootstrap_stage3_portable_authority_tools \
         cargo rustc "$bootstrap_stage3_tool_c_name" ld ar ranlib sh env perl sed file cmp \
         "$bootstrap_stage3_hash_tool"; do
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
@@ -2419,12 +2449,12 @@ bootstrap_stage3_tool_authority_snapshot() (
         ) || return 1
         [ -f "$bootstrap_stage3_tool_llvm_canonical" ] || return 1
         bootstrap_stage3_tool_llvm_version=$(
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_tool_llvm_requested" --version
+            bootstrap_stage3_native_metadata_probe llvm-config-tool-version \
+                "$bootstrap_stage3_tool_llvm_canonical" --version
         ) || return 1
         bootstrap_stage3_tool_llvm_prefix=$(
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_tool_llvm_requested" --prefix
+            bootstrap_stage3_native_metadata_probe llvm-config-tool-prefix \
+                "$bootstrap_stage3_tool_llvm_canonical" --prefix
         ) || return 1
         printf 'llvm-config-requested=%s|canonical=%s|sha256=%s|version=%s|prefix=%s\n' \
             "$bootstrap_stage3_tool_llvm_requested" \
@@ -3329,8 +3359,22 @@ bootstrap_stage3_copy_seed_tuple() {
 }
 
 bootstrap_stage3_verify_hosted_runtime_authority() {
-    [ "$#" -eq 1 ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 1" >&2; return 64; }
+    [ "$#" -eq 1 ] || [ "$#" -eq 3 ] || { echo "bootstrap_stage3_verify_hosted_runtime_authority: failed check 1" >&2; return 64; }
     bootstrap_stage3_hosted_root=$1
+    if [ "$#" -eq 3 ]; then
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256=
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_PATH=
+        [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" != 1 ] || return 1
+        bootstrap_stage3_hosted_result=$(bootstrap_stage3_descriptor_read \
+            "$2" "$3" hosted-runtime "$bootstrap_stage3_hosted_root") || return 1
+        [ "$(printf '%s\n' "$bootstrap_stage3_hosted_result" | wc -l | tr -d ' ')" = 2 ] || return 1
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH=$(printf '%s\n' "$bootstrap_stage3_hosted_result" | sed -n '1p')
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256=$(printf '%s\n' "$bootstrap_stage3_hosted_result" | sed -n '2p')
+        # Compatibility display only: the retained branch never reads this path.
+        BOOTSTRAP_STAGE3_HOSTED_RUNTIME_PATH="$bootstrap_stage3_hosted_root/$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH"
+        return 0
+    fi
     # Windows ships find.exe and admitted tool PATHs may place System32 ahead
     # of the MSYS utilities. Its command-line grammar is unrelated to POSIX
     # find(1): `-name libspl_hosted_runtime-*.rlib` becomes the misleading
@@ -5071,7 +5115,9 @@ bootstrap_stage3_git_state() {
 # The aggregate fingerprint remains the exact hash of `records`; this sidecar
 # deliberately does not alter that compatibility-sensitive byte stream.  It is
 # enough to explain a later aggregate mismatch without retaining source text,
-# command output, or credentials.
+# command output, or credentials. Native-tool categories additionally retain
+# ordered per-record hashes so a small unstable tool observation can be
+# localized without disclosing its path, version text, or command output.
 bootstrap_stage3_write_seed_fingerprint_details() (
     [ "$#" -eq 3 ] || return 64
     bootstrap_stage3_detail_path=$1
@@ -5127,6 +5173,20 @@ bootstrap_stage3_write_seed_fingerprint_details() (
             bootstrap_stage3_detail_hash=$(bootstrap_stage3_hash_file "$bootstrap_stage3_detail_file") || return 1
             printf 'category_%s_count=%s\n' "$bootstrap_stage3_detail_category" "$bootstrap_stage3_detail_count"
             printf 'category_%s_sha256=%s\n' "$bootstrap_stage3_detail_category" "$bootstrap_stage3_detail_hash"
+            if [ "$bootstrap_stage3_detail_category" = native_tools ]; then
+                bootstrap_stage3_detail_record_index=0
+                while IFS= read -r bootstrap_stage3_detail_record; do
+                    bootstrap_stage3_detail_record_index=$((bootstrap_stage3_detail_record_index + 1))
+                    bootstrap_stage3_detail_record_hash=$(printf '%s\n' \
+                        "$bootstrap_stage3_detail_record" | bootstrap_stage3_hash_stdin) || return 1
+                    # The pipeline status is the formatter's, not the hash
+                    # tool's: require a real SHA-256 digest.
+                    [ "${#bootstrap_stage3_detail_record_hash}" -eq 64 ] || return 1
+                    printf 'category_native_tools_record_%s_sha256=%s\n' \
+                        "$bootstrap_stage3_detail_record_index" \
+                        "$bootstrap_stage3_detail_record_hash"
+                done <"$bootstrap_stage3_detail_file"
+            fi
         done
     } >"$bootstrap_stage3_detail_out" || return 1
     chmod 400 "$bootstrap_stage3_detail_out" || return 1
@@ -5439,14 +5499,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             bootstrap_stage3_seed_trace native-cc-identity-recorded
             bootstrap_stage3_seed_cc_version=\
 "$bootstrap_stage3_seed_tmp/cc-version"
-            bootstrap_stage3_seed_cc_status=0
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_seed_cc" --version \
-                >"$bootstrap_stage3_seed_cc_version" 2>&1 ||
-                bootstrap_stage3_seed_cc_status=$?
-            bootstrap_stage3_seed_trace "native-cc-version-status=$bootstrap_stage3_seed_cc_status"
-            printf 'cc-version-status=%s\n' \
-                "$bootstrap_stage3_seed_cc_status" \
+            bootstrap_stage3_native_metadata_probe cc-fingerprint-version \
+                "$bootstrap_stage3_seed_cc_canonical" --version \
+                >"$bootstrap_stage3_seed_cc_version" || exit 1
+            bootstrap_stage3_seed_trace native-cc-version-status=0
+            printf 'cc-version-status=0\n' \
                 >>"$bootstrap_stage3_seed_records" || exit 1
             sed -n '1p' "$bootstrap_stage3_seed_cc_version" \
                 >>"$bootstrap_stage3_seed_records" || exit 1

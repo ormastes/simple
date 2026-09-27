@@ -14,6 +14,37 @@ are not repeated here:
 This page covers only what those two do not: **why a correct recipe still fails
 repeatedly, and the loop that gets around it.**
 
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
+
 ## Why it is a race
 
 Three properties compose into one:
@@ -90,6 +121,37 @@ the dispatch, because the update-branch push resets the admission.
    step behind other work.
 5. **On "base advanced", go back to step 1.** This is the expected outcome, not
    an error to investigate. Budget several full cycles.
+
+## PR-path CI is required checks only (2026-09-27)
+
+The main ruleset has no bypass actors, so the two required contexts must report
+fast. They used to wait hours behind ~300 queued runs because every PR push
+fanned out to ~35 heavy workflows. Now:
+
+- On a PR, only the required jobs run by default: `fast-gates` in its own
+  one-job workflow `required-gates.yml` ("Required Gates") and the
+  `review-admission.yml` broker. Every other `pull_request` /
+  `pull_request_target` workflow listens for `types: [labeled]` ONLY, so an
+  ordinary PR push (opened / synchronize / reopened) creates no run for it at
+  all -- not even a skipped one. Its jobs also carry
+  `if: github.event_name != '<event>' || contains(github.event.pull_request.labels.*.name, 'ci:full')`
+  so adding some other label does not fire the matrix. `repo-hygiene.yml` has
+  no PR trigger at all any more (main push + dispatch only).
+- **Label `ci:full`** opts a PR into the full matrix (extended ratchet lane,
+  bootstrap, platform tests, ...). Adding the label fires a `labeled` event,
+  so the heavy lanes start without a push. They do NOT re-run on a later push
+  to the PR: remove and re-add the label to re-run them. Path filters still
+  apply to the labelled run.
+- Every heavy lane still runs on push to `main` (PR-only workflows gained a
+  `push: branches: [main]` trigger with the same `paths:`), so nothing is
+  unenforced — it is enforced post-merge instead of pre-merge. The four
+  workflows whose `push:` had no branch filter (aot-lane-fences, rtl-toolchain,
+  rust-bootstrap-multiplatform, windows-build) now push-trigger on `main` only,
+  so pushing a `work/*` branch no longer queues them twice.
+- Every PR/push workflow has `concurrency` keyed on PR number or ref; test
+  lanes use `cancel-in-progress: true` (latest commit wins, also on `main`),
+  writers (`cache-main-writer`, `cache-promotion`, `release`,
+  `t32-tools-release`, `candidate`, `macos-phase23-evidence`) keep `false`.
 
 ## Notes
 

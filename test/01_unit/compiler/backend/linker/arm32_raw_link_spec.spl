@@ -1,0 +1,246 @@
+# @cover src/compiler/70.backend/linker/elf/arm32_raw_link.spl
+
+use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader, SHT_PROGBITS, ET_REL, EM_ARM}
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfSymbol, ElfRelocation, elf_make_empty_strtab,
+    STB_LOCAL, STB_GLOBAL, STB_WEAK, STT_NOTYPE, STT_FUNC
+}
+use compiler.backend.linker.elf.arm32_raw_link.{elf_arm32_link_parsed, elf_arm32_link_raw}
+use std.io_runtime.{file_read_bytes}
+
+val ARM32_FIX: text = "test/fixtures/linker/arm32"
+
+fn arm32_raw_symbol(name: text, binding: i64, section: i64, value: i64,
+        symbol_type: i64) -> ElfSymbol:
+    ElfSymbol(st_name: 0, st_info: (binding << 4) | symbol_type,
+        st_other: 0, st_shndx: section, st_value: value, st_size: 4, name: name)
+
+fn arm32_raw_object(symbols: [ElfSymbol], relocations: [ElfRelocation],
+        data: [i64]) -> ElfObject:
+    val shoff: i64 = 32
+    val data_offset: i64 = 128
+    var raw: [i64] = []
+    var i: i64 = 0
+    while i < data_offset + data.len():
+        raw = raw.push(0)
+        i = i + 1
+    raw[4] = 1
+    raw[shoff + 40 + 32] = 4
+    i = 0
+    while i < data.len():
+        raw[data_offset + i] = data[i]
+        i = i + 1
+
+    val header = ElfHeader(e_type: ET_REL, e_machine: EM_ARM, e_entry: 0,
+        e_phoff: 0, e_shoff: shoff, e_shnum: 2, e_shstrndx: 0)
+    val sections = [
+        ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0,
+            sh_addr: 0, sh_size: 0, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 2,
+            sh_addr: data_offset, sh_size: data.len(), sh_info: 0)
+    ]
+    val empty = elf_make_empty_strtab()
+    ElfObject(header: header, sections: sections, symbols: symbols,
+        relocations: relocations, strtab: empty, shstrtab: empty, raw: raw)
+
+fn arm32_raw_blank_symbol() -> ElfSymbol:
+    arm32_raw_symbol("", STB_LOCAL, 0, 0, STT_NOTYPE)
+
+fn arm32_raw_common_symbol(name: text, size: i64,
+        alignment: i64) -> ElfSymbol:
+    ElfSymbol(st_name: 0, st_info: (STB_GLOBAL << 4) | STT_NOTYPE,
+        st_other: 0, st_shndx: 0xfff2, st_value: alignment,
+        st_size: size, name: name)
+
+fn arm32_raw_common_object(size: i64, alignment: i64) -> ElfObject:
+    arm32_raw_object([
+        arm32_raw_blank_symbol(),
+        arm32_raw_common_symbol("target", size, alignment)
+    ], [], [])
+
+fn arm32_raw_main_object(target_binding: i64) -> ElfObject:
+    val symbols = [
+        arm32_raw_blank_symbol(),
+        arm32_raw_symbol("main", STB_GLOBAL, 1, 1, STT_FUNC),
+        arm32_raw_symbol("target", target_binding, 0, 0, STT_NOTYPE)
+    ]
+    val relocations = [ElfRelocation(r_offset: 0, r_info: (2 << 32) | 2,
+        r_addend: 0, section_idx: 0, target_section_idx: 1)]
+    arm32_raw_object(symbols, relocations, [0, 0, 0, 0])
+
+fn arm32_raw_pc8_main_object() -> ElfObject:
+    val symbols = [
+        arm32_raw_blank_symbol(),
+        arm32_raw_symbol("main", STB_GLOBAL, 1, 1, STT_FUNC),
+        arm32_raw_symbol("target", STB_GLOBAL, 0, 0, STT_NOTYPE)
+    ]
+    val relocations = [ElfRelocation(r_offset: 0, r_info: (2 << 32) | 11,
+        r_addend: 0, section_idx: 0, target_section_idx: 1)]
+    arm32_raw_object(symbols, relocations, [0x00, 0x48])
+
+fn arm32_raw_target_object(binding: i64) -> ElfObject:
+    arm32_raw_object([
+        arm32_raw_blank_symbol(),
+        arm32_raw_symbol("target", binding, 1, 0, STT_FUNC)
+    ], [], [0xaa, 0xbb, 0xcc, 0xdd])
+
+fn arm32_raw_exidx_object() -> ElfObject:
+    val shoff: i64 = 32
+    val text_offset: i64 = 160
+    val exidx_offset: i64 = 164
+    var raw: [i64] = [0; 168]
+    raw[4] = 1
+    raw[shoff + 40 + 32] = 4
+    raw[shoff + 80 + 32] = 4
+    raw[text_offset] = 0x70
+    raw[text_offset + 1] = 0x47
+    raw[exidx_offset] = 0x11
+    raw[exidx_offset + 1] = 0x22
+    raw[exidx_offset + 2] = 0x33
+    raw[exidx_offset + 3] = 0x44
+    val sections = [
+        ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0,
+            sh_addr: 0, sh_size: 0, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: SHT_PROGBITS, sh_flags: 2,
+            sh_addr: text_offset, sh_size: 2, sh_info: 0),
+        ElfSectionHeader(sh_name: 0, sh_type: 0x70000001, sh_flags: 2,
+            sh_addr: exidx_offset, sh_size: 4, sh_info: 0)
+    ]
+    val empty = elf_make_empty_strtab()
+    ElfObject(
+        header: ElfHeader(e_type: ET_REL, e_machine: EM_ARM, e_entry: 0,
+            e_phoff: 0, e_shoff: shoff, e_shnum: 3, e_shstrndx: 0),
+        sections: sections,
+        symbols: [arm32_raw_blank_symbol(),
+            arm32_raw_symbol("main", STB_GLOBAL, 1, 1, STT_FUNC)],
+        relocations: [], strtab: empty, shstrtab: empty, raw: raw)
+
+describe "ARM32 raw ELF linker":
+    it "links the compiler-generated two-object remote Cortex-M corpus":
+        val linked = elf_arm32_link_raw([
+            file_read_bytes("{ARM32_FIX}/remote_corpus_main.o"),
+            file_read_bytes("{ARM32_FIX}/remote_corpus_provider.o")
+        ], 0x20000000, "_start")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.entry_addr).to_equal(0x20000001)
+        expect(image.bytes.len()).to_equal(40)
+        expect(image.bytes[0:8]).to_equal([0x40, 0xf2, 0x24, 0x00, 0xc2, 0xf2, 0x00, 0x00])
+        expect(image.bytes[36:40]).to_equal([41, 0, 0, 0])
+
+    it "parses and links the LLVM AAELF32 Thumb PC8 fixture":
+        val linked = elf_arm32_link_raw([
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_main.o"),
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_target.o")
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().entry_addr).to_equal(0x1001)
+        expect(linked.unwrap().bytes[0]).to_equal(0x01)
+        expect(linked.unwrap().bytes[1]).to_equal(0x48)
+
+    it "links LLVM's natural Cortex-M3 Thumb PC12 literal relocation":
+        val linked = elf_arm32_link_raw([
+            file_read_bytes("{ARM32_FIX}/thumb_pc12_main.o"),
+            file_read_bytes("{ARM32_FIX}/thumb_pc8_target.o")
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().entry_addr).to_equal(0x1001)
+        expect(linked.unwrap().bytes[0]).to_equal(0xdf)
+        expect(linked.unwrap().bytes[1]).to_equal(0xf8)
+        expect(linked.unwrap().bytes[2]).to_equal(0x04)
+        expect(linked.unwrap().bytes[3]).to_equal(0x00)
+
+    it "lays out objects, preserves a Thumb entry, and applies ABS32":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.entry_addr).to_equal(0x1001)
+        expect(image.bytes.len()).to_equal(8)
+        expect(image.bytes[0]).to_equal(0x04)
+        expect(image.bytes[1]).to_equal(0x10)
+        expect(image.bytes[4]).to_equal(0xaa)
+        expect(image.bytes[7]).to_equal(0xdd)
+
+    it "applies a two-byte Thumb PC8 relocation at a section boundary":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_pc8_main_object(),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x1000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().bytes[0]).to_equal(0x01)
+        expect(linked.unwrap().bytes[1]).to_equal(0x48)
+
+    it "resolves an absent weak relocation target to zero":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_WEAK)
+        ], 0x2000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        expect(linked.unwrap().bytes[0]).to_equal(0)
+
+    it "coalesces common symbols into aligned zero-filled image storage":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(4, 4),
+            arm32_raw_common_object(12, 8)
+        ], 0x2000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.bytes.len()).to_equal(20)
+        expect(image.bytes[0]).to_equal(0x08)
+        expect(image.bytes[1]).to_equal(0x20)
+        expect(image.bytes[8:20]).to_equal([0; 12])
+
+    it "lets a strong section definition override tentative common storage":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(64, 16),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x3000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.bytes.len()).to_equal(8)
+        expect(image.bytes[0]).to_equal(0x04)
+        expect(image.bytes[1]).to_equal(0x30)
+
+    it "rejects malformed common alignment before placement":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(4, 3)
+        ], 0x2000, "main")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("non-power-of-two alignment")
+
+    it "rejects an absent strong relocation target":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL)
+        ], 0x2000, "main")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("undefined symbol 'target'")
+
+    it "rejects duplicate strong definitions":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_WEAK),
+            arm32_raw_target_object(STB_GLOBAL),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x3000, "main")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("duplicate strong symbol 'target'")
+
+    it "rejects misaligned placement bases":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x1002, "target")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("4-byte aligned")
+
+    it "places ARM exception-index sections as file-backed allocatable data":
+        val linked = elf_arm32_link_parsed([arm32_raw_exidx_object()], 0x4000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.entry_addr).to_equal(0x4001)
+        expect(image.bytes.len()).to_equal(8)
+        expect(image.bytes[4]).to_equal(0x11)
+        expect(image.bytes[7]).to_equal(0x44)

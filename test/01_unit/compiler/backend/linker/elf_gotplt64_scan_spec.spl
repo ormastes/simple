@@ -1,0 +1,30 @@
+# R_X86_64_GOTPLT64 scan contract: GOT storage plus a PLT side effect.
+
+use std.spec.*
+use compiler.backend.linker.elf.reloc_scan.{
+    ElfScanRef, elf_reloc_scan, elf_reloc_class, ELF_LINK_DYNAMIC_EXEC,
+    SYMREF_IMPORT
+}
+use compiler.backend.linker.reloc_engine.{RelocArch, R_X86_64_GOTPLT64}
+
+fn gotplt64_import(stype: i64) -> ElfScanRef:
+    ElfScanRef(oi: 0, sym_idx: 1, out_sec: 0, out_off: 0, writable: false,
+        rtype: R_X86_64_GOTPLT64,
+        rclass: elf_reloc_class(RelocArch.X86_64, R_X86_64_GOTPLT64),
+        kind: SYMREF_IMPORT, key: "shared_fn", name: "shared_fn", stype: stype,
+        size: 0, alignment: 1, weak: false, addend: 0, relax: false)
+
+describe "R_X86_64_GOTPLT64 scan":
+    it "allocates both an ordinary GOT slot and a PLT entry for an imported function":
+        val result = elf_reloc_scan([gotplt64_import(2)], RelocArch.X86_64,
+            ELF_LINK_DYNAMIC_EXEC)
+        expect(result.is_ok()).to_equal(true)
+        val scan = result.unwrap()
+        expect(scan.got_keys).to_contain("shared_fn")
+        expect(scan.plt_names).to_contain("shared_fn")
+
+    it "rejects a non-function import because the relocation requests a PLT":
+        val result = elf_reloc_scan([gotplt64_import(1)], RelocArch.X86_64,
+            ELF_LINK_DYNAMIC_EXEC)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("requires a function symbol")

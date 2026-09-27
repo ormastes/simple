@@ -1,6 +1,6 @@
 # QEMU ARM Remote JIT E2E
 
-> End-to-end JIT on QEMU ARM using the unified adapter pattern. Uses QemuArmAdapter for connect/disconnect/execute lifecycle, CompilerBridge for Simple-to-binary compilation, and RemoteExecutionManager for the full upload-execute pipeline.
+> End-to-end JIT on QEMU ARM using the unified adapter pattern. Uses QemuArmAdapter for connect/disconnect/execute lifecycle, the compiler-owned ARM32 adapter for Simple-to-binary compilation, and RemoteExecutionManager for the full upload-execute pipeline.
 
 <!-- sdn-diagram:id=qemu_arm_jit_e2e_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +34,7 @@ qemu_arm_jit_e2e_spec -> std
 
 # QEMU ARM Remote JIT E2E
 
-End-to-end JIT on QEMU ARM using the unified adapter pattern. Uses QemuArmAdapter for connect/disconnect/execute lifecycle, CompilerBridge for Simple-to-binary compilation, and RemoteExecutionManager for the full upload-execute pipeline.
+End-to-end JIT on QEMU ARM using the unified adapter pattern. Uses QemuArmAdapter for connect/disconnect/execute lifecycle, the compiler-owned ARM32 adapter for Simple-to-binary compilation, and RemoteExecutionManager for the full upload-execute pipeline.
 
 ## At a Glance
 
@@ -52,7 +52,7 @@ End-to-end JIT on QEMU ARM using the unified adapter pattern. Uses QemuArmAdapte
 
 End-to-end JIT on QEMU ARM using the unified adapter pattern.
 Uses QemuArmAdapter for connect/disconnect/execute lifecycle,
-CompilerBridge for Simple-to-binary compilation, and
+the compiler-owned ARM32 adapter for Simple-to-binary compilation, and
 RemoteExecutionManager for the full upload-execute pipeline.
 
 ## Scenarios
@@ -129,7 +129,7 @@ else:
 
 1. var adapter = QemuArmAdapter new
 2. print "SKIP: QEMU ARM connect failed: {conn err
-3. print "SKIP: compilation failed: {bytes result err
+3. print "FAIL: compilation failed: {bytes result err
 4. adapter disconnect
 5. print "SKIP: manager creation failed: {manager result err
 6. print "SKIP: execution failed: {exec result err
@@ -154,9 +154,10 @@ else:
     else:
         val source = "fn main() -> i64:\n    0\n"
         val mem = MemoryMap.qemu_arm()
-        val bytes_result = CompilerBridge.compile(source, Architecture.Arm32, mem.code_start)
+        val bytes_result = compile_remote_arm32_binary(source, mem.code_start)
         if bytes_result.is_err():
-            print "SKIP: compilation failed: {bytes_result.err().unwrap()}"
+            print "FAIL: compilation failed: {bytes_result.err().unwrap()}"
+            expect(bytes_result.is_ok()).to_equal(true)
             adapter.disconnect()
         else:
             val bytes = bytes_result.ok.unwrap()
@@ -186,7 +187,7 @@ else:
 
 1. var adapter = QemuArmAdapter new
 2. print "SKIP: QEMU ARM connect failed: {conn err
-3. print "SKIP: compilation failed: {bytes result err
+3. print "FAIL: compilation failed: {bytes result err
 4. adapter disconnect
 5. print "SKIP: manager creation failed: {manager result err
 6. print "SKIP: execution failed: {exec result err
@@ -211,9 +212,10 @@ else:
     else:
         val source = "fn main() -> i64:\n    42\n"
         val mem = MemoryMap.qemu_arm()
-        val bytes_result = CompilerBridge.compile(source, Architecture.Arm32, mem.code_start)
+        val bytes_result = compile_remote_arm32_binary(source, mem.code_start)
         if bytes_result.is_err():
-            print "SKIP: compilation failed: {bytes_result.err().unwrap()}"
+            print "FAIL: compilation failed: {bytes_result.err().unwrap()}"
+            expect(bytes_result.is_ok()).to_equal(true)
             adapter.disconnect()
         else:
             val bytes = bytes_result.ok.unwrap()

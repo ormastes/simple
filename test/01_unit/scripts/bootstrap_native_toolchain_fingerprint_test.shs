@@ -15,11 +15,12 @@ awk '/^        bootstrap_stage3_seed_trace resolve-native-toolchain$/ { active=1
 [ -s "$fixture/native-block.sh" ]
 cat >"$fixture/bin/clang" <<'EOF'
 #!/bin/sh
+printf '%s\n' "$*" >>"${0%/*}/clang.calls"
 case "$*" in
     --version|--target=x86_64-w64-windows-gnu\ --version) ;;
     *) exit 91 ;;
 esac
-if [ -e "${0%/*}/cc-fail" ]; then
+if [ -e "${0%/*}/cc-fail" ] && [ "$*" = --version ]; then
     printf 'fixture compiler version unsupported\n' >&2
     exit 51
 fi
@@ -50,19 +51,33 @@ run_block() (
     mkdir -p "$bootstrap_stage3_seed_tmp"
     bootstrap_stage3_seed_records="$bootstrap_stage3_seed_tmp/records"
     : >"$bootstrap_stage3_seed_records"
+    bootstrap_stage3_seed_llvm_authority='llvm-build-status=disabled'
     bootstrap_stage3_seed_trace() { printf 'fingerprint-step=%s\n' "$1" >&2; }
     . "$fixture/native-block.sh"
 )
-run_block success >"$fixture/success.stdout" 2>"$fixture/success.stderr"
+if ! run_block success >"$fixture/success.stdout" 2>"$fixture/success.stderr"; then
+    cat "$fixture/success.stderr" >&2
+    echo 'FAIL: nominal native fingerprint block failed' >&2
+    exit 1
+fi
 grep -Fx 'cc-version-status=0' "$fixture/success/records" >/dev/null
 grep -Fx 'llvm-config-version=23.1.0' "$fixture/success/records" >/dev/null
 grep -Fx 'llvm-config-prefix=/fixture/llvm' "$fixture/success/records" >/dev/null
 grep -Fx 'fingerprint-step=finalize-records' "$fixture/success.stderr" >/dev/null
 touch "$fixture/bin/cc-fail"
-run_block cc-failure >"$fixture/cc-failure.stdout" 2>"$fixture/cc-failure.stderr"
-grep -Fx 'cc-version-status=51' "$fixture/cc-failure/records" >/dev/null
-grep -Fx 'fixture compiler version unsupported' "$fixture/cc-failure/records" >/dev/null
-grep -Fx 'fingerprint-step=native-cc-version-status=51' "$fixture/cc-failure.stderr" >/dev/null
+: >"$fixture/bin/clang.calls"
+if run_block cc-failure >"$fixture/cc-failure.stdout" 2>"$fixture/cc-failure.stderr"; then
+    echo 'FAIL: failed C compiler metadata probe was admitted' >&2
+    exit 1
+fi
+[ "$(grep -c '^--version$' "$fixture/bin/clang.calls")" -eq 2 ]
+[ ! -s "$fixture/cc-failure.stdout" ]
+grep -Fx 'bootstrap-native-metadata-probe=cc-fingerprint-version attempt=1 shell-status=51' \
+    "$fixture/cc-failure.stderr" >/dev/null
+grep -Fx 'bootstrap-native-metadata-probe=cc-fingerprint-version attempt=2 shell-status=51' \
+    "$fixture/cc-failure.stderr" >/dev/null
+if grep -q '^cc-version-status=' "$fixture/cc-failure/records"; then exit 1; fi
+if grep -q '^fingerprint-step=finalize-records$' "$fixture/cc-failure.stderr"; then exit 1; fi
 rm -f "$fixture/bin/cc-fail"
 for query in version prefix; do
     printf '%s\n' "--$query" >"$fixture/bin/llvm-fail"
@@ -79,4 +94,4 @@ for query in version prefix; do
     if grep -q '^fingerprint-step=finalize-records$' "$fixture/$query.stderr"; then exit 1; fi
     if grep -q 'invalid metadata' "$fixture/llvm-$query-failure/records"; then exit 1; fi
 done
-printf 'PASS: native fingerprint preserves C version status and rejects LLVM version/prefix faults with bounded exact-command evidence\n'
+printf 'PASS: native fingerprint rejects C and LLVM metadata faults with bounded exact-command evidence\n'

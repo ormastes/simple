@@ -122,6 +122,26 @@ fn _session_index(owner: StructuralMaskLeaseOwnerV1, session_id: u64) -> i64:
 fn _counter_available(value: u64) -> bool:
     value != 0u64 and value != STRUCTURAL_MASK_MAX_COUNTER_V1
 
+# Only successful release marks a record dead. Reclaim table space without
+# recycling token identities or dropping a live session or provider pin.
+fn _compact_dead_kernels(owner: StructuralMaskLeaseOwnerV1):
+    var kept: [_KernelRecordV1] = []
+    for record in owner.kernels:
+        if record.live: kept.push(record)
+    owner.kernels = kept
+
+fn _compact_dead_sources(owner: StructuralMaskLeaseOwnerV1):
+    var kept: [_SourceRecordV1] = []
+    for record in owner.sources:
+        if record.live: kept.push(record)
+    owner.sources = kept
+
+fn _compact_dead_sessions(owner: StructuralMaskLeaseOwnerV1):
+    var kept: [_SessionRecordV1] = []
+    for record in owner.sessions:
+        if record.live: kept.push(record)
+    owner.sessions = kept
+
 fn _kernel_equal(a: ExecutableKernelLeaseV1, b: ExecutableKernelLeaseV1) -> bool:
     a.lease_id == b.lease_id and a.provider_handle == b.provider_handle and
         a.provider_generation == b.provider_generation and
@@ -146,6 +166,8 @@ pub fn executable_kernel_lease_issue_v1(
 ) -> Result<ExecutableKernelLeaseV1, i32>:
     if not capability_usable:
         return Err(STRUCTURAL_MASK_LEASE_CAPABILITY_UNAVAILABLE_V1)
+    if owner.kernels.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1:
+        _compact_dead_kernels(owner)
     if owner.kernels.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
        not _counter_available(owner.next_lease_id):
         return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
@@ -184,6 +206,8 @@ pub fn stable_source_buffer_lease_create_v1(
 ) -> Result<StableSourceBufferLeaseV1, i32>:
     if snapshot_identity_digest == 0u64 or readable_padding != 0u32:
         return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if owner.sources.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1:
+        _compact_dead_sources(owner)
     if owner.sources.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
        not _counter_available(owner.next_lease_id) or
        not _counter_available(owner.next_source_generation):
@@ -211,6 +235,8 @@ pub fn stable_source_buffer_transfer_issue_v1(owner: StructuralMaskLeaseOwnerV1,
         return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
     if owner.sources[index].transfer_id != 0u64:
         return Err(STRUCTURAL_MASK_LEASE_IN_USE_V1)
+    if not _counter_available(owner.next_lease_id):
+        return Err(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
     var copied: [u8] = []
     for byte in owner.sources[index].bytes: copied.push(byte)
     var record = owner.sources[index]
@@ -270,6 +296,8 @@ pub fn structural_mask_scalar_session_create_v1(owner: StructuralMaskLeaseOwnerV
     if si < 0 or not owner.sources[si].live or
        not _source_equal(owner.sources[si].lease, source):
         return Err(STRUCTURAL_MASK_LEASE_INVALID_V1)
+    if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1:
+        _compact_dead_sessions(owner)
     if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
        not _counter_available(owner.next_session_id) or
        not _counter_available(owner.next_session_generation):
@@ -306,6 +334,8 @@ pub fn structural_mask_session_create_v1(
     kernel: ExecutableKernelLeaseV1, source: StableSourceBufferLeaseV1,
     first_delimiter: u8, second_delimiter: u8
 ) -> Result<StructuralMaskSessionV1, i32>:
+    if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1:
+        _compact_dead_sessions(owner)
     if owner.sessions.len() as u64 >= STRUCTURAL_MASK_MAX_RECORDS_V1 or
        not _counter_available(owner.next_session_id) or
        not _counter_available(owner.next_session_generation):

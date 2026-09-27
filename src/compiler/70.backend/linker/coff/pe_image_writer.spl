@@ -1,0 +1,356 @@
+# Deterministic PE32+ image writer used by the pure-Simple Windows linker.
+
+val PE_AMD64_IMAGE_BASE: i64 = 0x140000000
+val PE_ARM64_IMAGE_BASE: i64 = 0x140000000
+val PE_MACHINE_AMD64: i64 = 0x8664
+val PE_MACHINE_ARM64: i64 = 0xaa64
+val PE_SECTION_ALIGNMENT: i64 = 0x1000
+val PE_FILE_ALIGNMENT: i64 = 0x200
+val PE_SUBSYSTEM_WINDOWS: i64 = 2
+val PE_SUBSYSTEM_CONSOLE: i64 = 3
+
+struct PeImagePolicy:
+    subsystem: i64
+    stack_reserve: i64
+    stack_commit: i64
+    heap_reserve: i64
+    heap_commit: i64
+    dynamic_base: bool
+    high_entropy_va: bool
+    nx_compat: bool
+    large_address_aware: bool
+    terminal_server_aware: bool
+    fixed_image: bool
+    section_alignment: i64
+    file_alignment: i64
+    os_version_major: i64
+    os_version_minor: i64
+    image_version_major: i64
+    image_version_minor: i64
+    subsystem_version_major: i64
+    subsystem_version_minor: i64
+
+impl PeImagePolicy:
+    static fn default() -> PeImagePolicy:
+        PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_CONSOLE,
+            stack_reserve: 0x100000,
+            stack_commit: 0x1000,
+            heap_reserve: 0x100000,
+            heap_commit: 0x1000,
+            dynamic_base: true,
+            high_entropy_va: true,
+            nx_compat: true,
+            large_address_aware: true,
+            terminal_server_aware: true,
+            fixed_image: false,
+            section_alignment: PE_SECTION_ALIGNMENT,
+            file_alignment: PE_FILE_ALIGNMENT,
+            os_version_major: 6, os_version_minor: 0,
+            image_version_major: 0, image_version_minor: 0,
+            subsystem_version_major: 6, subsystem_version_minor: 0)
+
+struct PeImageSection:
+    name: text
+    virtual_address: i64
+    virtual_size: i64
+    data: [u8]
+    characteristics: i64
+    import_directory_size: i64 = 0
+    iat_offset: i64 = 0
+    iat_size: i64 = 0
+    tls_directory_offset: i64 = 0
+    tls_directory_size: i64 = 0
+    load_config_offset: i64 = 0
+    load_config_size: i64 = 0
+
+fn pe_align_up(value: i64, alignment: i64) -> i64:
+    if alignment <= 0: return value
+    ((value + alignment - 1) / alignment) * alignment
+
+fn _pe_put_u8(bytes: [u8], value: i64) -> [u8]: bytes.push((value & 0xff) as u8)
+
+fn _pe_put_u16(bytes: [u8], value: i64) -> [u8]:
+    _pe_put_u8(_pe_put_u8(bytes, value), value >> 8)
+
+fn _pe_put_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var shift: i64 = 0
+    while shift < 32:
+        result = _pe_put_u8(result, value >> shift)
+        shift = shift + 8
+    result
+
+fn _pe_put_u64(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var shift: i64 = 0
+    while shift < 64:
+        result = _pe_put_u8(result, value >> shift)
+        shift = shift + 8
+    result
+
+fn _pe_put_name(bytes: [u8], name: text) -> Result<[u8], text>:
+    if name.len() == 0 or name.len() > 8: return Err("PE section name must contain 1..8 bytes")
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        val value = if i < name.len(): name.byte_at(i) else: 0
+        result = _pe_put_u8(result, value)
+        i = i + 1
+    Ok(result)
+
+fn _pe_pad_to(bytes: [u8], size: i64) -> Result<[u8], text>:
+    if bytes.len() > size: return Err("PE writer crossed planned offset {size}")
+    var result = bytes
+    while result.len() < size: result = result.push(0)
+    Ok(result)
+
+fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64,
+        section_alignment: i64) -> Result<bool, text>:
+    if sections.len() == 0: return Err("PE image requires at least one section")
+    if sections.len() > 96: return Err("PE image section count exceeds 96")
+    var entry_found = false
+    var previous_end: i64 = 0
+    for section in sections:
+        if (section.virtual_address < section_alignment or
+                section.virtual_address % section_alignment != 0):
+            return Err("PE section '{section.name}' RVA is not aligned to {section_alignment}")
+        val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
+        if section.virtual_address < previous_end:
+            return Err("PE section '{section.name}' overlaps its predecessor")
+        previous_end = section.virtual_address + pe_align_up(logical_size, section_alignment)
+        if entry_rva >= section.virtual_address and entry_rva < section.virtual_address + logical_size:
+            entry_found = true
+    if not entry_found: return Err("PE entry RVA {entry_rva} is outside every section")
+    Ok(true)
+
+fn pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
+    if policy.subsystem != PE_SUBSYSTEM_CONSOLE and policy.subsystem != PE_SUBSYSTEM_WINDOWS:
+        return Err("unsupported PE subsystem {policy.subsystem}")
+    if policy.stack_reserve <= 0:
+        return Err("PE stack reserve must be positive")
+    if policy.stack_commit <= 0 or policy.stack_commit > policy.stack_reserve:
+        return Err("PE stack commit must be positive and no greater than its reserve")
+    if policy.heap_reserve <= 0:
+        return Err("PE heap reserve must be positive")
+    if policy.heap_commit <= 0 or policy.heap_commit > policy.heap_reserve:
+        return Err("PE heap commit must be positive and no greater than its reserve")
+    if policy.high_entropy_va and not policy.dynamic_base:
+        return Err("PE high-entropy VA policy requires dynamic base policy")
+    if policy.fixed_image and policy.dynamic_base:
+        return Err("PE fixed-image policy cannot use dynamic base policy")
+    if (policy.section_alignment < 0x200 or
+            policy.section_alignment > 0x10000000 or
+            (policy.section_alignment & (policy.section_alignment - 1)) != 0):
+        return Err("PE section alignment must be a power of two from 512 through 268435456")
+    if (policy.file_alignment < 0x200 or policy.file_alignment > 0x10000 or
+            (policy.file_alignment & (policy.file_alignment - 1)) != 0):
+        return Err("PE file alignment must be a power of two from 512 through 65536")
+    if policy.section_alignment < policy.file_alignment:
+        return Err("PE section alignment must be no smaller than file alignment")
+    if (policy.section_alignment < 0x1000 and
+            policy.section_alignment != policy.file_alignment):
+        return Err("PE sub-page section alignment must equal file alignment")
+    if (policy.os_version_major < 0 or policy.os_version_major > 0xffff or
+            policy.os_version_minor < 0 or policy.os_version_minor > 0xffff or
+            policy.image_version_major < 0 or policy.image_version_major > 0xffff or
+            policy.image_version_minor < 0 or policy.image_version_minor > 0xffff or
+            policy.subsystem_version_major < 0 or policy.subsystem_version_major > 0xffff or
+            policy.subsystem_version_minor < 0 or policy.subsystem_version_minor > 0xffff):
+        return Err("PE optional-header versions must fit unsigned 16-bit fields")
+    Ok(true)
+
+fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
+    var wanted = ""
+    if directory == 0: wanted = ".edata"
+    elif directory == 1: wanted = ".idata"
+    elif directory == 2: wanted = ".rsrc"
+    elif directory == 3: wanted = ".pdata"
+    elif directory == 5: wanted = ".reloc"
+    elif directory == 9:
+        for section in sections:
+            if section.tls_directory_size > 0:
+                return (section.virtual_address + section.tls_directory_offset,
+                    section.tls_directory_size)
+        return (0, 0)
+    elif directory == 10:
+        for section in sections:
+            if section.load_config_size > 0:
+                return (section.virtual_address + section.load_config_offset,
+                    section.load_config_size)
+        return (0, 0)
+    elif directory == 12:
+        for section in sections:
+            if section.name == ".idata" and section.iat_size > 0:
+                return (section.virtual_address + section.iat_offset, section.iat_size)
+        return (0, 0)
+    if wanted == "": return (0, 0)
+    for section in sections:
+        if section.name == wanted:
+            val size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
+            if directory == 1 and section.import_directory_size > 0:
+                return (section.virtual_address, section.import_directory_size)
+            return (section.virtual_address, size)
+    (0, 0)
+
+fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64, policy: PeImagePolicy) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 or ARM64 PE32+ executable."""
+    if machine != PE_MACHINE_AMD64 and machine != PE_MACHINE_ARM64:
+        return Err("unsupported PE32+ machine {machine}")
+    if image_base <= 0 or image_base % 0x10000 != 0 or
+            image_base > 0x7fffffff00000000:
+        return Err("PE32+ image base must be a positive 64 KiB-aligned address with 4 GiB headroom")
+    val valid_policy = pe_validate_policy(policy)
+    if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
+    val valid = _pe_validate_sections(
+        sections, entry_rva, policy.section_alignment)
+    if valid.is_err(): return Err(valid.unwrap_err())
+    val pe_offset: i64 = 0x80
+    val optional_header_size: i64 = 0xf0
+    val headers_end = pe_offset + 4 + 20 + optional_header_size + sections.len() * 40
+    val size_of_headers = pe_align_up(headers_end, policy.file_alignment)
+
+    var raw_pointers: [i64] = []
+    var next_raw = size_of_headers
+    var size_of_code: i64 = 0
+    var size_of_initialized_data: i64 = 0
+    var size_of_uninitialized_data: i64 = 0
+    var base_of_code: i64 = 0
+    for section in sections:
+        val raw_size = pe_align_up(section.data.len(), policy.file_alignment)
+        if raw_size > 0:
+            raw_pointers = raw_pointers.push(next_raw)
+            next_raw = next_raw + raw_size
+        else:
+            raw_pointers = raw_pointers.push(0)
+        if (section.characteristics & 0x20) != 0:
+            size_of_code = size_of_code + raw_size
+            if base_of_code == 0: base_of_code = section.virtual_address
+        elif (section.characteristics & 0x80) != 0:
+            size_of_uninitialized_data = size_of_uninitialized_data +
+                pe_align_up(section.virtual_size, policy.file_alignment)
+        elif section.data.len() > 0:
+            size_of_initialized_data = size_of_initialized_data + raw_size
+    if base_of_code == 0: return Err("PE image requires an executable code section")
+
+    val last = sections[sections.len() - 1]
+    val last_size = if last.virtual_size > last.data.len(): last.virtual_size else: last.data.len()
+    val size_of_image = pe_align_up(
+        last.virtual_address + last_size, policy.section_alignment)
+    val relocation_directory = _pe_directory(sections, 5)
+    # ASLR flags are only truthful when the image carries base relocations.
+    var dll_characteristics: i64 = 0
+    if policy.terminal_server_aware: dll_characteristics = dll_characteristics | 0x8000
+    if policy.nx_compat: dll_characteristics = dll_characteristics | 0x0100
+    if relocation_directory.1 > 0 and policy.dynamic_base:
+        dll_characteristics = dll_characteristics | 0x0040
+        if policy.high_entropy_va:
+            dll_characteristics = dll_characteristics | 0x0020
+    var file_characteristics: i64 = 0x0002
+    if policy.fixed_image:
+        file_characteristics = file_characteristics | 0x0001
+    if policy.large_address_aware:
+        file_characteristics = file_characteristics | 0x0020
+
+    var output: [u8] = []
+    output = _pe_put_u16(output, 0x5a4d)
+    output = _pe_pad_to(output, 0x3c).unwrap()
+    output = _pe_put_u32(output, pe_offset)
+    output = _pe_pad_to(output, pe_offset).unwrap()
+    output = _pe_put_u32(output, 0x00004550)
+
+    output = _pe_put_u16(output, machine)
+    output = _pe_put_u16(output, sections.len())
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u16(output, optional_header_size)
+    output = _pe_put_u16(output, file_characteristics)
+
+    output = _pe_put_u16(output, 0x20b)
+    output = _pe_put_u8(output, 0)
+    output = _pe_put_u8(output, 0)
+    output = _pe_put_u32(output, size_of_code)
+    output = _pe_put_u32(output, size_of_initialized_data)
+    output = _pe_put_u32(output, size_of_uninitialized_data)
+    output = _pe_put_u32(output, entry_rva)
+    output = _pe_put_u32(output, base_of_code)
+    output = _pe_put_u64(output, image_base)
+    output = _pe_put_u32(output, policy.section_alignment)
+    output = _pe_put_u32(output, policy.file_alignment)
+    output = _pe_put_u16(output, policy.os_version_major)
+    output = _pe_put_u16(output, policy.os_version_minor)
+    output = _pe_put_u16(output, policy.image_version_major)
+    output = _pe_put_u16(output, policy.image_version_minor)
+    output = _pe_put_u16(output, policy.subsystem_version_major)
+    output = _pe_put_u16(output, policy.subsystem_version_minor)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, size_of_image)
+    output = _pe_put_u32(output, size_of_headers)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u16(output, policy.subsystem)
+    output = _pe_put_u16(output, dll_characteristics)
+    output = _pe_put_u64(output, policy.stack_reserve)
+    output = _pe_put_u64(output, policy.stack_commit)
+    output = _pe_put_u64(output, policy.heap_reserve)
+    output = _pe_put_u64(output, policy.heap_commit)
+    output = _pe_put_u32(output, 0)
+    output = _pe_put_u32(output, 16)
+    var directory: i64 = 0
+    while directory < 16:
+        val data_directory = _pe_directory(sections, directory)
+        output = _pe_put_u32(output, data_directory.0)
+        output = _pe_put_u32(output, data_directory.1)
+        directory = directory + 1
+
+    var section_index: i64 = 0
+    while section_index < sections.len():
+        val section = sections[section_index]
+        val named = _pe_put_name(output, section.name)
+        if named.is_err(): return Err(named.unwrap_err())
+        output = named.unwrap()
+        output = _pe_put_u32(output, section.virtual_size)
+        output = _pe_put_u32(output, section.virtual_address)
+        output = _pe_put_u32(output, pe_align_up(section.data.len(), policy.file_alignment))
+        output = _pe_put_u32(output, raw_pointers[section_index])
+        output = _pe_put_u32(output, 0)
+        output = _pe_put_u32(output, 0)
+        output = _pe_put_u16(output, 0)
+        output = _pe_put_u16(output, 0)
+        output = _pe_put_u32(output, section.characteristics)
+        section_index = section_index + 1
+
+    output = _pe_pad_to(output, size_of_headers).unwrap()
+    section_index = 0
+    while section_index < sections.len():
+        if raw_pointers[section_index] == 0:
+            section_index = section_index + 1
+            continue
+        output = _pe_pad_to(output, raw_pointers[section_index]).unwrap()
+        for b in sections[section_index].data: output = output.push(b)
+        output = _pe_pad_to(output, raw_pointers[section_index] +
+            pe_align_up(sections[section_index].data.len(), policy.file_alignment)).unwrap()
+        section_index = section_index + 1
+    Ok(output)
+
+fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 or ARM64 PE32+ console executable."""
+    pe_write_image_policy(
+        sections, entry_rva, machine, image_base, PeImagePolicy.default())
+
+fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 PE32+ console executable."""
+    pe_write_console(sections, entry_rva, PE_MACHINE_AMD64, PE_AMD64_IMAGE_BASE)
+
+fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
+    """Emit a deterministic ARM64 PE32+ console executable."""
+    pe_write_console(sections, entry_rva, PE_MACHINE_ARM64, PE_ARM64_IMAGE_BASE)
+
+export PeImageSection, PeImagePolicy
+export pe_validate_policy
+export PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_MACHINE_AMD64, PE_MACHINE_ARM64
+export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE
+export pe_align_up, pe_write_image_policy, pe_write_console
+export pe_write_amd64_console, pe_write_arm64_console

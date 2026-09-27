@@ -13,6 +13,9 @@ use compiler.backend.linker.elf_parser.{
     SHN_UNDEF, STB_GLOBAL, STB_WEAK
 }
 use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
+use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
+
+val SHN_COMMON: i64 = 0xfff2
 
 # ============================================================================
 # Types
@@ -21,6 +24,7 @@ use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
 struct ElfArchiveMember:
     archive_idx: i64
     name: text
+    raw: [i64]
     obj: ElfObject
 
 struct ElfClosureResult:
@@ -37,7 +41,7 @@ fn elf_closure_is_elf(bytes: [i64]) -> bool:
 fn elf_closure_add_defs(defined: {text: bool}, obj: ElfObject) -> {text: bool}:
     var d = defined
     for sym in obj.symbols:
-        if sym.name != "" and sym.st_shndx != SHN_UNDEF:
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON:
             val bind = elf_symbol_binding(sym)
             if bind == STB_GLOBAL or bind == STB_WEAK:
                 d[sym.name] = true
@@ -46,16 +50,19 @@ fn elf_closure_add_defs(defined: {text: bool}, obj: ElfObject) -> {text: bool}:
 fn elf_closure_add_strong_undefs(undef: {text: bool}, defined: {text: bool}, obj: ElfObject) -> {text: bool}:
     var u = undef
     for sym in obj.symbols:
-        if sym.name != "" and sym.st_shndx == SHN_UNDEF and elf_symbol_binding(sym) == STB_GLOBAL:
+        if sym.name != "" and (sym.st_shndx == SHN_UNDEF or sym.st_shndx == SHN_COMMON) and elf_symbol_binding(sym) == STB_GLOBAL:
             if not defined.has(sym.name):
-                u[sym.name] = true
+                # false = a real undefined reference; true = tentative-only demand.
+                # Once real undefined, later COMMON declarations cannot weaken it.
+                if sym.st_shndx == SHN_UNDEF or not u.has(sym.name):
+                    u[sym.name] = sym.st_shndx == SHN_COMMON
     u
 
 fn elf_closure_member_satisfies(obj: ElfObject, undef: {text: bool}) -> bool:
     for sym in obj.symbols:
-        if sym.name != "" and sym.st_shndx != SHN_UNDEF and undef.has(sym.name):
+        if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON and undef.has(sym.name):
             val bind = elf_symbol_binding(sym)
-            if bind == STB_GLOBAL or bind == STB_WEAK:
+            if bind == STB_GLOBAL or (bind == STB_WEAK and not undef[sym.name]):
                 return true
     false
 
@@ -78,13 +85,31 @@ fn elf_archive_members(archives: [[i64]]) -> Result<[ElfArchiveMember], text>:
             val parsed = elf_parse_object(data)
             if parsed.is_err():
                 return Err("archive {ai} member {m.name}: {parsed.unwrap_err()}")
-            out = out.push(ElfArchiveMember(archive_idx: ai, name: m.name, obj: parsed.unwrap()))
+            out = out.push(ElfArchiveMember(archive_idx: ai, name: m.name,
+                raw: data, obj: parsed.unwrap()))
         ai = ai + 1
     Ok(out)
 
 fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosureResult, text>:
     """Extract archive members until no still-undefined strong symbol can be resolved."""
-    val members = elf_archive_members(archives)?
+    elf_archive_closure_retained(roots, archives, [])
+
+fn elf_archive_closure_retained(roots: [ElfObject], archives: [[i64]],
+        retained_symbols: [text]) -> Result<ElfClosureResult, text>:
+    """Archive closure with `-u/--undefined`-style extraction roots."""
+    elf_archive_closure_retained_wrapped(roots, archives, retained_symbols, [])
+
+fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[i64]],
+        retained_symbols: [text], wraps: [text]) -> Result<ElfClosureResult, text>:
+    """Archive closure after applying the same --wrap view as relocation."""
+    var wrapped_roots: [ElfObject] = []
+    for root in roots: wrapped_roots = wrapped_roots.push(elf_wrap_object(root, wraps))
+    var members: [ElfArchiveMember] = []
+    val parsed_members = elf_archive_members(archives)?
+    for member in parsed_members:
+        members = members.push(ElfArchiveMember(
+            archive_idx: member.archive_idx, name: member.name, raw: member.raw,
+            obj: elf_wrap_object(member.obj, wraps)))
     var taken: [bool] = []
     for _m in members:
         taken = taken.push(false)
@@ -95,15 +120,18 @@ fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosu
     while changed:
         changed = false
         var defined: {text: bool} = {}
-        for obj in roots:
+        for obj in wrapped_roots:
             defined = elf_closure_add_defs(defined, obj)
         for sm in selected:
             defined = elf_closure_add_defs(defined, sm.obj)
         var undef: {text: bool} = {}
-        for obj in roots:
+        for obj in wrapped_roots:
             undef = elf_closure_add_strong_undefs(undef, defined, obj)
         for sm in selected:
             undef = elf_closure_add_strong_undefs(undef, defined, sm.obj)
+        for name in retained_symbols:
+            if name != "" and not defined.has(name):
+                undef[name] = false
         if undef.len() == 0:
             break
 
@@ -115,8 +143,10 @@ fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosu
                 changed = true
                 # Its definitions no longer count as undefined for later members.
                 for sym in members[mi].obj.symbols:
-                    if sym.name != "" and sym.st_shndx != SHN_UNDEF and undef.has(sym.name):
-                        undef.remove(sym.name)
+                    if sym.name != "" and sym.st_shndx != SHN_UNDEF and sym.st_shndx != SHN_COMMON and undef.has(sym.name):
+                        val bind = elf_symbol_binding(sym)
+                        if bind == STB_GLOBAL or (bind == STB_WEAK and not undef[sym.name]):
+                            undef.remove(sym.name)
             mi = mi + 1
         if changed:
             passes = passes + 1
@@ -128,4 +158,5 @@ fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosu
 # ============================================================================
 
 export ElfArchiveMember, ElfClosureResult
-export elf_archive_closure, elf_archive_members
+export elf_archive_closure, elf_archive_closure_retained
+export elf_archive_closure_retained_wrapped, elf_archive_members

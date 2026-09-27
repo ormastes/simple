@@ -209,3 +209,126 @@ Owner: `L/boot_layout/` (parser + `app/linker_gen` generator + `BootLayoutPlan`)
 4. Is dropping `lld_sffi`/`lld_shim.cpp` (never built) acceptable before the internal engine owns SimpleOS, given it only changes an error message?
 
 **Decided 2026-09-18:** (1) slice 1 = static ET_EXEC over native-backend objects; (2) `Link*V1` plain structs until S1 handoff; (3) kernel loader twins stay separate with golden parity; (4) `lld_sffi`/`lld_shim` retirement deferred to post-RC1 (not in any RC1 lane).
+
+## 13. Windows and remote-placement extension (2026-09-26)
+
+The user-expanded platform boundary makes Windows a completion gate. The
+Windows capsule is layered as follows:
+
+1. `coff/coff_object.spl` owns raw `.obj` decoding. It is distinct from
+   `pe_parser.spl`, which inspects an already-linked image. Every byte range,
+   symbol/aux index, section, and relocation reference is bounds checked.
+2. `coff/archive_closure.spl` owns selective `.lib` member extraction to a
+   symbol-resolution fixpoint and identifies selected Microsoft short imports.
+   `coff/coff_import.spl` owns the canonical 20-byte import-header decoder.
+3. `coff/pe_import_builder.spl` projects selected short imports into PE import
+   descriptors, ILT/IAT entries, hint/name rows, and AMD64 RIP-relative jump
+   thunks. Both the direct public symbol and `__imp_` symbol resolve to the
+   generated projection; descriptor-exact import and IAT data directories
+   describe it.
+4. `coff/coff_link.spl` owns AMD64 symbol resolution, COMDAT selection, and
+   relocation application. It orders `$` subsections lexically, merges them by
+   PE base name to stay below the 96-section image limit, and translates
+   `SECTION`/`SECREL` against the merged output identity. A whole-symbol-table
+   pass rejects duplicate and unresolved externals even when no relocation
+   references them. `ADDR64` fixup sites feed `pe_base_relocation.spl`, which
+   emits deterministic page-grouped `IMAGE_REL_BASED_DIR64` blocks. Remaining unsupported
+   CRT features return a named error; they never fall
+   through to `lld-link` when `SIMPLE_LINKER=internal` was explicit.
+   Nonzero undefined COFF common symbols are allocated deterministically in
+   `.bss` after archive resolution, so a real strong definition still wins.
+5. `coff/pe_image_writer.spl` owns deterministic PE32+ headers and section
+   materialization. Linked-image inspection remains in `pe_inspect.spl`.
+6. `_LinkerWrapper/native_linking.spl` is the only platform router and writes
+   `internal:coff` output for explicit GNU and MSVC Windows requests. The
+   internal resolver combines configured paths, detected MSVC/SDK roots, and
+   the selected runtime-provider directory. It offers canonical Windows and
+   `simple_native_all` support import libraries to archive closure, which
+   extracts only members demanded by unresolved symbols. The existing external
+   MSVC/LLD path remains the default until hosted execution and perf evidence
+   pass.
+
+SimpleOS uses the existing `BootLayoutPlan` and `elf_boot_link`; the wrapper
+now routes explicit `internal` requests there for x86_64 and arm64 instead of
+rejecting the target before the boot engine.
+The x86_64 boot relocation route resolves `R_X86_64_SIZE32` and `SIZE64` from
+the winning cross-object definition extent, matching the hosted ELF route;
+script-defined and unresolved-weak symbols have extent zero, and SIZE32 keeps
+checked unsigned-width semantics.
+All hosted and boot ELF relocations pass a shared architecture-aware patch
+extent check against their input section before symbol resolution or byte
+mutation. A malformed symbol index or a one-, two-, four-, or eight-byte patch
+crossing the section boundary fails with an object-scoped diagnostic rather
+than truncating silently or indexing outside the symbol table. Raw
+`R_X86_64_SIZE64` is explicitly eight bytes even though its formula is lowered
+to the generic 64-bit absolute operator only after this validation.
+The hosted Linux internal route consumes only typed `-rpath <value>` and
+`-Wl,-rpath,<value>` extra flags. It deduplicates entries in input order,
+joins them with `:`, stores the payload once in `.dynstr`, and publishes one
+`DT_RUNPATH`; malformed rpaths, NUL, unrelated flags, and static-image RUNPATH
+requests remain fail-closed. This admits Stage-4 external-provider `$ORIGIN`
+and provider-directory placement without silently accepting arbitrary linker
+flags.
+
+Remote interpreter placement is a target-filesystem decision, not a host-path
+guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`
+on Linux, `C:\Program Files\Simple\simple.exe` on Windows, and
+`/usr/bin/simple` on SimpleOS. An explicit `--simple-bin` is authoritative;
+unknown automatic targets fail closed. The shared
+`app.remote_test.binary_placement` capsule also renders the target-specific
+quoted test command, and `RemotePcAdapter.execute` consumes it instead of the
+old hardcoded checkout-relative `bin/simple` path. Windows execution is pinned
+to non-interactive PowerShell with single-quoted arguments and propagated
+`$LASTEXITCODE`; quote or line-break injection attempts fail closed.
+Explicit binary paths for known targets must be target-absolute at resolution
+time, so planning and execution cannot silently depend on the remote shell's
+working directory. Installed and staging paths must also contain a file leaf;
+POSIX roots, Windows drive roots, and bare UNC shares fail before transfer or
+publication work begins. Windows leaves additionally reject DOS device aliases
+(`CON`, `NUL`, `COM1` through `COM9`, and peers, including extensions), NTFS
+alternate-data-stream colons, trailing-dot/space aliases, and illegal filename
+characters in every component after the drive root or UNC share. ASCII control
+characters are rejected across the complete Windows path before any remote side
+effect. UNC server/share components must use ordinary component syntax, and NT
+extended/device namespaces (`\\?\\`, `\\.\\`) are not placement targets.
+Placement validation is target-lexical rather than host-canonical: both staging
+and installed paths must be absolute, and normalized dot segments, separators,
+Windows drive letters, and Windows case are compared before any upload begins.
+This prevents an alias of either the live interpreter or its sibling temporary
+publication file from bypassing the pre-transfer guard.
+The adapter executes a target-specific absence preflight before upload. POSIX
+checks both existence and symlink identity for the staging and publication
+leaves; Windows uses literal `Get-Item` probes so reparse entries are included.
+Any occupied leaf is an error rather than an overwrite or cleanup request.
+Successful publication consumes the uploaded staging leaf after the sibling
+copy is complete and before replacing the live interpreter.
+The upload result is not integrity evidence by itself. Before publication the
+adapter compares a local `file_hash_sha256` value with a target-side SHA-256
+(`sha256sum` on Linux/SimpleOS, `Get-FileHash` on Windows); only equality can
+advance to the sibling-copy/rename command.
+Publication also verifies the sibling copy against that digest immediately
+before rename. This closes the integrity gap between staging verification and
+the immutable atomic-replacement candidate.
+On Windows, an existing installed file is committed through
+`System.IO.File.Replace` and a first install through `System.IO.File.Move`;
+`Move-Item -Force` is not used because its overwrite sequence does not provide
+the required replace-without-an-absent-window contract. The sibling candidate
+is opened with `FileMode.CreateNew`, so a leaf introduced after preflight cannot
+be overwritten, and an installed reparse point or directory is rejected before
+the staged upload is consumed.
+Linux and SimpleOS likewise reject symlink and non-regular installed leaves,
+create the sibling under shell noclobber mode before copying into that owned
+regular file, then use `mv -T` so neither a raced publication leaf nor a
+destination directory can reinterpret publication.
+
+## 14. Linux runtime and library input completion (2026-09-27)
+
+`internal:elf` consumes the same admitted runtime-provider selection already
+used by the external native path. Runtime inputs must be ar archives. User
+libraries resolve in caller path order followed by discovered CRT and
+architecture-default directories; dynamic objects precede archives. Resolution
+accepts only ar magic or little-endian ELF `ET_DYN`, which avoids interpreting
+GNU ld scripts as object bytes while permitting their versioned shared-object
+targets. Missing or malformed libraries are named errors and never trigger an
+external-linker fallback. Output-policy fields whose semantics are not yet
+implemented remain rejected before linking.

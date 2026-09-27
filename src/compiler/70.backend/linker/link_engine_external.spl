@@ -27,7 +27,9 @@
 use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
 use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1, KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE}
 use std.common.linker.link_request_v1.{LinkTargetV1, LinkRequestV1, link_request_v1_validate}
-use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, link_policy_v1_validate}
+use std.common.linker.link_policy_v1.{
+    LinkExecutionModeV1, LinkExecutionPolicyV1,
+    link_policy_resolve_mode_v1, link_policy_v1_validate}
 use std.common.linker.link_receipt_v1.{LinkAccountingClassV1, LinkOutcomeV1, LinkReceiptV1}
 
 use std.nogc_sync_mut.io_runtime.{host_os, host_arch}
@@ -340,7 +342,7 @@ fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         return base_receipt(req, policy, INTERNAL_ELF_ENGINE_ID, LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
     val config = link_request_to_native_config(req, policy)
     val linked = internal_link_native(
-        link_os_text(req.target.os), link_arch_text(req.target.arch), config.pie, object_files, output)
+        link_os_text(req.target.os), link_arch_text(req.target.arch), config, object_files, output)
     if linked.is_err():
         val message = linked.unwrap_err()
         val outcome = classify_internal_error(message)
@@ -369,6 +371,16 @@ pub fn link_request_to_native(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
     if policy_status != "":
         debug("link-engine-external", "policy rejected: {policy_status}")
         return base_receipt(req, policy, "none", LinkOutcomeV1.InputError, LinkAccountingClassV1.NotCertified)
+
+    # A bounded decision must never fall through to the resident adapter. The
+    # A8 working-set primitives exist, but their owned execution/job-scope
+    # provider is not connected here yet; report that missing capability before
+    # reading any input instead of running without the requested enforcement.
+    val decision = link_policy_resolve_mode_v1(policy, 0)
+    if decision.selected_mode == LinkExecutionModeV1.Bounded:
+        debug("link-engine-external", "bounded link unavailable: {decision.reason}")
+        return base_receipt(req, policy, "none", LinkOutcomeV1.UnsupportedBudget,
+            LinkAccountingClassV1.NotCertified)
 
     if requested_linker_override().lower() == "internal":
         return link_request_internal(req, policy, object_files, output)

@@ -127,3 +127,28 @@ describe "SOSIX filesystem async transport state":
         val early = sosix_fs_transport_release(completed.state, submitted.key)
         expect(early.accepted).to_be(false)
         expect(early.reason).to_equal("completion-not-consumed")
+
+    it "retains exhausted request and notification identities as tombstones":
+        var near = sosix_fs_transport_state_new()
+        near.next_request_token = 0xffffffffffffffffu64
+        near.notification_event = 0xfffffffffffffffeu64
+        val last = sosix_fs_transport_submit(near, operation(7, 1), 1)
+        expect(last.accepted).to_be(true)
+        expect(last.key.request_token).to_equal(0xffffffffffffffffu64)
+        expect(last.state.next_request_token).to_equal(0u64)
+        val completed = sosix_fs_transport_complete(last.state, last.key, 0, 1)
+        expect(completed.accepted).to_be(true)
+        expect(completed.event.notification_event).to_equal(0xffffffffffffffffu64)
+        val consumed = sosix_fs_transport_consume(completed.state, last.key)
+        val released = sosix_fs_transport_release(consumed.state, last.key)
+        val denied = sosix_fs_transport_submit(released.state, operation(7, 2), 1)
+        expect(denied.accepted).to_be(false)
+        expect(denied.reason).to_equal("transport-identity-exhausted")
+        expect(denied.state.next_request_token).to_equal(0u64)
+
+        var event_exhausted = sosix_fs_transport_state_new()
+        event_exhausted.notification_event = 0xffffffffffffffffu64
+        val denied_event = sosix_fs_transport_submit(
+            event_exhausted, operation(8, 1), 1)
+        expect(denied_event.accepted).to_be(false)
+        expect(denied_event.reason).to_equal("transport-identity-exhausted")

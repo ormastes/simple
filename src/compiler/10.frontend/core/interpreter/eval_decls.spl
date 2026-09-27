@@ -154,8 +154,11 @@ fn eval_decl(did: i64) -> i64:
                     val owner_path = module_path[0:last_dot]
                     val member_name = module_path[last_dot + 1:module_path.len()]
                     load_result = load_module_selective(owner_path, [member_name], current_file)
+            if load_result == 1:
+                module_bind_exports_for_caller(module_path, current_file)
         else:
-            load_result = load_module_selective(module_path, imported_names, current_file)
+            load_result = load_module_selective_with_unbraced_alias(
+                module_path, imported_names, current_file)
 
         if load_result == 0:
             eval_set_error("failed to load module: " + module_path)
@@ -243,6 +246,7 @@ fn eval_module() -> i64:
         val tag = d_node.tag
         if tag == DECL_FN:
             func_table_register(d_node.name, did)
+            func_table_register_owned(entry_path, d_node.name, did)
             func_register_return_type(d_node.name, d_node.ret_type)
             # coverage owner-attribution — entry-script top-level functions
             # (RC2 equivalent): module_get_path() reflects the entry file
@@ -263,13 +267,19 @@ fn eval_module() -> i64:
         if utag == DECL_USE:
             eval_decl(did)
 
-    # Phase 2: Evaluate declarations (val/var bindings, enums)
+    # Phase 2: Evaluate declarations (val/var bindings, enums).
+    # Top-level expression statements are parsed as synthetic `_expr_N`
+    # val bindings; the last one's value is the module's result when there
+    # is no main() (the contract core_interpret documents in mod.spl).
     var last_val = val_make_nil()
     for did in decls:
         if eval_had_error: break
-        val tag = decl_get(did).tag
+        val p2_node = decl_get(did)
+        val tag = p2_node.tag
         if tag == DECL_VAL:
-            eval_decl(did)
+            val p2_value = eval_decl(did)
+            if p2_node.name.starts_with("_expr_"):
+                last_val = p2_value
         if tag == EVAL_DECL_LAZY_VAL:
             eval_decl(did)
         if tag == DECL_VAR:

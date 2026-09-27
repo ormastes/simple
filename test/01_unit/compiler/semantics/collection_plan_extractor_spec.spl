@@ -1,0 +1,142 @@
+"""
+Typed HIR collection-chain extraction. The fixture registry admits exact
+resolved method symbols; the resulting logical plan still lacks rewrite
+proofs and must not trigger MIR substitution.
+"""
+# @req REQ-003 REQ-007
+# @cover src/compiler/35.semantics/perf/collection_plan_extractor.spl
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, MethodResolution, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.semantics.perf_facts.types.*
+use compiler.semantics.perf.collection_plan.*
+use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+
+fn cp_span(line: i64) -> Span:
+    Span.at(line, line, 1)
+
+fn cp_array_type() -> HirType:
+    HirType(kind: HirTypeKind.Array(
+        HirType(kind: HirTypeKind.Int(64, true), span: cp_span(1)), nil),
+        span: cp_span(1))
+
+fn cp_unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: cp_span(1))
+
+fn cp_int_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: cp_span(1))
+
+fn cp_source() -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: 11), "items"),
+        has_type_: true, type_: cp_array_type(), span: cp_span(2))
+
+fn cp_call(receiver: HirExpr, method: text, symbol_id: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.MethodCall(
+        receiver, method, [HirCallArg(
+            has_name: false, name: "",
+            value: HirExpr(kind: HirExprKind.UnitLit,
+                has_type_: true, type_: cp_unit_type(), span: cp_span(line)),
+            span: cp_span(line))],
+        MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: symbol_id))),
+        has_type_: true, type_: cp_array_type(), span: cp_span(line))
+
+fn cp_register(registry: CollectionOperationRegistry, symbol_id: i64,
+    stable_name: text, operation: HirPerfOperationKind,
+    cardinality: HirPerfCardinality) -> CollectionOperationRegistry:
+    registry.register(CollectionOperationSummary(
+        symbol_id: symbol_id, stable_name: stable_name,
+        operation: operation, cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: cardinality,
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: stable_name + "(callback)->array",
+        explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: true, throws: false,
+            suspends: false, observable: false, unknown: false),
+        allocation: HirPerfAllocationClass.InitOnly,
+        preserves_order: true, materializes: true,
+        metadata_version: "collection-plan-fixture-v1",
+        provenance: "typed HIR fixture", evidence_receipt: "fixture-symbol-evidence"))
+    registry
+
+fn cp_registry() -> CollectionOperationRegistry:
+    var registry = CollectionOperationRegistry.new("collection-plan-fixture-v1")
+    registry = cp_register(registry, 40, "Array.map", HirPerfOperationKind.Map,
+        HirPerfCardinality.SameAsReceiver)
+    registry = cp_register(registry, 41, "Array.filter", HirPerfOperationKind.Filter,
+        HirPerfCardinality.AtMostReceiver)
+    registry
+
+describe "typed CollectionPlan extraction":
+    it "orders a resolved map-filter chain from source to result":
+        step("Extract two admitted unary calls without granting rewrite proofs")
+        val mapped = cp_call(cp_source(), "map", 40, 3)
+        val filtered = cp_call(mapped, "filter", 41, 4)
+        val plan = extract_unary_collection_plan(filtered, 20, cp_registry()).unwrap()
+        expect(plan.nodes.len()).to_equal(3)
+        expect(plan.nodes[0].kind).to_equal(CollectionPlanKind.Source)
+        expect(plan.nodes[1].kind).to_equal(CollectionPlanKind.Map)
+        expect(plan.nodes[2].kind).to_equal(CollectionPlanKind.Filter)
+        expect(plan.nodes[2].inputs[0]).to_equal(1)
+        expect(plan.output_id).to_equal(2)
+        expect(plan.nodes[0].source_expr.?).to_equal(true)
+        expect(plan.nodes[2].call_arguments.len()).to_equal(1)
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        expect(collection_plan_unproven_facts(plan.nodes[2])).to_contain("callback purity")
+
+    it "rejects missing metadata and unresolved call symbols":
+        step("Keep unregistered and unresolved calls out of the logical plan")
+        val unregistered = cp_call(cp_source(), "map", 99, 3)
+        expect(extract_unary_collection_plan(
+            unregistered, 20, cp_registry()).is_err()).to_equal(true)
+        val unresolved = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "map", [], MethodResolution.Unresolved),
+            has_type_: true, type_: cp_array_type(), span: cp_span(3))
+        expect(extract_unary_collection_plan(
+            unresolved, 20, cp_registry()).is_err()).to_equal(true)
+
+    it "rejects receiver mismatch and operations without a plan mapping":
+        step("Require a matching typed collection receiver and mapped semantics")
+        val scalar = HirExpr(kind: HirExprKind.UnitLit,
+            has_type_: true, type_: cp_unit_type(), span: cp_span(2))
+        expect(extract_unary_collection_plan(
+            cp_call(scalar, "map", 40, 3), 20, cp_registry()).is_err()).to_equal(true)
+        var registry = cp_registry()
+        registry = cp_register(registry, 42, "Array.materialize",
+            HirPerfOperationKind.Materialize, HirPerfCardinality.SameAsReceiver)
+        expect(extract_unary_collection_plan(
+            cp_call(cp_source(), "materialize", 42, 3), 20, registry).is_err()).to_equal(true)
+
+    it "retains missing key evidence for keyed operations":
+        step("Return a valid logical plan with an explicit rewrite blocker")
+        var registry = cp_registry()
+        registry = cp_register(registry, 43, "Array.distinct_by",
+            HirPerfOperationKind.DistinctBy, HirPerfCardinality.AtMostReceiver)
+        val plan = extract_unary_collection_plan(
+            cp_call(cp_source(), "distinct_by", 43, 3), 20, registry).unwrap()
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        expect(collection_plan_unproven_facts(plan.nodes[1])).to_contain("key type")
+
+    it "derives a distinct key type from a resolved callback":
+        step("Carry a typed callback return into the logical plan")
+        var registry = cp_registry()
+        registry = cp_register(registry, 43, "Array.distinct_by",
+            HirPerfOperationKind.DistinctBy, HirPerfCardinality.AtMostReceiver)
+        val callback_type = HirType(kind: HirTypeKind.Function(
+            [cp_int_type()], cp_int_type(), []), span: cp_span(3))
+        val callback = HirExpr(kind: HirExprKind.NamedVar(
+            SymbolId(id: 12), "key_fn"), has_type_: true,
+            type_: callback_type, span: cp_span(3))
+        val keyed = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "distinct_by", [HirCallArg(
+                has_name: false, name: "", value: callback, span: cp_span(3))],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 43))),
+            has_type_: true, type_: cp_array_type(), span: cp_span(3))
+        val extraction = extract_unary_collection_plan(keyed, 20, registry)
+        val plan = extraction.unwrap()
+        expect(plan.nodes[1].key_type.?).to_equal(true)
+        val missing = collection_plan_unproven_facts(plan.nodes[1])
+        expect(missing.contains("key type")).to_equal(false)

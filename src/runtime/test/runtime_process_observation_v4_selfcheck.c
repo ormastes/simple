@@ -89,16 +89,18 @@ static void put_bytes(SplArray* a, const uint8_t* bytes, size_t count) {
 static void put_text(SplArray* a, const char* text) {
     size_t n=strlen(text); put_u64(a,n); put_bytes(a,(const uint8_t*)text,n);
 }
-static SplArray* request_bytes(const char* cwd, int64_t cwd_pin, const uint8_t cwd_digest[32]) {
+static SplArray* request_bytes(const char* cwd, int64_t cwd_pin,
+                               const uint8_t cwd_digest[32],
+                               const char* child_arg, uint64_t output_limit) {
     SplArray* a=rt_array_new(1024);
     const uint8_t magic[8]={'P','O','V','4','R','E','Q',0}; put_bytes(a,magic,8);
     put_u64(a,1); put_u64(a,1); put_u64(a,2000000000ULL);
     put_u64(a,100000000ULL); put_u64(a,500000000ULL);
-    put_u64(a,1024); put_u64(a,1024); put_u64(a,0);
+    put_u64(a,output_limit); put_u64(a,output_limit); put_u64(a,0);
     put_u64(a,1); put_u64(a,1); put_u64(a,1000000); put_u64(a,77);
     put_bytes(a,test_exec_digest,32); put_text(a,cwd); put_text(a,cwd);
     put_u64(a,(uint64_t)cwd_pin); put_bytes(a,cwd_digest,32);
-    put_u64(a,2); put_text(a,"pov4-selfcheck"); put_text(a,"--pov4-child");
+    put_u64(a,2); put_text(a,"pov4-selfcheck"); put_text(a,child_arg);
     put_u64(a,1); put_text(a,"POV4_TEST"); put_text(a,"exact");
     return a;
 }
@@ -113,6 +115,35 @@ static SplArray* ticket_from(const SplArray* words) {
 }
 
 int main(int argc, char** argv) {
+    if (argc==2 && strcmp(argv[1],"--pov4-input-child")==0) {
+        const char* exact=getenv("POV4_TEST");
+        if (!exact || strcmp(exact,"exact")!=0) return 80;
+        uint8_t output[4096]; memset(output,'O',sizeof(output));
+        for(int stream=0;stream<2;stream++) {
+            memset(output,stream==0?'O':'E',sizeof(output));
+            for(int block=0;block<32;block++) {
+                size_t used=0;
+                while(used<sizeof(output)) {
+                    ssize_t n=write(stream==0?STDOUT_FILENO:STDERR_FILENO,
+                        output+used,sizeof(output)-used);
+                    if(n<0 && errno==EINTR) continue;
+                    if(n<=0) return 81;
+                    used+=(size_t)n;
+                }
+            }
+        }
+        uint8_t input[4096]; size_t seen=0;
+        for(;;) {
+            ssize_t n=read(STDIN_FILENO,input,sizeof(input));
+            if(n<0 && errno==EINTR) continue;
+            if(n<0) return 82;
+            if(n==0) break;
+            for(ssize_t i=0;i<n;i++)
+                if(input[i]!=(uint8_t)((seen+(size_t)i)&255)) return 83;
+            seen+=(size_t)n;
+        }
+        return seen==131072 ? 0 : 84;
+    }
     if (argc==2 && strcmp(argv[1],"--pov4-child")==0) {
         char cwd[4096]; const char* exact=getenv("POV4_TEST");
         if (!exact || strcmp(exact,"exact")!=0 || !getcwd(cwd,sizeof(cwd))) return 90;
@@ -127,7 +158,7 @@ int main(int argc, char** argv) {
     SplArray* cwd_digest_value=rt_process_observation_v4_cwd_digest_value(cwd_pin);
     uint8_t cwd_digest[32]; assert(rt_array_bytes_copy_checked(
         (int64_t)(uintptr_t)cwd_digest_value,cwd_digest,32)==32);
-    SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest);
+    SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest,"--pov4-child",1024);
     SplArray* unavailable=rt_process_observation_v4_start_value(request);
     assert(rt_array_get(tuple_item(unavailable,3),3)==POV4_STATUS_REJECTED);
     SplArray* started=rt_process_observation_v4_start_pinned_value(77,cwd_pin,request);
@@ -136,6 +167,8 @@ int main(int argc, char** argv) {
     assert(rt_array_get(words,13)==POV4_EXEC_CONFIRMED);
     assert(rt_array_get(words,22)>=rt_array_get(words,21));
     SplArray* ticket=ticket_from(words); SplArray* frozen=NULL;
+    SplArray* legacy_input_receipt=rt_process_inspection_v1_input_receipt_value(ticket);
+    assert(rt_array_get(legacy_input_receipt,10)==EPROTO);
     for (int i=0;i<100;i++) {
         frozen=rt_process_observation_v4_collect_value(ticket,50000000);
         words=tuple_item(frozen,3);
@@ -152,6 +185,101 @@ int main(int argc, char** argv) {
     assert(rt_array_get(tuple_item(ack,3),1)==POV4_KIND_ACK);
     SplArray* duplicate=rt_process_observation_v4_ack_collect_value(ticket,digest);
     assert(rt_array_get(tuple_item(duplicate,3),3)==POV4_STATUS_REJECTED);
+
+    /* The input-capable path must retain the exact bytes before return and
+     * drain both full output pipes while the child waits for stdin. */
+    SplArray* input_request=request_bytes(cwd,cwd_pin,cwd_digest,
+        "--pov4-input-child",262144);
+    uint8_t expected_input[131072];
+    for(int i=0;i<131072;i++) expected_input[i]=(uint8_t)(i&255);
+    uint8_t expected_digest[32];
+    owned_sha256(expected_input,sizeof(expected_input),expected_digest);
+    SplArray* digest_value=rt_array_new(32);
+    put_bytes(digest_value,expected_digest,32);
+    SplArray* malformed_input=rt_array_new(1);
+    assert(rt_array_push(malformed_input,256));
+    SplArray* malformed_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,input_request,malformed_input,digest_value);
+    assert(rt_array_get(tuple_item(malformed_start,3),3)==POV4_STATUS_REJECTED);
+    SplArray* input=rt_array_new(131072);
+    for(int i=0;i<131072;i++) assert(rt_array_push(input,i&255));
+    uint8_t mismatched_input_digest[32];
+    memcpy(mismatched_input_digest,expected_digest,32);
+    mismatched_input_digest[0]^=1;
+    SplArray* wrong_digest_value=rt_array_new(32);
+    put_bytes(wrong_digest_value,mismatched_input_digest,32);
+    SplArray* wrong_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,input_request,input,wrong_digest_value);
+    assert(rt_array_get(tuple_item(wrong_start,3),3)==POV4_STATUS_REJECTED);
+    SplArray* input_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,input_request,input,digest_value);
+    SplArray* input_words=tuple_item(input_start,3);
+    assert(rt_array_get(input_words,3)==POV4_STATUS_RUNNING);
+    assert(rt_array_set(input,0,255));
+    SplArray* input_ticket=ticket_from(input_words), *input_frozen=NULL;
+    SplArray* initial_input_receipt=rt_process_inspection_v1_input_receipt_value(input_ticket);
+    assert(initial_input_receipt->len==75);
+    assert(rt_array_get(initial_input_receipt,5)==131072);
+    for(int i=0;i<32;i++)
+        assert(rt_array_get(initial_input_receipt,11+i)==expected_digest[i]);
+    for(int i=0;i<100;i++) {
+        input_frozen=rt_process_observation_v4_collect_value(input_ticket,50000000);
+        input_words=tuple_item(input_frozen,3);
+        if(rt_array_get(input_words,1)==POV4_KIND_FROZEN) break;
+    }
+    assert(input_frozen && rt_array_get(input_words,1)==POV4_KIND_FROZEN);
+    assert(rt_array_get(input_words,3)==POV4_STATUS_TERMINAL);
+    assert(rt_array_get(input_words,17)==0);
+    SplArray* input_out=tuple_item(input_frozen,0),
+        *input_err=tuple_item(input_frozen,1);
+    assert(input_out->len==131072 && input_err->len==131072);
+    assert(rt_array_get(input_out,0)=='O' && rt_array_get(input_err,0)=='E');
+    SplArray* input_receipt=rt_process_inspection_v1_input_receipt_value(input_ticket);
+    assert(input_receipt->len==75 && rt_array_get(input_receipt,0)==1);
+    for(int i=0;i<4;i++)
+        assert(rt_array_get(input_receipt,1+i)==rt_array_get(input_ticket,1+i));
+    assert(rt_array_get(input_receipt,5)==131072);
+    assert(rt_array_get(input_receipt,6)==131072);
+    assert(rt_array_get(input_receipt,7)==1 && rt_array_get(input_receipt,8)==1);
+    assert(rt_array_get(input_receipt,9)==1 && rt_array_get(input_receipt,10)==0);
+    for(int i=0;i<32;i++)
+        assert(rt_array_get(input_receipt,11+i)==expected_digest[i]);
+    for(int i=0;i<32;i++)
+        assert(rt_array_get(input_receipt,43+i)==rt_array_get(initial_input_receipt,43+i));
+    SplArray* input_ack=rt_process_observation_v4_ack_collect_value(
+        input_ticket,tuple_item(input_frozen,2));
+    assert(rt_array_get(tuple_item(input_ack,3),1)==POV4_KIND_ACK);
+    SplArray* stale_input_receipt=rt_process_inspection_v1_input_receipt_value(input_ticket);
+    assert(rt_array_get(stale_input_receipt,10)==ESTALE);
+
+    /* An early-exiting child leaves a decodable terminal observation but
+     * cannot claim a complete input receipt. */
+    SplArray* early_request=request_bytes(cwd,cwd_pin,cwd_digest,
+        "--pov4-child",1024);
+    expected_input[0]=255;
+    owned_sha256(expected_input,sizeof(expected_input),expected_digest);
+    SplArray* early_digest_value=rt_array_new(32);
+    put_bytes(early_digest_value,expected_digest,32);
+    SplArray* early_start=rt_process_inspection_v1_start_pinned_value(
+        77,cwd_pin,early_request,input,early_digest_value);
+    SplArray* early_words=tuple_item(early_start,3);
+    assert(rt_array_get(early_words,3)==POV4_STATUS_RUNNING);
+    SplArray* early_ticket=ticket_from(early_words), *early_frozen=NULL;
+    for(int i=0;i<100;i++) {
+        early_frozen=rt_process_observation_v4_collect_value(early_ticket,50000000);
+        early_words=tuple_item(early_frozen,3);
+        if(rt_array_get(early_words,1)==POV4_KIND_FROZEN) break;
+    }
+    assert(early_frozen && rt_array_get(early_words,1)==POV4_KIND_FROZEN);
+    assert(rt_array_get(early_words,3)==POV4_STATUS_TERMINAL);
+    assert(rt_array_get(early_words,10)==POV4_FAIL_STREAM);
+    SplArray* early_receipt=rt_process_inspection_v1_input_receipt_value(early_ticket);
+    assert(rt_array_get(early_receipt,5)==131072);
+    assert(rt_array_get(early_receipt,6)<131072);
+    assert(rt_array_get(early_receipt,10)!=0);
+    SplArray* early_ack=rt_process_observation_v4_ack_collect_value(
+        early_ticket,tuple_item(early_frozen,2));
+    assert(rt_array_get(tuple_item(early_ack,3),1)==POV4_KIND_ACK);
 
     /* A forced post-fork/pre-exec failure returns retained cleanup authority,
      * never a false pre-spawn Rejected receipt. */

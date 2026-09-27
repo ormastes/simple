@@ -10,6 +10,8 @@ use compiler.backend.linker.elf_parser.{
     SHN_UNDEF, STB_LOCAL, STB_GLOBAL, STB_WEAK
 }
 
+val SHN_COMMON: i64 = 0xfff2
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -67,6 +69,23 @@ fn is_weak(entry: SymEntry) -> bool:
         case Weak: true
         case _: false
 
+fn is_common(entry: SymEntry) -> bool:
+    entry.section_idx == SHN_COMMON
+
+fn merge_common(existing: SymEntry, incoming: SymEntry) -> SymEntry:
+    """Coalesce tentative definitions while preserving first-definition order."""
+    var size = existing.size
+    if incoming.size > size:
+        size = incoming.size
+    var alignment = existing.offset
+    if incoming.offset > alignment:
+        alignment = incoming.offset
+    var binding = existing.binding
+    if is_strong(incoming):
+        binding = incoming.binding
+    SymEntry(name: existing.name, section_idx: SHN_COMMON, offset: alignment,
+        size: size, binding: binding, obj_idx: existing.obj_idx, is_defined: true)
+
 # ============================================================================
 # Resolution
 # ============================================================================
@@ -101,7 +120,17 @@ fn sym_add_object(res: SymResolution, obj: ElfObject, obj_idx: i64) -> SymResolu
 
         if defined.has(sym.name):
             val existing = defined[sym.name]
-            if is_strong(existing) and is_strong(entry):
+            if is_common(existing) and is_common(entry):
+                defined[sym.name] = merge_common(existing, entry)
+            else if is_common(existing):
+                # A regular strong definition overrides a tentative definition.
+                if is_strong(entry):
+                    defined[sym.name] = entry
+            else if is_common(entry):
+                # A tentative definition overrides a weak regular definition.
+                if is_weak(existing):
+                    defined[sym.name] = entry
+            else if is_strong(existing) and is_strong(entry):
                 errors = errors.push("duplicate symbol: {sym.name} (object {existing.obj_idx} and {obj_idx})")
             else if is_strong(entry) and is_weak(existing):
                 defined[sym.name] = entry

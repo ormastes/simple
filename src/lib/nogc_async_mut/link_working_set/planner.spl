@@ -1,0 +1,26 @@
+"""Pure planner for keeping linker residency within an admitted budget."""
+
+use std.nogc_async_mut.link_working_set.model.*
+
+fn add_checked(left: u64, right: u64) -> Option<u64>:
+    if right > 0xffffffffffffffffu64 - left: return nil
+    Some(left + right)
+
+pub fn plan_link_working_set_v1(input_bytes: u64, input_window_bytes: u64, staged_output_bytes: u64, scratch_bytes: u64, resident_limit_bytes: u64) -> LinkWorkingSetPlan:
+    if resident_limit_bytes == 0:
+        return LinkWorkingSetPlan(status: LinkWorkingSetStatus.InvalidLimit, input_bytes: input_bytes, input_window_bytes: input_window_bytes, staged_output_bytes: staged_output_bytes, scratch_bytes: scratch_bytes, resident_bytes: 0, resident_limit_bytes: resident_limit_bytes, window_count: 0, spill_required: false)
+    if input_window_bytes == 0:
+        return LinkWorkingSetPlan(status: LinkWorkingSetStatus.InvalidWindow, input_bytes: input_bytes, input_window_bytes: input_window_bytes, staged_output_bytes: staged_output_bytes, scratch_bytes: scratch_bytes, resident_bytes: 0, resident_limit_bytes: resident_limit_bytes, window_count: 0, spill_required: false)
+
+    val with_output = add_checked(input_window_bytes, staged_output_bytes)
+    if with_output == nil:
+        return LinkWorkingSetPlan(status: LinkWorkingSetStatus.ArithmeticOverflow, input_bytes: input_bytes, input_window_bytes: input_window_bytes, staged_output_bytes: staged_output_bytes, scratch_bytes: scratch_bytes, resident_bytes: 0, resident_limit_bytes: resident_limit_bytes, window_count: 0, spill_required: false)
+    val resident = add_checked(with_output ?? 0, scratch_bytes)
+    if resident == nil:
+        return LinkWorkingSetPlan(status: LinkWorkingSetStatus.ArithmeticOverflow, input_bytes: input_bytes, input_window_bytes: input_window_bytes, staged_output_bytes: staged_output_bytes, scratch_bytes: scratch_bytes, resident_bytes: 0, resident_limit_bytes: resident_limit_bytes, window_count: 0, spill_required: false)
+
+    val resident_bytes = resident ?? 0
+    val complete_windows = input_bytes / input_window_bytes
+    val window_count = complete_windows + (if input_bytes % input_window_bytes == 0: 0 else: 1)
+    val status = if resident_bytes > resident_limit_bytes: LinkWorkingSetStatus.ResidentBudgetExceeded else: LinkWorkingSetStatus.Ok
+    LinkWorkingSetPlan(status: status, input_bytes: input_bytes, input_window_bytes: input_window_bytes, staged_output_bytes: staged_output_bytes, scratch_bytes: scratch_bytes, resident_bytes: resident_bytes, resident_limit_bytes: resident_limit_bytes, window_count: window_count, spill_required: input_bytes > input_window_bytes or staged_output_bytes > input_window_bytes)

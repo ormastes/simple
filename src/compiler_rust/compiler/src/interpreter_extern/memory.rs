@@ -1115,7 +1115,60 @@ pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_mprotect`: POSIX `PROT_*` bits (1 read, 2 write, 4 exec) mapped
+/// onto `VirtualProtect`, with the same W^X refusal as the Unix arm. A
+/// copy-on-write file view (`rt_mmap_raw` MAP_PRIVATE) rejects PAGE_READWRITE,
+/// so a writable request falls back to PAGE_WRITECOPY. Execute grants flush the
+/// instruction cache, mirroring `rt_mmap_raw`.
+#[cfg(windows)]
+pub fn rt_mprotect(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
+    use windows_sys::Win32::System::Memory::{
+        VirtualProtect, PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE,
+        PAGE_WRITECOPY,
+    };
+
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_mprotect requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    let prot = args[2].as_int()?;
+    if addr <= 0 || length <= 0 || (prot & 0x6) == 0x6 || (prot & !0x7) != 0 {
+        return Ok(Value::Int(-1));
+    }
+    let protection = match prot {
+        0 => PAGE_NOACCESS,
+        1 => PAGE_READONLY,
+        2 | 3 => PAGE_READWRITE,
+        4 => PAGE_EXECUTE,
+        5 => PAGE_EXECUTE_READ,
+        _ => return Ok(Value::Int(-1)),
+    };
+    let pointer = addr as usize as *const core::ffi::c_void;
+    let mut old_protection = 0;
+    let mut ok = unsafe { VirtualProtect(pointer, length as usize, protection, &mut old_protection) } != 0;
+    if !ok && protection == PAGE_READWRITE {
+        ok = unsafe { VirtualProtect(pointer, length as usize, PAGE_WRITECOPY, &mut old_protection) } != 0;
+    }
+    if !ok {
+        return Ok(Value::Int(-1));
+    }
+    if (prot & 0x4) != 0
+        && unsafe {
+            FlushInstructionCache(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                pointer,
+                length as usize,
+            )
+        } == 0
+    {
+        return Ok(Value::Int(-1));
+    }
+    Ok(Value::Int(0))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_mprotect(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_mprotect is unavailable on this host"))
 }
@@ -1138,7 +1191,17 @@ pub fn rt_page_size(args: &[Value]) -> Result<Value, CompileError> {
         }
         Ok(Value::Int(page_size as i64))
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+        let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+        unsafe { GetSystemInfo(&mut info) };
+        if info.dwPageSize == 0 {
+            return Err(CompileError::runtime("rt_page_size is unavailable on this host"));
+        }
+        Ok(Value::Int(i64::from(info.dwPageSize)))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Err(CompileError::runtime("rt_page_size is unavailable on this host"))
     }
@@ -1200,7 +1263,22 @@ pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_madvise_raw`: parity with the C runtime
+/// (src/runtime/platform/platform_win.h) — Windows has no madvise equivalent,
+/// so the call reports failure (-1) instead of an interpreter error and never
+/// fabricates success. Callers treat advice as best-effort.
+#[cfg(windows)]
+pub fn rt_madvise_raw(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_madvise_raw requires 3 arguments"));
+    }
+    args[0].as_int()?;
+    args[1].as_int()?;
+    args[2].as_int()?;
+    Ok(Value::Int(-1))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_madvise_raw(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_madvise_raw is unavailable on this host"))
 }
@@ -1225,7 +1303,25 @@ pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(result)))
 }
 
-#[cfg(not(unix))]
+/// Windows `rt_msync_flags`: parity with the C runtime
+/// (src/runtime/platform/platform_win.h) — `FlushViewOfFile`, flags ignored.
+#[cfg(windows)]
+pub fn rt_msync_flags(args: &[Value]) -> Result<Value, CompileError> {
+    use windows_sys::Win32::System::Memory::FlushViewOfFile;
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_msync_flags requires 3 arguments"));
+    }
+    let addr = args[0].as_int()?;
+    let length = args[1].as_int()?;
+    args[2].as_int()?;
+    if addr <= 0 || length <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    let ok = unsafe { FlushViewOfFile(addr as usize as *const core::ffi::c_void, length as usize) } != 0;
+    Ok(Value::Int(if ok { 0 } else { -1 }))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_msync_flags(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_msync_flags is unavailable on this host"))
 }
@@ -1325,6 +1421,46 @@ mod ptr_read_u8_tests {
                 .unwrap(),
             -1
         );
+        assert_eq!(
+            rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Regression: the Windows seed had no `rt_mprotect` ("unavailable on this
+    /// host"), so the module loader's W^X transitions failed and
+    /// module_loader_relocation_spec could not load any SMF on Windows.
+    #[cfg(windows)]
+    #[test]
+    fn windows_mprotect_transitions_and_rejects_write_execute() {
+        const PROT_READ: i64 = 1;
+        const PROT_WRITE: i64 = 2;
+        const PROT_EXEC: i64 = 4;
+        let rw = rt_mmap_raw(&[
+            Value::Int(0),
+            Value::Int(4096),
+            Value::Int(PROT_READ | PROT_WRITE),
+            Value::Int(0x2 | 0x20),
+            Value::Int(-1),
+            Value::Int(0),
+        ])
+        .unwrap()
+        .as_int()
+        .unwrap();
+        assert_ne!(rw, -1);
+        let mprotect = |prot: i64| {
+            rt_mprotect(&[Value::Int(rw), Value::Int(4096), Value::Int(prot)])
+                .expect("rt_mprotect must be available on Windows")
+                .as_int()
+                .unwrap()
+        };
+        assert_eq!(mprotect(PROT_READ), 0);
+        assert_eq!(mprotect(PROT_READ | PROT_EXEC), 0);
+        assert_eq!(mprotect(PROT_READ | PROT_WRITE), 0);
+        assert_eq!(mprotect(PROT_WRITE | PROT_EXEC), -1, "W^X must be refused");
         assert_eq!(
             rt_munmap_raw(&[Value::Int(rw), Value::Int(4096)])
                 .unwrap()

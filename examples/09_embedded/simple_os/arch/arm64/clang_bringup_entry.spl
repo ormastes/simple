@@ -6,11 +6,13 @@
 #   R4a: /CLANG.ELF -cc1 -triple aarch64-unknown-simpleos -emit-obj /HELLO.C -o /HELLO.O
 #   R4b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /HELLO.O /LIBC.A -o /HELLO2.ELF
 #   R5: /HELLO2.ELF                     (prints HELLO_C_FROM_GUEST_ARM64)
-#   R6a: /CLANG.ELF -cc1 -x c++ -std=c++17 -fno-exceptions -fno-rtti
-#        -emit-obj /WITNESS.CPP -o /WITNESS.O     (in-guest C++ compile)
+#   R6a: /CLANG.ELF -cc1 -x c++ -std=c++17 -fno-rtti -emit-obj
+#        /WITNESS.CPP -o /WITNESS.O
+#        (in-guest C++ compile of the LEAN self-contained witness — one
+#         virtual class + new/delete + printf, no STL/PCH)
 #   R6b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /WITNESS.O
 #        /LIBCXX.A /LIBC.A /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF (C++ link)
-#   R6c: /WITNESS2.ELF                  (prints WITNESS_CXX_OK)
+#   R6c: /WITNESS2.ELF                  (prints WITNESS_CXX_42)
 # Final markers: CLANG_IN_GUEST_ARM64_OK (R1-R5), CLANG_IN_GUEST_ARM64_CXX_OK (R6)
 #
 # Staged by scripts/qemu/check_simpleos_arm64_clang_compile.shs via
@@ -109,16 +111,19 @@ fn spl_start():
     serial_println("CLANG_IN_GUEST_ARM64_OK")
 
     # R6a: in-guest cc1 C++ compile /WITNESS.CPP -> /WITNESS.O
-    # The TU is host-preprocessed (self-contained; the guest FAT32 is root-only
-    # 8.3 so the 568-header libc++ closure cannot live there — roadmap B1
-    # method). -fno-rtti matches the prebuilt guest libc++ (built -fno-rtti);
-    # NO -fno-exceptions: this fork's cc1 option table lacks it ("unknown
-    # argument" — same family as R4a's -nostdlibinc), and it is unnecessary:
-    # the preprocessed TU already resolved libc++ to its no-exceptions form.
+    # The witness is LEAN and self-contained (no #includes, no STL) — a class
+    # with virtuals, operator new/delete, printf. It compiles in ~seconds like
+    # R4a's HELLO.C (the earlier std::string/std::vector witness needed the
+    # libc++ headers, whose AST the guest cc1 could not read inside the boot
+    # budget under TCG — agent-47). The virtual + new + delete still pull the
+    # minimal libc++abi runtime at LINK time (rung R6b) — that is the C++
+    # proof. NO -include-pch (self-contained), NO -fno-exceptions (this fork's
+    # cc1 option table lacks the negative form — exceptions are compiled OUT by
+    # default; an explicit -fno-exceptions is an "unknown argument"), and
+    # -fno-rtti matches the prebuilt guest libc++.
     val rc6a = _rung("R6a-cc1-cxx-compile", "/CLANG.ELF",
         ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
-         "-ffreestanding", "-O0", "-x", "c++", "-std=c++17",
-         "-fno-rtti",
+         "-ffreestanding", "-O0", "-x", "c++", "-std=c++17", "-fno-rtti",
          "-emit-obj", "-o", "/WITNESS.O", "/WITNESS.CPP"])
     if rc6a != 0:
         serial_println("CLANG_IN_GUEST_ARM64_R6_COMPILE_FAIL rc={rc6a}")
@@ -141,7 +146,7 @@ fn spl_start():
         rt_qemu_exit_success()
         return
 
-    # R6c: run the guest-produced C++ binary (prints WITNESS_CXX_OK)
+    # R6c: run the guest-produced C++ binary (prints WITNESS_CXX_42)
     val rc6c = _rung("R6c-run-witness2", "/WITNESS2.ELF", ["/WITNESS2.ELF"])
     if rc6c != 0:
         serial_println("CLANG_IN_GUEST_ARM64_R6_RUN_FAIL rc={rc6c}")

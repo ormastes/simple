@@ -29,6 +29,13 @@ case "$1" in
         printf 'cargo fixture version\n'
         printf 'second launch diagnostic\n' >&2
         ;;
+    recover-windows)
+        if [ "$attempt" -lt 4 ]; then
+            printf 'transient Windows launch fault\n' >&2
+            exit 125
+        fi
+        printf 'rustc fixture version\n'
+        ;;
     mutate-failure|mutate-success)
         printf '\n# executable changed during launch\n' >>"$0"
         printf 'must not be published\n'
@@ -42,6 +49,7 @@ chmod +x "$fixture/native-tool"
 for scenario in success failure recover mutate-failure mutate-success; do
     cp "$fixture/native-tool" "$fixture/$scenario"
 done
+cp "$fixture/native-tool" "$fixture/recover-windows.exe"
 RUSTFLAGS=must-not-leak bootstrap_stage3_native_metadata_probe cargo-version \
     "$fixture/success" success >"$fixture/pass.stdout" 2>"$fixture/pass.stderr"
 [ "$(cat "$fixture/pass.stdout")" = 'cargo fixture version' ]
@@ -67,6 +75,17 @@ grep -Fx 'bootstrap-native-metadata-probe=llvm-config-version attempt=1 shell-st
 grep -Fx 'bootstrap-native-metadata-probe=llvm-config-version attempt=2 shell-status=0' "$fixture/recover.stderr" >/dev/null
 grep -Fx 'first launch fault' "$fixture/recover.stderr" >/dev/null
 grep -Fx 'second launch diagnostic' "$fixture/recover.stderr" >/dev/null
+RUSTFLAGS=must-not-leak bootstrap_stage3_native_metadata_probe rustc-version \
+    "$fixture/recover-windows.exe" recover-windows \
+    >"$fixture/recover-windows.stdout" 2>"$fixture/recover-windows.stderr"
+[ "$(wc -c <"$fixture/recover-windows.exe.calls")" -eq 4 ]
+[ "$(cat "$fixture/recover-windows.stdout")" = 'rustc fixture version' ]
+for attempt in 1 2 3; do
+    grep -Fx "bootstrap-native-metadata-probe=rustc-version attempt=$attempt shell-status=125" \
+        "$fixture/recover-windows.stderr" >/dev/null
+done
+grep -Fx 'bootstrap-native-metadata-probe=rustc-version attempt=4 shell-status=0' \
+    "$fixture/recover-windows.stderr" >/dev/null
 for scenario in mutate-failure mutate-success; do
     if bootstrap_stage3_native_metadata_probe llvm-config-prefix \
         "$fixture/$scenario" "$scenario" >"$fixture/$scenario.stdout" \
@@ -84,4 +103,4 @@ if (cd "$fixture" && PATH="$fixture:$PATH" bootstrap_stage3_native_metadata_prob
     exit 1
 fi
 [ ! -e "$fixture/native-tool.calls" ]
-printf 'PASS: metadata recovery is bounded to two exact launches, retains diagnostics, isolates environment and stdout, and rejects changed executables\n'
+printf 'PASS: metadata recovery is bounded to two launches or four for Windows executables, retains diagnostics, isolates environment and stdout, and rejects changed executables\n'

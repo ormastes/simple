@@ -13,6 +13,7 @@
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
 use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.resolve.{resolve_is_fast_local}
 
 # ===== Field Access =====
 
@@ -26,6 +27,14 @@ fn eval_field_access(eid: i64) -> i64:
     val base_tag = base_node2.tag
     if base_tag == EXPR_IDENT:
         val type_name = base_node2.s_val
+        val namespace_owner = func_module_namespace_lookup(
+            eval_caller_file(), type_name)
+        if namespace_owner != "":
+            val member_decl = func_resolve_module_member_for_caller(
+                eval_caller_file(), type_name, field_name)
+            if member_decl >= 0:
+                return val_make_function(field_name, member_decl)
+            # Preserve enum, static method, and value lookup for this member.
         val enum_variants = enum_table_lookup(type_name)
         if enum_variants != "":
             # Only treat as variant if field_name is a known variant
@@ -44,8 +53,16 @@ fn eval_field_access(eid: i64) -> i64:
             return val_make_function(static_fn, static_decl)
 
         # Try deferred (lazy) modules for Type.field or Enum.Variant
-        val forced_fa = try_force_any_deferred_for(type_name)
+        val forced_fa = try_force_any_deferred_for(type_name, eval_caller_file())
         if forced_fa == 1:
+            val lazy_namespace_owner = func_module_namespace_lookup(
+                eval_caller_file(), type_name)
+            if lazy_namespace_owner != "":
+                val lazy_member_decl = func_resolve_module_member_for_caller(
+                    eval_caller_file(), type_name, field_name)
+                if lazy_member_decl >= 0:
+                    return val_make_function(field_name, lazy_member_decl)
+                # Preserve non-function lookup after forcing the namespace.
             # Retry enum variant access
             val enum_variants3 = enum_table_lookup(type_name)
             if enum_variants3 != "":
@@ -263,6 +280,14 @@ fn eval_assign_expr(eid: i64) -> i64:
         if ok == false:
             eval_set_error("undefined variable: " + name)
             return -1
+        # LOAD_FAST: the resolver gave this target the same fast-local slot
+        # eval_ident reads; update it too, or the next read returns the stale
+        # pre-assignment value (eval_stmt_assign does the same).
+        var fast_slot = expr_i_val[target_eid]
+        if fast_slot < 0 and eval_current_decl_id >= 0:
+            fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if fast_slot >= 0 and env_has_frame():
+            env_set_local(fast_slot, new_val)
         return new_val
 
     if target_tag == EXPR_FIELD_ACCESS:

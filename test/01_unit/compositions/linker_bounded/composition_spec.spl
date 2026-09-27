@@ -1,0 +1,26 @@
+use std.spec
+use std.spec.step
+use compositions.linker_bounded.composition.*
+use std.mdsocpp.*
+
+describe "bounded linker composition":
+    it "seals within the six GiB contract":
+        step("Seal the bounded linker generation")
+        val result = seal_linker_bounded_v1(23)
+        assert_true(result.status.accepted())
+        assert_equal(result.receipt.generation, 23u64)
+        assert_equal(result.receipt.total_memory_bytes, 5972688896u64)
+        assert_true(result.receipt.total_memory_bytes < LINKER_BOUNDED_MEMORY_BUDGET_BYTES)
+
+    it "forbids post-activation allocation and concurrency":
+        step("Inspect the bounded capsule contract")
+        val capsule = linker_bounded_capsule_v1()
+        assert_equal(capsule.memory.may_allocate_after_activation, 0u32)
+        assert_equal(capsule.concurrency.maximum_concurrent_calls, 1u32)
+
+    it "rejects a policy smaller than the declared working set":
+        step("Mutation guard: lower the admitted budget by one byte")
+        var policy = linker_bounded_policy_v1(24)
+        policy.memory_budget_bytes = 5972688895
+        val result = mdsocpp_seal_v1([linker_bounded_capsule_v1()], policy)
+        assert_equal(result.status, MdsocppSealStatus.MemoryBudgetExceeded)

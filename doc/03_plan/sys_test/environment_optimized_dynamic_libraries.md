@@ -1,6 +1,6 @@
 # System Test Plan: Environment-Optimized Dynamic Libraries
 
-**Status:** Feature A + NFR N2 + target registry B + inspector input 1 selected; contract/admission/binding, host-target planning, and inert GPU completion adapters have focused diagnostic coverage. The executable scaffold has 30 intentionally fail-fast scenarios for REQ-001..016 and NFR-001..010; NFR-011/012 have no executable scenarios yet. Target-registry and atomic-input authority integration remains required until real parser artifacts and provider-backed execution exist.
+**Status:** Feature A + NFR N2 + target registry B + inspector input 1 selected; contract/admission/binding, host-target planning, and inert GPU completion adapters have focused diagnostic coverage. The executable scaffold includes intentionally fail-fast scenarios for REQ-001..016 and NFR-001..012. Target-registry and atomic-input authority integration remains required until real parser artifacts and provider-backed execution exist.
 
 ## Test boundary
 
@@ -56,15 +56,12 @@ not close these production joins:
 | Requirement | Required executable spec | Exact gap |
 |---|---|---|
 | REQ-015 / NFR-011 | `test/02_integration/compiler/driver/canonical_target_registry_consumer_v1_spec.spl` | Consume a live registry token in real target-profile, cache, binding-plan, receipt, and replacement/drain owners; measure post-construction lookup and prove no provider hot-path registry work. |
-| REQ-016 / NFR-012 | `test/02_integration/compiler/driver/owned_process_atomic_inspector_v3_spec.spl` | Drive the production Simple opaque V3 adapter with exact input, boundary/backpressure, failure injection, terminal-token gating, tool identity, and no-leak assertions. The C self-check alone is not this evidence. |
+| REQ-016 / NFR-012 | `test/02_integration/compiler/driver/owned_process_atomic_inspector_v1_spec.spl` | Drive the production Simple inspection V1 lease with exact input, boundary/backpressure, failure injection, terminal-token gating, tool identity, and no-leak assertions. The C self-check alone is not this evidence. |
 
-Add two fail-fast SSpec scenarios to
-`test/03_system/app/compiler/feature/environment_optimized_dynamic_libraries_spec.spl`
-before claiming complete requirement coverage: one `# @req NFR-011` hot-path
-registry-overhead scenario and one `# @req NFR-012` bounded inspector-progress
-and terminal-failure scenario. They remain `FAIL-FAST` until their production
-owners and timing/lifecycle oracles exist; their current status is **MISSING
-EXECUTABLE SPEC**, not PASS or blocked execution evidence.
+The `# @req NFR-011` hot-path registry-overhead and `# @req NFR-012` bounded
+inspector-progress scenarios are present in the fail-fast SSpec. They remain
+`FAIL-FAST` until their production timing/lifecycle oracles exist; neither is
+PASS or blocked execution evidence.
 
 ## Execution order
 
@@ -72,7 +69,7 @@ EXECUTABLE SPEC**, not PASS or blocked execution evidence.
 2. Contract codec and negative admission fixtures.
 3. Deterministic policy and binding-generation tests.
 4. Atomic inspector exact-input, boundary, and failure-injection fixtures.
-5. Registry-consumer and V3 opaque-adapter integration tests.
+5. Registry-consumer and inspection V1 lease integration tests.
 6. Native/SMF/JIT callable and cache-identity integration tests.
 7. Parser scalar/SIMD differential tests.
 8. Current-host emitted-code and performance evidence.

@@ -1,0 +1,386 @@
+# TLS model relaxations performed before symbol resolution and GC.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfRelocation, elf_reloc_sym, elf_reloc_type
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+val R_X86_64_PLT32_TLS: i64 = 4
+val R_X86_64_TLSGD_TLS: i64 = 19
+val R_X86_64_TLSLD_TLS: i64 = 20
+val R_X86_64_DTPOFF32_TLS: i64 = 21
+val R_X86_64_GOTTPOFF_TLS: i64 = 22
+val R_X86_64_TPOFF32_TLS: i64 = 23
+val R_X86_64_GOTPC32_TLSDESC_TLS: i64 = 34
+val R_X86_64_TLSDESC_CALL_TLS: i64 = 35
+val R_AARCH64_CALL26_TLS: i64 = 283
+val R_AARCH64_TLSGD_ADR_PAGE21_TLS: i64 = 513
+val R_AARCH64_TLSGD_ADD_LO12_NC_TLS: i64 = 514
+val R_AARCH64_TLSGD_MOVW_G1_TLS: i64 = 515
+val R_AARCH64_TLSGD_MOVW_G0_NC_TLS: i64 = 516
+val R_AARCH64_TLSLD_ADR_PAGE21_TLS: i64 = 518
+val R_AARCH64_TLSLD_ADD_LO12_NC_TLS: i64 = 519
+val R_AARCH64_TLSLD_MOVW_G1_TLS: i64 = 520
+val R_AARCH64_TLSLD_MOVW_G0_NC_TLS: i64 = 521
+val R_AARCH64_TLSLE_MOVW_TPREL_G1_TLS: i64 = 545
+val R_AARCH64_TLSLE_MOVW_TPREL_G0_NC_TLS: i64 = 548
+val R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS: i64 = 549
+val R_AARCH64_TLSLE_ADD_TPREL_LO12_NC_TLS: i64 = 551
+val R_AARCH64_TLSDESC_ADR_PAGE21_TLS: i64 = 562
+val R_AARCH64_TLSDESC_LD64_LO12_TLS: i64 = 563
+val R_AARCH64_TLSDESC_ADD_LO12_TLS: i64 = 564
+val R_AARCH64_TLSDESC_CALL_TLS: i64 = 569
+
+fn _a64_read_u32(raw: [u8], at: i64) -> i64:
+    (raw[at] as i64) | ((raw[at + 1] as i64) << 8) |
+        ((raw[at + 2] as i64) << 16) | ((raw[at + 3] as i64) << 24)
+
+fn _a64_write_u32(raw: [u8], at: i64, value: i64) -> [u8]:
+    var out = raw
+    out[at] = (value & 0xff) as u8
+    out[at + 1] = ((value >> 8) & 0xff) as u8
+    out[at + 2] = ((value >> 16) & 0xff) as u8
+    out[at + 3] = ((value >> 24) & 0xff) as u8
+    out
+
+fn _a64_find_pair_reloc(obj: ElfObject, reloc: ElfRelocation,
+        offset_delta: i64, rtype: i64, same_symbol: bool) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + offset_delta and
+                elf_reloc_type(next) == rtype and
+                (not same_symbol or elf_reloc_sym(next) == elf_reloc_sym(reloc)):
+            return i
+        i = i + 1
+    -1
+
+fn _a64_tls_call_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    val call = _a64_find_pair_reloc(obj, reloc, 8, R_AARCH64_CALL26_TLS, false)
+    if call < 0:
+        return -1
+    val sym = elf_reloc_sym(obj.relocations[call])
+    if sym <= 0 or sym >= obj.symbols.len() or obj.symbols[sym].name != "__tls_get_addr":
+        return -1
+    call
+
+fn _a64_tls_pair(obj: ElfObject, reloc: ElfRelocation, add_type: i64) -> bool:
+    _a64_find_pair_reloc(obj, reloc, 4, add_type, true) >= 0 and
+        _a64_tls_call_pair(obj, reloc) >= 0
+
+fn _a64_tlsdesc_sequence(obj: ElfObject, reloc: ElfRelocation) -> bool:
+    _a64_find_pair_reloc(obj, reloc, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true) >= 0 and
+        _a64_find_pair_reloc(obj, reloc, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true) >= 0 and
+        _a64_find_pair_reloc(obj, reloc, 12, R_AARCH64_TLSDESC_CALL_TLS, true) >= 0
+
+fn _a64_is_tlsdesc_member(obj: ElfObject, index: i64) -> bool:
+    for r in obj.relocations:
+        if elf_reloc_type(r) == R_AARCH64_TLSDESC_ADR_PAGE21_TLS and
+                _a64_tlsdesc_sequence(obj, r):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSDESC_LD64_LO12_TLS, true) == index or
+                    _a64_find_pair_reloc(obj, r, 8, R_AARCH64_TLSDESC_ADD_LO12_TLS, true) == index or
+                    _a64_find_pair_reloc(obj, r, 12, R_AARCH64_TLSDESC_CALL_TLS, true) == index:
+                return true
+    false
+
+fn _a64_is_tls_pair_member(obj: ElfObject, index: i64) -> bool:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val r = obj.relocations[i]
+        val rtype = elf_reloc_type(r)
+        if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSGD_ADD_LO12_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSGD_ADD_LO12_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        if rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSLD_ADD_LO12_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_ADD_LO12_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        if rtype == R_AARCH64_TLSGD_MOVW_G1_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSGD_MOVW_G0_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSGD_MOVW_G0_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        if rtype == R_AARCH64_TLSLD_MOVW_G1_TLS and
+                _a64_tls_pair(obj, r, R_AARCH64_TLSLD_MOVW_G0_NC_TLS):
+            if _a64_find_pair_reloc(obj, r, 4, R_AARCH64_TLSLD_MOVW_G0_NC_TLS, true) == index or
+                    _a64_tls_call_pair(obj, r) == index:
+                return true
+        i = i + 1
+    false
+
+fn _tls_gd_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + 8 and elf_reloc_type(next) == R_X86_64_PLT32_TLS:
+            val sym = elf_reloc_sym(next)
+            if sym > 0 and sym < obj.symbols.len() and obj.symbols[sym].name == "__tls_get_addr":
+                return i
+        i = i + 1
+    -1
+
+fn _tls_ld_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + 5 and elf_reloc_type(next) == R_X86_64_PLT32_TLS:
+            val sym = elf_reloc_sym(next)
+            if sym > 0 and sym < obj.symbols.len() and obj.symbols[sym].name == "__tls_get_addr":
+                return i
+        i = i + 1
+    -1
+
+fn _tls_has_ld(obj: ElfObject, section: i64) -> bool:
+    for r in obj.relocations:
+        if r.target_section_idx == section and elf_reloc_type(r) == R_X86_64_TLSLD_TLS and
+                _tls_ld_pair(obj, r) >= 0:
+            return true
+    false
+
+fn _tls_desc_pair(obj: ElfObject, reloc: ElfRelocation) -> i64:
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val next = obj.relocations[i]
+        if next.target_section_idx == reloc.target_section_idx and
+                next.r_offset == reloc.r_offset + 4 and elf_reloc_type(next) == R_X86_64_TLSDESC_CALL_TLS and
+                elf_reloc_sym(next) == elf_reloc_sym(reloc):
+            return i
+        i = i + 1
+    -1
+
+fn _tls_is_pair(obj: ElfObject, index: i64) -> bool:
+    val candidate = obj.relocations[index]
+    if elf_reloc_type(candidate) != R_X86_64_PLT32_TLS and
+            elf_reloc_type(candidate) != R_X86_64_TLSDESC_CALL_TLS:
+        return false
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val r = obj.relocations[i]
+        if (elf_reloc_type(r) == R_X86_64_TLSGD_TLS and _tls_gd_pair(obj, r) == index) or
+                (elf_reloc_type(r) == R_X86_64_TLSLD_TLS and _tls_ld_pair(obj, r) == index):
+            return true
+        if elf_reloc_type(r) == R_X86_64_GOTPC32_TLSDESC_TLS and _tls_desc_pair(obj, r) == index:
+            return true
+        i = i + 1
+    false
+
+fn _tls_relax_object(obj: ElfObject) -> Result<ElfObject, text>:
+    var raw = obj.raw
+    var relocs: [ElfRelocation] = []
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val r = obj.relocations[i]
+        val rtype = elf_reloc_type(r)
+        if rtype == R_X86_64_TLSGD_TLS:
+            if _tls_gd_pair(obj, r) < 0:
+                return Err("UnsupportedFeature: R_X86_64_TLSGD is not followed by the canonical __tls_get_addr call")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len() or r.r_offset < 4:
+                return Err("malformed R_X86_64_TLSGD target")
+            val at = obj.sections[si].sh_addr + r.r_offset - 4
+            if at < 0 or at + 16 > raw.len():
+                return Err("truncated R_X86_64_TLSGD instruction sequence")
+            if raw[at] != 0x66 or raw[at + 1] != 0x48 or raw[at + 2] != 0x8d or raw[at + 3] != 0x3d or
+                    raw[at + 8] != 0x66 or raw[at + 9] != 0x66 or raw[at + 10] != 0x48 or raw[at + 11] != 0xe8:
+                return Err("UnsupportedFeature: non-canonical x86_64 TLSGD instruction sequence")
+            val replacement: [i64] = [
+                0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0,
+                0x48, 0x03, 0x05, 0, 0, 0, 0
+            ]
+            var bi: i64 = 0
+            while bi < replacement.len():
+                raw[at + bi] = replacement[bi] as u8
+                bi = bi + 1
+            val info = (elf_reloc_sym(r) << 32) | R_X86_64_GOTTPOFF_TLS
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 8, r_info: info,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_TLSLD_TLS:
+            if _tls_ld_pair(obj, r) < 0:
+                return Err("UnsupportedFeature: R_X86_64_TLSLD is not followed by the canonical __tls_get_addr call")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len() or r.r_offset < 3:
+                return Err("malformed R_X86_64_TLSLD target")
+            val at = obj.sections[si].sh_addr + r.r_offset - 3
+            if at < 0 or at + 12 > raw.len():
+                return Err("truncated R_X86_64_TLSLD instruction sequence")
+            if raw[at] != 0x48 or raw[at + 1] != 0x8d or raw[at + 2] != 0x3d or raw[at + 7] != 0xe8:
+                return Err("UnsupportedFeature: non-canonical x86_64 TLSLD instruction sequence")
+            val replacement: [i64] = [0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0]
+            var bi: i64 = 0
+            while bi < replacement.len():
+                raw[at + bi] = replacement[bi] as u8
+                bi = bi + 1
+        else if rtype == R_X86_64_DTPOFF32_TLS:
+            if not _tls_has_ld(obj, r.target_section_idx):
+                return Err("UnsupportedFeature: R_X86_64_DTPOFF32 without a canonical TLSLD sequence")
+            val info = (elf_reloc_sym(r) << 32) | R_X86_64_TPOFF32_TLS
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset, r_info: info,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_GOTPC32_TLSDESC_TLS:
+            val pair = _tls_desc_pair(obj, r)
+            if pair < 0:
+                return Err("UnsupportedFeature: R_X86_64_GOTPC32_TLSDESC is not followed by TLSDESC_CALL")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len() or r.r_offset < 3:
+                return Err("malformed R_X86_64_GOTPC32_TLSDESC target")
+            val at = obj.sections[si].sh_addr + r.r_offset - 3
+            if at < 0 or at + 9 > raw.len() or raw[at] != 0x48 or raw[at + 1] != 0x8d or
+                    raw[at + 2] != 0x05 or raw[at + 7] != 0xff or raw[at + 8] != 0x10:
+                return Err("UnsupportedFeature: non-canonical x86_64 TLSDESC instruction sequence")
+            raw[at + 1] = 0x8b
+            raw[at + 7] = 0x66
+            raw[at + 8] = 0x90
+            val info = (elf_reloc_sym(r) << 32) | R_X86_64_GOTTPOFF_TLS
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset, r_info: info,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_X86_64_TLSDESC_CALL_TLS:
+            if not _tls_is_pair(obj, i):
+                return Err("UnsupportedFeature: unpaired R_X86_64_TLSDESC_CALL")
+        else if not _tls_is_pair(obj, i):
+            relocs = relocs.push(r)
+        i = i + 1
+    Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
+        relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw))
+
+fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
+    var raw = obj.raw
+    var relocs: [ElfRelocation] = []
+    var i: i64 = 0
+    while i < obj.relocations.len():
+        val r = obj.relocations[i]
+        val rtype = elf_reloc_type(r)
+        if rtype == R_AARCH64_TLSDESC_ADR_PAGE21_TLS:
+            if not _a64_tlsdesc_sequence(obj, r):
+                return Err("UnsupportedFeature: R_AARCH64_TLSDESC_ADR_PAGE21 is not followed by canonical LD64, ADD, and TLSDESC_CALL relocations")
+            val sym = elf_reloc_sym(r)
+            if sym <= 0 or sym >= obj.symbols.len() or obj.symbols[sym].st_shndx == 0:
+                return Err("UnsupportedFeature: AArch64 TLSDESC relaxation requires a defined TLS symbol")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len():
+                return Err("malformed R_AARCH64_TLSDESC target section")
+            val at = obj.sections[si].sh_addr + r.r_offset
+            if at < 0 or at + 16 > raw.len():
+                return Err("truncated R_AARCH64_TLSDESC instruction sequence")
+            if _a64_read_u32(raw, at) & 0x9f00001f != 0x90000000 or
+                    _a64_read_u32(raw, at + 4) & 0xffc003ff != 0xf9400001 or
+                    _a64_read_u32(raw, at + 8) & 0xffc003ff != 0x91000000 or
+                    _a64_read_u32(raw, at + 12) != 0xd63f0020:
+                return Err("UnsupportedFeature: non-canonical AArch64 TLSDESC instruction sequence")
+            # The descriptor call returns a TP offset; the caller adds
+            # tpidr_el0 itself, so materialize only the offset (as lld does).
+            raw = _a64_write_u32(raw, at, 0xd2a00000) # movz x0, #:tprel_g1:
+            raw = _a64_write_u32(raw, at + 4, 0xf2800000) # movk x0, #:tprel_g0_nc:
+            raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
+            raw = _a64_write_u32(raw, at + 12, 0xd503201f) # nop
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset,
+                r_info: (sym << 32) | R_AARCH64_TLSLE_MOVW_TPREL_G1_TLS,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 4,
+                r_info: (sym << 32) | R_AARCH64_TLSLE_MOVW_TPREL_G0_NC_TLS,
+                r_addend: r.r_addend, section_idx: r.section_idx,
+                target_section_idx: r.target_section_idx))
+        else if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS or
+                rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS or
+                rtype == R_AARCH64_TLSGD_MOVW_G1_TLS or
+                rtype == R_AARCH64_TLSLD_MOVW_G1_TLS:
+            val is_gd = rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS or
+                rtype == R_AARCH64_TLSGD_MOVW_G1_TLS
+            val is_movw = rtype == R_AARCH64_TLSGD_MOVW_G1_TLS or
+                rtype == R_AARCH64_TLSLD_MOVW_G1_TLS
+            val secondary_type = if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS:
+                R_AARCH64_TLSGD_ADD_LO12_NC_TLS
+            elif rtype == R_AARCH64_TLSLD_ADR_PAGE21_TLS:
+                R_AARCH64_TLSLD_ADD_LO12_NC_TLS
+            elif rtype == R_AARCH64_TLSGD_MOVW_G1_TLS:
+                R_AARCH64_TLSGD_MOVW_G0_NC_TLS
+            else:
+                R_AARCH64_TLSLD_MOVW_G0_NC_TLS
+            val model = if is_gd: "TLSGD" else: "TLSLD"
+            val form = if is_movw: "MOVW_G1" else: "ADR_PAGE21"
+            if not _a64_tls_pair(obj, r, secondary_type):
+                return Err("UnsupportedFeature: R_AARCH64_{model}_{form} is not followed by its canonical low group and __tls_get_addr call relocations")
+            val target_sym = elf_reloc_sym(r)
+            if is_gd and
+                    (target_sym <= 0 or target_sym >= obj.symbols.len() or
+                    obj.symbols[target_sym].st_shndx == 0):
+                return Err("UnsupportedFeature: AArch64 TLSGD relaxation requires a defined TLS symbol")
+            val si = r.target_section_idx
+            if si <= 0 or si >= obj.sections.len():
+                return Err("malformed R_AARCH64_{model} target section")
+            val at = obj.sections[si].sh_addr + r.r_offset
+            if at < 0 or at + 12 > raw.len():
+                return Err("truncated R_AARCH64_{model} instruction sequence")
+            val first = _a64_read_u32(raw, at)
+            val second = _a64_read_u32(raw, at + 4)
+            val call = _a64_read_u32(raw, at + 8)
+            val canonical_address = if is_movw:
+                first & 0xbfe0001f == 0x92a00000 and
+                    second & 0xffe0001f == 0xf2800000
+            else:
+                first & 0x9f00001f == 0x90000000 and
+                    second & 0xffc003ff == 0x91000000
+            if not canonical_address or call & 0xfc000000 != 0x94000000:
+                return Err("UnsupportedFeature: non-canonical AArch64 {model} instruction sequence")
+            raw = _a64_write_u32(raw, at, 0xd53bd040) # mrs x0, tpidr_el0
+            if is_gd:
+                raw = _a64_write_u32(raw, at + 4, 0x91400000) # add x0, x0, #0, lsl #12
+                raw = _a64_write_u32(raw, at + 8, 0x91000000) # add x0, x0, #0
+                val sym = target_sym
+                relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 4,
+                    r_info: (sym << 32) | R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS,
+                    r_addend: r.r_addend, section_idx: r.section_idx,
+                    target_section_idx: r.target_section_idx))
+                relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 8,
+                    r_info: (sym << 32) | R_AARCH64_TLSLE_ADD_TPREL_LO12_NC_TLS,
+                    r_addend: r.r_addend, section_idx: r.section_idx,
+                    target_section_idx: r.target_section_idx))
+            else:
+                raw = _a64_write_u32(raw, at + 4, 0x91004000) # add x0, x0, #16 (variant-I TCB)
+                raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
+        else if not _a64_is_tls_pair_member(obj, i) and not _a64_is_tlsdesc_member(obj, i):
+            relocs = relocs.push(r)
+        i = i + 1
+    Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
+        relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw))
+
+fn _tls_align_up(value: i64, alignment: i64) -> i64:
+    if alignment <= 1:
+        return value
+    ((value + alignment - 1) / alignment) * alignment
+
+fn elf_tls_tpoff(a64: bool, address: i64, tls_start: i64, tls_memsz: i64,
+        tls_align: i64) -> i64:
+    """Thread-pointer offset of a static-TLS address for an aligned PT_TLS.
+
+    AArch64 (variant I): the block starts align_up(16, p_align) past TP.
+    x86-64 (variant II): the block ends at TP and starts
+    align_up(p_memsz, p_align) below it."""
+    if a64:
+        return address - tls_start + _tls_align_up(16, tls_align)
+    address - tls_start - _tls_align_up(tls_memsz, tls_align)
+
+fn elf_relax_tls(objects: [ElfObject], target: RelocArch) -> Result<[ElfObject], text>:
+    match target:
+        case X86_64:
+            var out: [ElfObject] = []
+            for obj in objects:
+                out = out.push(_tls_relax_object(obj)?)
+            Ok(out)
+        case AArch64:
+            var out: [ElfObject] = []
+            for obj in objects:
+                out = out.push(_tls_relax_object_a64(obj)?)
+            Ok(out)
+        case _: Ok(objects)
+
+export elf_relax_tls, elf_tls_tpoff

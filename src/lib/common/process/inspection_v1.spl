@@ -1,0 +1,73 @@
+"""Versioned input facts for one pinned process inspection lease.
+
+The native owner issues this sideband under the same opaque ticket as its V4
+process observation. A terminal V4 packet alone does not prove stdin delivery.
+"""
+
+pub const PROCESS_INSPECTION_V1_VERSION: i64 = 1
+pub const PROCESS_INSPECTION_V1_WORDS: i64 = 75
+pub const PROCESS_INSPECTION_V1_MAX_INPUT_BYTES: i64 = 16777216
+
+pub struct ProcessInspectionInputReceiptV1:
+    request_id_high: i64
+    request_id_low: i64
+    ticket_high: i64
+    ticket_low: i64
+    input_bytes_accepted: i64
+    input_bytes_written: i64
+    stdin_closed: bool
+    terminal: bool
+    reaped: bool
+    runtime_error: i64
+    input_digest: [u8]
+    request_digest: [u8]
+
+pub fn decode_process_inspection_input_v1(
+    words: [i64]
+) -> Result<ProcessInspectionInputReceiptV1, text>:
+    if words.len() != PROCESS_INSPECTION_V1_WORDS or
+            words[0] != PROCESS_INSPECTION_V1_VERSION:
+        return Err("process inspection V1 input receipt schema is invalid")
+    if words[1] <= 0 or words[2] <= 0 or words[3] <= 0 or words[4] <= 0 or
+            words[5] < 0 or words[5] > PROCESS_INSPECTION_V1_MAX_INPUT_BYTES or
+            words[6] < 0 or words[6] > words[5] or words[10] < 0:
+        return Err("process inspection V1 input receipt authority is invalid")
+    if (words[7] != 0 and words[7] != 1) or
+            (words[8] != 0 and words[8] != 1) or
+            (words[9] != 0 and words[9] != 1) or
+            (words[8] == 1 and (words[7] != 1 or words[9] != 1)):
+        return Err("process inspection V1 input receipt state is invalid")
+    var input_digest: [u8] = []
+    var request_digest: [u8] = []
+    var index = 0
+    while index < 32:
+        if words[11 + index] < 0 or words[11 + index] > 255 or
+                words[43 + index] < 0 or words[43 + index] > 255:
+            return Err("process inspection V1 digest byte is invalid")
+        input_digest.push(words[11 + index] as u8)
+        request_digest.push(words[43 + index] as u8)
+        index = index + 1
+    Ok(ProcessInspectionInputReceiptV1(
+        request_id_high: words[1], request_id_low: words[2],
+        ticket_high: words[3], ticket_low: words[4],
+        input_bytes_accepted: words[5], input_bytes_written: words[6],
+        stdin_closed: words[7] == 1, terminal: words[8] == 1,
+        reaped: words[9] == 1, runtime_error: words[10],
+        input_digest: input_digest, request_digest: request_digest))
+
+pub fn process_inspection_input_complete_v1(
+    receipt: ProcessInspectionInputReceiptV1,
+    expected_length: i64,
+    expected_digest: [u8]
+) -> bool:
+    expected_length >= 0 and expected_length <= PROCESS_INSPECTION_V1_MAX_INPUT_BYTES and
+        expected_digest.len() == 32 and
+        receipt.input_bytes_accepted == expected_length and
+        receipt.input_bytes_written == expected_length and
+        receipt.stdin_closed and receipt.terminal and receipt.reaped and
+        receipt.runtime_error == 0 and receipt.input_digest == expected_digest
+
+export PROCESS_INSPECTION_V1_VERSION, PROCESS_INSPECTION_V1_WORDS
+export PROCESS_INSPECTION_V1_MAX_INPUT_BYTES
+export ProcessInspectionInputReceiptV1, decode_process_inspection_input_v1
+export process_inspection_input_complete_v1

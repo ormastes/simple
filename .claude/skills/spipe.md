@@ -387,8 +387,12 @@ push is rejected; `gh pr merge --admin` is refused for admins too. Two required
 checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
 Admission`**.
 
-**Push ONCE. Every force-push destroys an in-flight run.** `repo-hygiene.yml`
-(the idiom gate) declares `concurrency: group: ${{ github.workflow }}-${{
+**Push ONCE. Every force-push destroys an in-flight run.** Since 2026-09-27 the
+required idiom context is the one-job `required-gates.yml` ("Required Gates",
+job `fast-gates`); `repo-hygiene.yml` no longer runs on PRs, and every other
+non-required PR workflow runs only when the PR is labelled `ci:full`
+(`doc/07_guide/infra/vcs/pr_landing_timing_race.md`). `required-gates.yml`
+declares `concurrency: group: ${{ github.workflow }}-${{
 github.ref }}` with `cancel-in-progress: true`, and the repo has **0
 self-hosted runners** with **53 runs queued/in-progress** measured on
 2026-09-06 across the parallel agent sessions. So a re-push does not "retry" —
@@ -473,6 +477,37 @@ there — "fails only on mine" is usually "only ran on mine".
 You cannot approve your own PR (`Review Can not approve your own pull
 request`), and `required_approving_review_count` is 0, so approval never
 unblocks anything.
+
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
 
 ## Resolving a PR queue (measured 2026-09-07, ~35 PRs landed)
 

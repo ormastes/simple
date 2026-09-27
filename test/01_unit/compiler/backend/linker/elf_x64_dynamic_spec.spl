@@ -4,11 +4,9 @@
 # *GOTPLT+16(%rip); nopl`, PLTn `jmpq *slot(%rip); pushq $n; jmp PLT0`),
 # .got.plt ([0] = _DYNAMIC, slots start at PLTn+6), R_X86_64_JUMP_SLOT per
 # PLT entry, R_X86_64_GLOB_DAT for GOT-referenced imports and PT_INTERP
-# /lib64/ld-linux-x86-64.so.2. The build host has no x86_64 glibc/ld.so, so
-# these outputs are validated STRUCTURALLY only (readelf -l -S -d -r and PLT
-# disassembly vs ld.lld on the same inputs, evidence in the lane report).
-# Until an execution proof exists the default elf_link keeps x86_64 dynamic
-# behind a named UnsupportedFeature; elf_link_structural opts in.
+# /lib64/ld-linux-x86-64.so.2. The checked-in oracle validates image structure
+# (readelf -l -S -d -r and PLT disassembly vs ld.lld); native execution remains
+# a separate platform-certification receipt.
 #
 # Inputs: test/fixtures/linker/elf/pic_start_x64.o (REX_GOTPCRELX msg at
 # _start+4, PLT32 add_val at _start+0x1f) against libadd_x64.so.1 (ld.lld
@@ -19,15 +17,28 @@
 # @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
 
 use compiler.backend.linker.elf.elf_static_link.{
-    elf_link, elf_link_structural, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+    elf_link, elf_link_structural, ElfLinkRequest,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.shared_object.{
+    elf_parse_shared, elf_shared_effective_soname, elf_shared_symbol_visible,
+    elf_shared_symbol_binding_linkable}
 use std.io_runtime.{file_read_bytes}
 use std.string_core.{char_from_code}
 
 val FIX: text = "test/fixtures/linker/elf"
 val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
 val PT_INTERP: i64 = 3
+val PT_GNU_RELRO: i64 = 0x6474e552
+val PT_GNU_STACK: i64 = 0x6474e551
+val DT_RUNPATH: i64 = 29
+val DT_BIND_NOW: i64 = 24
+val DT_FLAGS: i64 = 30
+val DT_FLAGS_1: i64 = 0x6ffffffb
+val DT_HASH: i64 = 4
+val DT_GNU_HASH: i64 = 0x6ffffef5
+val DT_NEEDED: i64 = 1
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -94,8 +105,38 @@ fn dyn_tag(b: [i64], tag: i64) -> i64:
         o = o + 16
     -1
 
+fn dyn_tag_entry(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return o
+        o = o + 16
+    -1
+
+fn dyn_tag_count(b: [i64], tag: i64) -> i64:
+    var count: i64 = 0
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag: count = count + 1
+        o = o + 16
+    count
+
 fn dynsym_name(b: [i64], idx: i64) -> text:
     cstr(b, sec_off(b, ".dynstr") + rd32(b, sec_off(b, ".dynsym") + idx * 24))
+
+fn without_section_headers(bytes: [u8]) -> [u8]:
+    var out = bytes
+    var i: i64 = 40
+    while i < 48:
+        out[i] = 0u8
+        i = i + 1
+    out[60] = 0u8
+    out[61] = 0u8
+    out[62] = 0u8
+    out[63] = 0u8
+    out
 
 fn request(mode: i64) -> ElfLinkRequest:
     ElfLinkRequest(objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
@@ -110,13 +151,207 @@ fn structural(mode: i64) -> [i64]:
     r.unwrap()
 
 describe "elf_link - x86_64 dynamic gate":
-    it "is a named UnsupportedFeature by default (no execution proof on this host)":
+    it "does not bind hidden or internal DSO symbols":
+        expect(elf_shared_symbol_visible(0)).to_equal(true)
+        expect(elf_shared_symbol_visible(1)).to_equal(false)
+        expect(elf_shared_symbol_visible(2)).to_equal(false)
+        expect(elf_shared_symbol_visible(3)).to_equal(true)
+        var hidden = file_read_bytes("{FIX}/libadd_x64.so.1")
+        hidden[0x21d] = 2u8
+        val parsed = elf_parse_shared(hidden).unwrap()
+        expect(parsed.exports.has("add_val")).to_equal(false)
+        expect(parsed.exports.has("scratch")).to_equal(true)
+
+    it "admits GNU unique DSO definitions alongside global and weak bindings":
+        expect(elf_shared_symbol_binding_linkable(0)).to_equal(false)
+        expect(elf_shared_symbol_binding_linkable(1)).to_equal(true)
+        expect(elf_shared_symbol_binding_linkable(2)).to_equal(true)
+        expect(elf_shared_symbol_binding_linkable(10)).to_equal(true)
+        var unique = file_read_bytes("{FIX}/libadd_x64.so.1")
+        unique[0x21c] = 0xa2u8
+        expect(elf_parse_shared(unique).unwrap().exports.has("add_val")).to_equal(true)
+
+    it "rejects an out-of-range DSO string-table section link":
+        var malformed = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val dynsym = shdr_by_name(load_path("{FIX}/libadd_x64.so.1"), ".dynsym")
+        malformed[dynsym + 40] = 0xffu8
+        malformed[dynsym + 41] = 0xffu8
+        malformed[dynsym + 42] = 0xffu8
+        malformed[dynsym + 43] = 0x7fu8
+        val parsed = elf_parse_shared(malformed)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("section index")
+
+    it "rejects out-of-range dynamic symbol and SONAME string offsets":
+        val layout = load_path("{FIX}/libadd_x64.so.1")
+        var bad_symbol = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val symbol = sec_off(layout, ".dynsym") + 24
+        bad_symbol[symbol] = 0xffu8
+        bad_symbol[symbol + 1] = 0xffu8
+        bad_symbol[symbol + 2] = 0xffu8
+        bad_symbol[symbol + 3] = 0x7fu8
+        val symbol_result = elf_parse_shared(bad_symbol)
+        expect(symbol_result.is_err()).to_equal(true)
+        expect(symbol_result.unwrap_err()).to_contain("dynamic symbol name string offset")
+
+        var bad_soname = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val soname_value = dyn_tag_entry(layout, 14) + 8
+        bad_soname[soname_value] = 0xffu8
+        bad_soname[soname_value + 1] = 0xffu8
+        bad_soname[soname_value + 2] = 0xffu8
+        bad_soname[soname_value + 3] = 0x7fu8
+        val soname_result = elf_parse_shared(bad_soname)
+        expect(soname_result.is_err()).to_equal(true)
+        expect(soname_result.unwrap_err()).to_contain("DT_SONAME string offset")
+
+    it "reads SysV-hash and GNU-hash DSOs without section headers":
+        val layout = load_path("{FIX}/libadd_x64.so.1")
+        val sectionless = without_section_headers(file_read_bytes("{FIX}/libadd_x64.so.1"))
+        val sysv = elf_parse_shared(sectionless).unwrap()
+        expect(sysv.soname).to_equal("libadd_x64.so")
+        expect(sysv.exports.has("add_val")).to_equal(true)
+
+        var gnu_only = sectionless
+        val hash_tag = dyn_tag_entry(layout, DT_HASH)
+        gnu_only[hash_tag] = 21u8
+        val gnu = elf_parse_shared(gnu_only).unwrap()
+        expect(gnu.soname).to_equal("libadd_x64.so")
+        expect(gnu.exports.has("add_val")).to_equal(true)
+
+    it "deduplicates identical DSOs and rejects conflicting same-SONAME bytes":
+        val lib = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val duplicate = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [lib, lib], entry: "_start", target: RelocArch.X86_64,
+            mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP)).unwrap()
+        expect(dyn_tag_count(duplicate, DT_NEEDED)).to_equal(1)
+        var changed = file_read_bytes("{FIX}/libadd_x64.so.1")
+        changed[7] = changed[7] ^ 1u8
+        val conflict = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [lib, changed], entry: "_start", target: RelocArch.X86_64,
+            mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(conflict.is_err()).to_equal(true)
+        expect(conflict.unwrap_err()).to_contain("conflicting shared objects advertise SONAME")
+
+    it "uses the input identity only when a DSO has no embedded SONAME":
+        expect(elf_shared_effective_soname("libembedded.so", "/tmp/input.so").unwrap()).to_equal(
+            "libembedded.so")
+        expect(elf_shared_effective_soname("", "/tmp/input.so").unwrap()).to_equal(
+            "/tmp/input.so")
+        expect(elf_shared_effective_soname("", "").is_err()).to_equal(true)
+
+    it "omits unused shared libraries under typed as-needed policy":
+        val b = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1"),
+                file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, as_needed: true)).unwrap()
+        expect(dyn_tag_count(b, DT_NEEDED)).to_equal(1)
+        expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, DT_NEEDED))).to_equal(
+            "libadd_x64.so")
+
+    it "emits only the selected dynamic symbol hash table":
+        val gnu = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, hash_style: "gnu")).unwrap()
+        expect(shdr_by_name(gnu, ".gnu.hash") > 0).to_equal(true)
+        expect(shdr_by_name(gnu, ".hash")).to_equal(-1)
+        expect(dyn_tag(gnu, DT_GNU_HASH) > 0).to_equal(true)
+        expect(dyn_tag(gnu, DT_HASH)).to_equal(-1)
+        val sysv = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, hash_style: "sysv")).unwrap()
+        expect(shdr_by_name(sysv, ".gnu.hash")).to_equal(-1)
+        expect(shdr_by_name(sysv, ".hash") > 0).to_equal(true)
+        expect(dyn_tag(sysv, DT_GNU_HASH)).to_equal(-1)
+        expect(dyn_tag(sysv, DT_HASH) > 0).to_equal(true)
+        val both = structural(ELF_LINK_DYNAMIC_EXEC)
+        expect(shdr_by_name(both, ".gnu.hash") > 0).to_equal(true)
+        expect(shdr_by_name(both, ".hash") > 0).to_equal(true)
+
+    it "rejects dynamic hash policy on a static image":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "",
+            hash_style: "gnu")
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("dynamic hash policy")
+
+    it "rejects as-needed policy on a static image":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "",
+            as_needed: true)
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("as-needed policy")
+
+    it "emits eager-binding dynamic flags only when requested":
+        val eager = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, bind_now: true)).unwrap()
+        expect(dyn_tag(eager, DT_BIND_NOW)).to_equal(0)
+        expect(dyn_tag(eager, DT_FLAGS)).to_equal(8)
+        expect(dyn_tag(eager, DT_FLAGS_1)).to_equal(1)
+        expect(dyn_tag(structural(ELF_LINK_DYNAMIC_EXEC), DT_BIND_NOW)).to_equal(-1)
+
+    it "retains shared-object size and value metadata needed by copy relocations":
+        val lib = elf_parse_shared(file_read_bytes("{FIX}/libadd_x64.so.1")).unwrap()
+        expect(lib.exports["msg"]).to_equal(1)
+        expect(lib.export_sizes["msg"]).to_equal(4)
+        expect(lib.export_values["msg"] > 0).to_equal(true)
+
+    it "admits the production image path independently of host certification":
         val r = elf_link(request(ELF_LINK_DYNAMIC_EXEC))
-        expect(r.is_err()).to_equal(true)
-        expect(r.unwrap_err().contains("UnsupportedFeature")).to_equal(true)
-        expect(r.unwrap_err().contains("x86_64")).to_equal(true)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap()).to_equal(structural(ELF_LINK_DYNAMIC_EXEC))
+
+    it "emits one DT_RUNPATH string for typed internal-linker rpaths":
+        val req = ElfLinkRequest(objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP,
+            runpath: "$ORIGIN:/opt/simple/lib")
+        val b = elf_link(req).unwrap()
+        val runpath_offset = dyn_tag(b, DT_RUNPATH)
+        expect(runpath_offset > 0).to_equal(true)
+        expect(cstr(b, sec_off(b, ".dynstr") + runpath_offset)).to_equal(
+            "$ORIGIN:/opt/simple/lib")
+
+    it "rejects RUNPATH on a static image":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "",
+            runpath: "$ORIGIN")
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("RUNPATH given to a static link")
+
+    it "rejects an embedded NUL in a direct RUNPATH request":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP,
+            runpath: "$ORIGIN\0/hidden")
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("RUNPATH contains NUL")
 
 describe "elf_link_structural - x86_64 dynamic ET_EXEC":
+    it "emits a writable non-executable GNU stack policy":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        var stack: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = rd64(b, 32) + i * 56
+            if rd32(b, p) == PT_GNU_STACK: stack = p
+            i = i + 1
+        expect(stack > 0).to_equal(true)
+        expect(rd32(b, stack + 4)).to_equal(6)
+
     it "has PT_INTERP naming ld-linux-x86-64 and DT_NEEDED libadd_x64.so":
         val b = structural(ELF_LINK_DYNAMIC_EXEC)
         expect(b.len() > 64).to_equal(true)
@@ -130,6 +365,23 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
             i = i + 1
         expect(cstr(b, rd64(b, ip + 8))).to_equal(INTERP)
         expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, 1))).to_equal("libadd_x64.so")
+
+    it "seals dynamic metadata and the GOT with PT_GNU_RELRO":
+        val b = structural(ELF_LINK_DYNAMIC_EXEC)
+        var relro: i64 = -1
+        var i: i64 = 0
+        while i < rd16(b, 56):
+            val p = rd64(b, 32) + i * 56
+            if rd32(b, p) == PT_GNU_RELRO:
+                relro = p
+            i = i + 1
+        expect(relro > 0).to_equal(true)
+        val start = rd64(b, relro + 16)
+        val finish = start + rd64(b, relro + 40)
+        expect(sec_addr(b, ".dynamic") >= start).to_equal(true)
+        expect(sec_addr(b, ".dynamic") + sec_size(b, ".dynamic") <= finish).to_equal(true)
+        expect(sec_addr(b, ".got") >= start).to_equal(true)
+        expect(sec_addr(b, ".got") + sec_size(b, ".got") <= finish).to_equal(true)
 
     it "writes ld.lld's lazy PLT0 and PLT1 encodings":
         val b = structural(ELF_LINK_DYNAMIC_EXEC)
@@ -182,6 +434,115 @@ describe "elf_link_structural - x86_64 dynamic ET_EXEC":
         val e = rd64(b, 24)
         expect(b[at(b, ".text", e + 0x1e)]).to_equal(0xe8)
         expect(e + 0x23 + s32(rd32(b, at(b, ".text", e + 0x1f)))).to_equal(sec_addr(b, ".plt") + 16)
+
+    it "uses a canonical PLT entry when non-PIE data takes an imported function address":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/canonical_plt_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(rd64(b, sec_off(b, ".data"))).to_equal(sec_addr(b, ".plt") + 16)
+        expect(sec_size(b, ".rela.plt")).to_equal(24)
+        expect(dynsym_name(b, rd32(b, sec_off(b, ".rela.plt") + 12))).to_equal("add_val")
+
+    it "allocates an imported object in BSS and emits R_X86_64_COPY":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val copy_addr = sec_addr(b, ".bss")
+        val ro = sec_off(b, ".rela.dyn")
+        expect(rd64(b, ro)).to_equal(copy_addr)
+        expect(rd32(b, ro + 8)).to_equal(5)
+        val sym_idx = rd32(b, ro + 12)
+        expect(dynsym_name(b, sym_idx)).to_equal("msg")
+        val so = sec_off(b, ".dynsym") + sym_idx * 24
+        expect(rd16(b, so + 6) > 0).to_equal(true)
+        expect(rd64(b, so + 8)).to_equal(copy_addr)
+        expect(rd64(b, so + 16)).to_equal(4)
+
+    it "binds imported initial-exec TLS through a TPOFF64 GOT slot":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/tls_import_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val ro = sec_off(b, ".rela.dyn")
+        expect(sec_size(b, ".rela.dyn")).to_equal(24)
+        expect(rd64(b, ro)).to_equal(sec_addr(b, ".got"))
+        expect(rd32(b, ro + 8)).to_equal(18)
+        expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("imported_tls")
+        val text = sec_addr(b, ".text")
+        expect(text + 7 + s32(rd32(b, at(b, ".text", text + 3)))).to_equal(sec_addr(b, ".got"))
+
+    it "emits GNU version requirements for an explicitly versioned import":
+        val lib = elf_parse_shared(file_read_bytes("{FIX}/libtls_versioned_x64.so.1")).unwrap()
+        expect(lib.exports["imported_tls@TLS_1.0"]).to_equal(6)
+        expect(lib.export_versions["imported_tls"]).to_equal("TLS_1.0")
+        val sectionless_result = elf_parse_shared(without_section_headers(
+            file_read_bytes("{FIX}/libtls_versioned_x64.so.1")))
+        expect(sectionless_result.is_ok()).to_equal(true)
+        val sectionless = sectionless_result.unwrap()
+        expect(sectionless.exports["imported_tls@TLS_1.0"]).to_equal(6)
+        expect(sectionless.export_versions["imported_tls"]).to_equal("TLS_1.0")
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/tls_versioned_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libtls_versioned_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(dynsym_name(b, 1)).to_equal("imported_tls")
+        val vo = sec_off(b, ".gnu.version")
+        expect(rd16(b, vo)).to_equal(0)
+        expect(rd16(b, vo + 2)).to_equal(2)
+        val no = sec_off(b, ".gnu.version_r")
+        val ds = sec_off(b, ".dynstr")
+        expect(rd16(b, no)).to_equal(1)
+        expect(rd16(b, no + 2)).to_equal(1)
+        expect(cstr(b, ds + rd32(b, no + 4))).to_equal("libtls_versioned_x64.so.1")
+        expect(rd16(b, no + 22)).to_equal(2)
+        expect(cstr(b, ds + rd32(b, no + 24))).to_equal("TLS_1.0")
+        expect(dyn_tag(b, 0x6ffffff0)).to_equal(sec_addr(b, ".gnu.version"))
+        expect(dyn_tag(b, 0x6ffffffe)).to_equal(sec_addr(b, ".gnu.version_r"))
+        expect(dyn_tag(b, 0x6fffffff)).to_equal(1)
+
+    it "relaxes canonical global-dynamic TLS to initial-exec without a resolver PLT":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/tls_global_dynamic_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        expect(shdr_by_name(b, ".plt")).to_equal(-1)
+        val ro = sec_off(b, ".rela.dyn")
+        expect(rd32(b, ro + 8)).to_equal(18)
+        expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("imported_tls")
+        val text = sec_addr(b, ".text")
+        val to = sec_off(b, ".text")
+        expect(b[to + 1]).to_equal(0x64)
+        expect(b[to + 2]).to_equal(0x48)
+        expect(b[to + 3]).to_equal(0x8b)
+        expect(b[to + 9]).to_equal(0x48)
+        expect(b[to + 10]).to_equal(0x03)
+        expect(b[to + 11]).to_equal(0x05)
+        expect(text + 17 + s32(rd32(b, to + 13))).to_equal(sec_addr(b, ".got"))
+
+    it "relaxes TLSDESC address and call relocations to initial-exec":
+        val r = elf_link(ElfLinkRequest(objects: [load_path("{FIX}/tls_desc_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP))
+        expect(r.is_ok()).to_equal(true)
+        val b = r.unwrap()
+        val ro = sec_off(b, ".rela.dyn")
+        expect(rd32(b, ro + 8)).to_equal(18)
+        expect(dynsym_name(b, rd32(b, ro + 12))).to_equal("imported_tls")
+        val text = sec_addr(b, ".text")
+        val to = sec_off(b, ".text")
+        expect(b[to + 2]).to_equal(0x48)
+        expect(b[to + 3]).to_equal(0x8b)
+        expect(b[to + 4]).to_equal(0x05)
+        expect(b[to + 8]).to_equal(0x66)
+        expect(b[to + 9]).to_equal(0x90)
+        expect(text + 8 + s32(rd32(b, to + 4))).to_equal(sec_addr(b, ".got"))
 
 describe "elf_link_structural - x86_64 dynamic PIE":
     it "is ET_DYN with DT_FLAGS_1 PIE and the same PLT/GOT shape":

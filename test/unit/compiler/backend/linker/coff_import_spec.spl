@@ -1,0 +1,87 @@
+use std.spec.*
+use compiler.backend.linker.coff.coff_import.{
+    COFF_IMPORT_CODE, COFF_IMPORT_NAME, COFF_IMPORT_NAME_UNDECORATE,
+    coff_is_short_import, coff_parse_short_import}
+
+fn _ci16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+
+fn _ci32(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+        .push(((value >> 16) & 0xff) as u8).push(((value >> 24) & 0xff) as u8)
+
+fn _ci_text(bytes: [u8], value: text) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < value.len():
+        result = result.push(value.byte_at(i) as u8)
+        i = i + 1
+    result.push(0)
+
+fn _short_import(public_name: text, dll: text, name_type: i64,
+        machine: i64 = 0x8664) -> [u8]:
+    val payload_size = public_name.len() + dll.len() + 2
+    var bytes: [u8] = []
+    bytes = _ci16(bytes, 0)
+    bytes = _ci16(bytes, 0xffff)
+    bytes = _ci16(bytes, 0)
+    bytes = _ci16(bytes, machine)
+    bytes = _ci32(bytes, 0)
+    bytes = _ci32(bytes, payload_size)
+    bytes = _ci16(bytes, 7)
+    bytes = _ci16(bytes, COFF_IMPORT_CODE | (name_type << 2))
+    bytes = _ci_text(bytes, public_name)
+    _ci_text(bytes, dll)
+
+fn _bigobj_header() -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ci16(bytes, 0)
+    bytes = _ci16(bytes, 0xffff)
+    bytes = _ci16(bytes, 2)
+    bytes = _ci16(bytes, 0x8664)
+    bytes = _ci32(bytes, 0)
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    for byte in magic: bytes = bytes.push(byte as u8)
+    var i: i64 = 0
+    while i < 7:
+        bytes = _ci32(bytes, 0)
+        i = i + 1
+    bytes
+
+describe "COFF short import objects":
+    it "does not confuse a bigobj header with a short import":
+        val bytes = _bigobj_header()
+        expect(coff_is_short_import(bytes)).to_equal(false)
+        expect(coff_parse_short_import(bytes).is_err()).to_equal(true)
+
+    it "decodes a named AMD64 code import":
+        val bytes = _short_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_NAME)
+        expect(coff_is_short_import(bytes)).to_equal(true)
+        val parsed = coff_parse_short_import(bytes)
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().public_name).to_equal("ExitProcess")
+        expect(parsed.unwrap().import_name).to_equal("ExitProcess")
+        expect(parsed.unwrap().dll_name).to_equal("KERNEL32.dll")
+        expect(parsed.unwrap().iat_symbol()).to_equal("__imp_ExitProcess")
+        expect(parsed.unwrap().is_code()).to_equal(true)
+
+    it "decodes a named ARM64 code import without changing its machine":
+        val parsed = coff_parse_short_import(
+            _short_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_NAME, 0xaa64))
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().machine).to_equal(0xaa64)
+        expect(parsed.unwrap().public_name).to_equal("ExitProcess")
+
+    it "applies undecorated import-name semantics":
+        val parsed = coff_parse_short_import(
+            _short_import("_MessageBoxA@16", "USER32.dll", COFF_IMPORT_NAME_UNDECORATE))
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().import_name).to_equal("MessageBoxA")
+
+    it "rejects malformed payload bounds":
+        var bytes = _short_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_NAME)
+        bytes[12] = 0xff
+        bytes[13] = 0xff
+        expect(coff_parse_short_import(bytes).is_err()).to_equal(true)
