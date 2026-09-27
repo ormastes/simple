@@ -34,8 +34,9 @@ $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
-$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= 5859375
-    or die "rss-guard: cap must be between 1 and 5859375 KiB (6000000000 bytes)\n";
+# Default stays 6 GB; the ceiling admits the 7 GB macOS Stage 3 cap.
+$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= 6835937
+    or die "rss-guard: cap must be between 1 and 6835937 KiB (7000000000 bytes)\n";
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
 my $leader = 0;
