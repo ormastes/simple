@@ -163,6 +163,10 @@ with a symbol address or PC-relative displacement.
 hosted offset. The installed Windows lld wrote the expected comparison image
 and then crashed during teardown, so its emitted bytes are useful oracle
 evidence but not a successful lld execution receipt.
+`R_X86_64_GOTPCREL64` now allocates a GOT slot and applies the full-width
+`G + GOT + A - P` displacement in hosted and SimpleOS links. Clang's `.reloc`
+form pins the type-28 object encoding; Mold 2.42 accepts it and provides the
+comparison image, while the installed lld 23.1 rejects relocation 28.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE
