@@ -745,5 +745,9 @@ zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
 before publication. The PE writer validates the policy and emits its subsystem,
 stack, and heap fields for both AMD64 and ARM64; legacy callers retain the
 byte-identical console/1 MiB reserve/4 KiB commit defaults. Mirrored contracts
-check parser rejection and the exact optional-header bytes. Native Windows
-execution remains pending the host prerequisite recorded above.
+check parser rejection and the exact optional-header bytes. The internal route
+also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`, and `/MANIFEST:NO`
+because it is quiet, emits neither debug/PDB nor manifest directories, and is
+always a complete one-shot link. Their enabled counterparts and `/OPT:REF,ICF`
+remain named unsupported until those output contracts are implemented. Native
+Windows execution remains pending the host prerequisite recorded above.
