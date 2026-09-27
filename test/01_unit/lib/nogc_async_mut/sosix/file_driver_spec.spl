@@ -2,7 +2,7 @@
 
 use std.spec.*
 use std.env.platform.{get_temp_dir}
-use std.nogc_async_mut.io.{file_remove}
+use std.nogc_async_mut.io.{file_remove, file_read_text_at}
 use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
 use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_NATIVE}
 use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
@@ -149,12 +149,29 @@ describe "SOSIX reference file driver on the host filesystem":
         expect(driver.buffer_bytes(sink)).to_equal("windows path bytes")
 
     it "refuses a write whose buffer window starts past the buffer end without touching the file":
+        # @req REQ-SOSIX-FS-HOST-FILE
         step("Ask to write 4 bytes from offset 10 of a 5-byte buffer")
         val fs = setup_sosix_hosted_fs()
         val driver = SosixHostedFileDriver.create()
-        val file = driver.open_path(scratch_path("window"))
+        val path = scratch_path("window")
+        val file = driver.open_path(path)
         val source = driver.buffer_from("abcde")
         val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 10u64, 4u64, 0u64)
         expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
         expect(written.error.kind).to_equal(SOSIX_ERROR_NATIVE)
         expect(written.completion.transferred).to_equal(0u64)
+
+        step("Reject unsigned offsets and lengths that cannot fit the host I/O ABI")
+        val huge_offset = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0u64, 0x8000000000000000u64, 1u64, 0u64)
+        val huge_length = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0u64, 0u64, 0x8000000000000000u64, 0u64)
+        val huge_file_offset = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0x8000000000000000u64, 0u64, 1u64, 0u64)
+        expect(huge_offset.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_length.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_file_offset.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_offset.completion.transferred).to_equal(0u64)
+        expect(huge_length.completion.transferred).to_equal(0u64)
+        expect(huge_file_offset.completion.transferred).to_equal(0u64)
+        expect(file_read_text_at(path, 0, 1).is_err()).to_equal(true)
