@@ -106,7 +106,27 @@ case "$here_phys" in
         ;;
 esac
 
-# Wiring check runs FIRST and unconditionally, before any range is derived.
+# Capture Git's ref rows before invoking any other command or guard. A child
+# check inherits stdin and can consume it; capturing after the wiring check
+# can make a real push look like an empty one. The dispatcher also captures rows,
+# but this guard can be installed or invoked directly, so it must own a copy.
+_refs_tmp=$(mktemp 2>/dev/null) || {
+    echo "pre-push: cannot create a ref-row capture file — refusing to push blind" >&2
+    exit 2
+}
+trap 'rm -f "$_refs_tmp"' EXIT
+trap 'rm -f "$_refs_tmp"; exit 130' INT
+trap 'rm -f "$_refs_tmp"; exit 143' TERM
+if ! cat > "$_refs_tmp"; then
+    echo "pre-push: cannot capture the ref rows git fed this hook on stdin — refusing to push blind" >&2
+    exit 2
+fi
+if [ ! -s "$_refs_tmp" ]; then
+    echo "pre-push: stdin produced an EMPTY ref-rows file — refusing to push blind." >&2
+    exit 2
+fi
+
+# Wiring check runs before any range is derived.
 # It is cheap (no object walks) and it is the only check that can catch the
 # class of failure where this hook itself is half-installed. If we are running
 # at all, most of its checks already passed — but it also fences the guards
@@ -135,30 +155,8 @@ export MUST_CHECK_PUSH_REMOTE
 
 # 2026-09-24 (WP2, push_hook_plan.md A.5/D, owner decision O3=a): stdin carries
 # the ref rows git always feeds a pre-push hook, and check-push-must-pass.shs
-# reads them itself — stdin can only be consumed once, so we tee it to a temp
-# file first and feed that file to both the (unmodified) dispatcher and our own
-# post-pass reporting loop below.
-_refs_tmp=$(mktemp 2>/dev/null) || _refs_tmp="${TMPDIR:-/tmp}/simple-pre-push-refs.$$"
-# EXIT-only trap does cleanup unconditionally. INT/TERM get their OWN traps
-# that clean up AND exit non-zero explicitly — a signal delivered mid-hook
-# must never be allowed to fall through to whatever exit status the shell
-# would otherwise have produced (which could be 0).
-trap 'rm -f "$_refs_tmp"' EXIT
-trap 'rm -f "$_refs_tmp"; exit 130' INT
-trap 'rm -f "$_refs_tmp"; exit 143' TERM
-
-if ! cat > "$_refs_tmp"; then
-    echo "pre-push: cannot capture the ref rows git fed this hook on stdin — refusing to push blind" >&2
-    exit 2
-fi
-if [ ! -s "$_refs_tmp" ]; then
-    echo "pre-push: stdin produced an EMPTY ref-rows file — refusing to push blind." >&2
-    echo "  git always feeds a real pre-push invocation at least one ref row; an" >&2
-    echo "  empty capture here means stdin was truncated or redirected away, and" >&2
-    echo "  letting the dispatcher run on 0 rows would silently pass an unchecked push." >&2
-    exit 2
-fi
-
+# reads them itself — stdin can only be consumed once, so the early capture
+# above feeds both the driver and the post-pass reporting loop.
 sh "$repo_root/scripts/check/check-push-must-pass.shs" --from-pre-push-hook < "$_refs_tmp"
 _must_pass_rc=$?
 if [ "$_must_pass_rc" -ne 0 ]; then
