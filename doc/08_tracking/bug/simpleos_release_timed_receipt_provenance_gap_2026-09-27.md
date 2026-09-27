@@ -1,6 +1,6 @@
 # SimpleOS release timed-receipt provenance gap
 
-**Status:** open; structural duplicate-receipt guard proposed in draft source change. **Scope:** `REQ-018..019` / `UP-AC-006` immutable cold-boot release qualification. **Owner:** SimpleOS cold-boot verifier and evidence producers; final review by the release verification owner.
+**Status:** open; structural duplicate-receipt guard landed with PR #1708 (validator rejects reused timed receipt IDs/digests across stages; unit negatives in place). Provenance authentication and the live evidence below remain required. **Scope:** `REQ-018..019` / `UP-AC-006` immutable cold-boot release qualification. **Owner:** SimpleOS cold-boot verifier and evidence producers; final review by the release verification owner.
 
 `simpleos_release_evidence_validate_v1` checks the shape, success flag, execution binding and chronology of caller-supplied `SimpleOsReleaseTimedReceiptV1` values. It cannot prove that a receipt ID/digest was produced by the named boot, SOSIX, guest-toolchain or persistence owner, or that its digest commits to the supplied time, duration and result fields. The production cold-boot producer/consumer is still absent in `doc/03_plan/sys_test/simple_platform_unification.md`; the unit fixture synthesizes all receipts.
 
