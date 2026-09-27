@@ -167,6 +167,10 @@ evidence but not a successful lld execution receipt.
 `G + GOT + A - P` displacement in hosted and SimpleOS links. Clang's `.reloc`
 form pins the type-28 object encoding; Mold 2.42 accepts it and provides the
 comparison image, while the installed lld 23.1 rejects relocation 28.
+`R_X86_64_GOTPC64` now applies full-width `GOT + A - P` directly against the
+linker-defined `_GLOBAL_OFFSET_TABLE_` without allocating a per-symbol slot.
+Hosted ELF binds that symbol to `.got.plt`; SimpleOS binds it to its minimal
+`.got`. A type-29 Clang `.reloc` fixture matches Mold 2.42's emitted value.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE
