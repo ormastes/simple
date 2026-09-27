@@ -9,10 +9,12 @@ the written byte count without advancing the mount's `content_generation`.
 binding can therefore still appear current after its bytes change through the
 positioned route, whereas `write` and `pwrite` advance the generation.
 
-The fix preflights generation capacity before a nonempty positioned write and
-advances the generation after a successful nonzero write. A focused regression
-checks that a wrong-driver rejection leaves the binding current and a successful
-NVFS positioned write makes it stale.
+The fix rejects a wrong-driver request before dispatch, preflights generation
+capacity, and conservatively advances the generation after any nonempty request
+that reaches a supported driver. FAT32 can return an error after writing bytes
+if cursor restoration fails; NVFS POSIX can fail after an inner write while
+mirroring to NVMe. A focused regression checks that a wrong-driver rejection
+leaves the binding current and a successful NVFS positioned write makes it stale.
 
 The local pure-Simple binary at
 `bin/release/aarch64-apple-darwin-macho/simple` exited 139 during discovery of
