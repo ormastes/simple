@@ -9418,3 +9418,62 @@ fn respell_strips_verbatim_prefix_from_every_link_argument() {
         "explicit environment must survive the rebuild"
     );
 }
+
+#[test]
+fn platform_c_symbols_are_never_aliased_to_simple_functions() {
+    // Replays the 2026-09-27 Stage 2 link: winsock's `select` must NOT resolve
+    // to lib__nogc_async_mut__async__combinators__select. Aliasing it defined a
+    // global `select` against ws2_32's, crashed ld.lld 23.1.0, and would have
+    // sent every socket select() into an async combinator had it linked.
+    let mut defined = std::collections::HashSet::new();
+    defined.insert("lib__nogc_async_mut__async__combinators__select".to_string());
+    defined.insert("lib__common__text__trim".to_string());
+
+    assert_eq!(
+        super::stubs::resolve_defined_suffix_alias("select", &defined),
+        None,
+        "a platform C symbol must be left for the platform's import library"
+    );
+
+    // The legitimate case must still work: a bare Simple symbol with no
+    // platform meaning still resolves by suffix.
+    assert_eq!(
+        super::stubs::resolve_defined_suffix_alias("trim", &defined),
+        Some("lib__common__text__trim".to_string()),
+        "non-platform bare symbols must still resolve"
+    );
+}
+
+#[test]
+fn strict_compat_aliases_reject_ambiguous_bare_names() {
+    let defined = std::collections::HashSet::from([
+        "lib__network__getaddrinfo".to_string(),
+        "lib__io__printf".to_string(),
+        "lib__async__select".to_string(),
+        "lib__common__text__trim".to_string(),
+        "lib__common__text__qualified".to_string(),
+    ]);
+
+    assert_eq!(
+        super::stubs::resolve_strict_compat_alias("getaddrinfo", &defined),
+        None,
+        "an unlisted C import must not become a Simple trampoline"
+    );
+    for c_name in ["select", "_select", "printf", "_printf"] {
+        assert_eq!(
+            super::stubs::resolve_strict_compat_alias(c_name, &defined),
+            None,
+            "C import {c_name} must not become a Simple trampoline"
+        );
+    }
+    assert_eq!(
+        super::stubs::resolve_strict_compat_alias("trim", &defined),
+        None,
+        "bare names have no source provenance even when a Simple match exists"
+    );
+    assert_eq!(
+        super::stubs::resolve_strict_compat_alias("text__qualified", &defined),
+        Some("lib__common__text__qualified".to_string()),
+        "qualified Simple aliases still resolve"
+    );
+}

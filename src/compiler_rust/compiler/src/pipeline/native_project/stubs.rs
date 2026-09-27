@@ -369,8 +369,48 @@ fn check_fabricated_stub_ratchet(project_root: &Path, output: &Path, fabricated:
     Ok(())
 }
 
-fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+/// Platform C symbols that must never be satisfied by a same-named Simple
+/// function.
+///
+/// `resolve_defined_suffix_alias`'s last fallback matches a BARE symbol (one
+/// with no `__`, i.e. a plain C identifier) against any defined Simple symbol
+/// ending in `__<name>`. That is right for an undecorated Simple symbol and
+/// catastrophic for a libc/winsock one, because the names collide by
+/// coincidence and the suffix match cannot tell them apart.
+///
+/// Measured 2026-09-27 on the Windows Stage 2 link: an undefined reference to
+/// winsock's `select` resolved to
+/// `lib__nogc_async_mut__async__combinators__select`, and the generated alias
+///
+/// ```asm
+/// .globl select
+/// select:
+///   jmp lib__nogc_async_mut__async__combinators__select
+/// ```
+///
+/// crashed ld.lld 23.1.0 in `checkAndSetWeakAlias` against ws2_32's own
+/// `select`. The crash was the lucky outcome: had it linked, every socket
+/// `select()` call would have jumped into an async combinator.
+///
+/// These names must come from the platform's import library. Returning `None`
+/// here leaves the reference unresolved for the real provider to satisfy,
+/// which is the correct outcome, not a regression.
+const PLATFORM_C_SYMBOLS: &[&str] = &[
+    // winsock / POSIX sockets -- the family that produced the measured bug
+    "select", "accept", "bind", "connect", "listen", "send", "recv", "sendto",
+    "recvfrom", "shutdown", "socket", "getsockopt", "setsockopt", "poll",
+    // libc names a Simple module could plausibly also define
+    "read", "write", "open", "close", "seek", "flush", "abort", "exit",
+    "malloc", "free", "realloc", "calloc", "signal", "raise", "time", "clock",
+    "remove", "rename", "system", "getenv", "sleep", "wait", "kill", "pipe",
+    "fork", "exec", "stat", "link", "unlink", "chmod", "chown", "access",
+];
+
+pub(crate) fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
     if is_runtime_owned_symbol(sym) {
+        return None;
+    }
+    if PLATFORM_C_SYMBOLS.contains(&sym) {
         return None;
     }
 
@@ -403,6 +443,16 @@ fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<S
         tail.strip_prefix('_')
             .and_then(|decorated| unique_suffix(&format!("__{}", decorated)))
     })
+}
+
+/// A bare undefined name has no provenance: it may be a C import even when a
+/// Simple function with the same tail exists. Strict linking must fail closed
+/// instead of manufacturing an alias for that ambiguous name.
+pub(crate) fn resolve_strict_compat_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+    if !sym.contains("__") {
+        return None;
+    }
+    resolve_defined_suffix_alias(sym, defined)
 }
 
 /// The bare Simple function name of a mangled pure-Simple module symbol.
@@ -1168,7 +1218,11 @@ the old fabricating behaviour.",
     // present; those aliases resolve real code rather than hiding a missing
     // implementation. Leave every genuinely unresolved symbol to the linker.
     if strict_no_stub_fallback {
-        needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        if effective_target().os == TargetOS::Windows {
+            needs_stub.retain(|sym| resolve_strict_compat_alias(sym, &defined).is_some());
+        } else {
+            needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        }
     }
 
     if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {
