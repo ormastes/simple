@@ -1,7 +1,7 @@
 # Bug: `Some(_)` patterns and `.unwrap_or` silently accepted on NON-Option values
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** open — owner ruling 2026-09-27: staged migration (error for new code first, then convert existing sites in batches, then hard error). Plan: `doc/03_plan/compiler/type_system/option_pattern_non_option_scrutinee_migration_2026-09-27.md`; todo 339. The class spec carries `@tag:in-development` until stage 3.
 - **Severity:** high (silent wrong answers; type error degraded into bad data; engines disagree)
 - **Found by:** lane OPTNIL, reproduced independently by the coordinator
 - **Reconstructed:** the lane's original doc was clobbered off disk by a parallel
