@@ -2,10 +2,11 @@
 # returns inert data: only an admitted tool/process owner can issue authority.
 # Callers cannot supply already-decoded projections to this entrypoint.
 use std.common.crypto.sha256.sha256_u8_hex
+use std.common.json.parser.json_parse
 use compiler.driver.parser_external_inspection_contract_v1.ParserInspectionToolTerminalV1
-use compiler.driver.parser_llvm_readobj_codec_v1.parser_llvm_readobj_decode_v1
-use compiler.driver.parser_llvm_readobj_relocation_codec_v1.parser_llvm_readobj_relocations_decode_v1
-use compiler.driver.parser_llvm_readobj_group_codec_v1.parser_llvm_readobj_groups_decode_v1
+use compiler.driver.parser_llvm_readobj_codec_v1.parser_llvm_readobj_decode_parsed_v1
+use compiler.driver.parser_llvm_readobj_relocation_codec_v1.parser_llvm_readobj_relocations_decode_parsed_v1
+use compiler.driver.parser_llvm_readobj_group_codec_v1.parser_llvm_readobj_groups_decode_parsed_v1
 use compiler.driver.parser_llvm_objdump_codec_v1.parser_llvm_objdump_decode_v1
 use compiler.driver.parser_llvm_inspection_projection_join_v1.*
 use compiler.driver.parser_external_inspection_features_v2.*
@@ -58,7 +59,11 @@ pub fn parser_external_inspection_captures_v1(
         objdump_terminal.input_byte_count != artifact_bytes.len()):
         return Err(ParserExternalInspectionCapturesErrorV1.InputMismatch)
 
-    val readobj_result = parser_llvm_readobj_decode_v1(readobj_stdout, "<stdin>")
+    # The three projections share one bounded readobj parse tree.
+    val readobj_json = json_parse(readobj_stdout)
+    if readobj_json == nil: return Err(ParserExternalInspectionCapturesErrorV1.ReadobjDecode)
+    val parsed = readobj_json.unwrap()
+    val readobj_result = parser_llvm_readobj_decode_parsed_v1(parsed, "<stdin>")
     if readobj_result.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.ReadobjDecode)
     val readobj = readobj_result.unwrap()
     # The two decoders agreeing with each other is insufficient: each reported
@@ -79,9 +84,9 @@ pub fn parser_external_inspection_captures_v1(
             if sha256_u8_hex(section_bytes) != section.section_data_digest:
                 return Err(ParserExternalInspectionCapturesErrorV1.SectionInputMismatch)
 
-    val relocations = parser_llvm_readobj_relocations_decode_v1(readobj_stdout, "<stdin>")
+    val relocations = parser_llvm_readobj_relocations_decode_parsed_v1(parsed, "<stdin>")
     if relocations.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.RelocationDecode)
-    val groups = parser_llvm_readobj_groups_decode_v1(readobj_stdout, "<stdin>")
+    val groups = parser_llvm_readobj_groups_decode_parsed_v1(parsed, "<stdin>")
     if groups.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.GroupDecode)
     val objdump = parser_llvm_objdump_decode_v1(objdump_stdout, readobj.sections)
     if objdump.is_err(): return Err(ParserExternalInspectionCapturesErrorV1.ObjdumpDecode)
