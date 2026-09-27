@@ -178,8 +178,10 @@ matches Mold 2.42's emitted `value - .got.plt` result.
 `R_X86_64_PLTOFF64` now applies full-width `L + A - GOT`: local functions use
 their definition, imported functions receive a PLT entry, hosted ELF uses its
 `.got.plt` base, and SimpleOS uses its minimal `.got`. A type-31 Clang `.reloc`
-fixture matches Mold 2.42's emitted value. `R_X86_64_GOTPLT64` remains outside
-the compatibility surface because Mold 2.42 rejects relocation type 30.
+fixture matches Mold 2.42's emitted value. `R_X86_64_GOTPLT64` now follows its
+ABI `G + A` formula with an ordinary GOT slot and requests a PLT entry for
+imported functions; hosted Linux and SimpleOS share the full-width relocation
+path, while non-function imports fail during relocation scanning.
 LLVM 23's `R_X86_64_CODE_4_GOTPCRELX` now follows the non-relaxed signed
 32-bit GOT-slot displacement path. A type-43 Clang `.reloc` fixture matches
 Mold 2.42 without pretending the ordinary two-byte-prefix relaxation rewrite
