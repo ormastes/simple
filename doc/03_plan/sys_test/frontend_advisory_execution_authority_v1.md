@@ -33,6 +33,8 @@ only when its real owner-backed setup exists. Keep the frozen helper names
 | Independent request | REQ-003/006/014 | Change returned source digest/length, lexical state or transformed source while preserving a self-consistent receipt: consumption rejects |
 | Sealed join | REQ-003/004/012 | Wrong package/provider/artifact/interface/ABI/environment generation or revoked activation fails before native invocation |
 | Token lifecycle | REQ-006/012/014 | Wrong owner, forged coordinates, duplicate consumption, retired startup session and reused record slot reject; no public receipt constructor authorizes dispatch |
+| Nonce issuance | NFR-001/007 | Checked `random_hex(16)` yields one nonce per operation; injected `nil`, malformed/all-zero raw entropy, and retained-record collision fail without token/session creation; cleanup retry preserves the nonce |
+| Source snapshot identity | REQ-003/008/012 | Owner-minted nonzero `u64` binds full transformed-source digest/length; counter zero/exhaustion/collision reject before session creation; append/reset never reuses an identity, including equal-byte snapshots |
 | Resource failures | REQ-005/012 | Inject preparation, native-call, oracle, operation-close, session-close and build-use-release failures independently; retain pending resources, retry exact cleanup, never issue Ready early |
 | Policy distinction | REQ-005/008 | Prefer discards partial masks before truthful fallback; Require returns error before cache/parser admission; tiny input follows the documented no-complete-block rule |
 | Session isolation | REQ-008/012 | Reset/append/new-file transformed snapshots obtain distinct source sessions; no source/lexical state leaks after failure or reuse |

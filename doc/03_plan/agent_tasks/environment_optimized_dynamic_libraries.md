@@ -442,7 +442,7 @@ coordinate is not executable authority.
 
 | Ordered handoff | Implementation scope | Completion evidence |
 |---|---|---|
-| Authority review | Root/Astra; agree private issuer boundary, runtime nonce authority, table/epoch/request correlation and one-shot transitions | Reject guessed/replayed tokens; prove no public constructor/callback bypass; unavailable authority stays closed |
+| Authority review | Root/Astra; agree private issuer boundary, checked `random_hex(16)` per-operation nonce, owner-minted source snapshot IDs, table/epoch/request correlation and one-shot transitions | Reject nil/colliding entropy, source-ID wrap/collision and guessed/replayed tokens; prove no public constructor/callback bypass; unavailable authority stays closed |
 | Loader owner | New `src/compiler/99.loader/frontend_advisory_execution_owner_v1.spl`; join existing sealed activation and lexical package APIs | Per-transformed-source session, real guarded operation, independent scalar oracle, terminal cleanup before usable token, retained cleanup retry |
 | Typed frontend bridge | Existing startup binding, frontend advisory port and shared frontend facade | Owner-backed consume at the post-transform/pre-cache seam; independently derived source identity; Prefer discard and Require error behavior |
 | Composition/cache integration | Existing CLI startup owner and driver context, coordinated with cache V2 owner | Actual candidate installer, pinned startup lifetime through cache decision, no arbitrary function registration, no token replay on cache hit |

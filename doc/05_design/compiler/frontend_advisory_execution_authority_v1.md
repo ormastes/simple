@@ -53,12 +53,22 @@ not recreate a live owner, issue a token, or install executable callbacks.
 Threat model includes untrusted constructed token values, guessed sequential
 coordinates, cross-owner/session substitution and replay of a copied valid
 token. Coordinates alone are insufficient: each live table row also requires
-an unguessable nonce minted by the admitted runtime capability owner and bound
-to that exact owner/epoch/request/startup session/generation. The private row,
-not a public checksum, is authoritative. If that native capability source is
-unavailable, issuance remains unavailable; do not substitute a counter or hash
-of public fields. Copying a legitimately held token shares its single permitted
-consumption. Recovery invalidates all old epochs; no token survives owner
+an unguessable nonce bound to that exact owner/epoch/request/startup session/
+generation. Use the existing checked OS CSPRNG facade
+`std.nogc_sync_mut.io.crypto_sffi.random_hex(16)`: 16 random bytes encoded as
+exactly 32 lowercase hex characters, with all-zero output rejected by the facade.
+Generate it once per new operation, not as an owner seed expanded into predictable
+operation values. Never call raw `rt_random_i64` or derive it from public fields.
+Reserve the operation slot first, obtain entropy outside the metadata lock, then
+revalidate the reservation and reject a duplicate nonce against all retained
+records before committing it under serialization. On `nil` or collision, fail
+closed and release the unused reservation without opening a package session or
+issuing a token; there is no automatic retry loop. Cleanup retries retain the
+same operation nonce. Monotonic operation IDs and invalidated owner epochs keep
+an old token stale even after its diagnostic/nonce record is reclaimed.
+The private row, not a public checksum, is authoritative. Copying a legitimately
+held token shares its single permitted consumption. Recovery invalidates all old
+epochs; no token survives owner
 restart. Failed guesses cannot consume or mutate the legitimate row.
 
 Layer 10 owns a lower-layer typed request/result port. The composition root may
@@ -88,6 +98,12 @@ epoch when committing results. Never copy mutable owner state to grant authority
    bounded request, not a session, callable, execution count or receipt supplied
    by the caller. Acquire the sealed build-use and create a fresh package source
    session via `parser_structural_package_v2_source_session_v1` over those bytes.
+   Its `snapshot_identity: u64` is minted by this owner once per transformed-source
+   session from a monotonic nonzero counter. Reject zero, wrap/exhaustion and any
+   collision with a retained source record before opening the session. Bind that
+   identity to the full source digest and length in private state; it is neither
+   a truncated digest nor a caller-supplied identity. Failed issuance does not
+   recycle it. Each append/reset obtains a fresh identity, even for equal bytes.
    Reset/append callers receive separate requests for their actual transformed
    snapshot; an old session cannot be reused for changed input.
 4. Invoke the existing lexical adapter on complete 32-byte blocks. Its guarded
