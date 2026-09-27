@@ -28,7 +28,8 @@ use compiler.core.interpreter.eval.{eval_warnings}
 use compiler.core.interpreter.eval_tables.{
     func_register_return_type, func_table_lookup, func_table_register,
     func_table_register_owned, func_import_binding_register,
-    func_import_binding_names, struct_table_lookup, struct_table_register,
+    func_import_binding_names, func_resolve_for_caller,
+    struct_table_lookup, struct_table_register,
     decl_owner_file_set
 }
 use compiler.core.interpreter.interp_resource_tracker.{
@@ -39,7 +40,7 @@ use compiler.core.interpreter.interp_resource_tracker.{
     irt_track_struct_owned,
     irt_unload_module
 }
-use std.io_runtime.{env_get_opt, file_read_result}
+use std.io_runtime.{env_get_opt, file_exists, file_read_result}
 
 var _gc_warning_trace_state: i64 = -1
 
@@ -126,59 +127,69 @@ var deferred_module_names: [text] = []
 var deferred_module_files: [text] = []
 var deferred_module_imports: [[text]] = []
 var deferred_module_set = {}
+var deferred_module_seen = {}
+
+fn deferred_module_key(name: text, current_file: text) -> text:
+    name.len().to_text() + ":" + name + "|" + current_file
 
 fn register_deferred_module(name: text, current_file: text, imported_names: [text]):
-    if deferred_module_set.has(name):
+    val key = deferred_module_key(name, current_file)
+    if deferred_module_set.has(key):
         return
     deferred_module_names.push(name)
     deferred_module_files.push(current_file)
     deferred_module_imports.push(imported_names)
-    deferred_module_set[name] = true
+    deferred_module_set[key] = true
+    deferred_module_seen[name] = true
 
 fn is_deferred_module(name: text) -> i64:
-    if deferred_module_set.has(name):
+    if deferred_module_seen.has(name):
         return 1
     0
 
-fn force_deferred_module(name: text) -> i64:
+fn force_deferred_module(name: text, caller_file: text) -> i64:
     # Find the deferred module entry and load it
     var i: i64 = 0
     for mod_name in deferred_module_names:
-        if mod_name == name:
+        if mod_name == name and deferred_module_files[i] == caller_file:
             val current_file = deferred_module_files[i]
             val imported_names = deferred_module_imports[i]
             var load_result: i64 = 0
             if imported_names.len() == 0:
                 load_result = load_module(name, current_file)
             else:
-                load_result = load_module_selective(name, imported_names, current_file)
+                load_result = load_module_selective_with_unbraced_alias(
+                    name, imported_names, current_file)
             # Remove from deferred set (mark as loaded)
-            deferred_module_set[name] = false
+            deferred_module_set[deferred_module_key(name, caller_file)] = false
             return load_result
         i = i + 1
     0
 
-fn try_force_any_deferred_for(symbol_name: text) -> i64:
+fn try_force_any_deferred_for(symbol_name: text, caller_file: text) -> i64:
     # Try each deferred module until symbol is found
     var i: i64 = 0
     for mod_name in deferred_module_names:
-        val still_deferred = deferred_module_set[mod_name]
-        if still_deferred == true:
+        val still_deferred = deferred_module_set[
+            deferred_module_key(mod_name, deferred_module_files[i])]
+        if still_deferred == true and deferred_module_files[i] == caller_file:
             val imported_names = deferred_module_imports[i]
             if imported_names.len() > 0:
                 var can_provide = false
                 for imported_name in imported_names:
-                    if imported_name == symbol_name:
+                    if func_import_binding_names(imported_name).1 == symbol_name:
                         can_provide = true
                 if not can_provide:
                     i = i + 1
                     continue
-            val ok = force_deferred_module(mod_name)
+            val ok = force_deferred_module(mod_name, caller_file)
             if ok == 1:
                 # Check if this module provided the symbol
                 val fn_decl = func_table_lookup(symbol_name)
+                val bound_decl = func_resolve_for_caller(caller_file, symbol_name)
                 val struct_decl = struct_table_lookup(symbol_name)
-                if fn_decl >= 0 or struct_decl >= 0:
+                val global_vid = env_lookup(symbol_name)
+                if fn_decl >= 0 or bound_decl >= 0 or struct_decl >= 0 or global_vid >= 0:
                     return 1
         i = i + 1
     0
@@ -195,6 +206,7 @@ fn module_loader_init():
     deferred_module_files = []
     deferred_module_imports = []
     deferred_module_set = {}
+    deferred_module_seen = {}
     _gc_warn_emitted = {}
     _module_surface_provided = {}
     _module_surface_recorded = {}
@@ -532,7 +544,8 @@ fn load_module(module_name: text, current_file: text) -> i64:
         var dependency_ok = if requested.len() == 0:
             load_module(dependency_module, resolved_path)
         else:
-            load_module_selective(dependency_module, requested, resolved_path)
+            load_module_selective_with_unbraced_alias(
+                dependency_module, requested, resolved_path)
         # The core AST represents `use owner.member` as a dotted module with
         # no explicit item list. Apply the same parent-selective fallback here
         # as entry-module use evaluation; recursive facade loading must not
@@ -565,6 +578,34 @@ fn load_module(module_name: text, current_file: text) -> i64:
 
     _module_load_depth = _module_load_depth - 1
     1
+
+fn load_module_selective_with_unbraced_alias(
+    module_name: text, imported_names: [text], current_file: text
+) -> i64:
+    # A trailing `as local` on an unbraced path is encoded as one selective
+    # item `whole.module.path:local`. Prefer the complete module whenever it
+    # exists. Only a genuine file miss permits parent-item interpretation.
+    if imported_names.len() == 1:
+        val names = func_import_binding_names(imported_names[0])
+        if names.0 == module_name and names.1 != module_name:
+            val last_dot = module_name.last_index_of(".")
+            if last_dot > 0 and last_dot + 1 < module_name.len() and
+               module_is_loaded(module_name) == 0 and
+               not file_exists(resolve_module_path(module_name, current_file)):
+                val parent_name = module_name[0:last_dot]
+                val member_name = module_name[last_dot + 1:module_name.len()]
+                if load_module(parent_name, current_file) == 0:
+                    return 0
+                val parent_file = module_get_file_path(parent_name)
+                val source_key = parent_file + "|" + member_name
+                if _module_surface_recorded.has(parent_file) and
+                   not (_module_surface_opaque.has(parent_file) and
+                        _module_surface_opaque[parent_file] == true) and
+                   not _module_surface_provided.has(source_key):
+                    return 0
+                return load_module_selective(
+                    parent_name, [member_name + ":" + names.1], current_file)
+    load_module_selective(module_name, imported_names, current_file)
 
 fn load_module_selective(module_name: text, imported_names: [text], current_file: text) -> i64:
     # Load module and register requested names
