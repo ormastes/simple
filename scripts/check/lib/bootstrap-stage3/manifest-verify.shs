@@ -1,3 +1,115 @@
+# Positioned reads never reopen a pathname or change the inherited offset.
+# Keep this implementation in the byte-bound verifier module. Python is included
+# in tool authority on hosts without procfs; -I excludes ambient Python inputs.
+bootstrap_stage3_descriptor_read() {
+    "${bootstrap_stage3_portable_python:-python3}" -I - "$@" <<'BOOTSTRAP_POSITIONED_READ_PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+
+
+def positioned_read(fd, expected=None, source_path=None):
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > 1048576:
+        raise ValueError("descriptor is not a bounded regular authority file")
+    def identity(st):
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                st.st_mtime_ns, st.st_ctime_ns)
+    if source_path is not None:
+        path_before = os.lstat(source_path)
+        if not stat.S_ISREG(path_before.st_mode) or identity(path_before) != identity(before):
+            raise ValueError("source pathname does not identify retained descriptor")
+    parts = []
+    offset = 0
+    while offset < before.st_size:
+        part = os.pread(fd, min(65536, before.st_size - offset), offset)
+        if not part:
+            raise ValueError("short authority read")
+        parts.append(part)
+        offset += len(part)
+    data = b"".join(parts)
+    if identity(os.fstat(fd)) != identity(before):
+        raise ValueError("authority mutated during positioned read")
+    if source_path is not None and identity(os.lstat(source_path)) != identity(before):
+        raise ValueError("source pathname changed during positioned read")
+    digest = hashlib.sha256(data).hexdigest()
+    receipt = ":".join(map(str, (before.st_dev, before.st_ino, before.st_mode,
+                                 before.st_size, digest)))
+    if expected is not None and receipt != expected:
+        raise ValueError("retained authority identity or content changed")
+    return data, receipt, digest
+
+
+def main(args):
+    if len(args) != 4 or not args[0].isdigit():
+        raise ValueError("expected fd, receipt, operation, argument")
+    fd, expected, operation, argument = args
+    if int(fd) < 3:
+        raise ValueError("reserved descriptor")
+    data, receipt, digest = positioned_read(
+        int(fd), None if operation == "seal" else expected,
+        argument if operation == "seal" else None)
+    if operation == "seal":
+        print(receipt)
+    elif operation == "hash":
+        print(digest)
+    elif operation == "read":
+        sys.stdout.buffer.write(data)
+    elif operation == "value":
+        if not re.fullmatch(r"[a-zA-Z0-9_]+", argument):
+            raise ValueError("invalid authority key")
+        prefix = argument.encode("ascii") + b"="
+        values = [line[len(prefix):] for line in data.split(b"\n") if line.startswith(prefix)]
+        if len(values) != 1:
+            raise ValueError("authority key absent or repeated")
+        sys.stdout.buffer.write(values[0] + b"\n")
+    elif operation == "roles":
+        roles = re.findall(rb"^([a-z0-9_]+)_authority=", data, re.MULTILINE)
+        sys.stdout.buffer.write(b" ".join(roles) + b"\n")
+    elif operation == "lines":
+        print(data.count(b"\n"))
+    elif operation == "vector":
+        print(hashlib.sha256(b"\n".join(data.split(b"\n")[4:])).hexdigest())
+    else:
+        raise ValueError("unknown authority operation")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (OSError, ValueError) as error:
+        print("bootstrap positioned authority: " + str(error), file=sys.stderr)
+        sys.exit(1)
+BOOTSTRAP_POSITIONED_READ_PY
+}
+
+# Bind the interpreter actually used for map reads, not only the recorded PATH.
+bootstrap_stage3_verify_portable_python() {
+    [ "$#" = 1 ] || return 1
+    bootstrap_stage3_python_row=$(awk -F '|' '$1 == "tool=python3" {print; count++} END {if (count != 1) exit 1}' "$1") || return 1
+    printf '%s\n' "$bootstrap_stage3_python_row" | awk -F '|' \
+        -v canonical="$bootstrap_stage3_portable_python" \
+        -v digest="$bootstrap_stage3_portable_python_sha" '
+        { for (i = 2; i <= NF; i++) {
+            if ($i == "canonical=" canonical) paths++
+            if ($i == "sha256=" digest) hashes++
+          }
+          if (paths != 1 || hashes != 1) exit 1
+        }' || return 1
+    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_portable_python")" = \
+        "$bootstrap_stage3_portable_python_sha" ]
+}
+
+bootstrap_stage3_map_hash() {
+    if [ "${bootstrap_stage3_portable_map:-0}" = 1 ]; then
+        bootstrap_stage3_descriptor_read 9 "$bootstrap_stage3_map_receipt" hash ''
+    else
+        bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map"
+    fi
+}
+
 # Writing to an inherited fd by path. Linux spells that /proc/self/fd/N; every
 # host without procfs (macOS, the BSDs) spells it /dev/fd/N. Unlike the READ
 # views further down -- where /dev/fd's dup-not-reopen semantics silently breaks
@@ -63,6 +175,34 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "${bootstrap_stage3_manifest_display#/}" != \
             "$bootstrap_stage3_manifest_display" ] || { bootstrap_stage3_provenance_fail "manifest-entry-manifest-display-empty"; return 1; }
     bootstrap_stage3_manifest_phase_emit 3
+    bootstrap_stage3_portable_map=0
+    if [ ! -r /proc/self/stat ]; then
+        [ "${BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE:-0}" != 1 ] || {
+            bootstrap_stage3_provenance_fail "portable-descriptor-capsule-not-supported"
+            return 1
+        }
+        command -v python3 >/dev/null 2>&1 || {
+            bootstrap_stage3_provenance_fail "portable-authority-python3-required"
+            return 1
+        }
+        bootstrap_stage3_portable_python=$(bootstrap_stage3_resolve_symlinks \
+            "$(command -v python3)") || return 1
+        bootstrap_stage3_portable_python_sha=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_portable_python") || return 1
+        bootstrap_stage3_normalized_absolute "$bootstrap_stage3_bound_map" || return 1
+        [ -f "$bootstrap_stage3_bound_map" ] && [ ! -L "$bootstrap_stage3_bound_map" ] || return 1
+        exec 9<"$bootstrap_stage3_bound_map" || return 1
+        bootstrap_stage3_map_receipt=$(bootstrap_stage3_descriptor_read \
+            9 '' seal "$bootstrap_stage3_bound_map") || {
+            bootstrap_stage3_provenance_fail "portable-authority-map-seal"
+            return 1
+        }
+        bootstrap_stage3_portable_map=1
+        bootstrap_stage3_manifest_phase_emit 8
+        bootstrap_stage3_map_value() {
+            bootstrap_stage3_descriptor_read 9 "$bootstrap_stage3_map_receipt" value "$1"
+        }
+    else
     case "$bootstrap_stage3_bound_map" in
         /proc/[1-9][0-9]*/fd/[1-9][0-9]*) [ -f "$bootstrap_stage3_bound_map" ] || { bootstrap_stage3_provenance_fail "manifest-entry-bound-map-missing"; return 1; } ;;
         *)
@@ -90,16 +230,27 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_map_value() {
         bootstrap_stage3_manifest_value "$1" "$bootstrap_stage3_bound_map"
     }
+    fi
     [ "$(bootstrap_stage3_map_value schema)" = simple-stage3-bound-artifact-authority-map-v2 ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-schema"; return 1; }
     [ "$(bootstrap_stage3_map_value status)" = ready ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-status"; return 1; }
     [ "$(bootstrap_stage3_map_value entry_count)" = 31 ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-count"; return 1; }
     bootstrap_stage3_map_roles='seed native_all compiler_backfill stage2 stage2_admitted stage2_build_log stage2_command_transcript stage2_sanity_evidence stage2_sanity_companion_parent stage2_receiver_evidence stage2_receiver_log stage2_admission_receipt stage3_build_log stage3_command_transcript stage3_sanity_evidence stage3_sanity_companion_parent git_state runtime_origin_snapshot runtime_admitted_snapshot tool_authority seed_inputs_stamp source_snapshot output bootstrap_script provenance_helper stage2_native_cache_dir stage3_native_cache_dir runtime_path source_inputs_before tool_authority_before jobs_receipt'
+    if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+        bootstrap_stage3_map_actual_roles=$(bootstrap_stage3_descriptor_read \
+            9 "$bootstrap_stage3_map_receipt" roles '') || return 1
+        bootstrap_stage3_map_actual_lines=$(bootstrap_stage3_descriptor_read \
+            9 "$bootstrap_stage3_map_receipt" lines '') || return 1
+        bootstrap_stage3_map_vector=$(bootstrap_stage3_descriptor_read \
+            9 "$bootstrap_stage3_map_receipt" vector '') || return 1
+    else
     bootstrap_stage3_map_actual_roles=$(sed -n 's/^\([a-z0-9_]*\)_authority=.*/\1/p' "$bootstrap_stage3_bound_map" | tr '\n' ' ' | sed 's/ $//')
+    bootstrap_stage3_map_actual_lines=$(wc -l <"$bootstrap_stage3_bound_map" | tr -d ' ') || return 1
+    bootstrap_stage3_map_vector=$(tail -n +5 "$bootstrap_stage3_bound_map" | bootstrap_stage3_hash_stream) || return 1
+    fi
     [ "$bootstrap_stage3_map_actual_roles" = "$bootstrap_stage3_map_roles" ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-roles"; return 1; }
     bootstrap_stage3_map_expected_lines=185
     [ "$(bootstrap_stage3_map_value compiler_backfill_authority)" = descriptor-absent ] && bootstrap_stage3_map_expected_lines=184
-    [ "$(wc -l <"$bootstrap_stage3_bound_map" | tr -d ' ')" = "$bootstrap_stage3_map_expected_lines" ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-lines"; return 1; }
-    bootstrap_stage3_map_vector=$(tail -n +5 "$bootstrap_stage3_bound_map" | bootstrap_stage3_hash_stream) || return 1
+    [ "$bootstrap_stage3_map_actual_lines" = "$bootstrap_stage3_map_expected_lines" ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-lines"; return 1; }
     [ "$(bootstrap_stage3_map_value map_vector_sha256)" = "$bootstrap_stage3_map_vector" ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-vector"; return 1; }
     bootstrap_stage3_manifest_phase_emit 9
     for bootstrap_stage3_map_role in $bootstrap_stage3_map_roles; do
@@ -123,6 +274,13 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_map_role}_ino")" = "$2" ] &&
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_map_role}_mode")" = "$3" ] || return 1
     done
+    if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+        bootstrap_stage3_verify_portable_python \
+            "$(bootstrap_stage3_map_value tool_authority_authority)" || {
+            bootstrap_stage3_provenance_fail "portable-authority-python3-binding"
+            return 1
+        }
+    fi
     bootstrap_stage3_manifest_phase_emit A
     bootstrap_stage3_manifest_a_failure_code=V0
     [ -f "$bootstrap_stage3_expected_output" ] &&
@@ -355,7 +513,7 @@ bootstrap_stage3_verify_manifest_impl() {
             grep -Eq '^[0-9a-f]{64}$' || return 1
     done
     [ "$(bootstrap_stage3_manifest_value bound_artifact_authority_map_path "$bootstrap_stage3_manifest")" = "${bootstrap_stage3_manifest_display}.authority-map.env" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value bound_artifact_authority_map_sha256 "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_hash_file "$bootstrap_stage3_bound_map")" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value bound_artifact_authority_map_sha256 "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_hash)" ] || return 1
     bootstrap_stage3_platform=$(
         bootstrap_stage3_manifest_value platform "$bootstrap_stage3_manifest"
     ) || return 1
@@ -1149,6 +1307,7 @@ bootstrap_stage3_verify_manifest() (
             *) : ;;
         esac
     fi
+    exec 9<&- 2>/dev/null || :
     exec 7<&- 2>/dev/null || :
     exec 6<&- 2>/dev/null || :
     exec 8<&- 2>/dev/null || :

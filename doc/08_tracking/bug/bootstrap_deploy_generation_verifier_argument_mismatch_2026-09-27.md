@@ -79,3 +79,12 @@ descriptor rejection, helper binding, and mismatched parent source/git receipts.
 The existing controlled wrapper fixture cannot establish these properties.
 No protocol implementation was attempted in this bounded repair because an
 isolated path substitution cannot satisfy that authority contract.
+
+## Portable map foundation follow-up
+
+A later focused implementation replaces the non-procfs map ingress failure with
+a retained-descriptor positioned reader and explicit Python tool binding. See
+`doc/05_design/bootstrap_positioned_descriptor_authority.md` for the implemented
+contract, twelve targeted tests, and the remaining manifest/parent protocol
+barriers. The earlier host probe describes the pre-fix state. Full macOS
+admission and bootstrap remain unverified.
