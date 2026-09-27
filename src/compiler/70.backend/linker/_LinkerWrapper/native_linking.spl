@@ -62,7 +62,8 @@ use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_configured
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64_retained, coff_link_default_libraries}
+    CoffLinkRequest, coff_link_amd64_retained, coff_link_arm64_retained,
+    coff_link_default_libraries, coff_link_arm64_default_libraries}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -170,7 +171,7 @@ fn hosted_native_link_arch_supported(os: text, arch: text) -> bool:
     val x64 = arch == "x86_64" or arch == "amd64"
     val arm64 = arch == "aarch64" or arch == "arm64"
     if os == "windows" or os == "windows-mingw" or os == "windows-msvc":
-        return x64
+        return x64 or arm64
     if os == "macos" or os == "darwin" or os == "freebsd":
         return x64 or arm64
     if os == "linux":
@@ -181,8 +182,6 @@ fn hosted_native_link_unsupported_error(os: text) -> text:
     "Native linking is unsupported on host OS '" + os + "'"
 
 fn hosted_native_link_unsupported_arch_error(os: text, arch: text) -> text:
-    if os == "windows" and (arch == "aarch64" or arch == "arm64"):
-        return "Windows ARM64 native linking unsupported: MSVC linker and CRT discovery are x64-only"
     "Native linking is unsupported on host architecture '" + arch + "' for OS '" + os + "'"
 
 fn native_linker_abi_for_target(target: text) -> text:
@@ -1581,8 +1580,23 @@ fn _is_mingw_env() -> bool:
         return true
     linker_flavor == "gnu"
 
+fn _windows_link_arch(config: NativeLinkConfig) -> text:
+    val target = config.target_triple.lower()
+    if target.starts_with("aarch64-") or target.starts_with("arm64-"):
+        return "aarch64"
+    if target.starts_with("x86_64-") or target.starts_with("amd64-"):
+        return "x86_64"
+    val detected = host_arch().lower()
+    if detected == "arm64": return "aarch64"
+    if detected == "amd64": return "x86_64"
+    detected
+
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     if requested_linker_override().trim().lower() == "internal":
+        val target_arch = _windows_link_arch(config)
+        val arm64_target = target_arch == "aarch64" or target_arch == "arm64"
+        if not arm64_target and target_arch != "x86_64" and target_arch != "amd64":
+            return Err("internal engine: unsupported Windows COFF architecture '{target_arch}'")
         val unsupported_field = internal_coff_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
@@ -1638,9 +1652,14 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             if default_library_iterations > 64:
                 return Err("internal engine: COFF default-library directives did not converge")
             default_libraries_changed = false
-            val dependencies = coff_link_default_libraries(
-                CoffLinkRequest(objects: objects, archives: archives, entry: "auto"),
-                config.retained_symbols)
+            val dependency_request = CoffLinkRequest(
+                objects: objects, archives: archives, entry: "auto")
+            val dependencies = if arm64_target:
+                coff_link_arm64_default_libraries(
+                    dependency_request, config.retained_symbols)
+            else:
+                coff_link_default_libraries(
+                    dependency_request, config.retained_symbols)
             if dependencies.is_err():
                 return Err("internal engine: {dependencies.unwrap_err()}")
             var desired_default_files: [text] = []
@@ -1663,9 +1682,12 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
                     if not internal_coff_is_archive(bytes):
                         return Err("internal engine: COFF /DEFAULTLIB '{path}' is not an ar archive")
                     archives = archives.push(bytes)
-        val linked = coff_link_amd64_retained(
-            CoffLinkRequest(objects: objects, archives: archives, entry: "auto"),
-            config.retained_symbols)
+        val link_request = CoffLinkRequest(
+            objects: objects, archives: archives, entry: "auto")
+        val linked = if arm64_target:
+            coff_link_arm64_retained(link_request, config.retained_symbols)
+        else:
+            coff_link_amd64_retained(link_request, config.retained_symbols)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")
@@ -1681,6 +1703,7 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     """Link using MSVC toolchain (link.exe or lld-link)."""
     var msvc_config: MsvcConfig = MsvcConfig.default()
     msvc_config.debug = config.debug
+    if _windows_link_arch(config) == "aarch64": msvc_config.machine = "ARM64"
 
     # Populate CRT library paths from VS/SDK detection
     val crt_paths = _find_msvc_lib_paths()

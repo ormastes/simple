@@ -454,7 +454,10 @@ Implemented source slice:
   The shared COFF linker now exposes an ARM64 PE32+ route selecting ARM64
   object/archive validation, relocation formulas, imports, exception sorting,
   image base, and machine header; ARM64 `SECREL` is resolved against the merged
-  output-section base. Native Windows-on-ARM execution and full SDK/CRT corpus
+  output-section base. Windows native routing now derives the architecture from
+  the explicit target triple or normalized host architecture, selects the ARM64
+  internal linker/default-library scan, and passes `/MACHINE:ARM64` through the
+  external MSVC path. Native Windows-on-ARM execution and full SDK/CRT corpus
   evidence remain open, so this route is not yet certified;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;
