@@ -100,3 +100,32 @@ Simple build used a historical Stage2 compiler, not an admitted current-source
 Stage4 product. The isolated pure-Simple linker source now prefers LLD for
 Linux `opt_level == 1` when no explicit `SIMPLE_LINKER` override is set; that
 source path still needs a current-source native build and performance proof.
+
+## Linux hello: mmap and literal-print review
+
+The LLD-linked hello ELF imports no `mmap`, `munmap`, or `mprotect` symbol.
+Its `.text` is 7,660 bytes, `.dynsym` 552 bytes, and `.rela.plt` 432 bytes.
+The 524,288-byte `rt_literal_intern_table` lives in zero-filled `.bss`:
+it increases virtual memory size, not ELF file bytes. The host ELF loader's
+mapping of LOAD segments is separate from an application `mmap` import, so
+deleting an application mmap call cannot explain or repair this file-size gap.
+
+The historical producer boxed `"hello"` with `rt_string_new_literal` and
+called `rt_println_value`; its link map retained `rt_to_string` (2,024 bytes)
+and the literal table as a result. The isolated current source now lowers a
+plain literal passed to `print`, `println`, or `eprintln` to a pointer/length
+call into the existing `rt_*print*_str` writer. Cranelift emits a raw rodata
+pointer for that typed operand; LLVM already did so. Interpolated values,
+computed values, and literals containing NUL keep the prior path. This
+removes literal boxing and generic rendering from the simple hello call site.
+
+A same-host C-entry probe called `rt_println_str("hello", 5)` against the same
+core runtime archive, with clang `-Oz`, LLD, section GC, and strip. It printed
+`hello`, measured 5,152 bytes on disk and 1 byte of `.bss`, and imported no
+`mmap`. The probe lives in `build/mini_builds/target5_literal_print_probe/`.
+It excludes the Simple entry wrapper and the historical builder's forced
+runtime roots, so it is directional evidence only. A current-source Stage4
+hello build and paired C cohort remain necessary to assess the 1.05x gate.
+The attempted pure-Simple `check src/compiler` could not run because there is
+no admitted cached self-hosted check worker artifact; the log is alongside
+the probe. Do not mark Target 5 complete from this diagnostic.
