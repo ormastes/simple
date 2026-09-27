@@ -827,9 +827,14 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
   # cap, while retaining the stricter existing tree cap by default.
+  # Stage 3 compiles the whole compiler in one process; 6 GB tripped in HIR on
+  # a 24 GB M4. macOS Stage 3 defaults to 7 GB (7e9 bytes). Export it so the
+  # transcribed-run watchdog inside the worker applies the same tree cap.
+  : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=6835937}"
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
   stage3_darwin_rss_cap_kib=$(bootstrap_stage3_memory_darwin_rss_cap_kib \
     "$stage3_process_max_kib" \
-    "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}") ||
+    "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB") ||
     bootstrap_stage3_error 'invalid Darwin Stage 3 RSS cap'
   stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
   perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
