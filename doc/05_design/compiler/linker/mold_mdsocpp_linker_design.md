@@ -269,8 +269,10 @@ POSIX roots, Windows drive roots, and bare UNC shares fail before transfer or
 publication work begins. Windows leaves additionally reject DOS device aliases
 (`CON`, `NUL`, `COM1` through `COM9`, and peers, including extensions), NTFS
 alternate-data-stream colons, trailing-dot/space aliases, and illegal filename
-characters in every component after the drive root or UNC share before any
-remote side effect.
+characters in every component after the drive root or UNC share. ASCII control
+characters are rejected across the complete Windows path before any remote side
+effect. UNC server/share components must use ordinary component syntax, and NT
+extended/device namespaces (`\\?\\`, `\\.\\`) are not placement targets.
 Placement validation is target-lexical rather than host-canonical: both staging
 and installed paths must be absolute, and normalized dot segments, separators,
 Windows drive letters, and Windows case are compared before any upload begins.

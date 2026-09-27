@@ -377,7 +377,10 @@ bare UNC shares are rejected as installed or staging paths because they do not
 name a binary file leaf. Windows file leaves also fail early for DOS device
 aliases (including extensions), alternate-data-stream syntax, trailing-dot or
 trailing-space aliases, and illegal filename characters in every component
-after the drive root or UNC share.
+after the drive root or UNC share; ASCII control characters are rejected across
+the complete path.
+UNC server/share syntax is validated separately, and NT extended/device
+namespaces (`\\?\\`, `\\.\\`) are rejected as non-file placement roots.
 Before transfer, the adapter now asks the remote host to prove that both the
 upload leaf and sibling publication leaf are absent, including POSIX symlinks
 and Windows reparse entries visible to `Get-Item`. A stale or redirected leaf
