@@ -220,25 +220,35 @@ fn compiler_inventory_git_events_v1(
 ) -> CompilerInventoryGitEventsV1?:
     var events: [CompileSourceEventV1] = []
     if cold_init:
+        # Git's -t prefix distinguishes cached paths from others in one
+        # enumeration. Derive both the cold inventory and its untracked
+        # membership cursor from that same output; separate ls-files calls
+        # could observe different directory memberships during refresh.
         val listed = compiler_inventory_git_lines_v1(
-            root, ["-c", "core.quotePath=false", "ls-files",
+            root, ["-c", "core.quotePath=false", "ls-files", "-t",
                 "--cached", "--others", "--exclude-standard", "--"] + source_roots)
         if listed == nil:
             return nil
-        for path in listed!.split("\n"):
-            if path != "":
-                val next = compiler_inventory_event_push_v1(
-                    events, root, "create", path)
-                if next == nil:
-                    return nil
-                events = next!
-        val untracked = compiler_inventory_git_lines_v1(
-            root, ["-c", "core.quotePath=false", "ls-files", "--others",
-                "--exclude-standard", "--"] + source_roots)
-        if untracked == nil:
-            return nil
+        var untracked_paths: [text] = []
+        for line in listed!.split("\n"):
+            if line == "":
+                continue
+            if line.len() <= 2 or line[1:2] != " ":
+                return nil
+            val tag = line[0:1]
+            if tag != "?" and tag != "H" and tag != "S" and tag != "M" and
+                    tag != "R" and tag != "C":
+                return nil
+            val path = line[2:]
+            if tag == "?":
+                untracked_paths = untracked_paths.push(path)
+            val next = compiler_inventory_event_push_v1(
+                events, root, "create", path)
+            if next == nil:
+                return nil
+            events = next!
         val digests = compiler_inventory_untracked_digests_v1(
-            untracked!, source_roots)
+            untracked_paths.join("\n"), source_roots)
         if not digests.valid:
             return nil
         return Some(CompilerInventoryGitEventsV1(

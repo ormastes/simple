@@ -43,6 +43,13 @@ cohorts pass on a current-source worker. It reuses the existing warm
 zero-scan hot-path gate remains open until an admitted event-maintained
 membership source replaces that traversal.
 
+Cold refresh now uses one tagged `git ls-files -t --cached --others` output to
+derive both source events and untracked membership digests. This removes the
+internal mismatch where two Git listings could observe different untracked
+sets during one cold refresh. It does not freeze file contents or prevent a
+directory change after the listing; current-source behavior and concurrent
+writer admission still need proof.
+
 Do not add a per-request stat/read of every inventory source as a shortcut:
 that would hide a full warm source traversal and miss Target 6's latency/RSS
 contract. Preserve the existing rule that an explicit cold rebuild derives a
