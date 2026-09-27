@@ -188,3 +188,45 @@ is valid as a narrow resolver fix, but it did not repair this HIR population.
 Stage 3 and the full macOS bootstrap remain unadmitted. This was the second
 verify/fix cycle in this session; do not repeat the same run without a new
 root-cause fix.
+
+## Function-scope import memo diagnosis
+
+A fail-fast diagnostic using the admitted Stage 2 compiler and Stage 3's
+streaming-surface/default-root settings reproduced the first `env_get_opt`
+failure. `std.io_runtime` found the re-export route, so the early indexed-origin
+fallback was not the limiting step in this case. Temporary logging in an
+isolated diagnostic compiler then showed the terminal
+`std.nogc_sync_mut.io_runtime` surface declaring `env_get_opt` at callable
+position 34. Lazy registration while lowering `env_get` made the local name
+bound. After that function scope popped, lowering `home` saw the same name
+unbound, but the per-module `registered_import_memo` still contained the tuple
+and skipped registration. That is a direct cause of a repeated-function
+unresolved-name failure. The top-level facade registration also left the name
+unbound despite finding the route; its terminal-index transport remains
+unproven and may be a separate defect.
+
+The memo now records whether each completed registration left a live local
+binding and skips a repeat only while that binding state still matches. A
+focused unit case pops one function scope and requires the same import to bind
+in the next. Diagnostic-only logging and an attempted MC/DC clamp were removed
+from product source. At this point the repair had not yet received its final
+Stage 2/3 admission cycle.
+
+## Third-cycle Stage 2 rejection
+
+The memo-state source linked a third Stage 2 candidate (4 compiled, 766 cached,
+0 failed), SHA-256
+`ade21c9e39d31d3f9ac812576e9c3867da453a5421bb0657330065e87ca8a58c`.
+Canonical sanity rejected it when the positional two-line hello-world native
+build crashed with signal 11 at `native_compile 0/1`; the binary is preserved
+as `build/bootstrap/stage2/aarch64-apple-darwin/simple.rejected`. This verdict
+does not identify whether the memo change triggered the crash or merely changed
+code layout around the existing positional native-build instability. Stage 3
+was not started for this candidate. The focused unit case remains unexecuted
+because the admitted bootstrap CLI has no `test` command and the installed
+release runner cannot parse current compiler source.
+
+The three-cycle verification cap is exhausted for this session. The memo repair
+is unadmitted and must be reviewed on a fresh scoped session before promotion.
+The last admitted Stage 2/Stage 3 evidence remains the preceding source
+snapshot, whose Stage 3 verdict was 1797 HIR errors.

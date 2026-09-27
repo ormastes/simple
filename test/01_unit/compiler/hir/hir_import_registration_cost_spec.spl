@@ -22,6 +22,7 @@ use std.io.{file_read}
 use std.spec.{describe, it, expect}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_types.{ScopeKind}
 use compiler.hir.hir_lowering._Items.module_reexport_materialization.*
 use compiler.hir.hir_lowering._Items.module_import_registration.*
 use compiler.hir.hir_lowering._Items.module_lowering.*
@@ -263,6 +264,25 @@ describe("HIR import registration resolution facts", fn():
         lowering.begin_module("pkg/imp2.spl")
         expect(lowering.registered_import_memo.len()).to_equal(0)
         lowering.register_imported_symbol(0, "pkg.decl", "Widget", "Widget", span, false)
+        expect(lowering.registered_import_skip_count).to_equal(0)
+    )
+
+    it("re-registers an import after its function scope exits", fn():
+        step("Verify: a popped function binding does not satisfy the import memo")
+        val registry = declaring_registry()
+        val owner_index = registry.index_by_name["pkg.other"]
+        var lowering = hirlowering_for_module("pkg/consumer.spl", registry)
+        val span = Span.empty()
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering.register_imported_symbol(
+            owner_index, "pkg.other", "Widget", "Widget", span, false)
+        expect(lowering.symbols.lookup_or_invalid("Widget").is_valid()).to_equal(true)
+        lowering.symbols.pop_scope()
+        expect(lowering.symbols.lookup_or_invalid("Widget").is_valid()).to_equal(false)
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering.register_imported_symbol(
+            owner_index, "pkg.other", "Widget", "Widget", span, false)
+        expect(lowering.symbols.lookup_or_invalid("Widget").is_valid()).to_equal(true)
         expect(lowering.registered_import_skip_count).to_equal(0)
     )
 )
