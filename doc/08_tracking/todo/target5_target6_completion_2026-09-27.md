@@ -24,6 +24,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   startup/RSS budgets, 30 development or 100 release samples, and empty
   forbidden/optional-provider traces. The historical LLD diagnostic was
   13,944 bytes versus 4,864-byte C hello (2.87x), so the C ratio is open.
+- Verify the plain-literal print lowering in a current-source Stage4 hello build:
+  confirm the binary no longer retains `rt_string_new_literal`,
+  `rt_to_string`, or `rt_literal_intern_table`; then measure paired size,
+  startup, and RSS cohorts. The C-entry direct-writer probe is only
+  directional evidence (5,152-byte ELF), not completion evidence.
 
 ## Target 6 — persistent compile index
 
