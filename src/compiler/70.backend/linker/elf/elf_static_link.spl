@@ -117,6 +117,7 @@ struct ElfLinkRequest:
     interp: text          # PT_INTERP path (dynamic modes only)
     runpath: text = ""    # DT_RUNPATH payload (dynamic modes only)
     bind_now: bool = false # -z now: eager dynamic binding
+    hash_style: text = "both" # gnu, sysv, or both
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -138,6 +139,7 @@ struct ElfLinkCtx:
     copy_out: i64
     runpath: text
     bind_now: bool
+    hash_style: text
 
 struct ElfCommonPlacement:
     inputs: ElfStaticInputs
@@ -772,8 +774,10 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_FINI_ARRAY, a.fini_array])
         t = t.push([DT_FINI_ARRAYSZ, arrays[1]])
     if dynamic:
-        t = t.push([DT_GNU_HASH, a.gnu_hash])
-        t = t.push([DT_HASH, a.hash])
+        if ctx.hash_style == "gnu" or ctx.hash_style == "both":
+            t = t.push([DT_GNU_HASH, a.gnu_hash])
+        if ctx.hash_style == "sysv" or ctx.hash_style == "both":
+            t = t.push([DT_HASH, a.hash])
         t = t.push([DT_STRTAB, a.dynstr])
         t = t.push([DT_SYMTAB, a.dynsym])
         t = t.push([DT_STRSZ, dynstr.data.len()])
@@ -1167,6 +1171,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         return Err("bind-now policy given to a static link")
     if req.runpath.contains("\0"):
         return Err("RUNPATH contains NUL")
+    if req.hash_style != "gnu" and req.hash_style != "sysv" and req.hash_style != "both":
+        return Err("ELF hash style must be gnu, sysv, or both")
     if dynamic and req.interp == "":
         return Err("dynamic link needs an interpreter path (PT_INTERP)")
 
@@ -1225,7 +1231,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val common = elf_place_common(elf_static_place(collected, gc.live)?, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
-        runpath: req.runpath, bind_now: req.bind_now)
+        runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style)
     val initial_contents = elf_static_contents(common.inputs)
     val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
@@ -1242,7 +1248,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx,
         copy_offsets: copies.offsets, copy_out: copies.out_idx,
-        runpath: req.runpath, bind_now: req.bind_now)
+        runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style)
     var contents = elf_static_contents(inputs)
     val eh_out = elf_find_out(inputs.outs, ".eh_frame")
     var eh_fdes: i64 = 0
@@ -1317,9 +1323,12 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
                 (sc.imports.len() + 1) * 2, ELF_SEG_R), 2, ".dynsym", 0))
             secs = secs.push(elf_sec_with(elf_out_sec(".gnu.version_r", SHT_GNU_VERNEED_S, SHF_ALLOC, 4,
                 need_versions.len() * 32, ELF_SEG_R), 0, ".dynstr", need_versions.len()))
-        secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8,
-            elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
-        secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4, elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
+        if req.hash_style == "gnu" or req.hash_style == "both":
+            secs = secs.push(elf_sec_with(elf_out_sec(".gnu.hash", SHT_GNU_HASH_S, SHF_ALLOC, 8,
+                elf_gnu_hash_size(sc.copy_names.len()), ELF_SEG_R), 0, ".dynsym", 0))
+        if req.hash_style == "sysv" or req.hash_style == "both":
+            secs = secs.push(elf_sec_with(elf_out_sec(".hash", SHT_HASH_S, SHF_ALLOC, 4,
+                elf_hash_size(sc.imports.len() + 1), ELF_SEG_R), 4, ".dynsym", 0))
         secs = secs.push(elf_out_sec(".dynstr", SHT_STRTAB_E, SHF_ALLOC, 1, dynstr0.data.len(), ELF_SEG_R))
     secs = secs.push(elf_out_sec(".note.gnu.build-id", SHT_NOTE_E, SHF_ALLOC, 4, 36, ELF_SEG_R))
     if eh_fdes > 0:

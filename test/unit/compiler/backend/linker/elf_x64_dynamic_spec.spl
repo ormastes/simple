@@ -31,6 +31,8 @@ val PT_GNU_RELRO: i64 = 0x6474e552
 val DT_BIND_NOW: i64 = 24
 val DT_FLAGS: i64 = 30
 val DT_FLAGS_1: i64 = 0x6ffffffb
+val DT_HASH: i64 = 4
+val DT_GNU_HASH: i64 = 0x6ffffef5
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -113,6 +115,29 @@ fn structural(mode: i64) -> [i64]:
     r.unwrap()
 
 describe "elf_link - x86_64 dynamic gate":
+    it "emits only the selected dynamic symbol hash table":
+        val gnu = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, hash_style: "gnu")).unwrap()
+        expect(shdr_by_name(gnu, ".gnu.hash") > 0).to_equal(true)
+        expect(shdr_by_name(gnu, ".hash")).to_equal(-1)
+        expect(dyn_tag(gnu, DT_GNU_HASH) > 0).to_equal(true)
+        expect(dyn_tag(gnu, DT_HASH)).to_equal(-1)
+        val sysv = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, hash_style: "sysv")).unwrap()
+        expect(shdr_by_name(sysv, ".gnu.hash")).to_equal(-1)
+        expect(shdr_by_name(sysv, ".hash") > 0).to_equal(true)
+        expect(dyn_tag(sysv, DT_GNU_HASH)).to_equal(-1)
+        expect(dyn_tag(sysv, DT_HASH) > 0).to_equal(true)
+        val both = structural(ELF_LINK_DYNAMIC_EXEC)
+        expect(shdr_by_name(both, ".gnu.hash") > 0).to_equal(true)
+        expect(shdr_by_name(both, ".hash") > 0).to_equal(true)
+
     it "emits eager-binding dynamic flags only when requested":
         val eager = elf_link_structural(ElfLinkRequest(
             objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],

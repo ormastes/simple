@@ -837,3 +837,10 @@ because it is quiet, emits neither debug/PDB nor manifest directories, and is
 always a complete one-shot link. Their enabled counterparts remain named
 unsupported until those output contracts are implemented. Native
 Windows execution remains pending the host prerequisite recorded above.
+
+The Linux internal route now projects `--hash-style=gnu`, `sysv`, or `both`
+into typed ELF layout policy. The selected `.gnu.hash` and/or `.hash` sections
+and their matching `DT_GNU_HASH`/`DT_HASH` tags are emitted together; unknown
+or conflicting requests fail before publication. Direct linker API callers
+retain the byte-compatible `both` default, while the production mold-compatible
+command line's existing `--hash-style=gnu` request now produces GNU-only output.

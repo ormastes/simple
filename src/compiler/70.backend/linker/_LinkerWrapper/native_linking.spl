@@ -703,6 +703,7 @@ fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # provider archives. The remaining fields need explicit implementations;
     # rejecting them prevents a successful link with silently changed policy.
     if internal_elf_runpath(config.extra_flags).is_err(): return "extra_flags"
+    if internal_elf_hash_style(config.extra_flags).is_err(): return "extra_flags"
     if config.debug: return "debug"
     ""
 
@@ -721,7 +722,8 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
             path = flag.substring(11)
             i = i + 1
         elif flag == "--eh-frame-hdr" or flag == "--build-id" or
-                flag == "--build-id=sha1" or flag == "--gc-sections":
+                flag == "--build-id=sha1" or flag == "--gc-sections" or
+                flag.starts_with("--hash-style="):
             # These are intrinsic internal-ELF policies: every image emits the
             # sorted unwind header and GNU SHA-1 note, and the live-section
             # graph is rooted before layout.
@@ -743,6 +745,20 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
             return Err("internal ELF RUNPATH entry is empty or contains NUL")
         if not paths.contains(path): paths = paths.push(path)
     Ok(paths.join(":"))
+
+fn internal_elf_hash_style(extra_flags: [text]) -> Result<text, text>:
+    """Return the selected dynamic symbol hash-table policy."""
+    var selected = ""
+    for flag in extra_flags:
+        if flag.starts_with("--hash-style="):
+            val style = flag.substring(13)
+            if style != "gnu" and style != "sysv" and style != "both":
+                return Err("internal ELF hash style must be gnu, sysv, or both")
+            if selected != "" and selected != style:
+                return Err("internal ELF hash style flags conflict")
+            selected = style
+    if selected == "": return Ok("both")
+    Ok(selected)
 
 fn internal_elf_bind_now(extra_flags: [text]) -> bool:
     var i: i64 = 0
@@ -1362,9 +1378,11 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE
     val runpath = internal_elf_runpath(config.extra_flags)?
+    val hash_style = internal_elf_hash_style(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
-        runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags))
+        runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags),
+        hash_style: hash_style)
     val linked = elf_link_configured(request, config.strip_output, config.retained_symbols)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
