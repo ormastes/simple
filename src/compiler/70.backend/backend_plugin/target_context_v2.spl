@@ -1,0 +1,66 @@
+# codex-impl: retained builtin request configuration, not acceptance evidence.
+
+use compiler.common.backend_plugin.model.{BackendPluginRequestV1}
+use compiler.backend.backend.backend_types.{BackendKind, BackendCompileOptions, OptimizationLevel}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.llvm_codegen_adapter.{llvm_codegen_bare_metal_requested}
+
+# Internal plugin context. No mutating methods or acceptance constructors.
+# Arrays are copied at admission; callers receive no authoritative receipt here.
+struct BuiltinBackendTargetContextV2:
+    options: BackendCompileOptions
+    cpu: text
+    requested_features: [text]
+    llvm_config: LlvmTargetConfig
+
+fn builtin_backend_cpu_v2(cpu: text) -> text:
+    if cpu == "": "generic" else: cpu
+
+fn builtin_backend_target_context_v2(
+    request: BackendPluginRequestV1, options: BackendCompileOptions
+) -> BuiltinBackendTargetContextV2:
+    var copied: [text] = []
+    for feature in request.features:
+        copied.push(feature)
+    val cpu = builtin_backend_cpu_v2(request.cpu)
+    val config = LlvmTargetConfig.for_target_portable_numeric_with_mode(
+        options.target, Some(cpu), llvm_codegen_bare_metal_requested())
+    BuiltinBackendTargetContextV2(options, cpu, copied, config)
+
+fn builtin_backend_context_diagnostic_v2(
+    context: BuiltinBackendTargetContextV2, kind: BackendKind, operation_cpu: text
+) -> text:
+    if builtin_backend_cpu_v2(operation_cpu) != context.cpu:
+        return "AOT CPU differs from the admitted backend request"
+    # This is a producer-use check. V1 admission's separate fail-closed gate
+    # remains owned by builtin_feature_acceptance_gate; V2 also gates at open.
+    if context.requested_features.len() > 0:
+        return "backend feature acceptance is unavailable for builtin emission"
+    if kind == BackendKind.Cranelift and context.cpu != "generic":
+        return "Cranelift ISA builder cannot configure the requested CPU"
+    ""
+
+fn builtin_backend_aot_context_diagnostic_v2(
+    context: BuiltinBackendTargetContextV2, kind: BackendKind,
+    operation_cpu: text, operation_opt_level: i64
+) -> text:
+    val diagnostic = builtin_backend_context_diagnostic_v2(context, kind, operation_cpu)
+    if diagnostic != "": return diagnostic
+    val expected = match context.options.opt_level:
+        case OptimizationLevel.None_ | OptimizationLevel.Debug: 0
+        case OptimizationLevel.Basic | OptimizationLevel.Size: 1
+        case OptimizationLevel.Standard | OptimizationLevel.Speed: 2
+        case OptimizationLevel.Aggressive: 3
+    val normalized = if operation_opt_level <= 0:
+        0
+    elif operation_opt_level >= 3:
+        3
+    else:
+        operation_opt_level
+    if normalized != expected:
+        return "AOT optimization differs from the admitted backend request"
+    ""
+
+export BuiltinBackendTargetContextV2
+export builtin_backend_cpu_v2, builtin_backend_target_context_v2
+export builtin_backend_context_diagnostic_v2, builtin_backend_aot_context_diagnostic_v2

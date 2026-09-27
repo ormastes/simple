@@ -22,6 +22,7 @@ use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
     llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
+use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
 use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
@@ -338,13 +339,25 @@ fn compile_module_with_backend_target_cpu_storage_declarations(
         backend_name, produced.module, is_release, opt_level_i64, target_cpu,
         produced.sites)
 
+pub fn backend_helper_aot_opt_level(
+    opt_level_i64: i64, retained_options: BackendCompileOptions? = nil
+) -> OptimizationLevel:
+    if val retained = retained_options: return retained.opt_level
+    if opt_level_i64 <= 0: OptimizationLevel.None_
+    elif opt_level_i64 == 1: OptimizationLevel.Size
+    elif opt_level_i64 == 2: OptimizationLevel.Speed
+    else: OptimizationLevel.Aggressive
+
 fn compile_module_with_backend_target_cpu_storage_bindings(
     backend_name: text,
     module: MirModule,
     is_release: bool,
     opt_level_i64: i64,
     target_cpu: text,
-    storage_bindings: [MirStorageViewSiteBindingV1]
+    storage_bindings: [MirStorageViewSiteBindingV1],
+    retained_options: BackendCompileOptions? = nil,
+    retained_llvm_config: LlvmTargetConfig? = nil,
+    retained_cranelift_triple: text? = nil
 ) -> Result<CompiledModule, CompileError>:
     """Compile a MIR module using the named backend.
 
@@ -411,23 +424,18 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         print "[backend-helper] kind resolved"
 
     # Preserve the driver's explicit optimization level instead of collapsing to build mode defaults.
-    val opt = if opt_level_i64 <= 0:
-        OptimizationLevel.None_
-    elif opt_level_i64 == 1:
-        OptimizationLevel.Size
-    elif opt_level_i64 == 2:
-        OptimizationLevel.Speed
-    else:
-        OptimizationLevel.Aggressive
+    val opt = backend_helper_aot_opt_level(opt_level_i64, retained_options)
     if trace:
         print "[backend-helper] opt resolved"
 
     # Create backend options and compile
-    val configured_target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    val target_opt_ctx = backend_helper_target_opt_context(
-        configured_target, target_cpu, has_avx2())
+    val target_opt_ctx = if val retained = retained_options:
+        retained.target_opt_ctx
+    else:
+        backend_helper_target_opt_context(
+            env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "", target_cpu, has_avx2())
     val options = BackendCompileOptions(
-        target: backend_helper_native_target(),
+        target: if val retained = retained_options: retained.target else: backend_helper_native_target(),
         opt_level: opt,
         debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false,
@@ -478,8 +486,8 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         if trace:
             print "[backend-helper] direct llvm"
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            return llvm_compile_module_direct_compiled(options, backend_module)
-        val result = llvm_compile_module_direct(options, backend_module)
+            return llvm_compile_module_direct_compiled(options, backend_module, retained_llvm_config)
+        val result = llvm_compile_module_direct(options, backend_module, retained_llvm_config)
         match result:
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
@@ -487,7 +495,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_direct(options, backend_module)
+        val result = cranelift_compile_module_direct(options, backend_module, retained_cranelift_triple)
         match result:
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
@@ -505,22 +513,20 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
 fn compile_llvm_module_to_object_path(
     module: MirModule, is_release: bool, opt_level_i64: i64, target_cpu: text,
     storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
-    diagnostic_path: text
+    diagnostic_path: text,
+    retained_options: BackendCompileOptions? = nil,
+    retained_llvm_config: LlvmTargetConfig? = nil
 ) -> i64:
     """Builtin LLVM AOT path with no aggregate result or object-byte return."""
-    val opt = if opt_level_i64 <= 0:
-        OptimizationLevel.None_
-    elif opt_level_i64 == 1:
-        OptimizationLevel.Size
-    elif opt_level_i64 == 2:
-        OptimizationLevel.Speed
+    val opt = backend_helper_aot_opt_level(opt_level_i64, retained_options)
+    val target_opt_ctx = if val retained = retained_options:
+        retained.target_opt_ctx
     else:
-        OptimizationLevel.Aggressive
-    val configured_target = env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
-    val target_opt_ctx = backend_helper_target_opt_context(
-        configured_target, target_cpu, has_avx2())
+        backend_helper_target_opt_context(
+            env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "", target_cpu, has_avx2())
     val options = BackendCompileOptions(
-        target: backend_helper_native_target(), opt_level: opt,
+        target: if val retained = retained_options: retained.target else: backend_helper_native_target(),
+        opt_level: opt,
         debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false, emit_llvm_ir: false, emit_mir: false,
         verify_output: true, target_opt_ctx: target_opt_ctx, backend_kind: nil)
@@ -540,13 +546,16 @@ fn compile_llvm_module_to_object_path(
     val backend_module = optimize_module_for_backend(
         storage_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
     llvm_compile_module_direct_to_path(
-        options, backend_module, object_path, diagnostic_path)
+        options, backend_module, object_path, diagnostic_path, retained_llvm_config)
 
 fn backend_helper_mir_opt_level(level: OptimizationLevel) -> OptLevel:
     match level:
         case None_: OptLevel.NoOpt
         case Debug: OptLevel.NoOpt
+        # No separate MIR O1 pipeline exists; llc still receives -O1.
+        case Basic: OptLevel.NoOpt
         case Size: OptLevel.Size
+        case Standard: OptLevel.Speed
         case Speed: OptLevel.Speed
         case Aggressive: OptLevel.Aggressive
 

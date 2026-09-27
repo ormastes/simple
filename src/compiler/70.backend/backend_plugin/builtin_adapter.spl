@@ -6,25 +6,40 @@ use compiler.mir.mir_instructions.{MirModule}
 use compiler.backend.backend.backend_types.{
     BackendKind, CodegenTarget, OptimizationLevel, BackendCompileOptions,
     CompileError, CompiledModule,
-    compileoptions_default_options
+    compileoptions_default_options, compileerror_backend_error
 }
-use compiler.backend.codegen_types.{Codegen, CodegenOutput}
+use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.backend.backend_helpers.{
     compile_module_with_backend_target_cpu_storage_bindings,
-    compile_llvm_module_to_object_path
+    compile_llvm_module_to_object_path, backend_helper_target_opt_context
+}
+use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct}
+use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter}
+use compiler.backend.backend_plugin.target_context_v2.{
+    BuiltinBackendTargetContextV2, builtin_backend_target_context_v2,
+    builtin_backend_context_diagnostic_v2, builtin_backend_aot_context_diagnostic_v2
 }
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
 use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use compiler.backend.linker.linker_wrapper_helpers.{write_elf_bytes_to_file}
 
 class BuiltinBackendCompileAdapter:
-    """One factory-created Codegen object retained for a backend session."""
-    codegen: Codegen
+    """Retained builtin target configuration for a backend session."""
     kind: BackendKind
+    target_context: BuiltinBackendTargetContextV2
 
     fn compile_module(module: MirModule) -> Result<CodegenOutput, CompileError>:
-        self.codegen.compile_module(module)
+        val diagnostic = builtin_backend_context_diagnostic_v2(
+            self.target_context, self.kind, self.target_context.cpu)
+        if diagnostic != "":
+            return Err(compileerror_backend_error(self.kind, diagnostic))
+        if self.kind == BackendKind.Llvm:
+            return llvm_compile_module_direct(self.target_context.options, module,
+                Some(self.target_context.llvm_config))
+        val cranelift = CraneliftCodegenAdapter(options: self.target_context.options,
+            retained_target_triple: Some(self.target_context.llvm_config.triple.to_text()))
+        cranelift.compile_module(module)
 
     fn compile_aot_module(
         module: MirModule,
@@ -33,18 +48,29 @@ class BuiltinBackendCompileAdapter:
         target_cpu: text,
         storage_bindings: [MirStorageViewSiteBindingV1]
     ) -> Result<CompiledModule, CompileError>:
+        val diagnostic = builtin_backend_aot_context_diagnostic_v2(
+            self.target_context, self.kind, target_cpu, opt_level)
+        if diagnostic != "":
+            return Err(compileerror_backend_error(self.kind, diagnostic))
         # Keep the production AOT preparation semantics (typed-storage lowering,
         # target optimization, debug policy, and direct LLVM/Cranelift emission)
         # behind the admitted adapter while callers migrate to BackendSession.
         compile_module_with_backend_target_cpu_storage_bindings(
             self.kind.to_text(), module, is_release, opt_level, target_cpu,
-            storage_bindings)
+            storage_bindings, Some(self.target_context.options),
+            Some(self.target_context.llvm_config),
+            Some(self.target_context.llvm_config.triple.to_text()))
 
     fn compile_aot_into_path(
         module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
         storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
         diagnostic_path: text
     ) -> i64:
+        val diagnostic = builtin_backend_aot_context_diagnostic_v2(
+            self.target_context, self.kind, target_cpu, opt_level)
+        if diagnostic != "":
+            backend_aot_write_diagnostic(diagnostic_path, diagnostic)
+            return 1
         if self.kind != BackendKind.Llvm:
             # Only LLVM has a direct module->object-file emitter
             # (`compile_llvm_module_to_object_path`). This used to hard-fail
@@ -86,7 +112,8 @@ class BuiltinBackendCompileAdapter:
                         return 1
         compile_llvm_module_to_object_path(
             module, is_release, opt_level, target_cpu, storage_bindings,
-            object_path, diagnostic_path)
+            object_path, diagnostic_path, Some(self.target_context.options),
+            Some(self.target_context.llvm_config))
 
 fn builtin_backend_kind(provider_name: text) -> Result<BackendKind, BackendPluginError>:
     match provider_name:
@@ -149,7 +176,7 @@ fn create_builtin_backend_compile_adapter(
         emit_llvm_ir: defaults.emit_llvm_ir,
         emit_mir: defaults.emit_mir,
         verify_output: defaults.verify_output,
-        target_opt_ctx: defaults.target_opt_ctx,
+        target_opt_ctx: backend_helper_target_opt_context(request.target, request.cpu, false),
         backend_kind: Some(request.backend_name),
         allowed_families: defaults.allowed_families
     )
@@ -158,7 +185,8 @@ fn create_builtin_backend_compile_adapter(
         return Err(BackendPluginError.TargetUnsupported(
             request.backend_name + " does not support target " + request.target
         ))
-    Ok(BuiltinBackendCompileAdapter(codegen: codegen, kind: kind))
+    Ok(BuiltinBackendCompileAdapter(kind: kind,
+        target_context: builtin_backend_target_context_v2(request, options)))
 
 export BuiltinBackendCompileAdapter
 export builtin_backend_kind, builtin_backend_target, builtin_backend_optimization
