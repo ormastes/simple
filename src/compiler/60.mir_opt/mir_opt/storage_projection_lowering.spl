@@ -118,11 +118,14 @@ fn mir_storage_address_recipe_v1(binding: MirStorageViewBindingV1,
         i = i + 1
     var found = false
     var field = mir_storage_field_binding_v1(0, 0, 0, 0)
-    for candidate in binding.fields:
+    var field_index = 0
+    while field_index < binding.fields.len():
+        val candidate = binding.fields[field_index]
         if candidate.field_id == field_id:
             if found: return mir_storage_recipe_failure("duplicate-field-binding")
             found = true
             field = candidate
+        field_index = field_index + 1
     if not found: return mir_storage_recipe_failure("unknown-field")
     var scale = 0
     var base_offset = 0
@@ -186,12 +189,22 @@ fn lower_mir_storage_project_fields_v1(
 ) -> MirStorageProjectionLoweringResultV1:
     var rewritten_count = 0
     var rewritten_functions: Dict<SymbolId, MirFunction> = {}
-    for symbol in module.functions.keys():
-        val function = module.functions[symbol]
+    # The Stage-2 native lowering of nested `for` loops in this owner emitted
+    # rt_range with a heap pointer as its end bound. Explicit indices keep the
+    # traversal bounded by each source collection's actual length.
+    val symbols = module.functions.keys()
+    var symbol_index = 0
+    while symbol_index < symbols.len():
+        val symbol = symbols[symbol_index]
+        var function = module.functions[symbol]
         var blocks: [MirBlock] = []
-        for block in function.blocks:
+        var block_index = 0
+        while block_index < function.blocks.len():
+            val block = function.blocks[block_index]
             var instructions: [MirInst] = []
-            for instruction in block.instructions:
+            var instruction_index = 0
+            while instruction_index < block.instructions.len():
+                val instruction = block.instructions[instruction_index]
                 var rewritten = instruction
                 match instruction.kind:
                     case Intrinsic(dest, name, args):
@@ -212,10 +225,13 @@ fn lower_mir_storage_project_fields_v1(
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "missing-storage-view-site-binding")
                             var index_bounds_proven = false
-                            for site in bindings:
+                            var site_index = 0
+                            while site_index < bindings.len():
+                                val site = bindings[site_index]
                                 if site.function_symbol_id == symbol.id
                                     and site.base_local_id == base_local_id:
                                     index_bounds_proven = site.index_bounds_proven
+                                site_index = site_index + 1
                             if not index_bounds_proven:
                                 return mir_storage_projection_failure(module, rewritten_count,
                                     "storage-view-index-bounds-unproven")
@@ -242,9 +258,15 @@ fn lower_mir_storage_project_fields_v1(
                             rewritten_count = rewritten_count + 1
                     case _: pass
                 instructions.push(rewritten)
+                instruction_index = instruction_index + 1
             blocks.push(MirBlock(id: block.id, label: block.label,
                 instructions: instructions, terminator: block.terminator))
-        rewritten_functions[symbol] = MirFunction(..function, blocks: blocks)
+            block_index = block_index + 1
+        # Native struct spread here constructed an rt_range from a tagged
+        # aggregate value and could grow without bound on ordinary MIR.
+        function.blocks = blocks
+        rewritten_functions[symbol] = function
+        symbol_index = symbol_index + 1
     val result = MirModule(name: module.name, functions: rewritten_functions,
         statics: module.statics, constants: module.constants, types: module.types)
     MirStorageProjectionLoweringResultV1(ok: true, module: result,
