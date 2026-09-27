@@ -78,6 +78,9 @@ describe "backend session generation and compile-use authority V2":
         expect(projected.target).to_equal("host")
         expect(projected.cpu).to_equal("generic")
         expect(projected.optimization).to_equal("debug")
+        expect(projected.compile_kind).to_equal(BackendSessionCompileKindV2.Module)
+        expect(projected.compile_cpu_request).to_equal("generic")
+        expect(projected.compile_opt_level_request).to_equal(-1)
         expect(projected.requested_features.len()).to_equal(0)
         expect(projected.accepted_features.len()).to_equal(0)
         expect(projected.feature_acceptance).to_equal(
@@ -110,6 +113,34 @@ describe "backend session generation and compile-use authority V2":
         expect(backend_session_authority_result_project_v2(
             owner, token, use_token, result_token).err().unwrap()).to_equal(
             BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+        expect(backend_session_authority_use_release_v2(
+            owner, token, use_token)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, token)).to_equal(Ok(()))
+
+    it "retains the in-memory Cranelift AOT object with its compile inputs":
+        # @req REQ-010
+        var owner = BackendSessionAuthorityV2.create()
+        val token = backend_session_authority_open_v2(
+            owner, authority_request("cranelift")).ok().unwrap()
+        val use_token = backend_session_authority_use_acquire_v2(
+            owner, token).ok().unwrap()
+        val result_token = backend_session_authority_compile_aot_result_v2(
+            owner, token, use_token, authority_probe_module(),
+            false, 0, "generic", []).ok().unwrap()
+        val projected = backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).ok().unwrap()
+        expect(projected.compile_kind).to_equal(BackendSessionCompileKindV2.Aot)
+        expect(projected.compile_cpu_request).to_equal("generic")
+        expect(projected.compile_opt_level_request).to_equal(0)
+        expect(projected.compile_is_release).to_equal(false)
+        expect(projected.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.Unknown)
+        expect(projected.object_byte_count).to_be_greater_than(0)
+        expect(projected.object_sha256).to_equal(
+            sha256_u8_hex(projected.object_bytes))
+        expect(backend_session_authority_result_release_v2(
+            owner, token, use_token, result_token)).to_equal(Ok(()))
         expect(backend_session_authority_use_release_v2(
             owner, token, use_token)).to_equal(Ok(()))
         expect(backend_session_authority_close_v2(owner, token)).to_equal(Ok(()))
