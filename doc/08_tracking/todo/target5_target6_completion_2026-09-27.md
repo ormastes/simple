@@ -52,6 +52,8 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   inventory partition before it may publish this generation. The builder
   retains inventory entries once and stores only scalar source indices in its
   lookup table.
+  The concrete producer/receipt ownership gap is mapped in
+  `doc/09_report/compiler/target6_cold_graph_producer_boundary_2026-09-27.md`.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.
@@ -121,6 +123,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
   the optimize skill and guide. The historical cold-HIR batch result
   (normalized sum 0.181595) is diagnostic only.
+- The interface/action archive reader now validates lowercase digest bytes
+  and sorts dependency digests canonically in O(n log n). Run an archive
+  admission case on a current-source worker; the producer and receipt cutover
+  remain open.
 - The historical Stage2 native scheduler probe panicked with
   `direct-edge-missing:module.000:module.001` on a 64-module chain. Three
   fixture/check cycles produced the same result. The temporary fixture was
