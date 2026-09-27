@@ -3,7 +3,8 @@
 use std.io_runtime.{cwd, file_hash_sha256, host_os}
 use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
     chrome_render_symbol_names, chrome_render_load, chrome_render_create,
-    chrome_render_load_html, chrome_render_destroy, chrome_render_release}
+    chrome_render_load_html, chrome_render_destroy, chrome_render_close,
+    chrome_render_release}
 use std.nogc_sync_mut.gpu.native_session_owner_v1.{native_session_owner_begin_v1,
     native_session_owner_end_v1}
 
@@ -30,6 +31,9 @@ fn main() -> i64:
         chrome_render_create(handle, "{}")
     require(first > 0 and second > first, "two sessions were not ticketed")
     require(first != 73 and second != 74, "native addresses escaped as public sessions")
+    val premature_close = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_close(handle)
+    require(not premature_close, "provider closed while sessions lived")
     val first_call = unsafe(capabilities: [ffi, raw_ptr]):
         chrome_render_load_html(handle, first, "<p>first</p>")
     require(first_call == 0, "ticket did not resolve to the native session")
@@ -68,10 +72,10 @@ fn main() -> i64:
         chrome_render_destroy(handle, second)
     require(destroyed_second == 0, "pinned destructor failed after mapping retirement")
     val closed = unsafe(capabilities: [ffi, raw_ptr]):
-        chrome_render_release(handle, 0)
+        chrome_render_close(handle)
     require(closed, "empty provider did not close")
     val duplicate = unsafe(capabilities: [ffi, raw_ptr]):
-        chrome_render_release(retained, 0)
+        chrome_render_close(retained)
     require(not duplicate, "retained handle closed twice")
     val reloaded = unsafe(capabilities: [ffi, raw_ptr]):
         chrome_render_load(request)

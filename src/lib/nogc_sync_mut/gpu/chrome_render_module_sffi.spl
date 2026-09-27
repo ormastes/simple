@@ -487,19 +487,28 @@ fn chrome_render_destroy(handle: ChromeRenderHandle, session_handle: i64) -> i64
     _chrome_render_end_call(handle)
     result
 
-"""Destroys one session if supplied, then closes an empty provider exactly once.
+"""Closes the provider exactly once after every session has been destroyed.
 
-When other sessions remain, this may destroy the supplied session and return
-false. After the last session is destroyed, pass 0 to close the library.
+This operation has no session side effect. A false return means a create or
+session remains active, or another copied handle already closed the provider.
 """
-@unsafe(reason: "releases the admitted Chrome render provider session and library", capabilities: [ffi, raw_ptr])
-fn chrome_render_release(handle: ChromeRenderHandle, session_handle: i64) -> bool:
+@unsafe(reason: "retires the admitted Chrome render provider after sessions drain", capabilities: [ffi, raw_ptr])
+fn chrome_render_close(handle: ChromeRenderHandle) -> bool:
     if handle.library == nil or handle.session_owner == nil:
-        return false
-    if session_handle > 0 and chrome_render_destroy(handle, session_handle) != 0:
         return false
     if not native_session_owner_claim_close_v1(handle.session_owner.?):
         return false
     var library = handle.library.?
     library.close()
     true
+
+"""Destroys one session if supplied, then attempts to close the provider.
+
+When other sessions remain, this may destroy the supplied session and return
+false. Call chrome_render_close after the last session is destroyed.
+"""
+@unsafe(reason: "releases the admitted Chrome render provider session and library", capabilities: [ffi, raw_ptr])
+fn chrome_render_release(handle: ChromeRenderHandle, session_handle: i64) -> bool:
+    if session_handle > 0 and chrome_render_destroy(handle, session_handle) != 0:
+        return false
+    chrome_render_close(handle)
