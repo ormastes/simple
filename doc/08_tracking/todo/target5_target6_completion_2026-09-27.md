@@ -59,6 +59,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   instead of advancing the event cursor past omitted source changes; a unit
   spec covers those cases. Run that spec on a current-source test worker and
   extend the same fail-closed coverage to cold `ls-files` and untracked paths.
+- The SCV journal cursor now counts newline-terminated records rather than
+  the trailing empty split element. It hashes the exact consumed byte prefix,
+  so appending a new record does not falsely report a rewritten journal; a
+  unit spec covers append, pending-event replay, truncation, and bad cursors.
+  Qualify this on the current-source runtime before admitting warm refresh.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in

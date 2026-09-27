@@ -214,10 +214,11 @@ fn compiler_inventory_filesystem_events_v1(
 ) -> [FsWatchEvent]?:
     var events: [FsWatchEvent] = []
     val lines = journal.split("\n")
-    if consumed_rows > lines.len():
+    val rows = compiler_inventory_journal_rows_v1(journal)
+    if rows < 0 or consumed_rows < 0 or consumed_rows > rows:
         return nil
     var index = consumed_rows
-    while index < lines.len():
+    while index < rows:
         val line = lines[index]
         index = index + 1
         if not line.contains(" kind=fsevent "):
@@ -238,18 +239,38 @@ fn compiler_inventory_filesystem_events_v1(
         events = events.push(FsWatchEvent(index, kind, path, related))
     Some(events)
 
+fn compiler_inventory_journal_rows_v1(journal: text) -> i64:
+    # SCV writes one newline-terminated record per event. The empty element
+    # after the final newline is not a consumed journal row.
+    if journal == "":
+        return 0
+    if not journal.ends_with("\n"):
+        return -1
+    var rows = 0
+    var index = 0
+    while index < journal.len():
+        if (journal.byte_at(index) as i64) == 10:
+            rows = rows + 1
+        index = index + 1
+    rows
+
 fn compiler_inventory_journal_prefix_digest_v1(
     journal: text, consumed_rows: i64
 ) -> text?:
-    val lines = journal.split("\n")
-    if consumed_rows < 0 or consumed_rows > lines.len():
+    val rows = compiler_inventory_journal_rows_v1(journal)
+    if rows < 0 or consumed_rows < 0 or consumed_rows > rows:
         return nil
-    var prefix: [text] = []
+    if consumed_rows == 0:
+        return Some(sha256_text(""))
+    var seen = 0
     var index = 0
-    while index < consumed_rows:
-        prefix = prefix.push(lines[index])
+    while index < journal.len():
+        if (journal.byte_at(index) as i64) == 10:
+            seen = seen + 1
+            if seen == consumed_rows:
+                return Some(sha256_text(journal[:index + 1]))
         index = index + 1
-    Some(sha256_text(prefix.join("\n")))
+    nil
 
 fn compiler_inventory_refresh_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
@@ -298,6 +319,9 @@ fn compiler_inventory_refresh_v1(
             "filesystem-event-journal-missing" +
             " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     val journal = if file_exists(journal_path): file_read(journal_path) else: ""
+    val rows = compiler_inventory_journal_rows_v1(journal)
+    if rows < 0:
+        return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
     val filesystem_digest = sha256_text(journal)
     val consumed_rows = if cursor.valid: cursor.filesystem_rows else: 0
     if cursor.valid:
@@ -315,8 +339,6 @@ fn compiler_inventory_refresh_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
-    # An absent/empty journal is 0 rows, not `"".split("\n").len()` (1).
-    val rows = if journal == "": 0 else: journal.split("\n").len()
     val inventory = compile_source_inventory_apply_observed_events_v1(
         root, cache_root, git_events!, filesystem_events!, head, rows,
         filesystem_digest, sha256_text(pointer_content))
@@ -329,3 +351,6 @@ fn compiler_inventory_refresh_v1(
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
 export compiler_inventory_parse_name_status_v1
+export compiler_inventory_journal_rows_v1
+export compiler_inventory_journal_prefix_digest_v1
+export compiler_inventory_filesystem_events_v1
