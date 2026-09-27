@@ -39,13 +39,15 @@ fn cold_draft_artifact(
     imports: [text], inventory_digest: text
 ) -> ColdHirPackageArtifactV1:
     val digest = sha256_text("artifact:{module_identity}")
+    val abi_payload = "abi:{module_identity}"
     val seed = ColdHirSemanticSeedV1(
         module_identity, "src/{module_identity}.spl",
         sha256_text(module_identity), inventory_digest,
-        sha256_text("abi:{module_identity}"), imports)
+        sha256_text(abi_payload), imports)
     ColdHirPackageArtifactV1(
-        seed, package_identity, digest, digest,
-        [PackageSmfSectionV1("exports", 0, 1, digest)],
+        seed, package_identity, digest, sha256_text(abi_payload), abi_payload,
+        [PackageSmfSectionV1("abi_interface", 0, abi_payload.len(),
+            seed.abi_digest)],
         digest, digest, digest, digest, digest, digest, digest,
         "", PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
 
@@ -84,6 +86,24 @@ describe "cold HIR package draft assembly":
             case Ok(_): fail("missing import was admitted")
             case Err(reason):
                 expect(reason).to_equal("cold-drafts-import-missing:a:missing")
+
+    it "rejects an unbound SMF payload or typed ABI section":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val authority = cold_draft_authority(digest)
+        var payload_changed = cold_draft_artifact("a", "p", [], digest)
+        payload_changed.smf_payload = "other-abi"
+        val mismatch = cold_hir_package_drafts_v1(authority, [payload_changed])
+        expect(mismatch.unwrap_err()).to_equal(
+            "cold-drafts-smf-smf-payload-digest-mismatch:a")
+
+        var abi_changed = cold_draft_artifact("a", "p", [], digest)
+        var changed_seed = abi_changed.seed
+        changed_seed.abi_digest = sha256_text("different-abi")
+        abi_changed.seed = changed_seed
+        val wrong_abi = cold_hir_package_drafts_v1(authority, [abi_changed])
+        expect(wrong_abi.unwrap_err()).to_equal(
+            "cold-drafts-abi-section-mismatch:a")
 
     it "requires every frozen source and a frozen manifest witness":
         val inventory = cold_draft_inventory()
