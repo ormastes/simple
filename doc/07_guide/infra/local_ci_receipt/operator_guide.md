@@ -81,7 +81,7 @@ works locally; see the Status block.)
 
 ### 1a. 2026-09-23/24: the required check moved, and the job split in two
 
-`repo-hygiene.yml` now carries a separate `fast-gates` job (context
+`required-gates.yml` (split from `repo-hygiene.yml` 2026-09-27) carries a separate `fast-gates` job (context
 `Code Idiom & Structural Ratchet Gates`) that is the ruleset's actual required
 check; it is a fixed, short set of gates and is **not** what this receipt
 skips. The former `code-idiom-gates` job — the one this whole document is

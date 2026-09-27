@@ -286,7 +286,7 @@ tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
 parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
 vs base, content-keyed census cache). The required status context
 "Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
-in `repo-hygiene.yml`, which runs all 9 against the PR's base..head with a
+in `required-gates.yml` (its own one-job workflow since 2026-09-27; `repo-hygiene.yml` no longer runs per PR), which runs all 9 against the PR's base..head with a
 sparse checkout. `no-stale-snapshot-rewind` is included: it is BLOCKING at push
 and the push tier is bypassable, so a class with no automatic lane would be
 unenforced. It consults up to 40 first-parent ancestors as contributors, so that
