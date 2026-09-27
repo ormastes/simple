@@ -24,14 +24,19 @@
 #define RT_HSA_MAX_BYTES INT64_C(16777216)
 #define RT_HSA_PATH_BYTES 4096U
 
-#if defined(__linux__) && !defined(SIMPLE_RUNTIME_FREESTANDING_V2) && \
+#if (defined(__linux__) || defined(__APPLE__)) && !defined(SIMPLE_RUNTIME_FREESTANDING_V2) && \
     !defined(SIMPLE_HOSTED_SAFE_ARTIFACT_UNSUPPORTED_V1)
 #include <errno.h>
 #include <fcntl.h>
+#if defined(__linux__)
 #include <linux/openat2.h>
+#endif
 #include <pthread.h>
+#include <stdio.h>
 #include <sys/stat.h>
+#if defined(__linux__)
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #define RT_HSA_ROOT_SLOTS 32
@@ -103,7 +108,39 @@ static int rt_hsa_openat(int parent, const char* path, int flags, mode_t mode) {
 }
 
 static int rt_hsa_beneath(int root, const char* path, int flags) {
-#if defined(SYS_openat2)
+#if defined(__APPLE__)
+    /* Darwin has no openat2. Keep each directory descriptor while opening
+     * one no-follow component at a time, and reject mount crossings. */
+    struct stat root_identity;
+    char components[RT_HSA_PATH_BYTES];
+    if (rt_hsa_stat(root, &root_identity) != 0 ||
+        !S_ISDIR(root_identity.st_mode) ||
+        strlen(path) >= sizeof(components)) return -1;
+    memcpy(components, path, strlen(path) + 1);
+    int current = rt_hsa_openat(root, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW, 0);
+    if (current < 0) return -1;
+    char* component = components;
+    int result = -1;
+    for (;;) {
+        char* slash = strchr(component, '/');
+        if (slash) *slash = 0;
+        int next = rt_hsa_openat(current, component,
+            (slash ? O_RDONLY | O_DIRECTORY : flags) | O_CLOEXEC | O_NOFOLLOW, 0);
+        struct stat identity;
+        int valid = next >= 0 && rt_hsa_stat(next, &identity) == 0 &&
+            identity.st_dev == root_identity.st_dev &&
+            (!slash || S_ISDIR(identity.st_mode));
+        int closed = rt_hsa_close(current);
+        if (!valid || closed != 0) {
+            if (next >= 0) (void)rt_hsa_close(next);
+            break;
+        }
+        if (!slash) { result = next; break; }
+        current = next;
+        component = slash + 1;
+    }
+    return result;
+#elif defined(SYS_openat2)
     const struct open_how how = {
         .flags = (uint64_t)(flags | O_CLOEXEC | O_NOFOLLOW),
         .mode = 0,
@@ -195,10 +232,19 @@ bool rt_hosted_safe_artifact_root_close_v1(int64_t token) {
 }
 
 static int rt_hsa_same_stat(const struct stat* a, const struct stat* b) {
+#if defined(__APPLE__)
+    return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
+        a->st_mode == b->st_mode && a->st_size == b->st_size &&
+        a->st_mtimespec.tv_sec == b->st_mtimespec.tv_sec &&
+        a->st_mtimespec.tv_nsec == b->st_mtimespec.tv_nsec &&
+        a->st_ctimespec.tv_sec == b->st_ctimespec.tv_sec &&
+        a->st_ctimespec.tv_nsec == b->st_ctimespec.tv_nsec;
+#else
     return a->st_dev == b->st_dev && a->st_ino == b->st_ino &&
         a->st_mode == b->st_mode && a->st_size == b->st_size &&
         a->st_mtim.tv_sec == b->st_mtim.tv_sec && a->st_mtim.tv_nsec == b->st_mtim.tv_nsec &&
         a->st_ctim.tv_sec == b->st_ctim.tv_sec && a->st_ctim.tv_nsec == b->st_ctim.tv_nsec;
+#endif
 }
 
 int64_t rt_hosted_safe_artifact_read_v1(int64_t token, const uint8_t* path_bytes,
@@ -270,11 +316,40 @@ static int64_t rt_hsa_publish(RtHsaRootV1* root, char* path,
     int fd = -1;
     int published = 0;
     int64_t status = -1;
+#if defined(__APPLE__)
+    char stage_leaf[64] = {0};
+    int staged = 0;
+#endif
     struct stat identity;
     if (rt_hsa_stat(parent, &identity) != 0 || !S_ISDIR(identity.st_mode) ||
         identity.st_dev != root->device) goto cleanup;
+#if defined(__APPLE__)
+    /* A named staging file is required on Darwin. Only an owner-private
+     * directory can hold it without another uid replacing its name. */
+    if (identity.st_uid != geteuid() || (identity.st_mode & 022) != 0) goto cleanup;
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned int attempt = 0; attempt < 32; ++attempt) {
+        uint8_t nonce[16];
+        arc4random_buf(nonce, sizeof(nonce));
+        memcpy(stage_leaf, ".simple-stage-", 14);
+        for (size_t i = 0; i < sizeof(nonce); ++i) {
+            stage_leaf[14 + i * 2] = hex[nonce[i] >> 4];
+            stage_leaf[15 + i * 2] = hex[nonce[i] & 15];
+        }
+        stage_leaf[46] = 0;
+        fd = rt_hsa_openat(parent, stage_leaf,
+            O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0) { staged = 1; break; }
+        if (errno != EEXIST) break;
+    }
+    if (fd < 0) {
+        if (errno == EOPNOTSUPP || errno == ENOTSUP) status = -3;
+        goto cleanup;
+    }
+#else
     fd = rt_hsa_openat(parent, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) { status = -3; goto cleanup; }
+#endif
     size_t used = 0;
     unsigned int attempts = 0;
     while (used < length) {
@@ -286,13 +361,30 @@ static int64_t rt_hsa_publish(RtHsaRootV1* root, char* path,
     if (rt_hsa_sync(fd, 1) != 0 || rt_hsa_sync(fd, 0) != 0 ||
         rt_hsa_stat(fd, &identity) != 0 || !S_ISREG(identity.st_mode) ||
         identity.st_dev != root->device || identity.st_size != (off_t)length) goto cleanup;
-    /* Link the unnamed inode directly, never through a guessed temporary
-     * pathname or /proc/self/fd. linkat cannot replace any existing leaf. */
-    if ((rt_hsa_fault("linkat", fd) ? -1 : linkat(fd, "", parent, leaf, AT_EMPTY_PATH)) == 0) {
+    /* linkat cannot replace an existing leaf. The Linux inode is unnamed;
+     * Darwin links from the owner-private staged name. */
+#if defined(__APPLE__)
+    int linked = rt_hsa_fault("linkat", fd) ? -1 :
+        linkat(parent, stage_leaf, parent, leaf, 0);
+#else
+    int linked = rt_hsa_fault("linkat", fd) ? -1 :
+        linkat(fd, "", parent, leaf, AT_EMPTY_PATH);
+#endif
+    if (linked == 0) {
         published = 1;
+#if defined(__APPLE__)
+        if (!rt_hsa_fault("unlinkat", parent) &&
+            unlinkat(parent, stage_leaf, 0) == 0) staged = 0;
+        else status = -4;
+        if (staged == 0)
+#endif
         status = rt_hsa_sync(parent, 0) == 0 ? 0 : -4;
     } else if (errno == EEXIST) status = -2;
 cleanup:
+#if defined(__APPLE__)
+    if (staged && (rt_hsa_fault("unlinkat", parent) ||
+        unlinkat(parent, stage_leaf, 0) != 0)) status = published ? -4 : -5;
+#endif
     if (fd >= 0 && rt_hsa_close(fd) != 0) status = published ? -4 : -5;
     if (rt_hsa_close(parent) != 0) status = published ? -4 : -5;
     return status;
