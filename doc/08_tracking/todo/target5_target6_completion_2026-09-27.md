@@ -64,6 +64,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   so appending a new record does not falsely report a rewritten journal; a
   unit spec covers append, pending-event replay, truncation, and bad cursors.
   Qualify this on the current-source runtime before admitting warm refresh.
+- Journal event rows now require the writer's exact `kind`, `path`, and
+  `related` field names, a nonempty path, and a complete record envelope.
+  Malformed rows reject the batch before cursor publication; the cursor spec
+  includes rejected rows and a valid non-filesystem record.
 - Produce and run a current-source test worker for the Git and journal specs.
   The three bounded Stage2 build attempts reached a core-C/GPU link mismatch
   and then missed the required hosted-runtime archive directory; see

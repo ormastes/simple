@@ -221,21 +221,35 @@ fn compiler_inventory_filesystem_events_v1(
     while index < rows:
         val line = lines[index]
         index = index + 1
-        if not line.contains(" kind=fsevent "):
+        val kind_start = line.index_of(" kind=")
+        val refs_start = line.index_of(" refs=")
+        val sha_start = line.index_of(" sha=")
+        val utc_start = line.index_of(" utc=")
+        if not line.starts_with("op=") or kind_start <= 3 or
+                refs_start <= kind_start or sha_start <= refs_start or
+                utc_start <= sha_start or utc_start + " utc=".len() >= line.len():
+            return nil
+        val record_kind = line[kind_start + " kind=".len():refs_start]
+        if record_kind == "":
+            return nil
+        if record_kind != "fsevent":
+            if record_kind != "snapshot" and record_kind != "checkpoint":
+                return nil
             continue
-        val marker = line.index_of(" refs=kind=")
-        if marker < 0:
-            return nil
-        val refs = line[marker + " refs=".len():]
-        val end = refs.index_of(" sha=")
-        if end < 0:
-            return nil
-        val fields = refs[:end].split(",")
+        val fields = line[refs_start + " refs=".len():sha_start].split(",")
         if fields.len() != 3:
             return nil
-        val kind = fields[0].replace("kind=", "")
-        val path = compiler_inventory_decode_v1(fields[1].replace("path=", ""))
-        val related = compiler_inventory_decode_v1(fields[2].replace("related=", ""))
+        if not fields[0].starts_with("kind=") or
+                not fields[1].starts_with("path=") or
+                not fields[2].starts_with("related="):
+            return nil
+        val kind = fields[0].substring(5)
+        val path = compiler_inventory_decode_v1(fields[1].substring(5))
+        val related = compiler_inventory_decode_v1(fields[2].substring(8))
+        if kind == "" or path == "" or path.contains("\n") or
+                path.contains("\r") or related.contains("\n") or
+                related.contains("\r"):
+            return nil
         events = events.push(FsWatchEvent(index, kind, path, related))
     Some(events)
 
