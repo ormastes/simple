@@ -26,9 +26,13 @@ from HIR and validate their own bounded section directory; treating the AOT
 image as a package TLDR would bind unrelated or absent semantic facts.
 The ABI section uses `hir_abi_interface_encoded_v1` so its digest equals the
 existing typed ABI identity. A focused scenario passes those actual bytes to
-the new package export builder and verifies the resulting directory. This is
-still a partial producer; no complete package export SMF may be published until
-the remaining semantic section owners supply their own bytes and receipts.
+the package export builder and verifies the resulting directory. The cold
+draft assembler now also requires the supplied SMF payload bytes, validates
+their complete digest and section directory, and requires the ABI section
+digest to equal the typed-HIR seed. It can no longer publish a graph from a
+bare, caller-asserted SMF digest. This is still a partial producer; no complete
+package export SMF may be published until the remaining semantic section owners
+supply their own bytes and receipts.
 The new payload admission check has not run on a current-source test worker.
 
 The isolated archive reader now validates digest bytes and canonicalizes

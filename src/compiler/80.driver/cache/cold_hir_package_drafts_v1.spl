@@ -5,8 +5,9 @@
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
 use compiler.driver.cache.package_tldr_metadata.{
-    PackageSmfSectionV1, PackageTldrHeaderV1,
-    config_variant_digest_v1, package_tldr_header_validate_v1
+    PackageSmfSectionV1, PackageExportSmfV1, PackageTldrHeaderV1,
+    config_variant_digest_v1, package_export_smf_payload_validate_v1,
+    package_tldr_header_validate_v1
 }
 use compiler.driver.cache.package_module_index_builder.{
     PackageModuleIndexBuildAuthorityV1, PackageModuleIndexDraftV1,
@@ -23,6 +24,7 @@ struct ColdHirPackageArtifactV1:
     package_identity: text
     source_witness_digest: text
     smf_digest: text
+    smf_payload: text
     smf_sections: [PackageSmfSectionV1]
     export_digest: text
     initializer_digest: text
@@ -40,6 +42,9 @@ fn cold_hir_package_drafts_v1(
 ) -> Result<[PackageModuleIndexDraftV1], text>:
     if artifacts.len() == 0:
         return Err("cold-drafts-empty")
+    val variant_digest = config_variant_digest_v1(authority.variant)
+    if variant_digest == "":
+        return Err("cold-drafts-variant-invalid")
     var by_module: Dict<text, i64> = {}
     var reverse: Dict<text, [text]> = {}
     var module_ids: [text] = []
@@ -65,6 +70,22 @@ fn cold_hir_package_drafts_v1(
     for module_identity in canonical_identity_sort_texts(module_ids):
         val artifact = artifacts[by_module[module_identity]]
         val seed = artifact.seed
+        val export_smf = PackageExportSmfV1(
+            1, artifact.package_identity, module_identity,
+            variant_digest,
+            artifact.smf_sections, artifact.smf_digest)
+        val smf_reason = package_export_smf_payload_validate_v1(
+            export_smf, artifact.smf_payload)
+        if smf_reason != "ok":
+            return Err("cold-drafts-smf-{smf_reason}:{module_identity}")
+        var abi_section_found = false
+        for section in artifact.smf_sections:
+            if section.kind == "abi_interface":
+                if section.digest != seed.abi_digest:
+                    return Err("cold-drafts-abi-section-mismatch:{module_identity}")
+                abi_section_found = true
+        if not abi_section_found:
+            return Err("cold-drafts-abi-section-missing:{module_identity}")
         val header = PackageTldrHeaderV1(
             schema_version: 1,
             producer_digest: authority.producer_digest,
@@ -102,8 +123,7 @@ fn cold_hir_package_drafts_v1(
                 artifact.package_identity,
                 artifacts[by_module[imported]].package_identity))
     val groups: [ColdPackageSccGroupV1] = match cold_package_scc_v1(
-            package_ids, package_edges,
-            config_variant_digest_v1(authority.variant)):
+            package_ids, package_edges, variant_digest):
         case Err(reason): return Err("cold-drafts-scc-{reason}")
         case Ok(value): value
     var group_by_package: Dict<text, i64> = {}
