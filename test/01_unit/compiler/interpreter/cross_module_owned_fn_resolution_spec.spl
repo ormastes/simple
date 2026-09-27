@@ -35,6 +35,11 @@ use compiler.core.interpreter.eval_tables.{
     func_import_binding_reset,
     func_resolve_for_caller
 }
+use compiler.core.interpreter.module_loader_core.{
+    module_loader_init, module_mark_loaded, record_module_surface,
+    load_module_selective_with_unbraced_alias, register_deferred_module,
+    try_force_any_deferred_for
+}
 
 val MOD_A: text = "src/fixture/mod_a.spl"
 val MOD_B: text = "src/fixture/mod_b.spl"
@@ -92,6 +97,120 @@ describe "(module path, name)-keyed function resolution":
         func_import_binding_register(MOD_FACADE, "who:forwarded", MOD_A)
         func_import_binding_register(SPEC_FILE, "forwarded:public", MOD_FACADE)
         expect(func_resolve_for_caller(SPEC_FILE, "public")).to_equal(pair.0)
+
+    it "routes a missing complete module through its parent's exported item":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val provider_file = "spec/fixture/ru011_provider.spl"
+        val facade_file = "spec/fixture/ru011_facade.spl"
+        val origin = decl_fn("orig", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(provider_file, "orig", origin)
+        module_mark_loaded("ru011_spec.provider", provider_file, [])
+        record_module_surface(provider_file, [origin])
+        val loaded = load_module_selective_with_unbraced_alias(
+            "ru011_spec.provider.orig",
+            ["ru011_spec.provider.orig:public_orig"], facade_file)
+        expect(loaded).to_equal(1)
+        expect(func_import_binding_lookup(facade_file, "public_orig")).to_equal(provider_file)
+        expect(func_import_binding_lookup(facade_file, "orig")).to_equal("")
+        expect(func_resolve_for_caller(facade_file, "public_orig")).to_equal(origin)
+
+    it "keeps a present complete module ahead of the parent item":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val parent_file = "spec/fixture/ru011_parent.spl"
+        val complete_file = "spec/fixture/ru011_complete.spl"
+        val facade_file = "spec/fixture/ru011_complete_facade.spl"
+        module_mark_loaded("ru011_spec.provider", parent_file, [])
+        module_mark_loaded("ru011_spec.provider.orig", complete_file, [])
+        val loaded = load_module_selective_with_unbraced_alias(
+            "ru011_spec.provider.orig",
+            ["ru011_spec.provider.orig:local"], facade_file)
+        expect(loaded).to_equal(1)
+        expect(func_import_binding_lookup(facade_file, "local")).to_equal(complete_file)
+
+    it "rejects a missing parent item without registering the alias":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val provider_file = "spec/fixture/ru011_missing_provider.spl"
+        val facade_file = "spec/fixture/ru011_missing_facade.spl"
+        val present = decl_fn("present", [], [], 0, [], 0, [], 0)
+        module_mark_loaded("ru011_spec.missing_provider", provider_file, [])
+        record_module_surface(provider_file, [present])
+        val loaded = load_module_selective_with_unbraced_alias(
+            "ru011_spec.missing_provider.absent",
+            ["ru011_spec.missing_provider.absent:local"], facade_file)
+        expect(loaded).to_equal(0)
+        expect(func_import_binding_lookup(facade_file, "local")).to_equal("")
+
+    it "forces a lazy unbraced alias on first use of its local name":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val provider_file = "spec/fixture/ru011_lazy_provider.spl"
+        val caller_file = "spec/fixture/ru011_lazy_caller.spl"
+        val origin = decl_fn("orig", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(provider_file, "orig", origin)
+        module_mark_loaded("ru011_spec.lazy_provider", provider_file, [])
+        record_module_surface(provider_file, [origin])
+        register_deferred_module("ru011_spec.lazy_provider.orig", caller_file,
+            ["ru011_spec.lazy_provider.orig:local"])
+        expect(try_force_any_deferred_for("local", caller_file)).to_equal(1)
+        expect(func_resolve_for_caller(caller_file, "local")).to_equal(origin)
+
+    it "forces only the requesting caller's lazy alias":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val first_file = "spec/fixture/ru011_first_provider.spl"
+        val second_file = "spec/fixture/ru011_second_provider.spl"
+        val first_caller = "spec/fixture/ru011_first_caller.spl"
+        val second_caller = "spec/fixture/ru011_second_caller.spl"
+        val first = decl_fn("first", [], [], 0, [], 0, [], 0)
+        val second = decl_fn("second", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(first_file, "first", first)
+        func_table_register_owned(second_file, "second", second)
+        module_mark_loaded("ru011_spec.first_provider", first_file, [])
+        module_mark_loaded("ru011_spec.second_provider", second_file, [])
+        record_module_surface(first_file, [first])
+        record_module_surface(second_file, [second])
+        register_deferred_module("ru011_spec.first_provider.first", first_caller,
+            ["ru011_spec.first_provider.first:local"])
+        register_deferred_module("ru011_spec.second_provider.second", second_caller,
+            ["ru011_spec.second_provider.second:local"])
+        expect(try_force_any_deferred_for("local", second_caller)).to_equal(1)
+        expect(func_resolve_for_caller(second_caller, "local")).to_equal(second)
+        expect(func_import_binding_lookup(first_caller, "local")).to_equal("")
+
+    it "keeps two callers' deferred aliases for the same module distinct":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val provider_file = "spec/fixture/ru011_shared_provider.spl"
+        val first_caller = "spec/fixture/ru011_shared_first.spl"
+        val second_caller = "spec/fixture/ru011_shared_second.spl"
+        val origin = decl_fn("orig", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(provider_file, "orig", origin)
+        module_mark_loaded("ru011_spec.shared_provider", provider_file, [])
+        record_module_surface(provider_file, [origin])
+        register_deferred_module("ru011_spec.shared_provider.orig", first_caller,
+            ["ru011_spec.shared_provider.orig:first_local"])
+        register_deferred_module("ru011_spec.shared_provider.orig", second_caller,
+            ["ru011_spec.shared_provider.orig:second_local"])
+        expect(try_force_any_deferred_for("second_local", second_caller)).to_equal(1)
+        expect(func_resolve_for_caller(second_caller, "second_local")).to_equal(origin)
+        expect(func_import_binding_lookup(first_caller, "first_local")).to_equal("")
+        expect(try_force_any_deferred_for("first_local", first_caller)).to_equal(1)
+        expect(func_resolve_for_caller(first_caller, "first_local")).to_equal(origin)
 
     it "replaces the source and owner together when a local alias is rebound":
         setup_collision()
