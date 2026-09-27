@@ -28,7 +28,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   confirm the binary no longer retains `rt_string_new_literal`,
   `rt_to_string`, or `rt_literal_intern_table`; then measure paired size,
   startup, and RSS cohorts. The C-entry direct-writer probe is only
-  directional evidence (5,152-byte ELF), not completion evidence.
+  directional evidence (5,152-byte ELF). A same-wrapper, same-root C user
+  object probe is 9,168 bytes versus the historical Simple ELF's 13,944;
+  it still misses the 1.05x C ceiling by 4,061 bytes and is not completion
+  evidence. Review argv and forced runtime roots with exact closure proof.
 
 ## Target 6 — persistent compile index
 
@@ -51,6 +54,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
   the optimize skill and guide. The historical cold-HIR batch result
   (normalized sum 0.181595) is diagnostic only.
+- The historical Stage2 native scheduler probe panicked with
+  `direct-edge-missing:module.000:module.001` on a 64-module chain. Three
+  fixture/check cycles produced the same result. The temporary fixture was
+  removed and the production scheduler was left unchanged; diagnose this
+  under an ABI-matched current-source authority before optimizing scheduling.
 
 Completion requires a `STATUS: PASS` verify report. Stop after three
 verify/fix cycles per feature and retain failing logs under `build/mini_builds/`.

@@ -131,3 +131,30 @@ hello build and paired C cohort remain necessary to assess the 1.05x gate.
 The attempted pure-Simple `check src/compiler` could not run because there is
 no admitted cached self-hosted check worker artifact; the log is alongside
 the probe. Do not mark Target 5 complete from this diagnostic.
+
+## Same-wrapper direct-writer diagnostic
+
+A second probe used the historical strict core-C runtime archive, the same
+`_main_stub.o` and `_init_all.o`, the same five forced runtime roots, and the
+same LLD section-GC link arrangement as the 13,944-byte Simple hello above.
+Only the user object changed: a C `spl_main` calls
+`rt_println_str("hello", 5)`. It prints `hello` and its stripped ELF is
+9,168 bytes (SHA-256
+`17f6b463e68e57590a8521e53e1a1a56c0a2a1b0a8684f442e447613d318cfe8`).
+The historical Simple ELF is 4,776 bytes larger. The probe reduces `.text`
+from 7,660 to 3,316 bytes and `.bss` from 526,433 to 73 virtual bytes;
+neither ELF imports `mmap`. The probe source, object, ELF, and link map are in
+`build/mini_builds/target5_same_wrapper_probe/`.
+
+This controls the entry wrapper and forced roots, unlike the earlier
+5,152-byte C-entry probe. It still uses a C-authored user object, so it is
+directional evidence for the literal-print lowering, not a current-source
+Simple result. Against the same-host 4,864-byte C `puts` control, the
+9,168-byte probe is 1.88x; the 1.05x ceiling is 5,107 bytes, leaving a
+4,061-byte gap even for this probe. Its map still retains argv initialization,
+array helpers, runtime startup/shutdown, `rt_function_not_found`, and
+`rt_string_bytes`. The generated LLVM entry shim unconditionally calls
+`spl_init_args`, which also roots argv storage. Removing that call requires
+an exact closure proof that neither the program nor a startup hook can read
+argv; no such change is admitted here. A current-source Simple artifact and
+matched startup/RSS cohorts remain required.
