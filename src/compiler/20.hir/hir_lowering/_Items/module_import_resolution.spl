@@ -367,6 +367,7 @@ impl HirLowering:
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
+            var fallback_item_name = ""
             # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
             var imported_key = if self.surface_index_for_name(imp.module) >= 0: imp.module else: ""
@@ -430,6 +431,51 @@ impl HirLowering:
                 if fb_key != "" and self.surface_index_for_name(fb_key) >= 0:
                     imported_key = fb_key
                     resolved_module_name = fb_key
+            if imported_key == "" and importer_surface_index >= 0:
+                # The frozen importer owns the full-module versus parent-item
+                # decision. Reuse its selected target and normalized item row
+                # instead of independently guessing from the parser spelling.
+                val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+                if import_idx < importer_surface.import_target_names.len():
+                    val frozen_target = importer_surface.import_target_names[import_idx]
+                    if frozen_target != "" and self.surface_index_for_name(frozen_target) >= 0:
+                        imported_key = frozen_target
+                        resolved_module_name = frozen_target
+            if imported_key == "" and importer_surface_index < 0 and imp.items.len() == 1:
+                # Single-module embedders omit their own frozen surface. Keep
+                # their import behavior aligned with the registry freeze.
+                val item = imp.items[0]
+                if item.has_alias and item.name == imp.module:
+                    val path_parts = imp.module.split(".")
+                    if path_parts.len() > 1:
+                        val member_name = path_parts[path_parts.len() - 1]
+                        var parent_name = ""
+                        var part_index = 0
+                        while part_index < path_parts.len() - 1:
+                            if part_index > 0:
+                                parent_name = parent_name + "."
+                            parent_name = parent_name + path_parts[part_index]
+                            part_index = part_index + 1
+                        var parent_lookup = parent_name
+                        var leading_dots = 0
+                        while leading_dots < imp.module.len() and
+                              imp.module.substring(leading_dots, leading_dots + 1) == ".":
+                            leading_dots = leading_dots + 1
+                        if leading_dots > 0 and leading_dots == parent_name.len() + 1:
+                            parent_lookup = hir_pkg_canonical_module_name(module.name)
+                            var dot_index = 0
+                            while dot_index < leading_dots:
+                                val package_parts = parent_lookup.split(".")
+                                parent_lookup = if package_parts.len() > 1:
+                                    package_parts[0:package_parts.len() - 1].join(".")
+                                else: ""
+                                dot_index = dot_index + 1
+                        if parent_lookup != "" and member_name != "":
+                            val parent_key = self.resolve_module_key_relative(parent_lookup, module.name)
+                            if parent_key != "" and self.surface_index_for_name(parent_key) >= 0:
+                                imported_key = parent_key
+                                resolved_module_name = parent_key
+                                fallback_item_name = member_name
             if imported_key != "":
                 val imported_index = self.surface_index_for_name(imported_key)
                 if imported_index < 0:
@@ -455,11 +501,58 @@ impl HirLowering:
                     item_has_alias = importer_surface.import_item_has_alias
                 else:
                     for import_item in imp.items:
-                        item_names = item_names.push(import_item.name)
+                        val projected_item_name = if fallback_item_name != "":
+                            fallback_item_name
+                        else: import_item.name
+                        item_names = item_names.push(projected_item_name)
                         item_aliases = item_aliases.push(import_item.alias)
                         item_has_alias = item_has_alias.push(import_item.has_alias)
                     item_end = item_names.len()
-                if item_start == item_end:
+                # `use full.module as local` is encoded by the parser as one
+                # aliased import item whose source equals the complete module
+                # path. Once that module resolves, the item is a namespace
+                # alias, not a request for an exported item literally named
+                # `full.module`. Keep its defining module identity for
+                # qualified calls such as `local.function()`.
+                var is_complete_module_alias = false
+                if item_end == item_start + 1:
+                    is_complete_module_alias = item_has_alias[item_start] and
+                        item_names[item_start] == imp.module
+                if is_complete_module_alias:
+                    val module_alias = item_aliases[item_start]
+                    if module_alias != "" and not self.symbols.lookup_or_invalid(module_alias).is_valid():
+                        self.symbols.define(module_alias, SymbolKind.Module, nil,
+                            imp.span, Visibility.Private, false,
+                            Some(imported_surface.module_name))
+                    # A namespace alias also needs qualified projections of
+                    # the target's declarations. Registering a glob here
+                    # would leak bare names and let unrelated imports win.
+                    if module_alias != "":
+                        for name in imported_surface.callable_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.constant_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.composite_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.enum_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.trait_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.type_alias_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                elif item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`. Its owner

@@ -5,7 +5,7 @@ use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_can
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
 use std.common.crypto.sha256.{sha256_text}
 
-val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v1"
+val NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1: text = "hir-module-surface-resolver-v2"
 
 fn module_surface_stable_resolution_generation_v1(registry: ModuleSurfacesByName) -> text:
     var rows: [text] = []
@@ -444,9 +444,68 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         var import_index = 0
         while import_index < surface.imports.len():
             val import_decl = surface.imports[import_index]
-            val resolution_trace = module_surface_import_resolution_trace_with_generation_v1(
+            val item_start = surface.import_item_offsets[import_index]
+            val item_end = surface.import_item_offsets[import_index + 1]
+            if (item_start < 0 or item_start > item_end or
+                item_end > surface.import_item_names.len()):
+                return Err("pre-freeze import item range is invalid: surface={surface_index} import={import_index}")
+            var resolution_trace = module_surface_import_resolution_trace_with_generation_v1(
                 registry, surface, import_decl.module, stable_resolution_generation)
-            val target_name = resolution_trace.selected
+            var target_name = resolution_trace.selected
+            var fallback_item_name = ""
+            # The parser encodes `use a.b.item as local` as an import of
+            # a.b.item with one item named a.b.item. A complete module wins;
+            # only a full-path miss may select the parent module's item.
+            if target_name == "" and item_end == item_start + 1 and
+               surface.import_item_has_alias[item_start] and
+               surface.import_item_names[item_start] == import_decl.module:
+                val path_parts = import_decl.module.split(".")
+                if path_parts.len() > 1:
+                    val member_name = path_parts[path_parts.len() - 1]
+                    var parent_name = ""
+                    var part_index = 0
+                    while part_index < path_parts.len() - 1:
+                        if part_index > 0:
+                            parent_name = parent_name + "."
+                        parent_name = parent_name + path_parts[part_index]
+                        part_index = part_index + 1
+                    # A dot-only parent names the importing package itself
+                    # (or an ancestor), rather than an empty module path.
+                    var parent_lookup = parent_name
+                    var leading_dots = 0
+                    while leading_dots < import_decl.module.len() and
+                          import_decl.module.substring(leading_dots, leading_dots + 1) == ".":
+                        leading_dots = leading_dots + 1
+                    if leading_dots > 0 and leading_dots == parent_name.len() + 1:
+                        parent_lookup = surface.canonical_name
+                        var dot_index = 0
+                        while dot_index < leading_dots:
+                            parent_lookup = module_surface_package_name_from_name(parent_lookup)
+                            dot_index = dot_index + 1
+                    if parent_lookup != "" and member_name != "":
+                        val parent_trace = module_surface_import_resolution_trace_with_generation_v1(
+                            registry, surface, parent_lookup, stable_resolution_generation)
+                        if parent_trace.selected != "":
+                            target_name = parent_trace.selected
+                            fallback_item_name = member_name
+                            # Keep full-path misses before the parent probes:
+                            # a newly admitted complete module must invalidate
+                            # this selected item route on the next freeze.
+                            var probes = resolution_trace.probes
+                            var seen: [text] = []
+                            for probe in probes:
+                                seen = seen.push(probe.path)
+                            for probe in parent_trace.probes:
+                                if not seen.contains(probe.path):
+                                    probes = probes.push(probe)
+                                    seen = seen.push(probe.path)
+                            resolution_trace = NativeResolutionTraceV1(
+                                consumer_module_id: resolution_trace.consumer_module_id,
+                                import_id: resolution_trace.import_id,
+                                probes: probes, selected: target_name,
+                                selected_count: 1,
+                                dir_generation: resolution_trace.dir_generation,
+                                resolver_version: NATIVE_HIR_IMPORT_RESOLVER_VERSION_V1)
             var target_index = -1
             if target_name != "":
                 target_index = module_surface_registry_index(registry, target_name)
@@ -454,15 +513,12 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
             import_target_names = import_target_names.push(target_name)
             import_resolution_traces = import_resolution_traces.push(
                 resolution_trace)
-            val item_start = surface.import_item_offsets[import_index]
-            val item_end = surface.import_item_offsets[import_index + 1]
-            if (item_start < 0 or item_start > item_end or
-                item_end > surface.import_item_names.len()):
-                return Err("pre-freeze import item range is invalid: surface={surface_index} import={import_index}")
             var item_index = item_start
             while item_index < item_end:
-                import_item_names = import_item_names.push(
-                    surface.import_item_names[item_index])
+                val projected_item_name = if fallback_item_name != "":
+                    fallback_item_name
+                else: surface.import_item_names[item_index]
+                import_item_names = import_item_names.push(projected_item_name)
                 import_item_aliases = import_item_aliases.push(
                     surface.import_item_aliases[item_index])
                 import_item_has_alias = import_item_has_alias.push(
