@@ -1,0 +1,118 @@
+# Pinned source loader for the controlled 16x16 rectangle scene.
+# This prepares a drawing value only; it does not submit or certify GPU work.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    DrawIrCommand, DrawIrComposition, DRAW_IR_BACKEND_GPU,
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
+}
+
+val _CONTROLLED_RECT_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn"
+val _CONTROLLED_RECT_SHA256: text =
+    "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3"
+
+fn _controlled_rect_decimal(value: text) -> Result<i32, text>:
+    if value == "":
+        return Err("empty-decimal")
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57:
+            return Err("invalid-decimal")
+        index = index + 1
+    val number = value.to_i64()
+    if number < 0 or number > 2147483647:
+        return Err("decimal-out-of-range")
+    Ok(number as i32)
+
+fn _controlled_rect_color(value: text) -> Result<u32, text>:
+    if value.len() != 10 or not value.starts_with("0x"):
+        return Err("invalid-argb-color")
+    var packed = 0i64
+    var index = 2
+    while index < 10:
+        val code = value.char_code_at(index)
+        var digit = -1i64
+        if code >= 48 and code <= 57:
+            digit = code - 48
+        elif code >= 97 and code <= 102:
+            digit = code - 87
+        if digit < 0:
+            return Err("invalid-argb-color")
+        packed = (packed << 4) | digit
+        index = index + 1
+    if ((packed >> 24) & 255) != 255:
+        return Err("nonopaque-argb-color")
+    Ok(packed.to_u32())
+
+fn _controlled_rect_command(row: text, index: i32, width: i32,
+    height: i32) -> Result<DrawIrCommand, text>:
+    val line = row.trim()
+    if not line.starts_with("- rect: [") or not line.ends_with("]"):
+        return Err("invalid-rectangle-row")
+    val fields = line[9:line.len() - 1].split(",")
+    if fields.len() != 5:
+        return Err("invalid-rectangle-field-count")
+    val x = _controlled_rect_decimal(fields[0].trim())?
+    val y = _controlled_rect_decimal(fields[1].trim())?
+    val rect_width = _controlled_rect_decimal(fields[2].trim())?
+    val rect_height = _controlled_rect_decimal(fields[3].trim())?
+    val color = _controlled_rect_color(fields[4].trim())?
+    if rect_width <= 0 or rect_height <= 0 or
+        x.to_i64() + rect_width.to_i64() > width.to_i64() or
+        y.to_i64() + rect_height.to_i64() > height.to_i64():
+        return Err("rectangle-outside-surface")
+    Ok(draw_ir_rect("rect-{index}", x, y, rect_width, rect_height, color))
+
+pub fn simple_2d_controlled_rect_scene_from_source(
+    source: text
+) -> Result<DrawIrComposition, text>:
+    if sha256_text(source) != _CONTROLLED_RECT_SHA256:
+        return Err("controlled-rect-source-sha256-mismatch")
+    val rows = source.split("\n")
+    if rows.len() < 12:
+        return Err("controlled-rect-source-short")
+    if rows[0] != "schema: simple-2d-controlled-rect/v1" or
+        rows[1] != "fixture_id: controlled-opaque-rect-v1" or
+        rows[3] != "origin: top-left" or
+        rows[4] != "source_color_encoding: ARGB8888" or
+        rows[5] != "color_primaries: srgb" or
+        rows[6] != "transfer_function: srgb" or
+        rows[7] != "alpha_mode: opaque" or
+        rows[8] != "coverage: non-antialiased" or
+        rows[9] != "commands:":
+        return Err("controlled-rect-source-metadata")
+    if not rows[2].starts_with("surface: "):
+        return Err("controlled-rect-surface")
+    val surface_row = rows[2]
+    val extent = surface_row[9:].split("x")
+    if extent.len() != 2:
+        return Err("controlled-rect-surface")
+    val width = _controlled_rect_decimal(extent[0])?
+    val height = _controlled_rect_decimal(extent[1])?
+    if width != 16 or height != 16:
+        return Err("controlled-rect-surface")
+    var tail = 12
+    while tail < rows.len():
+        if rows[tail] != "":
+            return Err("controlled-rect-extra-source")
+        tail = tail + 1
+    val clear = _controlled_rect_command(rows[10], 0, width, height)?
+    val foreground = _controlled_rect_command(rows[11], 1, width, height)?
+    if clear.x != 0 or clear.y != 0 or
+        clear.width != width or clear.height != height:
+        return Err("controlled-rect-first-command-not-clear")
+    val batch = draw_ir_batch("controlled-opaque-rect-v1", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("controlled-rect-surface", "controlled-rect",
+            0, 0, width, height, 0, 1000, false), [clear, foreground])
+    Ok(draw_ir_composition("controlled-opaque-rect-v1",
+        "controlled-rectangle-only", DRAW_IR_BACKEND_GPU, [batch]))
+
+# Read and authenticate the exact pinned fixture before building render data.
+pub fn simple_2d_controlled_rect_fixture_scene() -> Result<DrawIrComposition, text>:
+    if not file_exists(_CONTROLLED_RECT_PATH):
+        return Err("controlled-rect-source-missing")
+    simple_2d_controlled_rect_scene_from_source(read_file(_CONTROLLED_RECT_PATH))
