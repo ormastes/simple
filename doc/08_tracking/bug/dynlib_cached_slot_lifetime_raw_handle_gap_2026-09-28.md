@@ -26,6 +26,12 @@ compilation and lifecycle tests before promotion. The GUI window/event-loop
 objects remain main-thread resources; the mapping lease alone does not make
 concurrent GUI object destruction safe.
 
+The Chromium bindings also own provider session objects separately from the
+library mapping. A mapping lease keeps function code loaded, but it does not
+stop `chromium_oracle_release` or `chrome_render_release` from destroying a
+session while another retained handle uses it. Session teardown needs its own
+drain/refusal rule before concurrent release can be claimed safe.
+
 The candidate's owner takes a mutex on every cached-slot call. The selected
 environment variant NFR-003 forbids a lifecycle lock in dense provider batch
 dispatch and limits its overhead to 2% against a direct reference batch call.
