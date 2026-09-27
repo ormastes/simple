@@ -1,8 +1,8 @@
 # SCV warm inventory can reuse a stale snapshot after untracked source deletion
 
-Status: OPEN — source call-chain finding; current-source runtime reproduction pending.
+Status: IMPLEMENTED, UNVERIFIED — current-source runtime reproduction pending.
 
-## Failure path
+## Pre-fix failure path
 
 1. A cold refresh admits an untracked `src/example.spl` through Git
    `ls-files --others` and publishes an inventory and compile snapshot.
@@ -31,6 +31,17 @@ change, either emit exact deletion/create events from an immutable prior path
 list or fail closed with an explicit cold-rebuild action. The cursor must bind
 the source-root scope so a `src` request and a `src`+`test` request do not
 cross-admit each other's membership. Migrate old cursors by cold rebuild.
+
+The isolated source now publishes `simple-compile-event-cursor-v2` with
+`untracked_src_digest` and `untracked_test_digest` in the same atomic CURRENT
+record as the inventory digest. A warm request compares the digest for each
+requested scope and fails with `untracked-membership-changed` when it differs;
+an old v1 cursor requires explicit cold rebuild. This is a fail-closed
+implementation, not an accepted fix until the integration and performance
+cohorts pass on a current-source worker. It reuses the existing warm
+`ls-files --others` listing, which may still traverse source roots; Target 6's
+zero-scan hot-path gate remains open until an admitted event-maintained
+membership source replaces that traversal.
 
 Do not add a per-request stat/read of every inventory source as a shortcut:
 that would hide a full warm source traversal and miss Target 6's latency/RSS

@@ -87,9 +87,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   cold rebuild complete.
 - Close the untracked-deletion authority gap before allowing warm snapshot
   reuse: `doc/08_tracking/bug/scv_untracked_delete_reuses_stale_snapshot_2026-09-27.md`.
-  The current cursor lacks prior untracked membership, so a deleted untracked
-  source can leave the inventory digest unchanged. Add scope-bound membership
-  admission and the disposable-Git deletion case without a warm full-tree scan.
+  The isolated cursor now binds `src` and `test` untracked membership digests
+  and refuses warm reuse after a membership change; the disposable-Git
+  integration case includes untracked deletion. Qualify current-source
+  behavior, old-cursor migration, and warm p95/RSS before closing this bug.
+  The existing warm `ls-files --others` traversal remains a separate Target 6
+  zero-scan cutover gap.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in

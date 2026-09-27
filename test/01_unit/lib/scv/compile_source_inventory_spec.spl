@@ -143,6 +143,34 @@ describe "event-maintained compile source inventory":
             cache_root, first_pointer).digest).to_equal(first_digest)
         dir_remove(cache_root, true)
 
+    it "binds both untracked scopes in the atomic cursor record":
+        val cache_root = "build/test-artifacts/scv-membership-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val src_digest = inventory_digest("src-membership")
+        val test_digest = inventory_digest("test-membership")
+        val (missing_digest, missing_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, empty_inventory(),
+            "0123456789abcdef0123456789abcdef01234567", 0,
+            inventory_digest(""), inventory_digest(""),
+            src_digest, "")
+        expect(missing_digest).to_equal("")
+        expect(missing_reason).to_equal("publish-untracked-cursor-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val (digest, reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, empty_inventory(),
+            "0123456789abcdef0123456789abcdef01234567", 0,
+            inventory_digest(""), inventory_digest(""),
+            src_digest, test_digest)
+        expect(reason).to_equal("ok")
+        expect(digest != "").to_equal(true)
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(pointer).to_contain("simple-compile-event-cursor-v2")
+        expect(pointer).to_contain("untracked_src_digest={src_digest}")
+        expect(pointer).to_contain("untracked_test_digest={test_digest}")
+        expect(pointer.len() < 768).to_equal(true)
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(true)
+        dir_remove(cache_root, true)
+
     it "applies Git and filesystem events without source discovery":
         val created = compile_source_inventory_apply_event_v1(
             empty_inventory(), inventory_event(
