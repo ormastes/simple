@@ -173,6 +173,20 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
     # unit.length.km → src/unit/simple-lang/length/km.spl (unit-system-consolidation)
 
     val current_dir = _sffi_path_dirname(current_file)
+    # Parser-normalized relative imports retain a leading dot. Resolve the
+    # stripped path from the nearest ancestor of the importing file: `.types`
+    # finds a sibling, while `.string_core` from crypto/types.spl climbs one
+    # package level to common/string_core.spl. Never join the leading slash to
+    # the filesystem root.
+    if module_name.starts_with("."):
+        var relative_name = module_name
+        while relative_name.starts_with("."):
+            relative_name = relative_name[1:relative_name.len()]
+        if relative_name != "":
+            val relative_import = relative_name.split(".").join("/") + ".spl"
+            val relative_resolved = _resolve_project_relative_path(current_dir, relative_import)
+            if relative_resolved != "":
+                return relative_resolved
     val type_relative_path = _normalize_type_relative_path(module_name)
     if type_relative_path != "":
         val type_path = _resolve_project_relative_path(current_dir, type_relative_path)
@@ -196,6 +210,17 @@ fn _resolve_module_path_uncached(module_name: text, current_file: text) -> text:
 
     # Build relative path with / separator
     var relative_path = path_parts.join("/") + ".spl"
+
+    # Bare library-internal imports are rooted at the nearest source root of
+    # the importing family. For example, from
+    # `.../nogc_sync_mut/src/testing/mock/prevention.spl`,
+    # `testing.mock.builder` resolves to the sibling source tree's
+    # `src/testing/mock/builder.spl`, not the repository root.
+    val is_global_namespace = relative_path.starts_with("std/") or relative_path.starts_with("lib/") or relative_path.starts_with("compiler/") or relative_path.starts_with("app/") or relative_path.starts_with("unit/")
+    if not is_global_namespace:
+        val family_relative = _resolve_project_relative_path(current_dir, relative_path)
+        if family_relative != "":
+            return family_relative
 
     # Rewrite std/ → lib/ (std is a package alias, real code is in lib/)
     if relative_path.starts_with("std/"):
