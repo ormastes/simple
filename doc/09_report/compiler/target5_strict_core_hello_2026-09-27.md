@@ -158,3 +158,26 @@ array helpers, runtime startup/shutdown, `rt_function_not_found`, and
 an exact closure proof that neither the program nor a startup hook can read
 argv; no such change is admitted here. A current-source Simple artifact and
 matched startup/RSS cohorts remain required.
+
+## Forced-root isolation
+
+Using the same C user object, historical entry wrapper, core-C archive, LLD,
+section GC, ICF, and strip mode, a diagnostic link without the historical
+builder's five forced roots prints `hello` and measures **6,584 bytes**.
+Adding only `__simple_runtime_init` and `__simple_runtime_shutdown` as explicit
+roots yields the same 6,584 bytes. The wrapper's `rt_set_args` reference
+already extracts the runtime member that provides those functions. Relative to
+the 9,168-byte five-root probe, the unnecessary `rt_function_not_found` and
+`rt_string_bytes` roots therefore account for **2,584 bytes** in this fixture.
+The outputs are retained as `direct_print_no_forced_roots` and
+`direct_print_required_roots` beside the earlier probe.
+
+The current pure-Simple Stage4 link path derives runtime requests from final
+object undefined symbols and does not install the historical five-root list;
+its `retained_symbols` list covers explicitly selected external providers.
+Therefore deleting five roots from the current linker would not reproduce
+this saving. The 6,584-byte diagnostic is still **1,477 bytes** above the
+5,107-byte 1.05x C ceiling. It uses the historical wrapper and archive, not a
+current-source Simple program, and does not establish a Target 5 pass. The
+remaining work is a current-source Stage4 hello link map and an exact
+argv/startup/runtime closure analysis before changing their retention policy.
