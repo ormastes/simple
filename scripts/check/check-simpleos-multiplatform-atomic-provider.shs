@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
+host_cc=${CC:-clang}
+cross_cc=${CROSS_CC:-clang}
+if [ -z "${CROSS_CC:-}" ] && [ -x /opt/homebrew/opt/llvm/bin/clang ]; then
+    cross_cc=/opt/homebrew/opt/llvm/bin/clang
+fi
+probe="$repo_root/test/01_unit/os/libc/simpleos_baremetal_atomic_shared_test.c"
+
+"$host_cc" -O2 -pthread "$probe" -o "$work_dir/shared-host"
+"$work_dir/shared-host"
+
+"$cross_cc" --target=aarch64-unknown-none-elf \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -c "$probe" -o "$work_dir/shared-aarch64.o"
+"$cross_cc" --target=aarch64-unknown-none-elf \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -S "$probe" -o "$work_dir/shared-aarch64.s"
+grep -Eq 'ldaxr|casal|ldadd' "$work_dir/shared-aarch64.s"
+grep -Eq 'stlxr|casal|ldadd' "$work_dir/shared-aarch64.s"
+
+"$cross_cc" --target=riscv64-unknown-none-elf -march=rv64gc -mabi=lp64d \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -c "$probe" -o "$work_dir/shared-rv64.o"
+"$cross_cc" --target=riscv64-unknown-none-elf -march=rv64gc -mabi=lp64d \
+    -DSIMPLEOS_FREESTANDING_ATOMIC_PROBE -O2 -ffreestanding -nostdlib \
+    -S "$probe" -o "$work_dir/shared-rv64.s"
+grep -Eq 'amoadd\.d|lr\.d' "$work_dir/shared-rv64.s"
+grep -Eq 'sc\.d|amoadd\.d' "$work_dir/shared-rv64.s"
+printf 'PASS: shared AArch64/RV64 atomic ABI, contention, and target instructions\n'
