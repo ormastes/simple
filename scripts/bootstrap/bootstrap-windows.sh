@@ -36,6 +36,16 @@ git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
   echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
   exit 1
 }
+# Settle the fresh gitlink's index. A just-cloned checkout has unsettled stat
+# data, so the Stage 3 consumer's hermetic `git status` (GIT_CONFIG_NOSYSTEM=1
+# hides Git for Windows' system core.autocrlf=true; GIT_OPTIONAL_LOCKS=0 never
+# writes a refreshed index) compares content, sees every CRLF file as
+# modified (334 entries), and fails preflight with "git.gitlink-dirty". One
+# ordinary status refreshes the stat cache; real content changes still report.
+# The sleep clears Git's racy-clean window: a status in the checkout's own
+# second leaves the entries unverified (measured: 289 dirty without it, 0 with).
+sleep 2
+git -C "${repo_root}/.spipe/spipe" status --porcelain >/dev/null 2>&1 || true
 
 # Materialize git symlinks as NTFS junctions/hardlinks before anything else
 # reads the tree. A checkout done by a Windows session that lacks a
