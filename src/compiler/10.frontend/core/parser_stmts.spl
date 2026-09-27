@@ -20,7 +20,7 @@ use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET}
-use compiler.core.tokens.{TOK_RBRACKET, TOK_RBRACE}
+use compiler.core.tokens.{TOK_RBRACKET, TOK_LBRACE, TOK_RBRACE, TOK_ERROR}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW, TOK_ARROW}
 use compiler.core.tokens.{TOK_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
@@ -77,7 +77,7 @@ use compiler.core.types.{TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, parser_error_count}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -97,6 +97,45 @@ fn parser_stmt_trace_enabled() -> bool:
 
 fn parser_stmt_trace_line_enabled() -> bool:
     parser_stmt_trace_enabled() and par_line_get() >= 60
+
+# Probe only token shape before the effectful parse_expr() used by the scoped
+# resource form. A rejected soft keyword must never allocate AST/type nodes or
+# record diagnostics which the ordinary identifier parse would inherit.
+fn parser_stmt_with_header_ahead() -> bool:
+    val snap = lex_snapshot_save()
+    val (tok_nums, tok_text) = parser_tok_save()
+    parser_advance()  # skip the contextual `with`
+    var depth: i64 = 0
+    var prior: i64 = -1
+    var before_prior: i64 = -1
+    var candidate = false
+    var scanned: i64 = 0
+    val scan_limit = lex_source_len() + 1
+    while scanned <= scan_limit:
+        val kind = par_kind_get()
+        if kind == TOK_EOF or kind == TOK_ERROR:
+            break
+        if depth == 0:
+            if kind == TOK_COLON:
+                if prior == TOK_IDENT and before_prior == TOK_KW_AS:
+                    candidate = true
+                    break
+            if kind == TOK_NEWLINE or kind == TOK_DEDENT or kind == TOK_SEMICOLON:
+                break
+        if kind == TOK_LPAREN or kind == TOK_LBRACKET or kind == TOK_LBRACE:
+            depth = depth + 1
+        elif kind == TOK_RPAREN or kind == TOK_RBRACKET or kind == TOK_RBRACE:
+            if depth == 0:
+                break
+            depth = depth - 1
+        if depth == 0:
+            before_prior = prior
+            prior = kind
+        parser_advance()
+        scanned = scanned + 1
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(tok_nums, tok_text)
+    candidate
 
 fn parse_optional_rationale_args() -> text:
     var msg = ""
@@ -895,12 +934,9 @@ fn parse_statement() -> i64:
         # therefore never compete for the same token-stream position -- this
         # is the same positional-disambiguation technique WP-A used for
         # `resource` (soft keyword, no new reserved token). If what follows
-        # `with` does not match `EXPR as NAME:`, backtrack and fall through
-        # to ordinary identifier-expression parsing so `with` stays usable as
-        # a plain identifier everywhere else.
-        if ident_text == "with":
-            val with_snap = lex_snapshot_save()
-            val (with_tok_nums, with_tok_text) = parser_tok_save()
+        # `with` does not have a token-shape `EXPR as NAME:` header, leave
+        # the token stream untouched for ordinary identifier parsing.
+        if ident_text == "with" and parser_stmt_with_header_ahead():
             parser_advance()  # consume 'with'
             # `as` is ALSO the cast operator (parser_expr.spl's parse_unary /
             # parse_binary_from), applied WITHIN ordinary expression parsing
@@ -914,6 +950,7 @@ fn parse_statement() -> i64:
             # very next token being ':' (so a genuine cast STATEMENT, `x as
             # SomeType` with no with-block colon following, is untouched and
             # keeps its pre-existing meaning/error behavior unchanged).
+            val with_error_count = parser_error_count()
             val with_parsed = parse_expr()
             var with_ok = false
             var with_acquire = with_parsed
@@ -954,11 +991,26 @@ fn parse_statement() -> i64:
                 val with_close_call = expr_method_call(expr_ident(with_name, 0), "close", with_close_args, 0)
                 with_stmts.push(stmt_expr_stmt(with_close_call, 0))
                 val with_block_expr = expr_block(with_stmts, -1, 0)
-                lex_snapshot_commit(with_snap)
                 return stmt_expr_stmt(with_block_expr, 0)
-            # Not `with EXPR as NAME:` -- backtrack, `with` is a plain ident.
-            lex_snapshot_rollback(with_snap)
-            parser_tok_restore(with_tok_nums, with_tok_text)
+            # The header had the scoped-resource token shape, so this parse
+            # path owns its nodes and diagnostics. Do not reparse it as a plain
+            # identifier expression and leave speculative effects behind.
+            if parser_error_count() == with_error_count:
+                parser_error("invalid scoped with resource header")
+            # The token probe found a colon on this statement line. Consume
+            # the rest of this malformed header and keep its body attached to
+            # an error-only block, so the enclosing parse does not interpret
+            # `as NAME:` as a second statement or orphan parsed body nodes.
+            var with_error_stmts: [i64] = [stmt_expr_stmt(with_parsed, 0)]
+            while par_kind_get() != TOK_COLON and par_kind_get() != TOK_NEWLINE and
+                par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+                parser_advance()
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                val with_error_body = parse_block()
+                for with_error_stmt in with_error_body:
+                    with_error_stmts.push(with_error_stmt)
+            return stmt_expr_stmt(expr_block(with_error_stmts, -1, 0), 0)
 
     # `me NAME(...) [-> T]: body` in statement position (a class's methods
     # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar
