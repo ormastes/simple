@@ -1,9 +1,11 @@
 use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.pe_image_writer.{
-    PeImageSection, PE_AMD64_IMAGE_BASE, pe_align_up, pe_write_amd64_console}
+    PeImageSection, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE,
+    pe_align_up, pe_write_amd64_console, pe_write_arm64_console, pe_write_console}
 use compiler.backend.linker.pe_inspect.{
-    IMAGE_FILE_MACHINE_AMD64, IMAGE_OPTIONAL_MAGIC_PE32_PLUS, pe_inspect}
+    IMAGE_FILE_MACHINE_AMD64, IMAGE_FILE_MACHINE_ARM64,
+    IMAGE_OPTIONAL_MAGIC_PE32_PLUS, pe_inspect}
 
 fn _tiny_text_section() -> PeImageSection:
     PeImageSection(name: ".text", virtual_address: 0x1000, virtual_size: 1,
@@ -35,6 +37,20 @@ describe "internal PE32+ image writer":
         expect(image.sections[0].name).to_equal(".text")
         expect(image.sections[0].raw_pointer).to_equal(0x200)
         expect(_u16_at(bytes, 0xde)).to_equal(0x8100)
+
+    it "emits a parseable deterministic ARM64 console image":
+        val written = pe_write_arm64_console([_tiny_text_section()], 0x1000)
+        expect(written.is_ok()).to_equal(true)
+        val image = pe_inspect(written.unwrap()).unwrap()
+        expect(image.header.machine).to_equal(IMAGE_FILE_MACHINE_ARM64)
+        expect(image.header.optional_magic).to_equal(IMAGE_OPTIONAL_MAGIC_PE32_PLUS)
+        expect(image.header.entry_point_rva).to_equal(0x1000)
+        expect(image.header.image_base).to_equal(PE_ARM64_IMAGE_BASE)
+
+    it "rejects unsupported PE32+ machines":
+        val written = pe_write_console([_tiny_text_section()], 0x1000, 0x14c, 0x400000)
+        expect(written.is_err()).to_equal(true)
+        expect(written.unwrap_err()).to_contain("unsupported PE32+ machine")
 
     it "advertises ASLR only when a base-relocation directory exists":
         val reloc = PeImageSection(name: ".reloc", virtual_address: 0x2000,

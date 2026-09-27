@@ -1,6 +1,9 @@
 # Deterministic PE32+ image writer used by the pure-Simple Windows linker.
 
 val PE_AMD64_IMAGE_BASE: i64 = 0x140000000
+val PE_ARM64_IMAGE_BASE: i64 = 0x140000000
+val PE_MACHINE_AMD64: i64 = 0x8664
+val PE_MACHINE_ARM64: i64 = 0xaa64
 val PE_SECTION_ALIGNMENT: i64 = 0x1000
 val PE_FILE_ALIGNMENT: i64 = 0x200
 val PE_SUBSYSTEM_CONSOLE: i64 = 3
@@ -110,8 +113,11 @@ fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
             return (section.virtual_address, size)
     (0, 0)
 
-fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
-    """Emit a deterministic AMD64 PE32+ console executable from planned sections."""
+fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 or ARM64 PE32+ console executable."""
+    if machine != PE_MACHINE_AMD64 and machine != PE_MACHINE_ARM64:
+        return Err("unsupported PE32+ machine {machine}")
     val valid = _pe_validate_sections(sections, entry_rva)
     if valid.is_err(): return Err(valid.unwrap_err())
     val pe_offset: i64 = 0x80
@@ -156,7 +162,7 @@ fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
     output = _pe_pad_to(output, pe_offset).unwrap()
     output = _pe_put_u32(output, 0x00004550)
 
-    output = _pe_put_u16(output, 0x8664)
+    output = _pe_put_u16(output, machine)
     output = _pe_put_u16(output, sections.len())
     output = _pe_put_u32(output, 0)
     output = _pe_put_u32(output, 0)
@@ -172,7 +178,7 @@ fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
     output = _pe_put_u32(output, size_of_uninitialized_data)
     output = _pe_put_u32(output, entry_rva)
     output = _pe_put_u32(output, base_of_code)
-    output = _pe_put_u64(output, PE_AMD64_IMAGE_BASE)
+    output = _pe_put_u64(output, image_base)
     output = _pe_put_u32(output, PE_SECTION_ALIGNMENT)
     output = _pe_put_u32(output, PE_FILE_ALIGNMENT)
     output = _pe_put_u16(output, 6)
@@ -229,6 +235,15 @@ fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
         section_index = section_index + 1
     Ok(output)
 
+fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 PE32+ console executable."""
+    pe_write_console(sections, entry_rva, PE_MACHINE_AMD64, PE_AMD64_IMAGE_BASE)
+
+fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
+    """Emit a deterministic ARM64 PE32+ console executable."""
+    pe_write_console(sections, entry_rva, PE_MACHINE_ARM64, PE_ARM64_IMAGE_BASE)
+
 export PeImageSection
-export PE_AMD64_IMAGE_BASE, PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_CONSOLE
-export pe_align_up, pe_write_amd64_console
+export PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_MACHINE_AMD64, PE_MACHINE_ARM64
+export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_CONSOLE
+export pe_align_up, pe_write_console, pe_write_amd64_console, pe_write_arm64_console
