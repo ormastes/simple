@@ -282,6 +282,10 @@ extent rather than the undefined reference row's zero size, also checked against
 The SimpleOS boot linker now applies the same winning-definition rule instead
 of accidentally encoding the symbol address for these already-classified
 relocations.
+Hosted ELF and SimpleOS boot relocation collection now share explicit patch
+width/range validation across x86-64, ARM32, AArch64, and RISC-V widths. Patches
+that cross an input-section boundary and boot relocations with an invalid
+symbol-table index fail closed before mutation.
 
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 

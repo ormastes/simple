@@ -20,7 +20,7 @@ use compiler.backend.linker.reloc_engine.{
 
     RelocArch, RelocTarget, RelocResult,
     reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv,
-    reloc_patch_bytes, reloc_arch_from_machine,
+    reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid, reloc_arch_from_machine,
     patch_u32_le, patch_u64_le, read_u16_le, read_u32_le,
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64,
     R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_PLT32,
@@ -113,6 +113,31 @@ describe "reloc_engine - byte patch helpers":
         val written = patch_u32_le(bytes, 0, 0xDEADBEEF)
         val read_back = read_u32_le(written, 0)
         expect(read_back).to_equal(0xDEADBEEF)
+
+describe "reloc_engine - patch extent contract":
+    it "reports architecture-specific relocation patch widths":
+        expect(reloc_patch_width(RelocArch.X86_64, R_X86_64_NONE)).to_equal(0)
+        expect(reloc_patch_width(RelocArch.X86_64, R_X86_64_8)).to_equal(1)
+        expect(reloc_patch_width(RelocArch.X86_64, R_X86_64_16)).to_equal(2)
+        expect(reloc_patch_width(RelocArch.X86_64, R_X86_64_PC32)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.X86_64, R_X86_64_64)).to_equal(8)
+        expect(reloc_patch_width(RelocArch.Arm32, R_ARM_V4BX)).to_equal(0)
+        expect(reloc_patch_width(RelocArch.Arm32, R_ARM_ABS8)).to_equal(1)
+        expect(reloc_patch_width(RelocArch.Arm32, R_ARM_ABS16)).to_equal(2)
+        expect(reloc_patch_width(RelocArch.Arm32, R_ARM_ABS32)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.AArch64, R_AARCH64_ABS16)).to_equal(2)
+        expect(reloc_patch_width(RelocArch.AArch64, R_AARCH64_PREL32)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.AArch64, R_AARCH64_ABS64)).to_equal(8)
+        expect(reloc_patch_width(RelocArch.Riscv32, R_RISCV_NONE)).to_equal(0)
+        expect(reloc_patch_width(RelocArch.Riscv32, R_RISCV_32)).to_equal(4)
+        expect(reloc_patch_width(RelocArch.Riscv64, R_RISCV_64)).to_equal(8)
+
+    it "rejects negative and truncated patch ranges":
+        expect(reloc_patch_range_valid(8, 0, 8)).to_equal(true)
+        expect(reloc_patch_range_valid(8, 8, 0)).to_equal(true)
+        expect(reloc_patch_range_valid(8, 1, 8)).to_equal(false)
+        expect(reloc_patch_range_valid(8, -1, 4)).to_equal(false)
+        expect(reloc_patch_range_valid(8, 0, -1)).to_equal(false)
 
 # ============================================================================
 # reloc_arch_from_machine

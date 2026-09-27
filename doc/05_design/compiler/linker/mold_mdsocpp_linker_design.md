@@ -255,6 +255,11 @@ The x86_64 boot relocation route resolves `R_X86_64_SIZE32` and `SIZE64` from
 the winning cross-object definition extent, matching the hosted ELF route;
 script-defined and unresolved-weak symbols have extent zero, and SIZE32 keeps
 checked unsigned-width semantics.
+All hosted and boot ELF relocations pass a shared architecture-aware patch
+extent check against their input section before symbol resolution or byte
+mutation. A malformed symbol index or a one-, two-, four-, or eight-byte patch
+crossing the section boundary fails with an object-scoped diagnostic rather
+than truncating silently or indexing outside the symbol table.
 
 Remote interpreter placement is a target-filesystem decision, not a host-path
 guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`
