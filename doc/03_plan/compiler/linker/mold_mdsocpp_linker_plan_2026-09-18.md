@@ -438,7 +438,10 @@ Implemented source slice:
   associative COMDAT section indices rather than truncating them to classic
   COFF widths. Archive admission recognizes the bigobj class identifier rather
   than skipping its machine-zero prefix, and short-import detection explicitly
-  excludes bigobj members despite their shared `0/0xffff` signature;
+  excludes bigobj members despite their shared `0/0xffff` signature. Sections
+  using `IMAGE_SCN_LNK_NRELOC_OVFL` decode the first relocation record as the
+  extended count marker, validate its reserved fields, and expose only the real
+  relocation rows downstream;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
 - ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,

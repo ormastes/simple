@@ -23,6 +23,7 @@ val COFF_SECTION_CNT_UNINITIALIZED_DATA: i64 = 0x00000080
 val COFF_SECTION_LNK_INFO: i64 = 0x00000200
 val COFF_SECTION_LNK_REMOVE: i64 = 0x00000800
 val COFF_SECTION_LNK_COMDAT: i64 = 0x00001000
+val COFF_SECTION_LNK_NRELOC_OVFL: i64 = 0x01000000
 
 val COFF_REL_AMD64_ADDR64: i64 = 0x0001
 val COFF_REL_AMD64_ABSOLUTE: i64 = 0x0000
@@ -298,9 +299,23 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         var virtual_size = _coff_u32(data, base + 8)
         val raw_size = _coff_u32(data, base + 16)
         val raw_pointer = _coff_u32(data, base + 20)
-        val relocation_pointer = _coff_u32(data, base + 24)
-        val relocation_count = _coff_u16(data, base + 32)
+        var relocation_pointer = _coff_u32(data, base + 24)
+        var relocation_count = _coff_u16(data, base + 32)
         val section_characteristics = _coff_u32(data, base + 36)
+        val extended_relocations =
+            (section_characteristics & COFF_SECTION_LNK_NRELOC_OVFL) != 0
+        if extended_relocations and relocation_count != 65535:
+            return Err("section '{name_result.unwrap()}' sets NRELOC_OVFL without count 65535")
+        if extended_relocations:
+            if relocation_pointer <= 0 or relocation_pointer + COFF_RELOCATION_SIZE > data.len():
+                return Err("section '{name_result.unwrap()}' extended relocation marker is out of bounds")
+            val encoded_count = _coff_u32(data, relocation_pointer)
+            val marker_symbol = _coff_u32(data, relocation_pointer + 4)
+            val marker_type = _coff_u16(data, relocation_pointer + 8)
+            if encoded_count <= 0 or marker_symbol != 0 or marker_type != 0:
+                return Err("section '{name_result.unwrap()}' has an invalid extended relocation marker")
+            relocation_count = encoded_count - 1
+            relocation_pointer = relocation_pointer + COFF_RELOCATION_SIZE
         var section_data: Result<[u8], text> = Ok([])
         if raw_size > 0 and raw_pointer == 0:
             if (section_characteristics & COFF_SECTION_CNT_UNINITIALIZED_DATA) == 0:

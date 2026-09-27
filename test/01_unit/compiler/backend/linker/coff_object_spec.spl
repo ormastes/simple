@@ -106,6 +106,39 @@ fn _minimal_bigobj() -> [u8]:
     bytes = bytes.push(2).push(0)
     _push_u32(bytes, 4)
 
+fn _extended_relocation_object(marker_count: i64 = 2) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 84)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_fixed(bytes, ".text", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 4)
+    bytes = _push_u32(bytes, 60)
+    bytes = _push_u32(bytes, 64)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0xffff)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0x61000020)
+    bytes = _push_u32(bytes, 0x90909090)
+    bytes = _push_u32(bytes, marker_count)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, COFF_REL_AMD64_REL32)
+    bytes = _push_fixed(bytes, "_start", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 1)
+    bytes = _push_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _push_u32(bytes, 4)
+
 fn _minimal_bss_object() -> [u8]:
     var bytes: [u8] = []
     bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
@@ -196,6 +229,20 @@ fn _weak_external_object(fallback_index: i64, characteristics: i64 = 3) -> [u8]:
     _push_u32(bytes, 4)
 
 describe "raw COFF object parser":
+    it "decodes the extended relocation-count marker without exposing it":
+        val parsed = coff_parse_object(_extended_relocation_object())
+        expect(parsed.is_ok()).to_equal(true)
+        val section = parsed.unwrap().sections[0]
+        expect(section.relocation_count).to_equal(1)
+        expect(section.relocations.len()).to_equal(1)
+        expect(section.relocations[0].virtual_address).to_equal(0)
+        expect(section.relocations[0].relocation_type).to_equal(COFF_REL_AMD64_REL32)
+
+    it "rejects an invalid extended relocation-count marker":
+        val parsed = coff_parse_object(_extended_relocation_object(0))
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("extended relocation marker")
+
     it "parses a bounded bigobj header and 32-bit section symbol":
         val parsed = coff_parse_object(_minimal_bigobj())
         expect(parsed.is_ok()).to_equal(true)
