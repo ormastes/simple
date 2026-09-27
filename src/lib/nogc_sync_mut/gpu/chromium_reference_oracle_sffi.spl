@@ -3,6 +3,10 @@
 
 use std.sffi.dynamic.{DynLib, spl_wffi_call_i64,
     spl_wffi_call_i64_with_bytes}
+use std.nogc_sync_mut.gpu.native_session_owner_v1.{NativeSessionOwnerV1,
+    native_session_owner_new_v1, native_session_owner_register_v1,
+    native_session_owner_begin_v1, native_session_owner_end_v1,
+    native_session_owner_claim_destroy_v1, native_session_owner_finish_destroy_v1}
 use std.io_runtime.{file_hash_sha256}
 use std.common.structural.digest.hash256.{hash256_hex_valid}
 use common.text.{escape_json}
@@ -45,14 +49,16 @@ struct ChromiumOracleLibraryProbe:
 struct ChromiumOracleHandle:
     library_handle: i64
     library: DynLib?
-    session_handle: i64
+    session_owner: NativeSessionOwnerV1?
+    session_ticket: u64
     library_path: text
     abi_version: i64
     symbols: ChromiumOracleResolvedSymbols
     released: bool
 
 fn _chromium_oracle_handle_live(handle: ChromiumOracleHandle) -> bool:
-    if handle.released or handle.library == nil:
+    if handle.released or handle.library == nil or handle.session_owner == nil or
+       handle.session_ticket == 0u64:
         return false
     handle.library.?.is_live()
 
@@ -292,21 +298,43 @@ fn chromium_oracle_load(request: ChromiumOracleLoadRequest) -> ChromiumOracleLoa
     if not admitted.ok:
         lib.close()
         return admitted
+    # Keep one mapping use for the entire session lifetime. Even if a copied
+    # DynLib alias retires the mapping, the destructor remains callable.
+    if not lib.begin_raw_call():
+        lib.close()
+        return _chromium_oracle_load_result(request, false, "mapping-retired", abi,
+            "provider-mapping-retired-before-create")
     val session = spl_wffi_call_i64(symbols.create, [0, 0], 2)
     if session <= 0:
+        lib.end_raw_call()
         lib.close()
         return _chromium_oracle_load_result(request, false, "create-failed", abi,
             "provider-session-create-failed")
+    val session_owner = native_session_owner_new_v1()
+    val session_ticket = native_session_owner_register_v1(session_owner, session)
+    if session_ticket == 0u64:
+        val cleanup_code = spl_wffi_call_i64(symbols.destroy, [session], 1)
+        if cleanup_code != 0:
+            # Cleanup did not confirm retirement. Quarantine the mapping use
+            # instead of unloading code that may still own a live session.
+            return _chromium_oracle_load_result(request, false,
+                "session-cleanup-quarantined", abi,
+                "provider-session-registration-and-cleanup-failed")
+        lib.end_raw_call()
+        lib.close()
+        return _chromium_oracle_load_result(request, false, "session-capacity", abi,
+            "provider-session-owner-refused-registration")
     ChromiumOracleLoadResult(ok: true, status: "ok", library_path: request.library_path,
         abi: abi, handle: Some(ChromiumOracleHandle(library_handle: lib.handle,
             library: Some(lib),
-            session_handle: session, library_path: request.library_path,
+            session_owner: Some(session_owner), session_ticket: session_ticket,
+            library_path: request.library_path,
             abi_version: abi_version, symbols: symbols, released: false)), error: "")
 
 @unsafe(reason: "invokes the admitted bounded Chromium oracle request ABI", capabilities: [ffi, raw_ptr])
 fn chromium_oracle_run(handle: ChromiumOracleHandle, request_json: text,
                        max_response_bytes: i64) -> ChromiumOracleCallResult:
-    if not _chromium_oracle_handle_live(handle) or handle.session_handle <= 0:
+    if not _chromium_oracle_handle_live(handle):
         return ChromiumOracleCallResult(ok: false, status: "released-handle",
             response_json: "", response_bytes: 0, error: "released-handle")
     if request_json == "" or request_json.len() > 1048576 or
@@ -328,10 +356,22 @@ fn chromium_oracle_run(handle: ChromiumOracleHandle, request_json: text,
     if not _chromium_oracle_begin_call(handle):
         return ChromiumOracleCallResult(ok: false, status: "released-handle",
             response_json: "", response_bytes: 0, error: "released-handle")
-    val code = spl_wffi_call_i64_with_bytes(run_ptr, [handle.session_handle],
+    val session = native_session_owner_begin_v1(handle.session_owner.?, handle.session_ticket)
+    if session <= 0:
+        _chromium_oracle_end_call(handle)
+        val refusal = if session < 0: "busy-session" else: "released-handle"
+        return ChromiumOracleCallResult(ok: false, status: refusal,
+            response_json: "", response_bytes: 0, error: refusal)
+    val code = spl_wffi_call_i64_with_bytes(run_ptr, [session],
         request_bytes, 0, request_bytes.len(),
         [response_ptr, response.len(), response_len_ptr])
+    val session_ended = native_session_owner_end_v1(
+        handle.session_owner.?, handle.session_ticket)
     _chromium_oracle_end_call(handle)
+    if not session_ended:
+        return ChromiumOracleCallResult(ok: false, status: "session-owner-mismatch",
+            response_json: "", response_bytes: 0,
+            error: "provider-session-call-quarantined")
     val response_len = rt_ptr_read_i64(response_len_ptr, 0)
     val status = _chromium_oracle_status(code)
     if code != 0:
@@ -359,25 +399,36 @@ fn chromium_oracle_run_fixture(handle: ChromiumOracleHandle,
 
 @unsafe(reason: "destroys the native oracle session and closes its provider exactly once", capabilities: [ffi, raw_ptr])
 fn chromium_oracle_release(handle: ChromiumOracleHandle) -> ChromiumOracleReleaseResult:
-    if not _chromium_oracle_handle_live(handle) or handle.session_handle <= 0:
+    if handle.released or handle.library == nil or handle.session_owner == nil or
+       handle.session_ticket == 0u64:
         return ChromiumOracleReleaseResult(ok: false, status: "released-handle",
             handle: handle, error: "released-handle")
-    if not _chromium_oracle_begin_call(handle):
-        return ChromiumOracleReleaseResult(ok: false, status: "released-handle",
-            handle: handle, error: "released-handle")
+    val session = native_session_owner_claim_destroy_v1(
+        handle.session_owner.?, handle.session_ticket)
+    if session <= 0:
+        val refusal = if session < 0: "busy-session" else: "released-handle"
+        return ChromiumOracleReleaseResult(ok: false, status: refusal,
+            handle: handle, error: refusal)
     val destroy_ptr = handle.symbols.destroy
     val code = if destroy_ptr <= 0: 1 else:
-        spl_wffi_call_i64(destroy_ptr, [handle.session_handle], 1)
-    _chromium_oracle_end_call(handle)
+        spl_wffi_call_i64(destroy_ptr, [session], 1)
+    if code != 0:
+        val failure = _chromium_oracle_status(code)
+        return ChromiumOracleReleaseResult(ok: false, status: failure,
+            handle: handle, error: "provider-session-destroy-quarantined")
+    if not native_session_owner_finish_destroy_v1(
+        handle.session_owner.?, handle.session_ticket):
+        return ChromiumOracleReleaseResult(ok: false, status: "destroy-owner-mismatch",
+            handle: handle, error: "provider-session-destroy-quarantined")
     var library = handle.library.?
+    library.end_raw_call()
     library.close()
     val released = ChromiumOracleHandle(library_handle: 0, library: nil,
-        session_handle: 0,
+        session_owner: nil, session_ticket: 0u64,
         library_path: handle.library_path, abi_version: handle.abi_version,
         symbols: handle.symbols, released: true)
-    val status = _chromium_oracle_status(code)
-    ChromiumOracleReleaseResult(ok: code == 0, status: status, handle: released,
-        error: if code == 0: "" else: status)
+    ChromiumOracleReleaseResult(ok: true, status: _chromium_oracle_status(code),
+        handle: released, error: "")
 
 export ChromiumOracleAbi, ChromiumOracleLoadRequest,
     ChromiumOracleResolvedSymbols, ChromiumOracleLibraryProbe,

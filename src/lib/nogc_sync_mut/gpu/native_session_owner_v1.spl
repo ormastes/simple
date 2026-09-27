@@ -1,0 +1,139 @@
+"""Revocable native session tickets shared by copied foreign-provider handles.
+
+The owner serializes admission and teardown, then releases its mutex before
+foreign code runs. A busy teardown refuses so the caller may retry on its
+own thread after the admitted call returns. Tickets never repeat, even when
+a native provider reuses an address for a later session.
+"""
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+
+const _NATIVE_SESSION_CAPACITY_V1: i64 = 4096
+const _NATIVE_SESSION_MAX_ID_V1: u64 = 18446744073709551615u64
+const _NATIVE_SESSION_IDLE_V1: i64 = 0
+const _NATIVE_SESSION_CALLING_V1: i64 = 1
+const _NATIVE_SESSION_DESTROYING_V1: i64 = 2
+
+struct _NativeSessionEntryV1:
+    ticket: u64
+    raw_session: i64
+    phase: i64
+
+struct _NativeSessionStateV1:
+    next_ticket: u64
+    entries: [_NativeSessionEntryV1]
+    result_ticket: u64
+    result_raw: i64
+    result_ok: bool
+
+class NativeSessionOwnerV1:
+    gate: Mutex
+
+fn native_session_owner_new_v1() -> NativeSessionOwnerV1:
+    NativeSessionOwnerV1(gate: mutex_new(_NativeSessionStateV1(
+        next_ticket: 1u64, entries: [], result_ticket: 0u64,
+        result_raw: 0, result_ok: false)))
+
+fn _native_session_index_v1(state: _NativeSessionStateV1, ticket: u64) -> i64:
+    var index = 0
+    while index < state.entries.len():
+        if state.entries[index].ticket == ticket:
+            return index
+        index = index + 1
+    -1
+
+# Zero refuses invalid input, full capacity, or exhausted ticket identity.
+@unsafe(reason: "registers a provider-owned raw session address under a revocable ticket", capabilities: [raw_ptr])
+fn native_session_owner_register_v1(owner: NativeSessionOwnerV1, raw_session: i64) -> u64:
+    if raw_session <= 0:
+        return 0u64
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ticket = 0u64
+        if state.next_ticket != 0u64 and
+           state.entries.len() < _NATIVE_SESSION_CAPACITY_V1:
+            val ticket = state.next_ticket
+            next.next_ticket = if ticket == _NATIVE_SESSION_MAX_ID_V1:
+                0u64
+            else:
+                ticket + 1u64
+            next.entries.push(_NativeSessionEntryV1(
+                ticket: ticket, raw_session: raw_session,
+                phase: _NATIVE_SESSION_IDLE_V1))
+            next.result_ticket = ticket
+        next)
+    updated.result_ticket
+
+# Positive result is the admitted native address. -1 means busy; zero means
+# retired or unknown. Every positive begin must have one matching end.
+@unsafe(reason: "borrows a provider-owned raw session address for one foreign call", capabilities: [raw_ptr])
+fn native_session_owner_begin_v1(owner: NativeSessionOwnerV1, ticket: u64) -> i64:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_raw = 0
+        val index = _native_session_index_v1(state, ticket)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.phase == _NATIVE_SESSION_IDLE_V1:
+                entry.phase = _NATIVE_SESSION_CALLING_V1
+                next.entries[index] = entry
+                next.result_raw = entry.raw_session
+            else:
+                next.result_raw = -1
+        next)
+    updated.result_raw
+
+@unsafe(reason: "ends a borrow of a provider-owned raw session address", capabilities: [raw_ptr])
+fn native_session_owner_end_v1(owner: NativeSessionOwnerV1, ticket: u64) -> bool:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ok = false
+        val index = _native_session_index_v1(state, ticket)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.phase == _NATIVE_SESSION_CALLING_V1:
+                entry.phase = _NATIVE_SESSION_IDLE_V1
+                next.entries[index] = entry
+                next.result_ok = true
+        next)
+    updated.result_ok
+
+# A positive result claims the sole destructor call. A busy call returns -1
+# without changing the session, so release can be retried on its owner thread.
+@unsafe(reason: "claims exclusive destruction of a provider-owned raw session", capabilities: [raw_ptr])
+fn native_session_owner_claim_destroy_v1(owner: NativeSessionOwnerV1,
+                                         ticket: u64) -> i64:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_raw = 0
+        val index = _native_session_index_v1(state, ticket)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.phase == _NATIVE_SESSION_IDLE_V1:
+                entry.phase = _NATIVE_SESSION_DESTROYING_V1
+                next.entries[index] = entry
+                next.result_raw = entry.raw_session
+            else:
+                next.result_raw = -1
+        next)
+    updated.result_raw
+
+# Call only after the provider confirms destruction. A failed destructor
+# leaves Destroying quarantined and keeps the caller's mapping lease pinned.
+@unsafe(reason: "retires a provider-owned raw session only after native destruction", capabilities: [raw_ptr])
+fn native_session_owner_finish_destroy_v1(owner: NativeSessionOwnerV1,
+                                          ticket: u64) -> bool:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ok = false
+        val index = _native_session_index_v1(state, ticket)
+        if index >= 0 and state.entries[index].phase == _NATIVE_SESSION_DESTROYING_V1:
+            next.entries.remove(index)
+            next.result_ok = true
+        next)
+    updated.result_ok
+
+export NativeSessionOwnerV1, native_session_owner_new_v1
+export native_session_owner_register_v1, native_session_owner_begin_v1
+export native_session_owner_end_v1, native_session_owner_claim_destroy_v1
+export native_session_owner_finish_destroy_v1

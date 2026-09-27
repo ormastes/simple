@@ -59,6 +59,14 @@ deadlock. Do not defer native destruction to the last calling thread: that
 changes synchronous release semantics and may violate provider thread
 affinity. The mapping owner alone cannot establish either session guarantee.
 
+The oracle candidate now uses `native_session_owner_v1.spl` to issue a ticket,
+refuse overlapping calls or busy teardown, and keep one library mapping use
+through session destruction. A failed destructor leaves that ticket and mapping
+quarantined. The code and state-transition tests need source-matched pure-Simple
+execution, and a blocking native fixture must still prove the actual race.
+Chrome render has not adopted the ticket owner or a multi-session release
+policy; its raw `i64` handle remains unsafe under address reuse.
+
 The candidate's owner takes a mutex on every cached-slot call. The selected
 environment variant NFR-003 forbids a lifecycle lock in dense provider batch
 dispatch and limits its overhead to 2% against a direct reference batch call.

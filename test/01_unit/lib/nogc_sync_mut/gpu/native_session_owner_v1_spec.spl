@@ -1,0 +1,55 @@
+use std.spec
+use std.nogc_sync_mut.gpu.native_session_owner_v1.{native_session_owner_new_v1,
+    native_session_owner_register_v1, native_session_owner_begin_v1,
+    native_session_owner_end_v1, native_session_owner_claim_destroy_v1,
+    native_session_owner_finish_destroy_v1}
+
+describe "Native session owner V1":
+    it "refuses release and reentrant calls while one foreign call is admitted":
+        unsafe(capabilities: [raw_ptr]):
+            val owner = native_session_owner_new_v1()
+            val ticket = native_session_owner_register_v1(owner, 41)
+            expect(ticket > 0u64).to_equal(true)
+            expect(native_session_owner_begin_v1(owner, ticket)).to_equal(41)
+            expect(native_session_owner_begin_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_end_v1(owner, ticket)).to_equal(true)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(41)
+            expect(native_session_owner_begin_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_finish_destroy_v1(owner, ticket)).to_equal(true)
+            expect(native_session_owner_begin_v1(owner, ticket)).to_equal(0)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(0)
+            expect(native_session_owner_finish_destroy_v1(owner, ticket)).to_equal(false)
+
+    it "never reuses a ticket when the provider reuses a native address":
+        unsafe(capabilities: [raw_ptr]):
+            val owner = native_session_owner_new_v1()
+            expect(native_session_owner_register_v1(owner, 0)).to_equal(0u64)
+            val first = native_session_owner_register_v1(owner, 73)
+            expect(native_session_owner_claim_destroy_v1(owner, first)).to_equal(73)
+            expect(native_session_owner_finish_destroy_v1(owner, first)).to_equal(true)
+            val second = native_session_owner_register_v1(owner, 73)
+            expect(second > first).to_equal(true)
+            expect(native_session_owner_begin_v1(owner, first)).to_equal(0)
+            expect(native_session_owner_begin_v1(owner, second)).to_equal(73)
+            expect(native_session_owner_end_v1(owner, second)).to_equal(true)
+
+    it "keeps a failed destructor claim quarantined":
+        unsafe(capabilities: [raw_ptr]):
+            val owner = native_session_owner_new_v1()
+            val ticket = native_session_owner_register_v1(owner, 97)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(97)
+            expect(native_session_owner_begin_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(-1)
+            expect(native_session_owner_end_v1(owner, ticket)).to_equal(false)
+
+    it "keeps another admitted session live while one is destroyed":
+        unsafe(capabilities: [raw_ptr]):
+            val owner = native_session_owner_new_v1()
+            val first = native_session_owner_register_v1(owner, 11)
+            val second = native_session_owner_register_v1(owner, 22)
+            expect(native_session_owner_claim_destroy_v1(owner, first)).to_equal(11)
+            expect(native_session_owner_finish_destroy_v1(owner, first)).to_equal(true)
+            expect(native_session_owner_begin_v1(owner, second)).to_equal(22)
+            expect(native_session_owner_end_v1(owner, second)).to_equal(true)
