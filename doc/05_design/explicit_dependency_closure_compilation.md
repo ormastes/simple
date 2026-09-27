@@ -200,6 +200,9 @@ accepting a live workspace root after freeze.
    and the Git/filesystem event cursor in one record; a failed rename leaves
    both prior values intact. Bare-digest pointers read their legacy cursor for
    migration and become combined records on the next successful refresh.
+   Each refresh reads the pointer once, validates that pinned generation, and
+   compares the captured pointer digest under the publication lock before
+   replacing it. A stale writer rejects instead of moving the cursor backward.
 6. On overflow/cursor mismatch, mark generation `needs_reconcile`; never silently
    call the compiler collectors.
 7. Run quietly. Write one bounded refresh receipt.

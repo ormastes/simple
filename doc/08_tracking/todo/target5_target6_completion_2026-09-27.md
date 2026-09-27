@@ -49,7 +49,7 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   and writes the inventory digest plus Git/filesystem cursor in one pointer
   rename, with a bare-digest legacy reader. The historical Stage2 diagnostic
   native build timed out before an executable was produced. Prove failed
-  rename, overflow, event loss, concurrent writers, cold rebuild, legacy
+  rename, overflow, event loss, cross-process concurrent writers, cold rebuild, legacy
   migration, and replay recovery without Git or source mutation.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
