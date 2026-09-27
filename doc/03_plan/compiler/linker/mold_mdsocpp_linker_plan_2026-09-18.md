@@ -441,10 +441,11 @@ Implemented source slice:
   pins the compiler-emitted relocation census. The deterministic PE32+ writer
   now emits either AMD64 or ARM64 machine headers through a checked target
   parameter while preserving the AMD64 compatibility wrapper, and ordinary
-  ARM64 COFF members are admitted by the archive-closure parser. Production
-  ARM64 link routing, short-import/thunk synthesis, `SECREL` resolution, and the
-  ARM64 8-byte exception-table format remain open and are not certified by this
-  slice;
+  ARM64 COFF members are admitted by the archive-closure parser. ARM64 `.pdata`
+  validation and sorting uses its native 8-byte runtime-function rows rather
+  than the AMD64 12-byte format. Production ARM64 link routing,
+  short-import/thunk synthesis, and `SECREL` resolution remain open and are not
+  certified by this slice;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;
 - AMD64 multi-object symbol resolution, static `.lib` fixpoint extraction,

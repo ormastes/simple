@@ -439,6 +439,49 @@ fn coff_sort_amd64_exception_table(
         index = index + 1
     Ok(result)
 
+fn coff_sort_arm64_exception_table(
+        sections: [PeImageSection]) -> Result<[PeImageSection], text>:
+    """Sort 8-byte ARM64 runtime-function rows by BeginAddress RVA."""
+    var result = sections
+    var index: i64 = 0
+    while index < result.len():
+        val section = result[index]
+        if section.name == ".pdata":
+            if section.data.len() % 8 != 0:
+                return Err("ARM64 .pdata size must be a multiple of 8 bytes")
+            var records: [[u8]] = []
+            var offset: i64 = 0
+            while offset < section.data.len():
+                var record: [u8] = []
+                var byte_index: i64 = 0
+                while byte_index < 8:
+                    record = record.push(section.data[offset + byte_index])
+                    byte_index = byte_index + 1
+                val begin = _coff_read_u32(record, 0).unwrap()
+                if begin % 4 != 0:
+                    return Err("ARM64 .pdata BeginAddress {begin} is not instruction-aligned")
+                records = records.push(record)
+                offset = offset + 8
+            var a: i64 = 0
+            while a < records.len():
+                var b = a + 1
+                while b < records.len():
+                    if _coff_read_u32(records[b], 0).unwrap() <
+                            _coff_read_u32(records[a], 0).unwrap():
+                        val temporary = records[a]
+                        records[a] = records[b]
+                        records[b] = temporary
+                    b = b + 1
+                a = a + 1
+            var sorted: [u8] = []
+            for record in records:
+                for byte in record: sorted = sorted.push(byte)
+            var updated = section
+            updated.data = sorted
+            result[index] = updated
+        index = index + 1
+    Ok(result)
+
 fn coff_validate_resource_sections(
         sections: [PeImageSection]) -> Result<bool, text>:
     """Validate the offset-based resource tree before publishing directory 2."""
@@ -1151,5 +1194,6 @@ export coff_link_default_libraries
 export coff_attach_amd64_tls_directory
 export coff_attach_amd64_load_config
 export coff_sort_amd64_exception_table
+export coff_sort_arm64_exception_table
 export coff_validate_resource_sections
 export coff_validate_export_sections

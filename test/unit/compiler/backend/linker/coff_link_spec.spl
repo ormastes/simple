@@ -4,6 +4,7 @@ use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
+    coff_sort_arm64_exception_table,
     coff_validate_resource_sections, coff_validate_export_sections}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
 use compiler.backend.linker.pe_inspect.{pe_inspect}
@@ -335,6 +336,31 @@ describe "internal freestanding Windows linker":
             virtual_size: 12, data: reversed, characteristics: 0x40000040)
         expect(coff_sort_amd64_exception_table(
             [invalid]).unwrap_err()).to_contain("BeginAddress")
+
+    it "sorts and validates ARM64 runtime-function records":
+        var records: [u8] = []
+        records = _cl_u32(records, 0x3000)
+        records = _cl_u32(records, 0x25)
+        records = _cl_u32(records, 0x1000)
+        records = _cl_u32(records, 0x49)
+        val pdata = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 16, data: records, characteristics: 0x40000040)
+        val sorted = coff_sort_arm64_exception_table([pdata]).unwrap()
+        expect(sorted[0].data[0] as i64).to_equal(0)
+        expect(sorted[0].data[1] as i64).to_equal(0x10)
+        expect(sorted[0].data[8] as i64).to_equal(0)
+        expect(sorted[0].data[9] as i64).to_equal(0x30)
+
+        val malformed = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 9, data: records.push(0), characteristics: 0x40000040)
+        expect(coff_sort_arm64_exception_table([malformed]).is_err()).to_equal(true)
+        var unaligned: [u8] = []
+        unaligned = _cl_u32(unaligned, 0x1002)
+        unaligned = _cl_u32(unaligned, 0x25)
+        val invalid = PeImageSection(name: ".pdata", virtual_address: 0x2000,
+            virtual_size: 8, data: unaligned, characteristics: 0x40000040)
+        expect(coff_sort_arm64_exception_table(
+            [invalid]).unwrap_err()).to_contain("instruction-aligned")
 
     it "validates the file-backed PE resource tree":
         var resource: [u8] = []
