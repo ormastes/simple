@@ -44,3 +44,22 @@ for this commit. The three-cycle verification cap is exhausted for this session.
 Next investigation: retain the native compiler subprocess command and timing
 for this exact positional fixture, then compare the two candidate binaries and
 runtime authority paths before another admission session.
+
+## 2026-09-28 diagnosis: native MIR traversal grows a range
+
+A clean-environment positional build with the previously admitted Stage 2
+compiler also timed out in the fix worktree at `native_compile 0/1`.
+`sample` captured 2,103 main-thread samples under
+`lower_mir_storage_project_fields_v1 -> rt_range -> rt_array_push_grow`;
+physical footprint reached 3.4 GB. The sampled call site is the nested
+function/block/instruction traversal, before any typed storage projection is
+needed for the two-line fixture. The disassembly passes a tagged register value
+as the `rt_range` end bound. This is evidence of an unbounded native loop,
+rather than a slow external linker invocation.
+
+The focused repair replaces the nested `for` traversal in that MIR lowering
+owner with index loops bounded by each source collection's length. Keep the
+original fail-closed behavior for logical projections without site bindings.
+The current installed self-hosted test runner cannot parse the repository's
+newer storage-layout source, so the required verification is a fresh Stage 2
+candidate, its positional sanity fixture, and then Stage 3 admission.
