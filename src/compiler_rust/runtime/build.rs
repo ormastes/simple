@@ -497,18 +497,39 @@ fn compile_c_runtime_sources() {
     }
     build.compile("runtime_sffi_c");
 
-    // hosted_cocoa.c is Objective-C behind a .c extension (real NSWindow path
-    // on __APPLE__). Compile it separately with the ObjC language flag so the
-    // staticlib carries real rt_cocoa_* providers on macOS; AppKit/Foundation
-    // are already in the platform framework link set.
+    // Cocoa has one process-wide owner: the dynamic runtime. A normal
+    // rustc-link-lib would also bundle this provider into native-all through
+    // the runtime rlib. Link and export it only when producing the cdylib.
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
         let cocoa = runtime_c_dir.join("hosted_cocoa.c");
         if cocoa.exists() {
             let mut objc = cc::Build::new();
             objc.opt_level(2).warnings(false).cargo_metadata(false);
+            // New upstream Clang can emit objc_msgSendClass selector stubs
+            // that the installed Apple linker cannot synthesize. Use ordinary
+            // libobjc calls so the bootstrap's Clang and SDK can differ.
+            objc.flag_if_supported("-fno-objc-msgsend-class-selector-stubs");
             objc.flag("-xobjective-c").file(cocoa);
             objc.compile("runtime_sffi_objc");
-            println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+            let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-force_load,{out_dir}/libruntime_sffi_objc.a");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-framework,Cocoa");
+            for name in [
+                "window_new",
+                "window_resize",
+                "window_close",
+                "layer_create",
+                "layer_fill_rect",
+                "layer_present",
+                "layer_free",
+                "layer_read_pixel",
+                "layer_blend_rect",
+                "layer_blur",
+                "layer_gradient_v",
+                "event_pump",
+            ] {
+                println!("cargo:rustc-cdylib-link-arg=-Wl,-exported_symbol,_rt_cocoa_{name}");
+            }
         }
     }
 
