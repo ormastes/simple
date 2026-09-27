@@ -91,6 +91,30 @@ the dispatch, because the update-branch push resets the admission.
 5. **On "base advanced", go back to step 1.** This is the expected outcome, not
    an error to investigate. Budget several full cycles.
 
+## PR-path CI is required checks only (2026-09-27)
+
+The main ruleset has no bypass actors, so the two required contexts must report
+fast. They used to wait hours behind ~300 queued runs because every PR push
+fanned out to ~35 heavy workflows. Now:
+
+- On a PR, only the required jobs run by default: `fast-gates` in
+  `repo-hygiene.yml` and the `review-admission.yml` broker. Every other job in a
+  `pull_request` / `pull_request_target` workflow carries
+  `if: github.event_name != '<event>' || contains(github.event.pull_request.labels.*.name, 'ci:full')`
+  and is skipped (no runner consumed).
+- **Label `ci:full`** opts a PR into the full matrix (extended ratchet lane,
+  bootstrap, platform tests, ...). Adding the label fires a `labeled` event, so
+  the heavy lanes start without a push. `repo-hygiene.yml` deliberately does
+  not listen for `labeled` (it would restart the required job), so its
+  non-required siblings pick the label up on the next push.
+- Every heavy lane still runs on push to `main` (PR-only workflows gained a
+  `push: branches: [main]` trigger with the same `paths:`), so nothing is
+  unenforced — it is enforced post-merge instead of pre-merge.
+- Every PR/push workflow has `concurrency` keyed on PR number or ref; test
+  lanes use `cancel-in-progress: true` (latest commit wins, also on `main`),
+  writers (`cache-main-writer`, `cache-promotion`, `release`,
+  `t32-tools-release`, `candidate`, `macos-phase23-evidence`) keep `false`.
+
 ## Notes
 
 - Run the loop detached from anything slow. Every minute spent between step 3
