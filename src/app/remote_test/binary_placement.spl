@@ -373,6 +373,12 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "(($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
             "{ Write-Error 'remote-test staging path is not a regular non-reparse file'; exit 75 }; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
+            "$parentItem = Get-Item -LiteralPath (Split-Path -Parent $dst) -Force; " +
+            "while ($null -ne $parentItem) { " +
+            "if ((-not $parentItem.PSIsContainer) -or (($parentItem.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test publication parent is redirected or not a directory'; exit 76 }; " +
+            "$parentItem = $parentItem.Parent }; " +
             "$input = [System.IO.File]::OpenRead($src); try { " +
             "$output = [System.IO.File]::Open($tmp, [System.IO.FileMode]::CreateNew, " +
             "[System.IO.FileAccess]::Write, [System.IO.FileShare]::None); try { " +
@@ -397,7 +403,11 @@ fn remote_simple_install_command(remote_os: text, configured: text,
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
         return Ok("if [ -L " + source + " ] || [ ! -f " + source + " ]; then " +
             "echo 'remote-test staging path is not a regular file' >&2; exit 75; fi; " +
-            "mkdir -p -- " + parent + " && (set -C; : > " + temporary +
+            "parent=" + parent + "; mkdir -p -- \"$parent\" && { probe=$parent; " +
+            "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test publication parent is redirected or not a directory' >&2; exit 76; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; } && " +
+            "(set -C; : > " + temporary +
             ") && cp -- " + source + " " + temporary + " && chmod 0755 -- " + temporary +
             " && { actual=$(sha256sum -- " +
             temporary + ") || { rm -f -- " + temporary + "; exit 75; }; " +

@@ -405,6 +405,11 @@ Both that digest step and the publication command recheck that the upload leaf
 is still a regular non-symlink/non-reparse file before reading it. A swapped
 directory, POSIX symlink, or Windows reparse entry therefore fails before its
 target can be hashed or copied into the publication sibling.
+After creating the destination directory, publication walks every parent up
+to the filesystem root and rejects POSIX symlinks, Windows reparse points, and
+non-directory components before opening the sibling file. Persistent parent
+redirection therefore cannot move an otherwise valid install outside the
+configured target tree.
 The publication command carries the same digest and re-hashes the sibling copy
 after mode changes but before rename. A copy mismatch removes that sibling and
 leaves the installed interpreter untouched.
