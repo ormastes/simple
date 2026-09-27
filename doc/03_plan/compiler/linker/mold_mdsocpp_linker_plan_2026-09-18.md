@@ -446,6 +446,8 @@ Implemented source slice:
   than the AMD64 12-byte format. Shared link preparation now validates an
   explicit target machine, and symbol/export/relocation address resolution
   consumes an explicit image base instead of embedding the AMD64 constant.
+  Microsoft short-import decoding admits both AMD64 and ARM64 machine rows
+  while preserving the machine for architecture-specific thunk selection.
   Production ARM64 link routing,
   short-import/thunk synthesis, and `SECREL` resolution remain open and are not
   certified by this slice;
