@@ -684,7 +684,10 @@ x86-64 userspace images (including sysroot archives and module-init wrapping),
 and legacy x86-64 kernel images call one host-independent
 `link_simpleos_internal` facade with their exact objects and typed policy.
 Their default path still invokes external `ld.lld`; RISC-V remains on its
-separate unsupported internal-linker lane.
+separate unsupported internal-linker lane. Mirrored
+`simpleos_internal_production_routing_spec.spl` contracts pin all three
+supported branches, the x86 sysroot archives/wrapper, and preservation of the
+default external fallback.
 
 Remote interpreter placement now validates the exact path bytes later quoted
 into target commands. Known-target explicit and staging paths reject outer
