@@ -158,6 +158,11 @@ Next: remaining TLS relocation models beyond local/initial-exec, a full-kernel r
 base while SimpleOS uses the minimal `.got` base. A checked-in Clang object and
 an ld.lld 23.1 oracle pin the negative hosted offset rather than confusing it
 with a symbol address or PC-relative displacement.
+`R_X86_64_GOT64` follows the same hosted/SimpleOS GOT-base contract without
+32-bit truncation; a second Clang fixture pins the sign-extended negative
+hosted offset. The installed Windows lld wrote the expected comparison image
+and then crashed during teardown, so its emitted bytes are useful oracle
+evidence but not a successful lld execution receipt.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE

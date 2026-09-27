@@ -1,7 +1,7 @@
 .globl _start
 .text
 _start:
-  .long target@GOT
+  .quad target@GOT
   ret
 
 .data
