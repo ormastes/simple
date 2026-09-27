@@ -459,7 +459,51 @@ impl HirLowering:
                         item_aliases = item_aliases.push(import_item.alias)
                         item_has_alias = item_has_alias.push(import_item.has_alias)
                     item_end = item_names.len()
-                if item_start == item_end:
+                # `use full.module as local` is encoded by the parser as one
+                # aliased import item whose source equals the complete module
+                # path. Once that module resolves, the item is a namespace
+                # alias, not a request for an exported item literally named
+                # `full.module`. Keep its defining module identity for
+                # qualified calls such as `local.function()`.
+                var is_complete_module_alias = false
+                if item_end == item_start + 1:
+                    is_complete_module_alias = item_has_alias[item_start] and
+                        item_names[item_start] == imp.module
+                if is_complete_module_alias:
+                    val module_alias = item_aliases[item_start]
+                    if module_alias != "" and not self.symbols.lookup_or_invalid(module_alias).is_valid():
+                        self.symbols.define(module_alias, SymbolKind.Module, nil,
+                            imp.span, Visibility.Private, false,
+                            Some(imported_surface.module_name))
+                    # A namespace alias also needs qualified projections of
+                    # the target's declarations. Registering a glob here
+                    # would leak bare names and let unrelated imports win.
+                    if module_alias != "":
+                        for name in imported_surface.callable_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.constant_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.composite_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.enum_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.trait_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.type_alias_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                elif item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`. Its owner

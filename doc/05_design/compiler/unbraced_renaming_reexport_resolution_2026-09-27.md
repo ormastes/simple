@@ -58,3 +58,13 @@ module as alias` remains a module alias when the complete module exists.
 
 The fail-first tests alone do not admit RU-011: source-matched execution and
 seed/native/SMF parity remain required.
+
+## 2026-09-27 HIR namespace step
+
+The first implementation candidate handles the complete-module branch in HIR
+`resolve_import_symbols()`: its parser-encoded `whole.module:local` item now
+registers `local` as a namespace and qualified target declarations when
+`whole.module` resolves, without exposing their bare names. It does not
+resolve a missing full module to a parent item, publish that choice in frozen
+surface routes, or alter interpreter/seed/SMF behavior. This step remains a
+draft until the source-matched test and compiler entry-closure checks run.
