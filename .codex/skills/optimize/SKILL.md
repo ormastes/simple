@@ -15,6 +15,20 @@ explicitly asks for runtime/compiler C/Rust changes.
 - Preserve behavior and public API. Add or keep SPipe coverage before risky rewrites.
 - Do not rewrite the feature in C/Rust to win a benchmark.
 - Prefer algorithm/data-layout improvements over micro-tuning.
+- Optimize elapsed time and memory together on the same workload. Record p50/p95
+  time and peak/steady RSS before and after with the same host and fixture;
+  record each immutable binary identity. First seek a change that improves
+  both. If one metric regresses, compute
+  `time_ratio = candidate_p95 / baseline_p95` and
+  `memory_ratio = candidate_peak_RSS / baseline_peak_RSS`; accept a tradeoff
+  only when `time_ratio + memory_ratio < 2` beyond measurement noise and each
+  metric still meets its independent hard budget. Report both ratios and the
+  sum. Missing measurements or a hard-budget failure cannot be offset by the
+  other metric. Preserve separate startup, warm, and build rows.
+  SPipe's pure `perf_joint_compare_v1` helper in
+  `src/lib/common/spec/evidence/format/simulation_profile.spl` computes the
+  fixed-point verdict from paired samples; release lanes still require their
+  larger cohort-size gates.
 - For concurrency benchmarks, keep `thread_spawn`, `cooperative_green_spawn`,
   and `multicore_green_spawn` separate. Optimize the Pure Simple path first and
   use the cross-language profile rows as evidence instead of replacing Simple

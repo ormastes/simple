@@ -1,0 +1,88 @@
+"""Native diagnostic for cold package SCC projection on one fixed graph."""
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.cold_package_scc_v1.{
+    ColdPackageEdgeV1, cold_package_scc_v1
+}
+use compiler.driver.cache.package_scc_scheduler.{package_scc_schedule_v1}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1,
+    PackageTldrHeaderV1 as CanonicalPackageTldrHeaderV1,
+    config_variant_digest_v1
+}
+
+extern fn rt_env_get(key: text) -> text?
+
+fn main() -> i64:
+    val variant = ConfigVariantKeyV1(
+        "aarch64-unknown-linux-gnu", "cranelift", [], "debug",
+        "abi-v1", [], [])
+    val digest = sha256_text("artifact")
+    var headers: [CanonicalPackageTldrHeaderV1] = []
+    var packages: [text] = []
+    var modules: [text] = []
+    var edges: [ColdPackageEdgeV1] = []
+    var index = 0
+    while index < 32:
+        val package_identity = "package_{index}"
+        val module_identity = "module_{index}"
+        var imports: [text] = []
+        var dependents: [text] = []
+        if index < 31:
+            val next_index = index + 1
+            imports.push("module_{next_index}")
+            edges.push(ColdPackageEdgeV1(
+                package_identity, "package_{next_index}"))
+        if index > 0:
+            val previous_index = index - 1
+            dependents.push("module_{previous_index}")
+        headers.push(CanonicalPackageTldrHeaderV1(
+            schema_version: 1,
+            producer_digest: digest,
+            package_identity: package_identity,
+            module_identity: module_identity,
+            source_identity: "src/{module_identity}.spl",
+            variant: variant,
+            source_digest: digest,
+            source_witness_digest: digest,
+            smf_digest: digest,
+            smf_sections: [PackageSmfSectionV1("exports", 0, 1, digest)],
+            export_digest: digest,
+            abi_digest: digest,
+            initializer_digest: digest,
+            provider_digest: digest,
+            generated_source_digest: digest,
+            reverse_projection_digest: digest,
+            direct_imports: imports,
+            reverse_dependents: dependents,
+            scc_identity: "pending",
+            scc_members: [module_identity],
+            interface_archive_digest: digest,
+            action_archive_digest: digest))
+        packages.push(package_identity)
+        modules.push(module_identity)
+        index = index + 1
+    val mode = rt_env_get("COLD_SCC_BENCH_MODE") ?? "new"
+    var checksum = 0
+    var iteration = 0
+    while iteration < 8:
+        if mode == "old":
+            val result = package_scc_schedule_v1(headers, variant, modules)
+            if not result.valid:
+                print "FAIL old:{result.reason}"
+                return 1
+            checksum = checksum + result.groups.len()
+        else:
+            match cold_package_scc_v1(
+                    packages, edges, config_variant_digest_v1(variant)):
+                case Err(reason):
+                    print "FAIL new:{reason}"
+                    return 2
+                case Ok(groups):
+                    checksum = checksum + groups.len()
+        iteration = iteration + 1
+    if checksum != 256:
+        print "FAIL checksum={checksum}"
+        return 3
+    print "CHECKSUM {checksum}"
+    0
