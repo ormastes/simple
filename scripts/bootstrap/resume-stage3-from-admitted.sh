@@ -831,8 +831,9 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$stage3_process_max_kib" \
     "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}") ||
     bootstrap_stage3_error 'invalid Darwin Stage 3 RSS cap'
+  stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
   perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
-    --session-mode=new --rss-cap-mode=enforce \
+    --session-mode="$stage3_darwin_rss_session_mode" --rss-cap-mode=enforce \
     --max-rss-kib="$stage3_darwin_rss_cap_kib" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \
