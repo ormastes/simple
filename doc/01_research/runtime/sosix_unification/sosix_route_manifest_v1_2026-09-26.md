@@ -53,3 +53,7 @@ The companion [hosted display, input, and GPU queue route manifest](sosix_render
 classifies SOSIX display state, toolkit adapters, native present and input
 routes, and Engine2D compatibility queue bookkeeping. A queued packet is not
 physical GPU execution evidence; RU-001 remains open for other families.
+
+### 2026-09-27 network route addendum
+
+The companion [network route manifest](sosix_network_route_manifest_v1_2026-09-27.md) classifies hosted TCP externs and selected SimpleOS socket routes. It identifies an x86_64 live-trap capability gap and an ARM64 exact-endpoint parity gap. The network provider and global RU-001 gates remain open.
