@@ -87,7 +87,30 @@ fn compile_source_inventory_translate_filesystem_events_v1(
     for event in events:
         if event.kind == "overflow":
             return Err("inventory-event-overflow")
+        if event.kind != "created" and event.kind != "modified" and
+                event.kind != "deleted" and event.kind != "renamed" and
+                event.kind != "rename_from" and event.kind != "rename_to":
+            return Err("inventory-event-kind-invalid")
         val identity = compile_source_inventory_event_path_v1(root, event.path)
+        if event.kind == "renamed":
+            if event.related == "":
+                return Err("inventory-event-rename-unpaired")
+            val related = compile_source_inventory_event_path_v1(root, event.related)
+            # A source renamed to a non-source still needs its old source
+            # identity removed. Decide the old and new sides independently.
+            if compile_source_inventory_path_valid_v1(related):
+                translated = translated.push(
+                    compile_source_inventory_filesystem_event_v1(
+                        "delete", related, ""))
+            if not compile_source_inventory_path_valid_v1(identity):
+                continue
+            val renamed_content = compile_source_inventory_read_text_v1(event.path)
+            if renamed_content == nil:
+                return Err("inventory-event-read-failed:{identity}")
+            translated = translated.push(
+                compile_source_inventory_filesystem_event_v1(
+                    "create", identity, renamed_content!))
+            continue
         # Watch journals cover the whole tree; only compilable source paths
         # (.spl, simple.sdn) are inventory-tracked, matching the git-event
         # producer filter. Skipping here keeps one editor saving e.g. a
@@ -99,11 +122,6 @@ fn compile_source_inventory_translate_filesystem_events_v1(
                 compile_source_inventory_filesystem_event_v1(
                     "delete", identity, ""))
             continue
-        if event.kind == "renamed" and event.related != "":
-            val related = compile_source_inventory_event_path_v1(root, event.related)
-            translated = translated.push(
-                compile_source_inventory_filesystem_event_v1(
-                    "delete", related, ""))
         val content = compile_source_inventory_read_text_v1(event.path)
         if content == nil:
             return Err("inventory-event-read-failed:{identity}")

@@ -59,6 +59,43 @@ describe "event-maintained compile source inventory":
         expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
         dir_remove(cache_root, true)
 
+    it "rejects unknown and unpaired filesystem events before publishing Git changes":
+        val cache_root = "build/test-artifacts/scv-event-kind-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val unknown = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 1, kind: "mystery", path: "README.md", related: "")])
+        expect(unknown.valid).to_equal(false)
+        expect(unknown.reason).to_equal("inventory-event-kind-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val unpaired = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 2, kind: "renamed", path: "src/b.spl", related: "")])
+        expect(unpaired.valid).to_equal(false)
+        expect(unpaired.reason).to_equal("inventory-event-rename-unpaired")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "removes a source renamed to a non-source path":
+        val cache_root = "build/test-artifacts/scv-rename-out-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val seeded = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git], [])
+        expect(seeded.valid).to_equal(true)
+        val renamed = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [],
+            [FsWatchEvent(seq: 1, kind: "renamed", path: "src/a.txt",
+                related: "src/a.spl")])
+        expect(renamed.valid).to_equal(true)
+        if renamed.valid:
+            expect(renamed.inventory!.entries.len()).to_equal(0)
+            expect(renamed.inventory!.generation).to_equal(2)
+        dir_remove(cache_root, true)
+
     it "keeps the prior cursor when a writer publishes from a stale pointer":
         val cache_root = "build/test-artifacts/scv-cas-{rt_getpid()}/build/scv"
         dir_remove(cache_root, true)
