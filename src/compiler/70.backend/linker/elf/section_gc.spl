@@ -33,8 +33,30 @@ fn _gc_mark_name(res: SymResolution, live: [[bool]],
     val marked = _gc_mark(live, work_obj, work_sec, e.obj_idx, e.section_idx)
     (marked.get(0), marked.get(1), marked.get(2), common_live)
 
+fn _gc_glob(pat: text, value: text) -> bool:
+    var pi: i64 = 0
+    var vi: i64 = 0
+    var star: i64 = -1
+    var mark: i64 = 0
+    while vi < value.len():
+        if pi < pat.len() and (pat[pi:pi + 1] == "?" or pat[pi:pi + 1] == value[vi:vi + 1]):
+            pi = pi + 1
+            vi = vi + 1
+        elif pi < pat.len() and pat[pi:pi + 1] == "*":
+            star = pi
+            mark = vi
+            pi = pi + 1
+        elif star >= 0:
+            pi = star + 1
+            mark = mark + 1
+            vi = mark
+        else:
+            return false
+    while pi < pat.len() and pat[pi:pi + 1] == "*": pi = pi + 1
+    pi == pat.len()
+
 fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
-        retained: [text]) -> ElfSectionGc:
+        retained: [text], root_patterns: [text]) -> ElfSectionGc:
     var live: [[bool]] = []
     for obj in objects:
         var row: [bool] = []
@@ -57,6 +79,11 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         work_sec = root.get(2)
         commons = root.get(3)
 
+    if root_patterns.contains("COMMON"):
+        for name in res.defined.keys():
+            if res.defined[name].section_idx == SHN_COMMON_GC:
+                commons[name] = true
+
     var oi: i64 = 0
     while oi < objects.len():
         val obj = objects[oi]
@@ -64,10 +91,13 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         while si < obj.sections.len():
             val sec = obj.sections[si]
             val name = elf_section_name(obj, si)
+            var pattern_root = false
+            for pattern in root_patterns:
+                if _gc_glob(pattern, name): pattern_root = true
             if sec.sh_flags & SHF_ALLOC_GC != 0 and
                     (sec.sh_flags & SHF_GNU_RETAIN_GC != 0 or name == ".init" or name == ".fini" or
                      name.starts_with(".init_array") or name.starts_with(".fini_array") or
-                     name.starts_with(".preinit_array") or name == ".eh_frame"):
+                     name.starts_with(".preinit_array") or name == ".eh_frame" or pattern_root):
                 val root = _gc_mark(live, work_obj, work_sec, oi, si)
                 live = root.get(0)
                 work_obj = root.get(1)

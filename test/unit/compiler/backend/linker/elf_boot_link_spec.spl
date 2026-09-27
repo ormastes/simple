@@ -10,7 +10,10 @@
 # @cover src/compiler/70.backend/linker/elf/elf_boot_link.spl
 # @cover src/compiler/70.backend/linker/elf/elf_exec_writer.spl
 
-use compiler.backend.linker.elf.elf_boot_link.{ElfBootImage, elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured, elf_boot_link_archives_configured, elf_boot_link_image}
+use compiler.backend.linker.elf.elf_boot_link.{
+    ElfBootImage, elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured,
+    elf_boot_link_archives_configured, elf_boot_link_archives_configured_gc,
+    elf_boot_link_image}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{BootLayoutPlan, boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_read_bytes}
@@ -57,6 +60,15 @@ SECTIONS {
     . = 0x400000;
     .text : { *(.text*) }
     .tdata : { *(.tdata*) }
+}
+"""
+
+val GC_SCRIPT: text = """ENTRY(_start)
+SECTIONS {
+    . = 0x400000;
+    .text : { *(.text*) }
+    .data : { *(.data*) }
+    .bss (NOLOAD) : { *(.bss*) }
 }
 """
 
@@ -135,6 +147,22 @@ fn sec_file_off(im: ElfBootImage, name: text) -> i64:
     -1
 
 describe "elf_boot_link - PHDRS segments with AT() load addresses":
+    it "garbage-collects unreachable boot sections and honors KEEP roots":
+        val object = load_fixture("gc_sections_x64.o")
+        val collected = elf_boot_link_archives_configured_gc(
+            [object], [], plan_of(GC_SCRIPT), RelocArch.X86_64,
+            false, [], true)
+        expect(collected.is_ok()).to_equal(true)
+
+        val kept_script = GC_SCRIPT.replace(
+            ".text : { *(.text*) }",
+            ".text : { KEEP(*(.text.dead_undefined_function)) *(.text*) }")
+        val kept = elf_boot_link_archives_configured_gc(
+            [object], [], plan_of(kept_script), RelocArch.X86_64,
+            false, [], true)
+        expect(kept.is_err()).to_equal(true)
+        expect(kept.unwrap_err()).to_contain("missing_dead_dependency")
+
     it "strip_output removes the two static symbol-table sections":
         val normal = img().bytes
         val stripped = elf_boot_link_stripped(objs(), plan_of(BOOT_SCRIPT), RelocArch.AArch64).unwrap()
@@ -385,6 +413,20 @@ SECTIONS {
         expect(sec_size(im, ".got")).to_equal(8)
         expect(u64_at(im.bytes, 0x1000)).to_equal(
             sec_vma(im, ".text") + 9 - sec_vma(im, ".got"))
+
+    it "writes R_X86_64_SIZE32 and SIZE64 from the winning symbol extent":
+        val script = """ENTRY(_start)
+SECTIONS {
+    . = 0x100000;
+    .text : { *(.text*) }
+    .data : { *(.data*) }
+}
+"""
+        val im = elf_boot_link_image([load_fixture("symbol_size_x64.o"),
+            load_fixture("symbol_size_def_x64.o")], plan_of(script), RelocArch.X86_64).unwrap()
+        val data_off = sec_file_off(im, ".data")
+        expect(u32_at(im.bytes, data_off)).to_equal(13)
+        expect(u64_at(im.bytes, data_off + 8)).to_equal(13)
 
     it "relocated .text bytes equal ld.lld --no-relax":
         val b = img().bytes

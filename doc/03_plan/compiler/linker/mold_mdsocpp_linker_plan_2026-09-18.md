@@ -147,7 +147,7 @@ Next: A9 rung 3 (BootLayoutPlan in the ELF writer + `ld.lld -T` parity), `link_t
 |---|---|---|
 | B1 A9 rung 3 (`elf_boot_link`) | **pass** after 2 Fable blockers | Round 1 fixed: ASSERT used the wrong operator precedence (`1<2 && 5<3` was true); `AT>` was ignored; there were no VMA/LMA/PT_LOAD overlap or MEMORY-overflow rejects. Round 2 fixed: a region used as both `>` and `AT>` advanced twice; a NOBITS `AT>` did not advance its region; an explicit address was moved by `ALIGN()`; MIN/MAX and `/` `%` were signed. Each fix has a red→green spec, matched against ld.lld 23: `elf_boot_link` 25/25, `boot_layout_ops` 17/17 (both trees). The hello kernel's loaded bytes are identical to `ld.lld -O0 --no-relax`. **Rung 4 PARTIAL:** EDK2→Limine boots both kernels, and their serial logs are byte-identical. The gate still FAILs for both, because it needs full-kernel `[BOOT]` markers. The sha256 evidence is local-only (`build/os/b1/`). The board is blocked (record updated) |
 | B2 ELF extras | **pass** (Fable) | `.gnu.hash` is byte-identical to the ld.lld oracle; `.symtab`/`.strtab` and `PT_GNU_RELRO` are emitted; x86_64 dynamic PLT/GOT has structural parity and is admitted by `elf_link`; non-PIE imported function addresses receive canonical PLT entries and imported objects receive COPY relocations. Native execution certification is still pending. `elf_gnu_hash` 6/6, `elf_symtab` 6/6, `elf_x64_dynamic` 11/11 |
-| B3 `link_to_native` routing | **pass** after a Fable blocker (config fields silently dropped) | `SIMPLE_LINKER=internal` routes `link_to_native` to `internal:elf` through a helper shared with `link_request_to_native`. Runtime archives plus user archive/shared-library inputs are consumed; `strip_output` selects symbol-table-free ELF/SimpleOS output and is naturally satisfied by PE output. Hosted ELF `retained_symbols` seed archive closure like `-u/--undefined`; Windows roots similarly drive `.lib`/short-import selection like `/INCLUDE`; SimpleOS validates roots against its keep-all object/script definitions. Missing roots fail by name. Fields without implementations are rejected by name. The single-SMF `create_temp_dir` Result bug is fixed; the default path is unchanged |
+| B3 `link_to_native` routing | **pass** after a Fable blocker (config fields silently dropped) | `SIMPLE_LINKER=internal` routes `link_to_native` to `internal:elf` through a helper shared with `link_request_to_native`. Runtime archives plus user archive/shared-library inputs are consumed; `strip_output` selects symbol-table-free ELF/SimpleOS output and is naturally satisfied by PE output. Hosted ELF `retained_symbols` seed archive closure like `-u/--undefined`; Windows roots similarly drive `.lib`/short-import selection like `/INCLUDE`; SimpleOS validates roots and uses them as section-GC roots when requested. Missing roots fail by name. Fields without implementations are rejected by name. The single-SMF `create_temp_dir` Result bug is fixed; the default path is unchanged |
 
 Merged tree: 27/27 linker specs green; `check-link-mutation-gates.shs` PASS (7/7).
 
@@ -630,8 +630,9 @@ payload in `.dynstr`, admitting Stage-4 `$ORIGIN` and provider-directory
 placement. Malformed rpaths and every unmodelled extra flag still fail closed;
 debug policy remains unsupported until its output semantics are implemented.
 Hosted ELF and Windows retained-symbol roots seed
-archive extraction; SimpleOS validates roots against its keep-all object and
-script definitions; every route fails unresolved roots by name. `strip_output`
+archive extraction; SimpleOS validates roots against its object and script
+definitions and retains their section graph under `--gc-sections`; every route
+fails unresolved roots by name. `strip_output`
 is implemented across internal ELF, SimpleOS, and PE routing rather than being
 silently ignored.
 
@@ -658,11 +659,16 @@ fail before publication. `debug` and unmodelled `extra_flags` remain explicit
 unsupported policy rather than being ignored.
 
 Modeled SimpleOS `extra_flags` now project GNU `-T`/`--script` spellings into
-the BootLayoutPlan script input and `--defsym=name=expression` into typed
-post-layout symbol assignments. Duplicate identical policy is deduplicated;
-conflicting scripts, conflicting symbol expressions, malformed values, and
-every unmodeled flag fail closed. An explicit flag and
-`SIMPLE_LINKER_SCRIPT` must name the same script when both are present.
+the BootLayoutPlan script input, `--defsym=name=expression` into typed
+post-layout symbol assignments, and `--gc-sections` into relocation-graph
+collection rooted by the entry, retained symbols, `SHF_GNU_RETAIN`, lifecycle
+arrays, and script `KEEP` patterns. Dead unwind FDEs are compacted through the
+shared hosted-ELF collector, dead-section undefined references do not poison
+the boot link, and live common symbols remain placeable through `*(COMMON)`.
+Duplicate identical policy is deduplicated; conflicting scripts, conflicting
+symbol expressions, malformed values, and every unmodeled flag fail closed.
+An explicit flag and `SIMPLE_LINKER_SCRIPT` must name the same script when both
+are present.
 
 Remote interpreter placement now validates the exact path bytes later quoted
 into target commands. Known-target explicit and staging paths reject outer
