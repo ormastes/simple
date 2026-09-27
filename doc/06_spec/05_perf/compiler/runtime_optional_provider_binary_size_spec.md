@@ -39,9 +39,18 @@ new current-source Simple output. The old ELF has no `mmap` import; its
 analysis is in
 `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`.
 
-**Status: BLOCKED.** The admitted current-source Stage4 compiler and check
-worker are unavailable. The companion `test/..._spec.spl` is an acceptance
-outline with no executable `it` examples. The Rust seed also rejects its
-`feature` keyword (tracked in
-`doc/08_tracking/bug/feature_block_not_a_bdd_keyword_2026-08-04.md`). These
-scenarios are not passing executable test results.
+## Executable checker examples
+
+The companion `test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl`
+contains two `describe`/`it` examples with assertions. One runs the production
+BS7 producer/checker fixture and requires its clean cohort plus five rejected
+mutations. The other invokes the production checker without admission inputs
+and requires a failing exit and the missing-input diagnostic. These examples
+test the checker using synthetic evidence; they do not measure a Stage4 hello.
+The shell fixture itself passed in this isolated worktree. The two SPipe
+examples have not run under an admitted current-source pure-Simple test runner.
+
+**Live size status: BLOCKED.** The admitted current-source Stage4 compiler and
+check worker are unavailable, so the three literal-print qualification steps
+above have no passing executable result. Do not infer a release-size PASS from
+the checker examples.

@@ -17,12 +17,14 @@ running heavy cohorts.
 
 ## Native Evidence
 
-`test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl` defines
-the release-facing scenarios. A PASS requires retained Stage4-native cohort
-receipts; unavailable or old-seed measurements remain BLOCKED/diagnostic.
-This file is an acceptance outline with no executable `it` examples. The Rust
-seed also rejects its `feature` keyword; that separate bug is tracked in
-`doc/08_tracking/bug/feature_block_not_a_bdd_keyword_2026-08-04.md`.
+`test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl` runs
+the production checker's clean and mutation-red fixture and checks fail-closed
+behavior when admission inputs are missing. Those executable examples use
+synthetic receipts and establish checker behavior only. A release PASS still
+requires retained Stage4-native cohort receipts; unavailable or old-seed
+measurements remain BLOCKED/diagnostic.
+The shell fixture passed locally; the SPipe wrapper still needs an admitted
+current-source pure-Simple runner before it can claim an executed PASS.
 
 ## Literal-print qualification
 
