@@ -3,7 +3,7 @@ use std.spec.step
 use app.remote_test.binary_placement.{
     remote_simple_binary_path, remote_simple_test_command,
     remote_simple_stage_guard_command, remote_simple_stage_verify_command,
-    remote_simple_install_command}
+    remote_simple_stage_cleanup_command, remote_simple_install_command}
 extern fn rt_file_read_text(path: text) -> text
 val TEST_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
@@ -168,6 +168,25 @@ describe "remote interpreter binary placement":
         expect(remote_simple_stage_verify_command("windows", "C:\\Temp\\simple.exe ", zero_digest).is_err()).to_equal(true)
         expect(remote_simple_stage_verify_command("plan9", "/tmp/simple", zero_digest).is_err()).to_equal(true)
 
+    it "renders race-aware cleanup for failed staging uploads":
+        val linux = remote_simple_stage_cleanup_command(
+            "linux", "/tmp/simple upload").unwrap()
+        expect(linux).to_contain("[ -L '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ ! -f '/tmp/simple upload' ]")
+        expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
+        expect(linux).to_contain("exit 77")
+
+        val windows = remote_simple_stage_cleanup_command(
+            "windows", "C:\\Temp\\simple upload.exe").unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath 'C:\\Temp\\simple upload.exe' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("Remove-Item -LiteralPath 'C:\\Temp\\simple upload.exe' -Force")
+        expect(windows).to_contain("exit 77")
+
+        expect(remote_simple_stage_cleanup_command("linux", "tmp/simple").is_err()).to_equal(true)
+        expect(remote_simple_stage_cleanup_command("windows", "C:\\Tools\\NUL").is_err()).to_equal(true)
+        expect(remote_simple_stage_cleanup_command("plan9", "/tmp/simple").is_err()).to_equal(true)
+
     it "verifies uploaded bytes before publishing the interpreter":
         val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
         val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
@@ -176,6 +195,20 @@ describe "remote interpreter binary placement":
         expect(upload).to_be_greater_than(-1)
         expect(verify).to_be_greater_than(upload)
         expect(publish).to_be_greater_than(verify)
+
+    it "cleans an owned regular staging leaf after every post-guard failure":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val cleanup_render = source.index_of("val cleanup_command = remote_simple_stage_cleanup_command") ?? -1
+        val upload_failure = source.index_of("if not terminal_upload") ?? -1
+        val upload_cleanup = source.index_of("val upload_cleanup = terminal_execute") ?? -1
+        val verify_failure = source.index_of("if verified.exit_code != 0") ?? -1
+        val verify_cleanup = source.index_of("val verify_cleanup = terminal_execute") ?? -1
+        val publish_failure = source.index_of("if result.exit_code != 0") ?? -1
+        val publish_cleanup = source.index_of("val publish_cleanup = terminal_execute") ?? -1
+        expect(cleanup_render).to_be_greater_than(-1)
+        expect(upload_cleanup).to_be_greater_than(upload_failure)
+        expect(verify_cleanup).to_be_greater_than(verify_failure)
+        expect(publish_cleanup).to_be_greater_than(publish_failure)
 
     it "rejects unsafe Windows staging values and unknown automatic targets":
         expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe", TEST_SHA256).is_err()).to_equal(true)

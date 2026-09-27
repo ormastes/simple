@@ -17,7 +17,10 @@ use app.test_daemon.session_adapter.{SessionAdapter, session_adapter_new}
 use app.test_daemon.types.{TestResult}
 use std.terminal.types.{TerminalConfig, TerminalConnection, TerminalExecResult}
 use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close, terminal_is_connected, terminal_upload}
-use app.remote_test.binary_placement.{remote_simple_binary_path, remote_simple_test_command, remote_simple_stage_guard_command, remote_simple_stage_verify_command, remote_simple_install_command}
+use app.remote_test.binary_placement.{
+    remote_simple_binary_path, remote_simple_test_command,
+    remote_simple_stage_guard_command, remote_simple_stage_verify_command,
+    remote_simple_stage_cleanup_command, remote_simple_install_command}
 
 use std.io_runtime.{time_now_unix_micros, file_hash_sha256}
 
@@ -74,17 +77,37 @@ impl RemotePcAdapter:
             self.remote_os, self.simple_binary, staged_path, local_digest)?
         val verify_command = remote_simple_stage_verify_command(
             self.remote_os, staged_path, local_digest)?
+        val cleanup_command = remote_simple_stage_cleanup_command(
+            self.remote_os, staged_path)?
         val guard = terminal_execute(self.connection, guard_command, timeout_ms)
         if guard.exit_code != 0:
             return Err("remote Simple staging preflight failed for '{staged_path}': {guard.stderr}")
         if not terminal_upload(self.connection, local_path, staged_path):
-            return Err("failed to upload Simple binary to remote staging path '{staged_path}'")
+            val upload_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val upload_cleanup_detail = if upload_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {upload_cleanup.stderr}"
+            return Err("failed to upload Simple binary to remote staging path '{staged_path}'{upload_cleanup_detail}")
         val verified = terminal_execute(self.connection, verify_command, timeout_ms)
         if verified.exit_code != 0:
-            return Err("remote Simple upload verification failed for '{staged_path}': {verified.stderr}")
+            val verify_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val verify_cleanup_detail = if verify_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {verify_cleanup.stderr}"
+            return Err("remote Simple upload verification failed for '{staged_path}': {verified.stderr}{verify_cleanup_detail}")
         val result = terminal_execute(self.connection, command, timeout_ms)
         if result.exit_code != 0:
-            return Err("failed to publish remote Simple binary at '{self.simple_binary}': {result.stderr}")
+            val publish_cleanup = terminal_execute(
+                self.connection, cleanup_command, timeout_ms)
+            val publish_cleanup_detail = if publish_cleanup.exit_code == 0:
+                ""
+            else:
+                "; staging cleanup failed: {publish_cleanup.stderr}"
+            return Err("failed to publish remote Simple binary at '{self.simple_binary}': {result.stderr}{publish_cleanup_detail}")
         Ok(self.simple_binary)
 
     fn can_handle(meta: TestSessionMeta) -> bool:

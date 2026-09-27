@@ -254,6 +254,35 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
             "echo 'remote-test uploaded Simple SHA-256 mismatch' >&2; exit 74; fi")
     Err("remote-test cannot verify an uploaded binary for remote OS '{remote_os}'")
 
+fn remote_simple_stage_cleanup_command(remote_os: text,
+        staged_path: text) -> Result<text, text>:
+    """Render best-effort cleanup for a staging leaf owned by this upload."""
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        if staged_path != staged_path.trim() or
+                not _remote_path_is_absolute(staged_path, true) or
+                not _remote_path_has_file_leaf(staged_path, true):
+            return Err("remote Windows Simple staging cleanup path must be an exact absolute file path")
+        val stage = _remote_windows_command_value(staged_path)?
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$item = Get-Item -LiteralPath " + stage + " -Force -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $item) { exit 0 }; " +
+            "if ($item.PSIsContainer -or (($item.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test refuses to clean a non-regular staging path'; exit 77 }; " +
+            "Remove-Item -LiteralPath " + stage + " -Force\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        if staged_path != staged_path.trim() or
+                not _remote_path_is_absolute(staged_path, false) or
+                not _remote_path_has_file_leaf(staged_path, false):
+            return Err("remote POSIX Simple staging cleanup path must be an exact absolute file path")
+        val stage = _remote_posix_quote(staged_path)
+        return Ok("if [ -L " + stage + " ] || { [ -e " + stage +
+            " ] && [ ! -f " + stage + " ]; }; then " +
+            "echo 'remote-test refuses to clean a non-regular staging path' >&2; exit 77; fi; " +
+            "if [ -f " + stage + " ]; then rm -f -- " + stage + "; fi")
+    Err("remote-test cannot clean an uploaded binary for remote OS '{remote_os}'")
+
 fn remote_simple_install_command(remote_os: text, configured: text,
         staged_path: text, expected_sha256: text) -> Result<text, text>:
     """Publish an uploaded binary at the target-owned Simple path.
@@ -316,4 +345,4 @@ fn remote_simple_install_command(remote_os: text, configured: text,
 
 export remote_simple_binary_path, remote_simple_test_command
 export remote_simple_stage_guard_command, remote_simple_stage_verify_command
-export remote_simple_install_command
+export remote_simple_stage_cleanup_command, remote_simple_install_command

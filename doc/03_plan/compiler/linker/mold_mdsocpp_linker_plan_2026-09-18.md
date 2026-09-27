@@ -419,6 +419,13 @@ host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and
 download are functional without a fabricated session; password auth and
 interactive channels remain explicitly fail-closed.
+Post-guard placement failures now run a target-owned cleanup command after a
+partial upload, staging digest mismatch, or failed publication. Cleanup is
+idempotent for a missing leaf and removes only a regular staging file; POSIX
+symlinks/non-files and Windows directories/reparse points are refused with a
+named error rather than followed or deleted. This prevents an owned failed
+upload from poisoning the next absence preflight without turning cleanup into
+an attacker-controlled deletion primitive.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
 real source-derived target backend is connected. The native RV32 backend now
