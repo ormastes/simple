@@ -251,6 +251,10 @@ Windows capsule is layered as follows:
 SimpleOS uses the existing `BootLayoutPlan` and `elf_boot_link`; the wrapper
 now routes explicit `internal` requests there for x86_64 and arm64 instead of
 rejecting the target before the boot engine.
+The x86_64 boot relocation route resolves `R_X86_64_SIZE32` and `SIZE64` from
+the winning cross-object definition extent, matching the hosted ELF route;
+script-defined and unresolved-weak symbols have extent zero, and SIZE32 keeps
+checked unsigned-width semantics.
 
 Remote interpreter placement is a target-filesystem decision, not a host-path
 guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`

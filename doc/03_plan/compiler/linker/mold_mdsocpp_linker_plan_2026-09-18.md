@@ -279,6 +279,9 @@ The x86_64 local-exec set now includes both instruction-field `TPOFF32` and
 data-word `TPOFF64`, with the latter checked against an lld static oracle.
 Cross-object `R_X86_64_SIZE32`/`SIZE64` now resolve from the winning definition's
 extent rather than the undefined reference row's zero size, also checked against lld.
+The SimpleOS boot linker now applies the same winning-definition rule instead
+of accidentally encoding the symbol address for these already-classified
+relocations.
 
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 
