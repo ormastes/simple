@@ -258,7 +258,7 @@ select_rows() {
         {
             id = trim($1)
             if (id == "" || id ~ /^must_check_gates$/) next
-            tier = nosp($2); blocking = nosp($3)
+            tier = nosp($2); blocking = nosp($3); kind = nosp($4)
             cmd = $5; sub(/^[[:space:]]*"/, "", cmd); sub(/"[[:space:]]*$/, "", cmd)
             if (id == "" || tier == "" || cmd == "") next
             keep = 0
@@ -269,7 +269,7 @@ select_rows() {
             # tier (bootstrap and ci rows use the same column for a different,
             # tier-local meaning of required).
             if (want_tier == "local" && tier == "push" && blocking == "true") keep = 1
-            if (keep && !seen[id]++) printf "%s\t%s\t%s\n", id, blocking, cmd
+            if (keep && !seen[id]++) printf "%s\t%s\t%s\t%s\n", id, blocking, kind, cmd
         }'
 }
 
@@ -339,8 +339,16 @@ run_tier() {
     trap on_interrupt INT TERM
 
     _n=0
-    while IFS="$_tab" read -r _id _blocking _cmd; do
+    while IFS="$_tab" read -r _id _blocking _kind _cmd; do
         _n=$((_n + 1))
+        # Backward compat (release-line manifests predate {range}/{rev}
+        # placeholders): a placeholder-less command receives its endpoints
+        # positionally, matching the old gate scripts' argv contract
+        # (range rows take the range as $1; ref rows end with a bare --rev).
+        case "$_cmd" in
+            *'{range}'*|*'{rev}'*|*'{base}'*) _has_ph=1 ;;
+            *) _has_ph=0 ;;
+        esac
         _expanded=$(substitute_placeholders "$_cmd") || {
             # A placeholder with no value is a usage/configuration defect,
             # not a gate verdict: this row never ran, so it can never be
@@ -352,6 +360,12 @@ run_tier() {
             echo "run-gate-tier: row $_id: ERROR — placeholder in '$_cmd' has no value supplied" >&2
             continue
         }
+        if [ "$_has_ph" = 0 ]; then
+            case "$_kind" in
+                range) _expanded="$_expanded $RANGE" ;;
+                ref)   _expanded="$_expanded $REF" ;;
+            esac
+        fi
         # Throttle to $_jobs concurrent rows; reap finished ones by polling
         # kill -0 (still-a-zombie test) then `wait` (retrieves the exit
         # status POSIX-portably; no bash-only `wait -n` is used).
