@@ -436,7 +436,9 @@ Implemented source slice:
   anonymous 56-byte bigobj headers share the same bounded parser; bigobj uses
   20-byte symbols, signed 32-bit section numbers, and the high half of
   associative COMDAT section indices rather than truncating them to classic
-  COFF widths;
+  COFF widths. Archive admission recognizes the bigobj class identifier rather
+  than skipping its machine-zero prefix, and short-import detection explicitly
+  excludes bigobj members despite their shared `0/0xffff` signature;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
 - ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,

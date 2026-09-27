@@ -53,6 +53,42 @@ fn _ca_object(symbol: text, section: i64, machine: i64 = 0x8664) -> [u8]:
     bytes = bytes.push(2).push(0)
     _ca_u32(bytes, 4)
 
+fn _ca_bigobj(symbol: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0xffff)
+    bytes = _ca_u16(bytes, 2)
+    bytes = _ca_u16(bytes, 0x8664)
+    bytes = _ca_u32(bytes, 0)
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    for byte in magic: bytes = bytes.push(byte as u8)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u32(bytes, 97)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_name(bytes, ".text")
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u32(bytes, 96)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u16(bytes, 0)
+    bytes = _ca_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _ca_name(bytes, symbol)
+    bytes = _ca_u32(bytes, 0)
+    bytes = _ca_u32(bytes, 1)
+    bytes = _ca_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _ca_u32(bytes, 4)
+
 fn _ca_long_symbol_object(symbol: text) -> [u8]:
     var bytes: [u8] = []
     bytes = _ca_u16(bytes, 0x8664)
@@ -136,6 +172,18 @@ describe "COFF archive closure":
         expect(members.is_ok()).to_equal(true)
         expect(members.unwrap().len()).to_equal(1)
         expect(members.unwrap()[0].object.machine).to_equal(0xaa64)
+
+    it "admits bigobj members instead of skipping them as machine zero":
+        val members = coff_archive_members([
+            _ca_archive("provider.obj", _ca_bigobj("foo"))])
+        expect(members.is_ok()).to_equal(true)
+        expect(members.unwrap().len()).to_equal(1)
+        expect(members.unwrap()[0].object.symbols[0].name).to_equal("foo")
+        val root = coff_parse_object(_ca_object("foo", 0)).unwrap()
+        val closure = coff_archive_closure([root], [
+            _ca_archive("provider.obj", _ca_bigobj("foo"))])
+        expect(closure.is_ok()).to_equal(true)
+        expect(closure.unwrap().members.len()).to_equal(1)
 
     it "extracts a member that resolves a root external":
         val root = coff_parse_object(_ca_object("foo", 0)).unwrap()
