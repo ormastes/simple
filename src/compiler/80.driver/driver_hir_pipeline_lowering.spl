@@ -238,12 +238,6 @@ impl CompilerDriver:
         if not rt_heap_ref_wellformed(surfaces):
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return false
-        # Stage 3 requests this durable sink even when phase 2 selected the
-        # streaming surface owner. Without opening it here, the RSS verifier
-        # receives no HIR records for the path that the bootstrap actually runs.
-        if mem_snapshot_begin() < 0:
-            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
-            return false
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
@@ -268,6 +262,14 @@ impl CompilerDriver:
         else:
             ""
         val hir_shard_mode: bool = hir_shard_active() and hir_closure_digest != ""
+        # Stage 3 requests this durable sink even when phase 2 selected the
+        # streaming surface owner. Shard children only fill the HIR cache and
+        # may share the parent's configured path; they must not open its
+        # O_EXCL evidence descriptor or publish an incomplete terminal row.
+        if not hir_shard_mode:
+            if mem_snapshot_begin() < 0:
+                self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+                return false
         var hir_level_count: i64 = 0
         var hir_shard_lowered: i64 = 0
         var hir_levels: [i64] = []
