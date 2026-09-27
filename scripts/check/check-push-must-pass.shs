@@ -25,6 +25,7 @@ MUST_CHECK_BUDGET_SPENT_MS=0
 MUST_CHECK_BLOCKING_RUN=0
 MUST_CHECK_BUDGET_OVERRUN=""
 TIMEOUT_BIN=""
+REMOTE_QUERY_TIMEOUT_S=3
 REQUIRED_BOOTSTRAP_IDS='compiler-stage1
 compiler-stage2
 compiler-stage3
@@ -1011,7 +1012,9 @@ rebased_push_published_base() {
     _rebased_tip=$1
     _rebased_remote=${MUST_CHECK_PUSH_REMOTE:-}
     case "$_rebased_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
-    _rebased_line=$(git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" refs/heads/main 2>/dev/null) || return 1
+    # This network call is outside run_push_gate's per-ref budget. Bound it
+    # independently so an unavailable remote cannot hang the pre-push hook.
+    _rebased_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" git -C "$ROOT" ls-remote --exit-code "$_rebased_remote" refs/heads/main 2>/dev/null) || return 1
     _rebased_sha=${_rebased_line%%[[:space:]]*}
     _rebased_ref=${_rebased_line#*[[:space:]]}
     [ "$_rebased_ref" = refs/heads/main ] || return 1
@@ -1212,6 +1215,27 @@ if [ "${1:-}" = --self-test ]; then
     [ "$(rebased_push_published_base "$_rebased_tip")" = "$_rebased_expected" ] || die "main advancing after rebase changed the published base"
     MUST_CHECK_PUSH_REMOTE=missing-remote
     rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1 && die "missing remote accepted as rebase authority"
+    MUST_CHECK_PUSH_REMOTE=origin
+    mkdir -p "$_tmp/rebased/slow-bin"
+    _real_git=$(command -v git)
+    cat > "$_tmp/rebased/slow-bin/git" <<'SLOW_GIT'
+#!/bin/sh
+case " $* " in
+    *' ls-remote '*) sleep 5 ;;
+esac
+exec "$REBASE_FIXTURE_REAL_GIT" "$@"
+SLOW_GIT
+    chmod +x "$_tmp/rebased/slow-bin/git"
+    (
+        PATH="$_tmp/rebased/slow-bin:$PATH"
+        REBASE_FIXTURE_REAL_GIT=$_real_git
+        REMOTE_QUERY_TIMEOUT_S=1
+        export PATH REBASE_FIXTURE_REAL_GIT
+        _slow_start=$(date +%s)
+        if rebased_push_published_base "$_rebased_tip" >/dev/null 2>&1; then exit 1; fi
+        _slow_elapsed=$(( $(date +%s) - _slow_start ))
+        [ "$_slow_elapsed" -lt 5 ] || exit 1
+    ) || die "slow remote was accepted or not bounded"
     ROOT=$_saved_root
     MUST_CHECK_PUSH_REMOTE=$_saved_remote
 
@@ -1272,7 +1296,7 @@ if [ "${1:-}" = --self-test ]; then
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 28 ledger/budget/dispatcher/rebase fixtures checked"
+    echo "push-must-check: PASS — 29 ledger/budget/dispatcher/rebase fixtures checked"
     exit 0
 fi
 
