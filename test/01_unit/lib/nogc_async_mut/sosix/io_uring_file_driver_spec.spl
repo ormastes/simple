@@ -80,6 +80,28 @@ describe "SOSIX Linux io_uring provider":
         expect(driver.buffer_bytes(sink)).to_equal("native uring bytes")
         driver.close()
 
+    it "places a positioned read at its buffer offset and preserves surrounding bytes":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        val driver = setup_linux_uring_driver()
+        val fs = setup_fs()
+        val path = scratch_path("read_buffer_offset")
+        expect(file_write_text_at(path, 0, "abc")).to_be_greater_than(-1)
+        val file = driver.open_path(path)
+        val sink = driver.buffer_from("XX.....YY")
+        val read = sosix_sync_fs_read_at(
+            fs, driver, file, sink, 1u64, 3u64, 2u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.completion.transferred).to_equal(2u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+
+        val rejected = sosix_sync_fs_read_at(
+            fs, driver, file, sink, 0u64, 10u64, 1u64, 0u64)
+        expect(rejected.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(rejected.error.native_code).to_equal(-22)
+        expect(rejected.completion.transferred).to_equal(0u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+        driver.close()
+
     it "preserves partial EOF progress and propagates a native negative errno":
         val driver = setup_linux_uring_driver()
         val fs = setup_fs()

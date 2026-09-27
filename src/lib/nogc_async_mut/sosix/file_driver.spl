@@ -192,12 +192,22 @@ class SosixLinuxUringFileDriver:
         var status: i64 = 0
         var transferred: u64 = 0u64
         if request.api_id == SOSIX_FS_READ_AT:
-            val read_op = native_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
-            status = self._wait_result(read_op)
-            if status >= 0:
-                val bytes = native_driver_poll_data(self.handle)
-                self.buffers[buffer_slot] = bytes
-                transferred = status.to_u64()
+            val start = request.buffer_offset.to_i64()
+            val current = self.buffers[buffer_slot]
+            if start < 0 or start > current.len():
+                status = -22
+            else:
+                val read_op = native_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
+                status = self._wait_result(read_op)
+                if status >= 0:
+                    val bytes = native_driver_poll_data(self.handle)
+                    val remaining = current.len() - start
+                    val suffix = if bytes.len() < remaining:
+                        current[start + bytes.len():current.len()]
+                    else:
+                        ""
+                    self.buffers[buffer_slot] = current[0:start] + bytes + suffix
+                    transferred = status.to_u64()
         else:
             val start = request.buffer_offset.to_i64()
             val stop = start + request.length.to_i64()
