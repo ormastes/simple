@@ -24,6 +24,19 @@ var ft_vals: [i64] = []
 var ft_buckets: [i64] = []
 var ft_nexts: [i64] = []
 
+# Caller-aware function ownership.  The historical flat table remains for
+# compatibility, but cannot distinguish two modules which define the same
+# bare name.  Keep the authoritative owner and selective-import routes in
+# parallel arrays; these tables are small during interpretation and lookup is
+# off the parser hot path.
+var fto_owners: [text] = []
+var fto_names: [text] = []
+var fto_vals: [i64] = []
+var fib_callers: [text] = []
+var fib_names: [text] = []
+var fib_source_names: [text] = []
+var fib_owners: [text] = []
+
 # ===== Function Return Types (Hash Map) =====
 var frt_keys: [text] = []
 var frt_vals: [i64] = []
@@ -275,6 +288,93 @@ fn func_table_lookup(name: text) -> i64:
             return ft_vals[idx]
         idx = ft_nexts[idx]
     -1
+
+fn func_table_register_owned(owner: text, name: text, decl_id: i64):
+    var i = 0
+    while i < fto_names.len():
+        if fto_owners[i] == owner and fto_names[i] == name:
+            fto_vals[i] = decl_id
+            return
+        i = i + 1
+    fto_owners.push(owner)
+    fto_names.push(name)
+    fto_vals.push(decl_id)
+
+fn func_table_lookup_owned(owner: text, name: text) -> i64:
+    var i = fto_names.len()
+    while i > 0:
+        i = i - 1
+        if fto_owners[i] == owner and fto_names[i] == name:
+            return fto_vals[i]
+    -1
+
+fn func_import_binding_reset():
+    fib_callers = []
+    fib_names = []
+    fib_source_names = []
+    fib_owners = []
+
+fn func_import_binding_names(name: text) -> (text, text):
+    # Selective imports encode `source:local` in the parser's use-decl list.
+    # Decode once at registration, not on every call through the alias.
+    val parts = name.split(":")
+    if parts.len() == 2 and parts[0] != "" and parts[1] != "":
+        return (parts[0], parts[1])
+    (name, name)
+
+fn func_import_binding_register(caller: text, name: text, owner: text):
+    val binding_names = func_import_binding_names(name)
+    val source_name = binding_names.0
+    val local_name = binding_names.1
+    var i = 0
+    while i < fib_names.len():
+        if fib_callers[i] == caller and fib_names[i] == local_name:
+            fib_source_names[i] = source_name
+            fib_owners[i] = owner
+            return
+        i = i + 1
+    fib_callers.push(caller)
+    fib_names.push(local_name)
+    fib_source_names.push(source_name)
+    fib_owners.push(owner)
+
+fn func_import_binding_route(caller: text, name: text) -> (text, text):
+    var i = fib_names.len()
+    while i > 0:
+        i = i - 1
+        if fib_callers[i] == caller and fib_names[i] == name:
+            return (fib_owners[i], fib_source_names[i])
+    ("", "")
+
+fn func_import_binding_lookup(caller: text, name: text) -> text:
+    func_import_binding_route(caller, name).0
+
+fn func_resolve_for_caller_depth(caller: text, name: text, depth: i64) -> i64:
+    if depth > 8: return -1
+    val own = func_table_lookup_owned(caller, name)
+    if own >= 0:
+        return own
+    val route = func_import_binding_route(caller, name)
+    val imported_owner = route.0
+    val imported_name = route.1
+    if imported_owner != "" and imported_owner != caller:
+        val did = func_table_lookup_owned(imported_owner, imported_name)
+        if did >= 0:
+            return did
+        # Re-export chain: the imported module (typically a facade that did
+        # `export use owner.{source as local}`) does not define the local name
+        # itself, but it registered its own source binding for the real owner.
+        # Follow that chain. Returning -1 here would let the call evaluator's
+        # legacy flat-table fallback silently dispatch to an unrelated
+        # same-named fn (last-write-wins) — the env_get hijack behind
+        # doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md
+        return func_resolve_for_caller_depth(imported_owner, imported_name, depth + 1)
+    # No caller route is safer than silently selecting an unrelated module's
+    # last-write-wins entry.  The call evaluator may apply its legacy fallback.
+    -1
+
+fn func_resolve_for_caller(caller: text, name: text) -> i64:
+    func_resolve_for_caller_depth(caller, name, 0)
 
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
