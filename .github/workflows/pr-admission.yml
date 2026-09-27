@@ -380,37 +380,8 @@ jobs:
           diff -u convergence-receipt/release.inventory.sorted convergence-receipt/release.classified
           jq -e --arg release_ref "$RELEASE_REF" \
             --slurpfile main_inventory convergence-receipt/main.inventory.json \
-            --slurpfile release_inventory convergence-receipt/release.inventory.json'
-            (.main_to_release.selected_shas | length) ==
-              (.main_to_release.selected_shas | unique | length) and
-            all(.main_to_release.selected_shas[];
-                test("^[0-9a-f]{40}$") and ($main_inventory[0] | index(.) != null)) and
-            (.main_to_release.backports | length) ==
-              (.main_to_release.backports | map(.source_commit_sha) | unique | length) and
-            ((.main_to_release.selected_shas | sort) ==
-             (.main_to_release.backports | map(.source_commit_sha) | sort)) and
-            all(.main_to_release.backports[]; . as $backport |
-                ($backport.source_commit_sha | test("^[0-9a-f]{40}$")) and
-                ($backport.result_commit_sha | test("^[0-9a-f]{40}$")) and
-                $backport.target_ref == $release_ref and
-                ($main_inventory[0] | index($backport.source_commit_sha) != null) and
-                ($release_inventory[0] | index($backport.result_commit_sha) != null)) and
-            (.release_to_main.classifications | length) ==
-              (.release_to_main.classifications | map(.commit_sha) | unique | length) and
-            all(.release_to_main.classifications[];
-                (.commit_sha | test("^[0-9a-f]{40}$")) and
-                (.kind == "fix" or .kind == "non_fix") and
-                (if .kind == "non_fix" then
-                   (.reason | type == "string" and test("^[^\\t\\r\\n]{3,256}$")) and
-                   (.owner | type == "string" and test("^@[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")) and
-                   (.expires_at | type == "string" and
-                    test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and
-                    (fromdateiso8601 > now))
-                 else
-                   ((.reason // "") == "" and (.owner // "") == "" and
-                    (.expires_at // "") == "")
-                 end))' \
-            "$manifest" >/dev/null
+            --slurpfile release_inventory convergence-receipt/release.inventory.json \
+            -f scripts/release/validate-convergence-manifest.jq "$manifest" >/dev/null
 
           : > convergence-receipt/classification-evidence.jsonl
           while IFS=$'\t' read -r source kind reason owner expires_at; do
@@ -649,30 +620,7 @@ jobs:
             --argjson verification_performed "$verification_performed" \
             --argjson github_pr_approval_claimed "$github_pr_approval_claimed" \
             --arg verifier_unavailability_proof_sha256 "$verifier_unavailability_proof_sha256" \
-            '{schema:"simple-release-convergence/3",producer:"protected_integration",
-              inventory_origin:"protected_integration",candidate_commit_sha:$candidate_commit_sha,
-              authority_class:$authority_class,verification_performed:$verification_performed,
-              github_pr_approval_claimed:$github_pr_approval_claimed,
-              verifier_unavailability_proof_sha256:$verifier_unavailability_proof_sha256,
-              release_ref:$release_ref,main_head_sha:$main_head_sha,release_head_sha:$release_head_sha,
-              review_summary_sha256:$review_summary_sha256,
-              evidence_receipt_sha256:$evidence_receipt_sha256,
-              integration_receipt_sha256:$integration_receipt_sha256,
-              provider:{integration_pr_number:($integration_pr_number | tonumber),
-                integration_base_sha:$integration_base_sha,
-                integration_head_sha:$integration_head_sha,
-                integration_merge_sha:$candidate_commit_sha,
-                release_inventory_head_sha:$release_inventory_head_sha,
-                reviewed_manifest_blob_sha:$manifest_blob_sha,
-                reviewed_manifest_sha256:$manifest_sha256},
-              main_to_release:{inventory_shas:$main_inventory[0],shared_fix_shas:$main_selected,
-                selected_shas:$main_selected,backported_shas:$backport_sources,
-                backport_receipt_sha256s:[$backports[].receipt_sha256],backports:$backports},
-              release_to_main:{inventory_shas:$release_inventory[0],shared_fix_shas:$fix_sources,
-                forward_ported_shas:$forward_sources,
-                forward_port_receipt_sha256s:[$forward_ports[].receipt_sha256],
-                classifications:$classifications,forward_ports:$forward_ports},
-              mutation:"none",main_remains_independent:true}' \
+            -f scripts/release/build-convergence-receipt.jq \
             > convergence-receipt/convergence-receipt.json
           (cd convergence-receipt && sha256sum \
             backport-evidence.json check-evidence.json classification-evidence.json convergence-receipt.json \
