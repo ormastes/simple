@@ -425,3 +425,39 @@ the existing QEMU TCG result.
   Linux preprocessor-scope defect. Add a length-aware pin ABI, register/wrap the
   three pinned symbols, bind SHA-256 of final sealed bytes, and rerun in a fresh
   verification session before consuming this path as tool authority.
+
+## 2026-09-27 Astra handoff — frontend execution authority
+
+**Status: design only; runtime qualification and promotion remain pending.**
+This bounded Stage 3/E3 milestone follows the
+[focused authority design](../../05_design/compiler/frontend_advisory_execution_authority_v1.md)
+and [companion test plan](../sys_test/frontend_advisory_execution_authority_v1.md).
+The parent design/test-plan files remain with their existing cache/inspector
+owners. No E1–E5 accounting weight, default or evidence status changes here.
+
+Canonical names: `FrontendAdvisoryExecutionOwnerV1`,
+`FrontendAdvisoryExecutionTokenV1`, `frontend_advisory_execution_issue_v1`, and
+`frontend_advisory_execution_consume_v1`. A copyable receipt or numeric startup
+coordinate is not executable authority.
+
+| Ordered handoff | Implementation scope | Completion evidence |
+|---|---|---|
+| Authority review | Root/Astra; agree private issuer boundary, checked `random_hex(16)` per-operation nonce, owner-minted source snapshot IDs, table/epoch/request correlation and one-shot transitions | Reject nil/colliding entropy, source-ID wrap/collision and guessed/replayed tokens; prove no public constructor/callback bypass; unavailable authority stays closed |
+| Loader owner | New `src/compiler/99.loader/frontend_advisory_execution_owner_v1.spl`; join existing sealed activation and lexical package APIs | Per-transformed-source session, real guarded operation, independent scalar oracle, terminal cleanup before usable token, retained cleanup retry |
+| Typed frontend bridge | Existing startup binding, frontend advisory port and shared frontend facade | Owner-backed consume at the post-transform/pre-cache seam; independently derived source identity; Prefer discard and Require error behavior |
+| Composition/cache integration | Existing CLI startup owner and driver context, coordinated with cache V2 owner | Actual candidate installer, pinned startup lifetime through cache decision, no arbitrary function registration, no token replay on cache hit |
+| Qualification/manual | Existing loader/frontend specs plus planned real system scenario extensions | Exact native invocation/terminal receipts, parity/negative controls, named latency/RSS corpus; generated manual review only after executable gates exist |
+
+Merge owner: root Codex. Final authority and evidence reviewer: Astra/highest
+capability reviewer independent of implementation acceptance. Parallel sidecars:
+**N/A for this bounded design handoff**; implementation file ownership must be
+rechecked before any future delegation. Recheck active PR/worktree overlap for
+the CLI startup owner because cache V2 already owns it.
+
+Reject wiring-only changes that restore legacy bind/reset callbacks, allow
+caller-issued `executed` receipts, reuse a source session across changed input,
+publish before terminal cleanup, or turn an ordinary parse-cache hit into
+execution proof. Preserve Reference laziness, classifier-only claims, and the
+existing no-complete-SIMD-block Require policy. No full bootstrap or unavailable
+runner substitution is authorized by this handoff. Complete each verification
+gate once per unchanged revision within the three-cycle cap.
