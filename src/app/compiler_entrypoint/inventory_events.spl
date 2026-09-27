@@ -20,6 +20,18 @@ struct CompilerInventoryCursorV1:
     filesystem_digest: text
     inventory_digest: text
     inventory_generation: i64
+    untracked_src_digest: text
+    untracked_test_digest: text
+
+struct CompilerInventoryGitEventsV1:
+    events: [CompileSourceEventV1]
+    untracked_src_digest: text
+    untracked_test_digest: text
+
+struct CompilerInventoryUntrackedDigestsV1:
+    valid: bool
+    src_digest: text
+    test_digest: text
 
 fn compiler_inventory_invalid_v1(reason: text) -> CompilerInventoryRefreshV1:
     CompilerInventoryRefreshV1(false, reason, "", -1)
@@ -30,20 +42,39 @@ fn compiler_inventory_event_root_v1(cache_root: text) -> text:
 fn compiler_inventory_cursor_path_v1(cache_root: text) -> text:
     compiler_inventory_event_root_v1(cache_root) + "/CURRENT"
 
+fn compiler_inventory_cursor_invalid_v1() -> CompilerInventoryCursorV1:
+    CompilerInventoryCursorV1(false, "", -1, "", "", -1, "", "")
+
 fn compiler_inventory_cursor_decode_v1(content: text) -> CompilerInventoryCursorV1:
     val lines = content.split("\n")
-    if (lines.len() != 6 or lines[0] != "simple-compile-event-cursor-v1" or
-            not lines[1].starts_with("git_head=") or
+    if lines.len() != 6 and lines.len() != 8:
+        return compiler_inventory_cursor_invalid_v1()
+    val scoped = lines.len() == 8
+    if (scoped and lines[0] != "simple-compile-event-cursor-v2") or
+            (not scoped and lines[0] != "simple-compile-event-cursor-v1"):
+        return compiler_inventory_cursor_invalid_v1()
+    if (not lines[1].starts_with("git_head=") or
             not lines[2].starts_with("filesystem_rows=") or
             not lines[3].starts_with("filesystem_digest=") or
             not lines[4].starts_with("inventory_digest=") or
             not lines[5].starts_with("inventory_generation=")):
-        return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
-    val head = lines[1].replace("git_head=", "")
-    val rows = lines[2].replace("filesystem_rows=", "").to_i64() ?? -1
-    val filesystem_digest = lines[3].replace("filesystem_digest=", "")
-    val inventory_digest = lines[4].replace("inventory_digest=", "")
-    val generation = lines[5].replace("inventory_generation=", "").to_i64() ?? -1
+        return compiler_inventory_cursor_invalid_v1()
+    if scoped and (not lines[6].starts_with("untracked_src_digest=") or
+            not lines[7].starts_with("untracked_test_digest=")):
+        return compiler_inventory_cursor_invalid_v1()
+    val head = lines[1].substring("git_head=".len())
+    val rows = lines[2].substring("filesystem_rows=".len()).to_i64() ?? -1
+    val filesystem_digest = lines[3].substring("filesystem_digest=".len())
+    val inventory_digest = lines[4].substring("inventory_digest=".len())
+    val generation = lines[5].substring("inventory_generation=".len()).to_i64() ?? -1
+    val untracked_src_digest = if scoped:
+        lines[6].substring("untracked_src_digest=".len())
+    else:
+        ""
+    val untracked_test_digest = if scoped:
+        lines[7].substring("untracked_test_digest=".len())
+    else:
+        ""
     var head_valid = head.len() == 40 or head.len() == 64
     for ch in head:
         if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
@@ -51,9 +82,12 @@ fn compiler_inventory_cursor_decode_v1(content: text) -> CompilerInventoryCursor
     val valid = head_valid and rows >= 0 and
         compile_source_inventory_digest_valid_v1(filesystem_digest) and
         compile_source_inventory_digest_valid_v1(inventory_digest) and
-        generation >= 0
+        generation >= 0 and (not scoped or
+            (compile_source_inventory_digest_valid_v1(untracked_src_digest) and
+            compile_source_inventory_digest_valid_v1(untracked_test_digest)))
     CompilerInventoryCursorV1(
-        valid, head, rows, filesystem_digest, inventory_digest, generation)
+        valid, head, rows, filesystem_digest, inventory_digest, generation,
+        untracked_src_digest, untracked_test_digest)
 
 fn compiler_inventory_cursor_read_v1(
     cache_root: text, pointer_content: text
@@ -68,7 +102,7 @@ fn compiler_inventory_cursor_read_v1(
                 pointer_content[separator + 1:])
     val path = compiler_inventory_cursor_path_v1(cache_root)
     if not file_exists(path):
-        return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
+        return compiler_inventory_cursor_invalid_v1()
     compiler_inventory_cursor_decode_v1(file_read(path))
 
 fn compiler_inventory_git_lines_v1(
@@ -150,9 +184,40 @@ fn compiler_inventory_parse_name_status_v1(
         result = next!
     Some(result)
 
+fn compiler_inventory_untracked_digests_v1(
+    output: text, source_roots: [text]
+) -> CompilerInventoryUntrackedDigestsV1:
+    for scope in source_roots:
+        if scope != "src" and scope != "test":
+            return CompilerInventoryUntrackedDigestsV1(false, "", "")
+    var src_paths: [text] = []
+    var test_paths: [text] = []
+    for path in output.split("\n"):
+        if path == "":
+            continue
+        if path.starts_with("\""):
+            return CompilerInventoryUntrackedDigestsV1(false, "", "")
+        val normalized = if path.contains("\\"): path.replace("\\", "/") else: path
+        if not compile_source_inventory_path_valid_v1(normalized):
+            continue
+        if normalized.starts_with("src/"):
+            src_paths = src_paths.push(normalized)
+        elif normalized.starts_with("test/"):
+            test_paths = test_paths.push(normalized)
+    val src_digest = if source_roots.contains("src"):
+        sha256_text(src_paths.join("\n"))
+    else:
+        ""
+    val test_digest = if source_roots.contains("test"):
+        sha256_text(test_paths.join("\n"))
+    else:
+        ""
+    CompilerInventoryUntrackedDigestsV1(
+        true, src_digest, test_digest)
+
 fn compiler_inventory_git_events_v1(
     root: text, previous_head: text, source_roots: [text], cold_init: bool
-) -> [CompileSourceEventV1]?:
+) -> CompilerInventoryGitEventsV1?:
     var events: [CompileSourceEventV1] = []
     if cold_init:
         val listed = compiler_inventory_git_lines_v1(
@@ -161,13 +226,23 @@ fn compiler_inventory_git_events_v1(
         if listed == nil:
             return nil
         for path in listed!.split("\n"):
-            if path.trim() != "":
+            if path != "":
                 val next = compiler_inventory_event_push_v1(
                     events, root, "create", path)
                 if next == nil:
                     return nil
                 events = next!
-        return Some(events)
+        val untracked = compiler_inventory_git_lines_v1(
+            root, ["-c", "core.quotePath=false", "ls-files", "--others",
+                "--exclude-standard", "--"] + source_roots)
+        if untracked == nil:
+            return nil
+        val digests = compiler_inventory_untracked_digests_v1(
+            untracked!, source_roots)
+        if not digests.valid:
+            return nil
+        return Some(CompilerInventoryGitEventsV1(
+            events, digests.src_digest, digests.test_digest))
     val head = compiler_inventory_git_head_v1(root)
     if head == "" or previous_head == "":
         return nil
@@ -192,17 +267,22 @@ fn compiler_inventory_git_events_v1(
             "--exclude-standard", "--"] + source_roots)
     if working == nil or untracked == nil:
         return nil
+    val digests = compiler_inventory_untracked_digests_v1(
+        untracked!, source_roots)
+    if not digests.valid:
+        return nil
     val changed = compiler_inventory_parse_name_status_v1(root, working!, events)
     if changed == nil:
         return nil
     events = changed!
     for path in untracked!.split("\n"):
-        if path.trim() != "":
+        if path != "":
             val next = compiler_inventory_event_push_v1(events, root, "create", path)
             if next == nil:
                 return nil
             events = next!
-    Some(events)
+    Some(CompilerInventoryGitEventsV1(
+        events, digests.src_digest, digests.test_digest))
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -306,13 +386,18 @@ fn compiler_inventory_refresh_v1(
                 current.digest != cursor.inventory_digest or
                 current.inventory!.generation != cursor.inventory_generation):
             return compiler_inventory_invalid_v1("compile-event-inventory-binding-mismatch")
+        if cursor.untracked_src_digest == "" or
+                cursor.untracked_test_digest == "":
+            return compiler_inventory_invalid_v1(
+                "untracked-membership-cursor-missing (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     val head = compiler_inventory_git_head_v1(root)
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
-    val git_events = compiler_inventory_git_events_v1(
-        root, if cursor.valid: cursor.git_head else: head, source_roots, cold_init)
-    if git_events == nil:
-        return compiler_inventory_invalid_v1("git-event-refresh-failed")
+    val observed = match compiler_inventory_git_events_v1(
+            root, if cursor.valid: cursor.git_head else: head,
+            source_roots, cold_init):
+        case Some(batch): batch
+        case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
     # A cold init that listed NO compilable source is never a legitimate state
     # for this repository, and publishing it is not survivable: the empty
     # inventory becomes authoritative at generation 0, and every later publish
@@ -324,12 +409,31 @@ fn compiler_inventory_refresh_v1(
     # files; the same command on a correct binary published 16,797 entries.
     # Fail closed here and name the remedy instead.
     # See doc/08_tracking/bug/seed_jit_optional_unwrap_returns_enum_box_2026-09-18.md
-    if cold_init and git_events!.len() == 0:
+    if cold_init and observed.events.len() == 0:
         return compiler_inventory_invalid_v1(
             "cold-init-listed-no-sources (the source walk returned nothing for " +
             "this checkout; refusing to publish an empty inventory that would " +
             "wedge the cache -- verify the binary with " +
             "scripts/check/check-deployed-binary-optional-unwrap.shs)")
+    if not cold_init:
+        if (observed.untracked_src_digest != "" and
+                observed.untracked_src_digest != cursor.untracked_src_digest) or
+                (observed.untracked_test_digest != "" and
+                observed.untracked_test_digest != cursor.untracked_test_digest):
+            return compiler_inventory_invalid_v1(
+                "untracked-membership-changed (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
+    val untracked_src_digest = if observed.untracked_src_digest != "":
+        observed.untracked_src_digest
+    elif cursor.valid and cursor.untracked_src_digest != "":
+        cursor.untracked_src_digest
+    else:
+        sha256_text("")
+    val untracked_test_digest = if observed.untracked_test_digest != "":
+        observed.untracked_test_digest
+    elif cursor.valid and cursor.untracked_test_digest != "":
+        cursor.untracked_test_digest
+    else:
+        sha256_text("")
     val journal_path = root + "/.scv/journal/events.log"
     if cursor.valid and not cold_init and cursor.filesystem_rows > 0 and
             not file_exists(journal_path):
@@ -366,8 +470,9 @@ fn compiler_inventory_refresh_v1(
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
     val inventory = compile_source_inventory_apply_observed_events_v1(
-        root, cache_root, git_events!, filesystem_events!, head, rows,
-        filesystem_digest, sha256_text(pointer_content), cold_init)
+        root, cache_root, observed.events, filesystem_events!, head, rows,
+        filesystem_digest, sha256_text(pointer_content), cold_init,
+        untracked_src_digest, untracked_test_digest)
     if not inventory.valid:
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
