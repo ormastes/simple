@@ -295,8 +295,9 @@ would have left it exiting 0 over a near-empty window, which is a silent
 weakening rather than a FAIL. The extended job runs it too (`--range`, in the
 "Push-tier core gates" step). The 47-step ratchet lane is the non-required
 "(extended)" job and runs on every main push and on PRs labelled `ci:full`
-(since 2026-09-27 every non-required PR workflow is skipped unless the PR
-carries `ci:full`; see `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
+(since 2026-09-27 every non-required PR workflow triggers only on the
+`labeled` event and runs only for `ci:full`, so a plain PR push starts just
+"Required Gates" and the admission broker; see `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
 § "PR-path CI is required checks only"), including the FROZEN
 rt-dual comparison so main's own single-lane debt stays a red verdict there.
 Local-CI receipts now only affect the extended job. Classes that moved

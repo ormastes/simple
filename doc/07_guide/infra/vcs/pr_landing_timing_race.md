@@ -97,16 +97,20 @@ The main ruleset has no bypass actors, so the two required contexts must report
 fast. They used to wait hours behind ~300 queued runs because every PR push
 fanned out to ~35 heavy workflows. Now:
 
-- On a PR, only the required jobs run by default: `fast-gates` in
-  `repo-hygiene.yml` and the `review-admission.yml` broker. Every other job in a
-  `pull_request` / `pull_request_target` workflow carries
+- On a PR, only the required jobs run by default: `fast-gates` in its own
+  one-job workflow `required-gates.yml` ("Required Gates") and the
+  `review-admission.yml` broker. Every other `pull_request` /
+  `pull_request_target` workflow listens for `types: [labeled]` ONLY, so an
+  ordinary PR push (opened / synchronize / reopened) creates no run for it at
+  all -- not even a skipped one. Its jobs also carry
   `if: github.event_name != '<event>' || contains(github.event.pull_request.labels.*.name, 'ci:full')`
-  and is skipped (no runner consumed).
+  so adding some other label does not fire the matrix. `repo-hygiene.yml` has
+  no PR trigger at all any more (main push + dispatch only).
 - **Label `ci:full`** opts a PR into the full matrix (extended ratchet lane,
-  bootstrap, platform tests, ...). Adding the label fires a `labeled` event, so
-  the heavy lanes start without a push. `repo-hygiene.yml` deliberately does
-  not listen for `labeled` (it would restart the required job), so its
-  non-required siblings pick the label up on the next push.
+  bootstrap, platform tests, ...). Adding the label fires a `labeled` event,
+  so the heavy lanes start without a push. They do NOT re-run on a later push
+  to the PR: remove and re-add the label to re-run them. Path filters still
+  apply to the labelled run.
 - Every heavy lane still runs on push to `main` (PR-only workflows gained a
   `push: branches: [main]` trigger with the same `paths:`), so nothing is
   unenforced — it is enforced post-merge instead of pre-merge. The four
