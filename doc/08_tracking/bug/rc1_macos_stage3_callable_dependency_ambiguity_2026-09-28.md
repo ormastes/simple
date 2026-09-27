@@ -145,3 +145,21 @@ import and module-alias work, so the next investigation should compare those
 resolver contracts with this RC1 lane before selecting a backport. The
 three-cycle verify/fix cap is reached for this session. Stage 3 and Mac release
 remain unadmitted.
+
+## Indexed origin owner fallback
+
+RC1's `find_reexport_source_walk` returned a miss as soon as an indexed export
+origin named a module absent from the frozen surface registry. This skipped the
+facade's independent frozen import and export routes. The resolver now marks
+that origin miss invalid for negative memoization and continues through those
+routes. A focused `reexport_physical_cache_spec.spl` case supplies a missing
+indexed owner and a valid imported declaration, and checks that the declaration
+is found while the walk remains invalid for negative caching.
+
+This fix has not passed a source-matched Stage 2/3 bootstrap. The admitted
+Stage 2 compiler does not expose `test`; the older installed release test
+runner cannot parse the current `module_surface_types.spl`, so the new case is
+not yet executable in this lane. Another macOS Stage 2 run was active in a
+separate worktree when this fix was prepared, so no competing bootstrap was
+started. The 1797-error Stage 3 log predates this change and is not evidence
+that the fix clears those errors.

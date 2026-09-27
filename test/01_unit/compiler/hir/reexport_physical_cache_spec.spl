@@ -154,6 +154,30 @@ fn unresolved_owner_registry() -> ModuleSurfacesByName:
     leaf.export_origin_index = origins
     freeze_registry([leaf], {"pkg.leaf": 0}, ["pkg.leaf"], [0])
 
+fn unresolved_origin_with_valid_import_registry() -> ModuleSurfacesByName:
+    var facade = ModuleSurface.empty("origin.facade")
+    var leaf = ModuleSurface.empty("origin.leaf")
+    facade.imports = [reexport_import("origin.leaf")]
+    facade.import_item_offsets = [0, 0]
+    val origins = module_surface_export_origin_index_empty()
+    module_surface_export_origin_index_put(
+        origins, "Real", "missing.surface", "Real", "explicit")
+    facade.export_origin_index = origins
+    val callable_type = Type(kind: TypeKind.Infer, span: Span.empty())
+    leaf.callables["Real"] = ModuleSurfaceCallable(
+        name: "Real", type_params: [], params: [], has_return_type: false,
+        return_type: callable_type, return_type_name: "",
+        return_array_element_name: "", visibility: Visibility.Public,
+        is_async: false, is_static: false, is_public: true,
+        is_method: false, is_mutable: false, is_const: false,
+        is_kernel: false, is_extern: false, span: Span.empty())
+    leaf.callable_names = ["Real"]
+    leaf.callable_values = [leaf.callables["Real"]]
+    freeze_registry(
+        [facade, leaf],
+        {"origin.facade": 0, "origin.leaf": 1},
+        ["origin.facade", "origin.leaf"], [0, 1])
+
 fn depth_registry() -> ModuleSurfacesByName:
     var surfaces: [ModuleSurface] = []
     var names: Dict<text, i64> = {}
@@ -289,6 +313,16 @@ describe "physical re-export cache":
         expect(result.found).to_equal(true)
         expect(result.module_index).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(result.item_name).to_equal("Real")
+
+    it "follows frozen imports when the indexed origin owner is unavailable":
+        step("Verify: follows frozen imports when the indexed origin owner is unavailable")
+        val registry = unresolved_origin_with_valid_import_registry()
+        var lowering = hirlowering_for_module("consumer", registry)
+        val result = lowering.find_reexport_source(0, "Real")
+        expect(result.found).to_equal(true)
+        expect(result.module_index).to_equal(1)
+        expect(result.item_name).to_equal("Real")
+        expect(lowering.reexport_walk_valid).to_equal(false)
 
     it "finds a hit behind a cycle":
         step("Verify: finds a hit behind a cycle")
