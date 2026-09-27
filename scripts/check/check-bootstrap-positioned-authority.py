@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Focused checks of the exact embedded production reader and real map ingress."""
 import hashlib
+import contextlib
+import io
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -320,6 +323,113 @@ bootstrap_stage3_verify_manifest "$2/manifest.env" "$2/manifest.env" "$1" "$2/ar
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('manifest-status-not-singular', result.stderr)
         self.assertNotIn('stat:', result.stderr)
+
+
+class ProducerAuthority(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='producer-authority-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.artifact = self.root / 'artifact'
+        self.artifact.write_bytes(b'producer authority bytes\n')
+        self.artifact.chmod(0o754)
+        self.directory = self.root / 'directory'
+        self.directory.mkdir(mode=0o750)
+        self.map_path = self.root / 'manifest.env.authority-map.env'
+
+    def produce(self, backfill='absent', missing=None):
+        writer = (ROOT / 'scripts/check/lib/bootstrap-stage3/manifest-write.shs').read_text()
+        rows = writer.split('bootstrap_stage3_write_authority_map_rows() {', 1)[1].split('\n}', 1)[0]
+        variables = set(re.findall(r'\$(BSTAGE3_[A-Z0-9_]+)', rows))
+        environment = os.environ.copy()
+        for name in variables:
+            path = self.directory if ('COMPANION_PARENT' in name or 'CACHE_DIR' in name or name.startswith('BSTAGE3_RUNTIME_PATH')) else self.artifact
+            environment[name] = str(path)
+        environment['BSTAGE3_MANIFEST'] = str(self.root / 'manifest.env')
+        environment['bootstrap_stage3_backfill_status'] = backfill
+        if missing:
+            environment[missing] = str(self.root / 'missing')
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$1
+unset BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_manifest_descriptor_mode=0
+if [ ! -r /proc/self/stat ]; then bootstrap_stage3_prepare_portable_python || exit 3; fi
+bootstrap_stage3_write_authority_map
+'''
+        return subprocess.run(['sh', '-c', script, 'test', str(ROOT)], env=environment, capture_output=True, text=True)
+
+    def assert_map(self, expected_lines):
+        raw = self.map_path.read_bytes()
+        lines = raw.decode().splitlines()
+        values = dict(line.split('=', 1) for line in lines)
+        self.assertEqual(len(lines), expected_lines)
+        self.assertEqual(len(values), expected_lines)
+        self.assertEqual(values['schema'], 'simple-stage3-bound-artifact-authority-map-v2')
+        self.assertEqual(values['status'], 'ready')
+        self.assertEqual(values['entry_count'], '31')
+        self.assertEqual(values['map_vector_sha256'], hashlib.sha256(b'\n'.join(raw.split(b'\n')[4:])).hexdigest())
+        self.assertEqual(self.map_path.stat().st_mode & 0o7777, 0o400)
+        roles = [key[:-10] for key in values if key.endswith('_authority')]
+        self.assertEqual(len(roles), 31)
+        for role in roles:
+            authority = values[role + '_authority']
+            if authority == 'descriptor-absent':
+                self.assertEqual(role, 'compiler_backfill')
+                self.assertNotIn(role + '_sha256', values)
+                continue
+            path = Path(authority)
+            st = path.stat()
+            self.assertEqual(values[role + '_dev'], str(st.st_dev))
+            self.assertEqual(values[role + '_ino'], str(st.st_ino))
+            self.assertEqual(values[role + '_mode'], format(st.st_mode & 0o7777, 'o'))
+            kind = 'directory' if path.is_dir() else 'file'
+            digest = '-' if kind == 'directory' else hashlib.sha256(path.read_bytes()).hexdigest()
+            if kind == 'file':
+                self.assertEqual(values[role + '_sha256'], digest)
+            else:
+                self.assertNotIn(role + '_sha256', values)
+            VERIFY_ROLE(path, ':'.join([kind, values[role + '_dev'], values[role + '_ino'], values[role + '_mode'], digest]))
+        self.assertFalse(list(self.root.glob('*.tmp.*')))
+
+    def test_producer_emits_absent_backfill_receipt(self):
+        result = self.produce()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_map(184)
+
+    def test_producer_emits_present_backfill_receipt(self):
+        result = self.produce(backfill='present')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_map(185)
+
+    def test_failed_first_middle_last_rows_never_publish(self):
+        for variable in ['BSTAGE3_SEED', 'BSTAGE3_STAGE2_LOG', 'BSTAGE3_JOBS_RECEIPT']:
+            with self.subTest(variable=variable):
+                result = self.produce(missing=variable)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.map_path.exists())
+                self.assertFalse(list(self.root.glob('*.tmp.*')))
+
+    def test_producer_rejects_leaf_symlink(self):
+        link = self.root / 'link'
+        self.artifact.rename(link)
+        self.artifact.symlink_to(link)
+        result = self.produce()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.map_path.exists())
+
+    def test_snapshot_mutation_emits_no_receipt(self):
+        pread = os.pread
+        def mutate(fd, count, offset):
+            result = pread(fd, count, offset)
+            self.artifact.write_bytes(b'changed size')
+            return result
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(os, 'pread', mutate):
+            with self.assertRaises(ValueError):
+                NAMESPACE['main'](['0', 'file', 'role-receipt', str(self.artifact)])
+        self.assertEqual(output.getvalue(), '')
 
 
 if __name__ == '__main__':

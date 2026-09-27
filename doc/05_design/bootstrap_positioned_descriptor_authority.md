@@ -94,13 +94,38 @@ an intentionally incomplete manifest. This is no claim of full admission.
 The initial six-test follow-up took 8.6 seconds, dominated by interpreter process
 startup for repeated sealed-map key reads. Shell syntax and diff checks passed.
 
+## Portable authority-map producer follow-up
+
+The map writer now shares `role_snapshot` with the verifier on non-procfs hosts.
+One held descriptor supplies device, inode, octal permission/special mode bits,
+and file digest. The primitive verifies regular-file or directory type, uses
+no-follow opens, and requires source lstat and held fstat identity to agree
+before and after the read. It returns no receipt when content or identity
+changes during capture. Directories emit no digest, matching the existing map
+schema. Linux retains its original GNU stat/hash branch and receipt shape.
+
+The existing row emitter and map-publication sequence are factored into callable
+production helpers. Each row now propagates failure explicitly. A failed first,
+middle, or final role removes the partial temporary map before publication.
+The schema, ordered roles, optional backfill form, vector digest, exclusive
+publication link, and read-only final mode remain unchanged. Python preparation
+and canonical interpreter pinning are shared by producer and verifier; the
+implementation remains within the existing byte-bound helper bundle.
+
+Five new targeted tests passed on Darwin in 3.7 seconds. The production map
+publication helper emits both the 184-line absent-backfill and 185-line
+present-backfill forms with 31 roles, correct vector digests, and mode 0400.
+Each emitted role is independently compared against OS stat/content and accepted
+by the portable verifier primitive. Missing first/middle/last inputs leave no
+published map or temporary file; symlinks reject; mutation during capture emits
+no receipt. Shell syntax and diff checks passed. These fixtures exercise real
+map generation without constructing an admitted compiler or running bootstrap.
+
 ## Remaining integration
 
 The runtime directory descriptor-6 branch, parent/source/helper descriptor
-transport, and descriptor-capsule admission remain Linux-specific. The map
-producer in `manifest-write.shs` still uses GNU `stat -Lc` to write map rows;
-this follow-up changes consumer identity checks and does not claim portable
-end-to-end production of receipts. The shared runner and standalone provenance
-verifier need corresponding descriptor transport support. Existing parent and
-source validation has not been disabled or replaced. No full bootstrap or
-source-matched macOS runtime admission has been performed.
+transport, and descriptor-capsule admission remain Linux-specific. The shared
+runner and standalone provenance verifier need corresponding descriptor
+transport support. Existing parent and source validation has not been disabled
+or replaced. No full bootstrap or source-matched macOS runtime admission has
+been performed.

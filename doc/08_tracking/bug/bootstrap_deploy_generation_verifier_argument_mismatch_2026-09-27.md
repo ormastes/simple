@@ -99,3 +99,14 @@ all map roles and reaches the intentionally missing manifest-status gate.
 Linux dispatch retains the existing lookup and snapshot branch. Producer GNU
 stat usage, runtime directory handling, and parent/capsule transport remain
 separate barriers; no full bootstrap was run.
+
+## Portable authority-map producer follow-up
+
+Non-procfs map rows now derive device/inode/octal mode/digest from the same held
+descriptor primitive as the verifier. The Linux map-production branch is retained.
+Row failures propagate before map publication and clean up the partial temporary
+map. Five focused tests passed on Darwin, covering both backfill receipt shapes,
+all 31 role identities, correct digests, missing first/middle/last roles, symlinks,
+and mid-read mutation. This removes the previously recorded producer GNU-stat
+barrier for ordinary file/directory maps. Runtime/parent/capsule handling remains
+separate work; no full bootstrap was run.

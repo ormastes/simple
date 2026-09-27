@@ -42,17 +42,9 @@ def positioned_read(fd, expected=None, source_path=None):
     return data, receipt, digest
 
 
-def verify_role(path, expected):
-    fields = expected.split(":")
-    if len(fields) != 5 or fields[0] not in ("file", "directory"):
-        raise ValueError("invalid role binding")
-    kind, dev, ino, mode, digest = fields
-    if not dev.isdigit() or not ino.isdigit() or not re.fullmatch(r"[0-7]+", mode):
-        raise ValueError("invalid role identity")
-    if kind == "file" and not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError("invalid role digest")
-    if kind == "directory" and digest != "-":
-        raise ValueError("invalid directory binding")
+def role_snapshot(path, kind, expected_identity=None):
+    if kind not in ("file", "directory"):
+        raise ValueError("invalid role type")
     def identity(st):
         return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
                 st.st_mtime_ns, st.st_ctime_ns)
@@ -68,8 +60,9 @@ def verify_role(path, expected):
         opened = os.fstat(fd)
         if identity(opened) != identity(before):
             raise ValueError("role replaced during open")
-        if (opened.st_dev, opened.st_ino, stat.S_IMODE(opened.st_mode)) != (int(dev), int(ino), int(mode, 8)):
+        if expected_identity is not None and (opened.st_dev, opened.st_ino, stat.S_IMODE(opened.st_mode)) != expected_identity:
             raise ValueError("role identity mismatch")
+        digest = "-"
         if kind == "file":
             hasher = hashlib.sha256()
             offset = 0
@@ -79,18 +72,40 @@ def verify_role(path, expected):
                     raise ValueError("short role read")
                 hasher.update(data)
                 offset += len(data)
-            if hasher.hexdigest() != digest:
-                raise ValueError("role digest mismatch")
+            digest = hasher.hexdigest()
         if identity(os.fstat(fd)) != identity(opened) or identity(os.lstat(path)) != identity(opened):
             raise ValueError("role changed during verification")
+        return opened.st_dev, opened.st_ino, stat.S_IMODE(opened.st_mode), digest
     finally:
         os.close(fd)
+
+
+def verify_role(path, expected):
+    fields = expected.split(":")
+    if len(fields) != 5 or fields[0] not in ("file", "directory"):
+        raise ValueError("invalid role binding")
+    kind, dev, ino, mode, digest = fields
+    if not dev.isdigit() or not ino.isdigit() or not re.fullmatch(r"[0-7]+", mode):
+        raise ValueError("invalid role identity")
+    if kind == "file" and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("invalid role digest")
+    if kind == "directory" and digest != "-":
+        raise ValueError("invalid directory binding")
+    actual = role_snapshot(path, kind, (int(dev), int(ino), int(mode, 8)))
+    if actual[:3] != (int(dev), int(ino), int(mode, 8)):
+        raise ValueError("role identity mismatch")
+    if actual[3] != digest:
+        raise ValueError("role digest mismatch")
 
 
 def main(args):
     if len(args) != 4 or not args[0].isdigit():
         raise ValueError("expected fd, receipt, operation, argument")
     fd, expected, operation, argument = args
+    if operation == "role-receipt":
+        dev, ino, mode, digest = role_snapshot(argument, expected)
+        print(f"{dev} {ino} {mode:o} {digest}")
+        return
     if operation == "role":
         verify_role(argument, expected)
         return
@@ -131,6 +146,17 @@ if __name__ == "__main__":
         print("bootstrap positioned authority: " + str(error), file=sys.stderr)
         sys.exit(1)
 BOOTSTRAP_POSITIONED_READ_PY
+}
+
+bootstrap_stage3_prepare_portable_python() {
+    command -v python3 >/dev/null 2>&1 || {
+        bootstrap_stage3_provenance_fail "portable-authority-python3-required"
+        return 1
+    }
+    bootstrap_stage3_portable_python=$(bootstrap_stage3_resolve_symlinks \
+        "$(command -v python3)") || return 1
+    bootstrap_stage3_portable_python_sha=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_portable_python") || return 1
 }
 
 # Bind the interpreter actually used for map reads, not only the recorded PATH.
@@ -253,14 +279,7 @@ bootstrap_stage3_verify_manifest_impl() {
             bootstrap_stage3_provenance_fail "portable-descriptor-capsule-not-supported"
             return 1
         }
-        command -v python3 >/dev/null 2>&1 || {
-            bootstrap_stage3_provenance_fail "portable-authority-python3-required"
-            return 1
-        }
-        bootstrap_stage3_portable_python=$(bootstrap_stage3_resolve_symlinks \
-            "$(command -v python3)") || return 1
-        bootstrap_stage3_portable_python_sha=$(bootstrap_stage3_hash_file \
-            "$bootstrap_stage3_portable_python") || return 1
+        bootstrap_stage3_prepare_portable_python || return 1
         bootstrap_stage3_normalized_absolute "$bootstrap_stage3_bound_map" || return 1
         [ -f "$bootstrap_stage3_bound_map" ] && [ ! -L "$bootstrap_stage3_bound_map" ] || return 1
         exec 9<"$bootstrap_stage3_bound_map" || return 1
