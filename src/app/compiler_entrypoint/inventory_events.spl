@@ -299,7 +299,7 @@ fn compiler_inventory_refresh_v1(
         # so a fresh checkout is not left with an opaque reason.
         return compiler_inventory_invalid_v1(
             "compile-event-journal-missing (first build in this checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
-    if cursor.valid:
+    if cursor.valid and not cold_init:
         val current = compile_source_inventory_read_at_pointer_v1(
             cache_root, pointer_content)
         if (not current.valid or current.inventory == nil or
@@ -331,27 +331,36 @@ fn compiler_inventory_refresh_v1(
             "wedge the cache -- verify the binary with " +
             "scripts/check/check-deployed-binary-optional-unwrap.shs)")
     val journal_path = root + "/.scv/journal/events.log"
-    if cursor.valid and cursor.filesystem_rows > 0 and not file_exists(journal_path):
+    if cursor.valid and not cold_init and cursor.filesystem_rows > 0 and
+            not file_exists(journal_path):
         return compiler_inventory_invalid_v1(
             "filesystem-event-journal-missing" +
-            " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
+            " (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1 to rebuild from Git)")
     val journal = if file_exists(journal_path): file_read(journal_path) else: ""
     val rows = compiler_inventory_journal_rows_v1(journal)
     if rows < 0:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
     val filesystem_digest = sha256_text(journal)
-    val consumed_rows = if cursor.valid: cursor.filesystem_rows else: 0
-    if cursor.valid:
+    # A cold listing covers the complete source scope, so prior journal rows
+    # are historical hints. Bind the current complete journal as the new
+    # cursor; warm refresh still validates and replays from its old prefix.
+    val consumed_rows = if cold_init:
+        rows
+    elif cursor.valid:
+        cursor.filesystem_rows
+    else:
+        0
+    if cursor.valid and not cold_init:
         val prefix_digest = compiler_inventory_journal_prefix_digest_v1(
             journal, consumed_rows)
         if prefix_digest == nil:
             return compiler_inventory_invalid_v1(
                 "filesystem-event-journal-truncated" +
-                " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
+                " (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1 to rebuild from Git)")
         if prefix_digest! != cursor.filesystem_digest:
             return compiler_inventory_invalid_v1(
                 "filesystem-event-journal-rewritten" +
-                " (clear build/scv and .scv, then rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
+                " (rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1 to rebuild from Git)")
     val filesystem_events = compiler_inventory_filesystem_events_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
