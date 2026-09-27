@@ -9,6 +9,12 @@ use compiler.common.backend_plugin.receipt.{BackendPluginError}
 use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
 use compiler.backend.backend_plugin.loader.{load_backend}
 use compiler.backend.backend_plugin.session.{BackendSession}
+# In-process, `compiler.driver.bootstrap_k1_selected` resolves to the fail-closed
+# stub (install returns false), so name the committed K1 composition directly,
+# as src/app/cli/native_build_worker.spl does. Without the installed table the
+# built-in LLVM/Cranelift providers do not exist and admission cannot succeed.
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1}
 
 fn builtin_feature_request(features: [text], provider: text = "llvm") -> BackendPluginRequestV1:
     BackendPluginRequestV1(
@@ -23,6 +29,8 @@ fn builtin_feature_error_code(result: Result<BackendSession, BackendPluginError>
 describe "built-in backend feature acceptance gate":
     it "rejects requested SIMD features without backend confirmation":
         # @req REQ-010
+        step("Install the composition-root K1 backend table so the provider exists")
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
         step("Request a feature the V1 builtin adapter cannot confirm")
         for provider in ["llvm", "cranelift"]:
             val result = load_backend(builtin_feature_request(["avx2"], provider))
@@ -31,6 +39,8 @@ describe "built-in backend feature acceptance gate":
 
     it "keeps ordinary feature-free compilation available":
         # @req REQ-010
+        step("Install the composition-root K1 backend table so the provider exists")
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
         step("Admit the existing baseline provider without an optimized claim")
         var session = load_backend(builtin_feature_request([])).ok().unwrap()
         expect(session.provider_name()).to_equal("llvm")
