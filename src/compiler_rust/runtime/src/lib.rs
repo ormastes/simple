@@ -9,6 +9,9 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+#[cfg(all(target_os = "macos", not(feature = "native-all-provider")))]
+mod cocoa_dynload_owner;
+
 // runtime_memory.c is always linked into the bootstrap runtime and provides
 // the allocator used by struct lowering.  Some already-materialized generated
 // symbol tables omitted this one provider even though they retained its paired

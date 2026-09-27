@@ -5,8 +5,9 @@
 # Dispatches to mounted Filesystem implementations via VfsManager.
 #
 # Wire protocol:
-#   Request:  method (u32) | payload (bytes), sent from a caller-owned
-#             anonymous reply port
+#   Request:  copied IPC header with method (u32) plus payload (bytes).
+#             Legacy clients send method-prefixed bytes from a caller-owned
+#             anonymous reply port; the kernel moves that method to the header.
 #   Response: status (i32) | payload (bytes)
 #
 # Payload encoding per method:
@@ -26,8 +27,12 @@
 
 use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
-use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.types.ipc_types.{IpcFlags}
 use os.async.os_executor.{OsExecutor}
+use os.userlib.ipc_endpoint.{
+    ipc_create_named_port, ipc_recv_owned_v1_into, ipc_reply_owned_v1,
+    IPC_OWNED_V1_HEADER_BYTES, IPC_OWNED_V1_MAX_PAYLOAD_BYTES
+}
 
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
@@ -57,19 +62,14 @@ val VFS_OPEN_O_CREAT: u32 = 64u32
 val VFS_OPEN_O_TRUNC: u32 = 512u32
 val VFS_OPEN_O_APPEND: u32 = 1024u32
 
-# Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
-# dispatcher cases 20..23. Keep in sync with test/01_unit/os/kernel/ipc/
-# syscall_number_consistency_spec.spl.
+# Legacy copied reply route for clients still using syscall 20/21.
 val SYS_IPC_SEND: u64 = 20
-val SYS_IPC_RECV: u64 = 21
-val SYS_IPC_CREATE_PORT: u64 = 22
-val SYS_IPC_CONNECT: u64 = 23
+val SYS_YIELD: u64 = 1u64
 
 # The kernel's copied service ABI accepts a 4096-byte raw reply and a request
 # frame of method(u32) + at most 4096 payload bytes.  Keep the VFS boundary
 # explicit so a driver result cannot make the service attempt an oversized
 # userspace copy.
-val VFS_SERVICE_NAME: text = "vfs"
 val VFS_IPC_REQUEST_PAYLOAD_MAX: u32 = 4096u32
 val VFS_IPC_REPLY_PAYLOAD_MAX: u64 = 4092u64
 val VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
@@ -77,6 +77,14 @@ val VFS_READDIR_ENTRY_MAX: u64 = 128u64
 val VFS_READDIR_NAME_BYTES_MAX: u64 = 255u64
 val VFS_READDIR_TOTAL_NAME_BYTES_MAX: u64 = 3072u64
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+fn _vfs_recv_buffer() -> [u8]:
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < IPC_OWNED_V1_HEADER_BYTES + IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        bytes.push(0u8)
+        index = index + 1u64
+    bytes
 
 # Response status codes
 val STATUS_OK: i32 = 0
@@ -101,6 +109,9 @@ class VfsService:
     running: bool
     executor: OsExecutor
     request_count: u64
+    receive_buffer: [u8]
+    reply_owned: bool
+    accept_legacy_requests: bool
 
 impl VfsService:
     static fn new(vfs: VfsManager) -> VfsService:
@@ -109,7 +120,10 @@ impl VfsService:
             port_id: 0,
             running: false,
             executor: OsExecutor.new(),
-            request_count: 0
+            request_count: 0,
+            receive_buffer: _vfs_recv_buffer(),
+            reply_owned: false,
+            accept_legacy_requests: true
         )
 
     static fn with_executor(vfs: VfsManager, executor: OsExecutor) -> VfsService:
@@ -119,13 +133,25 @@ impl VfsService:
             port_id: 0,
             running: false,
             executor: executor,
-            request_count: 0
+            request_count: 0,
+            receive_buffer: _vfs_recv_buffer(),
+            reply_owned: false,
+            accept_legacy_requests: true
         )
 
     me start():
-        """Create IPC port and start blocking service loop."""
+        """Create IPC port and start the yielding service loop."""
         self.init_port()
         self.run_loop()
+
+    me start_catalogue_owned() -> bool:
+        """Run the PID1 catalog service with copied IPC requests only."""
+        self.accept_legacy_requests = false
+        self.init_port()
+        if not self.running:
+            return false
+        self.run_loop()
+        true
 
     me init_port():
         """Create IPC port without entering the blocking loop.
@@ -133,59 +159,53 @@ impl VfsService:
         Call this instead of start() when using cooperative scheduling
         (os_main calls poll_once() in a shared main loop).
         """
-        val name_ptr = unsafe_addr_of(VFS_SERVICE_NAME)
-        val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, VFS_SERVICE_NAME.len(), 0, 0, 0)
-        if port < 0:
-            log_raw_println("[vfs-service] Failed to create IPC port (error {port})")
+        val port = ipc_create_named_port("vfs")
+        if port.is_err():
+            log_raw_println("[vfs-service] Failed to create IPC port")
             return
-        self.port_id = port.to_u64()
+        self.port_id = port.unwrap()
         self.running = true
         log_raw_println("[vfs-service] Listening on named IPC port {self.port_id}")
 
     me run_loop():
-        """Main service loop: blocking receive, dispatch, reply. Blocks forever.
-
-        Uses IpcRecv with timeout=-1 (infinite wait). For dedicated task mode.
-        """
+        """Poll the copied queue and yield between scheduler turns."""
         while self.running:
-            # arg1 = -1 means block until message arrives (cast via to_u64)
-            val timeout_blocking: u64 = 0xFFFFFFFFFFFFFFFF  # -1 as unsigned
-            val msg_raw = syscall(SYS_IPC_RECV, self.port_id, timeout_blocking, 0, 0, 0)
-            if msg_raw < 0:
-                continue  # Error — retry
-            self.request_count = self.request_count + 1
-            self.dispatch_message(msg_raw.to_u64())
+            self.poll_once()
+            syscall(SYS_YIELD, 0u64, 0u64, 0u64, 0u64, 0u64)
 
     me poll_once():
-        """Process one IPC request if available (non-blocking).
-
-        Uses IpcRecv with timeout=0: kernel returns -EAGAIN immediately
-        if no message is pending (syscall.spl line 627-629).
-        Call from the cooperative main loop in os_main.spl.
-        """
+        """Process one bounded copied request if available."""
         if not self.running:
             return
-        # arg1 = 0 means non-blocking: returns -11 (EAGAIN) if no message
-        val msg_raw = syscall(SYS_IPC_RECV, self.port_id, 0, 0, 0, 0)
-        if msg_raw < 0:
-            return  # EAGAIN or error — no message pending
+        val received = ipc_recv_owned_v1_into(self.port_id, self.receive_buffer)
+        if received.is_err():
+            return
         self.request_count = self.request_count + 1
-        self.dispatch_message(msg_raw.to_u64())
+        self.dispatch_catalogue_owned_record(self.receive_buffer.ptr() as u64, received.unwrap())
 
-    me dispatch_message(msg_addr: u64):
-        """Parse an IPC message and dispatch to the appropriate handler.
+    me dispatch_catalogue_owned_record(msg_addr: u64, record_len: u64):
+        """Parse a bounded copied record and dispatch its VFS request.
 
-        The IPC message is an IpcMessage struct at msg_addr. We read
-        the method field to determine which handler to invoke.
+        The first 32 bytes are the stable v1 header; the payload follows.
         """
+        if record_len < IPC_OWNED_V1_HEADER_BYTES or record_len > self.receive_buffer.len().to_u64():
+            return
         # Read IpcMessage fields from memory.  The kernel has already removed
         # the method prefix from copied request bytes and placed it in header.
         # IpcMessage layout: src_port(8) | dst_port(8) | method(4) | flags(4) | payload_len(4) | cap_count(4)
         val src_port = _read_u64(msg_addr)
         val method = _read_u32(msg_addr + 16)
+        val flags = _read_u32(msg_addr + 20)
         val payload_len = _read_u32(msg_addr + 24)
-        val payload_addr = msg_addr + 32  # Payload starts after header
+        val payload_addr = msg_addr + IPC_OWNED_V1_HEADER_BYTES
 
+        if flags != 0u32 and flags != (IpcFlags.Async as u32):
+            return
+        if flags == 0u32 and not self.accept_legacy_requests:
+            return
+        self.reply_owned = flags == (IpcFlags.Async as u32)
+        if payload_len.to_u64() > record_len - IPC_OWNED_V1_HEADER_BYTES:
+            return
         if payload_len > VFS_IPC_REQUEST_PAYLOAD_MAX:
             self.send_error_reply(src_port, STATUS_INVALID, "VFS request exceeds IPC bound")
             return
@@ -424,14 +444,23 @@ impl VfsService:
     # Reply Helpers
     # ========================================================================
 
-    fn send_u64_reply(dst_port: u64, status: i32, value: u64):
+    me send_transport_reply(dst_port: u64, data: [u8]):
+        """Choose the reply right from the checked request header flags."""
+        if self.reply_owned:
+            val sent = ipc_reply_owned_v1(dst_port, 0u32, data, self.port_id)
+            if sent.is_err():
+                log_raw_println("[vfs-service] Owned IPC reply failed")
+        else:
+            _ipc_send(dst_port, self.port_id, data)
+
+    me send_u64_reply(dst_port: u64, status: i32, value: u64):
         """Send a reply with status + u64 value."""
         var buf: [u8] = []
         _push_i32(buf, status)
         _push_u64(buf, value)
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_bytes_reply(dst_port: u64, status: i32, data: [u8]):
+    me send_bytes_reply(dst_port: u64, status: i32, data: [u8]):
         """Send a reply with status + raw bytes."""
         if data.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
             self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
@@ -442,9 +471,9 @@ impl VfsService:
         while i < data.len():
             buf.push(data[i])
             i = i + 1
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_text_reply(dst_port: u64, status: i32, text_val: text):
+    me send_text_reply(dst_port: u64, status: i32, text_val: text):
         """Send a reply with status + text payload."""
         if text_val.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
             self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
@@ -453,9 +482,9 @@ impl VfsService:
         _push_i32(buf, status)
         for ch in text_val:
             buf.push(ch.to_u8())
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
-    fn send_error_reply(dst_port: u64, status: i32, msg: text):
+    me send_error_reply(dst_port: u64, status: i32, msg: text):
         """Send an error reply with status + error message."""
         var buf: [u8] = []
         _push_i32(buf, status)
@@ -463,7 +492,7 @@ impl VfsService:
         while index < msg.len() and index < VFS_IPC_REPLY_PAYLOAD_MAX:
             buf.push(msg.byte_at(index))
             index = index + 1u64
-        _ipc_send(dst_port, self.port_id, buf)
+        self.send_transport_reply(dst_port, buf)
 
     me stop():
         """Stop the service loop."""

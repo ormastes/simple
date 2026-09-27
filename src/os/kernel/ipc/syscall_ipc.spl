@@ -4,9 +4,14 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{BlockReason}
-use os.kernel.types.ipc_types.{IpcPort, IpcMessage, OwnedIpcReceiveStatus}
+use os.kernel.types.ipc_types.{
+    IpcPort, IpcMessage, IpcFlags, OwnedIpcReceiveStatus, OwnedIpcReceiveResult
+}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.memory.user_copy.{user_copyin_bytes_validated, user_copyout_bytes}
+use os.kernel.errno.{EAGAIN, EFAULT, EINVAL, EIO, EMSGSIZE, ENOENT, ENOSPC, ENOSYS, EPERM}
 
 # ============================================================================
 # IPC Syscall Handlers
@@ -17,14 +22,6 @@ struct IpcSyscallState:
     scheduler: Scheduler
     ipc: IpcManager
 
-# os.kernel.types.ipc_types does not yet declare the owned-receive outcome;
-# this local view names the three slots consumers read until the canonical
-# struct lands there.
-struct _OwnedIpcReceiveView:
-    status: any
-    header: IpcMessage?
-    payload: [u8]
-
 extern fn rt_copy_user_byte(addr: u64) -> u8
 extern fn unsafe_addr_of(ref: any) -> u64
 extern fn rt_string_from_byte_array(bytes: [u8]) -> text
@@ -33,17 +30,17 @@ var g_ipc_syscall_receive_bytes: [u8] = []
 val IPC_SYSCALL_MAX_MESSAGE_BYTES: u64 = 4100u64  # method u32 + 4096-byte payload
 val IPC_SYSCALL_MAX_PORT_NAME_BYTES: u64 = 64u64
 val IPC_SYSCALL_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val IPC_OWNED_V1_HEADER_BYTES: u64 = 32u64
+val IPC_OWNED_V1_MAX_PAYLOAD_BYTES: u64 = 4096u64
+val IPC_OWNED_V1_REPLY_METHOD_FLAG: u64 = 0x80000000u64
 # Frozen SYS_IPC_SEND discriminator for copied service traffic.  No port or
 # payload property may select this ABI: every other arg4 value is legacy.
 val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
-fn _ipc_copy_user_text(addr: u64, length: u64) -> text:
-    var bytes: [u8] = []
-    var offset: u64 = 0
-    while offset < length:
-        bytes.push(rt_copy_user_byte(addr + offset))
-        offset = offset + 1
-    rt_string_from_byte_array(bytes)
+fn _ipc_copy_user_text(addr: u64, length: u64) -> text?:
+    if val bytes = user_copyin_bytes_validated(addr, length):
+        return Some(rt_string_from_byte_array(bytes))
+    nil
 
 fn _ipc_push_u32(bytes: [u8], value: u32):
     bytes.push((value & 0xFFu32).to_u8())
@@ -55,6 +52,111 @@ fn _ipc_push_u64(bytes: [u8], value: u64):
     _ipc_push_u32(bytes, (value & 0xFFFFFFFFu64).to_u32())
     _ipc_push_u32(bytes, (value >> 32).to_u32())
 
+fn ipc_owned_v1_encode(header: IpcMessage, payload: [u8]) -> [u8]:
+    """Serialize the fixed little-endian 32-byte header and owned payload."""
+    var bytes: [u8] = []
+    _ipc_push_u64(bytes, header.src_port)
+    _ipc_push_u64(bytes, header.dst_port)
+    _ipc_push_u32(bytes, header.method)
+    _ipc_push_u32(bytes, header.flags)
+    _ipc_push_u32(bytes, header.payload_len)
+    _ipc_push_u32(bytes, header.cap_count)
+    for byte in payload:
+        bytes.push(byte)
+    bytes
+
+fn _ipc_owned_state(value: i64, scheduler: Scheduler, ipc: IpcManager) -> IpcSyscallState:
+    IpcSyscallState(result: SyscallResult(value: value), scheduler: scheduler, ipc: ipc)
+
+fn _ipc_owned_send_errno(value: i64) -> i64:
+    if value == 0:
+        return 0
+    if value == -1:
+        return -(ENOENT as i64)
+    if value == -2:
+        return -(EAGAIN as i64)
+    if value == -3 or value == -8:
+        return -(EPERM as i64)
+    if value == -4:
+        return -(EMSGSIZE as i64)
+    if value == -6 or value == -9:
+        return -(ENOSPC as i64)
+    -(EINVAL as i64)
+
+fn _handle_ipc_send_owned_v1_state(
+    args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
+) -> IpcSyscallState:
+    """Copy one bounded 132 request and authenticate its claimed source port."""
+    var ipc_mgr = ipc
+    if args.arg3 > IPC_OWNED_V1_MAX_PAYLOAD_BYTES:
+        return _ipc_owned_state(-(EMSGSIZE as i64), scheduler, ipc_mgr)
+    if args.arg1 > 0xFFFFFFFFu64 or args.arg5 != 0u64:
+        return _ipc_owned_state(-(EINVAL as i64), scheduler, ipc_mgr)
+    val current = scheduler.get_current()
+    if not ipc_mgr.port_is_owned_by(args.arg4, current.id):
+        return _ipc_owned_state(-(EPERM as i64), scheduler, ipc_mgr)
+    val is_reply = (args.arg1 & IPC_OWNED_V1_REPLY_METHOD_FLAG) != 0u64
+    if not is_reply and ipc_mgr.port_owner_task_id(args.arg0) != current.id:
+        if val name = ipc_mgr.port_name(args.arg0):
+            if name == "" or not ipc_mgr.cap_check(
+                current, CapabilityKind.IpcConnect(port_name: name)
+            ):
+                return _ipc_owned_state(-(EPERM as i64), scheduler, ipc_mgr)
+        else:
+            return _ipc_owned_state(-(ENOENT as i64), scheduler, ipc_mgr)
+    var payload: [u8] = []
+    if args.arg3 != 0u64:
+        if val copied = user_copyin_bytes_validated(args.arg2, args.arg3):
+            payload = copied
+        else:
+            return _ipc_owned_state(-(EFAULT as i64), scheduler, ipc_mgr)
+    val flags = if is_reply: IpcFlags.Reply as u32 else: IpcFlags.Async as u32
+    val header = IpcMessage(
+        src_port: args.arg4, dst_port: args.arg0,
+        method: (args.arg1 & 0x7FFFFFFFu64).to_u32(),
+        flags: flags, payload_len: args.arg3.to_u32(), cap_count: 0u32
+    )
+    val sent = ipc_mgr.send_owned_from_scheduler(scheduler, args.arg4, header, payload)
+    _ipc_owned_state(_ipc_owned_send_errno(sent), scheduler, ipc_mgr)
+
+fn _handle_ipc_recv_owned_v1_state(
+    args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager
+) -> IpcSyscallState:
+    """Copy the checked FIFO head to user storage, then consume that head."""
+    var ipc_mgr = ipc
+    if args.arg3 != 0u64 or args.arg4 != 0u64:
+        return _ipc_owned_state(-(ENOSYS as i64), scheduler, ipc_mgr)
+    if args.arg5 != 0u64:
+        return _ipc_owned_state(-(EINVAL as i64), scheduler, ipc_mgr)
+    val current = scheduler.get_current()
+    val port = IpcPort(id: args.arg0, owner: current.id)
+    val length = ipc_mgr.next_owned_payload_len(current, port)
+    if length == -1:
+        return _ipc_owned_state(-(ENOENT as i64), scheduler, ipc_mgr)
+    if length == -2:
+        return _ipc_owned_state(-(EPERM as i64), scheduler, ipc_mgr)
+    if length == -3:
+        return _ipc_owned_state(-(EAGAIN as i64), scheduler, ipc_mgr)
+    if length < 0:
+        return _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
+    val required = IPC_OWNED_V1_HEADER_BYTES + length as u64
+    if args.arg2 < required:
+        return _ipc_owned_state(-(EMSGSIZE as i64), scheduler, ipc_mgr)
+    if args.arg1 == 0u64:
+        return _ipc_owned_state(-(EFAULT as i64), scheduler, ipc_mgr)
+    val peeked = ipc_mgr.peek_owned(current, port)
+    if peeked.status != OwnedIpcReceiveStatus.Delivered:
+        return _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
+    if val header = peeked.header:
+        val bytes = ipc_owned_v1_encode(header, peeked.payload)
+        if user_copyout_bytes(args.arg1, bytes) != required as i64:
+            return _ipc_owned_state(-(EFAULT as i64), scheduler, ipc_mgr)
+        val consumed = ipc_mgr.recv_owned(current, port)
+        if consumed.status != OwnedIpcReceiveStatus.Delivered:
+            return _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
+        return _ipc_owned_state(required as i64, scheduler, ipc_mgr)
+    _ipc_owned_state(-(EIO as i64), scheduler, ipc_mgr)
+
 fn _ipc_read_user_u32(addr: u64) -> u32:
     (rt_copy_user_byte(addr).to_u32() |
         (rt_copy_user_byte(addr + 1u64).to_u32() << 8) |
@@ -62,15 +164,7 @@ fn _ipc_read_user_u32(addr: u64) -> u32:
         (rt_copy_user_byte(addr + 3u64).to_u32() << 24))
 
 fn _ipc_materialize_received(header: IpcMessage, payload: [u8]) -> i64:
-    g_ipc_syscall_receive_bytes = []
-    _ipc_push_u64(g_ipc_syscall_receive_bytes, header.src_port)
-    _ipc_push_u64(g_ipc_syscall_receive_bytes, header.dst_port)
-    _ipc_push_u32(g_ipc_syscall_receive_bytes, header.method)
-    _ipc_push_u32(g_ipc_syscall_receive_bytes, header.flags)
-    _ipc_push_u32(g_ipc_syscall_receive_bytes, header.payload_len)
-    _ipc_push_u32(g_ipc_syscall_receive_bytes, header.cap_count)
-    for byte in payload:
-        g_ipc_syscall_receive_bytes.push(byte)
+    g_ipc_syscall_receive_bytes = ipc_owned_v1_encode(header, payload)
     # User-space decoders address the serialized IpcMessage at the first byte,
     # not at the Simple array object's 16-byte runtime header.
     (unsafe_addr_of(g_ipc_syscall_receive_bytes) + IPC_SYSCALL_BYTE_ARRAY_HEADER_BYTES).to_i64()
@@ -135,7 +229,7 @@ fn _handle_ipc_send_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManag
         cap_count: 0
     )
 
-    val result = ipc_mgr.send_owned(current, claimed_source_port, msg, payload)
+    val result = ipc_mgr.send_owned_from_scheduler(sched, claimed_source_port, msg, payload)
 
     # If send succeeded and there was a waiter, unblock it
     if result == 0:
@@ -162,7 +256,7 @@ fn _handle_ipc_recv_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManag
     val timeout = args.arg1.to_i64()
 
     val current = sched.get_current()
-    val received: _OwnedIpcReceiveView = ipc_mgr.recv_owned(current, port)
+    val received: OwnedIpcReceiveResult = ipc_mgr.recv_owned(current, port)
     if received.status == OwnedIpcReceiveStatus.Delivered:
         if val header = received.header:
             return IpcSyscallState(result: SyscallResult(value: _ipc_materialize_received(header, received.payload)), scheduler: sched, ipc: ipc_mgr)
@@ -202,10 +296,20 @@ fn _handle_ipc_create_port_state(args: SyscallArgs, scheduler: Scheduler, ipc: I
     val current = scheduler.get_current()
     if args.arg1 > IPC_SYSCALL_MAX_PORT_NAME_BYTES:
         return IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
-    val name = if args.arg1 == 0u64:
-        ""
-    else:
-        _ipc_copy_user_text(args.arg0, args.arg1)
+    var name = ""
+    if args.arg1 != 0u64:
+        if val copied_name = _ipc_copy_user_text(args.arg0, args.arg1):
+            name = copied_name
+        else:
+            return IpcSyscallState(
+                result: SyscallResult(value: -(EFAULT as i64)),
+                scheduler: scheduler, ipc: ipc_mgr
+            )
+    if name != "" and not ipc_mgr.cap_check(current, CapabilityKind.IpcListen(port_name: name)):
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EPERM as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
     val port = ipc_mgr.create_port(current, name)
     if port.id == 0u64:
         # Both a full table and a duplicate service name are creation failures;
@@ -251,15 +355,27 @@ fn _handle_ipc_connect_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
     var ipc_mgr = ipc
     if args.arg1 == 0u64 or args.arg1 > IPC_SYSCALL_MAX_PORT_NAME_BYTES:
         return IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
-    val name = _ipc_copy_user_text(args.arg0, args.arg1)
+    val copied_name = _ipc_copy_user_text(args.arg0, args.arg1)
+    if copied_name == nil:
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EFAULT as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
+    val name = copied_name.unwrap()
+    val current = scheduler.get_current()
+    if not ipc_mgr.cap_check(current, CapabilityKind.IpcConnect(port_name: name)):
+        return IpcSyscallState(
+            result: SyscallResult(value: -(EPERM as i64)),
+            scheduler: scheduler, ipc: ipc_mgr
+        )
     val port = ipc_mgr.connect(name)
     if port != nil:
         val p = port
         return IpcSyscallState(result: SyscallResult(value: p.id.to_i64()), scheduler: scheduler, ipc: ipc_mgr)
     IpcSyscallState(result: SyscallResult(value: -1), scheduler: scheduler, ipc: ipc_mgr)
 
-fn _handle_ipc_connect(args: SyscallArgs, ipc: IpcManager) -> SyscallResult:
-    _handle_ipc_connect_state(args, Scheduler.new_bootstrap(), ipc).result
+fn _handle_ipc_connect(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
+    _handle_ipc_connect_state(args, scheduler, ipc).result
 
 fn _handle_ipc_port_owner(args: SyscallArgs, ipc: IpcManager) -> SyscallResult:
     """Return the authenticated task owner of arg0's live IPC port."""

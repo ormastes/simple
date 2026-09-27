@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[path = "src/runtime_export_scan.rs"]
 mod runtime_export_scan;
@@ -497,18 +498,44 @@ fn compile_c_runtime_sources() {
     }
     build.compile("runtime_sffi_c");
 
-    // hosted_cocoa.c is Objective-C behind a .c extension (real NSWindow path
-    // on __APPLE__). Compile it separately with the ObjC language flag so the
-    // staticlib carries real rt_cocoa_* providers on macOS; AppKit/Foundation
-    // are already in the platform framework link set.
+    // hosted_cocoa.c is Objective-C behind a .c extension. Keep its symbols
+    // private to this Rust crate: cocoa_dynload_owner.rs supplies the public
+    // rt_cocoa_* exports from the cdylib. A native-all archive must not carry
+    // a second public Cocoa provider.
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
         let cocoa = runtime_c_dir.join("hosted_cocoa.c");
         if cocoa.exists() {
+            // LLVM 23 emits objc_msgSendClass$... references for this file;
+            // those class dispatch stubs are unresolved when rustc links its
+            // macOS 11 cdylib. Xcode Clang emits the supported dispatch ABI.
+            let apple_clang = Command::new("xcrun")
+                .args(["--find", "clang"])
+                .output()
+                .expect("xcrun is required to compile the macOS Cocoa provider");
+            assert!(apple_clang.status.success(), "xcrun could not find Xcode Clang");
+            let apple_clang = String::from_utf8(apple_clang.stdout)
+                .expect("xcrun returned a non-UTF-8 compiler path");
+            let apple_clang = apple_clang.trim();
+            assert!(!apple_clang.is_empty(), "xcrun returned an empty compiler path");
             let mut objc = cc::Build::new();
             objc.opt_level(2).warnings(false).cargo_metadata(false);
+            objc.compiler(apple_clang);
+            objc.flag("-mmacosx-version-min=11.0");
             objc.flag("-xobjective-c").file(cocoa);
+            for name in [
+                "window_new", "window_resize", "window_close", "layer_create",
+                "layer_fill_rect", "layer_present", "layer_free",
+                "layer_read_pixel", "layer_blend_rect", "layer_blur",
+                "layer_gradient_v", "event_pump",
+            ] {
+                objc.define(
+                    &format!("rt_cocoa_{name}"),
+                    Some(format!("simple_cocoa_impl_{name}").as_str()),
+                );
+            }
             objc.compile("runtime_sffi_objc");
             println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+            println!("cargo:rustc-link-lib=framework=Cocoa");
         }
     }
 

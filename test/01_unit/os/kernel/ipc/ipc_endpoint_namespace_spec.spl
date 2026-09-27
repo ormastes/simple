@@ -27,7 +27,7 @@ describe "IPC endpoint namespace":
         val ipc = IpcManager.new()
         expect(ipc.port_name(999)).to_equal(nil)
 
-    it "mints a one-shot reply right only after an owned request is delivered":
+    it "mints a one-shot reverse-pair right for an accepted owned request":
         var ipc = IpcManager.new()
         val client = TaskId(id: 31)
         val service = TaskId(id: 32)
@@ -40,7 +40,9 @@ describe "IPC endpoint namespace":
         expect(ipc.send_owned(client, client_port.id, request, [1u8])).to_equal(0)
         val delivered = ipc.recv_owned(service, IpcPort(id: service_port.id, owner: service.id))
         expect(delivered.status).to_equal(OwnedIpcReceiveStatus.Delivered)
-        expect(ipc.grant_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.reply_permit_allows(client, service_port.id, client_port.id)).to_equal(false)
+        expect(ipc.consume_reply_permit(service, client_port.id, service_port.id)).to_equal(false)
         expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(true)
         expect(ipc.consume_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
         expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(false)
@@ -54,3 +56,35 @@ describe "IPC endpoint namespace":
         expect(ipc.grant_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
         ipc.destroy_task_ports(client)
         expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(false)
+
+    it "consumes one right per accepted request for the same reverse pair":
+        var ipc = IpcManager.new()
+        val client = TaskId(id: 51)
+        val service = TaskId(id: 52)
+        val client_port = ipc.create_port(client, "reply-count-client")
+        val service_port = ipc.create_port(service, "reply-count-service")
+        expect(ipc.grant_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.grant_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.consume_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.consume_reply_permit(service, service_port.id, client_port.id)).to_equal(true)
+        expect(ipc.reply_permit_allows(service, service_port.id, client_port.id)).to_equal(false)
+
+    it "accepts one copied reply and rejects replay without changing the queue":
+        var ipc = IpcManager.new()
+        val client = TaskId(id: 61)
+        val service = TaskId(id: 62)
+        val client_port = ipc.create_port(client, "reply-once-client")
+        val service_port = ipc.create_port(service, "reply-once-service")
+        val request = IpcMessage(
+            src_port: client_port.id, dst_port: service_port.id, method: 7u32,
+            flags: IpcFlags.Async as u32, payload_len: 0u32, cap_count: 0u32
+        )
+        val reply = IpcMessage(
+            src_port: service_port.id, dst_port: client_port.id, method: 7u32,
+            flags: IpcFlags.Reply as u32, payload_len: 0u32, cap_count: 0u32
+        )
+        expect(ipc.send_owned(client, client_port.id, request, [])).to_equal(0)
+        expect(ipc.send_owned(service, service_port.id, reply, [])).to_equal(0)
+        expect(ipc.send_owned(service, service_port.id, reply, [])).to_equal(-8)
+        expect(ipc.queued_message_count(client_port.id)).to_equal(1)
