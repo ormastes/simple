@@ -436,7 +436,9 @@ Implemented source slice:
   anonymous 56-byte bigobj headers share the same bounded parser; bigobj uses
   20-byte symbols, signed 32-bit section numbers, and the high half of
   associative COMDAT section indices rather than truncating them to classic
-  COFF widths. Archive admission recognizes the bigobj class identifier rather
+  COFF widths. A zero symbol count now requires the header's symbol-table
+  pointer to be zero, preventing malformed objects from supplying a phantom
+  string-table base. Archive admission recognizes the bigobj class identifier rather
   than skipping its machine-zero prefix, and short-import detection explicitly
   excludes bigobj members despite their shared `0/0xffff` signature. Sections
   using `IMAGE_SCN_LNK_NRELOC_OVFL` decode the first relocation record as the
