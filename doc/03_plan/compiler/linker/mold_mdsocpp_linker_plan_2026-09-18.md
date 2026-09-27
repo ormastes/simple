@@ -448,8 +448,11 @@ Implemented source slice:
   consumes an explicit image base instead of embedding the AMD64 constant.
   Microsoft short-import decoding admits both AMD64 and ARM64 machine rows
   while preserving the machine for architecture-specific thunk selection.
+  ARM64 code imports now synthesize checked 12-byte `ADRP x16` / `LDR x16` /
+  `BR x16` stubs against 8-byte-aligned IAT slots; mixed-machine imports and
+  out-of-range page deltas fail closed.
   Production ARM64 link routing,
-  short-import/thunk synthesis, and `SECREL` resolution remain open and are not
+  production import routing and `SECREL` resolution remain open and are not
   certified by this slice;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;

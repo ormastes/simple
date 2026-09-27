@@ -2,7 +2,8 @@ use std.spec.*
 use compiler.backend.linker.coff.coff_import.{
     CoffImportObject, COFF_IMPORT_CODE, COFF_IMPORT_DATA,
     COFF_IMPORT_ORDINAL, COFF_IMPORT_NAME}
-use compiler.backend.linker.coff.pe_import_builder.{pe_build_amd64_imports}
+use compiler.backend.linker.coff.pe_import_builder.{
+    pe_build_amd64_imports, pe_build_arm64_imports}
 
 fn _pib_import(name: text, dll: text, import_type: i64, name_type: i64) -> CoffImportObject:
     CoffImportObject(machine: 0x8664, public_name: name,
@@ -13,6 +14,11 @@ fn _pib_import(name: text, dll: text, import_type: i64, name_type: i64) -> CoffI
 fn _pib_u32(bytes: [u8], offset: i64) -> i64:
     (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
         ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+fn _pib_arm64_import(name: text, dll: text) -> CoffImportObject:
+    CoffImportObject(machine: 0xaa64, public_name: name, import_name: name,
+        dll_name: dll, hint_or_ordinal: 7,
+        import_type: COFF_IMPORT_CODE, name_type: COFF_IMPORT_NAME)
 
 describe "PE AMD64 import builder":
     it "emits descriptors, IAT symbols, and RIP-relative code thunks":
@@ -52,3 +58,21 @@ describe "PE AMD64 import builder":
         val image = pe_build_amd64_imports([], 0, 0).unwrap()
         expect(image.idata_data.len()).to_equal(0)
         expect(image.thunk_data.len()).to_equal(0)
+
+describe "PE ARM64 import builder":
+    it "emits ADRP LDR BR thunks targeting aligned IAT slots":
+        val image = pe_build_arm64_imports([
+            _pib_arm64_import("ExitProcess", "KERNEL32.dll")],
+            0x1000, 0x2000).unwrap()
+        expect(image.thunk_data.len()).to_equal(12)
+        expect(_pib_u32(image.thunk_data, 0)).to_equal(0xb0000010)
+        expect(_pib_u32(image.thunk_data, 4)).to_equal(0xf9401e10)
+        expect(_pib_u32(image.thunk_data, 8)).to_equal(0xd61f0200)
+        expect(image.symbol_rvas["ExitProcess"]).to_equal(0x1000)
+        expect(image.symbol_rvas["__imp_ExitProcess"]).to_equal(0x2038)
+
+    it "rejects mixed-machine short imports":
+        val image = pe_build_arm64_imports([
+            _pib_import("ExitProcess", "KERNEL32.dll", COFF_IMPORT_CODE,
+                COFF_IMPORT_NAME)], 0x1000, 0x2000)
+        expect(image.is_err()).to_equal(true)
