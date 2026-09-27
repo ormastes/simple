@@ -88,3 +88,20 @@ differed. A path-dependent or cold-versus-warm native codegen defect remains
 possible; the available evidence does not identify which one. The third
 verify/fix cycle for this boundary is complete, so no further bootstrap retry
 was started in this session. Stage 3 and the Mac release gates remain unpassed.
+
+## Targeted cold-binary diagnosis
+
+A fresh scoped session reproduced the canonical rejected binary's positional
+hello-world hang without rerunning the full bootstrap. A five-second sample
+captured 3503 main-thread samples in
+`lower_mir_storage_project_fields_v1`, mostly under `rt_range` and
+`rt_array_push_grow`; the process reached about 3.4 GB RSS before it was
+stopped. The rejected and isolated admitted binaries have identical
+instructions for this function, so the differing admission outcomes do not
+come from a different copy of that function. Disassembly found exactly one
+`rt_range` call in it. The storage recipe helper still had one `for` over
+`binding.fields` that could inline into this owner. That remaining traversal
+is now indexed `while` code, matching the prior fix for the other traversals.
+The existing native projection unit spec covers selection of every field and
+missing-binding behavior. A source-matched Stage 2 admission is required to
+test whether this removes the cold-binary hang; no success is claimed here.
