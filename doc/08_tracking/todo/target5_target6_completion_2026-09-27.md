@@ -36,6 +36,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   bytes over the ceiling; current Stage4 already derives symbol roots from
   the final object closure, so this is attribution, not an unmade linker fix.
   Review argv and startup/runtime roots with exact closure proof.
+  A C-bootstrap argv fast-path probe removed an allocation but enlarged its
+  stripped microbinary by 152 bytes; the edit was reverted because the
+  current pure-Simple core already stores argv without that allocation.
 
 ## Target 6 — persistent compile index
 
