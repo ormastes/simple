@@ -31,6 +31,10 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+// macOS uses the Objective-C provider linked into libsimple_runtime.dylib.
+// Do not export the hosted Rust fallback into libsimple_native_all.a as a
+// second owner of the same rt_cocoa_* symbols.
+#[cfg(not(target_os = "macos"))]
 pub mod cocoa;
 pub mod js_test262;
 pub mod select;
