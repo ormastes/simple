@@ -16,6 +16,7 @@ SOURCE = VERIFIER.read_text().split("<<'BOOTSTRAP_POSITIONED_READ_PY'\n", 1)[1].
 NAMESPACE = {'__name__': 'production_reader'}
 exec(compile(SOURCE, str(VERIFIER), 'exec'), NAMESPACE)
 READ = NAMESPACE['positioned_read']
+VERIFY_ROLE = NAMESPACE['verify_role']
 
 
 class PositionedAuthority(unittest.TestCase):
@@ -169,6 +170,156 @@ bootstrap_stage3_verify_manifest "$2/manifest" "$2/manifest" "$1" "$2/compiler" 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('manifest-stage-map-status', result.stderr)
         self.assertNotIn('manifest-entry-bound-map-hash', result.stderr)
+
+
+class ManifestAndRoleAuthority(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='manifest-role-authority-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.path = self.root / 'artifact'
+        self.data = b'authority bytes\n'
+        self.path.write_bytes(self.data)
+
+    def binding(self, path, kind='file'):
+        info = path.stat()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest() if kind == 'file' else '-'
+        return f'{kind}:{info.st_dev}:{info.st_ino}:{info.st_mode & 0o7777:o}:{digest}'
+
+    def test_role_mode_matches_darwin_octal_receipts(self):
+        self.path.chmod(0o751)
+        binding = self.binding(self.path)
+        VERIFY_ROLE(self.path, binding)
+        if sys.platform == 'darwin':
+            mode = subprocess.check_output(['stat', '-f', '%Lp', str(self.path)], text=True).strip()
+            self.assertEqual(binding.split(':')[3], mode)
+        with self.assertRaises(ValueError):
+            VERIFY_ROLE(self.path, binding.replace(':751:', ':750:'))
+        VERIFY_ROLE(self.root, self.binding(self.root, 'directory'))
+
+    def test_role_identity_digest_and_type_rejections(self):
+        binding = self.binding(self.path)
+        other = self.root / 'other'
+        other.write_bytes(self.data)
+        with self.assertRaises(ValueError):
+            VERIFY_ROLE(other, binding)
+        with self.assertRaises(ValueError):
+            VERIFY_ROLE(self.path, binding.rsplit(':', 1)[0] + ':' + '0' * 64)
+        link = self.root / 'link'
+        link.symlink_to(self.path)
+        with self.assertRaises(ValueError):
+            VERIFY_ROLE(link, binding)
+        with self.assertRaises(ValueError):
+            VERIFY_ROLE(self.path, self.binding(self.root, 'directory'))
+
+    def test_role_mutation_during_hash_is_rejected(self):
+        binding = self.binding(self.path)
+        pread = os.pread
+        def mutate(fd, count, offset):
+            result = pread(fd, count, offset)
+            self.path.write_bytes(b'x' * len(self.data))
+            return result
+        with patch.object(os, 'pread', mutate), self.assertRaises(ValueError):
+            VERIFY_ROLE(self.path, binding)
+
+    def test_role_replacement_during_hash_is_rejected(self):
+        binding = self.binding(self.path)
+        pread = os.pread
+        def replace(fd, count, offset):
+            result = pread(fd, count, offset)
+            self.path.unlink()
+            self.path.write_bytes(self.data)
+            return result
+        with patch.object(os, 'pread', replace), self.assertRaises(ValueError):
+            VERIFY_ROLE(self.path, binding)
+
+    def test_nonportable_dispatch_preserves_existing_lookup(self):
+        self.path.write_bytes(b'schema=existing-path-reader\n')
+        script = '''
+. "$1/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$1/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+bootstrap_stage3_manifest=$2
+bootstrap_stage3_portable_manifest=0
+bootstrap_stage3_verify_value schema "$2" || exit 1
+printf 'schema=duplicate\n' >>"$2"
+if bootstrap_stage3_verify_value schema "$2"; then exit 1; fi
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'existing-path-reader\n')
+
+    def test_manifest_dispatch_retains_inode_and_rejects_later_mutation(self):
+        self.path.write_bytes(b'schema=original\nstatus=verified\n')
+        script = '''
+. "$1"
+bootstrap_stage3_manifest_value() { echo unexpected-path-fallback >&2; return 97; }
+bootstrap_stage3_manifest=$2
+exec 8<"$2"
+bootstrap_stage3_manifest_receipt=$(bootstrap_stage3_descriptor_read 8 '' seal "$2") || exit 1
+bootstrap_stage3_portable_manifest=1
+ln "$2" "$2.retained" || exit 1
+rm "$2"
+printf 'schema=replacement\n' >"$2"
+bootstrap_stage3_verify_value schema "$2" || exit 1
+bootstrap_stage3_verify_value status "$2" || exit 1
+printf 'mutated\n' >"$2.retained"
+if bootstrap_stage3_verify_value schema "$2"; then exit 1; fi
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(VERIFIER), str(self.path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['original', 'verified'])
+        self.assertNotIn('unexpected-path-fallback', result.stderr)
+
+    @unittest.skipIf(Path('/proc/self/stat').is_file(), 'non-procfs production ingress')
+    def test_real_verifier_passes_roles_and_seals_manifest(self):
+        self.path.chmod(0o755)
+        manifest = self.root / 'manifest.env'
+        manifest.write_bytes(b'schema=simple-bootstrap-stage3-provenance-v4\n')
+        interpreter = Path(sys.executable).resolve()
+        tools = self.root / 'tools.env'
+        tools.write_text(f'tool=python3|canonical={interpreter}|sha256={hashlib.sha256(interpreter.read_bytes()).hexdigest()}\n')
+        map_path = self.root / 'map.env'
+        map_path.touch()
+        roles = (
+            'seed native_all compiler_backfill stage2 stage2_admitted stage2_build_log '
+            'stage2_command_transcript stage2_sanity_evidence stage2_sanity_companion_parent '
+            'stage2_receiver_evidence stage2_receiver_log stage2_admission_receipt '
+            'stage3_build_log stage3_command_transcript stage3_sanity_evidence '
+            'stage3_sanity_companion_parent git_state runtime_origin_snapshot '
+            'runtime_admitted_snapshot tool_authority seed_inputs_stamp source_snapshot '
+            'output bootstrap_script provenance_helper stage2_native_cache_dir '
+            'stage3_native_cache_dir runtime_path source_inputs_before tool_authority_before jobs_receipt'
+        ).split()
+        directories = {'stage2_sanity_companion_parent', 'stage3_sanity_companion_parent',
+                       'stage2_native_cache_dir', 'stage3_native_cache_dir', 'runtime_path'}
+        rows = []
+        for role in roles:
+            path = self.root if role in directories else tools if role == 'tool_authority' else self.path
+            if role == 'compiler_backfill':
+                rows.extend([f'{role}_authority=descriptor-absent', f'{role}_display={path}',
+                             f'{role}_dev=absent', f'{role}_ino=absent', f'{role}_mode=absent'])
+                continue
+            st = path.stat()
+            rows.extend([f'{role}_authority={path}', f'{role}_display={path}',
+                         f'{role}_dev={st.st_dev}', f'{role}_ino={st.st_ino}',
+                         f'{role}_mode={st.st_mode & 0o7777:o}'])
+            if role not in directories:
+                rows.append(f'{role}_sha256={hashlib.sha256(path.read_bytes()).hexdigest()}')
+        vector = '\n'.join(rows) + '\n'
+        map_path.write_text('schema=simple-stage3-bound-artifact-authority-map-v2\nstatus=ready\nentry_count=31\n'
+                            + f'map_vector_sha256={hashlib.sha256(vector.encode()).hexdigest()}\n' + vector)
+        self.assertEqual(len(map_path.read_text().splitlines()), 184)
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$1
+unset BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_verify_manifest "$2/manifest.env" "$2/manifest.env" "$1" "$2/artifact" "$2/artifact" "$2/map.env"
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.root)], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('manifest-status-not-singular', result.stderr)
+        self.assertNotIn('stat:', result.stderr)
 
 
 if __name__ == '__main__':

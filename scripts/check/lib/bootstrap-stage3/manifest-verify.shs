@@ -42,10 +42,58 @@ def positioned_read(fd, expected=None, source_path=None):
     return data, receipt, digest
 
 
+def verify_role(path, expected):
+    fields = expected.split(":")
+    if len(fields) != 5 or fields[0] not in ("file", "directory"):
+        raise ValueError("invalid role binding")
+    kind, dev, ino, mode, digest = fields
+    if not dev.isdigit() or not ino.isdigit() or not re.fullmatch(r"[0-7]+", mode):
+        raise ValueError("invalid role identity")
+    if kind == "file" and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("invalid role digest")
+    if kind == "directory" and digest != "-":
+        raise ValueError("invalid directory binding")
+    def identity(st):
+        return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
+                st.st_mtime_ns, st.st_ctime_ns)
+    before = os.lstat(path)
+    predicate = stat.S_ISREG if kind == "file" else stat.S_ISDIR
+    if not predicate(before.st_mode):
+        raise ValueError("wrong role type or symlink")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    if kind == "directory":
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if identity(opened) != identity(before):
+            raise ValueError("role replaced during open")
+        if (opened.st_dev, opened.st_ino, stat.S_IMODE(opened.st_mode)) != (int(dev), int(ino), int(mode, 8)):
+            raise ValueError("role identity mismatch")
+        if kind == "file":
+            hasher = hashlib.sha256()
+            offset = 0
+            while offset < opened.st_size:
+                data = os.pread(fd, min(1048576, opened.st_size - offset), offset)
+                if not data:
+                    raise ValueError("short role read")
+                hasher.update(data)
+                offset += len(data)
+            if hasher.hexdigest() != digest:
+                raise ValueError("role digest mismatch")
+        if identity(os.fstat(fd)) != identity(opened) or identity(os.lstat(path)) != identity(opened):
+            raise ValueError("role changed during verification")
+    finally:
+        os.close(fd)
+
+
 def main(args):
     if len(args) != 4 or not args[0].isdigit():
         raise ValueError("expected fd, receipt, operation, argument")
     fd, expected, operation, argument = args
+    if operation == "role":
+        verify_role(argument, expected)
+        return
     if int(fd) < 3:
         raise ValueError("reserved descriptor")
     data, receipt, digest = positioned_read(
@@ -102,6 +150,29 @@ bootstrap_stage3_verify_portable_python() {
         "$bootstrap_stage3_portable_python_sha" ]
 }
 
+# Only the currently retained manifest is dispatched to fd8. Other receipts
+# retain the existing helper behavior; no descriptor token is accepted as a path.
+bootstrap_stage3_verify_value() {
+    [ "$#" = 2 ] || return 1
+    if [ "${bootstrap_stage3_portable_manifest:-0}" = 1 ] &&
+        [ "$2" = "$bootstrap_stage3_manifest" ]; then
+        bootstrap_stage3_descriptor_read 8 "$bootstrap_stage3_manifest_receipt" value "$1"
+    else
+        bootstrap_stage3_manifest_value "$@"
+    fi
+}
+
+bootstrap_stage3_verify_portable_role() {
+    [ "$#" = 3 ] || return 1
+    bootstrap_stage3_role_binding="$3:$(bootstrap_stage3_map_value "${2}_dev"):$(bootstrap_stage3_map_value "${2}_ino"):$(bootstrap_stage3_map_value "${2}_mode")" || return 1
+    if [ "$3" = file ]; then
+        bootstrap_stage3_role_digest=$(bootstrap_stage3_map_value "${2}_sha256") || return 1
+    else
+        bootstrap_stage3_role_digest=-
+    fi
+    bootstrap_stage3_descriptor_read 0 "$bootstrap_stage3_role_binding:$bootstrap_stage3_role_digest" role "$1"
+}
+
 bootstrap_stage3_map_hash() {
     if [ "${bootstrap_stage3_portable_map:-0}" = 1 ]; then
         bootstrap_stage3_descriptor_read 9 "$bootstrap_stage3_map_receipt" hash ''
@@ -155,6 +226,7 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     bootstrap_stage3_manifest_phase_emit 1
     [ "$#" = 6 ] || [ "$#" = 8 ] || return 1
+    bootstrap_stage3_portable_manifest=0
     bootstrap_stage3_manifest=$1
     bootstrap_stage3_manifest_display=$2
     bootstrap_stage3_root=$3
@@ -228,7 +300,7 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_manifest_phase_emit 8
     bootstrap_stage3_bound_map="/proc/$bootstrap_stage3_local_pid/fd/7"
     bootstrap_stage3_map_value() {
-        bootstrap_stage3_manifest_value "$1" "$bootstrap_stage3_bound_map"
+        bootstrap_stage3_verify_value "$1" "$bootstrap_stage3_bound_map"
     }
     fi
     [ "$(bootstrap_stage3_map_value schema)" = simple-stage3-bound-artifact-authority-map-v2 ] || { bootstrap_stage3_provenance_fail "manifest-stage-map-schema"; return 1; }
@@ -262,6 +334,18 @@ bootstrap_stage3_verify_manifest_impl() {
             [ "$bootstrap_stage3_map_role" = compiler_backfill ] || return 1
             continue
         fi
+        if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+            case "$bootstrap_stage3_map_role" in
+                stage2_sanity_companion_parent|stage3_sanity_companion_parent|stage2_native_cache_dir|stage3_native_cache_dir|runtime_path)
+                    bootstrap_stage3_role_kind=directory ;;
+                *) bootstrap_stage3_role_kind=file ;;
+            esac
+            bootstrap_stage3_verify_portable_role "$bootstrap_stage3_map_authority" \
+                "$bootstrap_stage3_map_role" "$bootstrap_stage3_role_kind" || {
+                bootstrap_stage3_provenance_fail "portable-authority-role-$bootstrap_stage3_map_role"
+                return 1
+            }
+        else
         case "$bootstrap_stage3_map_role" in
             stage2_sanity_companion_parent|stage3_sanity_companion_parent|stage2_native_cache_dir|stage3_native_cache_dir|runtime_path)
                 [ -d "$bootstrap_stage3_map_authority" ] || return 1 ;;
@@ -273,6 +357,7 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_map_role}_dev")" = "$1" ] &&
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_map_role}_ino")" = "$2" ] &&
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_map_role}_mode")" = "$3" ] || return 1
+        fi
     done
     if [ "$bootstrap_stage3_portable_map" = 1 ]; then
         bootstrap_stage3_verify_portable_python \
@@ -285,6 +370,9 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_manifest_a_failure_code=V0
     [ -f "$bootstrap_stage3_expected_output" ] &&
         [ -x "$bootstrap_stage3_expected_output" ] || return 1
+    if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+        bootstrap_stage3_verify_portable_role "$bootstrap_stage3_expected_output" output file || return 1
+    else
     set -- $(stat -Lc '%d %i %a' "$bootstrap_stage3_expected_output") ||
         return 1
     [ "$(bootstrap_stage3_map_value output_dev)" = "$1" ] &&
@@ -292,6 +380,7 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "$(bootstrap_stage3_map_value output_mode)" = "$3" ] || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_expected_output")" = \
         "$(bootstrap_stage3_map_value output_sha256)" ] || return 1
+    fi
     [ "$(bootstrap_stage3_map_value output_display)" = "$bootstrap_stage3_expected_output_display" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=U0
     bootstrap_stage3_root_canonical=$(
@@ -322,6 +411,14 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     bootstrap_stage3_manifest_a_failure_code=U2
     exec 8<"$bootstrap_stage3_manifest" || return 1
+    if [ "$bootstrap_stage3_portable_map" = 1 ]; then
+        bootstrap_stage3_manifest_receipt=$(bootstrap_stage3_descriptor_read \
+            8 '' seal "$bootstrap_stage3_manifest") || {
+            bootstrap_stage3_provenance_fail "portable-authority-manifest-seal"
+            return 1
+        }
+        bootstrap_stage3_portable_manifest=1
+    else
     bootstrap_stage3_manifest_source_before=$(
         stat -Lc '%d %i %f %s' \
             "/proc/$bootstrap_stage3_local_pid/fd/8"
@@ -377,9 +474,10 @@ bootstrap_stage3_verify_manifest_impl() {
     grep -Fqx 'schema=simple-bootstrap-stage3-provenance-v4' \
         "/proc/$bootstrap_stage3_local_pid/fd/8" || return 1
     bootstrap_stage3_manifest="/proc/$bootstrap_stage3_local_pid/fd/8"
+    fi
     bootstrap_stage3_manifest_a_failure_code=U8
     bootstrap_stage3_manifest_schema=$(
-        bootstrap_stage3_manifest_value schema "$bootstrap_stage3_manifest"
+        bootstrap_stage3_verify_value schema "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_manifest_a_failure_code=U9
     [ "$bootstrap_stage3_manifest_schema" = \
@@ -438,7 +536,7 @@ bootstrap_stage3_verify_manifest_impl() {
             bootstrap_stage3_manifest_base32_low=$((bootstrap_stage3_manifest_base32_low - 1))
         done
         bootstrap_stage3_manifest_a_failure_code=${bootstrap_stage3_manifest_a_failure_code}${bootstrap_stage3_manifest_base32_rest%"${bootstrap_stage3_manifest_base32_rest#?}"}
-        bootstrap_stage3_manifest_value "$bootstrap_stage3_key" \
+        bootstrap_stage3_verify_value "$bootstrap_stage3_key" \
             "$bootstrap_stage3_manifest" >/dev/null ||
             bootstrap_stage3_provenance_fail \
                 "manifest-${bootstrap_stage3_key}-not-singular" ||
@@ -446,46 +544,46 @@ bootstrap_stage3_verify_manifest_impl() {
     done
 
     bootstrap_stage3_manifest_a_failure_code=V2
-    [ "$(bootstrap_stage3_manifest_value schema "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value schema "$bootstrap_stage3_manifest")" = \
         simple-bootstrap-stage3-provenance-v4 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value status "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value status "$bootstrap_stage3_manifest")" = \
         pass ] || return 1
-    [ "$(bootstrap_stage3_manifest_value artifact_kind "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value artifact_kind "$bootstrap_stage3_manifest")" = \
         pure-simple-bootstrap-compiler ] || return 1
-    [ "$(bootstrap_stage3_manifest_value full_cli_status "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value full_cli_status "$bootstrap_stage3_manifest")" = \
         separate-not-proven ] || return 1
-    [ "$(bootstrap_stage3_manifest_value native_build_backfill_status "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value native_build_backfill_status "$bootstrap_stage3_manifest")" = \
         bound-bootstrap-native-all ] || return 1
-    [ "$(bootstrap_stage3_manifest_value source_roots "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value source_roots "$bootstrap_stage3_manifest")" = \
         src/compiler:src/app:src/lib ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_sanity_status \
+    [ "$(bootstrap_stage3_verify_value stage2_sanity_status \
         "$bootstrap_stage3_manifest")" = pass ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_receiver_status \
+    [ "$(bootstrap_stage3_verify_value stage2_receiver_status \
         "$bootstrap_stage3_manifest")" = pass ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_check_policy \
+    [ "$(bootstrap_stage3_verify_value stage2_check_policy \
         "$bootstrap_stage3_manifest")" = \
         identity-scoped-receipt-reuse ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_checks_executed_at_admission \
+    [ "$(bootstrap_stage3_verify_value stage2_checks_executed_at_admission \
         "$bootstrap_stage3_manifest")" = 1 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_checks_replayed_during_stage3 \
+    [ "$(bootstrap_stage3_verify_value stage2_checks_replayed_during_stage3 \
         "$bootstrap_stage3_manifest")" = 0 ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_sanity_status \
+    [ "$(bootstrap_stage3_verify_value stage3_sanity_status \
         "$bootstrap_stage3_manifest")" = pass ] || return 1
-    [ "$(bootstrap_stage3_manifest_value bootstrap_script_path \
+    [ "$(bootstrap_stage3_verify_value bootstrap_script_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_root/scripts/bootstrap/bootstrap-from-scratch.sh" ] ||
         return 1
-    [ "$(bootstrap_stage3_manifest_value provenance_helper_path \
+    [ "$(bootstrap_stage3_verify_value provenance_helper_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_root/scripts/check/lib/bootstrap-stage3-provenance.shs" ] ||
         return 1
     bootstrap_stage3_manifest_a_failure_code=V3
-    [ "$(bootstrap_stage3_manifest_value provenance_helper_bundle_fingerprint \
+    [ "$(bootstrap_stage3_verify_value provenance_helper_bundle_fingerprint \
         "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_helper_bundle_fingerprint)" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=V4
     bootstrap_stage3_manifest_dir=$(dirname -- "$bootstrap_stage3_manifest_display")
-    [ "$(bootstrap_stage3_manifest_value source_snapshot_path \
+    [ "$(bootstrap_stage3_verify_value source_snapshot_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_manifest_dir/source-inputs-after.txt" ] || return 1
     for bootstrap_stage3_sha_key in source_fingerprint seed_sha256 \
@@ -506,29 +604,29 @@ bootstrap_stage3_verify_manifest_impl() {
         source_snapshot_sha256 output_sha256 \
         bound_artifact_authority_map_sha256; do
         bootstrap_stage3_sha_value=$(
-            bootstrap_stage3_manifest_value "$bootstrap_stage3_sha_key" \
+            bootstrap_stage3_verify_value "$bootstrap_stage3_sha_key" \
                 "$bootstrap_stage3_manifest"
         ) || return 1
         printf '%s\n' "$bootstrap_stage3_sha_value" |
             grep -Eq '^[0-9a-f]{64}$' || return 1
     done
-    [ "$(bootstrap_stage3_manifest_value bound_artifact_authority_map_path "$bootstrap_stage3_manifest")" = "${bootstrap_stage3_manifest_display}.authority-map.env" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value bound_artifact_authority_map_sha256 "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_hash)" ] || return 1
+    [ "$(bootstrap_stage3_verify_value bound_artifact_authority_map_path "$bootstrap_stage3_manifest")" = "${bootstrap_stage3_manifest_display}.authority-map.env" ] || return 1
+    [ "$(bootstrap_stage3_verify_value bound_artifact_authority_map_sha256 "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_hash)" ] || return 1
     bootstrap_stage3_platform=$(
-        bootstrap_stage3_manifest_value platform "$bootstrap_stage3_manifest"
+        bootstrap_stage3_verify_value platform "$bootstrap_stage3_manifest"
     ) || return 1
     [ "$bootstrap_stage3_platform" = \
         "$(bootstrap_stage3_host_platform)" ] ||
         bootstrap_stage3_provenance_fail "manifest-platform-not-host" ||
         return 1
     bootstrap_stage3_backend=$(
-        bootstrap_stage3_manifest_value backend "$bootstrap_stage3_manifest"
+        bootstrap_stage3_verify_value backend "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_mode=$(
-        bootstrap_stage3_manifest_value mode "$bootstrap_stage3_manifest"
+        bootstrap_stage3_verify_value mode "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_rust_log=$(
-        bootstrap_stage3_manifest_value build_rust_log \
+        bootstrap_stage3_verify_value build_rust_log \
             "$bootstrap_stage3_manifest"
     ) || return 1
     case "$bootstrap_stage3_rust_log" in
@@ -541,19 +639,19 @@ bootstrap_stage3_verify_manifest_impl() {
             ;;
     esac
     bootstrap_stage3_stage2_threads=$(
-        bootstrap_stage3_manifest_value stage2_threads \
+        bootstrap_stage3_verify_value stage2_threads \
             "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_stage3_threads=$(
-        bootstrap_stage3_manifest_value stage3_threads \
+        bootstrap_stage3_verify_value stage3_threads \
             "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_manifest_a_failure_code=V5
     bootstrap_stage3_stage2_cache_dir=$(bootstrap_stage3_map_value stage2_native_cache_dir_authority) || return 1
     bootstrap_stage3_stage3_cache_dir=$(bootstrap_stage3_map_value stage3_native_cache_dir_authority) || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_native_cache_dir "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value stage2_native_cache_dir "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_map_value stage2_native_cache_dir_display)" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_native_cache_dir "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value stage3_native_cache_dir "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_map_value stage3_native_cache_dir_display)" ] || return 1
     [ "$bootstrap_stage3_stage2_cache_dir" != \
         "$bootstrap_stage3_stage3_cache_dir" ] || return 1
@@ -576,15 +674,15 @@ bootstrap_stage3_verify_manifest_impl() {
                 return 1
             ;;
     esac
-    [ "$(bootstrap_stage3_manifest_value runtime_path "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value runtime_path "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_map_value runtime_path_display)" ] || return 1
     bootstrap_stage3_manifest_a_failure_code=V6
     bootstrap_stage3_stage2_command_output=$(
-        bootstrap_stage3_manifest_value stage2_command_output \
+        bootstrap_stage3_verify_value stage2_command_output \
             "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_stage3_command_output=$(
-        bootstrap_stage3_manifest_value stage3_command_output \
+        bootstrap_stage3_verify_value stage3_command_output \
             "$bootstrap_stage3_manifest"
     ) || return 1
     case "$bootstrap_stage3_stage2_command_output" in
@@ -595,10 +693,10 @@ bootstrap_stage3_verify_manifest_impl() {
         /*) bootstrap_stage3_stage3_command_abs=$bootstrap_stage3_stage3_command_output ;;
         *) bootstrap_stage3_stage3_command_abs="$bootstrap_stage3_root/$bootstrap_stage3_stage3_command_output" ;;
     esac
-    [ "$(bootstrap_stage3_manifest_value stage2_path \
+    [ "$(bootstrap_stage3_verify_value stage2_path \
         "$bootstrap_stage3_manifest")" = "$bootstrap_stage3_stage2_command_abs" ] ||
         return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_path \
+    [ "$(bootstrap_stage3_verify_value stage3_path \
         "$bootstrap_stage3_manifest")" = "$bootstrap_stage3_stage3_command_abs" ] ||
         return 1
     bootstrap_stage3_manifest_output_root=$(
@@ -616,7 +714,7 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     bootstrap_stage3_stage2_transaction_display=${bootstrap_stage3_expected_stage2_path%"$bootstrap_stage3_stage2_suffix"}
     bootstrap_stage3_normalized_absolute "$bootstrap_stage3_stage2_transaction_display" || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_path \
+    [ "$(bootstrap_stage3_verify_value stage2_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_stage2_path" ] ||
         bootstrap_stage3_provenance_fail "stage2-path-outside-canonical-lane" ||
@@ -628,12 +726,12 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     [ "$(bootstrap_stage3_map_value stage2_admitted_display)" = \
         "$bootstrap_stage3_expected_stage2_admitted_path" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_admitted_path \
+    [ "$(bootstrap_stage3_verify_value stage2_admitted_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_stage2_admitted_path" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage2_admitted_sha256 \
+    [ "$(bootstrap_stage3_verify_value stage2_admitted_sha256 \
         "$bootstrap_stage3_manifest")" = \
-        "$(bootstrap_stage3_manifest_value stage2_sha256 \
+        "$(bootstrap_stage3_verify_value stage2_sha256 \
             "$bootstrap_stage3_manifest")" ] || return 1
     bootstrap_stage3_expected_stage3_path=\
 "$bootstrap_stage3_manifest_output_root/stage3/$bootstrap_stage3_platform/simple"
@@ -642,7 +740,7 @@ bootstrap_stage3_verify_manifest_impl() {
     esac
     [ "$(bootstrap_stage3_map_value output_display)" = \
         "$bootstrap_stage3_expected_stage3_path" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_path \
+    [ "$(bootstrap_stage3_verify_value stage3_path \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_stage3_path" ] ||
         bootstrap_stage3_provenance_fail "stage3-path-outside-canonical-lane" ||
@@ -661,7 +759,7 @@ bootstrap_stage3_verify_manifest_impl() {
         bootstrap_stage3_layout_path=${bootstrap_stage3_layout_rest#*:}
         [ "$(bootstrap_stage3_map_value "${bootstrap_stage3_layout_role}_display")" = \
             "$bootstrap_stage3_layout_path" ] || { bootstrap_stage3_provenance_fail "manifest-stage-layout-map"; return 1; }
-        [ "$(bootstrap_stage3_manifest_value \
+        [ "$(bootstrap_stage3_verify_value \
             "$bootstrap_stage3_layout_key" "$bootstrap_stage3_manifest")" = \
             "$bootstrap_stage3_layout_path" ] || { bootstrap_stage3_provenance_fail "manifest-stage-layout-manifest"; return 1; }
     done
@@ -794,7 +892,7 @@ bootstrap_stage3_verify_manifest_impl() {
             --runtime-path "$(bootstrap_stage3_map_value runtime_path_display)" \
             -o "$(bootstrap_stage3_map_value stage2_display)"
     )
-    [ "$(bootstrap_stage3_manifest_value stage2_build_args_sha256 \
+    [ "$(bootstrap_stage3_verify_value stage2_build_args_sha256 \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_stage2_args" ] || return 1
     bootstrap_stage3_seed_executable=$(bootstrap_stage3_map_value seed_display) || return 1
@@ -856,7 +954,7 @@ bootstrap_stage3_verify_manifest_impl() {
             -o "$bootstrap_stage3_expected_output_display" \
             src/app/cli/bootstrap_main.spl
     )
-    [ "$(bootstrap_stage3_manifest_value stage3_build_args_sha256 \
+    [ "$(bootstrap_stage3_verify_value stage3_build_args_sha256 \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_stage3_args" ] || return 1
     bootstrap_stage3_stage2_executable_authority=$(bootstrap_stage3_map_value stage2_admitted_authority) || return 1
@@ -900,13 +998,13 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_manifest_phase_emit C
 
     bootstrap_stage3_output=$(bootstrap_stage3_map_value output_authority) || return 1
-    [ "$(bootstrap_stage3_manifest_value output_path "$bootstrap_stage3_manifest")" = "$bootstrap_stage3_expected_output_display" ] || return 1
+    [ "$(bootstrap_stage3_verify_value output_path "$bootstrap_stage3_manifest")" = "$bootstrap_stage3_expected_output_display" ] || return 1
     [ -x "$bootstrap_stage3_output" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value output_sha256 "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value output_sha256 "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_hash_file "$bootstrap_stage3_output")" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_path "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value stage3_path "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_output_display" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value stage3_sha256 "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value stage3_sha256 "$bootstrap_stage3_manifest")" = \
         "$(bootstrap_stage3_hash_file "$bootstrap_stage3_output")" ] || return 1
 
     for bootstrap_stage3_pair in \
@@ -930,8 +1028,8 @@ bootstrap_stage3_verify_manifest_impl() {
         source_snapshot:source_snapshot_path:source_snapshot_sha256; do
         bootstrap_stage3_role=${bootstrap_stage3_pair%%:*}; bootstrap_stage3_rest=${bootstrap_stage3_pair#*:}
         bootstrap_stage3_path_key=${bootstrap_stage3_rest%%:*}; bootstrap_stage3_sha_key=${bootstrap_stage3_rest#*:}
-        [ "$(bootstrap_stage3_manifest_value "$bootstrap_stage3_path_key" "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_value "${bootstrap_stage3_role}_display")" ] || return 1
-        [ "$(bootstrap_stage3_manifest_value "$bootstrap_stage3_sha_key" "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_value "${bootstrap_stage3_role}_sha256")" ] || return 1
+        [ "$(bootstrap_stage3_verify_value "$bootstrap_stage3_path_key" "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_value "${bootstrap_stage3_role}_display")" ] || return 1
+        [ "$(bootstrap_stage3_verify_value "$bootstrap_stage3_sha_key" "$bootstrap_stage3_manifest")" = "$(bootstrap_stage3_map_value "${bootstrap_stage3_role}_sha256")" ] || return 1
     done
     bootstrap_stage3_manifest_phase_emit D
     bootstrap_stage3_runtime_origin_snapshot=$(bootstrap_stage3_map_value runtime_origin_snapshot_authority) || return 1
@@ -1009,15 +1107,15 @@ bootstrap_stage3_verify_manifest_impl() {
     [ "$bootstrap_stage3_seed_stamp_display" = \
         "${bootstrap_stage3_seed_display}.inputs.sha256" ] || return 1
     bootstrap_stage3_verify_seed_stamp "$bootstrap_stage3_seed_stamp" \
-        "$(bootstrap_stage3_manifest_value seed_inputs_fingerprint \
+        "$(bootstrap_stage3_verify_value seed_inputs_fingerprint \
             "$bootstrap_stage3_manifest")" \
         "$bootstrap_stage3_seed_path" "$bootstrap_stage3_native_all_path" \
         "$(bootstrap_stage3_map_value compiler_backfill_authority)" || { bootstrap_stage3_provenance_fail "manifest-stage-seed-stamp"; return 1; }
-    [ "$(bootstrap_stage3_manifest_value seed_backend \
+    [ "$(bootstrap_stage3_verify_value seed_backend \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_backend" ] || return 1
     bootstrap_stage3_seed_features=$(
-        bootstrap_stage3_manifest_value seed_features \
+        bootstrap_stage3_verify_value seed_features \
             "$bootstrap_stage3_manifest"
     ) || return 1
     bootstrap_stage3_seed_authority_path=$(
@@ -1031,7 +1129,7 @@ bootstrap_stage3_verify_manifest_impl() {
             "$bootstrap_stage3_platform"
     ) || return 1
     [ "$bootstrap_stage3_seed_fingerprint_rederived" = \
-        "$(bootstrap_stage3_manifest_value seed_inputs_fingerprint \
+        "$(bootstrap_stage3_verify_value seed_inputs_fingerprint \
             "$bootstrap_stage3_manifest")" ] ||
         bootstrap_stage3_provenance_fail \
             "seed-input-fingerprint-current-authority-mismatch" ||
@@ -1064,7 +1162,7 @@ bootstrap_stage3_verify_manifest_impl() {
         "$bootstrap_stage3_runtime_admitted_snapshot" "$(bootstrap_stage3_map_value runtime_admitted_snapshot_display)" \
         "$bootstrap_stage3_runtime_path" "$(bootstrap_stage3_map_value runtime_path_display)" \
         "$(bootstrap_stage3_map_value tool_authority_before_authority)" "$(bootstrap_stage3_map_value tool_authority_before_display)" \
-        "$(bootstrap_stage3_manifest_value stage2_build_args_sha256 \
+        "$(bootstrap_stage3_verify_value stage2_build_args_sha256 \
             "$bootstrap_stage3_manifest")" \
         "$bootstrap_stage3_stage2_sanity_authority" \
         "$bootstrap_stage3_stage2_sanity_display" \
@@ -1076,31 +1174,31 @@ bootstrap_stage3_verify_manifest_impl() {
         bootstrap_stage3_stage2_admission_identity \
             "$(bootstrap_stage3_hash_file \
                 "$bootstrap_stage3_stage2_executable_authority")" \
-            "$(bootstrap_stage3_manifest_value source_snapshot_sha256 \
+            "$(bootstrap_stage3_verify_value source_snapshot_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value \
+            "$(bootstrap_stage3_verify_value \
                 runtime_admitted_snapshot_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value tool_authority_sha256 \
+            "$(bootstrap_stage3_verify_value tool_authority_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value stage2_build_args_sha256 \
+            "$(bootstrap_stage3_verify_value stage2_build_args_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value \
+            "$(bootstrap_stage3_verify_value \
                 stage2_sanity_evidence_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value \
+            "$(bootstrap_stage3_verify_value \
                 stage2_receiver_evidence_sha256 \
                 "$bootstrap_stage3_manifest")" \
-            "$(bootstrap_stage3_manifest_value \
+            "$(bootstrap_stage3_verify_value \
                 hosted_runtime_relative_path \
                 "$bootstrap_stage3_stage2_admission")" \
-            "$(bootstrap_stage3_manifest_value hosted_runtime_sha256 \
+            "$(bootstrap_stage3_verify_value hosted_runtime_sha256 \
                 "$bootstrap_stage3_stage2_admission")"
     ) || { bootstrap_stage3_provenance_fail "manifest-stage-admission-identity-derive"; return 1; }
-    [ "$(bootstrap_stage3_manifest_value stage2_admission_identity \
+    [ "$(bootstrap_stage3_verify_value stage2_admission_identity \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_expected_admission_identity" ] || { bootstrap_stage3_provenance_fail "manifest-stage-admission-identity-manifest"; return 1; }
-    [ "$(bootstrap_stage3_manifest_value admission_identity \
+    [ "$(bootstrap_stage3_verify_value admission_identity \
         "$bootstrap_stage3_stage2_admission")" = \
         "$bootstrap_stage3_expected_admission_identity" ] || { bootstrap_stage3_provenance_fail "manifest-stage-admission-identity-receipt"; return 1; }
     bootstrap_stage3_manifest_phase_emit F
@@ -1119,7 +1217,7 @@ bootstrap_stage3_verify_manifest_impl() {
     bootstrap_stage3_manifest_phase_emit G
 
     bootstrap_stage3_recorded_lock=$(
-        bootstrap_stage3_manifest_value bootstrap_lock_path \
+        bootstrap_stage3_verify_value bootstrap_lock_path \
             "$bootstrap_stage3_manifest"
     ) || return 1
     [ "$bootstrap_stage3_recorded_lock" = \
@@ -1127,7 +1225,7 @@ bootstrap_stage3_verify_manifest_impl() {
     [ "$(bootstrap_stage3_canonical_path "$bootstrap_stage3_recorded_lock")" = \
         "$bootstrap_stage3_recorded_lock" ] || return 1
     bootstrap_stage3_recorded_lock_pid=$(
-        bootstrap_stage3_manifest_value bootstrap_lock_owner_pid \
+        bootstrap_stage3_verify_value bootstrap_lock_owner_pid \
             "$bootstrap_stage3_manifest"
     ) || return 1
     case "$bootstrap_stage3_recorded_lock_pid" in
@@ -1176,9 +1274,9 @@ bootstrap_stage3_verify_manifest_impl() {
         [ "$(wc -l <"$bootstrap_stage3_parent_git" | tr -d ' ')" = 2 ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-shape"; return 1; }
         [ "$(sed 's/=.*//' "$bootstrap_stage3_parent_git" | tr '\n' ' ')" = \
             'head dirty_fingerprint ' ] || { bootstrap_stage3_provenance_fail "manifest-stage-parent-git-external-schema"; return 1; }
-        bootstrap_stage3_current_git_head=$(bootstrap_stage3_manifest_value \
+        bootstrap_stage3_current_git_head=$(bootstrap_stage3_verify_value \
             head "$bootstrap_stage3_captured_git") || return 1
-        bootstrap_stage3_current_git_dirty=$(bootstrap_stage3_manifest_value \
+        bootstrap_stage3_current_git_dirty=$(bootstrap_stage3_verify_value \
             dirty_fingerprint "$bootstrap_stage3_captured_git") || return 1
     else
         bootstrap_stage3_verify_git_after="${TMPDIR:?}/stage3-git.verify.after.$bootstrap_stage3_local_pid"
@@ -1197,25 +1295,25 @@ bootstrap_stage3_verify_manifest_impl() {
         }
         bootstrap_stage3_current_git_sha=$(bootstrap_stage3_hash_file \
             "$bootstrap_stage3_verify_git_after") || return 1
-        bootstrap_stage3_current_git_head=$(bootstrap_stage3_manifest_value \
+        bootstrap_stage3_current_git_head=$(bootstrap_stage3_verify_value \
             head "$bootstrap_stage3_verify_git_after") || return 1
-        bootstrap_stage3_current_git_dirty=$(bootstrap_stage3_manifest_value \
+        bootstrap_stage3_current_git_dirty=$(bootstrap_stage3_verify_value \
             dirty_fingerprint "$bootstrap_stage3_verify_git_after") || return 1
         rm -f "$bootstrap_stage3_verify_git_before" \
             "$bootstrap_stage3_verify_git_after"
     fi
     rm -f "$bootstrap_stage3_verify_snapshot"
-    [ "$(bootstrap_stage3_manifest_value source_file_count "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value source_file_count "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_count" ] || {
         bootstrap_stage3_provenance_fail "descriptor-source-count-mismatch"
         return 1
     }
-    [ "$(bootstrap_stage3_manifest_value source_fingerprint "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value source_fingerprint "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_sha" ] || {
         bootstrap_stage3_provenance_fail "descriptor-source-fingerprint-mismatch"
         return 1
     }
-    [ "$(bootstrap_stage3_manifest_value source_snapshot_sha256 "$bootstrap_stage3_manifest")" = \
+    [ "$(bootstrap_stage3_verify_value source_snapshot_sha256 "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_sha" ] || {
         bootstrap_stage3_provenance_fail "descriptor-source-manifest-hash-mismatch"
         return 1
@@ -1229,25 +1327,25 @@ bootstrap_stage3_verify_manifest_impl() {
             return 1
         }
     fi
-    [ "$(bootstrap_stage3_manifest_value git_state_sha256 \
+    [ "$(bootstrap_stage3_verify_value git_state_sha256 \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_git_sha" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value git_head \
+    [ "$(bootstrap_stage3_verify_value git_head \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_git_head" ] || return 1
-    [ "$(bootstrap_stage3_manifest_value git_dirty_fingerprint \
+    [ "$(bootstrap_stage3_verify_value git_dirty_fingerprint \
         "$bootstrap_stage3_manifest")" = \
         "$bootstrap_stage3_current_git_dirty" ] || return 1
     bootstrap_stage3_manifest_phase_emit H
 
     bootstrap_stage3_backfill_status=$(
-        bootstrap_stage3_manifest_value compiler_backfill_status \
+        bootstrap_stage3_verify_value compiler_backfill_status \
             "$bootstrap_stage3_manifest"
     )
     bootstrap_stage3_backfill_path=$(bootstrap_stage3_map_value compiler_backfill_authority)
     bootstrap_stage3_backfill_display=$(bootstrap_stage3_map_value compiler_backfill_display)
     bootstrap_stage3_backfill_sha=$(
-        bootstrap_stage3_manifest_value compiler_backfill_sha256 \
+        bootstrap_stage3_verify_value compiler_backfill_sha256 \
             "$bootstrap_stage3_manifest"
     )
     case "$bootstrap_stage3_backfill_status" in

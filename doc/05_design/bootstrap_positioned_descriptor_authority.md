@@ -2,8 +2,9 @@
 
 ## Implemented scope
 
-The non-procfs authority-map ingress in the Stage 3 verifier now uses a retained
-numeric descriptor and positioned reads. Linux keeps its existing procfs path.
+The non-procfs authority-map and manifest ingress in the Stage 3 verifier use
+retained numeric descriptors and positioned reads. Role identity and content
+checks use held descriptors. Linux keeps its existing procfs path.
 This is a foundation for macOS and BSD verification, not full portable admission.
 No runtime, product test, or full bootstrap result is claimed.
 
@@ -62,11 +63,44 @@ it formerly failed earlier at `manifest-entry-bound-map-hash`.
 No full bootstrap was run. The existing three-cycle session cap remains in
 force. Shell syntax and diff formatting were checked for the initial foundation.
 
+## Retained manifest and role identity follow-up
+
+The verifier seals manifest descriptor 8 with the same positioned-read contract.
+All key reads in the verifier dispatch through `bootstrap_stage3_verify_value`;
+reads of the retained manifest use its descriptor and seal. Other receipts and
+the Linux branch retain the existing key lookup helper. No manifest key lookup
+reopens its source pathname after sealing. Unlink or replacement therefore
+cannot redirect a later read; mutation of the retained content rejects it.
+The portable path does not require an on-disk mutable snapshot or shared-offset
+`/dev/fd` reads. The existing Linux snapshot branch remains in place.
+
+Role identity checking on non-procfs hosts opens the role using `O_NOFOLLOW`
+and `O_NONBLOCK`, adding `O_DIRECTORY` for directory roles. Before-open lstat,
+after-open fstat, final fstat, and final lstat must agree. File contents are
+hashed through the held descriptor; no separate pathname hash/stat race is
+introduced. Device, inode, and permission/special mode bits must match the map.
+The mode is parsed as octal and compared with `stat.S_IMODE`; a Darwin test
+compares it directly with BSD `stat -f %Lp`. File roles also require the exact
+recorded SHA-256. Wrong type, symlink, replacement, or mutation rejects authority.
+The expected output is checked through this same role boundary.
+
+Seven additional focused tests passed, including replacement/mutation during
+role hashing, wrong identity/digest/type, exact mode semantics, manifest reads
+after pathname replacement, retained-content mutation, and existing lookup
+behavior on the nonportable dispatch. A complete 184-line authority-map fixture
+with real file identities passes the real Darwin role and interpreter checks,
+seals a manifest, and fails at `manifest-status-not-singular` as expected for
+an intentionally incomplete manifest. This is no claim of full admission.
+The initial six-test follow-up took 8.6 seconds, dominated by interpreter process
+startup for repeated sealed-map key reads. Shell syntax and diff checks passed.
+
 ## Remaining integration
 
-The manifest snapshot still uses descriptor 8 through Linux procfs, map-role
-identity uses GNU `stat -Lc`, runtime directory handling uses descriptor 6, and
-parent/source/helper descriptor transport in the shared runner and provenance
-verifier remains Linux-specific. Capsule mode is not converted or bypassed.
-These boundaries must adopt an equally bound protocol before a source-matched
-macOS runtime can be admitted. This component alone cannot satisfy those gates.
+The runtime directory descriptor-6 branch, parent/source/helper descriptor
+transport, and descriptor-capsule admission remain Linux-specific. The map
+producer in `manifest-write.shs` still uses GNU `stat -Lc` to write map rows;
+this follow-up changes consumer identity checks and does not claim portable
+end-to-end production of receipts. The shared runner and standalone provenance
+verifier need corresponding descriptor transport support. Existing parent and
+source validation has not been disabled or replaced. No full bootstrap or
+source-matched macOS runtime admission has been performed.

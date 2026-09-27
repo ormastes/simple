@@ -88,3 +88,14 @@ a retained-descriptor positioned reader and explicit Python tool binding. See
 contract, twelve targeted tests, and the remaining manifest/parent protocol
 barriers. The earlier host probe describes the pre-fix state. Full macOS
 admission and bootstrap remain unverified.
+
+## Retained manifest and role identity follow-up
+
+The portable verifier now seals manifest fd8 and routes all of its key reads
+through the retained descriptor. Role file/directory identity and content checks
+use retained descriptors with no-follow opens and before/after identity checks.
+Seven focused tests passed, including a real Darwin verifier fixture that clears
+all map roles and reaches the intentionally missing manifest-status gate.
+Linux dispatch retains the existing lookup and snapshot branch. Producer GNU
+stat usage, runtime directory handling, and parent/capsule transport remain
+separate barriers; no full bootstrap was run.
