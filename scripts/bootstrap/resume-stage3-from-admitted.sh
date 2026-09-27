@@ -468,6 +468,23 @@ stage2_env_value() {
 }
 bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
+# Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
+# bootstrap_windows_{abi,cc,include,lib,libpath}_env between the Darwin tool
+# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE. Without them every
+# Windows Stage 3 resume refused with `bootstrap-stage3-admission-mismatch:
+# build_args_sha256`. CC is carried exactly when the engine recorded it (always
+# on MSVC, only for an explicit MinGW driver on GNU).
+bootstrap_stage2_windows_env=
+bootstrap_stage2_msvc_env=
+bootstrap_stage2_windows_cc=
+case "$platform" in
+  *windows-msvc*) bootstrap_stage2_windows_env=1 bootstrap_stage2_msvc_env=1 ;;
+  *windows-gnu*) bootstrap_stage2_windows_env=1 ;;
+esac
+if [ -n "$bootstrap_stage2_windows_env" ] &&
+   bootstrap_stage2_windows_cc_value=$(stage2_env_value CC); then
+  bootstrap_stage2_windows_cc="CC=$bootstrap_stage2_windows_cc_value"
+fi
 stage2_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=$(stage2_env_value RUST_LOG)" \
   "LIBRARY_PATH=$stage2_library_path" \
@@ -490,6 +507,12 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   ${bootstrap_stage2_darwin_env:+"LD=$(stage2_env_value LD)"} \
   ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=$(stage2_env_value LLVM_CONFIG)"} \
   ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=$(stage2_env_value SIMPLE_LLVM_REQUIRED_VERSION)"} \
+  ${bootstrap_stage2_windows_env:+"SIMPLE_WINDOWS_ABI=$(stage2_env_value SIMPLE_WINDOWS_ABI)"} \
+  ${bootstrap_stage2_windows_env:+"SIMPLE_LINKER_FLAVOR=$(stage2_env_value SIMPLE_LINKER_FLAVOR)"} \
+  ${bootstrap_stage2_windows_cc:+"$bootstrap_stage2_windows_cc"} \
+  ${bootstrap_stage2_msvc_env:+"INCLUDE=$(stage2_env_value INCLUDE)"} \
+  ${bootstrap_stage2_msvc_env:+"LIB=$(stage2_env_value LIB)"} \
+  ${bootstrap_stage2_msvc_env:+"LIBPATH=$(stage2_env_value LIBPATH)"} \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
