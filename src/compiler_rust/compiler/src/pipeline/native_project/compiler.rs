@@ -660,6 +660,11 @@ pub(crate) fn compile_file_to_object(
     // first-wins pick in codegen (bug
     // x64_freestanding_cfg_multivariant_misdispatch).
     super::discovery::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
+    // Same rule as the module loader: a nested fn / lambda must not assign a
+    // captured enclosing local (closures are read-only by value).
+    if let Some(write) = simple_parser::capture_write_check::find_captured_local_writes(&ast).into_iter().next() {
+        return Err(format!("{}: semantic: {}", file_path.display(), write.message()));
+    }
     let is_freestanding = matches!(
         target.os,
         simple_common::target::TargetOS::None | simple_common::target::TargetOS::SimpleOS

@@ -2,6 +2,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod arena;
+pub mod capture_write_check;
 pub mod ast;
 pub mod diagnostic;
 pub mod doc_gen;
