@@ -920,9 +920,13 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
+    // Mach-O nm's single-letter output labels weak text definitions T. Read
+    // the explicit weak-definition flags so owner-overridable fallbacks are
+    // not mistaken for strong definitions. Inspection failures remain fatal.
+    let macho = cfg!(target_os = "macos");
     let output = nm_command()
         .arg("-g")
-        .arg("-p")
+        .arg(if macho { "-m" } else { "-p" })
         .arg(path)
         .output()
         .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
@@ -933,9 +937,32 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    Ok(parse_archive_weak_global_symbols(&String::from_utf8_lossy(&output.stdout), macho))
+}
+
+pub(super) fn parse_archive_weak_global_symbols(output: &str, macho: bool) -> BTreeSet<String> {
     let mut weak = BTreeSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
+        if macho {
+            // Definitions have an address and section. Undefined weak
+            // references are not definitions and must never grant authority.
+            if fields.len() < 5
+                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !fields[1].starts_with('(')
+                || fields[1] == "(undefined)"
+                || fields[2..4] != ["weak", "external"]
+            {
+                continue;
+            }
+            let name = match &fields[4..] {
+                [name] => *name,
+                ["automatically", "hidden", name] => *name,
+                _ => continue,
+            };
+            weak.insert(name.to_string());
+            continue;
+        }
         let (kind, name) = match fields.as_slice() {
             [kind, name] if kind.len() == 1 => (*kind, *name),
             [_address, kind, name] if kind.len() == 1 => (*kind, *name),
@@ -945,7 +972,7 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
             weak.insert(name.to_string());
         }
     }
-    Ok(weak)
+    weak
 }
 
 pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {
