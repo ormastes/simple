@@ -155,13 +155,47 @@ rejection; and actual shell helper publication. Snapshot construction currently
 uses one process for walking and hashing; full runtime-tree performance has not
 been measured. The full bootstrap cap remains in force.
 
+## Retained hosted-runtime verification follow-up
+
+The exact later call chain is `bootstrap_stage3_verify_manifest_impl` to
+`bootstrap_stage3_verify_stage2_admission_receipt` in `sanity.shs`, then
+`bootstrap_stage3_verify_hosted_runtime_authority` in `authority.shs`. The old
+last step reopened `hosted-runtime.env`, the selected library, and the runtime
+root for its policy scans. An identical replacement directory could satisfy the
+content checks after the original root inode had been admitted.
+
+The portable Stage 2 verification route now passes the root path, retained fd6,
+and explicit map identity binding through a dedicated routing helper. The
+hosted verifier accepts this optional three-argument route; its existing
+single-path producer and Linux callers retain their behavior. Capsule mode does
+not accept this optional route. A path mismatch or invalid descriptor binding
+fails without a pathname fallback.
+
+The retained traversal collects hosted receipt bytes and library digests while
+holding descendant descriptors. It enforces exactly the four required receipt
+keys, schema and frozen status, a direct `deps/libspl_hosted_runtime-*.rlib`
+path, the recorded library SHA, exactly one matching top-level library, root
+and deps mode 0500, receipt and library mode 0400, no writable descendants, and
+no symlinks. Root and descendant replacement/mutation checks remain active.
+Snapshot construction without the optional hosted collection retains the same
+byte format and results. Successful hosted results preserve the relative-path
+and SHA outputs used by the admission receipt comparison. The compatibility
+full-path output is display text; this retained route never uses it for reads.
+
+Five focused tests passed on Darwin in 0.28 seconds. They compare legacy and
+retained successful results and unchanged snapshot bytes. An identical-tree
+replacement is accepted by the old standalone pathname helper but rejected by
+the actual portable admission router, with stale result variables cleared.
+Negative coverage includes duplicate/unknown receipt keys, bad status/path/SHA,
+wrong modes, writable descendants, additional hosted libraries, symlinks, and
+mutation during the library read. Shell syntax and diff checks passed.
+
 ## Remaining integration
 
-`bootstrap_stage3_verify_hosted_runtime_authority`, reached later through Stage
-2 admission validation, still consumes the runtime pathname. It must use the
-retained root for its receipt and library reads before complete runtime authority
-binding can be claimed. Parent/source/helper descriptor transport and capsule
-admission also remain Linux-specific. Existing parent and source checks remain
-in force. No full bootstrap or source-matched macOS runtime admission has been
-performed. The focused fixture establishes progression through selected gates,
-not a new observed normal-lane bootstrap failure or complete admission.
+Parent/source/helper descriptor transport and capsule admission remain
+Linux-specific. Existing parent and source checks remain in force. The ordinary
+portable runtime snapshot and later hosted-runtime reads are now connected to
+the retained directory, but full bootstrap and source-matched macOS runtime
+admission have not been performed. The fixtures exercise these bounded authority
+contracts and do not establish release readiness or complete end-to-end
+admission. Full runtime-tree performance remains unmeasured.

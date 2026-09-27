@@ -121,3 +121,13 @@ relative traversal, preserving snapshot bytes and rejecting root replacement.
 Five focused snapshot tests passed. Later hosted-runtime receipt/library reads
 still use the pathname and require a separate retained-root change; this repair
 does not claim complete runtime binding or full bootstrap admission.
+
+## Retained hosted-runtime follow-up
+
+The later portable Stage 2 admission check now passes held fd6 and its explicit
+identity binding to hosted-runtime verification. Receipt, selected library, and
+policy traversal use retained descriptors. Producer/Linux single-path calls
+remain unchanged. Five focused tests passed, including parity, unchanged snapshot
+bytes, and a same-content root replacement that the old pathname helper accepts
+but the retained admission route rejects. Parent/capsule transport and full
+bootstrap evidence remain open; no release or main-branch action was taken.

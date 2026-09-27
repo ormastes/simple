@@ -116,11 +116,13 @@ def directory_identity(fd, expected, source_path):
     return held
 
 
-def directory_snapshot(fd, expected, source_path):
+def directory_snapshot(fd, expected, source_path, hosted=None):
     def identity(st):
         return (st.st_dev, st.st_ino, st.st_mode, st.st_size,
                 st.st_mtime_ns, st.st_ctime_ns)
     root_before = directory_identity(fd, expected, source_path)
+    if hosted is not None and stat.S_IMODE(root_before.st_mode) != 0o500:
+        raise ValueError("hosted runtime root is not frozen mode 0500")
     records = []
     def walk(directory_fd, prefix):
         before = os.fstat(directory_fd)
@@ -148,6 +150,14 @@ def directory_snapshot(fd, expected, source_path):
                 opened = os.fstat(child_fd)
                 if identity(opened) != identity(path_before):
                     raise ValueError("runtime descendant replaced during open")
+                if hosted is not None:
+                    if stat.S_IMODE(opened.st_mode) & 0o222:
+                        raise ValueError("writable hosted runtime descendant")
+                    hosted["modes"][relative] = stat.S_IMODE(opened.st_mode)
+                    if relative == b"deps" and not stat.S_ISDIR(opened.st_mode):
+                        raise ValueError("hosted deps is not a directory")
+                    if relative == b"hosted-runtime.env" and (not stat.S_ISREG(opened.st_mode) or opened.st_size > 1048576):
+                        raise ValueError("invalid hosted runtime receipt file")
                 if stat.S_ISDIR(opened.st_mode):
                     walk(child_fd, relative + b"/")
                 else:
@@ -158,7 +168,11 @@ def directory_snapshot(fd, expected, source_path):
                         if not chunk:
                             raise ValueError("short runtime descendant read")
                         hasher.update(chunk)
+                        if hosted is not None and relative == b"hosted-runtime.env":
+                            hosted["receipt"].append(chunk)
                         offset += len(chunk)
+                    if hosted is not None and re.fullmatch(rb"deps/libspl_hosted_runtime-[^/\n]*\.rlib", relative):
+                        hosted["libraries"][relative] = hasher.hexdigest().encode("ascii")
                     executable = int(os.access(name, os.X_OK, dir_fd=directory_fd,
                                                effective_ids=True, follow_symlinks=False))
                     records.append(b"file-hex:" + relative.hex().encode("ascii") + b":" +
@@ -175,6 +189,31 @@ def directory_snapshot(fd, expected, source_path):
     if not records:
         raise ValueError("empty runtime authority")
     return b"\n".join(sorted(records)) + b"\n"
+
+
+def verify_hosted_runtime(fd, expected, source_path):
+    hosted = {"receipt": [], "libraries": {}, "modes": {}}
+    directory_snapshot(fd, expected, source_path, hosted)
+    data = b"".join(hosted["receipt"])
+    rows = data.split(b"\n")
+    if rows and rows[-1] == b"":
+        rows.pop()
+    values = {}
+    for row in rows:
+        key, separator, value = row.partition(b"=")
+        if not separator or key not in (b"schema", b"status", b"relative_path", b"sha256") or key in values:
+            raise ValueError("invalid or repeated hosted receipt key")
+        values[key] = value
+    if len(values) != 4 or values[b"schema"] != b"simple-bootstrap-hosted-runtime-authority-v1" or values[b"status"] != b"frozen":
+        raise ValueError("invalid hosted receipt schema or status")
+    relative, digest = values[b"relative_path"], values[b"sha256"]
+    if not re.fullmatch(rb"deps/libspl_hosted_runtime-[^/\n]*\.rlib", relative) or not re.fullmatch(rb"[0-9a-f]{64}", digest):
+        raise ValueError("invalid hosted library path or digest")
+    if len(hosted["libraries"]) != 1 or hosted["libraries"].get(relative) != digest:
+        raise ValueError("hosted library count or digest mismatch")
+    if hosted["modes"].get(b"deps") != 0o500 or hosted["modes"].get(b"hosted-runtime.env") != 0o400 or hosted["modes"].get(relative) != 0o400:
+        raise ValueError("hosted deps, receipt, or library mode mismatch")
+    return relative, digest
 
 
 def publish_directory_snapshot(path, data):
@@ -194,6 +233,12 @@ def main(args):
     fd, expected, operation, argument = args[:4]
     if len(args) == 5 and operation != "directory-snapshot":
         raise ValueError("unexpected output argument")
+    if operation == "hosted-runtime":
+        if int(fd) < 3:
+            raise ValueError("reserved hosted directory descriptor")
+        relative, digest = verify_hosted_runtime(int(fd), expected, argument)
+        sys.stdout.buffer.write(relative + b"\n" + digest + b"\n")
+        return
     if operation in ("directory-check", "directory-snapshot"):
         if int(fd) < 3:
             raise ValueError("reserved directory descriptor")

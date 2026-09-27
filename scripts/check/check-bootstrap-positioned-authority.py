@@ -603,5 +603,130 @@ if bootstrap_stage3_descriptor_read 6 "$3" directory-snapshot "$2" "$4.rejected"
         self.assertFalse(list(self.root.glob('.stage3-runtime-*')))
 
 
+class HostedRuntimeAuthority(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='hosted-fd-authority-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.runtime = self.root / 'runtime'
+        self.deps = self.runtime / 'deps'
+        self.deps.mkdir(parents=True)
+        self.relative = b'deps/libspl_hosted_runtime-fixture.rlib'
+        self.library = self.runtime / os.fsdecode(self.relative)
+        self.library.write_bytes(b'hosted runtime fixture\n')
+        self.digest = hashlib.sha256(self.library.read_bytes()).hexdigest().encode('ascii')
+        self.receipt = self.runtime / 'hosted-runtime.env'
+        self.receipt_bytes = (b'schema=simple-bootstrap-hosted-runtime-authority-v1\nstatus=frozen\nrelative_path='
+                              + self.relative + b'\nsha256=' + self.digest + b'\n')
+        self.receipt.write_bytes(self.receipt_bytes)
+        self.library.chmod(0o400)
+        self.receipt.chmod(0o400)
+        self.deps.chmod(0o500)
+        self.runtime.chmod(0o500)
+        self.addCleanup(self.thaw)
+        self.fd = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.fd)
+        st = os.fstat(self.fd)
+        self.binding = f'directory:{st.st_dev}:{st.st_ino}:{st.st_mode & 0o7777:o}:-'
+
+    def thaw(self):
+        for root, dirs, files in os.walk(self.root):
+            Path(root).chmod(0o700)
+            for name in files:
+                path = Path(root) / name
+                if not path.is_symlink():
+                    path.chmod(0o600)
+
+    def check(self):
+        return NAMESPACE['verify_hosted_runtime'](self.fd, self.binding, str(self.runtime))
+
+    def test_existing_and_retained_helpers_match_without_changing_snapshot(self):
+        before = NAMESPACE['directory_snapshot'](self.fd, self.binding, str(self.runtime))
+        self.assertEqual(self.check(), (self.relative, self.digest))
+        self.assertEqual(NAMESPACE['directory_snapshot'](self.fd, self.binding, str(self.runtime)), before)
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_verify_hosted_runtime_authority "$2" || exit 1
+printf '%s\n%s\n' "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH" "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256"
+exec 6<"$2/."
+bootstrap_stage3_portable_map=1
+bootstrap_stage3_runtime_path=$2
+bootstrap_stage3_runtime_binding=$3
+bootstrap_stage3_verify_admission_runtime_authority "$2" || exit 1
+printf '%s\n%s\n' "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH" "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256"
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.runtime), self.binding], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.encode(), (self.relative + b'\n' + self.digest + b'\n') * 2)
+
+    def test_later_admission_route_rejects_identical_root_replacement(self):
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+exec 6<"$2/."
+mv "$2" "$2.old"
+cp -Rp "$2.old" "$2"
+# Content-only legacy lookup accepts the identical clone.
+bootstrap_stage3_verify_hosted_runtime_authority "$2" || exit 1
+bootstrap_stage3_portable_map=1
+bootstrap_stage3_runtime_path=$2
+bootstrap_stage3_runtime_binding=$3
+if bootstrap_stage3_verify_admission_runtime_authority "$2"; then exit 1; fi
+[ -z "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH" ] &&
+[ -z "$BOOTSTRAP_STAGE3_HOSTED_RUNTIME_SHA256" ]
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.runtime), self.binding], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('runtime directory identity mismatch', result.stderr)
+
+    def test_receipt_schema_duplicates_path_and_digest_reject(self):
+        cases = [self.receipt_bytes + b'status=frozen\n', self.receipt_bytes + b'unknown=value\n',
+                 self.receipt_bytes.replace(b'status=frozen', b'status=ready'),
+                 self.receipt_bytes.replace(self.relative, b'deps/../outside.rlib'),
+                 self.receipt_bytes.replace(self.digest, b'0' * 64)]
+        for receipt in cases:
+            with self.subTest(receipt=receipt):
+                self.receipt.chmod(0o600)
+                self.receipt.write_bytes(receipt)
+                self.receipt.chmod(0o400)
+                with self.assertRaises(ValueError):
+                    self.check()
+
+    def test_modes_writability_library_count_and_symlinks_reject(self):
+        for path, mode in [(self.receipt, 0o444), (self.library, 0o600), (self.deps, 0o555)]:
+            old = path.stat().st_mode & 0o7777
+            path.chmod(mode)
+            with self.subTest(path=path, mode=mode), self.assertRaises(ValueError):
+                self.check()
+            path.chmod(old)
+        self.deps.chmod(0o700)
+        extra = self.deps / 'libspl_hosted_runtime-extra.rlib'
+        extra.write_bytes(b'extra')
+        extra.chmod(0o400)
+        self.deps.chmod(0o500)
+        with self.assertRaises(ValueError):
+            self.check()
+        self.deps.chmod(0o700)
+        extra.unlink()
+        (self.deps / 'alias').symlink_to(self.library)
+        self.deps.chmod(0o500)
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_library_mutation_during_retained_read_rejects(self):
+        pread = os.pread
+        library_id = self.library.stat().st_ino
+        def mutate(fd, count, offset):
+            data = pread(fd, count, offset)
+            if os.fstat(fd).st_ino == library_id:
+                self.library.chmod(0o600)
+                self.library.write_bytes(b'changed library size')
+                self.library.chmod(0o400)
+            return data
+        with patch.object(os, 'pread', mutate), self.assertRaises(ValueError):
+            self.check()
+
+
 if __name__ == '__main__':
     unittest.main()
