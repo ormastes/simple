@@ -1,0 +1,28 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_journal_rows_v1, compiler_inventory_journal_prefix_digest_v1, compiler_inventory_filesystem_events_v1}
+
+describe "compiler inventory filesystem journal cursor":
+    it "retains the consumed prefix digest after a new terminated row":
+        val first = "op=one kind=fsevent refs=kind=created,path=src/a.spl,related=%empty sha=a utc=1\n"
+        val second = "op=two kind=fsevent refs=kind=created,path=src/b.spl,related=%empty sha=b utc=2\n"
+        expect(compiler_inventory_journal_rows_v1(first)).to_equal(1)
+        expect(compiler_inventory_journal_rows_v1(first + second)).to_equal(2)
+        expect(compiler_inventory_journal_prefix_digest_v1(
+            first + second, 1) ?? "").to_equal(sha256_text(first))
+        expect(compiler_inventory_journal_prefix_digest_v1(
+            first + second, 2) ?? "").to_equal(sha256_text(first + second))
+        val pending = compiler_inventory_filesystem_events_v1(
+            ".", first + second, 1)
+        match pending:
+            case Some(events):
+                expect(events.len()).to_equal(1)
+                expect(events[0].path).to_equal("src/b.spl")
+            case _: expect(false).to_equal(true)
+
+    it "rejects a partial trailing row and an impossible cursor":
+        expect(compiler_inventory_journal_rows_v1("one")).to_equal(-1)
+        expect(compiler_inventory_journal_prefix_digest_v1(
+            "one", 0) == nil).to_equal(true)
+        expect(compiler_inventory_journal_prefix_digest_v1(
+            "one\n", 2) == nil).to_equal(true)
