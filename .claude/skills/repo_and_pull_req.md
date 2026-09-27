@@ -42,7 +42,7 @@ setup, push, wiki, and PR review (with 3-level review state machine).
 | Flag        | Default                                                                                                | Notes |
 |-------------|--------------------------------------------------------------------------------------------------------|-------|
 | `--target=` | detect from `git remote get-url origin` (`github.com`→`gh`, `bitbucket.org`→`bb`); **error** if neither matches | Routes to git/, bb/, or jira/ sub-skill tree |
-| `--level=`  | `1`                                                                                                    | 1=one-shot/opportunistic-merge, 2=scoped admission or eligible independent provider approval + merge, 3=wait for eligible independent provider `User` account + merge |
+| `--level=`  | `1`                                                                                                    | 1=one-shot/opportunistic-merge (same-author PRs auto-promote to 2 — never wait for approval), 2=scoped admission or eligible independent provider approval + merge, 3=wait for eligible independent provider `User` account + merge |
 
 `--target=jira` is **NOT valid with `--level=2|3`** — Jira tracks
 tickets, not code review. Reject the combination with a clear error:
