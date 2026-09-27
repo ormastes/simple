@@ -87,8 +87,12 @@ fn compiler_inventory_git_head_v1(root: text) -> text:
 fn compiler_inventory_event_push_v1(
     events: [CompileSourceEventV1], root: text, operation: text, path: text
 ) -> [CompileSourceEventV1]?:
-    val trimmed = path.trim()
-    val normalized = if trimmed.contains("\\"): trimmed.replace("\\", "/") else: trimmed
+    # Preserve literal leading/trailing spaces in a Git path. Git quotes
+    # control-character names even with core.quotePath=false; that encoding
+    # cannot be treated as the canonical source identity, so refuse the batch.
+    if path.starts_with("\""):
+        return nil
+    val normalized = if path.contains("\\"): path.replace("\\", "/") else: path
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
         return Some(events)
@@ -124,13 +128,21 @@ fn compiler_inventory_parse_name_status_v1(
 ) -> [CompileSourceEventV1]?:
     var result = events
     for line in output.split("\n"):
-        if line.trim() == "":
+        if line == "":
             continue
         val separator = line.index_of("\t")
-        if separator <= 0:
-            continue
+        # A non-empty Git diff row must be fully understood before its cursor
+        # can be advanced. Skipping malformed rows would publish an inventory
+        # that silently omits a changed source.
+        if separator <= 0 or separator == line.len() - 1:
+            return nil
         val status = line[:separator]
+        if status != "A" and status != "M" and status != "D" and
+                status != "T" and status != "U":
+            return nil
         val path = line[separator + 1:]
+        if path.contains("\t") or path.contains("\r"):
+            return nil
         val operation = if status.starts_with("D"): "delete" else: "modify"
         val next = compiler_inventory_event_push_v1(result, root, operation, path)
         if next == nil:
@@ -316,3 +328,4 @@ fn compiler_inventory_refresh_v1(
 
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
+export compiler_inventory_parse_name_status_v1

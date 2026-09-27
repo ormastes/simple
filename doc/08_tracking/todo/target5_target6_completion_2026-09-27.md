@@ -55,6 +55,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   native build timed out before an executable was produced. Prove failed
   rename, overflow, event loss, cross-process concurrent writers, cold rebuild, legacy
   migration, and replay recovery without Git or source mutation.
+- The Git name-status bridge now rejects malformed, unknown, and quoted rows
+  instead of advancing the event cursor past omitted source changes; a unit
+  spec covers those cases. Run that spec on a current-source test worker and
+  extend the same fail-closed coverage to cold `ls-files` and untracked paths.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
