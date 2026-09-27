@@ -7,6 +7,8 @@ use compiler.backend.backend_plugin.loader.{load_backend}
 use compiler.backend.backend_plugin.session.{BackendSession}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.mir.mir_instructions.{MirModule}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.backend.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 
 pub const BACKEND_SESSION_AUTHORITY_SCHEMA_V2: u16 = 2u16
 pub const BACKEND_SESSION_AUTHORITY_MAX_SESSIONS_V2: i64 = 64
@@ -156,8 +158,8 @@ pub fn backend_session_authority_use_acquire_v2(
     if index < 0:
         return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
     var record = owner.records[index]
-    if record.state != BackendSessionAuthorityStateV2.Accepting or
-       not record.session.is_open():
+    if (record.state != BackendSessionAuthorityStateV2.Accepting or
+            not record.session.is_open()):
         return Err(BackendSessionAuthorityErrorV2.NotAccepting)
     if record.uses.len() >= BACKEND_SESSION_AUTHORITY_MAX_USES_V2:
         return Err(BackendSessionAuthorityErrorV2.CapacityExceeded)
@@ -172,12 +174,11 @@ pub fn backend_session_authority_use_acquire_v2(
     owner.next_use_id = owner.next_use_id + 1u64
     Ok(use_token)
 
-pub fn backend_session_authority_compile_module_v2(
+fn _backend_session_claim_use_v2(
     owner: BackendSessionAuthorityV2,
     token: BackendSessionAuthorityTokenV2,
-    use_token: BackendSessionCompileUseTokenV2,
-    module: MirModule
-) -> Result<CodegenOutput, BackendSessionAuthorityErrorV2>:
+    use_token: BackendSessionCompileUseTokenV2
+) -> Result<i64, BackendSessionAuthorityErrorV2>:
     val index = _backend_session_record_index_v2(owner, token)
     if index < 0:
         return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
@@ -187,13 +188,26 @@ pub fn backend_session_authority_compile_module_v2(
     val use_index = _backend_session_use_index_v2(record, use_token)
     if use_index < 0:
         return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
-    if use_token.owner_identity != owner.owner_identity or
-       use_token.generation != token.generation or record.uses[use_index].attempted:
+    if (use_token.owner_identity != owner.owner_identity or
+            use_token.generation != token.generation or
+            record.uses[use_index].attempted):
         return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
     var use_record = record.uses[use_index]
     use_record.attempted = true
     record.uses[use_index] = use_record
     owner.records[index] = record
+    Ok(index)
+
+pub fn backend_session_authority_compile_module_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule
+) -> Result<CodegenOutput, BackendSessionAuthorityErrorV2>:
+    val index = match _backend_session_claim_use_v2(owner, token, use_token):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var record = owner.records[index]
     var retained = record.session
     val compiled = retained.compile_module(module)
     record.session = retained
@@ -202,6 +216,30 @@ pub fn backend_session_authority_compile_module_v2(
         case Ok(output): Ok(output)
         case Err(error): Err(BackendSessionAuthorityErrorV2.CompileFailed(
             error.to_text()))
+
+pub fn backend_session_authority_compile_aot_into_path_v2(
+    owner: BackendSessionAuthorityV2,
+    token: BackendSessionAuthorityTokenV2,
+    use_token: BackendSessionCompileUseTokenV2,
+    module: MirModule,
+    is_release: bool,
+    opt_level: i64,
+    target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1],
+    object_path: text,
+    diagnostic_path: text
+) -> Result<i64, BackendSessionAuthorityErrorV2>:
+    val index = match _backend_session_claim_use_v2(owner, token, use_token):
+        case Ok(value): value
+        case Err(error): return Err(error)
+    var record = owner.records[index]
+    var retained = record.session
+    val status = retained.compile_aot_into_path(
+        module, is_release, opt_level, target_cpu, storage_bindings,
+        object_path, diagnostic_path)
+    record.session = retained
+    owner.records[index] = record
+    Ok(status)
 
 pub fn backend_session_authority_use_release_v2(
     owner: BackendSessionAuthorityV2,
@@ -213,8 +251,8 @@ pub fn backend_session_authority_use_release_v2(
         return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
     var record = owner.records[index]
     val use_index = _backend_session_use_index_v2(record, use_token)
-    if use_index < 0 or use_token.owner_identity != owner.owner_identity or
-       use_token.generation != token.generation:
+    if (use_index < 0 or use_token.owner_identity != owner.owner_identity or
+            use_token.generation != token.generation):
         return Err(BackendSessionAuthorityErrorV2.UseUnknownOrSpent)
     var kept: [_BackendSessionCompileUseRecordV2] = []
     var i = 0
@@ -268,12 +306,84 @@ pub fn backend_session_authority_release_v2(
     owner.records = kept
     Ok(())
 
+# The driver carries this facade rather than the raw V1 session. Its provider
+# remains reachable only through generation and compile-use checks above.
+pub class BackendSessionOwnedLeaseV2:
+    var authority: BackendSessionAuthorityV2
+    var token: BackendSessionAuthorityTokenV2
+    backend_name: text
+    receipt_hash: text
+    var retired: bool
+
+    pub static fn open(
+        request: BackendPluginRequestV1
+    ) -> Result<BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2>:
+        var authority = BackendSessionAuthorityV2.create()
+        val token = match backend_session_authority_open_v2(authority, request):
+            case Ok(value): value
+            case Err(error): return Err(error)
+        val projection = match backend_session_authority_project_v2(authority, token):
+            case Ok(value): value
+            case Err(error):
+                _ = backend_session_authority_close_v2(authority, token)
+                _ = backend_session_authority_release_v2(authority, token)
+                return Err(error)
+        Ok(BackendSessionOwnedLeaseV2(
+            authority: authority, token: token,
+            backend_name: projection.provider_identity,
+            receipt_hash: projection.receipt_hash, retired: false))
+
+    fn compile_aot_into_path(
+        module: MirModule, is_release: bool, opt_level: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
+        diagnostic_path: text
+    ) -> i64:
+        if self.retired:
+            backend_aot_write_diagnostic(diagnostic_path,
+                "backend session lease is retired")
+            return 1
+        val use_token = match backend_session_authority_use_acquire_v2(
+            self.authority, self.token):
+            case Ok(value): value
+            case Err(error):
+                backend_aot_write_diagnostic(diagnostic_path,
+                    "backend session use rejected: {error.to_text()}")
+                return 1
+        val compiled = backend_session_authority_compile_aot_into_path_v2(
+            self.authority, self.token, use_token, module, is_release,
+            opt_level, target_cpu, storage_bindings, object_path,
+            diagnostic_path)
+        val released = backend_session_authority_use_release_v2(
+            self.authority, self.token, use_token)
+        if released.is_err():
+            backend_aot_write_diagnostic(diagnostic_path,
+                "backend session compile use could not be released")
+            return 1
+        match compiled:
+            case Ok(status): status
+            case Err(error):
+                backend_aot_write_diagnostic(diagnostic_path,
+                    "backend session compile rejected: {error.to_text()}")
+                1
+
+    me close() -> bool:
+        if self.retired:
+            return true
+        if backend_session_authority_close_v2(self.authority, self.token).is_err():
+            return false
+        if backend_session_authority_release_v2(self.authority, self.token).is_err():
+            return false
+        self.retired = true
+        true
+
 export BackendSessionAuthorityV2, BackendSessionAuthorityErrorV2
+export BackendSessionOwnedLeaseV2
 export BackendSessionAuthorityTokenV2, BackendSessionCompileUseTokenV2
 export BackendSessionAuthorityStateV2, BackendSessionAuthorityProjectionV2
 export BACKEND_SESSION_AUTHORITY_SCHEMA_V2
 export backend_session_authority_open_v2, backend_session_authority_project_v2
 export backend_session_authority_use_acquire_v2
 export backend_session_authority_compile_module_v2
+export backend_session_authority_compile_aot_into_path_v2
 export backend_session_authority_use_release_v2
 export backend_session_authority_close_v2, backend_session_authority_release_v2
