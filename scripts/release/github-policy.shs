@@ -358,6 +358,16 @@ verify_live() {
         }
     fi
     _fail=0
+    # GitHub redacts/empties admin-scoped fields (bypass_actors on rulesets,
+    # workflow permissions, immutable releases) for tokens without the
+    # Administration scope -- which GITHUB_TOKEN can never hold. Probe once;
+    # when unreadable, a bypass_actors-only mismatch degrades to WARN below
+    # (owner apply-live still enforces the true values; bug #1787 family).
+    if gh api "repos/$_repo/actions/permissions/workflow" >/dev/null 2>&1; then
+        _admin_unreadable=0
+    else
+        _admin_unreadable=1
+    fi
     for _file in "$_expected_root"/rulesets/*.json; do
         _name=$(jq -r '.name' "$_file")
         _id=$(live_ruleset_by_name "$_repo" "$_name")
@@ -373,9 +383,24 @@ verify_live() {
         gh api "repos/$_repo/rulesets/$_id" >"$_actual_raw"
         normalize_ruleset "$_actual_raw" >"$_actual"
         if ! cmp -s "$_expected" "$_actual"; then
-            echo "github-policy: DRIFT ruleset $_name" >&2
-            diff -u "$_expected" "$_actual" >&2 || true
-            _fail=1
+            _bypass_only=0
+            if [ "$_admin_unreadable" = 1 ] && [ "$(jq '.bypass_actors | length' "$_expected")" -gt 0 ]; then
+                _expected_nob=$(mktemp) || exit 2
+                _actual_nob=$(mktemp) || exit 2
+                jq -S 'del(.bypass_actors)' "$_expected" >"$_expected_nob"
+                jq -S 'del(.bypass_actors)' "$_actual" >"$_actual_nob"
+                if cmp -s "$_expected_nob" "$_actual_nob"; then
+                    _bypass_only=1
+                fi
+                rm -f "$_expected_nob" "$_actual_nob"
+            fi
+            if [ "$_bypass_only" = 1 ]; then
+                echo "github-policy: WARN ruleset $_name bypass_actors unreadable by workflow token (403/redacted; owner apply-live enforces, see bug #1787)" >&2
+            else
+                echo "github-policy: DRIFT ruleset $_name" >&2
+                diff -u "$_expected" "$_actual" >&2 || true
+                _fail=1
+            fi
         else
             echo "github-policy: PASS ruleset $_name"
         fi
@@ -411,9 +436,12 @@ verify_live() {
     _expected_workflow=$(mktemp) || exit 2
     _actual_workflow=$(mktemp) || exit 2
     cp "$_expected_root/actions-workflow-permissions.json" "$_expected_workflow"
+    # GITHUB_TOKEN cannot carry the Administration scope, so this read 403s
+    # for workflow tokens. The setting is owner-enforced via apply-live before
+    # dispatch and gated by the admission environment approval; treat a 403 as
+    # a scope-limited WARNING, never as silent pass (bug #1787 follow-up).
     if ! gh api "repos/$_repo/actions/permissions/workflow" >"$_actual_workflow" 2>/dev/null; then
-        echo "github-policy: MISSING Actions workflow permissions" >&2
-        _fail=1
+        echo "github-policy: WARN Actions workflow permissions unreadable by workflow token (403; owner apply-live enforces, see bug #1787)" >&2
     elif ! normalize_workflow_permissions "$_actual_workflow" | cmp -s "$_expected_workflow" -; then
         echo "github-policy: DRIFT Actions workflow permissions" >&2
         _fail=1
@@ -421,8 +449,11 @@ verify_live() {
         echo "github-policy: PASS Actions workflow permissions"
     fi
     rm -f "$_expected_workflow" "$_actual_workflow"
-    _immutable=$(gh api "repos/$_repo/immutable-releases" --jq '.enabled')
-    if [ "$_immutable" != true ]; then
+    # As with actions/permissions/workflow above, GITHUB_TOKEN cannot read
+    # this endpoint (Administration scope); owner apply-live enforces it.
+    if ! _immutable=$(gh api "repos/$_repo/immutable-releases" --jq '.enabled' 2>/dev/null); then
+        echo "github-policy: WARN immutable releases unreadable by workflow token (403; owner apply-live enforces, see bug #1787)" >&2
+    elif [ "$_immutable" != true ]; then
         echo "github-policy: DRIFT immutable releases disabled" >&2
         _fail=1
     else
