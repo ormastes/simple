@@ -14,6 +14,8 @@
 
 use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
 use compiler.core.ast.{
+    decl_get_body,
+    decl_get_fields,
     decl_get_imports,
     decl_get_name,
     decl_get_ret_type,
@@ -60,6 +62,9 @@ val DECL_USE = 6
 val DECL_EXPORT = 7
 val DECL_ENUM = 8
 val DECL_IMPL = 9
+val DECL_CLASS = 10
+val DECL_LAZY_VAL = 12
+val DECL_TYPE_ALIAS = 17
 val DECL_CLI = 13
 val DECL_AOP_ADVICE = 14
 val DECL_ARCH_RULE = 16
@@ -191,6 +196,9 @@ fn module_loader_init():
     deferred_module_imports = []
     deferred_module_set = {}
     _gc_warn_emitted = {}
+    _module_surface_provided = {}
+    _module_surface_recorded = {}
+    _module_surface_opaque = {}
     _gc_warning_trace_state = -1
     module_resolve_cache_reset()
     irt_init()
@@ -436,6 +444,7 @@ fn load_module_register_only(module_name: text, current_file: text) -> i64:
     val exports = extract_module_exports(appended_decls)
     register_module_functions(appended_decls, resolved_path)
     module_mark_loaded(module_name, resolved_path, exports)
+    record_module_surface(resolved_path, appended_decls)
 
     _module_load_depth = _module_load_depth - 1
     1
@@ -513,6 +522,7 @@ fn load_module(module_name: text, current_file: text) -> i64:
 
     # Mark as loaded
     module_mark_loaded(module_name, resolved_path, exports)
+    record_module_surface(resolved_path, appended_decls)
 
     # Resolve the snapshotted dependencies after marking this owner so cyclic
     # facades terminate, but before returning success to the importing module.
@@ -694,6 +704,57 @@ fn check_gc_family_boundary(importer_path: text, imported_path: text, module_nam
         if gc_warning_trace_enabled():
             print msg
         return
+
+# Provided names for fail-closed unbraced item alias resolution.
+var _module_surface_provided: {text: bool} = {}
+var _module_surface_recorded: {text: bool} = {}
+var _module_surface_opaque: {text: bool} = {}
+
+fn record_module_surface(resolved_path: text, decls: [i64]):
+    if resolved_path == "":
+        return
+    _module_surface_recorded[resolved_path] = true
+    var opaque = false
+    for did in decls:
+        val tag = decl_get_tag(did)
+        if tag == DECL_FN or tag == DECL_EXTERN_FN or tag == DECL_STRUCT or tag == DECL_CLASS or tag == DECL_VAL or tag == DECL_VAR or tag == DECL_LAZY_VAL or tag == DECL_TYPE_ALIAS or tag == DECL_CLI or tag == DECL_ENUM:
+            val provided_name = decl_get_name(did)
+            if provided_name != "":
+                _module_surface_provided[resolved_path + "|" + provided_name] = true
+        if tag == DECL_ENUM:
+            # Variants are importable by bare name once the module is loaded.
+            for variant_name in decl_get_fields(did):
+                _module_surface_provided[resolved_path + "|" + variant_name] = true
+            for body_did in decl_get_body(did):
+                val body_name = decl_get_name(body_did)
+                if body_name != "":
+                    _module_surface_provided[resolved_path + "|" + body_name] = true
+        if tag == DECL_IMPL:
+            for method_did in decl_get_body(did):
+                val method_name = decl_get_name(method_did)
+                if method_name != "":
+                    _module_surface_provided[resolved_path + "|" + method_name] = true
+        if tag == DECL_EXPORT:
+            # `export a, b, c` lists and the export half of
+            # `export use m.{A, B as C}` — both recorded as DECL_EXPORT with
+            # items in "name[:alias]" encoding. Only a non-glob alias is an
+            # importer-facing provided name; a glob makes the surface opaque.
+            for item in decl_get_imports(did):
+                if item == "*" or item.ends_with(".*"):
+                    opaque = true
+                else:
+                    val alias_at = item.last_index_of(":")
+                    val provided_item = if alias_at > 0: item.substring(alias_at + 1) else: item
+                    if provided_item != "":
+                        _module_surface_provided[resolved_path + "|" + provided_item] = true
+        if tag == DECL_USE:
+            # Bare `export use {A, B}` parses as a use-decl with an empty module
+            # path; those names pull from siblings, so the surface is
+            # unknowable. Plain `use m.{A, B}` (non-empty path) is an internal
+            # import and contributes nothing to this module's own surface.
+            if decl_get_name(did) == "" and decl_get_imports(did).len() > 0:
+                opaque = true
+    _module_surface_opaque[resolved_path] = opaque
 
 fn interp_unload_module(module_name: text) -> i64:
     """Selectively unload a module: remove its names from tables.
