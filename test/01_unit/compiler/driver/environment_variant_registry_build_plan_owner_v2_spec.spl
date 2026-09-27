@@ -1,0 +1,279 @@
+"""Registry-bound build plans require live target uses for plan and cache projection."""
+
+use std.spec.*
+use compiler.driver.canonical_target_registry_owner_v2.*
+use compiler.driver.environment_variant_build_planner_v1.*
+use compiler.driver.environment_variant_registry_build_plan_owner_v2.*
+use compiler.driver.environment_publication_activation_coordinator_v1.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
+use std.nogc_sync_mut.composition.environment_variants.publication_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.*
+use std.nogc_sync_mut.composition.environment_variants.receipt_v1.BindingPlanV1
+
+fn digest_erbp(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn profile_erbp() -> TargetCodegenProfileV1:
+    TargetCodegenProfileV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: digest_erbp(1u64), target_identity: digest_erbp(2u64),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        target_abi_id: 1u32, target_object_format_id: 1u32,
+        target_endian_id: 1u16, target_pointer_width_bits: 64u16,
+        requested_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        strict_requested_features: true,
+        backend_identity: digest_erbp(3u64), semantic_identity: digest_erbp(4u64),
+        numerical_contract_id: 1u32)
+
+fn input_erbp(baseline_use: CanonicalTargetUseTokenV2,
+    artifact_use: CanonicalTargetUseTokenV2
+) -> EnvironmentRegistryBuildInputV2:
+    EnvironmentRegistryBuildInputV2(
+        baseline_core_identity: digest_erbp(10u64),
+        baseline_core_profile: profile_erbp(), baseline_feature_words: [1u64],
+        baseline_use: baseline_use,
+        requests: [EnvironmentVariantBuildRequestV1(
+            variant_identity: digest_erbp(20u64),
+            scope: ENV_VARIANT_SCOPE_PARSER_V1,
+            placement: ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+            target_profile: profile_erbp(),
+            source_or_ir_digest: digest_erbp(21u64),
+            compiler_digest: digest_erbp(22u64),
+            dependency_lock_digest: digest_erbp(23u64),
+            optimization_policy_digest: digest_erbp(24u64),
+            artifact_format_digest: digest_erbp(25u64))],
+        request_feature_words: [[1u64]],
+        backend_supported_features: [EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32))],
+        backend_feature_words: [[1u64]], request_uses: [artifact_use])
+
+fn publication_erbp() -> EnvironmentPublicationAdmissionV1:
+    val trust = ArtifactTrustVerificationReceiptV1(
+        descriptor_size: ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        authentication_status: ENV_ARTIFACT_TRUST_AUTHENTICATED_V1,
+        receipt_identity: digest_erbp(30u64), artifact_digest: digest_erbp(31u64),
+        trust_policy_digest: digest_erbp(32u64), verifier_identity: digest_erbp(33u64),
+        verifier_generation: 1u64, verification_evidence_digest: digest_erbp(34u64))
+    val plan = BindingPlanV1(descriptor_size: 224u32,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: digest_erbp(35u64), environment_identity: digest_erbp(36u64),
+        environment_generation: 1u64, catalog_digest: digest_erbp(37u64),
+        catalog_generation: 1u64, policy_digest: digest_erbp(38u64),
+        dependency_lock_digest: digest_erbp(39u64), publication_generation: 1u64,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32),
+        rejections: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+    EnvironmentPublicationAdmissionV1(
+        schema_version: ENV_PUBLICATION_ADMISSION_SCHEMA_V1, plan: plan,
+        root_provider_identity: digest_erbp(40u64),
+        root_variant_identity: digest_erbp(20u64),
+        dependency_closure_digest: digest_erbp(41u64),
+        admitted_artifacts: [PublicationArtifactEvidenceV1(
+            provider_identity: digest_erbp(40u64),
+            variant_identity: digest_erbp(20u64),
+            artifact_digest: digest_erbp(31u64), provider_generation: 1u64,
+            observed_artifact_digest: digest_erbp(31u64),
+            required_trust_policy_digest: digest_erbp(32u64),
+            required_verifier_identity: digest_erbp(33u64),
+            minimum_verifier_generation: 1u64, trust_receipt: trust)])
+
+describe "environment variant registry build-plan owner V2":
+    it "issues a provider receipt from live registry uses and authenticated publication":
+        # @req REQ-015
+        val registry = canonical_target_registry_owner_v2(306u64).unwrap()
+        val resolved = canonical_target_registry_resolve_v2(registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val baseline = canonical_target_registry_acquire_use_v2(registry, resolved).unwrap()
+        val artifact = canonical_target_registry_acquire_use_v2(registry, resolved).unwrap()
+        val owner = environment_registry_build_plan_owner_v2(406u64).unwrap()
+        val token = environment_registry_build_plan_create_v2(owner, registry,
+            input_erbp(baseline, artifact)).unwrap()
+        val bound = environment_registry_build_plan_project_v2(owner, registry,
+            token).unwrap()
+        val receipt = environment_registry_provider_receipt_candidate_v2(owner, registry,
+            token, publication_erbp(), 0).unwrap()
+        expect(receipt.plan_identity).to_equal(bound.plan_identity)
+        expect(receipt.selected_variant_identity).to_equal(digest_erbp(20u64))
+        expect(receipt.selected_artifact_identity).to_equal(
+            bound.artifacts[0].artifact_identity)
+        expect(receipt.selected_cache_key).to_equal(bound.artifacts[0].cache_key)
+        expect(receipt.target_profile_binding_digest).to_equal(
+            bound.artifacts[0].target_binding.profile_binding_digest)
+        expect(receipt.provider_receipt_hash.len() > 0).to_be(true)
+        val activation_owner = EnvironmentPublicationActivationCoordinatorV1.create()
+        val absent_activation = EnvironmentPublicationActivationCoordinatorTokenV1(
+            token_id: 1u64, owner_identity: activation_owner.owner_identity)
+        expect(environment_registry_activated_provider_receipt_v2(owner, registry,
+            token, activation_owner, absent_activation, 0)).to_equal(
+                Err(EnvironmentRegistryProviderReceiptErrorV2.ActivationRejected))
+        val forged = EnvironmentRegistryActivatedProviderReceiptV2(
+            receipt: receipt, activation_token: absent_activation)
+        expect(environment_registry_activated_provider_receipt_live_v2(owner,
+            registry, token, activation_owner, forged, 0)).to_be(false)
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
+            token, publication_erbp(), 1)).to_equal(
+                Err(EnvironmentRegistryProviderReceiptErrorV2.ArtifactIndexInvalid))
+        var unauthenticated = publication_erbp()
+        var evidence = unauthenticated.admitted_artifacts[0]
+        var trust = evidence.trust_receipt
+        trust.authentication_status = ENV_ARTIFACT_TRUST_REJECTED_V1
+        evidence.trust_receipt = trust
+        unauthenticated.admitted_artifacts[0] = evidence
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
+            token, unauthenticated, 0)).to_equal(
+                Err(EnvironmentRegistryProviderReceiptErrorV2.PublicationRejected))
+        expect(canonical_target_registry_replace_v2(registry, registry.candidate,
+            registry.aliases).is_ok()).to_be(true)
+        val current = canonical_target_registry_resolve_v2(registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val current_baseline = canonical_target_registry_acquire_use_v2(registry,
+            current).unwrap()
+        val current_artifact = canonical_target_registry_acquire_use_v2(registry,
+            current).unwrap()
+        val current_token = environment_registry_build_plan_create_v2(owner, registry,
+            input_erbp(current_baseline, current_artifact)).unwrap()
+        val current_receipt = environment_registry_provider_receipt_candidate_v2(owner, registry,
+            current_token, publication_erbp(), 0).unwrap()
+        expect(current_receipt.provider_receipt_hash == receipt.provider_receipt_hash).to_be(false)
+        expect(canonical_target_registry_release_v2(registry,
+            current_artifact).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(registry,
+            current_baseline).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(registry, artifact).is_ok()).to_be(true)
+        expect(environment_registry_provider_receipt_candidate_v2(owner, registry,
+            token, publication_erbp(), 0)).to_equal(
+                Err(EnvironmentRegistryProviderReceiptErrorV2.PlanRejected))
+        expect(canonical_target_registry_release_v2(registry, baseline).is_ok()).to_be(true)
+
+    it "keeps aliases and owner-local serials out of bound cache identity":
+        val alias_registry = canonical_target_registry_owner_v2(301u64).unwrap()
+        val alias_resolution = canonical_target_registry_resolve_v2(alias_registry,
+            "amd64-unknown-linux-gnu").unwrap()
+        val alias_baseline = canonical_target_registry_acquire_use_v2(alias_registry,
+            alias_resolution).unwrap()
+        val alias_artifact = canonical_target_registry_acquire_use_v2(alias_registry,
+            alias_resolution).unwrap()
+        val alias_owner = environment_registry_build_plan_owner_v2(401u64).unwrap()
+        val alias_token = environment_registry_build_plan_create_v2(alias_owner,
+            alias_registry, input_erbp(alias_baseline, alias_artifact)).unwrap()
+        val alias_plan = environment_registry_build_plan_project_v2(alias_owner,
+            alias_registry, alias_token).unwrap()
+
+        val canonical_registry = canonical_target_registry_owner_v2(302u64).unwrap()
+        val canonical_resolution = canonical_target_registry_resolve_v2(canonical_registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val canonical_baseline = canonical_target_registry_acquire_use_v2(canonical_registry,
+            canonical_resolution).unwrap()
+        val canonical_artifact = canonical_target_registry_acquire_use_v2(canonical_registry,
+            canonical_resolution).unwrap()
+        val canonical_owner = environment_registry_build_plan_owner_v2(402u64).unwrap()
+        val canonical_token = environment_registry_build_plan_create_v2(canonical_owner,
+            canonical_registry, input_erbp(canonical_baseline, canonical_artifact)).unwrap()
+        val canonical_plan = environment_registry_build_plan_project_v2(canonical_owner,
+            canonical_registry, canonical_token).unwrap()
+        expect(alias_plan.artifacts[0].cache_key).to_equal(canonical_plan.artifacts[0].cache_key)
+        expect(alias_plan.artifacts[0].artifact_identity).to_equal(
+            canonical_plan.artifacts[0].artifact_identity)
+        expect(alias_plan.plan_identity).to_equal(canonical_plan.plan_identity)
+        expect(alias_plan.artifacts[0].target_binding.canonical_target_triple).to_equal(
+            "x86_64-unknown-linux-gnu")
+        val alias_receipt = environment_registry_provider_receipt_candidate_v2(alias_owner,
+            alias_registry, alias_token, publication_erbp(), 0).unwrap()
+        val canonical_receipt = environment_registry_provider_receipt_candidate_v2(canonical_owner,
+            canonical_registry, canonical_token, publication_erbp(), 0).unwrap()
+        expect(alias_receipt.provider_receipt_hash).to_equal(
+            canonical_receipt.provider_receipt_hash)
+
+        expect(canonical_target_registry_release_v2(alias_registry,
+            alias_artifact).is_ok()).to_be(true)
+        expect(environment_registry_build_plan_project_v2(alias_owner,
+            alias_registry, alias_token)).to_equal(
+                Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected))
+        expect(environment_registry_build_plan_release_v2(alias_owner,
+            alias_token).is_ok()).to_be(true)
+        expect(environment_registry_build_plan_project_v2(alias_owner,
+            alias_registry, alias_token)).to_equal(
+                Err(EnvironmentRegistryBuildPlanErrorV2.UnknownOrStale))
+        expect(canonical_target_registry_release_v2(alias_registry,
+            alias_baseline).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(canonical_registry,
+            canonical_artifact).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(canonical_registry,
+            canonical_baseline).is_ok()).to_be(true)
+
+    it "retains old generation authority only while its registry uses live":
+        val registry = canonical_target_registry_owner_v2(303u64).unwrap()
+        val old_resolution = canonical_target_registry_resolve_v2(registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val old_baseline = canonical_target_registry_acquire_use_v2(registry,
+            old_resolution).unwrap()
+        val old_artifact = canonical_target_registry_acquire_use_v2(registry,
+            old_resolution).unwrap()
+        val owner = environment_registry_build_plan_owner_v2(403u64).unwrap()
+        val old_token = environment_registry_build_plan_create_v2(owner, registry,
+            input_erbp(old_baseline, old_artifact)).unwrap()
+        val old_plan = environment_registry_build_plan_project_v2(owner, registry,
+            old_token).unwrap()
+        expect(canonical_target_registry_replace_v2(registry, registry.candidate,
+            registry.aliases).is_ok()).to_be(true)
+        expect(environment_registry_build_plan_project_v2(owner, registry,
+            old_token).is_ok()).to_be(true)
+        val current_resolution = canonical_target_registry_resolve_v2(registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val current_baseline = canonical_target_registry_acquire_use_v2(registry,
+            current_resolution).unwrap()
+        val current_artifact = canonical_target_registry_acquire_use_v2(registry,
+            current_resolution).unwrap()
+        val mixed_token = environment_registry_build_plan_create_v2(owner, registry,
+            input_erbp(current_baseline, old_artifact)).unwrap()
+        val mixed_plan = environment_registry_build_plan_project_v2(owner, registry,
+            mixed_token).unwrap()
+        expect(mixed_plan.artifacts[0].cache_key == old_plan.artifacts[0].cache_key).to_be(false)
+        val current_token = environment_registry_build_plan_create_v2(owner, registry,
+            input_erbp(current_baseline, current_artifact)).unwrap()
+        val current_plan = environment_registry_build_plan_project_v2(owner, registry,
+            current_token).unwrap()
+        expect(current_plan.artifacts[0].cache_key == old_plan.artifacts[0].cache_key).to_be(false)
+        expect(current_plan.plan_identity == old_plan.plan_identity).to_be(false)
+        expect(canonical_target_registry_release_v2(registry, old_baseline).is_ok()).to_be(true)
+        expect(environment_registry_build_plan_project_v2(owner, registry,
+            old_token)).to_equal(Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected))
+        expect(environment_registry_build_plan_project_v2(owner, registry,
+            mixed_token).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(registry, old_artifact).is_ok()).to_be(true)
+        expect(environment_registry_build_plan_project_v2(owner, registry,
+            mixed_token)).to_equal(Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected))
+        expect(canonical_target_registry_release_v2(registry, current_artifact).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(registry, current_baseline).is_ok()).to_be(true)
+
+    it "rejects mismatched profile tuples and incomplete use arrays":
+        val registry = canonical_target_registry_owner_v2(304u64).unwrap()
+        val resolution = canonical_target_registry_resolve_v2(registry,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val baseline = canonical_target_registry_acquire_use_v2(registry, resolution).unwrap()
+        val artifact = canonical_target_registry_acquire_use_v2(registry, resolution).unwrap()
+        val owner = environment_registry_build_plan_owner_v2(404u64).unwrap()
+        var incomplete = input_erbp(baseline, artifact)
+        incomplete.request_uses = []
+        expect(environment_registry_build_plan_create_v2(owner, registry,
+            incomplete)).to_equal(Err(EnvironmentRegistryBuildPlanErrorV2.InvalidInput))
+        val foreign_registry = canonical_target_registry_owner_v2(305u64).unwrap()
+        expect(environment_registry_build_plan_create_v2(owner, foreign_registry,
+            input_erbp(baseline, artifact))).to_equal(
+                Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected))
+        var mismatched = input_erbp(baseline, artifact)
+        var request = mismatched.requests[0]
+        var profile = request.target_profile
+        profile.target_abi_id = 2u32
+        request.target_profile = profile
+        mismatched.requests[0] = request
+        expect(environment_registry_build_plan_create_v2(owner, registry,
+            mismatched)).to_equal(Err(EnvironmentRegistryBuildPlanErrorV2.RegistryRejected))
+        expect(canonical_target_registry_release_v2(registry, artifact).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(registry, baseline).is_ok()).to_be(true)
