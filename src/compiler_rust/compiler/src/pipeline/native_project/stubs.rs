@@ -445,6 +445,16 @@ pub(crate) fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections
     })
 }
 
+/// A bare undefined name has no provenance: it may be a C import even when a
+/// Simple function with the same tail exists. Strict linking must fail closed
+/// instead of manufacturing an alias for that ambiguous name.
+pub(crate) fn resolve_strict_compat_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+    if !sym.contains("__") {
+        return None;
+    }
+    resolve_defined_suffix_alias(sym, defined)
+}
+
 /// The bare Simple function name of a mangled pure-Simple module symbol.
 ///
 /// Pure-Simple symbols are mangled `<module_prefix>__<fn_name>` where the module
@@ -1208,7 +1218,11 @@ the old fabricating behaviour.",
     // present; those aliases resolve real code rather than hiding a missing
     // implementation. Leave every genuinely unresolved symbol to the linker.
     if strict_no_stub_fallback {
-        needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        if effective_target().os == TargetOS::Windows {
+            needs_stub.retain(|sym| resolve_strict_compat_alias(sym, &defined).is_some());
+        } else {
+            needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
+        }
     }
 
     if let Ok(dump_path) = std::env::var("SIMPLE_DUMP_STUBS") {

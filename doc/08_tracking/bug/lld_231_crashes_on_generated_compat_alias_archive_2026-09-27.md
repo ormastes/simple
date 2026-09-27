@@ -67,12 +67,15 @@ share: `read`, `write`, `open`, `connect`, `send`, and so on. The LLD crash is
 the lucky outcome; a successful link would have routed every socket `select()`
 call into an async combinator, silently.
 
-Fixed by `PLATFORM_C_SYMBOLS` in `stubs.rs`: those names return `None` from the
-resolver, leaving the reference for the platform's import library, which is the
-correct provider. Pinned by
+Fixed on the strict Windows link path by rejecting all bare-name compatibility
+aliases: symbol names alone cannot distinguish C imports from Simple functions.
+`PLATFORM_C_SYMBOLS` also guards known platform names in the general resolver.
+The reference remains for the platform's import library, which is the correct
+provider. Pinned by
 `platform_c_symbols_are_never_aliased_to_simple_functions` in `tests.rs`, which
 asserts both halves -- `select` must not resolve, and a genuine bare Simple
-symbol (`trim`) still must.
+symbol (`trim`) still resolves in non-strict mode. The strict-mode test also
+rejects an unlisted C name (`getaddrinfo`) while preserving qualified aliases.
 
 **The LLD-side defect remains real and unreported:** a linker must diagnose a
 duplicate/conflicting symbol, never segfault. A reduced case is still worth
