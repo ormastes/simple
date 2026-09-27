@@ -44,6 +44,14 @@ val COFF_REL_ARM64_REL21: i64 = 0x0005
 val COFF_REL_ARM64_PAGEOFFSET_12A: i64 = 0x0006
 val COFF_REL_ARM64_PAGEOFFSET_12L: i64 = 0x0007
 val COFF_REL_ARM64_SECREL: i64 = 0x0008
+val COFF_REL_ARM64_SECREL_LOW12A: i64 = 0x0009
+val COFF_REL_ARM64_SECREL_HIGH12A: i64 = 0x000a
+val COFF_REL_ARM64_SECREL_LOW12L: i64 = 0x000b
+val COFF_REL_ARM64_SECTION: i64 = 0x000d
+val COFF_REL_ARM64_ADDR64: i64 = 0x000e
+val COFF_REL_ARM64_BRANCH19: i64 = 0x000f
+val COFF_REL_ARM64_BRANCH14: i64 = 0x0010
+val COFF_REL_ARM64_REL32: i64 = 0x0011
 
 struct CoffRelocation:
     virtual_address: i64
@@ -383,6 +391,9 @@ fn coff_apply_arm64_relocation(relocation_type: i64, symbol_address: i64,
             return CoffRelocationValue(success: false, value: 0, width: 4,
                 error: "ARM64 COFF 32-bit address relocation is out of range")
         return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_ADDR64:
+        return CoffRelocationValue(success: true,
+            value: symbol_address + instruction, width: 8, error: "")
     if relocation_type == COFF_REL_ARM64_BRANCH26:
         if instruction & 0x7c000000 != 0x14000000:
             return CoffRelocationValue(success: false, value: 0, width: 4,
@@ -436,8 +447,83 @@ fn coff_apply_arm64_relocation(relocation_type: i64, symbol_address: i64,
         return CoffRelocationValue(success: true,
             value: (instruction & 0xffc003ff) | ((page_offset / scale) << 10),
             width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_BRANCH19:
+        if instruction & 0xff000010 != 0x54000000:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH19 does not name B.cond")
+        val addend = _coff_arm64_sign_extend(
+            ((instruction >> 5) & 0x7ffff) << 2, 21)
+        val value = symbol_address + addend - place_address
+        if value & 3 != 0 or value < -1048576 or value >= 1048576:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH19 is unaligned or out of range")
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xff00001f) | (((value >> 2) & 0x7ffff) << 5),
+            width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_BRANCH14:
+        if instruction & 0x7e000000 != 0x36000000:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH14 does not name TBZ or TBNZ")
+        val addend = _coff_arm64_sign_extend(
+            ((instruction >> 5) & 0x3fff) << 2, 16)
+        val value = symbol_address + addend - place_address
+        if value & 3 != 0 or value < -32768 or value >= 32768:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_BRANCH14 is unaligned or out of range")
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xfff8001f) | (((value >> 2) & 0x3fff) << 5),
+            width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_REL32:
+        val addend = _coff_arm64_sign_extend(instruction & 0xffffffff, 32)
+        val value = symbol_address + addend - (place_address + 4)
+        if value < -2147483648 or value > 2147483647:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_REL32 out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
     CoffRelocationValue(success: false, value: 0, width: 0,
         error: "unsupported ARM64 COFF relocation type {relocation_type}")
+
+fn coff_apply_arm64_section_relocation(relocation_type: i64, instruction: i64,
+        section_offset: i64, section_index: i64) -> CoffRelocationValue:
+    """Apply an ARM64 relocation whose target is relative to its output section."""
+    if relocation_type == COFF_REL_ARM64_SECTION:
+        val value = section_index + (instruction & 0xffff)
+        if value < 0 or value > 65535:
+            return CoffRelocationValue(success: false, value: 0, width: 2,
+                error: "IMAGE_REL_ARM64_SECTION out of range")
+        return CoffRelocationValue(success: true, value: value, width: 2, error: "")
+    if relocation_type == COFF_REL_ARM64_SECREL:
+        val value = section_offset + (instruction & 0xffffffff)
+        if value < 0 or value >= 4294967296:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_SECREL out of range")
+        return CoffRelocationValue(success: true, value: value, width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_SECREL_LOW12A or
+            relocation_type == COFF_REL_ARM64_SECREL_HIGH12A:
+        if instruction & 0x7f000000 != 0x11000000 or instruction & 0x400000 != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "ARM64 SECREL ADD relocation requires ADD/ADDS with unshifted immediate")
+        val encoded_addend = (instruction >> 10) & 0xfff
+        val immediate = if relocation_type == COFF_REL_ARM64_SECREL_LOW12A:
+            (section_offset + encoded_addend) & 0xfff
+        else:
+            ((section_offset >> 12) + encoded_addend) & 0xfff
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xffc003ff) | (immediate << 10), width: 4, error: "")
+    if relocation_type == COFF_REL_ARM64_SECREL_LOW12L:
+        if instruction & 0x3b000000 != 0x39000000 or instruction & 0x04000000 != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_SECREL_LOW12L requires scalar unsigned-immediate load/store")
+        val scale = 1 << ((instruction >> 30) & 3)
+        val addend = ((instruction >> 10) & 0xfff) * scale
+        val low = (section_offset + addend) & 0xfff
+        if low % scale != 0:
+            return CoffRelocationValue(success: false, value: 0, width: 4,
+                error: "IMAGE_REL_ARM64_SECREL_LOW12L target is misaligned")
+        return CoffRelocationValue(success: true,
+            value: (instruction & 0xffc003ff) | ((low / scale) << 10), width: 4, error: "")
+    CoffRelocationValue(success: false, value: 0, width: 0,
+        error: "unsupported ARM64 section-relative relocation type {relocation_type}")
 
 export CoffRelocation, CoffSection, CoffSymbol, CoffObject, CoffRelocationValue
 export COFF_MACHINE_AMD64, COFF_MACHINE_ARM64
@@ -452,8 +538,13 @@ export COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7
 export COFF_REL_ARM64_ABSOLUTE, COFF_REL_ARM64_ADDR32, COFF_REL_ARM64_ADDR32NB
 export COFF_REL_ARM64_BRANCH26, COFF_REL_ARM64_PAGEBASE_REL21, COFF_REL_ARM64_REL21
 export COFF_REL_ARM64_PAGEOFFSET_12A, COFF_REL_ARM64_PAGEOFFSET_12L, COFF_REL_ARM64_SECREL
+export COFF_REL_ARM64_SECREL_LOW12A, COFF_REL_ARM64_SECREL_HIGH12A
+export COFF_REL_ARM64_SECREL_LOW12L
+export COFF_REL_ARM64_SECTION, COFF_REL_ARM64_ADDR64
+export COFF_REL_ARM64_BRANCH19, COFF_REL_ARM64_BRANCH14, COFF_REL_ARM64_REL32
 export coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name
 export coff_weak_primary_for_fallback
 export coff_weak_primary_searches_library_for_fallback, coff_symbol_is_relocated
 export coff_apply_amd64_relocation
 export coff_apply_arm64_relocation
+export coff_apply_arm64_section_relocation

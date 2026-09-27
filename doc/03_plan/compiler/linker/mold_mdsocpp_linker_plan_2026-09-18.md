@@ -303,7 +303,7 @@ conflicting values fail closed with the key and values reported, and directives
 from unused archive members do not affect the link.
 
 The admitted aggregate producer is
-`src/app/test/mold_completion_receipt.spl`. It accepts exactly nine receipt
+`src/app/test/mold_completion_receipt.spl`. It accepts exactly ten receipt
 paths in the fixed `MoldCompletionEvidence` order. Each input must use
 `mold-linker-evidence-v1`, name the expected gate, report `status=pass`, and
 bind a regular no-follow command transcript and result artifact with lowercase
@@ -454,7 +454,11 @@ Implemented source slice:
   The shared COFF linker now exposes an ARM64 PE32+ route selecting ARM64
   object/archive validation, relocation formulas, imports, exception sorting,
   image base, and machine header; ARM64 `SECREL` is resolved against the merged
-  output-section base. Windows native routing now derives the architecture from
+  output-section base. The remaining specified native ARM64 relocation forms
+  are covered too: 64-bit VA with DIR64 base-relocation publication, `SECTION`,
+  low/high section-relative ADD/LDR immediates, conditional and test-bit
+  branches, and signed `REL32`; CLR `TOKEN` remains outside the native
+  executable contract. Windows native routing now derives the architecture from
   the explicit target triple or normalized host architecture, selects the ARM64
   internal linker/default-library scan, and passes `/MACHINE:ARM64` through the
   external MSVC path. Native Windows-on-ARM execution and full SDK/CRT corpus

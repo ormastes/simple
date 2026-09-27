@@ -7,11 +7,14 @@ use compiler.backend.linker.coff.coff_object.{
     COFF_REL_AMD64_ABSOLUTE, COFF_REL_AMD64_ADDR64,
     COFF_REL_AMD64_REL32, COFF_REL_AMD64_REL32_5,
     COFF_REL_AMD64_SECTION, COFF_REL_AMD64_SECREL, COFF_REL_AMD64_SECREL7,
-    COFF_REL_ARM64_SECREL,
+    COFF_REL_ARM64_SECREL, COFF_REL_ARM64_SECREL_LOW12A,
+    COFF_REL_ARM64_SECREL_HIGH12A, COFF_REL_ARM64_SECREL_LOW12L,
+    COFF_REL_ARM64_SECTION, COFF_REL_ARM64_ADDR64, COFF_REL_ARM64_REL32,
     COFF_SECTION_LNK_INFO, COFF_SECTION_LNK_REMOVE, COFF_SECTION_LNK_COMDAT,
     coff_parse_object, coff_symbol_at_table_index, coff_symbol_resolution_name,
     coff_weak_primary_for_fallback, coff_symbol_is_relocated,
-    coff_apply_amd64_relocation, coff_apply_arm64_relocation}
+    coff_apply_amd64_relocation, coff_apply_arm64_relocation,
+    coff_apply_arm64_section_relocation}
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_SECTION_ALIGNMENT,
     pe_align_up, pe_write_amd64_console, pe_write_arm64_console}
@@ -1085,7 +1088,11 @@ fn _coff_link_retained(request: CoffLinkRequest,
                 if symbol_result.is_err(): return Err(symbol_result.unwrap_err())
                 val relocation_symbol = symbol_result.unwrap()
                 if machine == COFF_MACHINE_ARM64 and
-                        relocation.relocation_type == COFF_REL_ARM64_SECREL:
+                        (relocation.relocation_type == COFF_REL_ARM64_SECTION or
+                         relocation.relocation_type == COFF_REL_ARM64_SECREL or
+                         relocation.relocation_type == COFF_REL_ARM64_SECREL_LOW12A or
+                         relocation.relocation_type == COFF_REL_ARM64_SECREL_HIGH12A or
+                         relocation.relocation_type == COFF_REL_ARM64_SECREL_LOW12L):
                     if relocation_symbol.is_absolute():
                         return Err("section-relative relocation cannot target absolute COFF symbol '{relocation_symbol.name}'")
                     val location = _coff_symbol_location(
@@ -1094,13 +1101,19 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     val target = location.unwrap()
                     val target_section_rva = _coff_output_section_base(objects, rvas, target)
                     if target_section_rva.is_err(): return Err(target_section_rva.unwrap_err())
-                    val addend = _coff_read_u32(patched, relocation.virtual_address)
+                    val addend = if relocation.relocation_type == COFF_REL_ARM64_SECTION:
+                        _coff_read_u16(patched, relocation.virtual_address)
+                    else:
+                        _coff_read_u32(patched, relocation.virtual_address)
                     if addend.is_err(): return Err(addend.unwrap_err())
-                    val value = target.rva - target_section_rva.unwrap() + addend.unwrap()
-                    if value < 0 or value >= 4294967296:
-                        return Err("IMAGE_REL_ARM64_SECREL out of range")
+                    val section_index = _coff_output_section_index(objects, rvas, target)
+                    if section_index.is_err(): return Err(section_index.unwrap_err())
+                    val value = coff_apply_arm64_section_relocation(
+                        relocation.relocation_type, addend.unwrap(),
+                        target.rva - target_section_rva.unwrap(), section_index.unwrap())
+                    if not value.success: return Err(value.error)
                     val result = _coff_patch(
-                        patched, relocation.virtual_address, 4, value)
+                        patched, relocation.virtual_address, value.width, value.value)
                     if result.is_err(): return Err(result.unwrap_err())
                     patched = result.unwrap()
                     continue
@@ -1164,7 +1177,13 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     image_base)
                 if symbol_address_result.is_err(): return Err(symbol_address_result.unwrap_err())
                 val resolved_address = symbol_address_result.unwrap()
-                val addend_result = if machine == COFF_MACHINE_ARM64:
+                val addend_result = if machine == COFF_MACHINE_ARM64 and
+                        relocation.relocation_type == COFF_REL_ARM64_ADDR64:
+                    _coff_read_u64(patched, relocation.virtual_address)
+                elif machine == COFF_MACHINE_ARM64 and
+                        relocation.relocation_type == COFF_REL_ARM64_REL32:
+                    _coff_read_i32(patched, relocation.virtual_address)
+                elif machine == COFF_MACHINE_ARM64:
                     _coff_read_u32(patched, relocation.virtual_address)
                 elif relocation.relocation_type == COFF_REL_AMD64_ADDR64:
                     _coff_read_u64(patched, relocation.virtual_address)
@@ -1187,6 +1206,11 @@ fn _coff_link_retained(request: CoffLinkRequest,
                 patched = patched_result.unwrap()
                 if machine == COFF_MACHINE_AMD64 and
                         relocation.relocation_type == COFF_REL_AMD64_ADDR64 and
+                        not resolved_address.absolute:
+                    base_relocation_rvas = base_relocation_rvas.push(
+                        rvas[oi][si] + relocation.virtual_address)
+                if machine == COFF_MACHINE_ARM64 and
+                        relocation.relocation_type == COFF_REL_ARM64_ADDR64 and
                         not resolved_address.absolute:
                     base_relocation_rvas = base_relocation_rvas.push(
                         rvas[oi][si] + relocation.virtual_address)
