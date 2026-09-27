@@ -77,7 +77,7 @@ use compiler.core.types.{TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, parser_error_count}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_warn_print_if_needed}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -950,6 +950,7 @@ fn parse_statement() -> i64:
             # very next token being ':' (so a genuine cast STATEMENT, `x as
             # SomeType` with no with-block colon following, is untouched and
             # keeps its pre-existing meaning/error behavior unchanged).
+            val with_error_count = parser_error_count()
             val with_parsed = parse_expr()
             var with_ok = false
             var with_acquire = with_parsed
@@ -994,8 +995,22 @@ fn parse_statement() -> i64:
             # The header had the scoped-resource token shape, so this parse
             # path owns its nodes and diagnostics. Do not reparse it as a plain
             # identifier expression and leave speculative effects behind.
-            parser_error("invalid scoped with resource header")
-            return stmt_expr_stmt(with_parsed, 0)
+            if parser_error_count() == with_error_count:
+                parser_error("invalid scoped with resource header")
+            # The token probe found a colon on this statement line. Consume
+            # the rest of this malformed header and keep its body attached to
+            # an error-only block, so the enclosing parse does not interpret
+            # `as NAME:` as a second statement or orphan parsed body nodes.
+            var with_error_stmts: [i64] = [stmt_expr_stmt(with_parsed, 0)]
+            while par_kind_get() != TOK_COLON and par_kind_get() != TOK_NEWLINE and
+                par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+                parser_advance()
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                val with_error_body = parse_block()
+                for with_error_stmt in with_error_body:
+                    with_error_stmts.push(with_error_stmt)
+            return stmt_expr_stmt(expr_block(with_error_stmts, -1, 0), 0)
 
     # `me NAME(...) [-> T]: body` in statement position (a class's methods
     # written at fn-body indent, e.g. semantics/resolve.spl) — same desugar

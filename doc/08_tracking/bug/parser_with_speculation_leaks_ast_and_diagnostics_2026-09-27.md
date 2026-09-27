@@ -86,9 +86,11 @@ current-token state only, then restores that token snapshot. It calls
 `parse_expr()` only when a top-level colon follows `as NAME`. Rejected
 forms therefore enter the ordinary identifier path without an AST/type parse.
 If the selected resource parse nevertheless fails its cast-shape check, it
-reports an error and retains that single parse path instead of reparsing and
-leaking its effects. The scan stops at a top-level statement terminator and is
-bounded by source length.
+retains that single parse path and reports an error only if the expression
+parser did not already do so. The scan stops at a top-level statement
+terminator and is bounded by source length. Failed selected headers consume
+their remaining tokens through the header colon and retain the parsed body in
+an error-only block, avoiding a second parse of `as NAME:`.
 
 This is a source candidate, not an admitted correction: the clean worktree
 still lacks a source-matched pure-Simple runner. Execute the regression spec,
