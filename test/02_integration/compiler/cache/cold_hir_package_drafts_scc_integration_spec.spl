@@ -1,0 +1,52 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    ColdHirPackageArtifactV1, cold_hir_package_index_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1, config_variant_digest_v1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1,
+    PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+}
+use compiler.driver.cache.package_scc_scheduler.{package_scc_identity_v1}
+
+describe "cold HIR package index with graph SCC projection":
+    it "builds a singleton package from one frozen source":
+        val source_digest = sha256_text("source")
+        val artifact_digest = sha256_text("artifact")
+        val inventory = CompileSourceInventoryV1(1, 0, [
+            CompileSourceInventoryEntryV1("src/a.spl", source_digest,
+                source_digest, source_digest, source_digest,
+                source_digest, 6)])
+        val inventory_digest = compile_source_inventory_digest_v1(inventory)
+        val variant = ConfigVariantKeyV1(
+            "aarch64-unknown-linux-gnu", "cranelift", [], "debug",
+            "abi-v1", [], [])
+        val authority = PackageModuleIndexBuildAuthorityV1(
+            sha256_text("producer"), "root", "revision", "commit",
+            "tree", inventory_digest, variant)
+        val seed = ColdHirSemanticSeedV1(
+            "a", "src/a.spl", source_digest, inventory_digest,
+            sha256_text("abi"), [])
+        val artifact = ColdHirPackageArtifactV1(
+            seed, "p", artifact_digest, artifact_digest,
+            [PackageSmfSectionV1("exports", 0, 1, artifact_digest)],
+            artifact_digest, artifact_digest, artifact_digest,
+            artifact_digest, artifact_digest, artifact_digest,
+            artifact_digest, "", PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+        val result = cold_hir_package_index_v1(
+            authority, inventory, [artifact])
+        match result:
+            case Err(reason): fail("cold package index failed: {reason}")
+            case Ok(generation):
+                expect(generation.entries.len()).to_equal(1)
+                expect(generation.entries[0].scc_identity).to_equal(
+                    package_scc_identity_v1(
+                        ["p"], config_variant_digest_v1(variant)))

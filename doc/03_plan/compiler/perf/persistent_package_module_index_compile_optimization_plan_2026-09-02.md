@@ -293,8 +293,8 @@ export/ABI/initializer/provider metadata stops reverse propagation.
 |---|---|---|
 | Immutable SCV snapshot core | Groundwork | `src/lib/scv/compile_snapshot.spl`; add event-maintained inventory and full entrypoint routing. |
 | Native entry closure freeze | Partial | `src/app/io/_CliCompile/native_build_closure.spl`; frozen reads enforced, but replace the closure scan with admitted index lookup. |
-| Persistent index generation | Groundwork | `src/compiler/80.driver/cache/package_module_index.spl`; immutable publish/read, SCV binding, edge validation, invalidation. |
-| Canonical TLDR/SMF schema | Partial | Canonical aliases exist; add variant key, lazy section directory, typed reverse-reference receipts, and metadata producer wiring. |
+| Persistent index generation | Pure cold builder added; publication cutover open | `src/compiler/80.driver/cache/package_module_index.spl` and `package_module_index_builder.spl`; the new builder validates frozen source coverage, variant root identity, graph edges, and action digests. Wire it to typed compiler output and publish its generation instead of the binding-only index. |
+| Canonical TLDR/SMF schema | Partial | `cold_hir_package_drafts_v1.spl` assembles typed-HIR seeds and caller-supplied artifact facts into graph drafts; add actual SMF/archive producers, typed reverse-reference receipts, and metadata publication wiring. |
 | Exact invalidation | Partial | Content-vs-semantic cutoff exists; add typed consumer families and SCC transactions. |
 | Deterministic scheduler | Partial | Acyclic package order exists; add reached-graph SCC condensation and parent-authoritative parallel commit. |
 | Action/archive receipts | Partial | Native warm key/receipt binds and exposes SCV identity; bind remaining action/archive and reverse-reference receipts to the package-index generation. |
