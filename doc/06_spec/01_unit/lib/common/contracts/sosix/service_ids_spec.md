@@ -62,12 +62,12 @@ expect(sosix_service_ids_are_unique()).to_be(true)
 
 </details>
 
-#### agrees with the filesystem and host-service redeclarations
+#### keeps filesystem and host-service aliases bound to the table
 
-- Compare the fs IDs owned by file_operation_v1
+- Compare the fs compatibility aliases in file_operation_v1
    - Expected: SOSIX_FS_READ_AT equals `SOSIX_ID_FS_READ_AT`
    - Expected: SOSIX_FS_WRITE_AT equals `SOSIX_ID_FS_WRITE_AT`
-- Compare the host-service IDs owned by os.sosix.host.service_contract
+- Compare the host-service compatibility aliases
    - Expected: SOSIX_HOST_DISPLAY_PRESENT equals `SOSIX_ID_HOST_DISPLAY_PRESENT`
    - Expected: SOSIX_HOST_DISPLAY_READBACK equals `SOSIX_ID_HOST_DISPLAY_READBACK`
    - Expected: SOSIX_HOST_INPUT_NEXT equals `SOSIX_ID_HOST_INPUT_NEXT`
@@ -81,10 +81,10 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Compare the fs IDs owned by file_operation_v1")
+step("Compare the fs compatibility aliases in file_operation_v1")
 expect(SOSIX_FS_READ_AT).to_equal(SOSIX_ID_FS_READ_AT)
 expect(SOSIX_FS_WRITE_AT).to_equal(SOSIX_ID_FS_WRITE_AT)
-step("Compare the host-service IDs owned by os.sosix.host.service_contract")
+step("Compare the host-service compatibility aliases")
 expect(SOSIX_HOST_DISPLAY_PRESENT).to_equal(SOSIX_ID_HOST_DISPLAY_PRESENT)
 expect(SOSIX_HOST_DISPLAY_READBACK).to_equal(SOSIX_ID_HOST_DISPLAY_READBACK)
 expect(SOSIX_HOST_INPUT_NEXT).to_equal(SOSIX_ID_HOST_INPUT_NEXT)
