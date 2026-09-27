@@ -440,9 +440,11 @@ Implemented source slice:
   alignment, and range validation. A reproducible real Clang ARM64 COFF object
   pins the compiler-emitted relocation census. The deterministic PE32+ writer
   now emits either AMD64 or ARM64 machine headers through a checked target
-  parameter while preserving the AMD64 compatibility wrapper. Production ARM64
-  link routing, `SECREL` resolution, and the ARM64 8-byte exception-table format
-  remain open and are not certified by this slice;
+  parameter while preserving the AMD64 compatibility wrapper, and ordinary
+  ARM64 COFF members are admitted by the archive-closure parser. Production
+  ARM64 link routing, short-import/thunk synthesis, `SECREL` resolution, and the
+  ARM64 8-byte exception-table format remain open and are not certified by this
+  slice;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;
 - AMD64 multi-object symbol resolution, static `.lib` fixpoint extraction,
