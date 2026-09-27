@@ -917,3 +917,16 @@ Clang. The workflow now installs Clang/LLD plus the MinGW sysroot and exports
 `CC_x86_64_pc_windows_gnu=clang`; the target-qualified Clang invocation remains
 owned by the native-support build script. This removes the compiler-selection
 blocker so the Windows binary lane can proceed to Simple compilation/linking.
+
+Exact-head workflow run `36300453546` refined that diagnosis. Both Linux and
+MinGW seed builds passed, and both Stage 2 legs compiled all 914 Simple units.
+The Windows link then failed because generated-C compilation correctly chose
+the target-prefixed `x86_64-w64-mingw32-gcc` but incorrectly appended Clang's
+`--target=x86_64-w64-windows-gnu` option. Generated main/init/security stubs,
+core runtime sources, inline assembly, and the hosted link now add that option
+only for Clang-family drivers; GNU cross drivers carry the target in their
+executable name. The workflow no longer converts a missing Windows Stage 2
+binary into a successful seed fallback: it requires a non-empty PE32+ result.
+The same run showed the Linux link lacked the required `llvm-nm`, so both
+Stage 2 tool installations now include the LLVM tools package. A new exact-head
+run is required before either Stage 2 lane is admitted.
