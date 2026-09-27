@@ -216,8 +216,12 @@ fn compiler_inventory_untracked_digests_v1(
         true, src_digest, test_digest)
 
 fn compiler_inventory_git_events_v1(
-    root: text, previous_head: text, source_roots: [text], cold_init: bool
+    root: text, previous_head: text, head: text,
+    source_roots: [text], cold_init: bool
 ) -> CompilerInventoryGitEventsV1?:
+    # Reuse the refresh owner's captured HEAD for both diffs. A second
+    # rev-parse costs a process on every warm request and can bind events from
+    # one revision to a cursor naming another if a commit lands mid-refresh.
     var events: [CompileSourceEventV1] = []
     if cold_init:
         # Git's -t prefix distinguishes cached paths from others in one
@@ -253,7 +257,6 @@ fn compiler_inventory_git_events_v1(
             return nil
         return Some(CompilerInventoryGitEventsV1(
             events, digests.src_digest, digests.test_digest))
-    val head = compiler_inventory_git_head_v1(root)
     if head == "" or previous_head == "":
         return nil
     if head != previous_head:
@@ -268,7 +271,7 @@ fn compiler_inventory_git_events_v1(
         events = next!
     val working = compiler_inventory_git_lines_v1(
         root, ["-c", "core.quotePath=false", "diff", "--name-status",
-            "--no-renames", "HEAD", "--"] + source_roots)
+            "--no-renames", head, "--"] + source_roots)
     val untracked = compiler_inventory_git_lines_v1(
         # Keep literal UTF-8 identities, matching cold initialization and diff.
         # Git's default C quoting adds a trailing quote, so the source filter
@@ -404,7 +407,7 @@ fn compiler_inventory_refresh_v1(
     if head == "":
         return compiler_inventory_invalid_v1("git-event-source-unavailable")
     val observed = match compiler_inventory_git_events_v1(
-            root, if cursor.valid: cursor.git_head else: head,
+            root, if cursor.valid: cursor.git_head else: head, head,
             source_roots, cold_init):
         case Some(batch): batch
         case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
