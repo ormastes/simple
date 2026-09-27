@@ -91,6 +91,37 @@ the dispatch, because the update-branch push resets the admission.
 5. **On "base advanced", go back to step 1.** This is the expected outcome, not
    an error to investigate. Budget several full cycles.
 
+## PR-path CI is required checks only (2026-09-27)
+
+The main ruleset has no bypass actors, so the two required contexts must report
+fast. They used to wait hours behind ~300 queued runs because every PR push
+fanned out to ~35 heavy workflows. Now:
+
+- On a PR, only the required jobs run by default: `fast-gates` in its own
+  one-job workflow `required-gates.yml` ("Required Gates") and the
+  `review-admission.yml` broker. Every other `pull_request` /
+  `pull_request_target` workflow listens for `types: [labeled]` ONLY, so an
+  ordinary PR push (opened / synchronize / reopened) creates no run for it at
+  all -- not even a skipped one. Its jobs also carry
+  `if: github.event_name != '<event>' || contains(github.event.pull_request.labels.*.name, 'ci:full')`
+  so adding some other label does not fire the matrix. `repo-hygiene.yml` has
+  no PR trigger at all any more (main push + dispatch only).
+- **Label `ci:full`** opts a PR into the full matrix (extended ratchet lane,
+  bootstrap, platform tests, ...). Adding the label fires a `labeled` event,
+  so the heavy lanes start without a push. They do NOT re-run on a later push
+  to the PR: remove and re-add the label to re-run them. Path filters still
+  apply to the labelled run.
+- Every heavy lane still runs on push to `main` (PR-only workflows gained a
+  `push: branches: [main]` trigger with the same `paths:`), so nothing is
+  unenforced — it is enforced post-merge instead of pre-merge. The four
+  workflows whose `push:` had no branch filter (aot-lane-fences, rtl-toolchain,
+  rust-bootstrap-multiplatform, windows-build) now push-trigger on `main` only,
+  so pushing a `work/*` branch no longer queues them twice.
+- Every PR/push workflow has `concurrency` keyed on PR number or ref; test
+  lanes use `cancel-in-progress: true` (latest commit wins, also on `main`),
+  writers (`cache-main-writer`, `cache-promotion`, `release`,
+  `t32-tools-release`, `candidate`, `macos-phase23-evidence`) keep `false`.
+
 ## Notes
 
 - Run the loop detached from anything slow. Every minute spent between step 3
