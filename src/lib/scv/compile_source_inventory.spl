@@ -29,7 +29,9 @@ fn compile_source_inventory_apply_and_publish_v1(
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
     expected_pointer_digest: text = "",
-    cold_rebuild: bool = false
+    cold_rebuild: bool = false,
+    untracked_src_digest: text = "",
+    untracked_test_digest: text = ""
 ) -> CompileSourceInventoryReadV1:
     val current = compile_source_inventory_read_current_v1(cache_root)
     var inventory = if current.valid:
@@ -64,7 +66,8 @@ fn compile_source_inventory_apply_and_publish_v1(
                     inventory = changed.inventory!
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory, cursor_head, cursor_rows,
-        cursor_filesystem_digest, expected_pointer_digest)
+        cursor_filesystem_digest, expected_pointer_digest,
+        untracked_src_digest, untracked_test_digest)
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
@@ -163,7 +166,9 @@ fn compile_source_inventory_apply_observed_events_v1(
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
     expected_pointer_digest: text = "",
-    cold_rebuild: bool = false
+    cold_rebuild: bool = false,
+    untracked_src_digest: text = "",
+    untracked_test_digest: text = ""
 ) -> CompileSourceInventoryReadV1:
     # Translation can fail on overflow or an unreadable source. Complete it
     # before one immutable inventory publication so a rejected journal cannot
@@ -178,7 +183,8 @@ fn compile_source_inventory_apply_observed_events_v1(
             compile_source_inventory_apply_and_publish_v1(
                 cache_root, events, cursor_head, cursor_rows,
                 cursor_filesystem_digest, expected_pointer_digest,
-                cold_rebuild)
+                cold_rebuild, untracked_src_digest,
+                untracked_test_digest)
 
 # Cold replay retains one slot per distinct identity rather than constructing
 # successively larger inventories for every event. Reuse the one-event authority
@@ -242,7 +248,7 @@ fn compile_source_inventory_read_pointer_content_v1(cache_root: text) -> text?:
     if not rt_file_is_regular_no_follow(path):
         return nil
     val size = rt_file_size(path)
-    if size <= 0 or size > 512:
+    if size <= 0 or size > 768:
         return nil
     rt_file_read_regular_no_follow_bounded(path, size)
 
@@ -298,7 +304,9 @@ fn compile_source_inventory_publish_reasoned_v1(
     cache_root: text, inventory: CompileSourceInventoryV1,
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
-    expected_pointer_digest: text = ""
+    expected_pointer_digest: text = "",
+    untracked_src_digest: text = "",
+    untracked_test_digest: text = ""
 ) -> (text, text):
     """Publish an inventory, answering `(digest, reason)`.
 
@@ -318,6 +326,9 @@ fn compile_source_inventory_publish_reasoned_v1(
     # CURRENT file. A failed rename leaves both old values in place; replay
     # from that cursor is then safe because inventory events are idempotent.
     var pointer_content = digest
+    if cursor_head == "" and (untracked_src_digest != "" or
+            untracked_test_digest != ""):
+        return ("", "publish-untracked-cursor-invalid")
     if cursor_head != "":
         if (not (cursor_head.len() == 40 or cursor_head.len() == 64) or
                 cursor_rows < 0 or
@@ -327,15 +338,27 @@ fn compile_source_inventory_publish_reasoned_v1(
         for ch in cursor_head:
             if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
                 return ("", "publish-cursor-invalid")
-        pointer_content = [
+        val scoped = untracked_src_digest != "" or untracked_test_digest != ""
+        if scoped and (not compile_source_inventory_digest_valid_v1(untracked_src_digest) or
+                not compile_source_inventory_digest_valid_v1(untracked_test_digest)):
+            return ("", "publish-untracked-cursor-invalid")
+        val cursor_version = if scoped:
+            "simple-compile-event-cursor-v2"
+        else:
+            "simple-compile-event-cursor-v1"
+        var cursor_rows_text = [
             digest,
-            "simple-compile-event-cursor-v1",
+            cursor_version,
             "git_head={cursor_head}",
             "filesystem_rows={cursor_rows}",
             "filesystem_digest={cursor_filesystem_digest}",
             "inventory_digest={digest}",
             "inventory_generation={inventory.generation}"
-        ].join("\n")
+        ]
+        if scoped:
+            cursor_rows_text = cursor_rows_text.push("untracked_src_digest={untracked_src_digest}")
+            cursor_rows_text = cursor_rows_text.push("untracked_test_digest={untracked_test_digest}")
+        pointer_content = cursor_rows_text.join("\n")
     val root = compile_source_inventory_storage_v1(cache_root)
     if not rt_dir_create_all("{root}/generations"):
         return ("", "publish-storage-mkdir-failed")
