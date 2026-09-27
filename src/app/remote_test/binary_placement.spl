@@ -5,8 +5,9 @@ fn remote_simple_binary_path(remote_os: text, configured: text) -> Result<text, 
     val requested = configured.trim()
     val platform = remote_os.trim().lower()
     if requested != "" and requested.lower() != "auto":
-        if (platform == "windows" or platform == "win") and configured != requested:
-            return Err("explicit remote Windows Simple binary path must not have outer whitespace")
+        if (platform == "windows" or platform == "win" or platform == "linux" or
+                platform == "simpleos" or platform == "simple-os") and configured != requested:
+            return Err("explicit remote Simple binary path must not have outer whitespace")
         if (platform == "windows" or platform == "win") and
                 not _remote_path_is_absolute(requested, true):
             return Err("explicit remote Windows Simple binary path must be absolute")
@@ -40,7 +41,7 @@ fn _remote_windows_same_path(left: text, right: text) -> bool:
     _remote_normalize_path(left, true) == _remote_normalize_path(right, true)
 
 fn _remote_path_is_absolute(value: text, windows: bool) -> bool:
-    val path = value.trim().replace("\\", "/")
+    val path = if windows: value.replace("\\", "/") else: value
     if windows:
         val drive = if path.len() > 0: path[0:1].lower() else: ""
         return path.starts_with("//") or
@@ -49,7 +50,7 @@ fn _remote_path_is_absolute(value: text, windows: bool) -> bool:
     path.starts_with("/")
 
 fn _remote_path_has_file_leaf(value: text, windows: bool) -> bool:
-    val lexical = value.trim().replace("\\", "/")
+    val lexical = if windows: value.replace("\\", "/") else: value
     if lexical.ends_with("/"): return false
     val normalized = _remote_normalize_path(value, windows)
     if windows and normalized.len() >= 3 and normalized[1:3] == ":/":
@@ -59,7 +60,13 @@ fn _remote_path_has_file_leaf(value: text, windows: bool) -> bool:
         val unc_tail = normalized.substring(2)
         val unc_parts = unc_tail.split("/")
         return unc_parts.len() >= 3 and _remote_windows_file_path_valid(lexical, true)
-    normalized != "/" and normalized != ""
+    normalized != "/" and normalized != "" and _remote_posix_file_path_valid(lexical)
+
+fn _remote_posix_file_path_valid(value: text) -> bool:
+    for character in value.chars():
+        val code = character.char_code_at(0)
+        if code < 32 or code == 127: return false
+    true
 
 fn _remote_windows_component_syntax_valid(component: text) -> bool:
     if component == "" or component.ends_with(".") or component.ends_with(" "):
@@ -106,7 +113,7 @@ fn _remote_windows_file_path_valid(value: text, unc: bool) -> bool:
 
 fn _remote_normalize_path(value: text, windows: bool) -> text:
     """Lexically normalize a target path without consulting the local host."""
-    var path = value.trim().replace("\\", "/")
+    var path = if windows: value.replace("\\", "/") else: value
     var prefix = ""
     if windows and path.len() >= 2 and path[1:2] == ":":
         prefix = path[0:2].lower() + "/"
@@ -148,6 +155,8 @@ fn _remote_validate_staging_path(remote_os: text, staged_path: text,
                 _remote_windows_same_path(staged, temporary):
             return Err("remote Simple staging path must differ from the installed and publication paths")
     else:
+        if staged_path != staged:
+            return Err("remote POSIX Simple staging path must not have outer whitespace")
         if not _remote_path_is_absolute(staged, false) or
                 not _remote_path_is_absolute(destination, false):
             return Err("remote POSIX Simple staging and installed paths must be absolute")
@@ -225,16 +234,20 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
         return Err("remote Simple expected SHA-256 must be 64 hexadecimal digits")
     val platform = remote_os.trim().lower()
     if platform == "windows" or platform == "win":
-        if not _remote_path_is_absolute(staged_path, true):
-            return Err("remote Windows Simple staging path must be absolute")
+        if staged_path != staged_path.trim() or
+                not _remote_path_is_absolute(staged_path, true) or
+                not _remote_path_has_file_leaf(staged_path, true):
+            return Err("remote Windows Simple staging path must be an exact absolute file path")
         val stage = _remote_windows_command_value(staged_path)
         if stage.is_err(): return Err(stage.unwrap_err())
         return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
             "$actual = (Get-FileHash -LiteralPath " + stage.unwrap() + " -Algorithm SHA256).Hash.ToLowerInvariant(); " +
             "if ($actual -ne '" + digest + "') { Write-Error 'remote-test uploaded Simple SHA-256 mismatch'; exit 74 }\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
-        if not _remote_path_is_absolute(staged_path, false):
-            return Err("remote POSIX Simple staging path must be absolute")
+        if staged_path != staged_path.trim() or
+                not _remote_path_is_absolute(staged_path, false) or
+                not _remote_path_has_file_leaf(staged_path, false):
+            return Err("remote POSIX Simple staging path must be an exact absolute file path")
         val stage = _remote_posix_quote(staged_path)
         return Ok("actual=$(sha256sum -- " + stage + ") || exit 74; actual=${actual%% *}; " +
             "if [ \"$actual\" != '" + digest + "' ]; then " +

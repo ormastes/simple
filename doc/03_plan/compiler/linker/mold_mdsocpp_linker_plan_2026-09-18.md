@@ -656,3 +656,12 @@ in diagnostics. Shared objects remain invalid for a freestanding boot image;
 missing libraries, malformed archives, and incomplete named runtime providers
 fail before publication. `debug` and unmodelled `extra_flags` remain explicit
 unsupported policy rather than being ignored.
+
+Remote interpreter placement now validates the exact path bytes later quoted
+into target commands. Known-target explicit and staging paths reject outer
+whitespace instead of validating a trimmed alias and executing the original;
+POSIX normalization no longer treats backslash as a directory separator, and
+control-character paths fail before transfer. The independent staging-digest
+command now applies the same absolute-file-leaf policy, including Windows
+device/namespace rejection, so it cannot hash a root or a different lexical
+target than the publication pipeline.
