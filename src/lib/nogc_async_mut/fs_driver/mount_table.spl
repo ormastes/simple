@@ -335,16 +335,18 @@ impl MountTable:
                         val actual_kind = driver_positioned_kind(self.mounts[i].driver)?
                         if kind != PositionedDriverKind.Auto and kind != actual_kind:
                             return Err(FsError.Unsupported)
-                        if length > 0u64:
-                            self._generation_available(binding.mount_id, false)?
+                        # Some backends extend the file to offset even for an
+                        # empty patch. An empty write must never reach them.
+                        if length == 0u64:
+                            return Ok(0u64)
+                        self._generation_available(binding.mount_id, false)?
                         val write_result = driver_positioned_write_bytes(
                             self.mounts[i].driver, actual_kind, binding.inner_handle,
                             offset as i64, data)
                         # Drivers can write bytes and then fail while restoring a
                         # cursor or mirroring storage. Once dispatched, even an
                         # error must invalidate retained content identities.
-                        if length > 0u64:
-                            self._advance_generation(binding.mount_id, false)?
+                        self._advance_generation(binding.mount_id, false)?
                         val written = write_result?
                         if written < 0 or written > data.len() as i64:
                             return Err(FsError.IoError(code: 0u32))

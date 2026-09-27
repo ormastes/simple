@@ -13,8 +13,10 @@ The fix rejects a wrong-driver request before dispatch, preflights generation
 capacity, and conservatively advances the generation after any nonempty request
 that reaches a supported driver. FAT32 can return an error after writing bytes
 if cursor restoration fails; NVFS POSIX can fail after an inner write while
-mirroring to NVMe. A focused regression checks that a wrong-driver rejection
-leaves the binding current and a successful NVFS positioned write makes it stale.
+mirroring to NVMe. A zero-length request returns before backend dispatch because
+DBFS otherwise extends the file to a past-EOF offset even when no patch bytes
+exist. A focused regression checks wrong-driver rejection, empty-write size and
+byte preservation, and successful NVFS positioned-write invalidation.
 
 The local pure-Simple binary at
 `bin/release/aarch64-apple-darwin-macho/simple` exited 139 during discovery of
