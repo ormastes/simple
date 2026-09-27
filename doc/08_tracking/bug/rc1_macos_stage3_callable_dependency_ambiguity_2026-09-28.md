@@ -105,3 +105,20 @@ is now indexed `while` code, matching the prior fix for the other traversals.
 The existing native projection unit spec covers selection of every field and
 missing-binding behavior. A source-matched Stage 2 admission is required to
 test whether this removes the cold-binary hang; no success is claimed here.
+
+## Stage 3 after the remaining field scan was bounded
+
+Commit `84d0a188004` passed canonical Stage 2 trust-root admission, including
+the positional frontend smoke and receiver check. Its planner receipt was
+produced from that admitted binary. Stage 3 then stopped before source loading
+with `MC/DC global byte budget must be at least the owner byte budget
+(owner=33533980673, global=0)`. This proves the earlier scalar reset inside
+`CompilerConfig.from_env()` was insufficient: a later aggregate return into
+`CompileContext.create()` can still corrupt the budget fields.
+
+The next source change resolves owner and global budgets through scalar
+functions in the config owner, and applies those values in
+`CompileContext.create()` after receiving the aggregate. The same functions
+retain the existing environment parsing and validation semantics, and CLI
+overrides still apply last. It requires a new source-matched Stage 2 admission
+and Stage 3 run; neither is claimed by this note.
