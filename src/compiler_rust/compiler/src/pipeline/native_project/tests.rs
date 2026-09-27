@@ -2925,6 +2925,7 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     assert_eq!(
         core_c_target_flags(
             Target::new(TargetArch::Aarch64, TargetOS::Linux),
+            "clang",
             "runtime_native.c",
             false
         ),
@@ -2933,6 +2934,7 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     assert_eq!(
         core_c_target_flags(
             Target::new(TargetArch::Riscv64, TargetOS::Linux),
+            "clang",
             "runtime_simd_dispatch.c",
             true
         ),
@@ -2940,10 +2942,21 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
     );
     assert!(core_c_target_flags(
         Target::new(TargetArch::Riscv64, TargetOS::Linux),
+        "clang",
         "runtime_native.c",
         true
     )
     .is_empty());
+}
+
+#[test]
+fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
+    let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+    assert_eq!(
+        windows_gnu_target_flag(target, "clang"),
+        Some("--target=x86_64-w64-windows-gnu")
+    );
+    assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
 }
 
 #[cfg(target_os = "linux")]
