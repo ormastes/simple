@@ -184,6 +184,11 @@ LLVM 23's `R_X86_64_CODE_4_GOTPCRELX` now follows the non-relaxed signed
 32-bit GOT-slot displacement path. A type-43 Clang `.reloc` fixture matches
 Mold 2.42 without pretending the ordinary two-byte-prefix relaxation rewrite
 also applies to the four-byte-prefix instruction family.
+LLVM 23's `R_X86_64_CODE_4_GOTTPOFF` and `R_X86_64_CODE_6_GOTTPOFF` now enter
+the existing initial-exec TLS pipeline without an instruction rewrite. They
+share a TPOFF GOT slot and apply checked signed PC-relative displacements in
+hosted ELF and SimpleOS; a two-relocation fixture matches Mold 2.42's fields
+and variant-II `-8` slot value.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE

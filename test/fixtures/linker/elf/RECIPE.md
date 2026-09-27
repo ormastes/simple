@@ -104,6 +104,7 @@ clang --target=x86_64-linux-gnu -c got64_x64.s -o got64_x64.o
 clang --target=x86_64-linux-gnu -c gotpcrel64_x64.s -o gotpcrel64_x64.o
 clang --target=x86_64-linux-gnu -c gotpc64_x64.s -o gotpc64_x64.o
 clang --target=x86_64-linux-gnu -c code4_gotpcrelx_x64.s -o code4_gotpcrelx_x64.o
+clang --target=x86_64-linux-gnu -c code_gottpoff_x64.s -o code_gottpoff_x64.o
 clang --target=x86_64-linux-gnu -c gotoff64_x64.s -o gotoff64_x64.o
 clang --target=x86_64-linux-gnu -c pltoff64_x64.s -o pltoff64_x64.o
 clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -fno-unwind-tables hello_libc.c -o hello_libc_a64.o
@@ -126,6 +127,7 @@ clang --target=aarch64-linux-gnu -c -O1 -fPIE -fno-asynchronous-unwind-tables -f
 | gotpcrel64_x64.o | explicit `.reloc` R_X86_64_GOTPCREL64 full-width displacement from the patch address to a local symbol's GOT slot |
 | gotpc64_x64.o | explicit `.reloc` R_X86_64_GOTPC64 full-width displacement to the linker-synthesized `_GLOBAL_OFFSET_TABLE_` |
 | code4_gotpcrelx_x64.o | explicit `.reloc` R_X86_64_CODE_4_GOTPCRELX signed 32-bit displacement to a local symbol's GOT slot; kept unrelaxed and checked against Mold 2.42 |
+| code_gottpoff_x64.o | explicit `.reloc` R_X86_64_CODE_4_GOTTPOFF and R_X86_64_CODE_6_GOTTPOFF initial-exec displacements sharing a local TLS TPOFF GOT slot; checked against Mold 2.42 |
 | gotoff64_x64.o | explicit `.reloc` R_X86_64_GOTOFF64 full-width displacement from `_GLOBAL_OFFSET_TABLE_` to a local data symbol; Mold 2.42 supplies the byte oracle |
 | pltoff64_x64.o | explicit `.reloc` R_X86_64_PLTOFF64 full-width displacement from `.got.plt` to a local function; Mold 2.42 supplies the byte oracle |
 
