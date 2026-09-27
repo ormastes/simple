@@ -624,9 +624,12 @@ Linux internal routing no longer rejects `runtime_path`, `runtime_bundle`,
 added as archive input and named user libraries resolve dynamic-first across
 explicit, CRT, and architecture-default search paths. Only real ar archives
 and ELF `ET_DYN` inputs are accepted; GNU ld text scripts are skipped during
-name lookup and explicit non-binary inputs fail closed. Debug/strip/retained
-Debug/extra-flag policies remain named unsupported fields until their output
-semantics are implemented. Hosted ELF and Windows retained-symbol roots seed
+name lookup and explicit non-binary inputs fail closed. Typed `-rpath` and
+`-Wl,-rpath,` extra flags now become one ordered, deduplicated `DT_RUNPATH`
+payload in `.dynstr`, admitting Stage-4 `$ORIGIN` and provider-directory
+placement. Malformed rpaths and every unmodelled extra flag still fail closed;
+debug policy remains unsupported until its output semantics are implemented.
+Hosted ELF and Windows retained-symbol roots seed
 archive extraction; SimpleOS validates roots against its keep-all object and
 script definitions; every route fails unresolved roots by name. `strip_output`
 is implemented across internal ELF, SimpleOS, and PE routing rather than being

@@ -546,9 +546,30 @@ fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
     # provider archives. The remaining fields need explicit implementations;
     # rejecting them prevents a successful link with silently changed policy.
-    if config.extra_flags.len() > 0: return "extra_flags"
+    if internal_elf_runpath(config.extra_flags).is_err(): return "extra_flags"
     if config.debug: return "debug"
     ""
+
+fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
+    """Consume only direct-linker rpath spellings; reject every other flag."""
+    var paths: [text] = []
+    var i: i64 = 0
+    while i < extra_flags.len():
+        val flag = extra_flags[i]
+        var path = ""
+        if flag == "-rpath":
+            if i + 1 >= extra_flags.len(): return Err("-rpath requires a value")
+            path = extra_flags[i + 1]
+            i = i + 2
+        elif flag.starts_with("-Wl,-rpath,"):
+            path = flag.substring(11)
+            i = i + 1
+        else:
+            return Err("unsupported internal ELF linker flag '{flag}'")
+        if path == "" or path.contains("\0"):
+            return Err("internal ELF RUNPATH entry is empty or contains NUL")
+        if not paths.contains(path): paths = paths.push(path)
+    Ok(paths.join(":"))
 
 fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
@@ -782,8 +803,10 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     var mode = ELF_LINK_DYNAMIC_EXEC
     if config.pie:
         mode = ELF_LINK_DYNAMIC_PIE
+    val runpath = internal_elf_runpath(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
-        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker)
+        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
+        runpath: runpath)
     val linked = elf_link_configured(request, config.strip_output, config.retained_symbols)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")

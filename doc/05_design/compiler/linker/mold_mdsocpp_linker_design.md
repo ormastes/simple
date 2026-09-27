@@ -262,6 +262,13 @@ crossing the section boundary fails with an object-scoped diagnostic rather
 than truncating silently or indexing outside the symbol table. Raw
 `R_X86_64_SIZE64` is explicitly eight bytes even though its formula is lowered
 to the generic 64-bit absolute operator only after this validation.
+The hosted Linux internal route consumes only typed `-rpath <value>` and
+`-Wl,-rpath,<value>` extra flags. It deduplicates entries in input order,
+joins them with `:`, stores the payload once in `.dynstr`, and publishes one
+`DT_RUNPATH`; malformed rpaths, NUL, unrelated flags, and static-image RUNPATH
+requests remain fail-closed. This admits Stage-4 external-provider `$ORIGIN`
+and provider-directory placement without silently accepting arbitrary linker
+flags.
 
 Remote interpreter placement is a target-filesystem decision, not a host-path
 guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`

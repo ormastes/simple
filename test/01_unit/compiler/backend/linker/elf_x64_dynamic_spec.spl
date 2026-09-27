@@ -17,7 +17,8 @@
 # @cover src/compiler/70.backend/linker/elf/reloc_scan.spl
 
 use compiler.backend.linker.elf.elf_static_link.{
-    elf_link, elf_link_structural, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
+    elf_link, elf_link_structural, ElfLinkRequest,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
@@ -28,6 +29,7 @@ val FIX: text = "test/fixtures/linker/elf"
 val INTERP: text = "/lib64/ld-linux-x86-64.so.2"
 val PT_INTERP: i64 = 3
 val PT_GNU_RELRO: i64 = 0x6474e552
+val DT_RUNPATH: i64 = 29
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -120,6 +122,33 @@ describe "elf_link - x86_64 dynamic gate":
         val r = elf_link(request(ELF_LINK_DYNAMIC_EXEC))
         expect(r.is_ok()).to_equal(true)
         expect(r.unwrap()).to_equal(structural(ELF_LINK_DYNAMIC_EXEC))
+
+    it "emits one DT_RUNPATH string for typed internal-linker rpaths":
+        val req = ElfLinkRequest(objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP,
+            runpath: "$ORIGIN:/opt/simple/lib")
+        val b = elf_link(req).unwrap()
+        val runpath_offset = dyn_tag(b, DT_RUNPATH)
+        expect(runpath_offset > 0).to_equal(true)
+        expect(cstr(b, sec_off(b, ".dynstr") + runpath_offset)).to_equal(
+            "$ORIGIN:/opt/simple/lib")
+
+    it "rejects RUNPATH on a static image":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "",
+            runpath: "$ORIGIN")
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("RUNPATH given to a static link")
+
+    it "rejects an embedded NUL in a direct RUNPATH request":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC, interp: INTERP,
+            runpath: "$ORIGIN\0/hidden")
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("RUNPATH contains NUL")
 
 describe "elf_link_structural - x86_64 dynamic ET_EXEC":
     it "has PT_INTERP naming ld-linux-x86-64 and DT_NEEDED libadd_x64.so":

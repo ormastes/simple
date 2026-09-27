@@ -74,7 +74,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     elf_build_dynamic, elf_build_interp, elf_build_gnu_build_id,
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
-    DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
+    DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH,
     DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1,
     DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM, DF_1_PIE,
     SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_GNU_VERNEED_S, SHT_GNU_VERSYM_S,
@@ -114,6 +114,7 @@ struct ElfLinkRequest:
     target: RelocArch
     mode: i64             # ELF_LINK_*
     interp: text          # PT_INTERP path (dynamic modes only)
+    runpath: text = ""    # DT_RUNPATH payload (dynamic modes only)
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -133,6 +134,7 @@ struct ElfLinkCtx:
     common_out: i64
     copy_offsets: {text: i64}
     copy_out: i64
+    runpath: text
 
 struct ElfCommonPlacement:
     inputs: ElfStaticInputs
@@ -750,6 +752,8 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
     if dynamic:
         for l in ctx.libs:
             t = t.push([DT_NEEDED, dynstr.offsets[l.soname]])
+        if ctx.runpath != "":
+            t = t.push([DT_RUNPATH, dynstr.offsets[ctx.runpath]])
         t = t.push([DT_DEBUG, 0])
         if elf_has_def(ctx, "_init"):
             t = t.push([DT_INIT, a.init])
@@ -1144,6 +1148,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val pie = elf_mode_pie(mode)
     if not dynamic and req.shared.len() > 0:
         return Err("shared objects given to a static link")
+    if not dynamic and req.runpath != "":
+        return Err("RUNPATH given to a static link")
+    if req.runpath.contains("\0"):
+        return Err("RUNPATH contains NUL")
     if dynamic and req.interp == "":
         return Err("dynamic link needs an interpreter path (PT_INTERP)")
 
@@ -1201,7 +1209,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
 
     val common = elf_place_common(elf_static_place(collected, gc.live)?, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
-        common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1)
+        common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
+        runpath: req.runpath)
     val initial_contents = elf_static_contents(common.inputs)
     val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
@@ -1217,7 +1226,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val inputs = copies.inputs
     val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx,
-        copy_offsets: copies.offsets, copy_out: copies.out_idx)
+        copy_offsets: copies.offsets, copy_out: copies.out_idx, runpath: req.runpath)
     var contents = elf_static_contents(inputs)
     val eh_out = elf_find_out(inputs.outs, ".eh_frame")
     var eh_fdes: i64 = 0
@@ -1272,6 +1281,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         strnames = strnames.push(elf_dynsym_name(n))
     for version in need_versions:
         strnames = strnames.push(version)
+    if req.runpath != "": strnames = strnames.push(req.runpath)
     val dynstr0 = elf_build_dynstr(strnames)
     val arrays = [elf_array_size(inputs.outs, ".init_array"), elf_array_size(inputs.outs, ".fini_array"),
         elf_array_size(inputs.outs, ".preinit_array")]
