@@ -35,3 +35,13 @@ The isolated source needs an ABI-matched current runtime authority and a
 current-source pure-Simple compiler candidate before SPipe, full-check,
 Stage4 size/startup cohorts, and native event-publication acceptance can be
 qualified. Do not treat the historical Stage2 checks as a PASS.
+
+## Follow-up
+
+The isolated `pipeline_fn.spl` now passes the enum variants directly for its
+debug and release defaults, matching the existing `optimizationconfig_debug`
+and `optimizationconfig_speed` definitions. This removes those imported helper
+calls from the focused CLI closure. The historical-runtime ABI gaps and the
+current-source Stage4 admission gap remain. No fresh Stage4 build has qualified
+this change; administrator privileges do not supply the missing runtime or
+compiler artifact.
