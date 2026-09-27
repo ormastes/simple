@@ -180,6 +180,10 @@ their definition, imported functions receive a PLT entry, hosted ELF uses its
 `.got.plt` base, and SimpleOS uses its minimal `.got`. A type-31 Clang `.reloc`
 fixture matches Mold 2.42's emitted value. `R_X86_64_GOTPLT64` remains outside
 the compatibility surface because Mold 2.42 rejects relocation type 30.
+LLVM 23's `R_X86_64_CODE_4_GOTPCRELX` now follows the non-relaxed signed
+32-bit GOT-slot displacement path. A type-43 Clang `.reloc` fixture matches
+Mold 2.42 without pretending the ordinary two-byte-prefix relaxation rewrite
+also applies to the four-byte-prefix instruction family.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE
