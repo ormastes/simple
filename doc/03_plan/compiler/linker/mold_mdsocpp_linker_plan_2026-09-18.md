@@ -654,6 +654,10 @@ name lookup and explicit non-binary inputs fail closed. Typed `-rpath` and
 payload in `.dynstr`, admitting Stage-4 `$ORIGIN` and provider-directory
 placement. Malformed rpaths and every unmodelled extra flag still fail closed;
 debug policy remains unsupported until its output semantics are implemented.
+Linux internal routing also accepts explicit `--eh-frame-hdr`, `--build-id`,
+`--build-id=sha1`, and `--gc-sections` requests because those exact policies
+are intrinsic to every produced image. Alternate build-id algorithms and
+`--no-gc-sections` remain rejected rather than silently changing semantics.
 Hosted ELF and Windows retained-symbol roots seed
 archive extraction; SimpleOS validates roots against its object and script
 definitions and retains their section graph under `--gc-sections`; every route
