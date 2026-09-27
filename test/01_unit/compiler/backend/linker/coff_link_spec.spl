@@ -3,6 +3,7 @@ use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_amd64_retained_policy, coff_link_amd64_retained_image_policy,
+    coff_link_amd64_retained_image_policy_gc,
     coff_link_arm64, coff_link_arm64_retained_policy,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
@@ -32,6 +33,11 @@ fn _cl_u64(bytes: [u8], value: i64) -> [u8]:
         result = result.push(((value >> (i * 8)) & 0xff) as u8)
         i = i + 1
     result
+
+fn _cl_read_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) |
+        ((bytes[offset + 3] as i64) << 24)
 
 fn _cl_read_u64(bytes: [u8], offset: i64) -> i64:
     var result: i64 = 0
@@ -76,6 +82,92 @@ fn _cl_object(symbol_name: text, section_number: i64) -> [u8]:
     bytes = _cl_u16(bytes, 0x20)
     bytes = bytes.push(2)
     bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_comdat_object(symbol_name: text, opcode: i64) -> [u8]:
+    # One IMAGE_COMDAT_SELECT_ANY section plus its external key symbol.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 61)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60001020)
+    bytes = bytes.push(opcode as u8)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(3).push(1)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x1234)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2).push(0).push(0).push(0)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_comdat_reference_object(symbol_name: text, target_name: text) -> [u8]:
+    # A discardable section whose sole relocation names an external.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0x8664)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 74)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 64)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60001020)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 3)
+    bytes = _cl_u16(bytes, 4)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(3).push(1)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2).push(0).push(0).push(0)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, target_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = bytes.push(2).push(0)
     _cl_u32(bytes, 4)
 
 fn _cl_arm64_object(symbol_name: text) -> [u8]:
@@ -367,6 +459,40 @@ fn _cl_weak_calling_object() -> [u8]:
     _cl_u32(bytes, 4)
 
 describe "internal freestanding Windows linker":
+    it "removes unreachable COMDATs under OPT REF":
+        val request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_object("dead", 0xcc)], archives: [], entry: "_start")
+        val kept = coff_link_amd64_retained_image_policy_gc(
+            request, [], PeImagePolicy.default(), 0x140000000, false).unwrap()
+        val collected = coff_link_amd64_retained_image_policy_gc(
+            request, [], PeImagePolicy.default(), 0x140000000, true).unwrap()
+        val explicitly_retained = coff_link_amd64_retained_image_policy_gc(
+            request, ["dead"], PeImagePolicy.default(), 0x140000000, true).unwrap()
+        expect(_cl_read_u32(kept, 0x188)).to_equal(2)
+        expect(_cl_read_u32(collected, 0x188)).to_equal(1)
+        expect(_cl_read_u32(explicitly_retained, 0x188)).to_equal(2)
+        expect(collected[0x200] as i64).to_equal(0xc3)
+
+        val dead_reference = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_reference_object("dead", "missing")],
+            archives: [], entry: "_start")
+        expect(coff_link_amd64_retained_image_policy_gc(
+            dead_reference, [], PeImagePolicy.default(),
+            0x140000000, false).is_err()).to_equal(true)
+        expect(coff_link_amd64_retained_image_policy_gc(
+            dead_reference, [], PeImagePolicy.default(),
+            0x140000000, true).is_ok()).to_equal(true)
+
+        val reachable_reference = CoffLinkRequest(objects: [
+            _cl_comdat_reference_object("_start", "helper"),
+            _cl_comdat_object("helper", 0xc3)], archives: [], entry: "_start")
+        val reachable = coff_link_amd64_retained_image_policy_gc(
+            reachable_reference, [], PeImagePolicy.default(),
+            0x140000000, true).unwrap()
+        expect(_cl_read_u32(reachable, 0x188)).to_equal(5)
+
     it "writes typed optional-header and alignment policy into PE32+":
         val policy = PeImagePolicy(
             subsystem: PE_SUBSYSTEM_WINDOWS,

@@ -62,8 +62,9 @@ use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64_retained_image_policy,
-    coff_link_arm64_retained_image_policy,
+    CoffLinkRequest,
+    coff_link_amd64_retained_image_policy_gc,
+    coff_link_arm64_retained_image_policy_gc,
     coff_link_default_libraries, coff_link_arm64_default_libraries}
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImagePolicy, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE,
@@ -564,6 +565,7 @@ struct InternalCoffFlags:
     policy: PeImagePolicy
     entry: text
     image_base: i64
+    opt_ref: bool
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -816,6 +818,7 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var saw_large_address: i64 = -1
     var saw_ts_aware: i64 = -1
     var saw_fixed: i64 = -1
+    var saw_opt_ref: i64 = -1
     for flag in extra_flags:
         val normalized = flag.lower()
         val dynamic_base = _internal_coff_switch(normalized, "/dynamicbase")
@@ -824,6 +827,7 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
         val large_address = _internal_coff_switch(normalized, "/largeaddressaware")
         val ts_aware = _internal_coff_switch(normalized, "/tsaware")
         val fixed = _internal_coff_switch(normalized, "/fixed")
+        val opt_ref = if normalized == "/opt:ref": 1 elif normalized == "/opt:noref": 0 else: -1
         if dynamic_base >= 0:
             saw_dynamic_base = _internal_coff_set_switch(
                 saw_dynamic_base, dynamic_base, "/DYNAMICBASE")?
@@ -848,6 +852,9 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             saw_fixed = _internal_coff_set_switch(
                 saw_fixed, fixed, "/FIXED")?
             policy.fixed_image = fixed == 1
+        elif opt_ref >= 0:
+            saw_opt_ref = _internal_coff_set_switch(
+                saw_opt_ref, opt_ref, "/OPT:REF")?
         elif normalized.starts_with("/machine:"):
             val machine = normalized.substring(9)
             var canonical = ""
@@ -974,7 +981,8 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     if (policy.section_alignment < 0x1000 and
             policy.section_alignment != policy.file_alignment):
         return Err("internal COFF sub-page /ALIGN must equal /FILEALIGN")
-    Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base))
+    Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base,
+        opt_ref: saw_opt_ref == 1))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:
     """Return the PE image policy projected from modeled internal COFF flags."""
@@ -2126,13 +2134,13 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         val link_request = CoffLinkRequest(
             objects: objects, archives: archives, entry: selected_entry)
         val linked = if arm64_target:
-            coff_link_arm64_retained_image_policy(
+            coff_link_arm64_retained_image_policy_gc(
                 link_request, config.retained_symbols, coff_flags.policy,
-                selected_image_base)
+                selected_image_base, coff_flags.opt_ref)
         else:
-            coff_link_amd64_retained_image_policy(
+            coff_link_amd64_retained_image_policy_gc(
                 link_request, config.retained_symbols, coff_flags.policy,
-                selected_image_base)
+                selected_image_base, coff_flags.opt_ref)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")

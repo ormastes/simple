@@ -766,9 +766,16 @@ Duplicate equal values deduplicate and conflicts fail closed.
 PE32+ optional-header fields. Components are decimal or `0x` values bounded to
 16 bits; malformed, overflowing, and conflicting repeats fail before output.
 Defaults remain OS 6.0, image 0.0, and subsystem 6.0 for byte compatibility.
+`/OPT:REF` now drives relocation-graph COMDAT elimination. Entry candidates,
+`/INCLUDE` roots, exports, and every ordinary non-COMDAT section seed the live
+graph; relocations and associative COMDAT parentage retain reachable packaged
+sections, while undefined references owned only by discarded sections do not
+poison the link. `/OPT:NOREF` preserves all selected sections, and conflicting
+REF policy fails closed.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
-always a complete one-shot link. Their enabled counterparts and `/OPT:REF,ICF`
-remain named unsupported until those output contracts are implemented. Native
+always a complete one-shot link. Their enabled counterparts and `/OPT:ICF`
+(including `/OPT:REF,ICF`) remain named unsupported until relocation-aware
+identical COMDAT folding is implemented. Native
 Windows execution remains pending the host prerequisite recorded above.
