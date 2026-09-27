@@ -305,7 +305,9 @@ fn verify_macos_llvm_tool(tool: &std::ffi::OsStr, required: &str) -> Result<(), 
 
 #[cfg(target_os = "macos")]
 fn add_macos_base_link_args(cmd: &mut std::process::Command) -> Result<(), String> {
-    if let Ok(required) = std::env::var("SIMPLE_LLVM_REQUIRED_VERSION") {
+    // Blank means unpinned: the bootstrap passes every macOS tool name, empty
+    // when the host has no pin (same rule as cc_detect's nonblank_tool_override).
+    if let Some(required) = std::env::var("SIMPLE_LLVM_REQUIRED_VERSION").ok().filter(|v| !v.trim().is_empty()) {
         verify_macos_llvm_tool(cmd.get_program(), &required)?;
         let linker = std::env::var_os("LD")
             .ok_or_else(|| "pinned macOS LLVM link requires explicit LD".to_string())?;
