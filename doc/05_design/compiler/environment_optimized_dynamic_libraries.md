@@ -1142,6 +1142,13 @@ selected Option B: parse and normalize a textual target triple, reject unknown
 or ambiguous aliases, resolve the canonical architecture/OS/ABI/object-format
 tuple, and issue an opaque live lookup token bound to registry generation,
 version, and mapping digest. Direct string hashing does not assign IDs.
+Registry generation 2 also assigns rows to the three supported 64-bit SimpleOS
+userland triples in `simpleos_target_v1`: x86_64, AArch64, and riscv64gc. Their
+canonical triples omit the ABI suffix while their rows retain explicit sysv,
+aapcs64, or lp64d ABI IDs. The riscv64gc spelling maps to the riscv64
+architecture-family ID; its ISA extension remains a target feature, not a new
+architecture ID. The 32-bit SimpleOS compile-only targets remain unknown to
+this registry until the environment architecture contract assigns their IDs.
 
 The common lookup layer revalidates candidate content/digest before resolving
 either canonical triple or numeric profile ID. Profile binding additionally
