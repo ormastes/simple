@@ -7,8 +7,8 @@ use simple_common::target::TargetOS;
 use super::{effective_target, ModuleImports};
 use super::tools::{
     archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
-    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
-    windows_gnu_target_flag,
+    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, is_system_symbol_for_target,
+    nm_command, target_c_compiler, windows_gnu_target_flag,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -1097,7 +1097,7 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
         .filter(|s| !is_linker_provided_symbol(s, &defined))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !is_runtime_optional_symbol(s))
         .cloned()
         .collect();
@@ -1158,7 +1158,7 @@ or set {}=1 to bypass at your own risk.",
         // final linker to diagnose.
         .filter(|s| !is_inline_asm_symbol(s))
         .filter(|s| stub_missing_runtime || !is_runtime_owned_symbol(s))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
 
