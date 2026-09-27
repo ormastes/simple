@@ -1,12 +1,14 @@
 use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained, coff_link_arm64,
+    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
+    coff_link_amd64_retained_policy, coff_link_arm64,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
     coff_sort_arm64_exception_table,
     coff_validate_resource_sections, coff_validate_export_sections}
-use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImageSection, PeImagePolicy, PE_SUBSYSTEM_WINDOWS}
 use compiler.backend.linker.pe_inspect.{IMAGE_FILE_MACHINE_ARM64, pe_inspect}
 use std.io_runtime.{file_read_bytes}
 
@@ -27,6 +29,14 @@ fn _cl_u64(bytes: [u8], value: i64) -> [u8]:
     var i: i64 = 0
     while i < 8:
         result = result.push(((value >> (i * 8)) & 0xff) as u8)
+        i = i + 1
+    result
+
+fn _cl_read_u64(bytes: [u8], offset: i64) -> i64:
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < 8:
+        result = result | ((bytes[offset + i] as i64) << (i * 8))
         i = i + 1
     result
 
@@ -356,6 +366,30 @@ fn _cl_weak_calling_object() -> [u8]:
     _cl_u32(bytes, 4)
 
 describe "internal freestanding Windows linker":
+    it "writes typed subsystem, stack, and heap policy into PE32+":
+        val policy = PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_WINDOWS,
+            stack_reserve: 0x200000, stack_commit: 0x2000,
+            heap_reserve: 0x300000, heap_commit: 0x3000)
+        val image = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], policy).unwrap()
+        expect(image[0xdc] as i64).to_equal(PE_SUBSYSTEM_WINDOWS)
+        expect(_cl_read_u64(image, 0xe0)).to_equal(0x200000)
+        expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
+        expect(_cl_read_u64(image, 0xf0)).to_equal(0x300000)
+        expect(_cl_read_u64(image, 0xf8)).to_equal(0x3000)
+
+    it "rejects invalid PE reserve and commit policy":
+        val invalid = PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_WINDOWS,
+            stack_reserve: 0x1000, stack_commit: 0x2000,
+            heap_reserve: 0x100000, heap_commit: 0x1000)
+        val linked = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], invalid)
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("stack commit")
     it "attaches TLS metadata only to a complete file-backed directory":
         var directory: [u8] = []
         while directory.len() < 48: directory = directory.push(0)

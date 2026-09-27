@@ -710,3 +710,14 @@ and Windows SDK include/library roots. No linker verdict or admitted Stage 2
 was produced. The next Windows execution gate requires a host with the VS 2022
 Desktop C++ workload and Windows SDK; this environmental block does not change
 the false completion predicate.
+
+The internal Windows route now consumes case-insensitive `/SUBSYSTEM:CONSOLE`
+and `/SUBSYSTEM:WINDOWS`, `/STACK:reserve[,commit]`, and
+`/HEAP:reserve[,commit]` as typed PE32+ image policy. Decimal and `0x` values
+are bounds-checked, identical duplicate policy is harmless, and conflicting,
+zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
+before publication. The PE writer validates the policy and emits its subsystem,
+stack, and heap fields for both AMD64 and ARM64; legacy callers retain the
+byte-identical console/1 MiB reserve/4 KiB commit defaults. Mirrored contracts
+check parser rejection and the exact optional-header bytes. Native Windows
+execution remains pending the host prerequisite recorded above.

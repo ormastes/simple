@@ -62,8 +62,11 @@ use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64_retained, coff_link_arm64_retained,
+    CoffLinkRequest, coff_link_amd64_retained_policy,
+    coff_link_arm64_retained_policy,
     coff_link_default_libraries, coff_link_arm64_default_libraries}
+use compiler.backend.linker.coff.pe_image_writer.{
+    PeImagePolicy, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE}
 
 # Re-export CRT discovery (extracted to crt_discovery.spl)
 use compiler.backend.linker.crt_discovery.*
@@ -709,10 +712,87 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
 
 fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
-    # archives itself.  The remaining options still require explicit support.
-    if config.extra_flags.len() > 0: return "extra_flags"
+    # archives itself. Modeled optional-header flags become typed PE policy;
+    # every other option remains a fail-closed unsupported field.
+    if internal_coff_policy(config.extra_flags).is_err(): return "extra_flags"
     if config.debug: return "debug"
     ""
+
+fn _internal_coff_number(value: text) -> Result<i64, text>:
+    if value == "": return Err("empty numeric value")
+    var base: i64 = 10
+    var index: i64 = 0
+    if value.len() > 2 and value.substring(0, 2).lower() == "0x":
+        base = 16
+        index = 2
+    if index >= value.len(): return Err("empty hexadecimal value")
+    var result: i64 = 0
+    while index < value.len():
+        val byte = value.byte_at(index) as i64
+        var digit: i64 = -1
+        if byte >= 48 and byte <= 57:
+            digit = byte - 48
+        elif base == 16 and byte >= 65 and byte <= 70:
+            digit = byte - 55
+        elif base == 16 and byte >= 97 and byte <= 102:
+            digit = byte - 87
+        if digit < 0 or digit >= base:
+            return Err("invalid numeric value '{value}'")
+        if result > (0x7fffffffffffffff - digit) / base:
+            return Err("numeric value '{value}' exceeds PE32+ policy range")
+        result = result * base + digit
+        index = index + 1
+    Ok(result)
+
+fn _internal_coff_reserve_commit(value: text,
+        default_commit: i64, kind: text) -> Result<(i64, i64), text>:
+    val parts = value.split(",")
+    if parts.len() < 1 or parts.len() > 2:
+        return Err("internal COFF /{kind} requires reserve[,commit]")
+    val reserve = _internal_coff_number(parts[0])?
+    var commit = default_commit
+    if parts.len() == 2: commit = _internal_coff_number(parts[1])?
+    if reserve <= 0 or commit <= 0 or commit > reserve:
+        return Err("internal COFF /{kind} requires positive commit <= reserve")
+    Ok((reserve, commit))
+
+fn internal_coff_policy(extra_flags: [text]) -> Result<PeImagePolicy, text>:
+    """Project modeled case-insensitive MSVC flags into typed PE policy."""
+    var policy = PeImagePolicy.default()
+    var saw_subsystem = false
+    var saw_stack = false
+    var saw_heap = false
+    for flag in extra_flags:
+        val normalized = flag.lower()
+        if normalized.starts_with("/subsystem:"):
+            val name = normalized.substring(11)
+            var subsystem: i64 = 0
+            if name == "console": subsystem = PE_SUBSYSTEM_CONSOLE
+            elif name == "windows": subsystem = PE_SUBSYSTEM_WINDOWS
+            else: return Err("internal COFF supports only CONSOLE or WINDOWS subsystems")
+            if saw_subsystem and policy.subsystem != subsystem:
+                return Err("conflicting internal COFF /SUBSYSTEM flags")
+            policy.subsystem = subsystem
+            saw_subsystem = true
+        elif normalized.starts_with("/stack:"):
+            val values = _internal_coff_reserve_commit(
+                flag.substring(7), PeImagePolicy.default().stack_commit, "STACK")?
+            if saw_stack and (policy.stack_reserve != values.0 or policy.stack_commit != values.1):
+                return Err("conflicting internal COFF /STACK flags")
+            policy.stack_reserve = values.0
+            policy.stack_commit = values.1
+            saw_stack = true
+        elif normalized.starts_with("/heap:"):
+            val values = _internal_coff_reserve_commit(
+                flag.substring(6), PeImagePolicy.default().heap_commit, "HEAP")?
+            if saw_heap and (policy.heap_reserve != values.0 or policy.heap_commit != values.1):
+                return Err("conflicting internal COFF /HEAP flags")
+            policy.heap_reserve = values.0
+            policy.heap_commit = values.1
+            saw_heap = true
+        else:
+            return Err("unsupported internal COFF flag '{flag}'")
+    Ok(policy)
 
 fn internal_coff_is_archive(bytes: [u8]) -> bool:
     bytes.len() >= 8 and bytes[0] == 0x21 and bytes[1] == 0x3c and
@@ -1769,6 +1849,7 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         val unsupported_field = internal_coff_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
+        val pe_policy = internal_coff_policy(config.extra_flags)?
         var objects: [[u8]] = []
         var archives: [[u8]] = []
         for path in object_files:
@@ -1854,9 +1935,11 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         val link_request = CoffLinkRequest(
             objects: objects, archives: archives, entry: "auto")
         val linked = if arm64_target:
-            coff_link_arm64_retained(link_request, config.retained_symbols)
+            coff_link_arm64_retained_policy(
+                link_request, config.retained_symbols, pe_policy)
         else:
-            coff_link_amd64_retained(link_request, config.retained_symbols)
+            coff_link_amd64_retained_policy(
+                link_request, config.retained_symbols, pe_policy)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")

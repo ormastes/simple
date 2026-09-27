@@ -16,8 +16,9 @@ use compiler.backend.linker.coff.coff_object.{
     coff_apply_amd64_relocation, coff_apply_arm64_relocation,
     coff_apply_arm64_section_relocation}
 use compiler.backend.linker.coff.pe_image_writer.{
-    PeImageSection, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_SECTION_ALIGNMENT,
-    pe_align_up, pe_write_amd64_console, pe_write_arm64_console}
+    PeImageSection, PeImagePolicy, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE,
+    PE_MACHINE_AMD64, PE_MACHINE_ARM64, PE_SECTION_ALIGNMENT, pe_align_up,
+    pe_write_image_policy}
 use compiler.backend.linker.coff.archive_closure.{
     CoffArchiveClosure, coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{
@@ -976,7 +977,13 @@ fn coff_link_amd64(request: CoffLinkRequest) -> Result<[u8], text>:
 fn coff_link_amd64_retained(request: CoffLinkRequest,
         retained_symbols: [text]) -> Result<[u8], text>:
     """Link with `/INCLUDE`-style archive roots."""
-    _coff_link_retained(request, retained_symbols, COFF_MACHINE_AMD64)
+    coff_link_amd64_retained_policy(
+        request, retained_symbols, PeImagePolicy.default())
+
+fn coff_link_amd64_retained_policy(request: CoffLinkRequest,
+        retained_symbols: [text], policy: PeImagePolicy) -> Result<[u8], text>:
+    """Link AMD64 COFF with typed PE optional-header policy."""
+    _coff_link_retained(request, retained_symbols, COFF_MACHINE_AMD64, policy)
 
 fn coff_link_arm64(request: CoffLinkRequest) -> Result<[u8], text>:
     """Link ARM64 COFF objects and libraries into a PE32+ console executable."""
@@ -985,10 +992,17 @@ fn coff_link_arm64(request: CoffLinkRequest) -> Result<[u8], text>:
 fn coff_link_arm64_retained(request: CoffLinkRequest,
         retained_symbols: [text]) -> Result<[u8], text>:
     """Link ARM64 with `/INCLUDE`-style archive roots."""
-    _coff_link_retained(request, retained_symbols, COFF_MACHINE_ARM64)
+    coff_link_arm64_retained_policy(
+        request, retained_symbols, PeImagePolicy.default())
+
+fn coff_link_arm64_retained_policy(request: CoffLinkRequest,
+        retained_symbols: [text], policy: PeImagePolicy) -> Result<[u8], text>:
+    """Link ARM64 COFF with typed PE optional-header policy."""
+    _coff_link_retained(request, retained_symbols, COFF_MACHINE_ARM64, policy)
 
 fn _coff_link_retained(request: CoffLinkRequest,
-        retained_symbols: [text], machine: i64) -> Result<[u8], text>:
+        retained_symbols: [text], machine: i64,
+        policy: PeImagePolicy) -> Result<[u8], text>:
     val machine_name = if machine == COFF_MACHINE_ARM64: "ARM64" else: "AMD64"
     var image_base = PE_AMD64_IMAGE_BASE
     if machine == COFF_MACHINE_ARM64: image_base = PE_ARM64_IMAGE_BASE
@@ -1294,13 +1308,15 @@ fn _coff_link_retained(request: CoffLinkRequest,
             virtual_address: relocation_rva,
             virtual_size: base_relocations.unwrap().len(),
             data: base_relocations.unwrap(), characteristics: 0x42000040))
-    if machine == COFF_MACHINE_ARM64:
-        pe_write_arm64_console(output_sections, entry.unwrap())
+    val pe_machine = if machine == COFF_MACHINE_ARM64:
+        PE_MACHINE_ARM64
     else:
-        pe_write_amd64_console(output_sections, entry.unwrap())
+        PE_MACHINE_AMD64
+    pe_write_image_policy(output_sections, entry.unwrap(), pe_machine, image_base, policy)
 
 export CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained
 export coff_link_arm64, coff_link_arm64_retained
+export coff_link_amd64_retained_policy, coff_link_arm64_retained_policy
 export coff_link_default_libraries, coff_link_arm64_default_libraries
 export coff_attach_amd64_tls_directory
 export coff_attach_amd64_load_config

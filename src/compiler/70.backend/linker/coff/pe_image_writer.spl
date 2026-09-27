@@ -6,7 +6,24 @@ val PE_MACHINE_AMD64: i64 = 0x8664
 val PE_MACHINE_ARM64: i64 = 0xaa64
 val PE_SECTION_ALIGNMENT: i64 = 0x1000
 val PE_FILE_ALIGNMENT: i64 = 0x200
+val PE_SUBSYSTEM_WINDOWS: i64 = 2
 val PE_SUBSYSTEM_CONSOLE: i64 = 3
+
+struct PeImagePolicy:
+    subsystem: i64
+    stack_reserve: i64
+    stack_commit: i64
+    heap_reserve: i64
+    heap_commit: i64
+
+impl PeImagePolicy:
+    static fn default() -> PeImagePolicy:
+        PeImagePolicy(
+            subsystem: PE_SUBSYSTEM_CONSOLE,
+            stack_reserve: 0x100000,
+            stack_commit: 0x1000,
+            heap_reserve: 0x100000,
+            heap_commit: 0x1000)
 
 struct PeImageSection:
     name: text
@@ -80,6 +97,19 @@ fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64) -> Result<b
     if not entry_found: return Err("PE entry RVA {entry_rva} is outside every section")
     Ok(true)
 
+fn _pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
+    if policy.subsystem != PE_SUBSYSTEM_CONSOLE and policy.subsystem != PE_SUBSYSTEM_WINDOWS:
+        return Err("unsupported PE subsystem {policy.subsystem}")
+    if policy.stack_reserve <= 0:
+        return Err("PE stack reserve must be positive")
+    if policy.stack_commit <= 0 or policy.stack_commit > policy.stack_reserve:
+        return Err("PE stack commit must be positive and no greater than its reserve")
+    if policy.heap_reserve <= 0:
+        return Err("PE heap reserve must be positive")
+    if policy.heap_commit <= 0 or policy.heap_commit > policy.heap_reserve:
+        return Err("PE heap commit must be positive and no greater than its reserve")
+    Ok(true)
+
 fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
     var wanted = ""
     if directory == 0: wanted = ".edata"
@@ -113,11 +143,13 @@ fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
             return (section.virtual_address, size)
     (0, 0)
 
-fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
-        machine: i64, image_base: i64) -> Result<[u8], text>:
-    """Emit a deterministic AMD64 or ARM64 PE32+ console executable."""
+fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64, policy: PeImagePolicy) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 or ARM64 PE32+ executable."""
     if machine != PE_MACHINE_AMD64 and machine != PE_MACHINE_ARM64:
         return Err("unsupported PE32+ machine {machine}")
+    val valid_policy = _pe_validate_policy(policy)
+    if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
     val valid = _pe_validate_sections(sections, entry_rva)
     if valid.is_err(): return Err(valid.unwrap_err())
     val pe_offset: i64 = 0x80
@@ -191,12 +223,12 @@ fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u32(output, size_of_image)
     output = _pe_put_u32(output, size_of_headers)
     output = _pe_put_u32(output, 0)
-    output = _pe_put_u16(output, PE_SUBSYSTEM_CONSOLE)
+    output = _pe_put_u16(output, policy.subsystem)
     output = _pe_put_u16(output, dll_characteristics)
-    output = _pe_put_u64(output, 0x100000)
-    output = _pe_put_u64(output, 0x1000)
-    output = _pe_put_u64(output, 0x100000)
-    output = _pe_put_u64(output, 0x1000)
+    output = _pe_put_u64(output, policy.stack_reserve)
+    output = _pe_put_u64(output, policy.stack_commit)
+    output = _pe_put_u64(output, policy.heap_reserve)
+    output = _pe_put_u64(output, policy.heap_commit)
     output = _pe_put_u32(output, 0)
     output = _pe_put_u32(output, 16)
     var directory: i64 = 0
@@ -235,6 +267,12 @@ fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
         section_index = section_index + 1
     Ok(output)
 
+fn pe_write_console(sections: [PeImageSection], entry_rva: i64,
+        machine: i64, image_base: i64) -> Result<[u8], text>:
+    """Emit a deterministic AMD64 or ARM64 PE32+ console executable."""
+    pe_write_image_policy(
+        sections, entry_rva, machine, image_base, PeImagePolicy.default())
+
 fn pe_write_amd64_console(sections: [PeImageSection], entry_rva: i64) -> Result<[u8], text>:
     """Emit a deterministic AMD64 PE32+ console executable."""
     pe_write_console(sections, entry_rva, PE_MACHINE_AMD64, PE_AMD64_IMAGE_BASE)
@@ -243,7 +281,8 @@ fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
     """Emit a deterministic ARM64 PE32+ console executable."""
     pe_write_console(sections, entry_rva, PE_MACHINE_ARM64, PE_ARM64_IMAGE_BASE)
 
-export PeImageSection
+export PeImageSection, PeImagePolicy
 export PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_MACHINE_AMD64, PE_MACHINE_ARM64
-export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_CONSOLE
-export pe_align_up, pe_write_console, pe_write_amd64_console, pe_write_arm64_console
+export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE
+export pe_align_up, pe_write_image_policy, pe_write_console
+export pe_write_amd64_console, pe_write_arm64_console
