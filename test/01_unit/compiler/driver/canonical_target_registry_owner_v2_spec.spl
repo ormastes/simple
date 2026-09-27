@@ -77,3 +77,43 @@ describe "canonical target registry owner V2":
         expect(canonical_target_registry_resolve_v2(owner,
             "x86_64-unknown-linux-gnu")).to_equal(
                 Err(CanonicalTargetRegistryErrorV2.CapacityExceeded))
+
+    it "reclaims retired resolutions without retiring pinned generations":
+        val owner = canonical_target_registry_owner_v2(701u64).unwrap()
+        val pinned = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val use_token = canonical_target_registry_acquire_use_v2(owner, pinned).unwrap()
+        var retired = pinned
+        for i in 1..CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2:
+            retired = canonical_target_registry_resolve_v2(owner,
+                "x86_64-unknown-linux-gnu").unwrap()
+        expect(canonical_target_registry_replace_v2(owner, owner.candidate,
+            owner.aliases).is_ok()).to_be(true)
+        val current = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        expect(current.serial == pinned.serial).to_be(false)
+        expect(canonical_target_registry_project_v2(owner, use_token).is_ok()).to_be(true)
+        expect(canonical_target_registry_resolution_state_v2(owner, pinned).unwrap()).to_equal(
+            CanonicalTargetRegistryStateV2.Draining)
+        expect(canonical_target_registry_resolution_state_v2(owner, retired)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.StaleToken))
+        expect(canonical_target_registry_release_v2(owner, use_token).is_ok()).to_be(true)
+
+    it "reclaims released use records after capacity without reusing serials":
+        val owner = canonical_target_registry_owner_v2(801u64).unwrap()
+        val resolution = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val pinned = canonical_target_registry_acquire_use_v2(owner, resolution).unwrap()
+        val old = canonical_target_registry_acquire_use_v2(owner, resolution).unwrap()
+        expect(canonical_target_registry_release_v2(owner, old).is_ok()).to_be(true)
+        for i in 2..CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
+            val token = canonical_target_registry_acquire_use_v2(owner, resolution).unwrap()
+            expect(canonical_target_registry_release_v2(owner, token).is_ok()).to_be(true)
+        val current = canonical_target_registry_acquire_use_v2(owner, resolution).unwrap()
+        expect(current.use_serial == old.use_serial).to_be(false)
+        expect(canonical_target_registry_release_v2(owner, old)).to_equal(
+            Err(CanonicalTargetRegistryErrorV2.StaleToken))
+        expect(canonical_target_registry_project_v2(owner, pinned).is_ok()).to_be(true)
+        expect(canonical_target_registry_project_v2(owner, current).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(owner, current).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(owner, pinned).is_ok()).to_be(true)
