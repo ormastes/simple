@@ -897,3 +897,9 @@ Dynamic symbol names, version-definition names, and `DT_SONAME` now use a
 checked string-table lookup. Out-of-range offsets and empty linkable symbol or
 version names produce diagnostics instead of silently becoming empty strings
 that could change provider selection or dependency identity.
+Section-header-free ELF64 DSOs now use a bounded `PT_DYNAMIC` fallback. It
+maps dynamic virtual addresses only through file-backed `PT_LOAD` ranges,
+derives symbol counts from either validated SysV `DT_HASH` or GNU hash tables,
+and preserves SONAME, visibility, size/value, and GNU symbol-version behavior.
+The x86_64 fixture is exercised with its section table removed through both
+the SysV-hash and GNU-hash-only discovery paths.
