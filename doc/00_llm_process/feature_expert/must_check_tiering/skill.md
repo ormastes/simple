@@ -120,7 +120,7 @@ Several 2026-09-06-era claims above and in the operator guide were stale; this
 section is the current state, checked against `origin/main` on 2026-09-24.
 
 - **`code-idiom-gates` is no longer the required status context.** Since
-  2026-09-23 the ruleset requires `fast-gates` in `repo-hygiene.yml` instead.
+  2026-09-23 the ruleset requires `fast-gates` (in `required-gates.yml` since 2026-09-27) instead.
   `code-idiom-gates` (the job this whole receipt feature targets) is now
   non-required, so signing a `ci`-tier receipt reduces work on a non-required
   job — it does not by itself satisfy the branch-protection ruleset.
