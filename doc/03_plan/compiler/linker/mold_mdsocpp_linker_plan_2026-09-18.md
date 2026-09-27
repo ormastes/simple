@@ -422,6 +422,9 @@ live destination is a regular non-symlink/non-reparse file and that its SHA-256
 still matches the selected local interpreter. A final-path mismatch stops the
 remote run without deleting the destination, preserving evidence and avoiding
 an unsafe cleanup of a path that may have changed ownership after publication.
+The final verifier also walks the installed path's complete ancestor chain;
+a directory swapped to a POSIX symlink or Windows reparse point after
+publication therefore cannot satisfy verification through a redirected copy.
 Windows publication no longer relies on `Move-Item -Force`: an existing file
 is replaced with sibling-volume `System.IO.File.Replace`, an absent path uses
 `File.Move`, and a reparse point or non-file destination fails closed before
