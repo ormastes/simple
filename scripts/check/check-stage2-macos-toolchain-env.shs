@@ -28,6 +28,7 @@ bootstrap_link_compat_sha256=absent simple_abi_policy=fixture-policy
 SIMPLE_PLUGIN_MANIFEST_POLICY=fixture-plugin SIMPLE_KERNEL_K1_POLICY=fixture-k1
 SIMPLE_COVERAGE_CUTOVER_STATE=fixture-coverage k1_composition_sha256_before=fixture-sha
 build_progress_events=$fixture/events stage2_cache_absolute=$fixture/cache
+stage2_refusal_log=$fixture/refusal NATIVE_LOW_MEMORY=
 bootstrap_windows_abi_env= bootstrap_windows_cc_env= bootstrap_windows_include_env=
 bootstrap_windows_lib_env= bootstrap_windows_libpath_env=
 stage2_compatibility_manifest_absolute=$fixture/manifest stage3_cache_absolute=$fixture/stage3
@@ -53,11 +54,9 @@ for PLATFORM in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
         echo "FAIL: macOS pin leaked to $PLATFORM/$backend" >&2; exit 1
       fi
     done
-    # The admission digest deliberately excludes the independently bound
-    # LLVM lookup/PATH prefix. Compare every remaining real env/argv argument.
+    # The admission digest covers every real env/argv argument.
     set --
     while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/env"
-    shift 3
     while IFS= read -r argument; do set -- "$@" "$argument"; done < "$fixture/argv"
     actual_hash=$(bootstrap_stage3_args_sha256 "$@")
     eval "$(sed -n '/^  stage2_build_args_sha256=\$(/,/^  )/p' "$bootstrap")"
@@ -75,3 +74,13 @@ for PLATFORM in aarch64-apple-darwin x86_64-unknown-linux-gnu; do
     echo "PASS: $PLATFORM/$backend pins, execution digest and replay"
   done
 done
+
+# Unpinned macOS host: blank tool vars must still pass the canonical env-name
+# pre-exec check (the seed's cc_detect falls back on a blank CC/CXX).
+PLATFORM=aarch64-apple-darwin bootstrap_stage2_darwin_env=1 backend=llvm
+CC= CXX= AR= LD= LLVM_CONFIG= SIMPLE_LLVM_REQUIRED_VERSION=
+bootstrap_run_stage2_native || { echo "FAIL: blank macOS tool vars refused" >&2; exit 1; }
+[ "$(sed -n 's/^CXX=//p' "$fixture/env")" = "" ] && grep -q '^CXX=$' "$fixture/env" || {
+  echo "FAIL: blank macOS CXX name not passed" >&2; exit 1;
+}
+echo "PASS: aarch64-apple-darwin blank tool vars keep the canonical env names"
