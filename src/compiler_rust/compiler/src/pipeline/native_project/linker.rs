@@ -1619,6 +1619,15 @@ int main(int argc, char** argv) {
         }
         if is_windows_gnu_target(cross_target) {
             cmd.arg("--target=x86_64-w64-windows-gnu");
+            // Clang + LLD only on this lane -- never GNU ld. Without this the
+            // mingw driver links with whatever bare `ld` PATH offers. Measured
+            // 2026-09-27: that was mingw-winlibs ld.exe, which (a) cannot
+            // consume the verbatim cache-root paths at all (see
+            // tools::respell_args_for_external_tool) and (b) left
+            // `clock_gettime64` undefined for runtime_native.obj. ld.lld
+            // handles both. Emitted BEFORE any SIMPLE_LINKER override below so
+            // an explicit request still wins (clang takes the last -fuse-ld).
+            cmd.arg("-fuse-ld=lld");
         }
         // Honour SIMPLE_LINKER. `-fuse-ld=<name>` is used rather than invoking
         // the linker binary directly because this is the HOSTED link: the C
