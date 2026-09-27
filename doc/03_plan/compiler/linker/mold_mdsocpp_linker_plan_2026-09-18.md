@@ -452,6 +452,10 @@ Failed publication also cleans the separately owned `.remote-test-new`
 sibling before cleaning the upload leaf. That cleanup is likewise idempotent
 and regular-file-only, so copy, permission, hashing, or final-rename failures
 cannot permanently poison the next two-leaf absence preflight.
+When either cleanup leaf exists, cleanup now validates its complete parent
+chain with the same POSIX symlink and Windows reparse-point policy before
+deletion. Missing leaves remain idempotent success, while a redirected parent
+fails closed instead of deleting a regular file outside the owned tree.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
 real source-derived target backend is connected. The native RV32 backend now

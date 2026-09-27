@@ -323,6 +323,12 @@ fn remote_simple_stage_cleanup_command(remote_os: text,
             "if ($item.PSIsContainer -or (($item.Attributes -band " +
             "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
             "{ Write-Error 'remote-test refuses to clean a non-regular staging path'; exit 77 }; " +
+            "$parentItem = Get-Item -LiteralPath (Split-Path -Parent " + stage + ") -Force; " +
+            "while ($null -ne $parentItem) { " +
+            "if ((-not $parentItem.PSIsContainer) -or (($parentItem.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test refuses cleanup through a redirected staging parent'; exit 77 }; " +
+            "$parentItem = $parentItem.Parent }; " +
             "Remove-Item -LiteralPath " + stage + " -Force\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
         if staged_path != staged_path.trim() or
@@ -330,10 +336,15 @@ fn remote_simple_stage_cleanup_command(remote_os: text,
                 not _remote_path_has_file_leaf(staged_path, false):
             return Err("remote POSIX Simple staging cleanup path must be an exact absolute file path")
         val stage = _remote_posix_quote(staged_path)
+        val parent = _remote_posix_quote(_remote_posix_parent(staged_path))
         return Ok("if [ -L " + stage + " ] || { [ -e " + stage +
             " ] && [ ! -f " + stage + " ]; }; then " +
             "echo 'remote-test refuses to clean a non-regular staging path' >&2; exit 77; fi; " +
-            "if [ -f " + stage + " ]; then rm -f -- " + stage + "; fi")
+            "if [ -f " + stage + " ]; then parent=" + parent + "; probe=$parent; " +
+            "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test refuses cleanup through a redirected staging parent' >&2; exit 77; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "rm -f -- " + stage + "; fi")
     Err("remote-test cannot clean an uploaded binary for remote OS '{remote_os}'")
 
 fn remote_simple_publication_cleanup_command(remote_os: text,
@@ -350,13 +361,24 @@ fn remote_simple_publication_cleanup_command(remote_os: text,
             "if ($item.PSIsContainer -or (($item.Attributes -band " +
             "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
             "{ Write-Error 'remote-test refuses to clean a non-regular publication path'; exit 78 }; " +
+            "$parentItem = Get-Item -LiteralPath (Split-Path -Parent " + path + ") -Force; " +
+            "while ($null -ne $parentItem) { " +
+            "if ((-not $parentItem.PSIsContainer) -or (($parentItem.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test refuses cleanup through a redirected publication parent'; exit 78 }; " +
+            "$parentItem = $parentItem.Parent }; " +
             "Remove-Item -LiteralPath " + path + " -Force\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
         val path = _remote_posix_quote(temporary)
+        val parent = _remote_posix_quote(_remote_posix_parent(temporary))
         return Ok("if [ -L " + path + " ] || { [ -e " + path +
             " ] && [ ! -f " + path + " ]; }; then " +
             "echo 'remote-test refuses to clean a non-regular publication path' >&2; exit 78; fi; " +
-            "if [ -f " + path + " ]; then rm -f -- " + path + "; fi")
+            "if [ -f " + path + " ]; then parent=" + parent + "; probe=$parent; " +
+            "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test refuses cleanup through a redirected publication parent' >&2; exit 78; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "rm -f -- " + path + "; fi")
     Err("remote-test cannot clean a publication sibling for remote OS '{remote_os}'")
 
 fn remote_simple_install_command(remote_os: text, configured: text,
