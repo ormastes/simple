@@ -567,6 +567,10 @@ struct InternalCoffFlags:
     image_base: i64
     opt_ref: bool
     opt_icf: bool
+    default_libraries: [text]
+    nodefault_libraries: [text]
+    nodefault_all: bool
+    include_symbols: [text]
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -788,6 +792,17 @@ fn _internal_coff_entry_valid(entry: text) -> bool:
         index = index + 1
     true
 
+fn _internal_coff_library_key(library: text) -> text:
+    var key = library.trim().lower()
+    if key.ends_with(".lib"): key = key.substring(0, key.len() - 4)
+    key
+
+fn _internal_coff_push_unique_casefold(values: [text], value: text) -> [text]:
+    val key = value.lower()
+    for existing in values:
+        if existing.lower() == key: return values
+    values.push(value)
+
 fn _internal_coff_switch(value: text, name: text) -> i64:
     if value == name: return 1
     if value == name + ":no": return 0
@@ -821,6 +836,10 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var saw_fixed: i64 = -1
     var saw_opt_ref: i64 = -1
     var saw_opt_icf: i64 = -1
+    var default_libraries: [text] = []
+    var nodefault_libraries: [text] = []
+    var nodefault_all = false
+    var include_symbols: [text] = []
     for flag in extra_flags:
         val normalized = flag.lower()
         val dynamic_base = _internal_coff_switch(normalized, "/dynamicbase")
@@ -979,6 +998,27 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             policy.heap_reserve = values.0
             policy.heap_commit = values.1
             saw_heap = true
+        elif normalized.starts_with("/defaultlib:"):
+            val library = flag.substring(12).trim()
+            if not _internal_coff_entry_valid(library):
+                return Err("internal COFF /DEFAULTLIB requires a library name without controls or whitespace")
+            default_libraries = _internal_coff_push_unique_casefold(
+                default_libraries, library)
+        elif normalized == "/nodefaultlib":
+            nodefault_all = true
+        elif normalized.starts_with("/nodefaultlib:"):
+            val library = flag.substring(14).trim()
+            if not _internal_coff_entry_valid(library):
+                return Err("internal COFF /NODEFAULTLIB requires a library name without controls or whitespace")
+            val key = _internal_coff_library_key(library)
+            if not nodefault_libraries.contains(key):
+                nodefault_libraries = nodefault_libraries.push(key)
+        elif normalized.starts_with("/include:"):
+            val symbol = flag.substring(9)
+            if not _internal_coff_entry_valid(symbol):
+                return Err("internal COFF /INCLUDE requires a nonempty symbol without controls or whitespace")
+            if not include_symbols.contains(symbol):
+                include_symbols = include_symbols.push(symbol)
         elif (normalized == "/nologo" or normalized == "/debug:none" or
                 normalized == "/incremental:no" or normalized == "/manifest:no"):
             # The internal linker is quiet, emits no debug/PDB or manifest
@@ -1001,12 +1041,36 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             policy.section_alignment != policy.file_alignment):
         return Err("internal COFF sub-page /ALIGN must equal /FILEALIGN")
     Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base,
-        opt_ref: saw_opt_ref == 1, opt_icf: saw_opt_icf == 1))
+        opt_ref: saw_opt_ref == 1, opt_icf: saw_opt_icf == 1,
+        default_libraries: default_libraries,
+        nodefault_libraries: nodefault_libraries,
+        nodefault_all: nodefault_all, include_symbols: include_symbols))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:
     """Return the PE image policy projected from modeled internal COFF flags."""
     val parsed = internal_coff_flags(extra_flags, target_arch)?
     Ok(parsed.policy)
+
+fn internal_coff_retained_symbols(flags: InternalCoffFlags,
+        configured: [text]) -> [text]:
+    """Merge command-line INCLUDE roots with configured retained symbols."""
+    var result = configured
+    for symbol in flags.include_symbols:
+        if not result.contains(symbol): result = result.push(symbol)
+    result
+
+fn internal_coff_selected_default_libraries(flags: InternalCoffFlags,
+        discovered: [text]) -> [text]:
+    """Apply command-line DEFAULTLIB/NODEFAULTLIB policy to closure requests."""
+    var candidates = flags.default_libraries
+    for library in discovered:
+        candidates = _internal_coff_push_unique_casefold(candidates, library)
+    var result: [text] = []
+    for library in candidates:
+        val key = _internal_coff_library_key(library)
+        if not flags.nodefault_all and not flags.nodefault_libraries.contains(key):
+            result = result.push(library)
+    result
 
 fn internal_coff_is_archive(bytes: [u8]) -> bool:
     bytes.len() >= 8 and bytes[0] == 0x21 and bytes[1] == 0x3c and
@@ -2064,6 +2128,8 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:coff does not honour it; unset SIMPLE_LINKER to use lld-link)")
         val coff_flags = internal_coff_flags(config.extra_flags, target_arch)?
+        val retained_symbols = internal_coff_retained_symbols(
+            coff_flags, config.retained_symbols)
         val selected_entry = if coff_flags.entry != "": coff_flags.entry else: "auto"
         var selected_image_base = PE_AMD64_IMAGE_BASE
         if arm64_target: selected_image_base = PE_ARM64_IMAGE_BASE
@@ -2124,14 +2190,16 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
                 objects: objects, archives: archives, entry: selected_entry)
             val dependencies = if arm64_target:
                 coff_link_arm64_default_libraries(
-                    dependency_request, config.retained_symbols)
+                    dependency_request, retained_symbols)
             else:
                 coff_link_default_libraries(
-                    dependency_request, config.retained_symbols)
+                    dependency_request, retained_symbols)
             if dependencies.is_err():
                 return Err("internal engine: {dependencies.unwrap_err()}")
             var desired_default_files: [text] = []
-            for library in dependencies.unwrap():
+            val desired_default_libraries = internal_coff_selected_default_libraries(
+                coff_flags, dependencies.unwrap())
+            for library in desired_default_libraries:
                 val path = internal_coff_library_file(library, search_paths)
                 if path == "":
                     return Err("internal engine: COFF /DEFAULTLIB '{library}' was not found")
@@ -2154,11 +2222,11 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             objects: objects, archives: archives, entry: selected_entry)
         val linked = if arm64_target:
             coff_link_arm64_retained_image_policy_opt(
-                link_request, config.retained_symbols, coff_flags.policy,
+                link_request, retained_symbols, coff_flags.policy,
                 selected_image_base, coff_flags.opt_ref, coff_flags.opt_icf)
         else:
             coff_link_amd64_retained_image_policy_opt(
-                link_request, config.retained_symbols, coff_flags.policy,
+                link_request, retained_symbols, coff_flags.policy,
                 selected_image_base, coff_flags.opt_ref, coff_flags.opt_icf)
         if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
         if not internal_link_publish_bytes(output, linked.unwrap()):

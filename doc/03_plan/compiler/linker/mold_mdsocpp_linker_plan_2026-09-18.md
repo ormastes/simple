@@ -788,6 +788,11 @@ resolved relocation identities match. The conservative identity rule declines
 self-recursive or merely structurally similar graphs instead of risking an
 incorrect address merge. `/OPT:NOICF`, combined `/OPT:REF,ICF`, and conflict
 validation are typed through both AMD64 and ARM64 production routes.
+Command-line `/DEFAULTLIB:name`, `/NODEFAULTLIB[:name]`, and
+`/INCLUDE:symbol` now share the archive-closure and retained-root path used by
+object directives. Library suppression is case-insensitive and treats the
+optional `.lib` suffix canonically; bare `/NODEFAULTLIB` suppresses directive
+and command-line defaults without removing explicitly supplied libraries.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
