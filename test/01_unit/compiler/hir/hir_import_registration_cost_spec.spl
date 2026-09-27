@@ -50,6 +50,23 @@ fn declaring_registry() -> ModuleSurfacesByName:
     sources = sources.push(SourceFile(path: "pkg/decl.spl", content: decl_body, module_name: "pkg.decl"))
     module_surfaces_from_modules(modules, sources).unwrap()
 
+fn explicit_over_glob_registry() -> ModuleSurfacesByName:
+    var modules: {text: ParserModule} = {}
+    var sources: [SourceFile] = []
+    val base_body = "pub struct Widget:\n    value: i64\n"
+    val other_body = "pub struct Widget:\n    other: i64\n"
+    val decl_body = "use pkg.base.{{Widget}}\nuse pkg.other.*\npub fn g(w: Widget) -> i64:\n    1\n"
+    val importer_body = "use pkg.decl.{{g}}\nfn main() -> i64:\n    0\n"
+    modules["pkg.base"] = parse_and_build_module(base_body, "pkg/base.spl")
+    modules["pkg.other"] = parse_and_build_module(other_body, "pkg/other.spl")
+    modules["pkg.decl"] = parse_and_build_module(decl_body, "pkg/decl.spl")
+    modules["pkg.imp"] = parse_and_build_module(importer_body, "pkg/imp.spl")
+    sources = sources.push(SourceFile(path: "pkg/base.spl", content: base_body, module_name: "pkg.base"))
+    sources = sources.push(SourceFile(path: "pkg/other.spl", content: other_body, module_name: "pkg.other"))
+    sources = sources.push(SourceFile(path: "pkg/decl.spl", content: decl_body, module_name: "pkg.decl"))
+    sources = sources.push(SourceFile(path: "pkg/imp.spl", content: importer_body, module_name: "pkg.imp"))
+    module_surfaces_from_modules(modules, sources).unwrap()
+
 
 fn import_registry() -> ModuleSurfacesByName:
     """One declaring surface plus three importers, the shape that made the
@@ -66,6 +83,24 @@ fn import_registry() -> ModuleSurfacesByName:
     built.unwrap()
 
 describe("HIR import registration resolution facts", fn():
+    it("lets a named callable dependency beat a competing glob terminal", fn():
+        val registry = explicit_over_glob_registry()
+        var lowering = hirlowering_for_module("pkg/imp.spl", registry)
+        lowering.begin_module("pkg/imp.spl")
+        var declaring_index = -1
+        var surface_index = 0
+        while surface_index < registry.surfaces.len():
+            if registry.surfaces[surface_index].module_name == "pkg.decl":
+                declaring_index = surface_index
+            surface_index = surface_index + 1
+        expect(declaring_index >= 0).to_equal(true)
+        lowering.materialize_imported_callable_explicit_dependency(
+            registry.surfaces[declaring_index], "Widget", Span.empty(), false)
+        expect(lowering.errors.len()).to_equal(0)
+        val selected = lowering.explicit_dep_target_memo["pkg.decl Widget"]
+        expect(registry.surfaces[selected].module_name).to_equal("pkg.base")
+    )
+
     it("resolves a qualified type name once per (surface, name), not once per importer", fn():
         val registry = import_registry()
         var lowering = hirlowering_for_module("pkg/imp1.spl", registry)
