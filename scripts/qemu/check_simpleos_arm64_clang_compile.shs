@@ -42,6 +42,13 @@
 #              LD_LIBRARY_PATH="$HOME/.local/lib"; \
 #              sh scripts/qemu/check_simpleos_arm64_clang_compile.shs'
 # ACCEL=tcg GUEST_CPU=max stays available as the no-KVM fallback.
+# Guest sizing (host-local knobs, env-only — never committed per-host):
+#   A64_MEM   guest RAM   (default: 32G)
+#   A64_SMP   guest cores (default: 10)
+# GUEST_CPU defaults to the host CPU (kvm -cpu host); override per host as
+# needed. The guest kernel image currently maps a 768 MiB RAM region (linker
+# script), so A64_MEM beyond that is headroom for future heap growth, not yet
+# usable by the in-kernel bump heap (512 MiB, baremetal_stubs.c).
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -50,9 +57,14 @@ cd "$ROOT_DIR"
 LLVM_WORK="${LLVM_WORK:-/home/yoon/llvm-project-simpleos/build-os-llvm}"
 GUEST_BIN_DIR="$LLVM_WORK/cross-aarch64-unknown-simpleos/bin"
 SYSROOT_A64="$LLVM_WORK/sysroot-aarch64"
-STAGE_DIR=build/os/elfexec_clang_arm64
+# Multi-session note: multiple agent sessions share this repo and may run
+# this gate concurrently. Override A64_STAGE_DIR/A64_KERNEL to keep runs
+# disjoint (private image/kernel/serial logs) — a shared stage dir means a
+# concurrent session's R1 re-staging rewrites the image under a running
+# guest and its cleanup can SIGKILL the other session's QEMU.
+STAGE_DIR="${A64_STAGE_DIR:-build/os/elfexec_clang_arm64}"
 IMAGE="$STAGE_DIR/fat32-clang-arm64.img"
-KERNEL=build/os/simpleos_arm64_clang_bringup.elf
+KERNEL="${A64_KERNEL:-build/os/simpleos_arm64_clang_bringup.elf}"
 OUT="$STAGE_DIR/run-$(date +%Y%m%d_%H%M%S)"
 # Compiler selection: this gate's kernel REQUIRES the FAM RuntimeArray
 # inline-accessor fix (commit 1b3e40d8b9b, 2026-09-25) — the committed
@@ -118,7 +130,7 @@ note "guest clang=${CLANG_BYTES}B lld=${LLD_BYTES}B"
 
 # ------------------------------------------------------------------- R1: img --
 note "R1: staging FAT32 image"
-mkdir -p "$STAGE_DIR/stage" "$OUT"
+mkdir -p "$STAGE_DIR/stage" "$STAGE_DIR/tmp" "$OUT"
 cp "$SYSROOT_A64/lib/crt0.o"                      "$STAGE_DIR/stage/CRT0.O"
 cp "$SYSROOT_A64/share/simpleos/simpleos.ld"      "$STAGE_DIR/stage/SIMPLEOS.LD"
 cp "$SYSROOT_A64/lib/libsimpleos_c.a"             "$STAGE_DIR/stage/LIBC.A"
@@ -177,6 +189,7 @@ INCLUDE_TREE_FILES=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_files
 INCLUDE_TREE_DIRS=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_dirs=\([0-9]*\).*/\1/p')
 
 note "R1: running FAT32 structural-prefix writer (seed interpreter)"
+A64_STAGE_DIR="$STAGE_DIR"; export A64_STAGE_DIR
 "$SEED" run scripts/os/fsexec_mkimg_clang_arm64.spl > "$OUT/mkimg.log" 2>&1 \
     || { cat "$OUT/mkimg.log"; fail "image writer failed"; }
 STATUS=$(grep -o 'fsexec_mkimg_clang_arm64_status=ok.*' "$OUT/mkimg.log" | head -1)
@@ -289,12 +302,15 @@ scripts/check/check-simpleos-arm64-fs-exec-elf.shs "$KERNEL" || fail "kernel ELF
 note "kernel ready: $KERNEL"
 
 # ------------------------------------------------------------- R2-R5: boot --
-note "R2-R5: booting arm64 guest (KVM, 2G, virtio-blk FAT32)"
-# The R7a STL rung reads ~250 libc++ headers through the syscall layer's
-# single-sector virtio path (~1.8 s/header: dir re-scans + 512 B sector
-# reads — an I/O-granularity cost, NOT the old TCG AST wall). Budget 30 min
-# for the full R1-R7 sequence; a clean KVM run lands well inside it.
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-1800}"
+# The R7a STL rung reads ~430 files (247 unique headers + has_include probes)
+# through the syscall layer's single-sector virtio path (~2-5 s/file: dir
+# re-scans + 512 B sector reads — an I/O-granularity cost, NOT the old TCG
+# AST wall, which KVM removed). Measured on this host (KVM, 32G/10):
+# R1-R6 complete in ~4 min; R7a cc1 then compiles the <string>/<vector>/
+# <algorithm> closure at ~9 s/unique-header single-vCPU — 381 unique headers
+# in 60 min, killed by the old 3600 s budget at __variant/monostate.h. Full
+# closure is ~2 h. Budget accordingly.
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-9600}"
 # ACCEL/GUEST_CPU overrides: the host rule prefers KVM, but hosts where the
 # invoking user lacks /dev/kvm access (no kvm group / no logind seat ACL) can
 # run ACCEL=tcg GUEST_CPU=max to execute the same rungs without privileges.
@@ -303,8 +319,12 @@ GUEST_CPU="${GUEST_CPU:-host}"
 if [ "$ACCEL" = "tcg" ] && [ "$GUEST_CPU" = "host" ]; then
     GUEST_CPU=max
 fi
+# Guest sizing: 32G RAM / 10 cores by default (host rule), env-overridable.
+A64_MEM="${A64_MEM:-32G}"
+A64_SMP="${A64_SMP:-10}"
+note "R2-R5: booting arm64 guest (KVM, ${A64_MEM}, smp ${A64_SMP}, virtio-blk FAT32)"
 timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
-    -machine virt -accel "$ACCEL" -cpu "$GUEST_CPU" -m 2G -smp 4 \
+    -machine virt -accel "$ACCEL" -cpu "$GUEST_CPU" -m "$A64_MEM" -smp "$A64_SMP" \
     -nographic -monitor none -no-reboot \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMAGE,if=none,id=armdisk,format=raw" \
