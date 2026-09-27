@@ -107,10 +107,8 @@ class HostRuntime:
 
     me run_task<T>(f: fn() -> T) -> HostTaskHandle<T>:
         """Run task and return handle."""
-        var result_store: Option<T> = nil
         val poll_fn = \:
-            val result = f()
-            result_store = Some(result)
+            f()
             Poll.Ready(())
         val id = self.scheduler.schedule(Priority.Normal, poll_fn)
         HostTaskHandle(
@@ -124,10 +122,8 @@ class HostRuntime:
 
     me run_task_with_priority<T>(f: fn() -> T, priority: Priority) -> HostTaskHandle<T>:
         """Run with specific priority."""
-        var result_store: Option<T> = nil
         val poll_fn = \:
-            val result = f()
-            result_store = Some(result)
+            f()
             Poll.Ready(())
         val id = self.scheduler.schedule(priority, poll_fn)
         HostTaskHandle(
@@ -147,25 +143,15 @@ class HostRuntime:
         death reason keyed by current_unified_task_key().
         Plain-value task bodies: use run_task() — zero overhead on that path.
         """
-        var result_store: Option<T> = nil
-        var error_store: Option<text> = nil
         val poll_fn = \:
-            val outcome = f()
-            match outcome:
-                case Ok(v):
-                    result_store = Some(v)
-                case Err(msg):
-                    error_store = Some(msg)
+            f()
             Poll.Ready(())
         val id = self.scheduler.schedule(Priority.Normal, poll_fn)
-        # Wire error back to handle after scheduler runs.
-        # We capture the scheduler ref and task id in the handle's task_id so
-        # callers can query handle.error after block_on / run().
-        # The scheduler's mark_task_error is called via a second poll-round wrapper
-        # constructed in the poll closure above via the error_store capture.
-        # Because Simple closures can READ outer vars but not mutate them across
-        # module boundaries, we use a post-schedule probe: the runtime checks
-        # error_store on the next run() call.  This is the .spl-safe pattern.
+        # The task's Ok/Err outcome is NOT captured here. Closures capture by
+        # value and are read-only (a write to a captured local is a compile
+        # error), so the earlier `result_store` / `error_store` writes inside
+        # poll_fn were always lost. Callers surface an error explicitly with
+        # drain_result_errors(handle, error) after block_on() / run().
         val handle = HostTaskHandle(
             task_id: id,
             state: TaskState.Pending,

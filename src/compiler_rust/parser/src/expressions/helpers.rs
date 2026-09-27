@@ -84,7 +84,7 @@ impl<'a> Parser<'a> {
                 return Ok(Some(Expr::Lambda {
                     params: vec![],
                     body: Box::new(Expr::Tuple(vec![])),
-                    move_mode: MoveMode::Copy,
+                    move_mode: MoveMode::ColonBlock,
                     capture_all: false,
                 }));
             }
@@ -105,7 +105,7 @@ impl<'a> Parser<'a> {
             return Ok(Some(Expr::Lambda {
                 params: vec![],
                 body: Box::new(Expr::Tuple(vec![])),
-                move_mode: MoveMode::Copy,
+                move_mode: MoveMode::ColonBlock,
                 capture_all: false,
             }));
         }
@@ -142,7 +142,7 @@ impl<'a> Parser<'a> {
         Ok(Some(Expr::Lambda {
             params: vec![],
             body: Box::new(block_expr),
-            move_mode: MoveMode::Copy,
+            move_mode: MoveMode::ColonBlock,
             capture_all: false, // Do-block wrapping doesn't auto-capture
         }))
     }

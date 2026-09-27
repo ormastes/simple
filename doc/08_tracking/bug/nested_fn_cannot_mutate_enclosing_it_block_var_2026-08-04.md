@@ -1,4 +1,28 @@
 # Nested `fn` cannot mutate an enclosing `it`-block `var`; compound assignment fails "variable not found"
+## Resolved by ruling 2026-09-27 — writes to captured locals are a compile error
+
+Owner ruling 2026-09-27, fork (a) below: keep by-value, read-only capture
+(`.claude/rules/language.md:22`) and make the silent loss LOUD. A nested `fn`
+or lambda that assigns a local of an enclosing function/lambda now fails with
+
+    cannot assign to captured variable `<name>` inside nested fn `<fn>` (line N): closures capture enclosing locals by value and are read-only; return the new value or use a module-level `var`
+
+(`inside a closure` for an anonymous lambda) in:
+
+- the Rust seed: `simple_parser::capture_write_check`, enforced for every
+  module the loader reads (`module_loader.rs reject_captured_local_writes`) and
+  in the native-build compile path;
+- the pure-Simple interpreter: `resolve.spl capture_write_check_module`,
+  called from `_core_run_pipeline` before evaluation.
+
+Module-level `var`s are not captures and stay writable. Colon-blocks
+(`describe`/`it`/`before_each`/`after_each`) are scopes, not closures, and are
+not covered (hooks have their own write-back path). The 33 `src/` sites that
+relied on the lost writes were fixed first (credential_store builders always
+returned "", Mailbox.drop_stale always reported 0, ...), and 100 test sites
+were migrated to module-level recorders. Gate:
+`test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
+(retargeted to assert the diagnostic on both seed engines and in pure-Simple).
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

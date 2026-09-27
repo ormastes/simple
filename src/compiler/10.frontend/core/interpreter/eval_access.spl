@@ -13,6 +13,7 @@
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
 use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.resolve.{resolve_is_fast_local}
 
 # ===== Field Access =====
 
@@ -263,6 +264,14 @@ fn eval_assign_expr(eid: i64) -> i64:
         if ok == false:
             eval_set_error("undefined variable: " + name)
             return -1
+        # LOAD_FAST: the resolver gave this target the same fast-local slot
+        # eval_ident reads; update it too, or the next read returns the stale
+        # pre-assignment value (eval_stmt_assign does the same).
+        var fast_slot = expr_i_val[target_eid]
+        if fast_slot < 0 and eval_current_decl_id >= 0:
+            fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if fast_slot >= 0 and env_has_frame():
+            env_set_local(fast_slot, new_val)
         return new_val
 
     if target_tag == EXPR_FIELD_ACCESS:
