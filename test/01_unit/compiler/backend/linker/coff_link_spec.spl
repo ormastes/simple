@@ -1,13 +1,13 @@
 use std.spec.*
 use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
-    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
+    CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained, coff_link_arm64,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
     coff_sort_arm64_exception_table,
     coff_validate_resource_sections, coff_validate_export_sections}
 use compiler.backend.linker.coff.pe_image_writer.{PeImageSection}
-use compiler.backend.linker.pe_inspect.{pe_inspect}
+use compiler.backend.linker.pe_inspect.{IMAGE_FILE_MACHINE_ARM64, pe_inspect}
 use std.io_runtime.{file_read_bytes}
 
 val COFF_FIX: text = "test/fixtures/linker/coff"
@@ -57,6 +57,33 @@ fn _cl_object(symbol_name: text, section_number: i64) -> [u8]:
     bytes = _cl_u16(bytes, 0x20)
     bytes = bytes.push(2)
     bytes = bytes.push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_arm64_object(symbol_name: text) -> [u8]:
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0xaa64)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 64)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc0).push(0x03).push(0x5f).push(0xd6)
+    bytes = _cl_name(bytes, symbol_name)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
     _cl_u32(bytes, 4)
 
 fn _cl_set_section_name(bytes: [u8], name: text) -> [u8]:
@@ -548,6 +575,15 @@ describe "internal freestanding Windows linker":
         expect(inspected.is_ok()).to_equal(true)
         expect(inspected.unwrap().header.entry_point_rva).to_equal(0x1000)
         expect(inspected.unwrap().sections[0].name).to_equal(".text")
+
+    it "links a raw ARM64 object into a PE32+ executable":
+        val linked = coff_link_arm64(CoffLinkRequest(
+            objects: [_cl_arm64_object("_start")], archives: [], entry: "_start"))
+        expect(linked.is_ok()).to_equal(true)
+        val inspected = pe_inspect(linked.unwrap()).unwrap()
+        expect(inspected.header.machine).to_equal(IMAGE_FILE_MACHINE_ARM64)
+        expect(inspected.header.entry_point_rva).to_equal(0x1000)
+        expect(inspected.sections[0].name).to_equal(".text")
 
     it "links the compiler-generated Windows corpus with unwind metadata":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [

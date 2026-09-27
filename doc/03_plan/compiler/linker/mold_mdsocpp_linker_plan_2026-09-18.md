@@ -451,9 +451,11 @@ Implemented source slice:
   ARM64 code imports now synthesize checked 12-byte `ADRP x16` / `LDR x16` /
   `BR x16` stubs against 8-byte-aligned IAT slots; mixed-machine imports and
   out-of-range page deltas fail closed.
-  Production ARM64 link routing,
-  production import routing and `SECREL` resolution remain open and are not
-  certified by this slice;
+  The shared COFF linker now exposes an ARM64 PE32+ route selecting ARM64
+  object/archive validation, relocation formulas, imports, exception sorting,
+  image base, and machine header; ARM64 `SECREL` is resolved against the merged
+  output-section base. Native Windows-on-ARM execution and full SDK/CRT corpus
+  evidence remain open, so this route is not yet certified;
 - deterministic PE32+ section/image writer with import, exception, and base
   relocation directories, including synthesized DIR64 page blocks;
 - AMD64 multi-object symbol resolution, static `.lib` fixpoint extraction,
