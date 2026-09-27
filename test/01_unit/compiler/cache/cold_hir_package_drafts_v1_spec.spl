@@ -1,0 +1,120 @@
+use std.spec.{describe, it, expect, fail}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    ColdHirPackageArtifactV1, cold_hir_package_index_v1,
+    cold_hir_package_drafts_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageSmfSectionV1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1,
+    PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1,
+    package_module_index_root_for_variant_v1
+}
+
+fn cold_draft_inventory() -> CompileSourceInventoryV1:
+    var entries: [CompileSourceInventoryEntryV1] = []
+    for module_identity in ["a", "b", "c"]:
+        val digest = sha256_text(module_identity)
+        entries.push(CompileSourceInventoryEntryV1(
+            "src/{module_identity}.spl", digest, digest, digest,
+            digest, digest, 1))
+    CompileSourceInventoryV1(1, 0, entries)
+
+fn cold_draft_authority(inventory_digest: text) -> PackageModuleIndexBuildAuthorityV1:
+    PackageModuleIndexBuildAuthorityV1(
+        sha256_text("producer"), "root", "revision", "commit", "tree",
+        inventory_digest,
+        ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "cranelift",
+            [], "debug", "abi-v1", [], []))
+
+fn cold_draft_artifact(
+    module_identity: text, package_identity: text,
+    imports: [text], inventory_digest: text
+) -> ColdHirPackageArtifactV1:
+    val digest = sha256_text("artifact:{module_identity}")
+    val seed = ColdHirSemanticSeedV1(
+        module_identity, "src/{module_identity}.spl",
+        sha256_text(module_identity), inventory_digest,
+        sha256_text("abi:{module_identity}"), imports)
+    ColdHirPackageArtifactV1(
+        seed, package_identity, digest, digest,
+        [PackageSmfSectionV1("exports", 0, 1, digest)],
+        digest, digest, digest, digest, digest, digest, digest,
+        "", PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+
+describe "cold HIR package draft assembly":
+    it "derives reverse edges and package SCCs before building an index":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val authority = cold_draft_authority(digest)
+        val artifacts = [
+            cold_draft_artifact("a", "p", ["b"], digest),
+            cold_draft_artifact("b", "q", ["a"], digest),
+            cold_draft_artifact("c", "r", ["a"], digest)]
+        val drafts = cold_hir_package_drafts_v1(authority, artifacts)
+        match drafts:
+            case Err(reason): fail("draft assembly failed: {reason}")
+            case Ok(rows):
+                expect(rows.len()).to_equal(3)
+                expect(rows[0].header.reverse_dependents).to_equal(["b", "c"])
+                expect(rows[0].header.scc_identity).to_equal(rows[1].header.scc_identity)
+                expect(rows[0].header.scc_members).to_equal(["a", "b"])
+                expect(rows[2].header.scc_members).to_equal(["c"])
+        val built = cold_hir_package_index_v1(authority, inventory, artifacts)
+        match built:
+            case Err(reason): fail("index build failed: {reason}")
+            case Ok(generation):
+                expect(generation.entries.len()).to_equal(3)
+                expect(generation.entries[0].reverse_dependents).to_equal(["b", "c"])
+
+    it "rejects a missing dependency before publishing metadata":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val artifacts = [cold_draft_artifact("a", "p", ["missing"], digest)]
+        val result = cold_hir_package_drafts_v1(
+            cold_draft_authority(digest), artifacts)
+        match result:
+            case Ok(_): fail("missing import was admitted")
+            case Err(reason):
+                expect(reason).to_equal("cold-drafts-import-missing:a:missing")
+
+    it "requires every frozen source and a frozen manifest witness":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val authority = cold_draft_authority(digest)
+        val incomplete = cold_hir_package_index_v1(authority, inventory, [
+            cold_draft_artifact("a", "p", [], digest),
+            cold_draft_artifact("b", "q", [], digest)])
+        match incomplete:
+            case Ok(_): fail("incomplete source coverage was admitted")
+            case Err(reason):
+                expect(reason).to_equal("index-builder-source-coverage-incomplete")
+        var invented = cold_draft_artifact("a", "p", [], digest)
+        invented.manifest_source_identity = "src/simple.sdn"
+        invented.manifest_digest = sha256_text("manifest-not-in-inventory")
+        val unfrozen = cold_hir_package_index_v1(authority, inventory, [
+            invented,
+            cold_draft_artifact("b", "q", [], digest),
+            cold_draft_artifact("c", "r", [], digest)])
+        match unfrozen:
+            case Ok(_): fail("unfrozen manifest was admitted")
+            case Err(reason):
+                expect(reason).to_equal("index-builder-manifest-absent:a")
+
+    it "partitions a graph root by configuration variant":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val first = cold_draft_authority(digest)
+        var second = cold_draft_authority(digest)
+        second.variant = ConfigVariantKeyV1(
+            "aarch64-unknown-linux-gnu", "cranelift",
+            [], "release", "abi-v1", [], [])
+        expect(package_module_index_root_for_variant_v1(first) ==
+            package_module_index_root_for_variant_v1(second)).to_equal(false)
