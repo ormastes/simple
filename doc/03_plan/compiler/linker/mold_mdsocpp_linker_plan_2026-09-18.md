@@ -754,7 +754,15 @@ before publication. The PE writer validates the policy and emits its subsystem,
 stack, and heap fields for both AMD64 and ARM64; legacy callers retain the
 byte-identical console/1 MiB reserve/4 KiB commit defaults. Mirrored contracts
 check parser rejection and the exact optional-header bytes. The internal route
-also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`, and `/MANIFEST:NO`
+also consumes `/ALIGN` and `/FILEALIGN` as one typed layout policy. COFF output
+section RVAs, synthesized import/export/relocation sections, PE header/image
+sizes, raw offsets, padding, and optional-header fields all use the selected
+values. Section alignment is a bounded power of two from 512 bytes through 256 MiB;
+file alignment is a power of two from 512 bytes through 64 KiB and cannot exceed
+section alignment; a sub-page section alignment must equal file alignment.
+Duplicate equal values deduplicate and conflicts fail closed.
+The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
+and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
 always a complete one-shot link. Their enabled counterparts and `/OPT:REF,ICF`
 remain named unsupported until those output contracts are implemented. Native

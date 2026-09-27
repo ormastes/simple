@@ -21,6 +21,8 @@ struct PeImagePolicy:
     large_address_aware: bool
     terminal_server_aware: bool
     fixed_image: bool
+    section_alignment: i64
+    file_alignment: i64
 
 impl PeImagePolicy:
     static fn default() -> PeImagePolicy:
@@ -35,7 +37,9 @@ impl PeImagePolicy:
             nx_compat: true,
             large_address_aware: true,
             terminal_server_aware: true,
-            fixed_image: false)
+            fixed_image: false,
+            section_alignment: PE_SECTION_ALIGNMENT,
+            file_alignment: PE_FILE_ALIGNMENT)
 
 struct PeImageSection:
     name: text
@@ -92,24 +96,26 @@ fn _pe_pad_to(bytes: [u8], size: i64) -> Result<[u8], text>:
     while result.len() < size: result = result.push(0)
     Ok(result)
 
-fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64) -> Result<bool, text>:
+fn _pe_validate_sections(sections: [PeImageSection], entry_rva: i64,
+        section_alignment: i64) -> Result<bool, text>:
     if sections.len() == 0: return Err("PE image requires at least one section")
     if sections.len() > 96: return Err("PE image section count exceeds 96")
     var entry_found = false
     var previous_end: i64 = 0
     for section in sections:
-        if section.virtual_address < PE_SECTION_ALIGNMENT or section.virtual_address % PE_SECTION_ALIGNMENT != 0:
-            return Err("PE section '{section.name}' RVA is not 4096-byte aligned")
+        if (section.virtual_address < section_alignment or
+                section.virtual_address % section_alignment != 0):
+            return Err("PE section '{section.name}' RVA is not aligned to {section_alignment}")
         val logical_size = if section.virtual_size > section.data.len(): section.virtual_size else: section.data.len()
         if section.virtual_address < previous_end:
             return Err("PE section '{section.name}' overlaps its predecessor")
-        previous_end = section.virtual_address + pe_align_up(logical_size, PE_SECTION_ALIGNMENT)
+        previous_end = section.virtual_address + pe_align_up(logical_size, section_alignment)
         if entry_rva >= section.virtual_address and entry_rva < section.virtual_address + logical_size:
             entry_found = true
     if not entry_found: return Err("PE entry RVA {entry_rva} is outside every section")
     Ok(true)
 
-fn _pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
+fn pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
     if policy.subsystem != PE_SUBSYSTEM_CONSOLE and policy.subsystem != PE_SUBSYSTEM_WINDOWS:
         return Err("unsupported PE subsystem {policy.subsystem}")
     if policy.stack_reserve <= 0:
@@ -124,6 +130,18 @@ fn _pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
         return Err("PE high-entropy VA policy requires dynamic base policy")
     if policy.fixed_image and policy.dynamic_base:
         return Err("PE fixed-image policy cannot use dynamic base policy")
+    if (policy.section_alignment < 0x200 or
+            policy.section_alignment > 0x10000000 or
+            (policy.section_alignment & (policy.section_alignment - 1)) != 0):
+        return Err("PE section alignment must be a power of two from 512 through 268435456")
+    if (policy.file_alignment < 0x200 or policy.file_alignment > 0x10000 or
+            (policy.file_alignment & (policy.file_alignment - 1)) != 0):
+        return Err("PE file alignment must be a power of two from 512 through 65536")
+    if policy.section_alignment < policy.file_alignment:
+        return Err("PE section alignment must be no smaller than file alignment")
+    if (policy.section_alignment < 0x1000 and
+            policy.section_alignment != policy.file_alignment):
+        return Err("PE sub-page section alignment must equal file alignment")
     Ok(true)
 
 fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
@@ -167,14 +185,15 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     if image_base <= 0 or image_base % 0x10000 != 0 or
             image_base > 0x7fffffff00000000:
         return Err("PE32+ image base must be a positive 64 KiB-aligned address with 4 GiB headroom")
-    val valid_policy = _pe_validate_policy(policy)
+    val valid_policy = pe_validate_policy(policy)
     if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
-    val valid = _pe_validate_sections(sections, entry_rva)
+    val valid = _pe_validate_sections(
+        sections, entry_rva, policy.section_alignment)
     if valid.is_err(): return Err(valid.unwrap_err())
     val pe_offset: i64 = 0x80
     val optional_header_size: i64 = 0xf0
     val headers_end = pe_offset + 4 + 20 + optional_header_size + sections.len() * 40
-    val size_of_headers = pe_align_up(headers_end, PE_FILE_ALIGNMENT)
+    val size_of_headers = pe_align_up(headers_end, policy.file_alignment)
 
     var raw_pointers: [i64] = []
     var next_raw = size_of_headers
@@ -183,7 +202,7 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     var size_of_uninitialized_data: i64 = 0
     var base_of_code: i64 = 0
     for section in sections:
-        val raw_size = pe_align_up(section.data.len(), PE_FILE_ALIGNMENT)
+        val raw_size = pe_align_up(section.data.len(), policy.file_alignment)
         if raw_size > 0:
             raw_pointers = raw_pointers.push(next_raw)
             next_raw = next_raw + raw_size
@@ -194,14 +213,15 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
             if base_of_code == 0: base_of_code = section.virtual_address
         elif (section.characteristics & 0x80) != 0:
             size_of_uninitialized_data = size_of_uninitialized_data +
-                pe_align_up(section.virtual_size, PE_FILE_ALIGNMENT)
+                pe_align_up(section.virtual_size, policy.file_alignment)
         elif section.data.len() > 0:
             size_of_initialized_data = size_of_initialized_data + raw_size
     if base_of_code == 0: return Err("PE image requires an executable code section")
 
     val last = sections[sections.len() - 1]
     val last_size = if last.virtual_size > last.data.len(): last.virtual_size else: last.data.len()
-    val size_of_image = pe_align_up(last.virtual_address + last_size, PE_SECTION_ALIGNMENT)
+    val size_of_image = pe_align_up(
+        last.virtual_address + last_size, policy.section_alignment)
     val relocation_directory = _pe_directory(sections, 5)
     # ASLR flags are only truthful when the image carries base relocations.
     var dll_characteristics: i64 = 0
@@ -241,8 +261,8 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u32(output, entry_rva)
     output = _pe_put_u32(output, base_of_code)
     output = _pe_put_u64(output, image_base)
-    output = _pe_put_u32(output, PE_SECTION_ALIGNMENT)
-    output = _pe_put_u32(output, PE_FILE_ALIGNMENT)
+    output = _pe_put_u32(output, policy.section_alignment)
+    output = _pe_put_u32(output, policy.file_alignment)
     output = _pe_put_u16(output, 6)
     output = _pe_put_u16(output, 0)
     output = _pe_put_u16(output, 0)
@@ -276,7 +296,7 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
         output = named.unwrap()
         output = _pe_put_u32(output, section.virtual_size)
         output = _pe_put_u32(output, section.virtual_address)
-        output = _pe_put_u32(output, pe_align_up(section.data.len(), PE_FILE_ALIGNMENT))
+        output = _pe_put_u32(output, pe_align_up(section.data.len(), policy.file_alignment))
         output = _pe_put_u32(output, raw_pointers[section_index])
         output = _pe_put_u32(output, 0)
         output = _pe_put_u32(output, 0)
@@ -293,7 +313,8 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
             continue
         output = _pe_pad_to(output, raw_pointers[section_index]).unwrap()
         for b in sections[section_index].data: output = output.push(b)
-        output = _pe_pad_to(output, raw_pointers[section_index] + pe_align_up(sections[section_index].data.len(), PE_FILE_ALIGNMENT)).unwrap()
+        output = _pe_pad_to(output, raw_pointers[section_index] +
+            pe_align_up(sections[section_index].data.len(), policy.file_alignment)).unwrap()
         section_index = section_index + 1
     Ok(output)
 
@@ -312,6 +333,7 @@ fn pe_write_arm64_console(sections: [PeImageSection], entry_rva: i64) -> Result<
     pe_write_console(sections, entry_rva, PE_MACHINE_ARM64, PE_ARM64_IMAGE_BASE)
 
 export PeImageSection, PeImagePolicy
+export pe_validate_policy
 export PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE, PE_MACHINE_AMD64, PE_MACHINE_ARM64
 export PE_SECTION_ALIGNMENT, PE_FILE_ALIGNMENT, PE_SUBSYSTEM_WINDOWS, PE_SUBSYSTEM_CONSOLE
 export pe_align_up, pe_write_image_policy, pe_write_console

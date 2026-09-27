@@ -791,6 +791,8 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var saw_subsystem = false
     var saw_stack = false
     var saw_heap = false
+    var saw_align = false
+    var saw_file_align = false
     var saw_machine = ""
     var saw_dynamic_base: i64 = -1
     var saw_high_entropy: i64 = -1
@@ -863,6 +865,24 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             if image_base != 0 and image_base != selected:
                 return Err("conflicting internal COFF /BASE flags")
             image_base = selected
+        elif normalized.starts_with("/align:"):
+            val selected = _internal_coff_number(flag.substring(7))?
+            if (selected < 0x200 or selected > 0x10000000 or
+                    (selected & (selected - 1)) != 0):
+                return Err("internal COFF /ALIGN must be a power of two from 512 through 268435456")
+            if saw_align and policy.section_alignment != selected:
+                return Err("conflicting internal COFF /ALIGN flags")
+            policy.section_alignment = selected
+            saw_align = true
+        elif normalized.starts_with("/filealign:"):
+            val selected = _internal_coff_number(flag.substring(11))?
+            if (selected < 0x200 or selected > 0x10000 or
+                    (selected & (selected - 1)) != 0):
+                return Err("internal COFF /FILEALIGN must be a power of two from 512 through 65536")
+            if saw_file_align and policy.file_alignment != selected:
+                return Err("conflicting internal COFF /FILEALIGN flags")
+            policy.file_alignment = selected
+            saw_file_align = true
         elif normalized.starts_with("/subsystem:"):
             val name = normalized.substring(11)
             var subsystem: i64 = 0
@@ -905,6 +925,11 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
         if saw_high_entropy == 1:
             return Err("internal COFF /HIGHENTROPYVA requires /DYNAMICBASE")
         policy.high_entropy_va = false
+    if policy.section_alignment < policy.file_alignment:
+        return Err("internal COFF /ALIGN must be no smaller than /FILEALIGN")
+    if (policy.section_alignment < 0x1000 and
+            policy.section_alignment != policy.file_alignment):
+        return Err("internal COFF sub-page /ALIGN must equal /FILEALIGN")
     Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:

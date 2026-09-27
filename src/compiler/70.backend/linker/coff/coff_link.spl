@@ -17,8 +17,8 @@ use compiler.backend.linker.coff.coff_object.{
     coff_apply_arm64_section_relocation}
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PeImagePolicy, PE_AMD64_IMAGE_BASE, PE_ARM64_IMAGE_BASE,
-    PE_MACHINE_AMD64, PE_MACHINE_ARM64, PE_SECTION_ALIGNMENT, pe_align_up,
-    pe_write_image_policy}
+    PE_MACHINE_AMD64, PE_MACHINE_ARM64, pe_align_up,
+    pe_validate_policy, pe_write_image_policy}
 use compiler.backend.linker.coff.archive_closure.{
     CoffArchiveClosure, coff_archive_closure_retained_aliases}
 use compiler.backend.linker.coff.pe_import_builder.{
@@ -118,7 +118,8 @@ fn _coff_section_is_image_input(section: CoffSection) -> bool:
     # internal linker owns PDB/debug-directory production.
     not section.name.starts_with(".debug$")
 
-fn _coff_section_rvas(objects: [CoffObject]) -> Result<[[i64]], text>:
+fn _coff_section_rvas(objects: [CoffObject],
+        section_alignment: i64) -> Result<[[i64]], text>:
     var result: [[i64]] = []
     var accepted: [[bool]] = []
     for object in objects:
@@ -213,7 +214,7 @@ fn _coff_section_rvas(objects: [CoffObject]) -> Result<[[i64]], text>:
             si = si + 1
         oi = oi + 1
 
-    var next_rva = PE_SECTION_ALIGNMENT
+    var next_rva = section_alignment
     for group in group_names:
         var subsection_names: [text] = []
         oi = 0
@@ -254,7 +255,7 @@ fn _coff_section_rvas(objects: [CoffObject]) -> Result<[[i64]], text>:
                         group_offset = group_offset + logical_size
                     si = si + 1
                 oi = oi + 1
-        next_rva = next_rva + pe_align_up(group_offset, PE_SECTION_ALIGNMENT)
+        next_rva = next_rva + pe_align_up(group_offset, section_alignment)
     Ok(result)
 
 fn _coff_local_symbol_rva(object_index: i64, symbol: CoffSymbol,
@@ -267,8 +268,9 @@ fn _coff_local_symbol_rva(object_index: i64, symbol: CoffSymbol,
         return Err("symbol '{symbol.name}' is defined in a removed COFF section")
     Ok(rvas[object_index][section_index] + symbol.value)
 
-fn _coff_next_rva(objects: [CoffObject], rvas: [[i64]]) -> i64:
-    var end_rva = PE_SECTION_ALIGNMENT
+fn _coff_next_rva(objects: [CoffObject], rvas: [[i64]],
+        section_alignment: i64) -> i64:
+    var end_rva = section_alignment
     var object_index: i64 = 0
     while object_index < objects.len():
         var section_index: i64 = 0
@@ -281,7 +283,7 @@ fn _coff_next_rva(objects: [CoffObject], rvas: [[i64]]) -> i64:
                 if section_end > end_rva: end_rva = section_end
             section_index = section_index + 1
         object_index = object_index + 1
-    pe_align_up(end_rva, PE_SECTION_ALIGNMENT)
+    pe_align_up(end_rva, section_alignment)
 
 fn _coff_defined_symbols(objects: [CoffObject], rvas: [[i64]]) -> {text: bool}:
     var result: {text: bool} = {}
@@ -1019,6 +1021,8 @@ fn coff_link_arm64_retained_image_policy(request: CoffLinkRequest,
 fn _coff_link_retained(request: CoffLinkRequest,
         retained_symbols: [text], machine: i64,
         policy: PeImagePolicy, image_base: i64) -> Result<[u8], text>:
+    val valid_policy = pe_validate_policy(policy)
+    if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
     val machine_name = if machine == COFF_MACHINE_ARM64: "ARM64" else: "AMD64"
     val prepared_result = _coff_prepare_link_machine(
         request, retained_symbols, machine, machine_name)
@@ -1056,13 +1060,15 @@ fn _coff_link_retained(request: CoffLinkRequest,
                     found = true
         if not found: return Err("retained COFF symbol not found: {name}")
 
-    val rva_result = _coff_section_rvas(objects)
+    val rva_result = _coff_section_rvas(objects, policy.section_alignment)
     if rva_result.is_err(): return Err(rva_result.unwrap_err())
     val rvas = rva_result.unwrap()
-    val common_base_rva = _coff_next_rva(objects, rvas)
+    val common_base_rva = _coff_next_rva(
+        objects, rvas, policy.section_alignment)
     val common_layout = _coff_common_layout(objects, rvas, common_base_rva)
     val import_base_rva = if common_layout.size > 0:
-        common_base_rva + pe_align_up(common_layout.size, PE_SECTION_ALIGNMENT)
+        common_base_rva + pe_align_up(
+            common_layout.size, policy.section_alignment)
     else:
         common_base_rva
     var import_code_count: i64 = 0
@@ -1072,7 +1078,7 @@ fn _coff_link_retained(request: CoffLinkRequest,
     val import_thunk_size = if machine == COFF_MACHINE_ARM64: 12 else: 6
     val import_idata_rva = if import_code_count > 0:
         import_thunk_rva + pe_align_up(
-            import_code_count * import_thunk_size, PE_SECTION_ALIGNMENT)
+            import_code_count * import_thunk_size, policy.section_alignment)
     else:
         import_base_rva
     val import_result = if machine == COFF_MACHINE_ARM64:
@@ -1087,10 +1093,10 @@ fn _coff_link_retained(request: CoffLinkRequest,
     var export_base_rva = import_base_rva
     if import_image.thunk_data.len() > 0:
         export_base_rva = import_thunk_rva +
-            pe_align_up(import_image.thunk_data.len(), PE_SECTION_ALIGNMENT)
+            pe_align_up(import_image.thunk_data.len(), policy.section_alignment)
     if import_image.idata_data.len() > 0:
         export_base_rva = import_idata_rva +
-            pe_align_up(import_image.idata_data.len(), PE_SECTION_ALIGNMENT)
+            pe_align_up(import_image.idata_data.len(), policy.section_alignment)
     val export_symbols = _coff_export_symbol_rvas(exports, objects, rvas,
         import_image.symbol_rvas, common_layout.symbol_rvas, aliases,
         image_base)
@@ -1311,13 +1317,13 @@ fn _coff_link_retained(request: CoffLinkRequest,
         var relocation_rva = import_base_rva
         if import_image.thunk_data.len() > 0:
             relocation_rva = import_thunk_rva +
-                pe_align_up(import_image.thunk_data.len(), PE_SECTION_ALIGNMENT)
+                pe_align_up(import_image.thunk_data.len(), policy.section_alignment)
         if import_image.idata_data.len() > 0:
             relocation_rva = import_idata_rva +
-                pe_align_up(import_image.idata_data.len(), PE_SECTION_ALIGNMENT)
+                pe_align_up(import_image.idata_data.len(), policy.section_alignment)
         if export_image.unwrap().len() > 0:
             relocation_rva = export_base_rva +
-                pe_align_up(export_image.unwrap().len(), PE_SECTION_ALIGNMENT)
+                pe_align_up(export_image.unwrap().len(), policy.section_alignment)
         output_sections = output_sections.push(PeImageSection(name: ".reloc",
             virtual_address: relocation_rva,
             virtual_size: base_relocations.unwrap().len(),

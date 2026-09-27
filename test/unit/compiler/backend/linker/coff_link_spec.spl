@@ -367,14 +367,15 @@ fn _cl_weak_calling_object() -> [u8]:
     _cl_u32(bytes, 4)
 
 describe "internal freestanding Windows linker":
-    it "writes typed subsystem, stack, and heap policy into PE32+":
+    it "writes typed optional-header and alignment policy into PE32+":
         val policy = PeImagePolicy(
             subsystem: PE_SUBSYSTEM_WINDOWS,
             stack_reserve: 0x200000, stack_commit: 0x2000,
             heap_reserve: 0x300000, heap_commit: 0x3000,
             dynamic_base: false, high_entropy_va: false,
             nx_compat: false, large_address_aware: false,
-            terminal_server_aware: false, fixed_image: true)
+            terminal_server_aware: false, fixed_image: true,
+            section_alignment: 0x2000, file_alignment: 0x400)
         val image = coff_link_amd64_retained_image_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], policy, 0x180000000).unwrap()
@@ -384,9 +385,25 @@ describe "internal freestanding Windows linker":
         expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
         expect(_cl_read_u64(image, 0xf0)).to_equal(0x300000)
         expect(_cl_read_u64(image, 0xf8)).to_equal(0x3000)
+        expect(_cl_read_u32(image, 0xa8)).to_equal(0x2000)
+        expect(_cl_read_u32(image, 0xb8)).to_equal(0x2000)
+        expect(_cl_read_u32(image, 0xbc)).to_equal(0x400)
+        expect(_cl_read_u32(image, 0x19c)).to_equal(0x400)
+        expect(image[0x400] as i64).to_equal(0xc3)
         expect(image[0x96] as i64).to_equal(0x03)
         expect(image[0xde] as i64).to_equal(0x00)
         expect(image[0xdf] as i64).to_equal(0x00)
+
+        var compact = PeImagePolicy.default()
+        compact.section_alignment = 0x200
+        compact.file_alignment = 0x200
+        val compact_image = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], compact).unwrap()
+        expect(_cl_read_u32(compact_image, 0xa8)).to_equal(0x200)
+        expect(_cl_read_u32(compact_image, 0xb8)).to_equal(0x200)
+        expect(_cl_read_u32(compact_image, 0xbc)).to_equal(0x200)
+        expect(compact_image[0x200] as i64).to_equal(0xc3)
 
     it "rejects invalid PE reserve and commit policy":
         val invalid = PeImagePolicy(
@@ -395,7 +412,8 @@ describe "internal freestanding Windows linker":
             heap_reserve: 0x100000, heap_commit: 0x1000,
             dynamic_base: true, high_entropy_va: true,
             nx_compat: true, large_address_aware: true,
-            terminal_server_aware: true, fixed_image: false)
+            terminal_server_aware: true, fixed_image: false,
+            section_alignment: 0x1000, file_alignment: 0x200)
         val linked = coff_link_amd64_retained_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], invalid)
@@ -407,6 +425,14 @@ describe "internal freestanding Windows linker":
             [], PeImagePolicy.default(), 0x180001000)
         expect(bad_base.is_err()).to_equal(true)
         expect(bad_base.unwrap_err()).to_contain("image base")
+
+        var bad_alignment = PeImagePolicy.default()
+        bad_alignment.file_alignment = 0x300
+        val bad_aligned = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], bad_alignment)
+        expect(bad_aligned.is_err()).to_equal(true)
+        expect(bad_aligned.unwrap_err()).to_contain("file alignment")
 
         var inconsistent = PeImagePolicy.default()
         inconsistent.dynamic_base = false
