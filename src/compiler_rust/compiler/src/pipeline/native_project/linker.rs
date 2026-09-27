@@ -88,6 +88,20 @@ fn generated_c_source_compiler(target: simple_common::target::Target) -> String 
     }
 }
 
+fn generated_c_target_flag(
+    target: simple_common::target::Target,
+    compiler: &str,
+    fallback_triple: Option<&str>,
+) -> Option<String> {
+    windows_gnu_target_flag(target, compiler)
+        .map(str::to_string)
+        .or_else(|| {
+            compiler_accepts_target_flag(compiler)
+                .then(|| fallback_triple.map(|triple| format!("--target={triple}")))
+                .flatten()
+        })
+}
+
 pub(super) fn is_boot_c_translation_unit(path: &Path) -> bool {
     if path.extension().and_then(|extension| extension.to_str()) != Some("c") {
         return false;
@@ -1274,10 +1288,8 @@ int main(int argc, char** argv) {
                 .arg("/O2")
                 .arg("/Gy")
                 .arg(format!("/Fo{}", init_o.display()));
-            if compiler_accepts_target_flag(&cc) {
-                if let Some(triple) = init_target_triple {
-                    cmd.arg(format!("--target={}", triple));
-                }
+            if let Some(flag) = generated_c_target_flag(cross_target, &cc, init_target_triple) {
+                cmd.arg(flag);
             }
             match cross_target.arch {
                 simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
@@ -1313,10 +1325,8 @@ int main(int argc, char** argv) {
                 .arg("-fno-asynchronous-unwind-tables")
                 .arg("-fno-unwind-tables")
                 .arg("-fno-stack-protector");
-            if compiler_accepts_target_flag(&cc) {
-                if let Some(triple) = init_target_triple {
-                    cmd.arg(format!("--target={}", triple));
-                }
+            if let Some(flag) = generated_c_target_flag(cross_target, &cc, init_target_triple) {
+                cmd.arg(flag);
             }
             match cross_target.arch {
                 simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
@@ -3321,7 +3331,7 @@ mod linker_tests {
 
     #[test]
     fn hosted_link_args_follow_cross_target_os() {
-        let mingw = Target::parse("x86_64-w64-windows-gnu").unwrap();
+        let mingw = Target::parse("x86_64-pc-windows-gnu").unwrap();
         assert_eq!(mingw.os, TargetOS::Windows);
         assert!(hosted_elf_link_args(mingw, false).is_empty());
         assert!(!is_linux_link_target(mingw));
@@ -3331,6 +3341,10 @@ mod linker_tests {
         assert!(!mingw_config
             .unresolved_symbol_flags
             .contains(&"-Wl,--unresolved-symbols=ignore-all"));
+        assert_eq!(
+            generated_c_target_flag(mingw, "clang", None).as_deref(),
+            Some("--target=x86_64-w64-windows-gnu")
+        );
 
         let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(
@@ -3338,6 +3352,14 @@ mod linker_tests {
             &["-no-pie", "-Wl,-z,muldefs"]
         );
         assert!(is_linux_link_target(linux));
+        assert_eq!(
+            generated_c_target_flag(linux, "clang", Some("riscv64-unknown-elf")).as_deref(),
+            Some("--target=riscv64-unknown-elf")
+        );
+        assert_eq!(
+            generated_c_target_flag(linux, "gcc", Some("riscv64-unknown-elf")),
+            None
+        );
     }
 
     #[test]
