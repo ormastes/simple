@@ -13,6 +13,7 @@ use compiler.backend.linker.elf_parser.{
     SHN_UNDEF, STB_GLOBAL, STB_WEAK
 }
 use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
+use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
 
 val SHN_COMMON: i64 = 0xfff2
 
@@ -96,7 +97,19 @@ fn elf_archive_closure(roots: [ElfObject], archives: [[i64]]) -> Result<ElfClosu
 fn elf_archive_closure_retained(roots: [ElfObject], archives: [[i64]],
         retained_symbols: [text]) -> Result<ElfClosureResult, text>:
     """Archive closure with `-u/--undefined`-style extraction roots."""
-    val members = elf_archive_members(archives)?
+    elf_archive_closure_retained_wrapped(roots, archives, retained_symbols, [])
+
+fn elf_archive_closure_retained_wrapped(roots: [ElfObject], archives: [[i64]],
+        retained_symbols: [text], wraps: [text]) -> Result<ElfClosureResult, text>:
+    """Archive closure after applying the same --wrap view as relocation."""
+    var wrapped_roots: [ElfObject] = []
+    for root in roots: wrapped_roots = wrapped_roots.push(elf_wrap_object(root, wraps))
+    var members: [ElfArchiveMember] = []
+    val parsed_members = elf_archive_members(archives)?
+    for member in parsed_members:
+        members = members.push(ElfArchiveMember(
+            archive_idx: member.archive_idx, name: member.name, raw: member.raw,
+            obj: elf_wrap_object(member.obj, wraps)))
     var taken: [bool] = []
     for _m in members:
         taken = taken.push(false)
@@ -107,12 +120,12 @@ fn elf_archive_closure_retained(roots: [ElfObject], archives: [[i64]],
     while changed:
         changed = false
         var defined: {text: bool} = {}
-        for obj in roots:
+        for obj in wrapped_roots:
             defined = elf_closure_add_defs(defined, obj)
         for sm in selected:
             defined = elf_closure_add_defs(defined, sm.obj)
         var undef: {text: bool} = {}
-        for obj in roots:
+        for obj in wrapped_roots:
             undef = elf_closure_add_strong_undefs(undef, defined, obj)
         for sm in selected:
             undef = elf_closure_add_strong_undefs(undef, defined, sm.obj)
@@ -145,4 +158,5 @@ fn elf_archive_closure_retained(roots: [ElfObject], archives: [[i64]],
 # ============================================================================
 
 export ElfArchiveMember, ElfClosureResult
-export elf_archive_closure, elf_archive_closure_retained, elf_archive_members
+export elf_archive_closure, elf_archive_closure_retained
+export elf_archive_closure_retained_wrapped, elf_archive_members

@@ -668,8 +668,11 @@ the boot link, and live common symbols remain placeable through `*(COMMON)`.
 The route also consumes `-nostdlib`, `-static`/`-Bstatic`, balanced archive
 group markers, and `--no-gc-sections` as typed policy: the boot engine is
 intrinsically freestanding/static, archive extraction is already a fixpoint,
-and the last GC toggle wins. `--wrap` remains rejected until references and
-archive selection share one symbol-rewrite implementation.
+and the last GC toggle wins. GNU `--wrap=name` now rewrites undefined `name`
+references to `__wrap_name` and `__real_name` references back to `name` through
+one shared projection used before both archive fixpoint extraction and final
+resolution; definitions retain their real names. This admits the canonical
+x86-64 module-initializer wrapper without hiding a missing wrapper provider.
 Duplicate identical policy is deduplicated; conflicting scripts, conflicting
 symbol expressions, malformed values, and every unmodeled flag fail closed.
 An explicit flag and `SIMPLE_LINKER_SCRIPT` must name the same script when both

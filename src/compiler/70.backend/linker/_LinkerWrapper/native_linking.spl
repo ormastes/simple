@@ -58,7 +58,7 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
 use compiler.backend.linker.elf.elf_static_link.{elf_link_configured, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
-use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_configured_gc}
+use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
@@ -549,6 +549,7 @@ struct InternalSimpleOsFlags:
     nostdlib: bool
     static_link: bool
     archive_group: bool
+    wraps: [text]
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -571,6 +572,7 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
     var static_link = false
     var group_depth: i64 = 0
     var archive_group = false
+    var wraps: [text] = []
     var i: i64 = 0
     while i < extra_flags.len():
         val flag = extra_flags[i]
@@ -601,6 +603,21 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
             if group_depth <= 0:
                 return Err("internal SimpleOS archive group closes before it opens")
             group_depth = group_depth - 1
+            i = i + 1
+            continue
+        elif flag == "--wrap":
+            if i + 1 >= extra_flags.len(): return Err("--wrap requires a symbol name")
+            val name = extra_flags[i + 1]
+            if not _internal_simpleos_symbol_name_valid(name):
+                return Err("internal SimpleOS --wrap has an invalid symbol name")
+            if not wraps.contains(name): wraps = wraps.push(name)
+            i = i + 2
+            continue
+        elif flag.starts_with("--wrap="):
+            val name = flag.substring(7)
+            if not _internal_simpleos_symbol_name_valid(name):
+                return Err("internal SimpleOS --wrap has an invalid symbol name")
+            if not wraps.contains(name): wraps = wraps.push(name)
             i = i + 1
             continue
         elif flag == "-T" or flag == "--script":
@@ -654,7 +671,7 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
         return Err("internal SimpleOS archive group is not closed")
     Ok(InternalSimpleOsFlags(script: script, defsym_names: names,
         defsym_exprs: exprs, gc_sections: gc_sections, nostdlib: nostdlib,
-        static_link: static_link, archive_group: archive_group))
+        static_link: static_link, archive_group: archive_group, wraps: wraps))
 
 fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
@@ -839,8 +856,9 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         boot_plan = boot_layout_add_defsym(boot_plan,
             flags.defsym_names[defsym_i], flags.defsym_exprs[defsym_i])
         defsym_i = defsym_i + 1
-    val linked = elf_boot_link_archives_configured_gc(objects, archives, boot_plan,
-        target_arch, config.strip_output, config.retained_symbols, flags.gc_sections)
+    val linked = elf_boot_link_archives_policy(objects, archives, boot_plan,
+        target_arch, config.strip_output, config.retained_symbols,
+        flags.gc_sections, flags.wraps)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
     var bytes: [u8] = []
     for b in linked.unwrap(): bytes = bytes.push(b as u8)
