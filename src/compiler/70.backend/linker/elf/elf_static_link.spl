@@ -118,6 +118,7 @@ struct ElfLinkRequest:
     runpath: text = ""    # DT_RUNPATH payload (dynamic modes only)
     bind_now: bool = false # -z now: eager dynamic binding
     hash_style: text = "both" # gnu, sysv, or both
+    as_needed: bool = false # emit DT_NEEDED only for provider DSOs
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -131,6 +132,7 @@ struct ElfLinkCtx:
     inputs: ElfStaticInputs
     res: SymResolution
     libs: [ElfSharedLib]
+    needed_libs: [ElfSharedLib]
     target: RelocArch
     mode: i64
     common_offsets: {text: i64}
@@ -526,6 +528,32 @@ fn elf_lib_export_soname(libs: [ElfSharedLib], name: text) -> text:
             return l.soname
     ""
 
+fn elf_libs_have_soname(libs: [ElfSharedLib], soname: text) -> bool:
+    for lib in libs:
+        if lib.soname == soname: return true
+    false
+
+fn elf_needed_libs(libs: [ElfSharedLib], imports: [text], weak: [bool],
+        retained: [text]) -> [ElfSharedLib]:
+    """Preserve command order while retaining each actually selected provider once."""
+    var names: [text] = []
+    var i: i64 = 0
+    while i < imports.len():
+        if not weak[i]:
+            val soname = elf_lib_export_soname(libs, imports[i])
+            if soname != "" and not names.contains(soname): names = names.push(soname)
+        i = i + 1
+    for symbol in retained:
+        val soname = elf_lib_export_soname(libs, symbol)
+        if soname != "" and not names.contains(soname): names = names.push(soname)
+    var out: [ElfSharedLib] = []
+    var emitted: [text] = []
+    for lib in libs:
+        if names.contains(lib.soname) and not emitted.contains(lib.soname):
+            out = out.push(lib)
+            emitted = emitted.push(lib.soname)
+    out
+
 fn elf_lib_export_version(libs: [ElfSharedLib], name: text) -> text:
     for l in libs:
         if l.export_versions.has(name):
@@ -755,7 +783,7 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
     var t: [[i64]] = []
     val dynamic = elf_mode_dynamic(ctx.mode)
     if dynamic:
-        for l in ctx.libs:
+        for l in ctx.needed_libs:
             t = t.push([DT_NEEDED, dynstr.offsets[l.soname]])
         if ctx.runpath != "":
             t = t.push([DT_RUNPATH, dynstr.offsets[ctx.runpath]])
@@ -1171,6 +1199,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         return Err("bind-now policy given to a static link")
     if not dynamic and req.hash_style != "both":
         return Err("dynamic hash policy given to a static link")
+    if not dynamic and req.as_needed:
+        return Err("as-needed policy given to a static link")
     if req.runpath.contains("\0"):
         return Err("RUNPATH contains NUL")
     if req.hash_style != "gnu" and req.hash_style != "sysv" and req.hash_style != "both":
@@ -1231,12 +1261,17 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         return Err("entry symbol not defined: {req.entry}")
 
     val common = elf_place_common(elf_static_place(collected, gc.live)?, res, gc.common_live)
-    val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
+    val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, needed_libs: libs,
+        target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
         runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style)
     val initial_contents = elf_static_contents(common.inputs)
     val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
+    val dynamic_libs = if req.as_needed:
+        elf_needed_libs(libs, sc.imports, sc.import_weak, retained_symbols)
+    else:
+        libs
     var need_got_base = false
     for r in refs:
         if r.name == "_GLOBAL_OFFSET_TABLE_" or
@@ -1247,7 +1282,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             need_got_base = true
     val copies = elf_place_copies(common.inputs, sc)
     val inputs = copies.inputs
-    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
+    val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, needed_libs: dynamic_libs,
+        target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx,
         copy_offsets: copies.offsets, copy_out: copies.out_idx,
         runpath: req.runpath, bind_now: req.bind_now, hash_style: req.hash_style)
@@ -1281,10 +1317,13 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         var version = elf_dynsym_version(name)
         if version == "":
             version = elf_lib_export_version(libs, name)
+        val provider = elf_lib_export_soname(libs, name)
+        if req.as_needed and not elf_libs_have_soname(dynamic_libs, provider):
+            version = ""
         if version == "":
             import_versions = import_versions.push(1)
         else:
-            val library = elf_lib_export_soname(libs, name)
+            val library = provider
             if library == "":
                 return Err("versioned import has no providing shared object: {name}")
             var requirement: i64 = -1
@@ -1299,7 +1338,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
                 need_versions = need_versions.push(version)
             import_versions = import_versions.push(requirement + 2)
     var strnames: [text] = []
-    for l in libs:
+    for l in dynamic_libs:
         strnames = strnames.push(l.soname)
     for n in sc.imports:
         strnames = strnames.push(elf_dynsym_name(n))

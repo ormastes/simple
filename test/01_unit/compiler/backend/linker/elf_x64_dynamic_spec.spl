@@ -35,6 +35,7 @@ val DT_FLAGS: i64 = 30
 val DT_FLAGS_1: i64 = 0x6ffffffb
 val DT_HASH: i64 = 4
 val DT_GNU_HASH: i64 = 0x6ffffef5
+val DT_NEEDED: i64 = 1
 
 fn load_path(path: text) -> [i64]:
     val raw = file_read_bytes(path)
@@ -101,6 +102,15 @@ fn dyn_tag(b: [i64], tag: i64) -> i64:
         o = o + 16
     -1
 
+fn dyn_tag_count(b: [i64], tag: i64) -> i64:
+    var count: i64 = 0
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag: count = count + 1
+        o = o + 16
+    count
+
 fn dynsym_name(b: [i64], idx: i64) -> text:
     cstr(b, sec_off(b, ".dynstr") + rd32(b, sec_off(b, ".dynsym") + idx * 24))
 
@@ -117,6 +127,17 @@ fn structural(mode: i64) -> [i64]:
     r.unwrap()
 
 describe "elf_link - x86_64 dynamic gate":
+    it "omits unused shared libraries under typed as-needed policy":
+        val b = elf_link_structural(ElfLinkRequest(
+            objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
+            shared: [file_read_bytes("{FIX}/libadd_x64.so.1"),
+                file_read_bytes("{FIX}/libtls_x64.so.1")], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: INTERP, as_needed: true)).unwrap()
+        expect(dyn_tag_count(b, DT_NEEDED)).to_equal(1)
+        expect(cstr(b, sec_off(b, ".dynstr") + dyn_tag(b, DT_NEEDED))).to_equal(
+            "libadd_x64.so")
+
     it "emits only the selected dynamic symbol hash table":
         val gnu = elf_link_structural(ElfLinkRequest(
             objects: [load_path("{FIX}/pic_start_x64.o")], archives: [],
@@ -147,6 +168,14 @@ describe "elf_link - x86_64 dynamic gate":
         val result = elf_link(req)
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_contain("dynamic hash policy")
+
+    it "rejects as-needed policy on a static image":
+        val req = ElfLinkRequest(objects: [], archives: [], shared: [], entry: "_start",
+            target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC, interp: "",
+            as_needed: true)
+        val result = elf_link(req)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("as-needed policy")
 
     it "emits eager-binding dynamic flags only when requested":
         val eager = elf_link_structural(ElfLinkRequest(
