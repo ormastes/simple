@@ -30,3 +30,9 @@ dev-done
 
 ## Log
 - dev: Created state file with 8 acceptance criteria (type: todo).
+
+- bootstrap: Source pinned to main edfa0daab038472319196313594265412f2b2f07 for Windows and WSL. Windows: 24 logical CPUs, 64 GiB RAM, requested 20 jobs and policy admitted 7. Linux WSL: 14 CPUs, 31 GiB RAM, requested 12 jobs and policy admitted 9.
+- bootstrap: Windows Stage 2 exited 1 before compilation because LLVM 23.1.1 was not detected. A matching installed provider exists at C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc; set LLVM_SYS_231_PREFIX to its MSYS path for the next attempt. Log: build/bootstrap/multihost_windows/console.log. The materializer's 61 generated links were undone with its receipt-backed --undo; the worktree was clean afterward.
+- bootstrap: Linux default backend exited at startup because LLVM 23 is absent. Cranelift reached fingerprint but failed on symlinked /usr/bin/llvm-config; setting LLVM_CONFIG=/usr/lib/llvm-14/bin/llvm-config reached Rust seed build. That build exited 101 because native Cargo 1.75 cannot parse Cargo.lock v4. Three distinct Linux attempts completed; do not repeat in this session. Logs: build/bootstrap/multihost_linux/console.log and logs/x86_64-unknown-linux-gnu/rust-seed-build.log in the WSL worktree.
+- bootstrap: FreeBSD QEMU --preflight failed only at admitted_media. The required 14.4 amd64 BASIC-CLOUDINIT qcow2 and trusted SHA-256 are absent from the WSL shared-media path. The guest wrapper also hardcodes bootstrap --jobs=2 despite QEMU_CPUS=12; this needs a safe job knob before full acceptance.
+- bootstrap: All three host rows remain active and unverified. See doc/03_plan/agent_tasks/multihost_bootstrap.md and doc/08_tracking/todo/multihost_bootstrap_2026_09_27.md.
