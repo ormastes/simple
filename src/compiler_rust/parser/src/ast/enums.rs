@@ -239,6 +239,11 @@ pub enum MoveMode {
     /// Copy/borrow closure: captures environment by reference (|x: expr, default)
     #[default]
     Copy,
+    /// Colon-block closure (`describe "x":`, `it "y":`, `before_each:`,
+    /// `run():` + indented block). Captures exactly like `Copy`; the marker
+    /// only lets static checks tell the BDD/trailing-block form apart from a
+    /// user-written `\x:` / `fn():` lambda (see `capture_write_check`).
+    ColonBlock,
 }
 
 impl MoveMode {
