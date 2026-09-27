@@ -1,9 +1,9 @@
 # Production bridge from Git/filesystem change journals to the compile-owned
 # source inventory. Git commands are read-only; all writes stay under build/scv.
 
-use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
+use app.io.mod.{file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1, compile_source_inventory_read_pointer_content_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 
@@ -32,43 +32,43 @@ fn compiler_inventory_cursor_path_v1(cache_root: text) -> text:
 
 fn compiler_inventory_cursor_decode_v1(content: text) -> CompilerInventoryCursorV1:
     val lines = content.split("\n")
-    if lines.len() != 6 or lines[0] != "simple-compile-event-cursor-v1":
+    if (lines.len() != 6 or lines[0] != "simple-compile-event-cursor-v1" or
+            not lines[1].starts_with("git_head=") or
+            not lines[2].starts_with("filesystem_rows=") or
+            not lines[3].starts_with("filesystem_digest=") or
+            not lines[4].starts_with("inventory_digest=") or
+            not lines[5].starts_with("inventory_generation=")):
         return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
     val head = lines[1].replace("git_head=", "")
     val rows = lines[2].replace("filesystem_rows=", "").to_i64() ?? -1
     val filesystem_digest = lines[3].replace("filesystem_digest=", "")
     val inventory_digest = lines[4].replace("inventory_digest=", "")
     val generation = lines[5].replace("inventory_generation=", "").to_i64() ?? -1
-    val valid = (head.len() == 40 or head.len() == 64) and rows >= 0 and
-        filesystem_digest.len() == 64 and inventory_digest.len() == 64 and
+    var head_valid = head.len() == 40 or head.len() == 64
+    for ch in head:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            head_valid = false
+    val valid = head_valid and rows >= 0 and
+        compile_source_inventory_digest_valid_v1(filesystem_digest) and
+        compile_source_inventory_digest_valid_v1(inventory_digest) and
         generation >= 0
     CompilerInventoryCursorV1(
         valid, head, rows, filesystem_digest, inventory_digest, generation)
 
 fn compiler_inventory_cursor_read_v1(cache_root: text) -> CompilerInventoryCursorV1:
+    # New generations bind the cursor to the inventory in one CURRENT rename.
+    # A bare digest is the legacy layout; only that layout may use the old
+    # separate cursor during migration.
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    if pointer_content != "":
+        val separator = pointer_content.index_of("\n")
+        if separator >= 0:
+            return compiler_inventory_cursor_decode_v1(
+                pointer_content[separator + 1:])
     val path = compiler_inventory_cursor_path_v1(cache_root)
     if not file_exists(path):
         return CompilerInventoryCursorV1(false, "", -1, "", "", -1)
     compiler_inventory_cursor_decode_v1(file_read(path))
-
-fn compiler_inventory_cursor_write_v1(
-    cache_root: text, git_head: text, filesystem_rows: i64,
-    filesystem_digest: text, inventory: CompileSourceInventoryReadV1
-) -> bool:
-    if not inventory.valid or inventory.inventory == nil:
-        return false
-    val root = compiler_inventory_event_root_v1(cache_root)
-    if not dir_create(root, true):
-        return false
-    val content = [
-        "simple-compile-event-cursor-v1",
-        "git_head={git_head}",
-        "filesystem_rows={filesystem_rows}",
-        "filesystem_digest={filesystem_digest}",
-        "inventory_digest={inventory.digest}",
-        "inventory_generation={inventory.inventory!.generation}"
-    ].join("\n")
-    file_atomic_write(compiler_inventory_cursor_path_v1(cache_root), content)
 
 fn compiler_inventory_git_lines_v1(
     root: text, args: [text]
@@ -300,18 +300,14 @@ fn compiler_inventory_refresh_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+    # An absent/empty journal is 0 rows, not `"".split("\n").len()` (1).
+    val rows = if journal == "": 0 else: journal.split("\n").len()
     val inventory = compile_source_inventory_apply_observed_events_v1(
-        root, cache_root, git_events!, filesystem_events!)
+        root, cache_root, git_events!, filesystem_events!, head, rows,
+        filesystem_digest)
     if not inventory.valid:
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
-    # An absent/empty journal is 0 rows, not `"".split("\n").len()` (1): with
-    # rows=1 recorded, the next refresh demanded a journal that never existed
-    # and failed filesystem-event-journal-missing (2026-09-25).
-    val rows = if journal == "": 0 else: journal.split("\n").len()
-    if not compiler_inventory_cursor_write_v1(
-            cache_root, head, rows, filesystem_digest, inventory):
-        return compiler_inventory_invalid_v1("compile-event-receipt-write-failed")
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 

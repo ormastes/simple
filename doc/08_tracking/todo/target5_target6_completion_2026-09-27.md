@@ -44,11 +44,13 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   action/archive receipts. Route compile, check, bootstrap, native-build,
   MCP/LSP, and daemon requests through one pinned catalog owner; remove warm
   closure scans.
-- Make inventory publication and event-cursor publication recover as one
-  transaction. The isolated fix validates filesystem events before publishing
-  one combined Git/filesystem generation, but a cursor-write failure can still
-  leave the cursor behind. Prove overflow, event loss, concurrent writers,
-  cold rebuild, and replay recovery without Git or source mutation.
+- Qualify the new atomic inventory/cursor `CURRENT` record on a current-source
+  runtime. The isolated source now validates filesystem events before publish
+  and writes the inventory digest plus Git/filesystem cursor in one pointer
+  rename, with a bare-digest legacy reader. The historical Stage2 diagnostic
+  native build timed out before an executable was produced. Prove failed
+  rename, overflow, event loss, concurrent writers, cold rebuild, legacy
+  migration, and replay recovery without Git or source mutation.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
