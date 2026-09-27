@@ -151,3 +151,31 @@ Kimi owns implementation and evidence collection in its lane. The merge owner
 must review the final diff and evidence against the accepted requirements;
 source inspection, CPU validation and a Mac-only GPU run are not completion
 evidence for the Linux N2 gate.
+
+## Handoff record (2026-09-28)
+
+The lane source was published as **PR #1870**
+(`work/2d-skia-renderdoc-hardening-20260928`, commit `85d4e28450e`): 139
+files — Stage 4 text-lane source (native glyph contract, GUI pixel oracle,
+31-latin-shaping oracle + registration + specs), the optional upstream Skia
+Ganesh Vulkan provider with deterministic macOS/Linux builds and the
+MoltenVK pin, the corpus/qualification runner sources, requirement/design/
+verify docs, and the tracking bug/todo docs. The verify gate stays FAIL;
+nothing in the PR claims execution evidence.
+
+State for the next owner/session:
+- Blocker 1 (stage2 host-gpu link, 170 undefined symbols) is still OPEN on
+  origin/main — check `doc/08_tracking/bug/macos_stage2_compiler_cli_build_host_gpu_link_2026-09-27.md`.
+  When it lands: resume the bootstrap trust-root lane in
+  `/private/tmp/simple-kimi-bootstrap-2026-09-27` (admitted stage-2
+  candidate `7620bf8f…` retained on disk), produce the planner receipt, run
+  the full `--deploy` lane, then execute the new specs/oracles once.
+- Blocker 2 (physical Linux Vulkan host) — follow the two TODO docs;
+  reusable macOS artifacts (pinned Skia checkout, oracle digests,
+  comparator) are listed there.
+- Blocker 3 (case02 edge tolerance) — owner decision pending in the bug
+  doc; do not widen silently.
+- New Stage 4 source is compile-unverified until Blocker 1 clears; the
+  oracle self-checks will confirm the pinned image digests at first real
+  execution.
+- Disk warning: `/private/tmp` was at ~4.7 GiB free at publication.
