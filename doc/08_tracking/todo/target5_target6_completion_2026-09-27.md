@@ -47,7 +47,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   variant identity, exact reverse edges, reached SCC schedule, and complete
   action/archive receipts. Route compile, check, bootstrap, native-build,
   MCP/LSP, and daemon requests through one pinned catalog owner; remove warm
-  closure scans.
+  closure scans. The existing warm package route now uses the shared bytewise
+  heap sort for selected module and package identities instead of native text
+  `<` plus quadratic selection/deduplication. Its closure walk now tracks
+  queued modules in a lookup table, and archive routing uses selected-module
+  membership lookups instead of repeated linear scans. Qualify closure order,
+  p95 time, and max RSS on the current-source worker.
 - Qualify the new atomic inventory/cursor `CURRENT` record on a current-source
   runtime. The isolated source now validates filesystem events before publish
   and writes the inventory digest plus Git/filesystem cursor in one pointer
