@@ -31,6 +31,11 @@ use std.nogc_sync_mut.io_runtime.{
     file_write, host_os
 }
 use compiler.backend_plugin.dynamic_loader.*
+use compiler.backend_plugin.loader.{load_backend}
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
+    BackendPluginRequestV1}
+use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.mir.mir_data.{MirModule}
 
 val DYNAMIC_LOADER_FIXTURE_BUILDER =
     "test/fixtures/backend_plugin/build_dynamic_loader_fixtures.shs"
@@ -174,5 +179,91 @@ describe "dynamic backend provider library lease":
         expect(lease.close()).to_equal(true)
         expect(lease.admitted_handle()).to_equal(0)
         expect(dir_exists(staging_dir)).to_be(false)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
+
+    it "retries staging cleanup without unloading a dynamic provider twice":
+        # @req REQ-DYNLOADER-002
+        step("Load a real provider and arrange a cleanup-only failure")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(provider_path)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        var lease = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path).ok().unwrap()
+        val staging_dir = lease.staging_dir
+        lease.staging_dir = provider_path + "/not-a-directory"
+
+        step("Unload once and retain the failed cleanup for retry")
+        expect(lease.close()).to_equal(false)
+        expect(lease.closed).to_equal(false)
+        expect(lease.is_open()).to_equal(false)
+        expect(lease.admitted_handle()).to_equal(0)
+        expect(lease.library.handle).to_equal(0)
+        expect(lease.entry_symbol_address).to_equal(0)
+        expect(dir_exists(staging_dir)).to_equal(true)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+
+        step("Retry only the private directory cleanup")
+        lease.staging_dir = staging_dir
+        expect(lease.close()).to_equal(true)
+        expect(lease.close()).to_equal(true)
+        expect(lease.closed).to_equal(true)
+        expect(dir_exists(staging_dir)).to_equal(false)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
+
+    it "keeps a dynamic session uncallable while cleanup is retryable":
+        # @req REQ-DYNLOADER-002
+        step("Admit a real provider through the dynamic backend session")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(provider_path)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        val request = BackendPluginRequestV1(BackendRole.CompilerAot,
+            "dynamic-test", "host", "generic", [], "debug",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            provider_path, true)
+        var session = load_backend(request).ok().unwrap()
+        var adapter = session.dynamic_adapter.unwrap()
+        var retained_lease = adapter.lease
+        val staging_dir = retained_lease.staging_dir
+        retained_lease.staging_dir = provider_path + "/not-a-directory"
+        adapter.lease = retained_lease
+        session.dynamic_adapter = Some(adapter)
+
+        step("Reject calls after unloading while retaining cleanup state")
+        expect(session.close()).to_equal(false)
+        expect(session.closed).to_equal(false)
+        expect(session.is_open()).to_equal(false)
+        expect(session.handle).to_equal(0)
+        expect(session.close_count).to_equal(0)
+        val empty_module = MirModule(name: "closed-dynamic-provider",
+            functions: {}, statics: {}, constants: {}, types: {})
+        expect(session.compile_module(empty_module).is_err()).to_equal(true)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+
+        step("Retry cleanup and keep the closed session safe")
+        adapter = session.dynamic_adapter.unwrap()
+        retained_lease = adapter.lease
+        retained_lease.staging_dir = staging_dir
+        adapter.lease = retained_lease
+        session.dynamic_adapter = Some(adapter)
+        expect(session.close()).to_equal(true)
+        expect(session.close()).to_equal(true)
+        expect(session.closed).to_equal(true)
+        expect(session.close_count).to_equal(1)
+        expect(dir_exists(staging_dir)).to_equal(false)
+        expect(session.compile_module(empty_module).is_err()).to_equal(true)
         expect(file_read(unload_marker)).to_equal("unloaded\n")
         expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)

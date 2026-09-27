@@ -113,14 +113,21 @@ impl DynamicBackendPluginLease:
             0
 
     me close() -> bool:
-        """Release the provider library once without invoking provider code."""
+        """Unload once, then retry private staging cleanup until it succeeds."""
         if self.closed:
             return true
-        unsafe(capabilities: [ffi]):
-            self.library.close()
-        val cleanup_ok = dir_remove_all(self.staging_dir)
+        if self.library.handle > 0:
+            var retained_library = self.library
+            unsafe(capabilities: [ffi]):
+                retained_library.close()
+            self.library = retained_library
+        # A failed directory removal leaves a cleanup-only lease. Its handle
+        # and symbol are already unavailable, so a retry never reloads or
+        # unloads the provider a second time.
         self.entry_symbol_address = 0
-        self.closed = true
+        val cleanup_ok = dir_remove_all(self.staging_dir)
+        if cleanup_ok:
+            self.closed = true
         cleanup_ok
 
 @unsafe(
