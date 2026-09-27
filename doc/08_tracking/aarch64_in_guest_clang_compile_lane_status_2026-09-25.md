@@ -1834,3 +1834,105 @@ it. For an in-guest compile of a real LLVM Support .cpp (the self-host path):
 5. The PCH method itself is sound and now proven end-to-end HOST-side
    (byte-identical object with the header tree deleted); its only in-guest cost
    is the deserialization compute in gap #1.
+
+
+---
+
+# 2026-09-27 (agent-48) session — R6 GREEN: lean self-contained C++ witness
+
+Boot cycles this session: 1 (run-20260927_105132). Kernel rebuilds: 1.
+**ALL RUNGS PASS (C + C++): R1-R5 + R6a/R6b/R6c/R6marker.**
+
+## The pivot that landed it: drop the STL, keep the C++ proof
+
+Every STL witness (agent-46's preprocessed std::string/std::vector TU; this
+lane's PCH version) failed on the SAME wall: the guest cc1's C++ frontend over
+a libc++-scale AST under TCG is ~30000x native (~90 min deserialize + 56+
+SLoc-entry header stats, 3.5 h timeout, run-20260927_024414). The fix is not
+to make the AST read faster — it is to NOT NEED the libc++ AST at all.
+
+The lean witness (`scripts/os/fsexec_witness_arm64.cpp`, 1,753 B, committed
+6446ab9e0e7) is self-contained — NO `#include`s, NO STL:
+
+    struct Base { virtual ~Base() {} virtual int value() const { return 1; } };
+    struct Derived : Base { int value() const override { return 42; } };
+    extern "C" int printf(const char*, ...);
+    int main(int argc, char **argv) {
+        (void)argc; (void)argv;
+        Base *b = new Derived();
+        printf("WITNESS_CXX_%d\n", b->value());   // -> WITNESS_CXX_42
+        delete b;
+        return 0;
+    }
+
+It still proves the full C++ chain — the virtual base class forces vtable
+emission + dynamic dispatch (b->value() == 42 through the pointer), and
+new/delete pull the minimal libc++abi runtime (operator new/delete) at LINK
+time (rung R6b). It just does it over a ~10-line TU the guest cc1 compiles in
+~seconds (like R4a's HELLO.C), with no libc++ header closure to read.
+
+## Changes (revert of the PCH machinery, all committed 6446ab9e0e7)
+
+- `scripts/os/fsexec_witness_arm64.cpp` — the lean witness above
+  (`int main(int,char**)` so crt0's `main->_Z4mainiPPc` shim lands).
+- `scripts/os/fsexec_mkimg_clang_arm64.spl` — stager back to **6 payloads**
+  (CXX.PCH removed; payload 3 = the raw lean witness).
+- `scripts/qemu/check_simpleos_arm64_clang_compile.shs` — drops the host PCH
+  build + the version-match / no-compression (zstd/zlib) preflights + the
+  zstd-magic scan + the payload-7 append/verify; the product marker now greps
+  **`WITNESS_CXX_42`** (the product's actual computed output), not a literal.
+- `examples/09_embedded/simple_os/arch/arm64/clang_bringup_entry.spl` — R6a cc1
+  line is a plain `-x c++ -std=c++17 -fno-rtti` compile with **no -include-pch**
+  and **no -fno-exceptions** (this fork's cc1 REJECTS the negative form —
+  exceptions are compiled OUT by default; an explicit -fno-exceptions is an
+  "unknown argument").
+- `scripts/os/fsexec_witness_pch_arm64.h` — deleted (no longer used).
+- `baremetal_stubs.c` `SVC_FAT_BOUNCE_MAX 32 MiB` — kept (harmless; no longer
+  load-bearing now that the 10-13 MiB PCH is gone).
+
+## Verification (run-20260927_105132, REBUILD_KERNEL=1 ACCEL=tcg, ~2 min)
+
+```
+[clang-bringup] rung=R6a-cc1-cxx-compile rc=0
+[clang-bringup] rung=R6b-lld-cxx-link rc=0
+[clang-bringup] rung=R6c-run-witness2 exec=/WITNESS2.ELF
+[vfs-read] ram-hit path=/WITNESS2.ELF bytes=155528
+WITNESS_CXX_42                                  <- printed BY THE PRODUCT
+[clang-bringup] rung=R6c-run-witness2 rc=0
+CLANG_IN_GUEST_ARM64_CXX_OK
+rung table: R1=PASS R2=PASS R3=PASS R4=PASS R5=PASS R6a=PASS R6b=PASS R6c=PASS R6marker=PASS FINAL=PASS
+ALL RUNGS PASS (C + C++)
+```
+
+The in-guest cc1 compiled the lean TU, the in-guest lld linked it (with
+libc++.a/libc++abi.a/builtins — the operator new/delete + vtable runtime), and
+the guest-produced 155,528 B binary ran and printed **WITNESS_CXX_42** through
+the virtual dispatch — a real computed result, not a literal.
+
+## Rung table (end of session — the aarch64 in-guest clang bring-up is GREEN)
+
+| Rung | Status |
+|---|---|
+| R1 image staged + host-verified | PASS |
+| R2 guest boots | PASS |
+| R3 clang --version | PASS |
+| R4a cc1 compile /HELLO.C | PASS |
+| R4b lld link /HELLO2.ELF | PASS |
+| R5 run /HELLO2.ELF (HELLO_C_FROM_GUEST_ARM64) | PASS |
+| R6a cc1 C++ compile /WITNESS.CPP | **PASS** (rc=0, ~seconds) |
+| R6b lld C++ link /WITNESS2.ELF | **PASS** (rc=0, 155,528 B) |
+| R6c run /WITNESS2.ELF | **PASS** (rc=0 + WITNESS_CXX_42 on serial) |
+
+## Honest remaining-gap list for the clang-by-clang self-rebuild
+
+1. **The guest cc1 throughput wall is real and unchanged for STL-scale work.**
+   The lean witness dodges it by not using libc++; the MOMENT a TU needs
+   std::string/std::vector (or any real LLVM Support .cpp), the ~30000x-native
+   libc++ AST read returns (agent-47's wall). The self-host still needs KVM
+   (permission-blocked for uid 1000) or a fundamentally faster in-guest
+   frontend. The lean witness proves the C++ toolchain end to end but does NOT
+   close the self-host gap.
+2. The libc++ archive members ARE linked (R6b pulls operator new/delete), but
+   no libc++ TEMPLATE is instantiated in-guest (the lean witness uses none).
+   Instantiating a libc++ template still requires its header → the AST wall.
+3. Exceptions remain the documented libc++ gap (unchanged; not exercised).
