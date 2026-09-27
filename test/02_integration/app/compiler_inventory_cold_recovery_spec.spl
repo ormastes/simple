@@ -1,0 +1,43 @@
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, process_run}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+describe "compiler inventory cold journal recovery":
+    it "rebuilds from Git after a journal rewrite while warm refresh refuses it":
+        val root = "build/test-artifacts/scv-cold-journal-{rt_getpid()}"
+        val cache_root = root + "/build/scv"
+        val journal_dir = root + "/.scv/journal"
+        val journal_path = journal_dir + "/events.log"
+        dir_remove(root, true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(file_write(root + "/src/a.spl", "export fn a(): 1\n")).to_equal(true)
+        val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+        expect(init_code).to_equal(0)
+        val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/a.spl"])
+        expect(add_code).to_equal(0)
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+        expect(commit_code).to_equal(0)
+
+        val initial = compiler_inventory_refresh_v1(root, cache_root, ["src"], true)
+        expect(initial.valid).to_equal(true)
+        expect(dir_create_all(journal_dir)).to_equal(true)
+        expect(file_write(journal_path,
+            "op=first kind=snapshot refs=x sha=x utc=1\n")).to_equal(true)
+        val warmed = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+        expect(warmed.valid).to_equal(true)
+
+        expect(file_write(journal_path,
+            "op=changed kind=snapshot refs=x sha=x utc=2\n")).to_equal(true)
+        val rejected = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("filesystem-event-journal-rewritten")
+        val rebuilt = compiler_inventory_refresh_v1(root, cache_root, ["src"], true)
+        expect(rebuilt.valid).to_equal(true)
+        val admitted = compiler_inventory_refresh_v1(root, cache_root, ["src"], false)
+        expect(admitted.valid).to_equal(true)
+        dir_remove(root, true)

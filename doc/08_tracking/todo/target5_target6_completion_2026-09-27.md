@@ -80,8 +80,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   source events and publishes a successor generation, dropping paths absent
   from that listing. The CLI's cold inventory listing includes both `src` and
   `test` even when the current snapshot selects only one; warm replay remains
-  incremental. The unit spec covers a disappeared source; verify the production
-  cold path and journal recovery on a current-source worker before marking
+  incremental. Cold refresh now rebases a stale journal cursor from the full
+  Git listing while warm refresh continues to reject rewritten rows. A unit
+  spec covers a disappeared source, and a disposable-Git integration spec
+  covers journal recovery. Run both on a current-source worker before marking
   cold rebuild complete.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
