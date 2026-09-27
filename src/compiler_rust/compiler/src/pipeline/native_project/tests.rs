@@ -9461,7 +9461,7 @@ fn platform_c_symbols_are_never_aliased_to_simple_functions() {
 }
 
 #[test]
-fn strict_compat_aliases_reject_ambiguous_bare_names() {
+fn windows_compat_aliases_reject_ambiguous_bare_names() {
     let defined = std::collections::HashSet::from([
         "lib__network__getaddrinfo".to_string(),
         "lib__io__printf".to_string(),
@@ -9471,24 +9471,24 @@ fn strict_compat_aliases_reject_ambiguous_bare_names() {
     ]);
 
     assert_eq!(
-        super::stubs::resolve_strict_compat_alias("getaddrinfo", &defined),
+        super::stubs::resolve_windows_compat_alias("getaddrinfo", &defined),
         None,
         "an unlisted C import must not become a Simple trampoline"
     );
     for c_name in ["select", "_select", "printf", "_printf"] {
         assert_eq!(
-            super::stubs::resolve_strict_compat_alias(c_name, &defined),
+            super::stubs::resolve_windows_compat_alias(c_name, &defined),
             None,
             "C import {c_name} must not become a Simple trampoline"
         );
     }
     assert_eq!(
-        super::stubs::resolve_strict_compat_alias("trim", &defined),
+        super::stubs::resolve_windows_compat_alias("trim", &defined),
         None,
         "bare names have no source provenance even when a Simple match exists"
     );
     assert_eq!(
-        super::stubs::resolve_strict_compat_alias("text__qualified", &defined),
+        super::stubs::resolve_windows_compat_alias("text__qualified", &defined),
         Some("lib__common__text__qualified".to_string()),
         "qualified Simple aliases still resolve"
     );
