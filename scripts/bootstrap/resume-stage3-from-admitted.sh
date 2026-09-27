@@ -825,11 +825,12 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
-  # Enforce the same per-process maximum on the whole worker tree with the RSS
-  # watchdog Stage 2 already uses on this platform.
+  # Cap the whole worker tree with the RSS watchdog and the same tree cap Stage 2
+  # uses on this platform; the watchdog admits at most 5859375 KiB, below the
+  # 50 GiB cgroup maximum, so the Darwin cap is stricter, never looser.
   perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
     --session-mode=new --rss-cap-mode=enforce \
-    --max-rss-kib="$stage3_process_max_kib" \
+    --max-rss-kib="${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}" \
     --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
     --receipt="$stage3_log.rss.env" -- \
     "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
