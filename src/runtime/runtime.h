@@ -809,14 +809,14 @@ int64_t  rt_native_neq(int64_t left, int64_t right);
  * codegen `<`/`<=`/`>`/`>=` arm when neither operand is statically typed. */
 int64_t  rt_native_cmp(int64_t left, int64_t right);
 /* OrderedMap key comparison: 2 means unsupported erased key representation. */
-int64_t  rt_ordered_key_cmp(int64_t left, int64_t right);
-int64_t  rt_collection_capture_begin(int64_t target);
-int64_t  rt_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
-int64_t  rt_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
-int64_t  rt_collection_capture_note_materialization(int64_t site, int64_t target);
-int64_t  rt_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
-int64_t  rt_collection_capture_finish(void);
-int64_t  rt_collection_capture_abort(void);
+int64_t  spl_ordered_key_cmp(int64_t left, int64_t right);
+int64_t  spl_collection_capture_begin(int64_t target);
+int64_t  spl_collection_capture_note_size(int64_t site, int64_t target, int64_t size);
+int64_t  spl_collection_capture_note_lookup(int64_t site, int64_t target, int64_t found);
+int64_t  spl_collection_capture_note_materialization(int64_t site, int64_t target);
+int64_t  spl_collection_capture_note_hash_probe(int64_t site, int64_t target, int64_t probes, int64_t collisions);
+int64_t  spl_collection_capture_finish(void);
+int64_t  spl_collection_capture_abort(void);
 int64_t  rt_text_eq_any(int64_t left, int64_t right);
 int64_t  rt_slice(int64_t value, int64_t start, int64_t end, int64_t step);
 int64_t  rt_string_starts_with(int64_t value, int64_t prefix);

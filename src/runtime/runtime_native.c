@@ -4476,7 +4476,7 @@ int64_t rt_native_cmp(int64_t left, int64_t right) {
  * stronger contract: registered aggregate handles have no address-based Ord.
  * Return 2 (outside the -1/0/1 relation) so the Simple wrapper fails clearly.
  */
-int64_t rt_ordered_key_cmp(int64_t left, int64_t right) {
+int64_t spl_ordered_key_cmp(int64_t left, int64_t right) {
     const int64_t values[2] = {left, right};
     for (size_t i = 0; i < 2; i++) {
         uintptr_t raw = (uintptr_t)values[i];
@@ -4558,23 +4558,23 @@ typedef struct RtCollectionCaptureEntry {
     int hash_probe_observed;
 } RtCollectionCaptureEntry;
 
-static atomic_flag rt_collection_capture_lock = ATOMIC_FLAG_INIT;
-static _Atomic int rt_collection_capture_active = 0;
-static RtCollectionCaptureEntry* rt_collection_capture_slots = NULL;
-static char* rt_collection_capture_target = NULL;
-static size_t rt_collection_capture_count = 0;
-static int rt_collection_capture_error = 0;
+static atomic_flag spl_collection_capture_lock = ATOMIC_FLAG_INIT;
+static _Atomic int spl_collection_capture_active = 0;
+static RtCollectionCaptureEntry* spl_collection_capture_slots = NULL;
+static char* spl_collection_capture_target = NULL;
+static size_t spl_collection_capture_count = 0;
+static int spl_collection_capture_error = 0;
 
-static void rt_collection_capture_lock_enter(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_collection_capture_lock,
+static void spl_collection_capture_lock_enter(void) {
+    while (atomic_flag_test_and_set_explicit(&spl_collection_capture_lock,
                                              memory_order_acquire)) { }
 }
 
-static void rt_collection_capture_lock_leave(void) {
-    atomic_flag_clear_explicit(&rt_collection_capture_lock, memory_order_release);
+static void spl_collection_capture_lock_leave(void) {
+    atomic_flag_clear_explicit(&spl_collection_capture_lock, memory_order_release);
 }
 
-static int rt_collection_capture_token_valid(const char* text, size_t max_len,
+static int spl_collection_capture_token_valid(const char* text, size_t max_len,
                                              int require_site) {
     if (!text) return 0;
     size_t len = strlen(text);
@@ -4586,14 +4586,14 @@ static int rt_collection_capture_token_valid(const char* text, size_t max_len,
     return 1;
 }
 
-static char* rt_collection_capture_copy(const char* text) {
+static char* spl_collection_capture_copy(const char* text) {
     size_t len = strlen(text);
     char* copy = (char*)malloc(len + 1);
     if (copy) memcpy(copy, text, len + 1);
     return copy;
 }
 
-static uint64_t rt_collection_capture_hash(const char* site) {
+static uint64_t spl_collection_capture_hash(const char* site) {
     uint64_t hash = UINT64_C(14695981039346656037);
     for (const unsigned char* p = (const unsigned char*)site; *p; p++) {
         hash = (hash ^ *p) * UINT64_C(1099511628211);
@@ -4601,42 +4601,42 @@ static uint64_t rt_collection_capture_hash(const char* site) {
     return hash;
 }
 
-static void rt_collection_capture_free_slots(RtCollectionCaptureEntry* slots) {
+static void spl_collection_capture_free_slots(RtCollectionCaptureEntry* slots) {
     if (!slots) return;
     for (size_t i = 0; i < RT_COLLECTION_CAPTURE_SLOTS; i++) free(slots[i].site);
     free(slots);
 }
 
-static RtCollectionCaptureEntry* rt_collection_capture_site_locked(const char* site) {
-    uint64_t hash = rt_collection_capture_hash(site);
+static RtCollectionCaptureEntry* spl_collection_capture_site_locked(const char* site) {
+    uint64_t hash = spl_collection_capture_hash(site);
     size_t first = (size_t)(hash % RT_COLLECTION_CAPTURE_SLOTS);
     for (size_t probe = 0; probe < RT_COLLECTION_CAPTURE_SLOTS; probe++) {
-        RtCollectionCaptureEntry* entry = &rt_collection_capture_slots[
+        RtCollectionCaptureEntry* entry = &spl_collection_capture_slots[
             (first + probe) % RT_COLLECTION_CAPTURE_SLOTS];
         if (entry->site) {
             if (entry->hash == hash && strcmp(entry->site, site) == 0) return entry;
             continue;
         }
-        if (rt_collection_capture_count >= RT_COLLECTION_CAPTURE_MAX_SITES) return NULL;
-        entry->site = rt_collection_capture_copy(site);
+        if (spl_collection_capture_count >= RT_COLLECTION_CAPTURE_MAX_SITES) return NULL;
+        entry->site = spl_collection_capture_copy(site);
         if (!entry->site) return NULL;
         entry->hash = hash;
-        rt_collection_capture_count++;
+        spl_collection_capture_count++;
         return entry;
     }
     return NULL;
 }
 
-static int rt_collection_capture_target_matches_locked(const char* target) {
+static int spl_collection_capture_target_matches_locked(const char* target) {
     return target && (target[0] == '\0' ||
-        (rt_collection_capture_target && strcmp(target, rt_collection_capture_target) == 0));
+        (spl_collection_capture_target && strcmp(target, spl_collection_capture_target) == 0));
 }
 
-int64_t rt_collection_capture_begin(int64_t target_value) {
+int64_t spl_collection_capture_begin(int64_t target_value) {
     const char* target = rt_interp_cstr(target_value);
-    if (!rt_collection_capture_token_valid(target, RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES, 0))
+    if (!spl_collection_capture_token_valid(target, RT_COLLECTION_CAPTURE_MAX_TARGET_BYTES, 0))
         return 0;
-    char* owned_target = rt_collection_capture_copy(target);
+    char* owned_target = spl_collection_capture_copy(target);
     RtCollectionCaptureEntry* slots = (RtCollectionCaptureEntry*)calloc(
         RT_COLLECTION_CAPTURE_SLOTS, sizeof(RtCollectionCaptureEntry));
     if (!owned_target || !slots) {
@@ -4644,176 +4644,176 @@ int64_t rt_collection_capture_begin(int64_t target_value) {
         free(slots);
         return 0;
     }
-    rt_collection_capture_lock_enter();
-    if (atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_enter();
+    if (atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         free(owned_target);
         free(slots);
         return 0;
     }
-    rt_collection_capture_slots = slots;
-    rt_collection_capture_target = owned_target;
-    rt_collection_capture_count = 0;
-    rt_collection_capture_error = 0;
-    atomic_store_explicit(&rt_collection_capture_active, 1, memory_order_release);
-    rt_collection_capture_lock_leave();
+    spl_collection_capture_slots = slots;
+    spl_collection_capture_target = owned_target;
+    spl_collection_capture_count = 0;
+    spl_collection_capture_error = 0;
+    atomic_store_explicit(&spl_collection_capture_active, 1, memory_order_release);
+    spl_collection_capture_lock_leave();
     return 1;
 }
 
-int64_t rt_collection_capture_note_size(int64_t site_value, int64_t target_value,
+int64_t spl_collection_capture_note_size(int64_t site_value, int64_t target_value,
                                         int64_t size) {
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_acquire)) return 1;
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     const char* site = rt_interp_cstr(site_value);
     const char* target = rt_interp_cstr(target_value);
-    rt_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (!rt_collection_capture_target_matches_locked(target)) {
-        rt_collection_capture_lock_leave();
+    if (!spl_collection_capture_target_matches_locked(target)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (size < 0 || !rt_collection_capture_token_valid(site,
+    if (size < 0 || !spl_collection_capture_token_valid(site,
             RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
-    RtCollectionCaptureEntry* entry = rt_collection_capture_site_locked(site);
-    if (!entry) rt_collection_capture_error = 1;
+    RtCollectionCaptureEntry* entry = spl_collection_capture_site_locked(site);
+    if (!entry) spl_collection_capture_error = 1;
     else {
         entry->current_size = size;
         if (size > entry->peak_size) entry->peak_size = size;
     }
-    rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_leave();
     return entry ? 1 : 0;
 }
 
-int64_t rt_collection_capture_note_lookup(int64_t site_value, int64_t target_value,
+int64_t spl_collection_capture_note_lookup(int64_t site_value, int64_t target_value,
                                           int64_t found) {
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_acquire)) return 1;
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     const char* site = rt_interp_cstr(site_value);
     const char* target = rt_interp_cstr(target_value);
-    rt_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (!rt_collection_capture_target_matches_locked(target)) {
-        rt_collection_capture_lock_leave();
+    if (!spl_collection_capture_target_matches_locked(target)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if ((found != 0 && found != 1) || !rt_collection_capture_token_valid(site,
+    if ((found != 0 && found != 1) || !spl_collection_capture_token_valid(site,
             RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
-    RtCollectionCaptureEntry* entry = rt_collection_capture_site_locked(site);
+    RtCollectionCaptureEntry* entry = spl_collection_capture_site_locked(site);
     if (!entry || entry->lookups == INT64_MAX ||
             (found && entry->hits == INT64_MAX) ||
             (!found && entry->misses == INT64_MAX)) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
     entry->lookups++;
     if (found) entry->hits++;
     else entry->misses++;
-    rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_leave();
     return 1;
 }
 
-int64_t rt_collection_capture_note_materialization(int64_t site_value,
+int64_t spl_collection_capture_note_materialization(int64_t site_value,
                                                    int64_t target_value) {
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_acquire)) return 1;
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     const char* site = rt_interp_cstr(site_value);
     const char* target = rt_interp_cstr(target_value);
-    rt_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (!rt_collection_capture_target_matches_locked(target)) {
-        rt_collection_capture_lock_leave();
+    if (!spl_collection_capture_target_matches_locked(target)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (!rt_collection_capture_token_valid(site, RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+    if (!spl_collection_capture_token_valid(site, RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
-    RtCollectionCaptureEntry* entry = rt_collection_capture_site_locked(site);
+    RtCollectionCaptureEntry* entry = spl_collection_capture_site_locked(site);
     if (!entry || entry->materializations == INT64_MAX) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
     entry->materializations++;
-    rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_leave();
     return 1;
 }
 
-int64_t rt_collection_capture_note_hash_probe(int64_t site_value,
+int64_t spl_collection_capture_note_hash_probe(int64_t site_value,
                                               int64_t target_value,
                                               int64_t probes,
                                               int64_t collisions) {
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_acquire)) return 1;
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_acquire)) return 1;
     const char* site = rt_interp_cstr(site_value);
     const char* target = rt_interp_cstr(target_value);
-    rt_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
-    if (!rt_collection_capture_target_matches_locked(target)) {
-        rt_collection_capture_lock_leave();
+    if (!spl_collection_capture_target_matches_locked(target)) {
+        spl_collection_capture_lock_leave();
         return 1;
     }
     if (probes < 1 || collisions < 0 || collisions > probes ||
-            !rt_collection_capture_token_valid(site,
+            !spl_collection_capture_token_valid(site,
                 RT_COLLECTION_CAPTURE_MAX_SITE_BYTES, 1)) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
-    RtCollectionCaptureEntry* entry = rt_collection_capture_site_locked(site);
+    RtCollectionCaptureEntry* entry = spl_collection_capture_site_locked(site);
     if (!entry || entry->hash_probes > INT64_MAX - probes ||
             entry->hash_collisions > INT64_MAX - collisions) {
-        rt_collection_capture_error = 1;
-        rt_collection_capture_lock_leave();
+        spl_collection_capture_error = 1;
+        spl_collection_capture_lock_leave();
         return 0;
     }
     entry->hash_probes += probes;
     entry->hash_collisions += collisions;
     entry->hash_probe_observed = 1;
-    rt_collection_capture_lock_leave();
+    spl_collection_capture_lock_leave();
     return 1;
 }
 
-static int rt_collection_capture_entry_order(const void* left, const void* right) {
+static int spl_collection_capture_entry_order(const void* left, const void* right) {
     const RtCollectionCaptureEntry* a = *(const RtCollectionCaptureEntry* const*)left;
     const RtCollectionCaptureEntry* b = *(const RtCollectionCaptureEntry* const*)right;
     return strcmp(a->site, b->site);
 }
 
-int64_t rt_collection_capture_finish(void) {
-    rt_collection_capture_lock_enter();
-    if (!atomic_load_explicit(&rt_collection_capture_active, memory_order_relaxed)) {
-        rt_collection_capture_lock_leave();
+int64_t spl_collection_capture_finish(void) {
+    spl_collection_capture_lock_enter();
+    if (!atomic_load_explicit(&spl_collection_capture_active, memory_order_relaxed)) {
+        spl_collection_capture_lock_leave();
         return rt_core_nil();
     }
-    atomic_store_explicit(&rt_collection_capture_active, 0, memory_order_release);
-    RtCollectionCaptureEntry* slots = rt_collection_capture_slots;
-    char* target = rt_collection_capture_target;
-    size_t count = rt_collection_capture_count;
-    int failed = rt_collection_capture_error;
-    rt_collection_capture_slots = NULL;
-    rt_collection_capture_target = NULL;
-    rt_collection_capture_count = 0;
-    rt_collection_capture_error = 0;
-    rt_collection_capture_lock_leave();
+    atomic_store_explicit(&spl_collection_capture_active, 0, memory_order_release);
+    RtCollectionCaptureEntry* slots = spl_collection_capture_slots;
+    char* target = spl_collection_capture_target;
+    size_t count = spl_collection_capture_count;
+    int failed = spl_collection_capture_error;
+    spl_collection_capture_slots = NULL;
+    spl_collection_capture_target = NULL;
+    spl_collection_capture_count = 0;
+    spl_collection_capture_error = 0;
+    spl_collection_capture_lock_leave();
 
     RtCollectionCaptureEntry** ordered = count ?
         (RtCollectionCaptureEntry**)malloc(count * sizeof(*ordered)) : NULL;
@@ -4826,7 +4826,7 @@ int64_t rt_collection_capture_finish(void) {
         if (next != count) failed = 1;
     }
     if (!failed && count) qsort(ordered, count, sizeof(*ordered),
-                               rt_collection_capture_entry_order);
+                               spl_collection_capture_entry_order);
     int64_t builder = failed ? 0 : rt_string_builder_new();
     if (!failed && !builder) failed = 1;
     size_t next_metric_sample = count;
@@ -4875,22 +4875,22 @@ int64_t rt_collection_capture_finish(void) {
     int64_t result = failed ? rt_core_nil() : rt_string_builder_finish(builder);
     if (failed && builder) rt_string_builder_free(builder);
     free(ordered);
-    rt_collection_capture_free_slots(slots);
+    spl_collection_capture_free_slots(slots);
     free(target);
     return result;
 }
 
-int64_t rt_collection_capture_abort(void) {
-    rt_collection_capture_lock_enter();
-    atomic_store_explicit(&rt_collection_capture_active, 0, memory_order_release);
-    RtCollectionCaptureEntry* slots = rt_collection_capture_slots;
-    char* target = rt_collection_capture_target;
-    rt_collection_capture_slots = NULL;
-    rt_collection_capture_target = NULL;
-    rt_collection_capture_count = 0;
-    rt_collection_capture_error = 0;
-    rt_collection_capture_lock_leave();
-    rt_collection_capture_free_slots(slots);
+int64_t spl_collection_capture_abort(void) {
+    spl_collection_capture_lock_enter();
+    atomic_store_explicit(&spl_collection_capture_active, 0, memory_order_release);
+    RtCollectionCaptureEntry* slots = spl_collection_capture_slots;
+    char* target = spl_collection_capture_target;
+    spl_collection_capture_slots = NULL;
+    spl_collection_capture_target = NULL;
+    spl_collection_capture_count = 0;
+    spl_collection_capture_error = 0;
+    spl_collection_capture_lock_leave();
+    spl_collection_capture_free_slots(slots);
     free(target);
     return 1;
 }
