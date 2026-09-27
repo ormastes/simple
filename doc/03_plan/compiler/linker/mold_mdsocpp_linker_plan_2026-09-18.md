@@ -394,6 +394,10 @@ Before transfer, the adapter now asks the remote host to prove that both the
 upload leaf and sibling publication leaf are absent, including POSIX symlinks
 and Windows reparse entries visible to `Get-Item`. A stale or redirected leaf
 therefore fails before `scp`/terminal upload can follow it.
+That preflight also requires the staging parent to exist and walks its complete
+ancestor chain, rejecting POSIX symlinks, Windows reparse points, and
+non-directories before `terminal_upload` runs. Uploads therefore cannot be
+redirected through a persistent staging-directory alias.
 After the sibling copy and permission step succeeds, publication removes the
 uploaded staging leaf before the atomic replacement, so a successful install
 does not poison the next absence preflight.

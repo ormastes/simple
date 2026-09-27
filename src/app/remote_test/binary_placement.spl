@@ -210,13 +210,29 @@ fn remote_simple_stage_guard_command(remote_os: text, configured: text,
         if temporary.is_err(): return Err(temporary.unwrap_err())
         return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
             "$stage = " + stage.unwrap() + "; $tmp = " + temporary.unwrap() + "; " +
+            "$stageParent = Get-Item -LiteralPath (Split-Path -Parent $stage) -Force -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $stageParent) " +
+            "{ Write-Error 'remote-test staging parent does not exist'; exit 73 }; " +
+            "while ($null -ne $stageParent) { " +
+            "if ((-not $stageParent.PSIsContainer) -or (($stageParent.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test staging parent is redirected or not a directory'; exit 73 }; " +
+            "$stageParent = $stageParent.Parent }; " +
             "if (($null -ne (Get-Item -LiteralPath $stage -Force -ErrorAction SilentlyContinue)) -or " +
             "($null -ne (Get-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue))) " +
             "{ Write-Error 'remote-test staging or publication path already exists'; exit 73 }\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
         val stage = _remote_posix_quote(staged_path)
+        val stage_parent = _remote_posix_quote(_remote_posix_parent(staged_path))
         val temporary = _remote_posix_quote(temporary_path)
-        return Ok("if [ -e " + stage + " ] || [ -L " + stage + " ] || [ -e " +
+        return Ok("stage_parent=" + stage_parent + "; " +
+            "if [ ! -d \"$stage_parent\" ]; then " +
+            "echo 'remote-test staging parent does not exist' >&2; exit 73; fi; " +
+            "probe=$stage_parent; while [ \"$probe\" != / ]; do " +
+            "if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test staging parent is redirected or not a directory' >&2; exit 73; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "if [ -e " + stage + " ] || [ -L " + stage + " ] || [ -e " +
             temporary + " ] || [ -L " + temporary + " ]; then " +
             "echo 'remote-test staging or publication path already exists' >&2; exit 73; fi")
     Err("remote-test cannot render a staging guard for remote OS '{remote_os}'")
