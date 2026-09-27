@@ -458,7 +458,10 @@ Implemented source slice:
   are covered too: 64-bit VA with DIR64 base-relocation publication, `SECTION`,
   low/high section-relative ADD/LDR immediates, conditional and test-bit
   branches, and signed `REL32`; CLR `TOKEN` remains outside the native
-  executable contract. Windows native routing now derives the architecture from
+  executable contract. A hand-built ARM64 COFF integration corpus drives these
+  forms through parsing, symbol resolution, relocation dispatch, PE emission,
+  and DIR64 directory publication rather than testing formulas alone. Windows
+  native routing now derives the architecture from
   the explicit target triple or normalized host architecture, selects the ARM64
   internal linker/default-library scan, and passes `/MACHINE:ARM64` through the
   external MSVC path. Native Windows-on-ARM execution and full SDK/CRT corpus

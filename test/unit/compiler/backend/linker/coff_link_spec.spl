@@ -22,6 +22,14 @@ fn _cl_u32(bytes: [u8], value: i64) -> [u8]:
     result = result.push(((value >> 16) & 0xff) as u8)
     result.push(((value >> 24) & 0xff) as u8)
 
+fn _cl_u64(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 8:
+        result = result.push(((value >> (i * 8)) & 0xff) as u8)
+        i = i + 1
+    result
+
 fn _cl_name(bytes: [u8], value: text) -> [u8]:
     var result = bytes
     var i: i64 = 0
@@ -81,6 +89,51 @@ fn _cl_arm64_object(symbol_name: text) -> [u8]:
     bytes = bytes.push(0xc0).push(0x03).push(0x5f).push(0xd6)
     bytes = _cl_name(bytes, symbol_name)
     bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _cl_u32(bytes, 4)
+
+fn _cl_arm64_relocation_object(relocation_type: i64, field: i64,
+        field_width: i64) -> [u8]:
+    # Header 20 + section 40 + data 24 + relocation 10 + symbols 36 + strings 4.
+    var bytes: [u8] = []
+    bytes = _cl_u16(bytes, 0xaa64)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 94)
+    bytes = _cl_u32(bytes, 2)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_name(bytes, ".text")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 24)
+    bytes = _cl_u32(bytes, 60)
+    bytes = _cl_u32(bytes, 84)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0)
+    bytes = _cl_u32(bytes, 0x60000020)
+    bytes = _cl_u32(bytes, 0xd65f03c0)
+    if field_width == 8:
+        bytes = _cl_u64(bytes, field)
+    else:
+        bytes = _cl_u32(bytes, field)
+        bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u32(bytes, 0xd65f03c0)
+    bytes = _cl_u32(bytes, 4)
+    bytes = _cl_u32(bytes, 1)
+    bytes = _cl_u16(bytes, relocation_type)
+    bytes = _cl_name(bytes, "_start")
+    bytes = _cl_u32(bytes, 0)
+    bytes = _cl_u16(bytes, 1)
+    bytes = _cl_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    bytes = _cl_name(bytes, "target")
+    bytes = _cl_u32(bytes, 20)
     bytes = _cl_u16(bytes, 1)
     bytes = _cl_u16(bytes, 0x20)
     bytes = bytes.push(2).push(0)
@@ -584,6 +637,34 @@ describe "internal freestanding Windows linker":
         expect(inspected.header.machine).to_equal(IMAGE_FILE_MACHINE_ARM64)
         expect(inspected.header.entry_point_rva).to_equal(0x1000)
         expect(inspected.sections[0].name).to_equal(".text")
+
+    it "applies extended ARM64 relocations through PE emission":
+        val cases = [
+            _cl_arm64_relocation_object(0x000f, 0x54000000, 4),
+            _cl_arm64_relocation_object(0x0010, 0x37000001, 4),
+            _cl_arm64_relocation_object(0x0011, 0, 4),
+            _cl_arm64_relocation_object(0x000d, 0, 4),
+            _cl_arm64_relocation_object(0x0008, 0, 4),
+            _cl_arm64_relocation_object(0x0009, 0x91000000, 4)
+        ]
+        val expected_offsets = [4, 4, 4, 4, 4, 5]
+        val expected = [0x80, 0x81, 0x0c, 0x01, 0x14, 0x50]
+        var i: i64 = 0
+        while i < cases.len():
+            val image = coff_link_arm64(CoffLinkRequest(
+                objects: [cases[i]], archives: [], entry: "_start")).unwrap()
+            val text = pe_inspect(image).unwrap().sections[0]
+            expect(image[text.raw_pointer + expected_offsets[i]] as i64).to_equal(expected[i])
+            i = i + 1
+
+    it "publishes ARM64 ADDR64 sites in the PE base-relocation directory":
+        val image = coff_link_arm64(CoffLinkRequest(objects: [
+            _cl_arm64_relocation_object(0x000e, 0, 8)
+        ], archives: [], entry: "_start")).unwrap()
+        val inspected = pe_inspect(image).unwrap()
+        val text = inspected.sections[0]
+        expect(image[text.raw_pointer + 4] as i64).to_equal(0x14)
+        expect(inspected.data_directories[5].size).to_be_greater_than(0)
 
     it "links the compiler-generated Windows corpus with unwind metadata":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [
