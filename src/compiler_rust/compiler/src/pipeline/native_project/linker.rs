@@ -2353,6 +2353,10 @@ int main(int argc, char** argv) {
             eprintln!("Link command: {:?}", cmd);
         }
 
+        // GNU ld truncates a Windows verbatim path to its last component; see
+        // tools::respell_args_for_external_tool.
+        let mut cmd = super::tools::respell_args_for_external_tool(&cmd);
+
         #[allow(unused_mut)]
         let mut output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
@@ -3158,6 +3162,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             eprintln!("Freestanding link command: {:?}", cmd);
         }
 
+        let mut cmd = super::tools::respell_args_for_external_tool(&cmd);
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {

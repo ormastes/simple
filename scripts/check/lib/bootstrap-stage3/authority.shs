@@ -1265,13 +1265,16 @@ bootstrap_stage3_native_metadata_probe() (
     bootstrap_stage3_probe_tmp=$(mktemp -d \
         "${TMPDIR:-/tmp}/bootstrap-native-probe.XXXXXX") || return 1
     trap 'rm -rf -- "$bootstrap_stage3_probe_tmp"' EXIT HUP INT TERM
-    bootstrap_stage3_probe_max_attempts=2
-    case "$bootstrap_stage3_probe_tool" in
-        *.exe) bootstrap_stage3_probe_max_attempts=4 ;;
-    esac
-    for bootstrap_stage3_probe_attempt in 1 2 3 4; do
-        [ "$bootstrap_stage3_probe_attempt" -le \
-            "$bootstrap_stage3_probe_max_attempts" ] || break
+    # Attempts 3..5 exist only for shell-status=125, which is `env` itself
+    # failing to exec -- on MSYS a fork/exec transiently fails under memory
+    # pressure and the tool never runs. Measured 2026-09-26 on
+    # DESKTOP-5A4V03J (~4.8 GiB free): cargo-fingerprint-version returned 125
+    # on BOTH attempts and aborted a 12-minute fingerprint stage, and the same
+    # class aborted the Stage 4 tool-authority bind minutes earlier. A genuine
+    # tool failure still gets exactly the original two attempts (see the
+    # `case` at the end of this loop), so this widens only the transient
+    # class and cannot mask a real non-zero exit.
+    for bootstrap_stage3_probe_attempt in 1 2 3 4 5; do
         bootstrap_stage3_probe_current=$(
             bootstrap_stage3_hash_file "$bootstrap_stage3_probe_tool"
         ) || return 1
@@ -1285,8 +1288,7 @@ bootstrap_stage3_native_metadata_probe() (
             >"$bootstrap_stage3_probe_tmp/stdout" \
             2>"$bootstrap_stage3_probe_tmp/stderr" || bootstrap_stage3_probe_status=$?
         if [ "$bootstrap_stage3_probe_status" -ne 0 ] ||
-            [ "$bootstrap_stage3_probe_attempt" -eq \
-                "$bootstrap_stage3_probe_max_attempts" ]; then
+            [ "$bootstrap_stage3_probe_attempt" -eq 5 ]; then
             printf 'bootstrap-native-metadata-probe=%s attempt=%s shell-status=%s\n' \
                 "$bootstrap_stage3_probe_label" "$bootstrap_stage3_probe_attempt" \
                 "$bootstrap_stage3_probe_status" >&2
@@ -1305,6 +1307,10 @@ bootstrap_stage3_native_metadata_probe() (
             cat "$bootstrap_stage3_probe_tmp/stdout"
             return $?
         fi
+        case "$bootstrap_stage3_probe_status" in
+            125) sleep 1 ;;
+            *) [ "$bootstrap_stage3_probe_attempt" -lt 2 ] || break ;;
+        esac
     done
     return "$bootstrap_stage3_probe_status"
 )

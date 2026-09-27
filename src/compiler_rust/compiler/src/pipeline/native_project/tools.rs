@@ -1020,6 +1020,51 @@ pub(crate) fn external_tool_path<P: AsRef<Path>>(path: P) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Respell every verbatim (`\?\C:\...`) argument of an external tool's command
+/// in plain absolute form.
+///
+/// `external_tool_path` above fixes ONE path at a time, which works when a call
+/// site knows which of its arguments is a path. A link line does not: the
+/// clang-driver link in `linker.rs` assembles 100+ arguments across a dozen
+/// branches (objects, archives, the main stub, the init caller, the runtime
+/// supplement, `-o`), and any of them can inherit the verbatim spelling from
+/// the native-build cache root.
+///
+/// GNU `ld` cannot consume that spelling at all. Measured 2026-09-26 on a
+/// Windows GNU-ABI Stage 2 link (mingw-winlibs 16.2.0 `ld.exe`), every verbatim
+/// argument was truncated to its last component and the whole link failed:
+///
+/// ```text
+/// ld.exe: cannot find \\_main_stub.o: No such file or directory
+/// ld.exe: cannot find \\libspl_objects.a: No such file or directory
+/// ```
+///
+/// Passing the plain form is safe for both linkers for the reason
+/// `external_tool_path` already gives: LLVM tools lift MAX_PATH themselves, and
+/// GNU ld has no other spelling it accepts.
+pub(crate) fn respell_args_for_external_tool(
+    cmd: &std::process::Command,
+) -> std::process::Command {
+    let mut rebuilt = std::process::Command::new(cmd.get_program());
+    for arg in cmd.get_args() {
+        if arg.to_string_lossy().starts_with(r"\\?\") {
+            rebuilt.arg(external_tool_path(Path::new(arg)));
+        } else {
+            rebuilt.arg(arg);
+        }
+    }
+    if let Some(dir) = cmd.get_current_dir() {
+        rebuilt.current_dir(dir);
+    }
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(value) => rebuilt.env(key, value),
+            None => rebuilt.env_remove(key),
+        };
+    }
+    rebuilt
+}
+
 /// Resolve the `nm`-style symbol-table reader to use for scanning archives and
 /// object files.
 ///
