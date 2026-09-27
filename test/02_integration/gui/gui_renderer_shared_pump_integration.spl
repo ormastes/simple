@@ -1,0 +1,41 @@
+"""Live GUI integration: two renderer windows share one provider event loop.
+
+Run on a host GUI thread with a source-matched self-hosted Simple binary and
+the rebuilt `libspl_winit` provider. The test has no simulated provider path.
+"""
+
+use std.nogc_sync_mut.ui.gui_renderer.{GuiRenderer}
+use std.nogc_sync_mut.gpu.native_session_owner_v1.{native_session_owner_begin_v1,
+    native_session_owner_end_v1}
+
+fn require(ok: bool, message: text):
+    if not ok:
+        panic("gui-renderer-shared-pump: {message}")
+
+fn main() -> i64:
+    val first_created = GuiRenderer.create("winit", 320, 240, "Simple first window")
+    require(first_created != nil, "first window creation failed")
+    var first = first_created.?
+    val second_created = GuiRenderer.create("winit", 320, 240, "Simple second window")
+    require(second_created != nil, "second window creation failed")
+    var second = second_created.?
+    val retained = first
+
+    val held = unsafe(capabilities: [raw_ptr]):
+        native_session_owner_begin_v1(first.session_owner.?, first.session_ticket)
+    require(held == first.win, "first window admission failed")
+    require(not first.close(), "busy window closed")
+    val ended = unsafe(capabilities: [raw_ptr]):
+        native_session_owner_end_v1(first.session_owner.?, first.session_ticket)
+    require(ended, "first window admission did not end")
+
+    require(first.close(), "first window did not close")
+    require(not retained.is_open(), "retained alias stayed open")
+    require(not retained.close(), "retained alias closed twice")
+    require(second.is_open(), "closing first window invalidated second")
+    require(second.stage_clear(320, 240, 0x00224466), "second window staging failed")
+    require(second.present_staged(320, 240), "second window presentation failed")
+    require(second.close(), "last window did not close")
+    require(not second.is_open(), "last window stayed open")
+    print "gui-renderer-shared-pump: PASS"
+    0

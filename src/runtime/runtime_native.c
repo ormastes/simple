@@ -8751,6 +8751,18 @@ int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs) {
     }
 }
 
+/* Exact Chrome resize shape. The bit transport keeps the Simple extern all-i64;
+ * the provider still receives a real double in its floating-point ABI slot. */
+int64_t spl_wffi_call_i32_i64_u32_u32_f64_bits(int64_t fptr, int64_t arg0,
+                                                 int64_t arg1, int64_t arg2,
+                                                 int64_t arg3_bits) {
+    typedef int32_t (*Fn)(int64_t, uint32_t, uint32_t, double);
+    double arg3;
+    if (!fptr || arg1 <= 0 || arg2 <= 0 || arg1 > UINT32_MAX || arg2 > UINT32_MAX) return -1;
+    memcpy(&arg3, &arg3_bits, sizeof(arg3));
+    return (int64_t)((Fn)(uintptr_t)fptr)(arg0, (uint32_t)arg1, (uint32_t)arg2, arg3);
+}
+
 /* Checked integer-only WFFI transport: [status, value]. */
 #define SPL_WFFI_OK 0
 #define SPL_WFFI_INVALID_ARGUMENT 1

@@ -1,0 +1,101 @@
+"""Hosted Chrome render session-owner fixture; no CEF or pixel evidence."""
+
+use std.io_runtime.{cwd, file_hash_sha256, host_os}
+use std.nogc_sync_mut.gpu.chrome_render_module_sffi.{ChromeRenderLoadRequest,
+    chrome_render_symbol_names, chrome_render_load, chrome_render_create,
+    chrome_render_load_html, chrome_render_resize, chrome_render_destroy, chrome_render_close,
+    chrome_render_release}
+use std.nogc_sync_mut.gpu.native_session_owner_v1.{native_session_owner_begin_v1,
+    native_session_owner_end_v1}
+
+fn require(condition: bool, message: text):
+    if not condition:
+        panic("chrome-render-session-integration: {message}")
+
+fn main() -> i64:
+    val suffix = if host_os() == "macos" or host_os() == "darwin": ".dylib" else: ".so"
+    val library_path = "{cwd()}/build/test-fixtures/chrome_render_session/libsimple_chrome_render_session{suffix}"
+    val digest = file_hash_sha256(library_path)
+    require(digest.len() == 64, "fixture digest unavailable")
+    val request = ChromeRenderLoadRequest(
+        library_path: library_path, manifest_sha256: digest,
+        expected_abi_version: 1, required_symbols: chrome_render_symbol_names(),
+        max_request_bytes: 1048576, max_response_bytes: 268435456)
+    val loaded = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load(request)
+    require(loaded.ok and loaded.handle != nil, "fixture load failed: {loaded.status}")
+    val handle = loaded.handle.?
+    val first = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_create(handle, "{}")
+    val second = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_create(handle, "{}")
+    require(first > 0 and second > first, "two sessions were not ticketed")
+    require(first != 73 and second != 74, "native addresses escaped as public sessions")
+    val premature_close = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_close(handle)
+    require(not premature_close, "provider closed while sessions lived")
+    val first_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(handle, first, "<p>first</p>")
+    require(first_call == 0, "ticket did not resolve to the native session")
+    val resize_called = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_resize(handle, first, 800, 600)
+    require(resize_called == 0, "resize did not deliver exact 1.0 through the mixed ABI")
+    val held = unsafe(capabilities: [raw_ptr]):
+        native_session_owner_begin_v1(handle.session_owner.?, first.to_u64())
+    require(held == 73, "fixture did not give its expected native address")
+    val busy_destroy = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_destroy(handle, first)
+    require(busy_destroy == 2, "destroy entered a busy session")
+    val ended = unsafe(capabilities: [raw_ptr]):
+        native_session_owner_end_v1(handle.session_owner.?, first.to_u64())
+    require(ended, "held session did not end")
+    val destroyed_first = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_destroy(handle, first)
+    require(destroyed_first == 0, "first session destroy failed")
+    val stale_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(handle, first, "<p>stale</p>")
+    require(stale_call == 2, "retired ticket called a native session")
+    val third = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_create(handle, "{}")
+    require(third > second, "reused native address reused a public ticket")
+    val third_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(handle, third, "<p>reused address</p>")
+    require(third_call == 0, "reused native address was not admitted under a new ticket")
+    val retained = handle
+    val partial_release = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_release(handle, third)
+    require(not partial_release, "provider closed while another session lived")
+    val second_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(handle, second, "<p>second</p>")
+    require(second_call == 0, "independent live session was retired")
+    var library_alias = handle.library.?
+    unsafe(capabilities: [ffi]):
+        library_alias.close()
+    val destroyed_second = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_destroy(handle, second)
+    require(destroyed_second == 0, "pinned destructor failed after mapping retirement")
+    val closed = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_close(handle)
+    require(closed, "empty provider did not close")
+    val duplicate = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_close(retained)
+    require(not duplicate, "retained handle closed twice")
+    val reloaded = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load(request)
+    require(reloaded.ok and reloaded.handle != nil, "second mapping load failed")
+    val other_handle = reloaded.handle.?
+    val other_ticket = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_create(other_handle, "{}")
+    require(other_ticket > 0 and other_ticket != first,
+        "new mapping reused an old public ticket")
+    val foreign_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(other_handle, first, "<p>foreign ticket</p>")
+    require(foreign_call == 2, "ticket from another mapping selected a session")
+    val other_call = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_load_html(other_handle, other_ticket, "<p>own ticket</p>")
+    require(other_call == 0, "new mapping rejected its own session")
+    val other_closed = unsafe(capabilities: [ffi, raw_ptr]):
+        chrome_render_release(other_handle, other_ticket)
+    require(other_closed, "new mapping did not destroy and close")
+    print "chrome-render-session-integration: PASS fixture-only"
+    0

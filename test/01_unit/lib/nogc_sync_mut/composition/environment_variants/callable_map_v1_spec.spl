@@ -47,6 +47,7 @@ use std.nogc_sync_mut.composition.environment_variants.callable_map_v1.{
     VariantCallableV1,
     variant_callable_map_v1,
     variant_callable_invoke_v1,
+    variant_callable_invoke_batch_into_v1,
     variant_callable_receipt_mark_v1,
     variant_callable_release_v1,
     VARIANT_CALLABLE_PLACEMENT_UNSUPPORTED_V1,
@@ -57,11 +58,26 @@ use std.nogc_sync_mut.composition.environment_variants.callable_map_v1.{
     VARIANT_CALLABLE_ABI_MISMATCH_V1,
     VARIANT_CALLABLE_GENERATION_STALE_V1,
     VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
-    VARIANT_CALLABLE_NOT_CALLABLE_V1
+    VARIANT_CALLABLE_NOT_CALLABLE_V1,
+    VARIANT_CALLABLE_OUTPUT_CAPACITY_V1
 }
+
 use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
     dynlib_artifact_digest_hex_v1
 }
+
+fn copy_callable_ticket(value: VariantCallableV1) -> VariantCallableV1:
+    VariantCallableV1(
+        placement: value.placement,
+        operation_id: value.operation_id,
+        provider_generation: value.provider_generation,
+        arity: value.arity,
+        abi_digest: value.abi_digest,
+        artifact_digest: value.artifact_digest,
+        mapping_handle: value.mapping_handle,
+        callable_handle: value.callable_handle,
+        native_owner_identity: value.native_owner_identity,
+        static_op: value.static_op)
 
 val FIXTURE_SYMBOL = "egl_pkg2_mix2"
 val FIXTURE_ARITY: i64 = 2
@@ -260,6 +276,42 @@ describe "Environment variant callable mapping V1":
             case Err(refusal):
                 fail("static mapping refused: {refusal.reason}")
 
+    it "runs static batches and refuses invalid rows before writing outputs":
+        val callable = match variant_callable_map_v1(
+                request(ENV_PLACEMENT_STATIC_V1, FIXTURE_SYMBOL, "", "",
+                        abi_identity(), PROVIDER_GENERATION, FIXTURE_ARITY),
+                static_table()):
+            case Ok(value): value
+            case Err(refusal):
+                fail("static batch mapping refused: {refusal.reason}")
+                return
+        val batch_args = [[7, 5], [0, 0], [-3, 11], [1000003, 17]]
+        var outputs = [-1, -1, -1, -1, 777]
+        match variant_callable_invoke_batch_into_v1(callable, batch_args, outputs):
+            case Ok(count): expect(count).to_equal(4)
+            case Err(refusal): fail("static batch refused: {refusal.reason}")
+        expect(outputs).to_equal([222, 0, -82, 31000110, 777])
+
+        var empty_output = [777]
+        match variant_callable_invoke_batch_into_v1(callable, [], empty_output):
+            case Ok(count): expect(count).to_equal(0)
+            case Err(refusal): fail("empty static batch refused: {refusal.reason}")
+        expect(empty_output).to_equal([777])
+
+        var short_output = [-1]
+        match variant_callable_invoke_batch_into_v1(callable, batch_args, short_output):
+            case Ok(_): fail("short static batch output was accepted")
+            case Err(refusal):
+                expect(refusal.code).to_equal(VARIANT_CALLABLE_OUTPUT_CAPACITY_V1)
+        expect(short_output).to_equal([-1])
+
+        var invalid_batch = [-1, -1]
+        match variant_callable_invoke_batch_into_v1(callable, [[7, 5], [1]], invalid_batch):
+            case Ok(_): fail("malformed static batch row was accepted")
+            case Err(refusal):
+                expect(refusal.code).to_equal(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1)
+        expect(invalid_batch).to_equal([-1, -1])
+
 describe "Environment variant native placement parity V1":
 
     it "executes a native dynlib callable and agrees with the static twin":
@@ -270,10 +322,7 @@ describe "Environment variant native placement parity V1":
         file_delete(so)
         val compiler = shell("command -v cc 2>/dev/null || command -v clang 2>/dev/null").stdout.trim()
         if compiler == "":
-            # Absence of a C compiler is absence of evidence, not a pass; the
-            # native lane is reported unavailable rather than silently skipped.
-            print "[egl-pkg2] native lane UNAVAILABLE: no cc/clang on this host"
-            expect("native-lane-unavailable").to_equal("native-lane-unavailable")
+            fail("native lane unavailable: no cc/clang on this host")
         else:
             val prog = "long long egl_pkg2_mix2(long long a, long long b){return a*31+b;}"
             shell("printf '%s' '{prog}' > '{csrc}'")
@@ -328,6 +377,32 @@ describe "Environment variant native placement parity V1":
             expect(native_results).to_equal([222, 0, -82, 31000110])
             expect(native_results).to_equal(twin_results)
 
+            val batch_args = [[7, 5], [0, 0], [-3, 11], [1000003, 17]]
+            var native_batch = [-1, -1, -1, -1, 777]
+            match variant_callable_invoke_batch_into_v1(native, batch_args, native_batch):
+                case Ok(count): expect(count).to_equal(4)
+                case Err(refusal): fail("native batch refused: {refusal.reason}")
+            expect(native_batch).to_equal([222, 0, -82, 31000110, 777])
+
+            var empty_output = [777]
+            match variant_callable_invoke_batch_into_v1(native, [], empty_output):
+                case Ok(count): expect(count).to_equal(0)
+                case Err(refusal): fail("empty native batch refused: {refusal.reason}")
+            expect(empty_output).to_equal([777])
+
+            var short_output = [-1]
+            match variant_callable_invoke_batch_into_v1(native, batch_args, short_output):
+                case Ok(_): fail("short batch output was accepted")
+                case Err(refusal):
+                    expect(refusal.code).to_equal(VARIANT_CALLABLE_OUTPUT_CAPACITY_V1)
+            expect(short_output).to_equal([-1])
+            var invalid_batch = [-1, -1]
+            match variant_callable_invoke_batch_into_v1(native, [[7, 5], [1]], invalid_batch):
+                case Ok(_): fail("malformed batch row was accepted")
+                case Err(refusal):
+                    expect(refusal.code).to_equal(VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1)
+            expect(invalid_batch).to_equal([-1, -1])
+
             # Identical lifecycle projection: state sequence, execution digest,
             # execution count, event sequence and provider generation. The mask
             # is exactly `artifact_digest`, `mapping_handle`, `callable_handle`
@@ -355,15 +430,22 @@ describe "Environment variant native placement parity V1":
                 case Err(refusal):
                     fail("peer native mapping refused: {refusal.reason}")
                     return
-            val retained_copy = native
+            val retained_copy = copy_callable_ticket(native)
             expect(peer.mapping_handle != native.mapping_handle).to_equal(true)
-            var invalid_identity = native
+            var invalid_identity = copy_callable_ticket(native)
             invalid_identity.native_owner_identity = 0u64
+            expect(native.native_owner_identity != 0u64).to_equal(true)
             match variant_callable_invoke_v1(invalid_identity, [7, 5]):
                 case Ok(_): fail("invalid native owner identity invoked a mapping")
                 case Err(refusal):
                     expect(refusal.code).to_equal(VARIANT_CALLABLE_NOT_CALLABLE_V1)
             expect(variant_callable_release_v1(native)).to_equal(true)
+            var retired_batch = [-1]
+            match variant_callable_invoke_batch_into_v1(retained_copy, [[7, 5]], retired_batch):
+                case Ok(_): fail("retired native batch invoked a mapping")
+                case Err(refusal):
+                    expect(refusal.code).to_equal(VARIANT_CALLABLE_NOT_CALLABLE_V1)
+            expect(retired_batch).to_equal([-1])
             match variant_callable_invoke_v1(retained_copy, [7, 5]):
                 case Ok(_): fail("retained copy invoked after native release")
                 case Err(refusal):

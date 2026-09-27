@@ -24,7 +24,7 @@ Intended audience: engineers maintaining the dynamic-SFFI facade or any
 provider binding that follows the `(buf, cap, out_len)` idiom.
 """
 use std.spec
-use std.sffi.dynamic.{DynLib, spl_dlclose, spl_wffi_call_i64,
+use std.sffi.dynamic.{DynLib, spl_wffi_call_i64,
     spl_wffi_call_i64_into_bytes}
 use std.nogc_sync_mut.fs.{file_exists}
 
@@ -106,7 +106,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         step("Load the stub chrome render shim, resolve last_error_into, and read the global status text into a 32-byte caller allocation")
         val path = shim_path()
         expect(path).to_not_equal("")
-        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        var lib = unsafe(capabilities: [ffi]): DynLib.open(path)
         val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
         expect(fptr > 0).to_equal(true)
         val got = read_last_error(fptr, 0, 32, 32)
@@ -118,7 +118,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         expect(prefix_is(got.bytes, want_backend_unavailable())).to_equal(true)
         expect(got.bytes.len()).to_equal(32)
         expect(sentinel_intact(got.bytes, 19)).to_equal(true)
-        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+        unsafe(capabilities: [ffi]): lib.close()
 
     it "writes nothing at all when the capacity is zero":
         # @req REQ-WFFIINTOBYTES-002
@@ -126,7 +126,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         step("Call the same symbol with capacity 0 over a 32-byte allocation and check every sentinel byte")
         val path = shim_path()
         expect(path).to_not_equal("")
-        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        var lib = unsafe(capabilities: [ffi]): DynLib.open(path)
         val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
         val got = read_last_error(fptr, 0, 32, 0)
         # cap=0 cannot hold the status text, so the provider refuses with
@@ -135,7 +135,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         expect(got.rc).to_equal(3)
         expect(got.out_len).to_equal(19)
         expect(sentinel_intact(got.bytes, 0)).to_equal(true)
-        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+        unsafe(capabilities: [ffi]): lib.close()
 
     it "never writes past the declared capacity":
         # @req REQ-WFFIINTOBYTES-003
@@ -143,13 +143,13 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         step("Declare a capacity of 1 inside a 32-byte allocation, far too small for the 19-byte status text, and check the whole allocation")
         val path = shim_path()
         expect(path).to_not_equal("")
-        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        var lib = unsafe(capabilities: [ffi]): DynLib.open(path)
         val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
         val got = read_last_error(fptr, 0, 32, 1)
         expect(got.rc).to_equal(3)
         expect(got.out_len).to_equal(19)
         expect(sentinel_intact(got.bytes, 0)).to_equal(true)
-        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+        unsafe(capabilities: [ffi]): lib.close()
 
     it "returns a longer provider string once the global error is set":
         # @req REQ-WFFIINTOBYTES-004
@@ -157,7 +157,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         step("Force a create() refusal with an empty config payload, then read the recorded global status text back through the facade")
         val path = shim_path()
         expect(path).to_not_equal("")
-        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        var lib = unsafe(capabilities: [ffi]): DynLib.open(path)
         val create = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_create")
         val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
         # A null/zero-length config is an invalid request, which the shim records
@@ -169,7 +169,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         expect(got.out_len).to_equal(15)
         expect(prefix_is(got.bytes, want_invalid_request())).to_equal(true)
         expect(sentinel_intact(got.bytes, 15)).to_equal(true)
-        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+        unsafe(capabilities: [ffi]): lib.close()
 
     it "refuses a window that runs past the caller's allocation":
         # @req REQ-WFFIINTOBYTES-005
@@ -177,7 +177,7 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         step("Ask for a 64-byte window inside an 8-byte allocation and confirm the facade refuses without calling the provider")
         val path = shim_path()
         expect(path).to_not_equal("")
-        val lib = unsafe(capabilities: [ffi]): DynLib.open(path)
+        var lib = unsafe(capabilities: [ffi]): DynLib.open(path)
         val fptr = unsafe(capabilities: [ffi, raw_ptr]): lib.sym("simple_chrome_render_last_error_into")
         val got = read_last_error(fptr, 0, 8, 64)
         # Fail closed: a negative facade status, an untouched allocation, and an
@@ -185,4 +185,4 @@ describe "Bounded OUT-byte-buffer dynamic SFFI facade":
         expect(got.rc < 0).to_equal(true)
         expect(got.out_len).to_equal(0)
         expect(sentinel_intact(got.bytes, 0)).to_equal(true)
-        unsafe(capabilities: [ffi]): spl_dlclose(lib.handle)
+        unsafe(capabilities: [ffi]): lib.close()

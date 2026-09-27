@@ -14,12 +14,14 @@ close the same handle twice; an invoke after release may jump into unloaded
 code. The current native fixture calls release only once and never invokes
 afterward, so its existing assertions do not cover either failure.
 
-Simple classes have value semantics (`doc/07_guide/quick_reference/
-syntax_quick_reference.md`, capability-group rules). Clearing fields on one
-copy cannot revoke another copy. The current deterministic `mapping_handle`
-and `callable_handle` values are also shared by independent loads of the same
-artifact, symbol, and provider generation; they cannot serve as unique mutable
-lifetime keys without a distinct per-load identity.
+Native Simple class assignments can alias the same receiver. Mutating its
+fields during close also risks an unsynchronized read/write race with an
+in-flight call. The owner identity must remain stable on the receiver; the
+owner registry, not receiver mutation, revokes calls. The baseline's
+deterministic `mapping_handle` and `callable_handle` values are shared by
+independent loads of the same artifact, symbol, and provider generation; they
+cannot serve as unique mutable lifetime keys without a distinct per-load
+identity.
 
 ## Required correction
 
@@ -47,7 +49,7 @@ No current source check or metadata receipt proves these outcomes. Do not mark
 the native dynload workstream release-qualified until this gate passes.
 
 The candidate serializes a bounded registry with one mutex and looks up the
-identity linearly on every native invocation. That is a correctness staging
+identity by binary search on every native invocation. That is a correctness staging
 point, not evidence for Stage 2's allocation-free, lock-free hot dispatch or
 latency/RSS targets. Those targets require an independently measured indexed
 owner or another safe fast path before production promotion.
