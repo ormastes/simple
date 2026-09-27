@@ -893,3 +893,7 @@ table indices and types, and fixed-width `.dynsym`/`.dynamic` entry sizes.
 Malformed shared objects therefore return a typed linker error before any
 out-of-range byte read; mirrored x86_64 coverage corrupts a `.dynsym` string
 table link to prove the fail-closed path.
+Dynamic symbol names, version-definition names, and `DT_SONAME` now use a
+checked string-table lookup. Out-of-range offsets and empty linkable symbol or
+version names produce diagnostics instead of silently becoming empty strings
+that could change provider selection or dependency identity.

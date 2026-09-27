@@ -9,7 +9,9 @@ use compiler.backend.linker.elf_inspect.{
     ElfSectionHeader, elf_parse_header, elf_read_u16_le, elf_read_u32_le, elf_read_u64_le,
     ET_DYN, ELF64_SHDR_SIZE
 }
-use compiler.backend.linker.elf_parser.{elf_strtab_get, elf_parse_string_table}
+use compiler.backend.linker.elf_parser.{
+    ElfStringTable, elf_strtab_get, elf_parse_string_table
+}
 
 val SHT_DYNSYM_SO: i64 = 11
 val SHT_DYNAMIC_SO: i64 = 6
@@ -72,6 +74,11 @@ fn elf_so_checked_linked_strtab(bytes: [u8], shoff: i64, shnum: i64,
         return Err("shared object {role} does not reference a string table")
     Ok(section)
 
+fn elf_so_strtab_get(strtab: ElfStringTable, index: i64, role: text) -> Result<text, text>:
+    if index < 0 or index >= strtab.data.len():
+        return Err("shared object {role} string offset {index} is out of range")
+    Ok(elf_strtab_get(strtab, index))
+
 fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
     val header = elf_parse_header(bytes)?
@@ -128,7 +135,11 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
             val aux = elf_read_u32_le(bytes, base + 12)
             if aux < 20 or vd + aux + 8 > vdsec.sh_size:
                 return Err("malformed .gnu.version_d auxiliary record")
-            version_names[ndx] = elf_strtab_get(vdstr, elf_read_u32_le(bytes, base + aux))
+            val version_name = elf_so_strtab_get(vdstr,
+                elf_read_u32_le(bytes, base + aux), "version definition")?
+            if version_name == "":
+                return Err("shared object version definition has an empty name")
+            version_names[ndx] = version_name
             val next = elf_read_u32_le(bytes, base + 16)
             if next == 0:
                 vd = vdsec.sh_size
@@ -157,7 +168,10 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
         val linkable = shndx != 0 and elf_shared_symbol_binding_linkable(bind) and
             elf_shared_symbol_visible(other)
         if linkable:
-            val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
+            val name = elf_so_strtab_get(strtab, elf_read_u32_le(bytes, e),
+                "dynamic symbol name")?
+            if name == "":
+                return Err("shared object has a linkable dynamic symbol with an empty name")
             var hidden = false
             if versym_off >= 0:
                 hidden = elf_read_u16_le(bytes, versym_off + k * 2) & VERSYM_HIDDEN != 0
@@ -195,7 +209,8 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
                 d = dsec.sh_size
             else:
                 if tag == DT_SONAME_SO:
-                    soname = elf_strtab_get(dstr, elf_read_u64_le(bytes, dsec.sh_addr + d + 8))
+                    soname = elf_so_strtab_get(dstr,
+                        elf_read_u64_le(bytes, dsec.sh_addr + d + 8), "DT_SONAME")?
                 d = d + 16
     soname = elf_shared_effective_soname(soname, fallback_name)?
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,

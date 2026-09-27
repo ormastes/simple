@@ -103,6 +103,15 @@ fn dyn_tag(b: [i64], tag: i64) -> i64:
         o = o + 16
     -1
 
+fn dyn_tag_entry(b: [i64], tag: i64) -> i64:
+    var o = sec_off(b, ".dynamic")
+    val end = o + sec_size(b, ".dynamic")
+    while o < end:
+        if rd64(b, o) == tag:
+            return o
+        o = o + 16
+    -1
+
 fn dyn_tag_count(b: [i64], tag: i64) -> i64:
     var count: i64 = 0
     var o = sec_off(b, ".dynamic")
@@ -158,6 +167,28 @@ describe "elf_link - x86_64 dynamic gate":
         val parsed = elf_parse_shared(malformed)
         expect(parsed.is_err()).to_equal(true)
         expect(parsed.unwrap_err()).to_contain("section index")
+
+    it "rejects out-of-range dynamic symbol and SONAME string offsets":
+        val layout = load_path("{FIX}/libadd_x64.so.1")
+        var bad_symbol = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val symbol = sec_off(layout, ".dynsym") + 24
+        bad_symbol[symbol] = 0xffu8
+        bad_symbol[symbol + 1] = 0xffu8
+        bad_symbol[symbol + 2] = 0xffu8
+        bad_symbol[symbol + 3] = 0x7fu8
+        val symbol_result = elf_parse_shared(bad_symbol)
+        expect(symbol_result.is_err()).to_equal(true)
+        expect(symbol_result.unwrap_err()).to_contain("dynamic symbol name string offset")
+
+        var bad_soname = file_read_bytes("{FIX}/libadd_x64.so.1")
+        val soname_value = dyn_tag_entry(layout, 14) + 8
+        bad_soname[soname_value] = 0xffu8
+        bad_soname[soname_value + 1] = 0xffu8
+        bad_soname[soname_value + 2] = 0xffu8
+        bad_soname[soname_value + 3] = 0x7fu8
+        val soname_result = elf_parse_shared(bad_soname)
+        expect(soname_result.is_err()).to_equal(true)
+        expect(soname_result.unwrap_err()).to_contain("DT_SONAME string offset")
 
     it "deduplicates identical DSOs and rejects conflicting same-SONAME bytes":
         val lib = file_read_bytes("{FIX}/libadd_x64.so.1")
