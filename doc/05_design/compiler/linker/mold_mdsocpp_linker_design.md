@@ -266,7 +266,10 @@ Explicit binary paths for known targets must be target-absolute at resolution
 time, so planning and execution cannot silently depend on the remote shell's
 working directory. Installed and staging paths must also contain a file leaf;
 POSIX roots, Windows drive roots, and bare UNC shares fail before transfer or
-publication work begins.
+publication work begins. Windows leaves additionally reject DOS device aliases
+(`CON`, `NUL`, `COM1` through `COM9`, and peers, including extensions), NTFS
+alternate-data-stream colons, trailing-dot/space aliases, and illegal filename
+characters before any remote side effect.
 Placement validation is target-lexical rather than host-canonical: both staging
 and installed paths must be absolute, and normalized dot segments, separators,
 Windows drive letters, and Windows case are compared before any upload begins.
