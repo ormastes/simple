@@ -826,6 +826,15 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_cranelift_new_aot_module_triple" => {
             crate::codegen::cranelift_sffi::rt_cranelift_new_aot_module_triple as *const () as usize
         }
+        "spl_cranelift_new_aot_module_config_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_new_aot_module_config_v2 as *const () as usize
+        }
+        "spl_cranelift_aot_isa_feature_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_aot_isa_feature_v2 as *const () as usize
+        }
+        "spl_cranelift_aot_opt_level_v2" => {
+            crate::codegen::cranelift_sffi::spl_cranelift_aot_opt_level_v2 as *const () as usize
+        }
         "rt_cranelift_finalize_module" => {
             crate::codegen::cranelift_sffi::rt_cranelift_finalize_module as *const () as usize
         }

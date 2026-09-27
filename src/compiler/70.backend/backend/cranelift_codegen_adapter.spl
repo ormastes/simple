@@ -12,7 +12,7 @@
 use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature, MirConstValue, MirStatic, LocalId, LocalKind, MirLocal}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBody, MirBlock, BlockId, MirInst, MirInstKind, MirBinOp, MirUnaryOp,
     MirOperand, MirOperandKind, MirTerminator, SwitchCase}
-use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions, CompileError, compileerror_backend_error, compileerror_target_unsupported}
+use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BackendCompileOptions, OptimizationLevel, CompileError, compileerror_backend_error, compileerror_target_unsupported}
 use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
@@ -86,9 +86,41 @@ class CraneliftCodegenAdapter:
     """Adapts Cranelift backend to the Codegen trait interface."""
     options: BackendCompileOptions
     retained_target_triple: text? = nil
+    retained_cpu_v2: text? = nil
+    retained_features_v2: [text] = []
+
+fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
+    match options.opt_level:
+        case OptimizationLevel.None_ | OptimizationLevel.Debug: 0
+        # Cranelift 0.116 has no distinct O1/Basic mode; fail closed rather
+        # than substitute its size-oriented mode for the retained request.
+        case OptimizationLevel.Basic: -1
+        case OptimizationLevel.Size: 1
+        case OptimizationLevel.Standard | OptimizationLevel.Speed: 2
+        case OptimizationLevel.Aggressive: 3
+
+fn cranelift_new_aot_for_request_v2(
+    name: text, target: text, options: BackendCompileOptions,
+    cpu: text?, features: [text]
+) -> i64:
+    if val requested_cpu = cpu:
+        val expected_opt = cranelift_isa_opt_level_v2(options)
+        val module = cranelift_new_aot_module_config_v2(
+            name, target, requested_cpu, expected_opt, features)
+        if module == 0: return 0
+        if cranelift_aot_opt_level_v2(module) != expected_opt:
+            cranelift_free_module(module)
+            return 0
+        for feature in features:
+            if cranelift_aot_isa_feature_v2(module, feature) != 1:
+                cranelift_free_module(module)
+                return 0
+        return module
+    cranelift_new_aot_module(name, target)
 
 pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: MirModule,
-    retained_target_triple: text? = nil) -> Result<CodegenOutput, CompileError>:
+    retained_target_triple: text? = nil, retained_cpu_v2: text? = nil,
+    retained_features_v2: [text] = []) -> Result<CodegenOutput, CompileError>:
     print "[cranelift-direct] start"
     val target_code = codegen_target_to_cl(options.target)
     if target_code < 0:
@@ -96,7 +128,8 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
     val target_triple = retained_target_triple ?? backend_requested_aot_target_triple(options.target.to_text())
     print "[cranelift-direct] target"
 
-    val cl_module = cranelift_new_aot_module("bootstrap_main", target_triple)
+    val cl_module = cranelift_new_aot_for_request_v2(
+        "bootstrap_main", target_triple, options, retained_cpu_v2, retained_features_v2)
     if cl_module == 0:
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to create Cranelift AOT module"))
@@ -156,7 +189,9 @@ impl Codegen for CraneliftCodegenAdapter:
         val target_triple = self.retained_target_triple ?? backend_requested_aot_target_triple(self.options.target.to_text())
 
         # Create AOT module
-        val cl_module = cranelift_new_aot_module(module.name, target_triple)
+        val cl_module = cranelift_new_aot_for_request_v2(
+            module.name, target_triple, self.options,
+            self.retained_cpu_v2, self.retained_features_v2)
         if cl_module == 0:
             return Err(compileerror_backend_error(BackendKind.Cranelift,
                 "Failed to create Cranelift AOT module"))

@@ -67,6 +67,9 @@ struct JITModuleContext {
 struct ObjectModuleContext {
     module: ObjectModule,
     func_ids: HashMap<String, FuncId>,
+    // The same ISA Arc passed to ObjectBuilder. V1 modules have no acceptance
+    // evidence; only the configured V2 constructor may expose readback.
+    configured_isa_v2: Option<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>>,
 }
 
 /// Backing storage for a function being built.
@@ -294,6 +297,55 @@ fn build_aot_isa_and_triple(target: &str) -> Option<(Triple, std::sync::Arc<dyn 
         target.parse::<Triple>().ok()?
     };
     build_isa_for_triple(triple)
+}
+
+// Cranelift 0.116 x64 lowering tests these effective predicates, not isolated
+// has_* bits. A requested feature must include every predicate prerequisite.
+fn cranelift_feature_flags(feature: &str) -> Option<&'static [&'static str]> {
+    match feature {
+        "sse4.1" => Some(&["has_sse41"]),
+        "sse4.2" => Some(&["has_sse41", "has_sse42"]),
+        "avx" => Some(&["has_avx"]),
+        "avx2" => Some(&["has_avx", "has_avx2"]),
+        "fma" => Some(&["has_avx", "has_fma"]),
+        _ => None,
+    }
+}
+
+fn isa_has_effective_feature(isa: &dyn cranelift_codegen::isa::TargetIsa, feature: &str) -> bool {
+    let required = match cranelift_feature_flags(feature) {
+        Some(flags) => flags,
+        None => return false,
+    };
+    let actual = isa.isa_flags();
+    required.iter().all(|flag| {
+        actual
+            .iter()
+            .any(|value| value.name == *flag && value.as_bool() == Some(true))
+    })
+}
+
+// This ABI admits only Cranelift optimization modes with an exact readback.
+// O3 has no distinct Cranelift 0.116 mode and must not be reported as accepted.
+fn cranelift_opt_setting(level: i64) -> Option<&'static str> {
+    match level {
+        0 => Some("none"),
+        1 => Some("speed_and_size"),
+        2 => Some("speed"),
+        _ => None,
+    }
+}
+
+unsafe fn strict_abi_text(ptr: i64, len: i64, max_len: i64) -> Option<String> {
+    if len < 0 || len > max_len || (len > 0 && ptr == 0) {
+        return None;
+    }
+    if len == 0 {
+        return Some(String::new());
+    }
+    std::str::from_utf8(std::slice::from_raw_parts(ptr as *const u8, len as usize))
+        .ok()
+        .map(|text| text.to_owned())
 }
 
 // ============================================================================
@@ -1566,7 +1618,7 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module(name_ptr: i64, name_len: i6
         None => return 0,
     };
 
-    rt_cranelift_new_aot_module_impl(name, isa)
+    rt_cranelift_new_aot_module_impl(name, isa, false)
 }
 
 /// Create a new AOT module for an exact target triple.
@@ -1587,10 +1639,130 @@ pub unsafe extern "C" fn rt_cranelift_new_aot_module_triple(
         None => return 0,
     };
 
-    rt_cranelift_new_aot_module_impl(name, isa)
+    rt_cranelift_new_aot_module_impl(name, isa, false)
 }
 
-fn rt_cranelift_new_aot_module_impl(name: String, isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>) -> i64 {
+/// V2 constructor: comma-separated canonical positive features, generic CPU,
+/// and an exact Cranelift optimization mode. Returns zero on any substitution.
+#[no_mangle]
+pub unsafe extern "C" fn spl_cranelift_new_aot_module_config_v2(
+    name_ptr: i64,
+    name_len: i64,
+    target_ptr: i64,
+    target_len: i64,
+    cpu_ptr: i64,
+    cpu_len: i64,
+    opt_level: i64,
+    features_ptr: i64,
+    features_len: i64,
+) -> i64 {
+    let (name, target, cpu, features) = match (
+        strict_abi_text(name_ptr, name_len, 256),
+        strict_abi_text(target_ptr, target_len, 256),
+        strict_abi_text(cpu_ptr, cpu_len, 64),
+        strict_abi_text(features_ptr, features_len, 512),
+    ) {
+        (Some(name), Some(target), Some(cpu), Some(features)) => (name, target, cpu, features),
+        _ => return 0,
+    };
+    if name.is_empty() || target.is_empty() || cpu != "generic" {
+        return 0;
+    }
+    let opt = match cranelift_opt_setting(opt_level) {
+        Some(opt) => opt,
+        None => return 0,
+    };
+    let triple = match target.parse::<Triple>() {
+        Ok(triple) if triple.to_string() == target => triple,
+        _ => return 0,
+    };
+    let mut flags = settings::builder();
+    if flags.set("opt_level", opt).is_err() || flags.set("is_pic", "true").is_err() {
+        return 0;
+    }
+    let mut builder = match cranelift_codegen::isa::lookup(triple.clone()) {
+        Ok(builder) => builder,
+        Err(_) => return 0,
+    };
+    let mut requested_features = Vec::new();
+    let mut enabled_flags = Vec::new();
+    if !features.is_empty() {
+        if triple.architecture != target_lexicon::Architecture::X86_64 {
+            return 0;
+        }
+        for feature in features.split(',') {
+            let flags = match cranelift_feature_flags(feature) {
+                Some(flags) if !requested_features.contains(&feature) => flags,
+                _ => return 0,
+            };
+            for flag in flags {
+                if !enabled_flags.contains(flag) {
+                    if builder.enable(flag).is_err() {
+                        return 0;
+                    }
+                    enabled_flags.push(*flag);
+                }
+            }
+            requested_features.push(feature);
+        }
+    }
+    let isa = match builder.finish(settings::Flags::new(flags)) {
+        Ok(isa) => isa,
+        Err(_) => return 0,
+    };
+    if requested_features
+        .iter()
+        .any(|feature| !isa_has_effective_feature(isa.as_ref(), feature))
+    {
+        return 0;
+    }
+    rt_cranelift_new_aot_module_impl(name, isa, true)
+}
+
+/// Readback from the exact ISA retained by the live V2 object module.
+/// 1=enabled, 0=disabled, -1=invalid feature or stale/V1 handle.
+#[no_mangle]
+pub unsafe extern "C" fn spl_cranelift_aot_isa_feature_v2(module: i64, feature_ptr: i64, feature_len: i64) -> i64 {
+    let feature = match strict_abi_text(feature_ptr, feature_len, 32) {
+        Some(feature) => feature,
+        None => return -1,
+    };
+    if cranelift_feature_flags(&feature).is_none() {
+        return -1;
+    }
+    let modules = AOT_MODULES.lock().unwrap();
+    match modules
+        .get(&module)
+        .and_then(|context| context.configured_isa_v2.as_ref())
+    {
+        Some(isa) => i64::from(isa_has_effective_feature(isa.as_ref(), &feature)),
+        None => -1,
+    }
+}
+
+/// Readback of the exact optimization mode used to build a live V2 module.
+#[no_mangle]
+pub unsafe extern "C" fn spl_cranelift_aot_opt_level_v2(module: i64) -> i64 {
+    let modules = AOT_MODULES.lock().unwrap();
+    match modules
+        .get(&module)
+        .and_then(|context| context.configured_isa_v2.as_ref())
+    {
+        Some(isa) => match isa.flags().opt_level() {
+            settings::OptLevel::None => 0,
+            settings::OptLevel::SpeedAndSize => 1,
+            settings::OptLevel::Speed => 2,
+        },
+        None => -1,
+    }
+}
+
+fn rt_cranelift_new_aot_module_impl(
+    name: String,
+    isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+    configured_v2: bool,
+) -> i64 {
+    let configured_isa_v2 = if configured_v2 { Some(isa.clone()) } else { None };
     let mut builder = match ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names()) {
         Ok(b) => b,
         Err(_) => return 0,
@@ -1605,6 +1777,7 @@ fn rt_cranelift_new_aot_module_impl(name: String, isa: std::sync::Arc<dyn cranel
         ObjectModuleContext {
             module,
             func_ids: HashMap::new(),
+            configured_isa_v2,
         },
     );
     handle
@@ -1703,6 +1876,18 @@ pub fn register_cranelift_sffi_functions(builder: &mut JITBuilder) {
     builder.symbol(
         "rt_cranelift_new_aot_module_triple",
         rt_cranelift_new_aot_module_triple as *const u8,
+    );
+    builder.symbol(
+        "spl_cranelift_new_aot_module_config_v2",
+        spl_cranelift_new_aot_module_config_v2 as *const u8,
+    );
+    builder.symbol(
+        "spl_cranelift_aot_isa_feature_v2",
+        spl_cranelift_aot_isa_feature_v2 as *const u8,
+    );
+    builder.symbol(
+        "spl_cranelift_aot_opt_level_v2",
+        spl_cranelift_aot_opt_level_v2 as *const u8,
     );
     builder.symbol(
         "rt_cranelift_finalize_module",
@@ -1938,6 +2123,155 @@ mod tests {
             let handle = rt_cranelift_new_aot_module(name.as_ptr() as i64, name.len() as i64, CL_TARGET_X86_64);
             assert!(handle > 0);
             rt_cranelift_free_module(handle);
+        }
+    }
+
+    #[test]
+    fn test_configured_aot_isa_readback_is_bound_to_emitted_object() {
+        use object::Object;
+
+        unsafe {
+            let name = "configured_aot";
+            let target = "x86_64-unknown-linux-gnu";
+            let cpu = "generic";
+            let features = "avx2";
+            let create = |features: &str, cpu: &str, opt: i64| {
+                spl_cranelift_new_aot_module_config_v2(
+                    name.as_ptr() as i64,
+                    name.len() as i64,
+                    target.as_ptr() as i64,
+                    target.len() as i64,
+                    cpu.as_ptr() as i64,
+                    cpu.len() as i64,
+                    opt,
+                    features.as_ptr() as i64,
+                    features.len() as i64,
+                )
+            };
+            // A raw has_* bit alone is insufficient for Cranelift's use_*
+            // predicates. This is the regression the provider readback guards.
+            for (feature, lone_flag) in [("avx2", "has_avx2"), ("fma", "has_fma"), ("sse4.2", "has_sse42")] {
+                let mut builder = cranelift_codegen::isa::lookup(target.parse::<Triple>().unwrap()).unwrap();
+                builder.enable(lone_flag).unwrap();
+                let isa = builder.finish(settings::Flags::new(settings::builder())).unwrap();
+                assert!(!isa_has_effective_feature(isa.as_ref(), feature));
+            }
+            assert_eq!(create("unknown", cpu, 2), 0);
+            assert_eq!(create("avx2,avx2", cpu, 2), 0);
+            assert_eq!(create(features, "native", 2), 0);
+            assert_eq!(create(features, cpu, 3), 0);
+
+            let v1 = rt_cranelift_new_aot_module_triple(
+                name.as_ptr() as i64,
+                name.len() as i64,
+                target.as_ptr() as i64,
+                target.len() as i64,
+            );
+            assert!(v1 > 0);
+            assert_eq!(
+                spl_cranelift_aot_isa_feature_v2(v1, features.as_ptr() as i64, features.len() as i64),
+                -1
+            );
+            rt_cranelift_free_module(v1);
+
+            let module = create(features, cpu, 2);
+            assert!(module > 0);
+            assert_eq!(
+                spl_cranelift_aot_isa_feature_v2(module, features.as_ptr() as i64, features.len() as i64),
+                1
+            );
+            let avx = "avx";
+            assert_eq!(
+                spl_cranelift_aot_isa_feature_v2(module, avx.as_ptr() as i64, avx.len() as i64),
+                1
+            );
+            assert_eq!(spl_cranelift_aot_opt_level_v2(module), 2);
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().join("configured.o");
+            let path = path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                module,
+                path.as_ptr() as i64,
+                path.len() as i64
+            ));
+            let bytes = std::fs::read(path.as_ref()).unwrap();
+            let object = object::File::parse(bytes.as_slice()).unwrap();
+            assert_eq!(object.architecture(), object::Architecture::X86_64);
+            assert_eq!(object.format(), object::BinaryFormat::Elf);
+            assert_eq!(
+                spl_cranelift_aot_isa_feature_v2(module, features.as_ptr() as i64, features.len() as i64),
+                -1
+            );
+            assert_eq!(spl_cranelift_aot_opt_level_v2(module), -1);
+        }
+    }
+
+    #[test]
+    fn test_configured_fma_isa_lowers_a_real_function() {
+        use object::{Object, ObjectSection};
+
+        unsafe {
+            let name = "configured_fma";
+            let target = "x86_64-unknown-linux-gnu";
+            let cpu = "generic";
+            let feature = "fma";
+            let module = spl_cranelift_new_aot_module_config_v2(
+                name.as_ptr() as i64,
+                name.len() as i64,
+                target.as_ptr() as i64,
+                target.len() as i64,
+                cpu.as_ptr() as i64,
+                cpu.len() as i64,
+                2,
+                feature.as_ptr() as i64,
+                feature.len() as i64,
+            );
+            assert!(module > 0);
+            assert_eq!(
+                spl_cranelift_aot_isa_feature_v2(module, feature.as_ptr() as i64, feature.len() as i64),
+                1
+            );
+            {
+                let mut modules = AOT_MODULES.lock().unwrap();
+                let object_module = &mut modules.get_mut(&module).unwrap().module;
+                let mut signature = object_module.make_signature();
+                for _ in 0..3 {
+                    signature.params.push(AbiParam::new(types::F64));
+                }
+                signature.returns.push(AbiParam::new(types::F64));
+                let func_id = object_module
+                    .declare_function("fma_probe", Linkage::Export, &signature)
+                    .unwrap();
+                let mut context = object_module.make_context();
+                context.func.signature = signature;
+                let mut builder_context = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+                let entry = builder.create_block();
+                builder.append_block_params_for_function_params(entry);
+                builder.switch_to_block(entry);
+                builder.seal_block(entry);
+                let arg0 = builder.block_params(entry)[0];
+                let arg1 = builder.block_params(entry)[1];
+                let arg2 = builder.block_params(entry)[2];
+                let result = builder.ins().fma(arg0, arg1, arg2);
+                builder.ins().return_(&[result]);
+                builder.finalize();
+                object_module.define_function(func_id, &mut context).unwrap();
+                object_module.clear_context(&mut context);
+            }
+            let temp_dir = tempfile::tempdir().unwrap();
+            let path = temp_dir.path().join("fma.o");
+            let path = path.to_string_lossy();
+            assert!(rt_cranelift_emit_object_raw(
+                module,
+                path.as_ptr() as i64,
+                path.len() as i64
+            ));
+            let bytes = std::fs::read(path.as_ref()).unwrap();
+            let object = object::File::parse(bytes.as_slice()).unwrap();
+            assert!(object
+                .sections()
+                .any(|section| { section.name().unwrap_or("").contains("fma_probe") && section.size() > 0 }));
         }
     }
 

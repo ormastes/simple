@@ -364,6 +364,18 @@ session authority issues AcceptedExact only when those canonical features equal
 the request. This completes LLVM configuration acceptance, not instruction
 inspection or execution. Cranelift and dynamic V1 remain Unknown.
 
+Cranelift V2 provider work in this draft adds a strict hosted ISA constructor,
+reads optimization and canonical x86 feature flags from the same live ISA used
+by `ObjectModule`, and rejects unsupported CPU/optimization/feature requests.
+Feature readback checks Cranelift's effective AVX2/FMA/SSE4.2 prerequisites;
+O1/Basic and O3/Aggressive remain rejected because this Cranelift version has
+no distinct matching optimization mode.
+The retained builtin adapter uses that constructor for admitted Cranelift
+compiles. The session authority still rejects feature-bearing requests and
+projects Cranelift results as `Unknown`: it does not yet retain a provider-owned
+accepted-feature record with the exact object bytes. This is a 6A.1c input,
+not completion of 6A.1c or emitted/executed SIMD evidence.
+
 Implemented inspection checkpoint: a bounded strict x86-64 ELF64 ET_REL
 decoder projects exact ordered `.text`/`.text.*` candidate sections with
 per-section and framed projection digests. It rejects malformed identity,
