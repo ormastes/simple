@@ -10,11 +10,14 @@ provider. A copied or retained slot can therefore call unmapped code. The
 candidate introduces a revocable mapping identity and defers `dlclose` until
 admitted calls finish, but the existing raw API still exposes `DynLib.handle`.
 
-`chromium_reference_oracle_sffi.spl` and `chrome_render_module_sffi.spl` obtain
-that handle through `DynLib.load()`, then close it directly with `spl_dlclose`.
-`wffi_into_bytes_spec.spl` does the same. Those closes bypass the candidate
-owner, leaving an entry that appears live after the native mapping is gone.
-The GPU modules also retain raw function pointers in their own handle structs.
+`chromium_reference_oracle_sffi.spl`, `chrome_render_module_sffi.spl`, and
+`ui/gui_renderer.spl` obtain that handle through `DynLib.load()`, retain raw
+addresses in their own structs, then close directly with `spl_dlclose`.
+`wffi_into_bytes_spec.spl` does the same in tests. Those closes bypass the
+candidate owner, leaving an entry that appears live after the native mapping
+is gone. `backend_plugin/dynamic_loader.spl` also exposes the raw handle to a
+tagged transport, although its own close path calls `DynLib.close()`; its
+in-flight transport lifetime must be covered before retiring that mapping.
 The candidate must not be published until those ownership routes are made
 explicit and checked together.
 
@@ -27,8 +30,9 @@ allocation, or RSS comparison for the candidate has been run.
 
 ## Acceptance
 
-1. One owner closes each mapping exactly once, including raw GPU success and
-   failure paths, while stale slots and stale aliases return a typed refusal.
+1. One owner closes each mapping exactly once, including raw GPU, GUI, and
+   tagged backend transport paths, while stale slots and stale aliases return
+   a typed refusal.
 2. An admitted call survives concurrent retirement and the final use closes
    the mapping. New calls fail after retirement.
 3. Versioned and convention loader caches never return retired entries.
