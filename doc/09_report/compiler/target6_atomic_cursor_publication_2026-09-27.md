@@ -34,3 +34,21 @@ seed, and the historical admitted pure-Simple Stage2 native probe timed out
 after 120 seconds without producing an executable. Neither is Target 6
 acceptance evidence. Concurrent-writer, crash/rename-failure, replay, and
 native performance cohorts remain open.
+
+## Historical Stage2 native diagnostic
+
+Adding `--entry-closure` to the focused native-build command reduced its
+source set to 28 modules and produced a 135 KB executable in 3.8 seconds.
+The final diagnostic rebuild took 3.7 seconds (1 compiled, 27 cached;
+SHA-256
+`8dd77a6d5a0eb36b81487ea850806cbeff5c3dcc9c85fd54cb82d1476dafa1fa`).
+The probe remains under `build/mini_builds/target6_atomic_cursor_probe/`.
+The first run used a cache path outside the inventory owner's allowed
+`build/scv` suffix; the corrected run reached inventory publication but
+returned `publish-encode-empty`. A third and final diagnostic showed why:
+the historical Stage2 native Option unwrap of the valid cold-initialization
+result yielded generation `-1037955087042871295` and zero entries, so the
+canonical encoder correctly refused it. The isolated source now binds that
+`Some(seed)` through a pattern match, avoiding the observed unwrap path.
+The three-cycle limit stops further testing of this probe in this session.
+This does not prove current-source behavior or Target 6 acceptance.

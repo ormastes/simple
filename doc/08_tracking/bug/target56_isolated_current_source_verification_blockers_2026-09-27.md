@@ -43,6 +43,15 @@ phase. Its sole progress receipt was `bootstrap_ffi ... rt_native_build`.
 The log is `build/mini_builds/target56_closure_trace/events`; this run cannot
 attribute the earlier 704/1202 source-closure stall and was not retried.
 
+The focused SCV cursor probe compiled in 3.8 seconds when `--entry-closure`
+was supplied. Its historical Stage2 binary reproduced the cold-inventory
+`publish-encode-empty` failure: `Some(seed)` unwrapped to a negative generation
+and zero entries. The isolated source now uses a pattern binding for that
+option. Three fixture/check cycles were used, so no further probe retry is
+admitted in this session. The failed result cannot qualify or reject the
+current-source cursor transaction; see
+`doc/09_report/compiler/target6_atomic_cursor_publication_2026-09-27.md`.
+
 ## Follow-up
 
 The isolated `pipeline_fn.spl` now passes the enum variants directly for its
