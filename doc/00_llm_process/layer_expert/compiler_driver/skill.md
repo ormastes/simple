@@ -107,3 +107,33 @@ A truncated closure does not fail here — it fails much later in HIR as
 See `doc/08_tracking/bug/simpleos_wm_vulkan_cross_arch_rows_blocked_2026-08-31.md`.
 
 - 2026-09-05 gpu_frontend_offload: default-off frontend offload switch (`structural_contracts/frontend_offload_switch.spl`, driver gate in `80.driver/driver_source_pipeline_parsing.spl`) — see `doc/00_llm_process/feature_expert/gpu_frontend_offload/skill.md`.
+
+## 2026-09-26 — `native-build` restored: backend table in the interpreted worker, entry-file hashing, module-init reads
+
+- **The interpreted native-build worker never installed the static backend
+  table.** Since the K1 migration only the compiled CLI entries install it, and
+  the worker cannot `use compiler.driver.bootstrap_k1_selected` — under the
+  interpreter that module path resolves to the fail-closed stub
+  (`src/compiler/80.driver/bootstrap_k1_selected.spl`), so every build died
+  with SIGILL (`ud2`) at codegen entry. The worker now imports the committed
+  composition by path,
+  `use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{...}`
+  ([native_build_worker.spl](../../../../src/app/cli/native_build_worker.spl) :10-13, `a5158762598`).
+  Record: [native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26](../../../08_tracking/bug/native_build_worker_sigill_ud2_at_codegen_entry_2026-09-26.md).
+- **`--output-format both` hashed the `--source` DIRECTORY, not the entry
+  file.** `dynload` (the default mode) selects `Both`, so every default
+  native-build hit it the moment `file_read_result` became fail-closed.
+  `_driver_entry_source_input`
+  ([driver_aot_pipeline.spl](../../../../src/compiler/80.driver/driver_aot_pipeline.spl) :65)
+  now picks the first `is_file` input for the SMF manifest hash (:193-198).
+- **Module-level values land in `.bss` and are filled by a generated
+  `__module_init_*` that freestanding consumers never call**, so an unguarded
+  `slot[0]` on a module-level array can index an EMPTY array in natively
+  compiled code. Every `lex_env_save_enabled[0]` read in `lexer.spl` now goes
+  through the length-checked `bool_slot0_or` / `lex_env_save_on`
+  ([lexer.spl](../../../../src/compiler/10.frontend/core/lexer.spl) :93 / :105,
+  `a6aea23798f`). Same defect class as
+  [simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19](../../../08_tracking/bug/simple_module_const_scalars_need_runtime_init_on_baremetal_2026-09-19.md);
+  record [stage2_candidate_env_lexer_array_oob_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_lexer_array_oob_sigill_2026-09-26.md).
+  Until the driver guarantees `__module_init_*` runs for every consumer, treat
+  every module-level container read in compiler code as possibly-empty.

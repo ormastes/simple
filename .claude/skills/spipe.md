@@ -3122,3 +3122,46 @@ and prompt it to read this skill, run `bin/simple test <area>`, fix, and
 re-run — never to git commit. Full setup (model root, shim build, tmux
 headless recipe, prompt pattern):
 `doc/07_guide/app/llm/local_llm_slang_caret_setup.md`.
+
+## Spec-writing rules that cost a session (2026-09-27)
+
+Five process rules, each learned the expensive way during one day of Stage-2
+admission work. They extend § "Reading the verdict", § "Source-text assertions
+are not evidence" and § "Reproduce-first for bug-fix specs" — read those too.
+
+1. **`outcome=ERROR ... executed=0` is a BROKEN spec, not a passing one.** Read
+   `executed=N` and require N > 0 before believing any verdict. It happened
+   three times in one day, once to a spec that "passed" review while asserting
+   nothing: its `use core.lexer` import is unresolvable under `simple run`, so
+   no example ever executed. Every `use core.lexer` spec under
+   `test/01_unit/compiler/frontend/` (3 today:
+   `lexer_dead_stream_forward_progress_spec.spl`,
+   `lexer_indentation_eof_emits_token_spec.spl`,
+   `lexer_if_condition_leading_and_continuation_spec.spl`) is vacuous under
+   `simple run` for the same reason — the self-hosted lexer is
+   `compiler.frontend.core.lexer`.
+2. **A spec that shells out to a compiler must honour `SIMPLE_SPEC_COMPILER`
+   (and `SIMPLE_SPEC_RUNTIME_PATH` for the runtime capsule).** `bin/simple` on
+   this host is a stale 2026-09-19 seed; two correct fixes looked broken purely
+   because their specs exercised `bin/simple` instead of the freshly built
+   seed. `SIMPLE_BINARY` cannot carry the override: the runner pins it to the
+   invoking candidate's own identity (`test_runner_single.spl` ~:305-327) and
+   refuses a foreign value, which is why the spec-side selector is a separate
+   allowlisted variable (`test_runner_client.spl` `_binary_override_vars`).
+   Pattern: `compiler_binary()` in
+   `test/01_unit/compiler/backend/text_predicate_argument_shapes_native_spec.spl`.
+3. **A source-guard spec is legitimate — narrowly.** § "Source-text assertions
+   are not evidence" still holds for system specs. The exception: when the
+   behaviour lives on module-private functions a spec cannot import (a lexer
+   accessor, a parser decorator subset), assert on the source text so the
+   regression cannot come back silently, and say WHY in the spec header (which
+   private function, why it is not importable). A source guard with no stated
+   reason is the anti-pattern; one with the reason is a ratchet.
+4. **Prove red-then-green, and report both.** Revert the fix (or stash it), run
+   the spec, quote the failing values; re-apply, run, quote the pass. A spec
+   never observed failing is not known to discriminate.
+5. **Never read an exit status through a pipe.** `cmd | tail -5; echo $?`
+   yields `tail`'s status — a documented false-green source in this repo (see
+   § "Silent defaults" and the `check-c-runtime-compiles-push.shs` header).
+   Redirect verbose output to a file, capture `rc=$?` on the very next line,
+   then filter the file.
