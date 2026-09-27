@@ -40,6 +40,12 @@ extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8
 extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8],
     offset: i64, capacity: i64, out_len: *mut i64, suffix_args: [i64]) -> i64
 
+@unsafe(reason: "passes a bit-exact double to a resolved mixed-ABI C function", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i32_i64_u32_u32_f64_bits(fptr: i64, arg0: i64,
+    arg1: i64, arg2: i64, arg3_bits: i64) -> i64
+
+extern fn spl_f64_to_bits(value: f64) -> i64
+
 struct ChromeRenderAbi:
     version: i64
     module_id: text
@@ -330,26 +336,26 @@ fn chrome_render_load_html(handle: ChromeRenderHandle, session_handle: i64, html
     _chrome_render_end_session(handle, session_handle)
     result
 
-"""Refuses resize until the dynamic call bridge can pass its `double` scale.
+"""Calls resize with the frozen `(int64_t, uint32_t, uint32_t, double)` C ABI.
 
-The frozen C ABI is `(int64_t, uint32_t, uint32_t, double)`. Passing integer 1
-through `spl_wffi_call_i64` does not populate the floating-point argument
-register, even though the numeric values look equivalent. Return
-BACKEND_UNAVAILABLE after validating the session instead of entering that ABI
-with an indeterminate scale.
+The scale is encoded as f64 bits for the Simple-to-runtime boundary. The
+runtime bridge restores a double before entering the provider.
 """
-@unsafe(reason: "validates an admitted Chrome render session without calling the incompatible resize ABI", capabilities: [ffi, raw_ptr])
+@unsafe(reason: "invokes the admitted mixed-ABI Chrome render resize function", capabilities: [ffi, raw_ptr])
 fn chrome_render_resize(handle: ChromeRenderHandle, session_handle: i64,
                         width: i64, height: i64) -> i64:
     if not _chrome_render_handle_live(handle) or handle.symbols.resize <= 0:
         return 2
     if width <= 0 or height <= 0 or width > 8192 or height > 8192:
         return 1
-    if _chrome_render_begin_session(handle, session_handle) <= 0:
+    val raw = _chrome_render_begin_session(handle, session_handle)
+    if raw <= 0:
         return 2
+    val scale_bits = spl_f64_to_bits(1.0)
+    val result = spl_wffi_call_i32_i64_u32_u32_f64_bits(
+        handle.symbols.resize, raw, width, height, scale_bits)
     _chrome_render_end_session(handle, session_handle)
-    # CHROME_RENDER_E_BACKEND_UNAVAILABLE: no mixed integer/f64 bridge exists.
-    4
+    result
 
 """Calls `render_frame` with a bounded timeout. A zero timeout is refused by the ABI."""
 @unsafe(reason: "invokes the admitted Chrome render frame ABI", capabilities: [ffi, raw_ptr])

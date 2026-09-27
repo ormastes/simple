@@ -1,7 +1,7 @@
 # Chrome render resize needs a mixed integer and floating-point call bridge
 
-Status: open. The Simple facade now refuses resize with
-`CHROME_RENDER_E_BACKEND_UNAVAILABLE` (4) after validating the session.
+Status: bridge implemented on the draft dynload branch; source-matched Simple
+integration and Rust package checks remain unverified.
 
 ## Reproduction and cause
 
@@ -14,19 +14,19 @@ argument register used for `double scale`. The provider could receive an
 indeterminate scale. Converting `1` numerically in Simple does not repair the
 foreign call signature.
 
-The hosted session fixture's resize export now aborts if reached, and its
-Simple caller expects the facade's refusal code. This proves only the safety
-boundary when the source-matched Simple runner executes the fixture; it does
-not prove resizing works.
+The facade now calls a bit-transport bridge that reconstructs `double` before
+calling the provider through the exact C signature. The hosted session
+fixture returns success only when it receives handle 73, dimensions 800x600,
+and scale 1.0. Its Simple caller checks the result. A standalone native
+bridge harness passes 1.0 and 1.25, rejection of bad arguments, and signed
+return propagation on macOS.
 
 ## Completion criteria
 
-1. Add a typed dynamic call transport for exactly
-   `int32_t(int64_t, uint32_t, uint32_t, double)` in the admitted native and
-   interpreter paths, preserving the frozen 10-symbol provider ABI.
-2. Pass the intended device scale as a real `double` argument; validate the
-   scale and dimensions before the call.
-3. Change the fixture to assert the provider receives exact `1.0` (and a
-   non-unit scale if exposed), then run it with a source-matched self-hosted
-   Simple binary on both supported host ABIs.
-4. Remove the local refusal and update the showcase receipt documentation.
+1. Run the hosted Simple caller fixture with a source-matched self-hosted
+   binary on macOS and Linux. Local `bin/simple` is a Rust bootstrap seed and
+   the available self-hosted test discovery crashed; neither is proof here.
+2. Run Rust package checks after resolving the checkout's locked `inkwell`
+   feature mismatch (`llvm23-1-force-static` is absent from locked 0.9.0).
+3. Record a provider-side non-unit scale assertion if the public Simple
+   facade exposes device scale in a later API revision.

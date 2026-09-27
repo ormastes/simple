@@ -1,6 +1,5 @@
 /* Session-lifetime fixture only. It does not render or provide CEF evidence. */
 #include "chrome_render_shim.h"
-#include <stdlib.h>
 
 static int slot_live[2];
 
@@ -32,12 +31,8 @@ int32_t simple_chrome_render_load_url(int64_t handle, const uint8_t *url, uint64
 }
 
 int32_t simple_chrome_render_resize(int64_t handle, uint32_t width, uint32_t height, double scale) {
-    (void)handle;
-    (void)width;
-    (void)height;
-    (void)scale;
-    /* The caller must refuse resize until it has a correctly typed bridge. */
-    abort();
+    return valid(handle) && width == 800u && height == 600u && scale == 1.0
+        ? 0 : CHROME_RENDER_E_INVALID_REQUEST;
 }
 
 int32_t simple_chrome_render_frame(int64_t handle, uint64_t timeout_ms) {

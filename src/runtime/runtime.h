@@ -1567,6 +1567,9 @@ int64_t spl_dlclose(int64_t handle);
 int64_t spl_wffi_try_call_i64_c(void* fptr, const int64_t* args, int64_t nargs, int64_t* out);
 int64_t spl_wffi_call_i64_c(void* fptr, int64_t* args, int64_t nargs);
 int64_t spl_wffi_call_i64(int64_t fptr, int64_t args_value, int64_t nargs);
+int64_t spl_wffi_call_i32_i64_u32_u32_f64_bits(int64_t fptr, int64_t arg0,
+                                                 int64_t arg1, int64_t arg2,
+                                                 int64_t arg3_bits);
 int64_t rt_bytes_from_raw(int64_t ptr, int64_t len);
 int64_t spl_backend_plugin_run_v1(int64_t path_bytes, int64_t request_bytes,
                                   int64_t mir_bytes);
