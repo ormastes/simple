@@ -32,6 +32,17 @@ Performance is a first-class acceptance axis: every task in the plan carries a s
 | Specs | 49 specs in `test/01_unit/os/sosix/`, 4 in `test/02_integration/os/sosix/`, `simple_ring_spec.spl` (262), `mission_adapter_spec.spl`, `operation_core_spec.spl` (136) | Extend these files; no parallel spec tree. |
 | Perf baselines | `doc/10_metrics/` has no sosix/ring rows | Plan task H0 creates them before any behavior change. |
 
+### 2026-09-27 hosted facade candidate
+
+The staged host facade replaces its eleven exact-signature `@always_inline`
+forwarders with braced renaming re-exports. That gives `sosix_*` names the
+source declaration identity without a facade function body. The three
+value-domain/signature adapters remain functions. This candidate depends on
+the interpreter selective-alias binding fix and still needs source-matched
+interpreter/native tests and an ABI/closure receipt. It does not qualify raw
+libc/POSIX aliases or resolve unbraced `export use m.orig as local` ambiguity;
+RU-011 and RU-030 remain open.
+
 ## 3. Target module map
 
 ```sdn
@@ -47,7 +58,7 @@ src/os/sosix/core/*.spl                    # -> one-line `export use std.common.
 src/os/sosix/fs/operation_adapter.spl      # -> shim over file_operation_v1
 src/lib/nogc_async_mut/sosix/
   __init__.spl            # export use of every sibling
-  host_facade.spl         # existing, unchanged
+  host_facade.spl         # existing; candidate uses braced alias re-exports for exact-signature calls
   fs.spl                  # sosix_fs_read_at / write_at -> Future<Result<SosixCompletion, SosixError>> over SimpleRing
   time.spl                # sosix_time_deadline (async) ; sosix_time_monotonic_now (sync leaf, existing time_ops)
   sync.spl                # sosix_sync_fs_read_at / write_at: same op, waits via wait_v1 (one native wait, no spin)

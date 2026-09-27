@@ -13,16 +13,13 @@ later bind behind identical names.
 
 ## Overhead policy
 
-The POSIX path must add nothing. Where the underlying primitive already has the
-exact signature this facade needs, the facade is a pass-through marked
-`@always_inline`, following the repo precedent in
-`src/lib/nogc_sync_mut/io/process_ops.spl` (`process_run_direct`,
-`process_kill_unchecked`). A pure name-binding re-export would have been even
-cheaper, but the language has **no renaming re-export**: `export use m.f as g`
-was tested against the seed and fails with `error[E1002]: function 'g' not
-found`, so `sosix_*` names cannot be produced by `export use` alone. Only
-`sosix_run`, `sosix_platform` and `sosix_proc_usage` carry real adapter bodies,
-each because its signature or value domain genuinely differs.
+The host path adds no facade call frame where the underlying primitive has
+the exact signature: braced `export use module.{source as sosix_name}` binds the
+same declaration under the SOSIX name. The unbraced
+`export use module.source as sosix_name` form is still an open module-versus-
+symbol resolution gap. Only `sosix_run`, `sosix_platform` and
+`sosix_proc_usage` carry adapter bodies because their signature or value
+domain differs. Native POSIX raw-alias qualification remains separate.
 
 ## Why no `variants/` overlay
 
@@ -37,13 +34,22 @@ promoting this seam to the `platform` variants group is a mechanical change.
 """
 
 use std.nogc_sync_mut.io_runtime.{platform_name}
-use std.nogc_async_mut.io.process_ops.{
-    process_run, process_spawn_async, process_is_running, process_kill
+use std.nogc_async_mut.io.process_ops.{process_run}
+export use std.nogc_async_mut.io.process_ops.{
+    process_spawn_async as sosix_spawn,
+    process_is_running as sosix_is_running,
+    process_kill as sosix_kill
 }
-use std.nogc_async_mut.env.{which}
-use std.sys.pty.{open as pty_open, spawn as pty_spawn, write as pty_write,
-    read as pty_read, close as pty_close, is_running as pty_is_running,
-    platform_default_shell as pty_default_shell}
+export use std.nogc_async_mut.env.{which as sosix_which}
+export use std.sys.pty.{
+    open as sosix_pty_open,
+    spawn as sosix_pty_spawn,
+    write as sosix_pty_write,
+    read as sosix_pty_read,
+    close as sosix_pty_close,
+    is_running as sosix_pty_is_running,
+    platform_default_shell as sosix_pty_default_shell
+}
 
 
 struct SosixRun:
@@ -127,65 +133,5 @@ fn _parse_pct(raw: text) -> f64:
     value
 
 
-# ---------------------------------------------------------------------------
-# Pass-throughs: signature already matches, body is a single call.
-# ---------------------------------------------------------------------------
-
-@always_inline
-fn sosix_spawn(cmd: text, args: [text]) -> i64:
-    """Spawn `cmd` without waiting. Returns the pid, or <= 0 on failure."""
-    process_spawn_async(cmd, args)
-
-
-@always_inline
-fn sosix_is_running(pid: i64) -> bool:
-    """True while `pid` is alive."""
-    process_is_running(pid)
-
-
-@always_inline
-fn sosix_kill(pid: i64) -> bool:
-    """Terminate `pid`. False when the pid is not killable."""
-    process_kill(pid)
-
-
-@always_inline
-fn sosix_which(exe: text) -> text:
-    """Absolute path of `exe` on PATH, or "" when it is not installed."""
-    which(exe)
-
-@always_inline
-fn sosix_pty_open(rows: i32, cols: i32) -> i32:
-    pty_open(rows, cols)
-
-@always_inline
-fn sosix_pty_spawn(handle: i32, command: text) -> i64:
-    pty_spawn(handle, command)
-
-@always_inline
-fn sosix_pty_write(handle: i32, data: text) -> bool:
-    pty_write(handle, data)
-
-@always_inline
-fn sosix_pty_read(handle: i32, timeout_ms: i32) -> text:
-    pty_read(handle, timeout_ms)
-
-@always_inline
-fn sosix_pty_close(handle: i32) -> bool:
-    pty_close(handle)
-
-@always_inline
-fn sosix_pty_is_running(handle: i32) -> bool:
-    pty_is_running(handle)
-
-@always_inline
-fn sosix_pty_default_shell() -> text:
-    pty_default_shell()
-
-
 export SosixRun, SosixProcUsage
-export sosix_platform, sosix_run, sosix_spawn, sosix_is_running
-export sosix_kill, sosix_proc_usage, sosix_which
-export sosix_pty_open, sosix_pty_spawn, sosix_pty_write, sosix_pty_read
-export sosix_pty_close, sosix_pty_default_shell
-export sosix_pty_is_running
+export sosix_platform, sosix_run, sosix_proc_usage

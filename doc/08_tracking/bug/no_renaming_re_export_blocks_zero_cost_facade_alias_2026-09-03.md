@@ -88,3 +88,14 @@ module system, and that a facade cannot express its intent directly.
 - `doc/02_requirements/nfr/cs_caret_suite.md` NFR-2 — the requirement this gap
   degrades.
 
+## 2026-09-27 scope update
+
+The original reproduction remains the **unbraced** form
+`export use m.orig as aliased`. Current parser/HIR source has a separate
+braced path, `export use m.{orig as aliased}`, that records an import and an
+export with the local alias. Draft PR #1727 repairs the interpreter's
+`source:local` selective binding and missing-name warning path; the staged
+host facade uses that braced form for exact-signature names. These changes do
+not establish seed/native/SMF parity or resolve whether unbraced `m.orig` is
+a module alias or a symbol alias. Keep this bug open for the exact syntax and
+the RU-011 identity/ABI gate.
