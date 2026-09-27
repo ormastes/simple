@@ -330,25 +330,26 @@ fn chrome_render_load_html(handle: ChromeRenderHandle, session_handle: i64, html
     _chrome_render_end_session(handle, session_handle)
     result
 
-"""Calls `resize`. `scale` is milli-units here because the facade carries only i64 args.
+"""Refuses resize until the dynamic call bridge can pass its `double` scale.
 
-The C entry takes a `double` scale; a device-scale other than 1.0 therefore cannot be
-expressed through the all-i64 transport and is recorded as a separate limitation rather
-than silently rounded. 1.0 is passed as the integer 1, which is exact.
+The frozen C ABI is `(int64_t, uint32_t, uint32_t, double)`. Passing integer 1
+through `spl_wffi_call_i64` does not populate the floating-point argument
+register, even though the numeric values look equivalent. Return
+BACKEND_UNAVAILABLE after validating the session instead of entering that ABI
+with an indeterminate scale.
 """
-@unsafe(reason: "invokes the admitted Chrome render resize ABI", capabilities: [ffi, raw_ptr])
+@unsafe(reason: "validates an admitted Chrome render session without calling the incompatible resize ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_resize(handle: ChromeRenderHandle, session_handle: i64,
                         width: i64, height: i64) -> i64:
     if not _chrome_render_handle_live(handle) or handle.symbols.resize <= 0:
         return 2
     if width <= 0 or height <= 0 or width > 8192 or height > 8192:
         return 1
-    val raw = _chrome_render_begin_session(handle, session_handle)
-    if raw <= 0:
+    if _chrome_render_begin_session(handle, session_handle) <= 0:
         return 2
-    val result = spl_wffi_call_i64(handle.symbols.resize, [raw, width, height, 1], 4)
     _chrome_render_end_session(handle, session_handle)
-    result
+    # CHROME_RENDER_E_BACKEND_UNAVAILABLE: no mixed integer/f64 bridge exists.
+    4
 
 """Calls `render_frame` with a bounded timeout. A zero timeout is refused by the ABI."""
 @unsafe(reason: "invokes the admitted Chrome render frame ABI", capabilities: [ffi, raw_ptr])
