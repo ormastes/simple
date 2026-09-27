@@ -17,7 +17,8 @@ use super::tools::{
     external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
     nm_command,
     strip_llvm_constructors,
-    target_c_compiler, target_cxx_compiler, terminfo_link_args, validate_stage4_cli_c_provider_archive_disjointness,
+    compiler_accepts_target_flag, target_c_compiler, target_cxx_compiler, terminfo_link_args,
+    validate_stage4_cli_c_provider_archive_disjointness, windows_gnu_target_flag,
 };
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
@@ -65,10 +66,6 @@ pub(super) fn archive_object_batches<'a>(
         batches.push(&objects[start..]);
     }
     Ok(batches)
-}
-
-fn is_windows_gnu_target(target: simple_common::target::Target) -> bool {
-    target.os == simple_common::target::TargetOS::Windows && target.linker_flavor() == LinkerFlavor::Gnu
 }
 
 fn generated_c_source_compiler(target: simple_common::target::Target) -> String {
@@ -1133,8 +1130,8 @@ int main(int argc, char** argv) {
         let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
         let mut cmd = std::process::Command::new(&cc);
         cmd.args(argv);
-        if is_windows_gnu_target(target) {
-            cmd.arg("--target=x86_64-w64-windows-gnu");
+        if let Some(flag) = windows_gnu_target_flag(target, &cc) {
+            cmd.arg(flag);
         }
         let output = cmd
             .output()
@@ -1263,8 +1260,10 @@ int main(int argc, char** argv) {
                 .arg("/O2")
                 .arg("/Gy")
                 .arg(format!("/Fo{}", init_o.display()));
-            if let Some(triple) = init_target_triple {
-                cmd.arg(format!("--target={}", triple));
+            if compiler_accepts_target_flag(&cc) {
+                if let Some(triple) = init_target_triple {
+                    cmd.arg(format!("--target={}", triple));
+                }
             }
             match cross_target.arch {
                 simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
@@ -1300,11 +1299,10 @@ int main(int argc, char** argv) {
                 .arg("-fno-asynchronous-unwind-tables")
                 .arg("-fno-unwind-tables")
                 .arg("-fno-stack-protector");
-            if let Some(triple) = init_target_triple {
-                cmd.arg(format!("--target={}", triple));
-            }
-            if is_windows_gnu_target(cross_target) {
-                cmd.arg("--target=x86_64-w64-windows-gnu");
+            if compiler_accepts_target_flag(&cc) {
+                if let Some(triple) = init_target_triple {
+                    cmd.arg(format!("--target={}", triple));
+                }
             }
             match cross_target.arch {
                 simple_common::target::TargetArch::Riscv64 if use_llvm_backend => {
@@ -1617,8 +1615,8 @@ int main(int argc, char** argv) {
                 super::linker_env::configure_msvc_link_cl(&mut cmd, &cl);
             }
         }
-        if is_windows_gnu_target(cross_target) {
-            cmd.arg("--target=x86_64-w64-windows-gnu");
+        if let Some(flag) = windows_gnu_target_flag(cross_target, &cc) {
+            cmd.arg(flag);
             // Clang + LLD only on this lane -- never GNU ld. Without this the
             // mingw driver links with whatever bare `ld` PATH offers. Measured
             // 2026-09-27: that was mingw-winlibs ld.exe, which (a) cannot

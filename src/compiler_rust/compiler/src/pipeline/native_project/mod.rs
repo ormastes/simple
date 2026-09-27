@@ -1551,10 +1551,8 @@ void __module_init_security_registry(void) {{
         } else {
             let mut cmd = std::process::Command::new(&compiler);
             cmd.args(["-c", "-O2", "-ffunction-sections", "-fdata-sections"]);
-            if target.os == simple_common::target::TargetOS::Windows
-                && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
-            {
-                cmd.arg("--target=x86_64-w64-windows-gnu");
+            if let Some(flag) = tools::windows_gnu_target_flag(target, &compiler) {
+                cmd.arg(flag);
             }
             cmd.arg("-o")
                 .arg(&object_path)

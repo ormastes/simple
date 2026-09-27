@@ -269,6 +269,14 @@ pub(crate) fn hosted_linux_cross_compiler(
 }
 
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
+    // Windows GNU bootstrap is Clang-only.  The MinGW GCC driver rejects the
+    // target-qualified flags used by the generated-C and hosted-link paths,
+    // and using two driver families makes their ABI/toolchain policy diverge.
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        return "clang".to_string();
+    }
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
         .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
@@ -330,11 +338,12 @@ fn host_object_extension() -> &'static str {
 
 pub(crate) fn core_c_target_flags(
     target: simple_common::target::Target,
+    compiler: &str,
     source: &str,
     riscv_vector: bool,
 ) -> Vec<&'static str> {
     let mut flags = Vec::new();
-    if let Some(flag) = windows_gnu_target_flag(target) {
+    if let Some(flag) = windows_gnu_target_flag(target, compiler) {
         flags.push(flag);
     }
     if target.arch == simple_common::target::TargetArch::Aarch64 {
@@ -349,10 +358,17 @@ pub(crate) fn core_c_target_flags(
 
 pub(crate) fn windows_gnu_target_flag(
     target: simple_common::target::Target,
+    compiler: &str,
 ) -> Option<&'static str> {
     (target.os == simple_common::target::TargetOS::Windows
         && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu)
-        .then_some("--target=x86_64-w64-windows-gnu")
+        .then_some(())
+        .filter(|_| compiler.to_ascii_lowercase().contains("clang"))
+        .map(|_| "--target=x86_64-w64-windows-gnu")
+}
+
+pub(crate) fn compiler_accepts_target_flag(compiler: &str) -> bool {
+    compiler.to_ascii_lowercase().contains("clang")
 }
 
 /// C11-atomics flags required by the MSVC-style drivers, and by nobody else.
@@ -657,7 +673,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
                     // runtime_native.c's mutually-exclusive fallback copies of the same
                     // 16 names.  Mirrors runtime_compiler.spl:545 in the pure-Simple lane.
                     .arg("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
-                    .args(core_c_target_flags(target, source, riscv_vector))
+                    .args(core_c_target_flags(target, &cc, source, riscv_vector))
                     .arg(format!("-I{}", runtime_root.display()))
                     .arg(format!("-I{}", runtime_root.join("platform").display()))
                     .arg(runtime_root.join(source))
@@ -815,7 +831,7 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     let status = command
         .args(msvc_c11_atomics_flags(&cc))
         .arg("-DSIMPLE_CORE_C_STANDALONE=1")
-        .args(core_c_target_flags(target, source, riscv_vector))
+        .args(core_c_target_flags(target, &cc, source, riscv_vector))
         .arg(format!("-I{}", runtime_root.display()))
         .arg(format!("-I{}", runtime_root.join("platform").display()))
         .arg(&source_path)
@@ -2114,7 +2130,7 @@ pub(crate) fn build_stage4_cli_c_provider_archives(build_dir: &Path) -> Result<V
             .arg("-fPIC")
             .arg("-std=gnu11")
             .args(msvc_c11_atomics_flags(&cc))
-            .args(core_c_target_flags(target, spec.source, riscv_vector))
+            .args(core_c_target_flags(target, &cc, spec.source, riscv_vector))
             .arg(format!("-I{}", runtime_root.display()))
             .arg(format!("-I{}", runtime_root.join("platform").display()))
             .arg(runtime_root.join(spec.source))
