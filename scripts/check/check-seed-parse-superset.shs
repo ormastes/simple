@@ -106,8 +106,9 @@ trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
 DETECT="$WORK_DIR/detect.awk"
 
 # ---------------------------------------------------------------------------
-# The detector. Two passes: pass 1 classifies every line, pass 2 applies the
-# guards (the if/elif rule needs the block body's indent, which is downstream).
+# The detector. Two passes per file: pass 1 classifies every line, pass 2
+# applies the guards. Flush at each file boundary so one awk process can scan
+# a bounded batch without mixing indentation or docstring state across files.
 # ---------------------------------------------------------------------------
 cat > "$DETECT" <<'AWK_EOF'
 # Indentation width, using handle_indentation's weights: space 1, tab 4, CR 0.
@@ -150,29 +151,7 @@ function fence_count(s,   n, i) {
     return n
 }
 
-{
-    raw = $0
-    sub(/\r$/, "", raw)
-    N++
-    LINE[N] = raw
-
-    # docstrings / triple-quoted blocks are prose, never code
-    fc = fence_count(raw)
-    if (in_doc) { SKIP[N] = 1; if (fc % 2 == 1) in_doc = 0; next }
-    if (fc % 2 == 1) { SKIP[N] = 1; in_doc = 1; next }
-
-    b = raw
-    sub(/^[ \t]+/, "", b)
-    if (b == "" || b ~ /^#/) { SKIP[N] = 1; next }
-
-    SKIP[N]  = 0
-    BODY[N]  = b
-    IND[N]   = indent_of(raw)
-    CODE[N]  = strip_and_depth(raw)
-    DELTA[N] = DEPTH_DELTA
-}
-
-END {
+function check_file(   depth, prev, head, hits, i, is_cont, b, why) {
     depth = 0   # bracket depth entering the current line
     prev  = 0   # previous meaningful line
     head  = 0   # line that STARTED the current logical line
@@ -210,7 +189,7 @@ END {
             # would have rejected legal code. See the header.
 
             if (why != "") {
-                printf "%s:%d: %s\n", FILENAME, i, why
+                printf "%s:%d: %s\n", current_file, i, why
                 printf "    %s\n", substr(LINE[i], 1, 120)
                 hits++
             }
@@ -223,8 +202,45 @@ END {
         if (depth < 0) depth = 0
     }
 
-    if (hits > 0) exit 1
-    exit 0
+    all_hits += hits
+    for (i = 1; i <= N; i++) {
+        delete LINE[i]; delete SKIP[i]; delete BODY[i]; delete IND[i]
+        delete CODE[i]; delete DELTA[i]
+    }
+    N = 0
+    in_doc = 0
+}
+
+FNR == 1 {
+    if (N > 0) check_file()
+    current_file = FILENAME
+}
+
+{
+    raw = $0
+    sub(/\r$/, "", raw)
+    N++
+    LINE[N] = raw
+
+    # docstrings / triple-quoted blocks are prose, never code
+    fc = fence_count(raw)
+    if (in_doc) { SKIP[N] = 1; if (fc % 2 == 1) in_doc = 0; next }
+    if (fc % 2 == 1) { SKIP[N] = 1; in_doc = 1; next }
+
+    b = raw
+    sub(/^[ \t]+/, "", b)
+    if (b == "" || b ~ /^#/) { SKIP[N] = 1; next }
+
+    SKIP[N]  = 0
+    BODY[N]  = b
+    IND[N]   = indent_of(raw)
+    CODE[N]  = strip_and_depth(raw)
+    DELTA[N] = DEPTH_DELTA
+}
+
+END {
+    if (N > 0) check_file()
+    if (all_hits > 0) exit 1
 }
 AWK_EOF
 
@@ -287,6 +303,22 @@ selftest() {
             st_fail=1
         fi
     done
+
+    # A batch must report both positives with per-file line numbers, while
+    # docstring/bracket state from adjacent negative files stays isolated.
+    st_batch="$st_dir/batch-report.txt"
+    if awk -f "$DETECT" \
+        "$st_dir/neg_docstring.spl" "$st_dir/pos_eq.spl" \
+        "$st_dir/neg_paren.spl" "$st_dir/pos_ge.spl" > "$st_batch"; then
+        echo "SELFTEST FAIL: batched detector did not flag either positive" >&2
+        st_fail=1
+    elif [ "$(wc -l < "$st_batch" | tr -d ' ')" -ne 4 ] ||
+        ! grep -Fq "$st_dir/pos_eq.spl:3:" "$st_batch" ||
+        ! grep -Fq "$st_dir/pos_ge.spl:3:" "$st_batch"; then
+        echo "SELFTEST FAIL: batched detector mixed file state or locations" >&2
+        cat "$st_batch" >&2
+        st_fail=1
+    fi
 
     if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
         echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
@@ -397,10 +429,18 @@ count="$(wc -l < "$FILES" | tr -d ' ')"
 REPORT="$WORK_DIR/report.txt"
 : > "$REPORT"
 scanned=0
+set --
 while IFS= read -r f; do
     scanned=$((scanned + 1))
-    awk -f "$DETECT" "$f" >> "$REPORT" 2>/dev/null || true
+    set -- "$@" "$f"
+    if [ "$#" -eq 128 ]; then
+        awk -f "$DETECT" "$@" >> "$REPORT" || [ "$?" -eq 1 ]
+        set --
+    fi
 done < "$FILES"
+if [ "$#" -gt 0 ]; then
+    awk -f "$DETECT" "$@" >> "$REPORT" || [ "$?" -eq 1 ]
+fi
 
 if [ "$scanned" -ne "$count" ]; then
     echo "FAIL: scanned $scanned of $count files -- the scan aborted early" >&2
