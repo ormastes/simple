@@ -197,3 +197,38 @@ reverted. The current pure-Simple core's `spl_init_args` already stores argv
 directly without allocating this filtered array, so changing the historical
 C filter would not reduce the current Stage4 hello footprint. The next size
 experiment must use the current-source pure-Simple link closure.
+
+## C-reference reasonableness table
+
+The following is a controlled diagnostic on the same Linux/aarch64 host. The
+new pair uses Clang `-Oz -fPIC -ffunction-sections -fdata-sections` for its user
+objects and the same historical `_main_stub.o`, `_init_all.o`, core-C runtime
+archive, LLD, `--gc-sections`, `--icf=all`, and strip link command for both
+binaries. Both print `hello`. The retained inputs and outputs are under
+`build/mini_builds/target5_matched_c_pair/`; the direct-writer object is the
+previous `target5_same_wrapper_probe/direct_print.o`.
+
+| Binary | Entry and print path | Stripped bytes | Reference | Ratio |
+| --- | --- | ---: | --- | ---: |
+| Bare C | C `main` calls `puts` | 4,864 | Bare C | 1.000x |
+| Historical Simple | Stage2 hello, generic value print, five forced roots | 13,944 | Bare C | 2.867x |
+| Historical direct writer | C-authored `spl_main` calls `rt_println_str`, no forced roots | 6,584 | Bare C | 1.354x |
+| Matched C | Same startup wrapper and runtime; C `spl_main` calls `puts` | 6,368 | Matched C | 1.000x |
+| Matched direct writer | Same startup wrapper and runtime; C `spl_main` calls `rt_println_str` | 6,504 | Matched C | **1.021x** |
+
+The 6,504/6,368 pair passes a 1.05x **matched-startup** threshold (ceiling
+6,686 bytes). The same 6,504-byte direct writer misses the current bare-C
+threshold (ceiling 5,107 bytes) by 1,397 bytes. This pair controls startup
+and link inputs; it does **not** measure a current-source Simple program,
+because both user objects were authored in C. Its 80-byte difference from the
+earlier 6,584-byte direct writer reflects a different probe link command;
+compare only binaries built in the same pair.
+
+Decision: the 15 KiB absolute gate remains meaningful, and the 1.05x ratio is
+plausible when C carries the same required startup semantics. The current
+bare-C ratio mixes Simple startup and optional extension support into only
+one side, so these diagnostics do not justify claiming that its 1.05x target
+is reachable. Do not silently change the requirement or cohort checker:
+the user must choose the C reference. A current-source Stage4 hello, exact
+closure map, and qualified 30/100-sample cohorts are still required before
+Target 5 can pass.
