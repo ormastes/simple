@@ -1,0 +1,38 @@
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int}
+
+val NAMESPACE_ALIAS_CALLER_FILE: text =
+    "test/fixtures/compiler/interpreter/namespace_alias_caller.spl"
+
+describe "core interpreter complete module alias":
+    it "calls a provider function through its caller-owned namespace":
+        val source = "use namespace_alias_provider as ns\n" +
+            "fn main() -> i64:\n    ns.orig()"
+        val result = core_interpret(source, NAMESPACE_ALIAS_CALLER_FILE)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(7)
+
+    it "does not expose the provider function as a bare import":
+        val source = "use namespace_alias_provider as ns\n" +
+            "fn main() -> i64:\n    orig()"
+        val _result = core_interpret(source, NAMESPACE_ALIAS_CALLER_FILE)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_contain("undefined function: orig")
+
+    it "keeps a separate glob import callable after loading the namespace":
+        val source = "use namespace_alias_other.*\n" +
+            "use namespace_alias_provider as ns\n" +
+            "fn main() -> i64:\n    orig() + ns.orig()"
+        val result = core_interpret(source, NAMESPACE_ALIAS_CALLER_FILE)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(20)
+
+    it "forces a lazy glob without letting the namespace steal its bare call":
+        val source = "use lazy namespace_alias_other.*\n" +
+            "use namespace_alias_provider as ns\n" +
+            "fn main() -> i64:\n    orig() + ns.orig()"
+        val result = core_interpret(source, NAMESPACE_ALIAS_CALLER_FILE)
+        expect(eval_has_error()).to_equal(false)
+        expect(val_get_int(result)).to_equal(20)
