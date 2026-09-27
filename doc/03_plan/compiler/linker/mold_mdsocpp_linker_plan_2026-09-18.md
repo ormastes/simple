@@ -430,6 +430,10 @@ symlinks/non-files and Windows directories/reparse points are refused with a
 named error rather than followed or deleted. This prevents an owned failed
 upload from poisoning the next absence preflight without turning cleanup into
 an attacker-controlled deletion primitive.
+Failed publication also cleans the separately owned `.remote-test-new`
+sibling before cleaning the upload leaf. That cleanup is likewise idempotent
+and regular-file-only, so copy, permission, hashing, or final-rename failures
+cannot permanently poison the next two-leaf absence preflight.
 The adjacent Arm32/RiscV32 compiler bridge no longer returns successful fixed
 return-zero byte sequences while ignoring source. It now fails closed until a
 real source-derived target backend is connected. The native RV32 backend now

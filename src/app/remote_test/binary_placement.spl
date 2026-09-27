@@ -288,6 +288,29 @@ fn remote_simple_stage_cleanup_command(remote_os: text,
             "if [ -f " + stage + " ]; then rm -f -- " + stage + "; fi")
     Err("remote-test cannot clean an uploaded binary for remote OS '{remote_os}'")
 
+fn remote_simple_publication_cleanup_command(remote_os: text,
+        configured: text) -> Result<text, text>:
+    """Render regular-file-only cleanup for a failed publication sibling."""
+    val binary = remote_simple_binary_path(remote_os, configured)?
+    val temporary = binary + ".remote-test-new"
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        val path = _remote_windows_command_value(temporary)?
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$item = Get-Item -LiteralPath " + path + " -Force -ErrorAction SilentlyContinue; " +
+            "if ($null -eq $item) { exit 0 }; " +
+            "if ($item.PSIsContainer -or (($item.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test refuses to clean a non-regular publication path'; exit 78 }; " +
+            "Remove-Item -LiteralPath " + path + " -Force\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        val path = _remote_posix_quote(temporary)
+        return Ok("if [ -L " + path + " ] || { [ -e " + path +
+            " ] && [ ! -f " + path + " ]; }; then " +
+            "echo 'remote-test refuses to clean a non-regular publication path' >&2; exit 78; fi; " +
+            "if [ -f " + path + " ]; then rm -f -- " + path + "; fi")
+    Err("remote-test cannot clean a publication sibling for remote OS '{remote_os}'")
+
 fn remote_simple_install_command(remote_os: text, configured: text,
         staged_path: text, expected_sha256: text) -> Result<text, text>:
     """Publish an uploaded binary at the target-owned Simple path.
@@ -351,4 +374,5 @@ fn remote_simple_install_command(remote_os: text, configured: text,
 
 export remote_simple_binary_path, remote_simple_test_command
 export remote_simple_stage_guard_command, remote_simple_stage_verify_command
-export remote_simple_stage_cleanup_command, remote_simple_install_command
+export remote_simple_stage_cleanup_command, remote_simple_publication_cleanup_command
+export remote_simple_install_command

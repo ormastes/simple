@@ -20,7 +20,8 @@ use std.terminal.connection.{terminal_connect, terminal_execute, terminal_close,
 use app.remote_test.binary_placement.{
     remote_simple_binary_path, remote_simple_test_command,
     remote_simple_stage_guard_command, remote_simple_stage_verify_command,
-    remote_simple_stage_cleanup_command, remote_simple_install_command}
+    remote_simple_stage_cleanup_command,
+    remote_simple_publication_cleanup_command, remote_simple_install_command}
 
 use std.io_runtime.{time_now_unix_micros, file_hash_sha256}
 
@@ -79,6 +80,8 @@ impl RemotePcAdapter:
             self.remote_os, staged_path, local_digest)?
         val cleanup_command = remote_simple_stage_cleanup_command(
             self.remote_os, staged_path)?
+        val publication_cleanup_command = remote_simple_publication_cleanup_command(
+            self.remote_os, self.simple_binary)?
         val guard = terminal_execute(self.connection, guard_command, timeout_ms)
         if guard.exit_code != 0:
             return Err("remote Simple staging preflight failed for '{staged_path}': {guard.stderr}")
@@ -101,13 +104,20 @@ impl RemotePcAdapter:
             return Err("remote Simple upload verification failed for '{staged_path}': {verified.stderr}{verify_cleanup_detail}")
         val result = terminal_execute(self.connection, command, timeout_ms)
         if result.exit_code != 0:
-            val publish_cleanup = terminal_execute(
+            val publication_cleanup = terminal_execute(
+                self.connection, publication_cleanup_command, timeout_ms)
+            val staging_cleanup = terminal_execute(
                 self.connection, cleanup_command, timeout_ms)
-            val publish_cleanup_detail = if publish_cleanup.exit_code == 0:
+            val staging_cleanup_detail = if staging_cleanup.exit_code == 0:
                 ""
             else:
-                "; staging cleanup failed: {publish_cleanup.stderr}"
-            return Err("failed to publish remote Simple binary at '{self.simple_binary}': {result.stderr}{publish_cleanup_detail}")
+                "; staging cleanup failed: {staging_cleanup.stderr}"
+            val publication_cleanup_detail = if publication_cleanup.exit_code == 0:
+                ""
+            else:
+                "; publication cleanup failed: {publication_cleanup.stderr}"
+            return Err("failed to publish remote Simple binary at '{self.simple_binary}': " +
+                result.stderr + staging_cleanup_detail + publication_cleanup_detail)
         Ok(self.simple_binary)
 
     fn can_handle(meta: TestSessionMeta) -> bool:
