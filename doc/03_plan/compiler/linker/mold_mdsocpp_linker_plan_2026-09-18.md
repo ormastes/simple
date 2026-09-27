@@ -697,3 +697,16 @@ control-character paths fail before transfer. The independent staging-digest
 command now applies the same absolute-file-leaf policy, including Windows
 device/namespace rejection, so it cannot hash a root or a different lexical
 target than the publication pipeline.
+
+The 2026-09-27 native Windows bootstrap probe used the canonical
+`bootstrap-windows.sh --msvc --backend=cranelift --full-bootstrap
+--stop-after-stage2 --jobs=1` lane with `SIMPLE_LINKER=internal`. It passed
+Windows materialization, disk, platform, fingerprint, and Cranelift preflight,
+then stopped before the Simple linker while building the Rust authority seed:
+`ring` could not find the MSVC/UCRT `assert.h`. The repository's canonical
+`windows-msvc-bootstrap-env.shs` confirmed the host has no discoverable Visual
+Studio C++ workload (`vswhere.exe` absent) and therefore cannot supply the VC
+and Windows SDK include/library roots. No linker verdict or admitted Stage 2
+was produced. The next Windows execution gate requires a host with the VS 2022
+Desktop C++ workload and Windows SDK; this environmental block does not change
+the false completion predicate.
