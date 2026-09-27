@@ -3,7 +3,7 @@ use std.spec.step
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_amd64_retained_policy, coff_link_amd64_retained_image_policy,
-    coff_link_arm64,
+    coff_link_arm64, coff_link_arm64_retained_policy,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
     coff_sort_arm64_exception_table,
@@ -374,7 +374,7 @@ describe "internal freestanding Windows linker":
             heap_reserve: 0x300000, heap_commit: 0x3000,
             dynamic_base: false, high_entropy_va: false,
             nx_compat: false, large_address_aware: false,
-            terminal_server_aware: false)
+            terminal_server_aware: false, fixed_image: true)
         val image = coff_link_amd64_retained_image_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], policy, 0x180000000).unwrap()
@@ -384,7 +384,7 @@ describe "internal freestanding Windows linker":
         expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
         expect(_cl_read_u64(image, 0xf0)).to_equal(0x300000)
         expect(_cl_read_u64(image, 0xf8)).to_equal(0x3000)
-        expect(image[0x96] as i64).to_equal(0x02)
+        expect(image[0x96] as i64).to_equal(0x03)
         expect(image[0xde] as i64).to_equal(0x00)
         expect(image[0xdf] as i64).to_equal(0x00)
 
@@ -395,7 +395,7 @@ describe "internal freestanding Windows linker":
             heap_reserve: 0x100000, heap_commit: 0x1000,
             dynamic_base: true, high_entropy_va: true,
             nx_compat: true, large_address_aware: true,
-            terminal_server_aware: true)
+            terminal_server_aware: true, fixed_image: false)
         val linked = coff_link_amd64_retained_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], invalid)
@@ -726,6 +726,20 @@ describe "internal freestanding Windows linker":
         expect(inspected.data_directories[5].size).to_be_greater_than(0)
         expect(image[0x96] as i64).to_equal(0x22)
         expect(image[0xde] as i64).to_equal(0x60)
+        expect(image[0xdf] as i64).to_equal(0x81)
+
+    it "strips base relocations from an explicitly fixed image":
+        var policy = PeImagePolicy.default()
+        policy.fixed_image = true
+        policy.dynamic_base = false
+        policy.high_entropy_va = false
+        val image = coff_link_arm64_retained_policy(CoffLinkRequest(objects: [
+            _cl_arm64_relocation_object(0x000e, 0, 8)
+        ], archives: [], entry: "_start"), [], policy).unwrap()
+        val inspected = pe_inspect(image).unwrap()
+        expect(inspected.data_directories[5].size).to_equal(0)
+        expect(image[0x96] as i64).to_equal(0x23)
+        expect(image[0xde] as i64).to_equal(0x00)
         expect(image[0xdf] as i64).to_equal(0x81)
 
     it "links the compiler-generated Windows corpus with unwind metadata":

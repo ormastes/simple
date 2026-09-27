@@ -735,7 +735,11 @@ models `/DYNAMICBASE`, `/HIGHENTROPYVA`, `/NXCOMPAT`,
 `/LARGEADDRESSAWARE`, and `/TSAWARE`, including each `:NO` spelling. These
 drive the PE file/DLL characteristic bits; ASLR/high-entropy bits remain absent
 without a relocation directory, explicit high entropy without dynamic base is
-rejected, and conflicting repeats fail closed. Decimal and `0x` values
+rejected, and conflicting repeats fail closed. `/FIXED` now suppresses the
+otherwise synthesized base-relocation directory, marks relocations stripped,
+and disables dynamic-base/high-entropy policy; explicitly requesting either
+ASLR policy with `/FIXED`, or mixing `/FIXED` with `/FIXED:NO`, fails closed.
+`/FIXED:NO` retains relocations and the existing ASLR defaults. Decimal and `0x` values
 are bounds-checked, identical duplicate policy is harmless, and conflicting,
 zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
 before publication. The PE writer validates the policy and emits its subsystem,
