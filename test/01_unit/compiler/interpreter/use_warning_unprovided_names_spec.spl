@@ -24,7 +24,8 @@ src/compiler_rust/compiler/src/interpreter_module/module_loader.rs):
 - `warn_unprovided_use_names` emits, per braced `use` name the module does not
   provide, exactly one `[use-warning]` on fd 2 and into `eval_warnings`,
   deduped per (module path, name, importer). Message wording matches the seed
-  oracle verbatim.
+  oracle verbatim for unaliased names. For `source:local` imports it checks and
+  names the source declaration, while binding the local alias separately.
 - Modules whose surface is genuinely unknowable — glob re-exports
   (`export use m.*`, `export *`, `export m.*`) and bare `export use {A, B}`
   (parsed as a use-decl with an empty module path) — are recorded opaque and
@@ -147,6 +148,26 @@ fn check_absent_names_warn_once_with_seed_wording() -> text:
         return "message wording mismatch:\n  got:  " + got[0] + "\n  want: " + want_msg
     ""
 
+fn check_aliases_validate_the_source_name() -> text:
+    module_loader_init()
+    ast_reset()
+    record_module_surface(spec_surface_path(), build_surface_decls())
+    val mark = eval_warnings.len()
+    warn_unprovided_use_names(
+        "uw_spec_mod", spec_surface_path(),
+        ["uw_spec_fn:local_fn", "uw_spec_alias_dst:local_alias",
+         "uw_spec_absent_alias:local_missing"],
+        spec_current_file()
+    )
+    val got = use_warnings_after(mark)
+    if got.len() != 1:
+        return "aliased imports should warn only for the absent source, got " + got.len().to_text()
+    if count_naming(got, "uw_spec_absent_alias") != 1:
+        return "aliased missing source was not named in its warning"
+    if got[0].contains("local_missing"):
+        return "alias name replaced the missing source in the warning"
+    ""
+
 fn check_opaque_and_unrecorded_surfaces_skip() -> text:
     module_loader_init()
     ast_reset()
@@ -213,6 +234,10 @@ describe "use-warning oracle: braced use names checked against the module surfac
     it "warns once per absent braced name with the seed oracle's exact wording":
         step("warns once per absent braced name with the seed oracle's exact wording")
         expect(check_absent_names_warn_once_with_seed_wording()).to_equal("")
+
+    it "checks the original name of aliased imports against the module surface":
+        step("checks aliased import sources without warning on provided names")
+        expect(check_aliases_validate_the_source_name()).to_equal("")
 
     it "skips opaque re-export surfaces and never-recorded surfaces":
         step("skips opaque re-export surfaces and never-recorded surfaces")
