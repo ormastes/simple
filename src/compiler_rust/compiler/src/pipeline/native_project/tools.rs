@@ -1491,17 +1491,12 @@ fn canonical_archive_symbol(symbol: &str) -> &str {
 /// is how runtime_memtrack.c's rt_heap_* fallbacks yield to the Rust runtime
 /// accounting (93e0b028ffb). `archive_global_symbols` counts these as defined.
 pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String>, String> {
-    // Mach-O POSIX nm prints weak *definitions* as 'T' — the weakness only
-    // appears in the `-m` flag field as `weak external`. GNU/ELF nm prints
-    // them as 'W'/'V'. Request the Mach-O flag field on macOS hosts and
-    // accept BOTH formats below, so the stage-4 runtime capsule check does
-    // not misread Apple weak fallbacks (e.g. rt_heap_live_bytes) as STRONG.
+    // Mach-O weak definitions appear as T in the one-letter nm output. Read
+    // their explicit flags; an undefined weak reference is not an owner.
+    let macho = cfg!(target_os = "macos");
     let output = {
         let mut cmd = nm_command()?;
-        cmd.arg("-g").arg("-p");
-        if cfg!(target_os = "macos") {
-            cmd.arg("-m");
-        }
+        cmd.arg("-g").arg(if macho { "-m" } else { "-p" });
         cmd.arg(external_tool_path(path)).output()
     }
     .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
@@ -1512,16 +1507,31 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
+    Ok(parse_archive_weak_global_symbols(&String::from_utf8_lossy(&output.stdout), macho))
+}
+
+pub(super) fn parse_archive_weak_global_symbols(output: &str, macho: bool) -> BTreeSet<String> {
     let mut weak = BTreeSet::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        // Mach-O `-m` form: `0000000000000000 (__TEXT,__text) weak external _f`
-        if line.contains(" weak external ") || line.contains(" weak reference ") {
-            if let Some(name) = line.split_whitespace().next_back() {
-                weak.insert(name.to_string());
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if macho {
+            // Require a defined address and section followed by weak external.
+            if fields.len() < 5
+                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !fields[1].starts_with('(')
+                || fields[1] == "(undefined)"
+                || fields[2..4] != ["weak", "external"]
+            {
+                continue;
             }
+            let name = match &fields[4..] {
+                [name] => *name,
+                ["automatically", "hidden", name] => *name,
+                _ => continue,
+            };
+            weak.insert(name.to_string());
             continue;
         }
-        let fields: Vec<&str> = line.split_whitespace().collect();
         let (kind, name) = match fields.as_slice() {
             [kind, name] if kind.len() == 1 => (*kind, *name),
             [_address, kind, name] if kind.len() == 1 => (*kind, *name),
@@ -1531,35 +1541,7 @@ pub(super) fn archive_weak_global_symbols(path: &Path) -> Result<BTreeSet<String
             weak.insert(name.to_string());
         }
     }
-    // Mach-O carries weakness in the N_WEAK_DEF bit, which `nm -p`'s one-letter
-    // kind column does NOT surface: a weak definition prints as `T`, byte for
-    // byte identical to a strong one. So the ELF-shaped W/V parse above finds
-    // nothing on macOS and every weak fallback looks strong to the caller —
-    // which made the Stage-4 capsule guard reject the core-C archive's
-    // deliberately-weak rt_heap_live_bytes/rt_heap_peak_bytes and fail Stage 2.
-    // Apple's `nm -m` does report it, as "weak external". Names keep their
-    // leading underscore here, matching archive_global_symbols' raw keys.
-    if cfg!(target_os = "macos") {
-        let detailed = nm_command()?
-            .arg("-g")
-            .arg("-m")
-            .arg(external_tool_path(path))
-            .output()
-            .map_err(|err| format!("failed to inspect archive {}: {err}", path.display()))?;
-        if detailed.status.success() {
-            for line in String::from_utf8_lossy(&detailed.stdout).lines() {
-                if !line.contains("weak external") && !line.contains("weak definition") {
-                    continue;
-                }
-                if let Some(name) = line.split_whitespace().last() {
-                    // "... weak external automatically hidden _sym" also ends in
-                    // the symbol, so taking the last field is correct for both.
-                    weak.insert(name.to_string());
-                }
-            }
-        }
-    }
-    Ok(weak)
+    weak
 }
 
 pub(super) fn archive_global_symbols(path: &Path) -> Result<(BTreeMap<String, usize>, BTreeSet<String>), String> {

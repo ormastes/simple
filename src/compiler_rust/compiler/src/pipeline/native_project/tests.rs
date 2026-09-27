@@ -9561,3 +9561,26 @@ fn windows_compat_aliases_reject_ambiguous_bare_names() {
         "qualified Simple aliases still resolve"
     );
 }
+#[test]
+fn test_archive_weak_parser_macho_definitions_preserve_raw_names() {
+    let output = "archive(member.o):\n0000000000000624 (__TEXT,__text) weak external _rt_heap_live_bytes\n0000000000000630 (__TEXT,__text) weak external _rt_heap_peak_bytes\n0000000000000640 (__DATA,__data) weak external automatically hidden _hidden\n";
+    let actual = super::tools::parse_archive_weak_global_symbols(output, true);
+    let expected = ["_rt_heap_live_bytes", "_rt_heap_peak_bytes", "_hidden"]
+        .into_iter().map(str::to_string).collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_archive_weak_parser_macho_rejects_strong_undefined_and_malformed() {
+    let output = "0000000000000624 (__TEXT,__text) external _strong\n                 (undefined) weak external _reference\n0000000000000000 (undefined) weak external _reference_with_address\n0000000000000000 (__TEXT,__text) weak reference _weak_reference\n0000000000000000 (__TEXT,__text) weak external\narchive.o: (__TEXT,__text) weak external _header\n0000000000000000 (__TEXT,__text) weak external extra fields _bad\n";
+    assert!(super::tools::parse_archive_weak_global_symbols(output, true).is_empty());
+}
+
+#[test]
+fn test_archive_weak_parser_elf_preserves_definition_and_reference_distinction() {
+    let output = "00000000 W function\n00000000 V data\nW addressless\n00000000 T strong\n         w reference\n         v data_reference\n         U undefined\n";
+    let actual = super::tools::parse_archive_weak_global_symbols(output, false);
+    let expected = ["function", "data", "addressless"]
+        .into_iter().map(str::to_string).collect();
+    assert_eq!(actual, expected);
+}
