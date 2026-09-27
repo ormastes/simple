@@ -94,7 +94,7 @@ describe "remote interpreter binary placement":
         expect(linux).to_contain("cp -- '/tmp/simple upload' '/usr/local/bin/simple.remote-test-new'")
         expect(linux).to_contain("chmod 0755 -- '/usr/local/bin/simple.remote-test-new'")
         expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
-        expect(linux).to_contain("parent='/tmp'; probe=$parent")
+        expect(linux).to_contain("source_parent='/tmp'; probe=$source_parent")
         expect(linux).to_contain("[ -L \"$probe\" ]")
         expect(linux).to_contain("[ -L '/usr/local/bin/simple' ]")
         expect(linux).to_contain("[ ! -f '/usr/local/bin/simple' ]")
@@ -108,6 +108,14 @@ describe "remote interpreter binary placement":
         expect(windows).to_contain("$dst = 'C:\\Program Files\\Simple\\simple.exe'")
         expect(windows).to_contain("Remove-Item -LiteralPath $src -Force")
         expect(windows).to_contain("[System.IO.FileMode]::CreateNew")
+        expect(windows).to_contain("$createParentItem = Get-Item -LiteralPath $existingParentPath")
+        expect(windows).to_contain("publication ancestor is redirected or not a directory")
+        expect(windows).to_contain("New-Item -ItemType Directory -Force -Path $createParent")
+        val windows_ancestor_check = windows.index_of(
+            "$createParentItem = Get-Item -LiteralPath $existingParentPath") ?? -1
+        val windows_parent_create = windows.index_of(
+            "New-Item -ItemType Directory -Force -Path $createParent") ?? -1
+        expect(windows_parent_create).to_be_greater_than(windows_ancestor_check)
         expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
         expect(windows).to_contain("regular non-reparse file")
         expect(windows).to_contain("[System.IO.File]::Replace($tmp, $dst, $null, $true)")
@@ -120,16 +128,21 @@ describe "remote interpreter binary placement":
         expect(windows).to_contain("Get-FileHash -LiteralPath $tmp -Algorithm SHA256")
         expect(windows).to_contain("publication copy SHA-256 mismatch")
         expect(linux).to_contain("sha256sum -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("create_probe=$parent")
+        expect(linux).to_contain("publication ancestor is redirected or not a directory")
+        val linux_ancestor_check = linux.index_of("create_probe=$parent") ?? -1
+        val linux_parent_create = linux.index_of("mkdir -p -- \"$parent\"") ?? -1
+        expect(linux_parent_create).to_be_greater_than(linux_ancestor_check)
         expect(linux).to_contain("exit 75")
 
         val special_parent = remote_simple_install_command("linux",
             "/opt/team's Simple/[nightly]/simple", "/tmp/simple", TEST_SHA256).unwrap()
         expect(special_parent).to_contain(
-            "parent='/opt/team'\"'\"'s Simple/[nightly]'; mkdir -p -- \"$parent\" &&")
+            "parent='/opt/team'\"'\"'s Simple/[nightly]'; create_probe=$parent")
         expect(special_parent.contains("$(dirname")).to_equal(false)
         val root_parent = remote_simple_install_command(
             "simpleos", "/simple", "/tmp/simple", TEST_SHA256).unwrap()
-        expect(root_parent).to_contain("parent='/'; mkdir -p -- \"$parent\" &&")
+        expect(root_parent).to_contain("parent='/'; create_probe=$parent")
 
     it "renders a pre-upload absence guard for both mutable leaves":
         val linux = remote_simple_stage_guard_command("linux", "auto", "/tmp/simple upload").unwrap()

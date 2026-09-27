@@ -438,7 +438,20 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
             "{ Write-Error 'remote-test staging parent is redirected'; exit 75 }; " +
             "$sourceParent = $sourceParent.Parent }; " +
-            "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
+            "$createParent = Split-Path -Parent $dst; $existingParentPath = $createParent; " +
+            "$createParentItem = Get-Item -LiteralPath $existingParentPath -Force -ErrorAction SilentlyContinue; " +
+            "while ($null -eq $createParentItem) { " +
+            "$nextParent = Split-Path -Parent $existingParentPath; " +
+            "if ([string]::IsNullOrEmpty($nextParent) -or ($nextParent -eq $existingParentPath)) " +
+            "{ Write-Error 'remote-test publication has no existing safe ancestor'; exit 76 }; " +
+            "$existingParentPath = $nextParent; " +
+            "$createParentItem = Get-Item -LiteralPath $existingParentPath -Force -ErrorAction SilentlyContinue }; " +
+            "while ($null -ne $createParentItem) { " +
+            "if ((-not $createParentItem.PSIsContainer) -or (($createParentItem.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test publication ancestor is redirected or not a directory'; exit 76 }; " +
+            "$createParentItem = $createParentItem.Parent }; " +
+            "New-Item -ItemType Directory -Force -Path $createParent | Out-Null; " +
             "$parentItem = Get-Item -LiteralPath (Split-Path -Parent $dst) -Force; " +
             "while ($null -ne $parentItem) { " +
             "if ((-not $parentItem.PSIsContainer) -or (($parentItem.Attributes -band " +
@@ -474,7 +487,16 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
             "if [ -L " + source + " ] || [ ! -f " + source + " ]; then " +
             "echo 'remote-test staging path is not a regular file' >&2; exit 75; fi; " +
-            "parent=" + parent + "; mkdir -p -- \"$parent\" && { probe=$parent; " +
+            "parent=" + parent + "; create_probe=$parent; " +
+            "while [ ! -e \"$create_probe\" ] && [ ! -L \"$create_probe\" ]; do " +
+            "next=${create_probe%/*}; if [ -z \"$next\" ]; then next=/; fi; " +
+            "if [ \"$next\" = \"$create_probe\" ]; then " +
+            "echo 'remote-test publication has no existing safe ancestor' >&2; exit 76; fi; " +
+            "create_probe=$next; done; probe=$create_probe; while [ \"$probe\" != / ]; do " +
+            "if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test publication ancestor is redirected or not a directory' >&2; exit 76; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "mkdir -p -- \"$parent\" && { probe=$parent; " +
             "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
             "echo 'remote-test publication parent is redirected or not a directory' >&2; exit 76; fi; " +
             "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; } && " +

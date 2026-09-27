@@ -843,6 +843,10 @@ no-follow file before rendering commands, hashing, or uploading it. Local
 symlinks, directories, and missing paths therefore cannot become upload
 sources; the target-side staging digest still detects replacement after this
 local preflight.
+Destination creation now walks the nearest existing publication ancestor
+before `mkdir -p` or PowerShell `New-Item`, rejecting POSIX symlinks, Windows
+reparse points, and non-directories before any filesystem mutation. The
+existing post-creation full-chain validation remains as the second phase.
 
 The post-upload digest verifier and publication command now independently walk
 the staging file's complete parent chain immediately before reopening it.
