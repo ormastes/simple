@@ -24,7 +24,7 @@ so `simple test` GREEN still does not prove self-hosted on this host.
 5. The windows-gnu lane never selected a linker, so clang's mingw driver used
    GNU ld. `-fuse-ld=lld` in source.
 6. `resolve_defined_suffix_alias` aliased libc/winsock names to same-named
-   Simple functions (`select` -> an async combinator). Strict Windows linking
+   Simple functions (`select` -> an async combinator). Windows linking
    now rejects all ambiguous bare-name aliases; `PLATFORM_C_SYMBOLS` guards
    known platform names in the general resolver.
 
@@ -51,7 +51,7 @@ Raise it only after the commit limit is raised.
 ## Remaining blocker 2: the LLD crash the alias guard should have removed
 
 See `lld_231_crashes_on_generated_compat_alias_archive_2026-09-27.md`. With
-the strict bare-name guard in place the `select` alias should no longer be generated,
+the Windows bare-name guard in place the `select` alias should no longer be generated,
 so this link should proceed — **but that has not been observed yet.** The run
 that would have shown it was still in its seed rebuild when this session ended.
 Verify before assuming it is resolved.

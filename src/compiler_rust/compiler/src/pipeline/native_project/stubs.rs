@@ -446,9 +446,9 @@ pub(crate) fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections
 }
 
 /// A bare undefined name has no provenance: it may be a C import even when a
-/// Simple function with the same tail exists. Strict linking must fail closed
+/// Simple function with the same tail exists. Windows linking must fail closed
 /// instead of manufacturing an alias for that ambiguous name.
-pub(crate) fn resolve_strict_compat_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
+pub(crate) fn resolve_windows_compat_alias(sym: &str, defined: &std::collections::HashSet<String>) -> Option<String> {
     if !sym.contains("__") {
         return None;
     }
@@ -1219,7 +1219,7 @@ the old fabricating behaviour.",
     // implementation. Leave every genuinely unresolved symbol to the linker.
     if strict_no_stub_fallback {
         if effective_target().os == TargetOS::Windows {
-            needs_stub.retain(|sym| resolve_strict_compat_alias(sym, &defined).is_some());
+            needs_stub.retain(|sym| resolve_windows_compat_alias(sym, &defined).is_some());
         } else {
             needs_stub.retain(|sym| resolve_defined_suffix_alias(sym, &defined).is_some());
         }
@@ -1348,7 +1348,7 @@ the old fabricating behaviour.",
                 if !plat_config.is_valid_asm_label(sym) {
                     continue;
                 }
-                let real_fn = resolve_defined_suffix_alias(sym, &defined).ok_or_else(|| {
+                let real_fn = resolve_windows_compat_alias(sym, &defined).ok_or_else(|| {
                     format!("strict Windows compatibility alias '{sym}' has no resolved target")
                 })?;
                 if !plat_config.is_valid_asm_label(&real_fn) {
@@ -1509,7 +1509,12 @@ the old fabricating behaviour.",
                 continue;
             }
 
-            if let Some(real_fn) = resolve_defined_suffix_alias(sym, &defined) {
+            let resolved_alias = if target.os == TargetOS::Windows {
+                resolve_windows_compat_alias(sym, &defined)
+            } else {
+                resolve_defined_suffix_alias(sym, &defined)
+            };
+            if let Some(real_fn) = resolved_alias {
                 // Use the platform-aware trampoline emitter so macOS gets
                 // `.weak_definition` (its assembler rejects GNU `.weak`).
                 asm_code.push_str(&plat_config.generate_builtin_trampoline_asm(sym, jmp_prefix, &real_fn));
