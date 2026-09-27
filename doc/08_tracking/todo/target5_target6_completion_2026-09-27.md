@@ -77,9 +77,14 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   closure scans. The existing warm package route now uses the shared bytewise
   heap sort for selected module and package identities instead of native text
   `<` plus quadratic selection/deduplication. Its closure walk now tracks
-  queued modules in a lookup table, and archive routing uses selected-module
-  membership lookups instead of repeated linear scans. Qualify closure order,
-  p95 time, and max RSS on the current-source worker.
+  queued modules in a lookup table. Archive routing now groups selected entry
+  positions once, avoiding two full-generation scans per selected package
+  while storing only integer links and package heads/tails. Qualify closure
+  order, p95 time, and max RSS on the current-source worker.
+  CLI snapshot admission now refuses to overwrite a stale nonempty graph with
+  its temporary empty binding generation. The full graph producer still needs
+  to rebuild and publish an exact successor after that refusal; the system
+  spec now requires preservation of the prior graph on stale admission.
 - Qualify the new atomic inventory/cursor `CURRENT` record on a current-source
   runtime. The isolated source now validates filesystem events before publish
   and writes the inventory digest plus Git/filesystem cursor in one pointer

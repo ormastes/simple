@@ -95,7 +95,9 @@ events; it never grants permission to mutate Git or user-authored files.
 1. Refuse untrusted package metadata without recovery authority.
 2. Confirm missing, stale, corrupt, and tampered forms produce `PKG-IDX-001`,
    `PKG-IDX-002`, `PKG-IDX-003`, and `PKG-IDX-004` respectively.
-3. Confirm compilation does not start and no fallback scan occurs.
+3. Confirm a stale complete graph remains the prior generation; the temporary
+   binding-only admission path cannot overwrite it.
+4. Confirm compilation does not start and no fallback scan occurs.
 
 ### Allow only a bounded rebuild
 
