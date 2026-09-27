@@ -171,6 +171,10 @@ comparison image, while the installed lld 23.1 rejects relocation 28.
 linker-defined `_GLOBAL_OFFSET_TABLE_` without allocating a per-symbol slot.
 Hosted ELF binds that symbol to `.got.plt`; SimpleOS binds it to its minimal
 `.got`. A type-29 Clang `.reloc` fixture matches Mold 2.42's emitted value.
+`R_X86_64_GOTOFF64` now applies full-width `S + A - GOT` without allocating a
+per-symbol GOT slot. Hosted ELF uses the ABI `_GLOBAL_OFFSET_TABLE_` base at
+`.got.plt`, while SimpleOS uses its minimal `.got`; a type-25 Clang fixture
+matches Mold 2.42's emitted `value - .got.plt` result.
 `R_X86_64_PLTOFF64` now applies full-width `L + A - GOT`: local functions use
 their definition, imported functions receive a PLT entry, hosted ELF uses its
 `.got.plt` base, and SimpleOS uses its minimal `.got`. A type-31 Clang `.reloc`
