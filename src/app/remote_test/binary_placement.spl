@@ -53,30 +53,44 @@ fn _remote_path_has_file_leaf(value: text, windows: bool) -> bool:
     if lexical.ends_with("/"): return false
     val normalized = _remote_normalize_path(value, windows)
     if windows and normalized.len() >= 3 and normalized[1:3] == ":/":
-        return normalized.len() > 3 and _remote_windows_file_leaf_valid(lexical)
+        return normalized.len() > 3 and _remote_windows_file_path_valid(lexical, false)
     if windows and normalized.starts_with("//"):
         # A UNC file needs server, share, and leaf components.
         val unc_tail = normalized.substring(2)
         val unc_parts = unc_tail.split("/")
-        return unc_parts.len() >= 3 and _remote_windows_file_leaf_valid(lexical)
+        return unc_parts.len() >= 3 and _remote_windows_file_path_valid(lexical, true)
     normalized != "/" and normalized != ""
 
-fn _remote_windows_file_leaf_valid(value: text) -> bool:
-    val parts = value.replace("\\", "/").split("/")
-    if parts.len() == 0: return false
-    val leaf = parts[parts.len() - 1]
-    if leaf == "" or leaf.ends_with(".") or leaf.ends_with(" "): return false
-    if leaf.contains(":") or leaf.contains("<") or leaf.contains(">") or
-            leaf.contains("\"") or leaf.contains("|") or leaf.contains("?") or
-            leaf.contains("*"):
+fn _remote_windows_component_valid(component: text) -> bool:
+    if component == "" or component.ends_with(".") or component.ends_with(" "):
         return false
-    val stem = leaf.lower().split(".")[0]
-    if stem == "con" or stem == "prn" or stem == "aux" or stem == "nul":
+    if component.contains(":") or component.contains("<") or component.contains(">") or
+            component.contains("\"") or component.contains("|") or component.contains("?") or
+            component.contains("*"):
+        return false
+    val stem = component.lower().split(".")[0]
+    if stem == "con" or stem == "prn" or stem == "aux" or stem == "nul" or
+            stem == "conin$" or stem == "conout$" or stem == "clock$":
         return false
     if stem.len() == 4 and (stem.starts_with("com") or stem.starts_with("lpt")):
         val suffix = stem[3:4]
         if suffix >= "1" and suffix <= "9": return false
     true
+
+fn _remote_windows_file_path_valid(value: text, unc: bool) -> bool:
+    val slash_path = value.replace("\\", "/")
+    val tail = if unc: slash_path.substring(2) else: slash_path.substring(3)
+    val parts = tail.split("/")
+    val first_file_component: i64 = if unc: 2 else: 0
+    if parts.len() <= first_file_component: return false
+    var i = first_file_component
+    while i < parts.len():
+        # Repeated separators are harmless lexical aliases and normalize away.
+        if parts[i] != "" and parts[i] != "." and parts[i] != ".." and
+                not _remote_windows_component_valid(parts[i]):
+            return false
+        i = i + 1
+    _remote_windows_component_valid(parts[parts.len() - 1])
 
 fn _remote_normalize_path(value: text, windows: bool) -> text:
     """Lexically normalize a target path without consulting the local host."""
