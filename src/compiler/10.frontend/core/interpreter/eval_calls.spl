@@ -45,7 +45,7 @@ fn eval_call(eid: i64) -> i64:
         # Check function table
         var decl_id = func_resolve_for_caller(eval_caller_file(), name)
         if decl_id < 0:
-            decl_id = func_table_lookup(name)
+            decl_id = func_flat_lookup_for_caller(eval_caller_file(), name)
         if decl_id >= 0:
             return eval_function_call(decl_id, arg_eids, arg_names)
 
@@ -57,11 +57,11 @@ fn eval_call(eid: i64) -> i64:
                 return eval_function_call(fn_decl, arg_eids, arg_names)
 
         # Try deferred (lazy) modules before giving up
-        val forced_ok = try_force_any_deferred_for(name)
+        val forced_ok = try_force_any_deferred_for(name, eval_caller_file())
         if forced_ok == 1:
             var decl_id2 = func_resolve_for_caller(eval_caller_file(), name)
             if decl_id2 < 0:
-                decl_id2 = func_table_lookup(name)
+                decl_id2 = func_flat_lookup_for_caller(eval_caller_file(), name)
             if decl_id2 >= 0:
                 return eval_function_call(decl_id2, arg_eids, arg_names)
             # Maybe it's a struct constructor after forcing
@@ -82,6 +82,15 @@ fn eval_call(eid: i64) -> i64:
         val base_tag = base_node.tag
         if base_tag == EXPR_IDENT:
             val type_name = base_node.s_val
+            val namespace_owner = func_module_namespace_lookup(
+                eval_caller_file(), type_name)
+            if namespace_owner != "":
+                val member_decl = func_resolve_module_member_for_caller(
+                    eval_caller_file(), type_name, member_name)
+                if member_decl >= 0:
+                    return eval_function_call(member_decl, arg_eids, arg_names)
+                # A namespace member may be a struct constructor or a type.
+                # Let the existing non-function paths below inspect it.
             # Check enum variant constructor: Enum.Variant(payload)
             val enum_variants = enum_table_lookup(type_name)
             if enum_variants != "":
@@ -105,8 +114,16 @@ fn eval_call(eid: i64) -> i64:
                 return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
 
             # Try deferred (lazy) modules for Type.method or Enum.Variant
-            val forced_path = try_force_any_deferred_for(type_name)
+            val forced_path = try_force_any_deferred_for(type_name, eval_caller_file())
             if forced_path == 1:
+                val lazy_namespace_owner = func_module_namespace_lookup(
+                    eval_caller_file(), type_name)
+                if lazy_namespace_owner != "":
+                    val lazy_member_decl = func_resolve_module_member_for_caller(
+                        eval_caller_file(), type_name, member_name)
+                    if lazy_member_decl >= 0:
+                        return eval_function_call(lazy_member_decl, arg_eids, arg_names)
+                    # Continue through the non-function member paths.
                 # Retry enum variant
                 val enum_variants2 = enum_table_lookup(type_name)
                 if enum_variants2 != "":
