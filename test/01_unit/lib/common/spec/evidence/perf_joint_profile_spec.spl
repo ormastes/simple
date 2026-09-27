@@ -1,0 +1,124 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.spec.evidence.model.{
+    EvidenceStatus, check_exact, oracle_spec, oracle_spec_open
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.common.spec.evidence.format.simulation_profile.{
+    PerfJointCohortV1, perf_joint_compare_v1, perf_joint_to_evidence_v1
+}
+
+fn cohort(time_us: i64, rss_kib: i64) -> PerfJointCohortV1:
+    PerfJointCohortV1(
+        workload_id: "compile-fixture", host_id: "host-a",
+        fixture_digest: sha256_text("fixture"), cohort_kind: "warm",
+        binary_digest: sha256_text("binary"), output_digest: sha256_text("output"),
+        warmup_count: 2, elapsed_us: [time_us, time_us, time_us],
+        peak_rss_kib: [rss_kib, rss_kib, rss_kib])
+
+describe "SPipe joint time and memory perf profile":
+    it "accepts improvement in both metrics":
+        val verdict = perf_joint_compare_v1(cohort(100, 100), cohort(90, 90),
+            120, 120, 0)
+        expect(verdict.valid).to_equal(true)
+        expect(verdict.improved).to_equal(true)
+        expect(verdict.time_ratio_permille).to_equal(900)
+        expect(verdict.memory_ratio_permille).to_equal(900)
+        expect(verdict.ratio_sum_permille).to_equal(1800)
+
+    it "accepts a measured time gain that outweighs a memory increase":
+        val verdict = perf_joint_compare_v1(cohort(100, 100), cohort(80, 110),
+            120, 120, 0)
+        expect(verdict.improved).to_equal(true)
+        expect(verdict.ratio_sum_permille).to_equal(1900)
+
+    it "rejects an overall regression and a hard memory budget failure":
+        val regression = perf_joint_compare_v1(cohort(100, 100),
+            cohort(80, 125), 120, 130, 0)
+        expect(regression.valid).to_equal(true)
+        expect(regression.improved).to_equal(false)
+        expect(regression.reason).to_equal("no-measured-overall-improvement")
+        val budget = perf_joint_compare_v1(cohort(100, 100),
+            cohort(80, 110), 120, 105, 0)
+        expect(budget.improved).to_equal(false)
+        expect(budget.reason).to_equal("hard-budget-exceeded")
+
+    it "does not let a valid regression satisfy an improvement oracle":
+        val verdict = perf_joint_compare_v1(cohort(100, 100),
+            cohort(80, 125), 120, 130, 0)
+        val evidence = perf_joint_to_evidence_v1(verdict, "perf/joint")
+        val improvement_oracle = oracle_spec_open("perf/joint", [
+            check_exact("perf_joint.improved", "true")
+        ])
+        expect(evidence.parse_ok).to_equal(true)
+        expect(compare_evidence(evidence, improvement_oracle).status).to_equal(
+            EvidenceStatus.failed)
+        val gain = perf_joint_compare_v1(cohort(100, 100),
+            cohort(80, 110), 120, 130, 0)
+        expect(compare_evidence(
+            perf_joint_to_evidence_v1(gain, "perf/joint"),
+            improvement_oracle).status).to_equal(EvidenceStatus.passed)
+
+    it "rejects unmatched output and insufficient samples":
+        var different = cohort(80, 90)
+        different.output_digest = sha256_text("different-output")
+        val mismatch = perf_joint_compare_v1(cohort(100, 100), different,
+            120, 120, 0)
+        expect(mismatch.valid).to_equal(false)
+        expect(mismatch.reason).to_equal("unmatched-cohort")
+        var short = cohort(80, 90)
+        short.elapsed_us = [80]
+        short.peak_rss_kib = [90]
+        val missing = perf_joint_compare_v1(cohort(100, 100), short,
+            120, 120, 0)
+        expect(missing.valid).to_equal(false)
+        expect(missing.reason).to_equal("invalid-or-missing-samples")
+
+    it "requires the gain to clear declared measurement noise":
+        val verdict = perf_joint_compare_v1(cohort(100, 100), cohort(80, 110),
+            120, 120, 100)
+        expect(verdict.valid).to_equal(true)
+        expect(verdict.improved).to_equal(false)
+
+    it "projects a valid decision into closed SPipe evidence":
+        var candidate = cohort(90, 90)
+        candidate.binary_digest = sha256_text("candidate-binary")
+        val verdict = perf_joint_compare_v1(cohort(100, 100), candidate,
+            120, 120, 0)
+        val evidence = perf_joint_to_evidence_v1(verdict, "perf/joint")
+        val oracle = oracle_spec("perf/joint", [
+            check_exact("perf_joint.improved", "true"),
+            check_exact("perf_joint.reason", "overall-improvement"),
+            check_exact("perf_joint.baseline_p50_us", "100"),
+            check_exact("perf_joint.candidate_p50_us", "90"),
+            check_exact("perf_joint.baseline_p95_us", "100"),
+            check_exact("perf_joint.candidate_p95_us", "90"),
+            check_exact("perf_joint.baseline_peak_rss_kib", "100"),
+            check_exact("perf_joint.candidate_peak_rss_kib", "90"),
+            check_exact("perf_joint.time_ratio_permille", "900"),
+            check_exact("perf_joint.memory_ratio_permille", "900"),
+            check_exact("perf_joint.ratio_sum_permille", "1800"),
+            check_exact("perf_joint.workload_id", "compile-fixture"),
+            check_exact("perf_joint.host_id", "host-a"),
+            check_exact("perf_joint.fixture_digest", sha256_text("fixture")),
+            check_exact("perf_joint.baseline_binary_digest", sha256_text("binary")),
+            check_exact("perf_joint.candidate_binary_digest", sha256_text("candidate-binary")),
+            check_exact("perf_joint.output_digest", sha256_text("output")),
+            check_exact("perf_joint.cohort_kind", "warm"),
+            check_exact("perf_joint.warmup_count", "2"),
+            check_exact("perf_joint.sample_count", "3"),
+            check_exact("perf_joint.max_p95_us", "120"),
+            check_exact("perf_joint.max_peak_rss_kib", "120"),
+            check_exact("perf_joint.noise_permille", "0")
+        ])
+        expect(compare_evidence(evidence, oracle).status).to_equal(
+            EvidenceStatus.passed)
+
+    it "rejects invalid cohort evidence before oracle comparison":
+        var candidate = cohort(90, 90)
+        candidate.host_id = "host-b"
+        val verdict = perf_joint_compare_v1(cohort(100, 100), candidate,
+            120, 120, 0)
+        val evidence = perf_joint_to_evidence_v1(verdict, "perf/joint")
+        expect(evidence.parse_ok).to_equal(false)
+        expect(evidence.parse_error).to_equal("unmatched-cohort")

@@ -1,0 +1,137 @@
+# Cold package-index semantic facts from one typed HIR module and a frozen SCV
+# inventory. The caller must provide the HIR emitted by lowering the supplied
+# source content; this pure boundary verifies inventory and path identity but
+# cannot reconstruct that lowering. No source-root discovery or persistence
+# occurs in this owner.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
+    compile_source_inventory_digest_v1,
+    compile_source_inventory_entry_valid_v1,
+    compile_source_inventory_path_valid_v1,
+    compile_source_inventory_find_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ColdHirSemanticSeedV1:
+    module_identity: text
+    source_identity: text
+    source_digest: text
+    inventory_digest: text
+    abi_digest: text
+    direct_imports: [text]
+
+struct ColdHirSemanticInputV1:
+    module: HirModule
+    source_identity: text
+    source_content: text
+
+fn _cold_hir_source_path_error_v1(
+    module: HirModule, source_root: text, source_identity: text
+) -> text:
+    if not compile_source_inventory_path_valid_v1(source_identity):
+        return "cold-hir-source-identity-invalid"
+    val normalized_root = source_root.replace("\\", "/")
+    if normalized_root == "" or normalized_root.ends_with("/"):
+        return "cold-hir-source-root-invalid"
+    if module.name == "" or
+            module.path.replace("\\", "/") !=
+                "{normalized_root}/{source_identity}":
+        return "cold-hir-module-source-mismatch"
+    ""
+
+fn _cold_hir_seed_from_entry_v1(
+    module: HirModule,
+    source_identity: text,
+    source_content: text,
+    inventory_digest: text,
+    source: CompileSourceInventoryEntryV1
+) -> Result<ColdHirSemanticSeedV1, text>:
+    if source.source_identity != source_identity or
+            not compile_source_inventory_entry_valid_v1(source) or
+            source.content_digest != sha256_text(source_content) or
+            source.byte_count != source_content.len():
+        return Err("cold-hir-source-content-mismatch")
+    val abi = hir_abi_interface_digest_v1(module)
+    if abi.is_err():
+        return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}")
+    var imports: [text] = []
+    for imported in module.imports:
+        val module_path = imported.module_path
+        if module_path == "" or module_path.contains("\n") or
+                module_path.contains("\r") or module_path.contains("|"):
+            return Err("cold-hir-import-invalid")
+        imports.push(module_path)
+    val sorted_imports = canonical_identity_sort_texts(imports)
+    var unique_imports: [text] = []
+    for module_path in sorted_imports:
+        if unique_imports.len() == 0 or
+                unique_imports[unique_imports.len() - 1] != module_path:
+            unique_imports.push(module_path)
+    Ok(ColdHirSemanticSeedV1(
+        module.name, source_identity, source.content_digest,
+        inventory_digest, abi.unwrap(), unique_imports))
+
+fn cold_hir_semantic_seed_v1(
+    module: HirModule,
+    source_root: text,
+    source_identity: text,
+    source_content: text,
+    inventory: CompileSourceInventoryV1,
+    expected_inventory_digest: text
+) -> Result<ColdHirSemanticSeedV1, text>:
+    val path_error = _cold_hir_source_path_error_v1(
+        module, source_root, source_identity)
+    if path_error != "": return Err(path_error)
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if inventory_digest == "" or inventory_digest != expected_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    val source_index = compile_source_inventory_find_v1(
+        inventory.entries, source_identity)
+    if source_index < 0:
+        return Err("cold-hir-source-absent")
+    _cold_hir_seed_from_entry_v1(module, source_identity, source_content,
+        inventory_digest, inventory.entries[source_index])
+
+fn cold_hir_semantic_seeds_v1(
+    inputs: [ColdHirSemanticInputV1],
+    source_root: text,
+    inventory: CompileSourceInventoryV1,
+    expected_inventory_digest: text
+) -> Result<[ColdHirSemanticSeedV1], text>:
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if inventory_digest == "" or inventory_digest != expected_inventory_digest:
+        return Err("cold-hir-inventory-mismatch")
+    var source_indices: Dict<text, i64> = {}
+    var index = 0
+    while index < inventory.entries.len():
+        source_indices[inventory.entries[index].source_identity] = index
+        index = index + 1
+    var seeds: [ColdHirSemanticSeedV1] = []
+    var produced: Dict<text, bool> = {}
+    for input in inputs:
+        val path_error = _cold_hir_source_path_error_v1(
+            input.module, source_root, input.source_identity)
+        if path_error != "": return Err(path_error)
+        if not source_indices.has(input.source_identity):
+            return Err("cold-hir-source-absent")
+        if produced.has(input.source_identity):
+            return Err("cold-hir-source-duplicate")
+        match _cold_hir_seed_from_entry_v1(
+                input.module, input.source_identity, input.source_content,
+                inventory_digest, inventory.entries[source_indices[input.source_identity]]):
+            case Err(reason): return Err(reason)
+            case Ok(seed):
+                seeds.push(seed)
+                produced[input.source_identity] = true
+    for source in inventory.entries:
+        if source.source_identity.ends_with(".spl") and
+                not produced.has(source.source_identity):
+            return Err("cold-hir-source-missing:{source.source_identity}")
+    Ok(seeds)
+
+export ColdHirSemanticSeedV1, ColdHirSemanticInputV1
+export cold_hir_semantic_seed_v1, cold_hir_semantic_seeds_v1

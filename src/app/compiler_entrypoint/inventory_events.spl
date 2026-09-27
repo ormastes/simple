@@ -3,7 +3,7 @@
 
 use app.io.mod.{dir_create, file_atomic_write, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_filesystem_events_v1, compile_source_inventory_apply_git_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, CompileSourceInventoryReadV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 
@@ -277,9 +277,6 @@ fn compiler_inventory_refresh_v1(
             "this checkout; refusing to publish an empty inventory that would " +
             "wedge the cache -- verify the binary with " +
             "scripts/check/check-deployed-binary-optional-unwrap.shs)")
-    var inventory = compile_source_inventory_apply_git_events_v1(cache_root, git_events!)
-    if not inventory.valid:
-        return compiler_inventory_invalid_v1("git-event-apply:" + inventory.reason)
     val journal_path = root + "/.scv/journal/events.log"
     if cursor.valid and cursor.filesystem_rows > 0 and not file_exists(journal_path):
         return compiler_inventory_invalid_v1(
@@ -303,12 +300,11 @@ fn compiler_inventory_refresh_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
-    if filesystem_events!.len() > 0:
-        inventory = compile_source_inventory_apply_filesystem_events_v1(
-            root, cache_root, filesystem_events!)
-        if not inventory.valid:
-            return compiler_inventory_invalid_v1(
-                "filesystem-event-apply:" + inventory.reason)
+    val inventory = compile_source_inventory_apply_observed_events_v1(
+        root, cache_root, git_events!, filesystem_events!)
+    if not inventory.valid:
+        return compiler_inventory_invalid_v1(
+            "observed-event-apply:" + inventory.reason)
     # An absent/empty journal is 0 rows, not `"".split("\n").len()` (1): with
     # rows=1 recorded, the next refresh demanded a journal that never existed
     # and failed filesystem-event-journal-missing (2026-09-25).

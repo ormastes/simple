@@ -22,6 +22,11 @@ fn host_without_capability() -> HostOfferV1:
         [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
         ["sha256:image-v2"], [], [])
 
+fn host_with_capabilities(capabilities: [text]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        ["sha256:image-v2"], capabilities, [])
+
 fn host_abi(version: i64) -> HostOfferV1:
     HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), version, false, "fixture",
         [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
@@ -69,6 +74,25 @@ describe "versioned SFFI real plugin entry negotiation":
         val refused = MultiVersionLoader.instance().load_path(path, "schema-cache", malformed_host())
         expect(refused.is_err()).to_equal(true)
         expect(refused.unwrap_err().code()).to_equal("PLUG-E-SCHEMA")
+
+    it "does not let a delimiter-bearing capability reuse a negotiated handle":
+        val path = build_fixture("capability-cache-key", "")
+        val loader = MultiVersionLoader.instance()
+        val accepted = loader.load_path(path, "fixture", host_with_capabilities(["image.decode", "other"]))
+        expect(accepted.is_ok()).to_equal(true)
+        val refused = loader.load_path(path, "fixture", host_with_capabilities(["image.decode;cap=other"]))
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err().code()).to_equal("PLUG-E-CAP")
+
+    it "keeps the requested name when loading one path under two names":
+        val path = build_fixture("path-two-names", "")
+        val loader = MultiVersionLoader.instance()
+        val first = loader.load_path(path, "fixture-first", host())
+        expect(first.is_ok()).to_equal(true)
+        expect(first.unwrap().name).to_equal("fixture-first")
+        val second = loader.load_path(path, "fixture-second", host())
+        expect(second.is_ok()).to_equal(true)
+        expect(second.unwrap().name).to_equal("fixture-second")
 
     it "returns no handle for a different major":
         val loaded = VersionedDynLib.load_plugin_path(

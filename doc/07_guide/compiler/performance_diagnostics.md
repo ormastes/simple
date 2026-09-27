@@ -13,6 +13,26 @@ Source warnings describe likely application defects. Optimizer remarks describe 
 decisions. Runtime profiles rank candidates but never authorize a semantics-changing
 transformation.
 
+## Joint time and memory decision
+
+Measure the same semantic workload before and after with matched host, fixture,
+warmup, and sample count; record each immutable binary identity. Retain
+p50/p95 elapsed time and peak/steady RSS for each relevant startup, warm, or
+build cohort. Prefer a
+change that improves both. If one regresses, calculate
+`candidate_p95 / baseline_p95 + candidate_peak_RSS / baseline_peak_RSS`.
+An overall tradeoff improves only when this sum is below `2` by more than the
+measured noise and both metrics remain within their independent hard budgets.
+Publish both ratios and the sum; missing or unmatched measurements do not
+qualify. Correctness, output identity, and feature preservation remain gates.
+SPipe's `perf_joint_compare_v1` in
+`src/lib/common/spec/evidence/format/simulation_profile.spl` returns the
+rounded-up per-mille ratios, sum, and explicit invalid/budget/no-gain reason.
+`perf_joint_to_evidence_v1` projects valid verdicts into closed SPipe evidence
+and marks unmatched or missing cohorts as parse failures.
+The helper requires at least three paired samples; a release lane still needs
+its own larger sample-count gate.
+
 Collection rules use the `collection_performance` configuration name. SDN entries and
 `@allow`/`@warn`/`@deny` attributes resolve lint names without rebuilding the registry per
 name, so large explicit configurations do not multiply registry allocation and scanning.

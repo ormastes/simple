@@ -238,3 +238,170 @@ pub fn distribution_within(set: SampleSet, expected: i64, tolerance: i64) -> boo
     if not sample_set_is_valid(set):
         return false
     abs_i64(sample_mean_scaled(set) - expected) <= tolerance
+
+# One timing/RSS pair per run. Identity fields make an unmatched comparison an
+# explicit invalid result; the binary digests identify each immutable artifact
+# and may differ between baseline and candidate.
+pub struct PerfJointCohortV1:
+    workload_id: text
+    host_id: text
+    fixture_digest: text
+    cohort_kind: text
+    binary_digest: text
+    output_digest: text
+    warmup_count: i64
+    elapsed_us: [i64]
+    peak_rss_kib: [i64]
+
+pub struct PerfJointVerdictV1:
+    valid: bool
+    improved: bool
+    reason: text
+    workload_id: text
+    host_id: text
+    fixture_digest: text
+    baseline_binary_digest: text
+    candidate_binary_digest: text
+    output_digest: text
+    cohort_kind: text
+    warmup_count: i64
+    sample_count: i64
+    max_p95_us: i64
+    max_peak_rss_kib: i64
+    noise_permille: i64
+    baseline_p50_us: i64
+    candidate_p50_us: i64
+    baseline_p95_us: i64
+    candidate_p95_us: i64
+    baseline_peak_rss_kib: i64
+    candidate_peak_rss_kib: i64
+    time_ratio_permille: i64
+    memory_ratio_permille: i64
+    ratio_sum_permille: i64
+
+fn perf_joint_invalid_v1(reason: text) -> PerfJointVerdictV1:
+    PerfJointVerdictV1(valid: false, improved: false, reason: reason,
+        workload_id: "", host_id: "", fixture_digest: "",
+        baseline_binary_digest: "", candidate_binary_digest: "",
+        output_digest: "", cohort_kind: "", warmup_count: 0,
+        sample_count: 0, max_p95_us: 0, max_peak_rss_kib: 0,
+        noise_permille: 0, baseline_p50_us: 0, candidate_p50_us: 0,
+        baseline_p95_us: 0, candidate_p95_us: 0,
+        baseline_peak_rss_kib: 0, candidate_peak_rss_kib: 0,
+        time_ratio_permille: 0, memory_ratio_permille: 0,
+        ratio_sum_permille: 0)
+
+fn perf_joint_samples_valid_v1(cohort: PerfJointCohortV1) -> bool:
+    if cohort.elapsed_us.len() < 3 or
+            cohort.elapsed_us.len() != cohort.peak_rss_kib.len():
+        return false
+    # Bounds keep fixed-point ratio multiplication inside signed i64.
+    for value in cohort.elapsed_us:
+        if value <= 0 or value > 9000000000000:
+            return false
+    for value in cohort.peak_rss_kib:
+        if value <= 0 or value > 9000000000000:
+            return false
+    true
+
+fn perf_joint_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+pub fn perf_joint_compare_v1(
+    baseline: PerfJointCohortV1, candidate: PerfJointCohortV1,
+    max_p95_us: i64, max_peak_rss_kib: i64, noise_permille: i64
+) -> PerfJointVerdictV1:
+    if (baseline.workload_id == "" or baseline.host_id == "" or
+            baseline.cohort_kind == "" or
+            not perf_joint_digest_valid_v1(baseline.fixture_digest) or
+            not perf_joint_digest_valid_v1(baseline.binary_digest) or
+            not perf_joint_digest_valid_v1(candidate.binary_digest) or
+            not perf_joint_digest_valid_v1(baseline.output_digest) or
+            baseline.workload_id != candidate.workload_id or
+            baseline.host_id != candidate.host_id or
+            baseline.fixture_digest != candidate.fixture_digest or
+            baseline.cohort_kind != candidate.cohort_kind or
+            baseline.output_digest != candidate.output_digest or
+            baseline.warmup_count < 0 or
+            baseline.warmup_count != candidate.warmup_count):
+        return perf_joint_invalid_v1("unmatched-cohort")
+    if (not perf_joint_samples_valid_v1(baseline) or
+            not perf_joint_samples_valid_v1(candidate) or
+            baseline.elapsed_us.len() != candidate.elapsed_us.len()):
+        return perf_joint_invalid_v1("invalid-or-missing-samples")
+    if (max_p95_us <= 0 or max_peak_rss_kib <= 0 or
+            noise_permille < 0 or noise_permille > 100):
+        return perf_joint_invalid_v1("invalid-budget-or-noise")
+    val baseline_p50 = sample_percentile(baseline.elapsed_us, 50, 3)
+    val candidate_p50 = sample_percentile(candidate.elapsed_us, 50, 3)
+    val baseline_p95 = sample_percentile(baseline.elapsed_us, 95, 3)
+    val candidate_p95 = sample_percentile(candidate.elapsed_us, 95, 3)
+    val baseline_rss = sample_max(SampleSet(
+        metric: "peak_rss", unit: "KiB", samples: baseline.peak_rss_kib, scale: 1))
+    val candidate_rss = sample_max(SampleSet(
+        metric: "peak_rss", unit: "KiB", samples: candidate.peak_rss_kib, scale: 1))
+    # Round each ratio upward so fixed-point rounding cannot manufacture a
+    # passing improvement near the threshold.
+    val time_ratio = (candidate_p95 * 1000 + baseline_p95 - 1) / baseline_p95
+    val memory_ratio = (candidate_rss * 1000 + baseline_rss - 1) / baseline_rss
+    val sum = time_ratio + memory_ratio
+    val within_budgets = candidate_p95 <= max_p95_us and
+        candidate_rss <= max_peak_rss_kib
+    val improved = within_budgets and sum < 2000 - noise_permille
+    var reason = "no-measured-overall-improvement"
+    if not within_budgets:
+        reason = "hard-budget-exceeded"
+    elif improved:
+        reason = "overall-improvement"
+    PerfJointVerdictV1(valid: true, improved: improved, reason: reason,
+        workload_id: baseline.workload_id, host_id: baseline.host_id,
+        fixture_digest: baseline.fixture_digest,
+        baseline_binary_digest: baseline.binary_digest,
+        candidate_binary_digest: candidate.binary_digest,
+        output_digest: baseline.output_digest, cohort_kind: baseline.cohort_kind,
+        warmup_count: baseline.warmup_count,
+        sample_count: baseline.elapsed_us.len(), max_p95_us: max_p95_us,
+        max_peak_rss_kib: max_peak_rss_kib, noise_permille: noise_permille,
+        baseline_p50_us: baseline_p50, candidate_p50_us: candidate_p50,
+        baseline_p95_us: baseline_p95, candidate_p95_us: candidate_p95,
+        baseline_peak_rss_kib: baseline_rss, candidate_peak_rss_kib: candidate_rss,
+        time_ratio_permille: time_ratio, memory_ratio_permille: memory_ratio,
+        ratio_sum_permille: sum)
+
+pub fn perf_joint_to_evidence_v1(
+    verdict: PerfJointVerdictV1, profile_id: text
+) -> CanonicalEvidence:
+    if not verdict.valid:
+        return CanonicalEvidence(
+            kind: "perf_joint", profile_id: profile_id, parse_ok: false,
+            parse_error: verdict.reason, nodes: [])
+    canonical_evidence("perf_joint", profile_id, [
+        evidence_node_at("perf_joint.improved", "{verdict.improved}", 0),
+        evidence_node_at("perf_joint.reason", verdict.reason, 1),
+        evidence_node_at("perf_joint.baseline_p50_us", "{verdict.baseline_p50_us}", 2),
+        evidence_node_at("perf_joint.candidate_p50_us", "{verdict.candidate_p50_us}", 3),
+        evidence_node_at("perf_joint.baseline_p95_us", "{verdict.baseline_p95_us}", 4),
+        evidence_node_at("perf_joint.candidate_p95_us", "{verdict.candidate_p95_us}", 5),
+        evidence_node_at("perf_joint.baseline_peak_rss_kib", "{verdict.baseline_peak_rss_kib}", 6),
+        evidence_node_at("perf_joint.candidate_peak_rss_kib", "{verdict.candidate_peak_rss_kib}", 7),
+        evidence_node_at("perf_joint.time_ratio_permille", "{verdict.time_ratio_permille}", 8),
+        evidence_node_at("perf_joint.memory_ratio_permille", "{verdict.memory_ratio_permille}", 9),
+        evidence_node_at("perf_joint.ratio_sum_permille", "{verdict.ratio_sum_permille}", 10),
+        evidence_node_at("perf_joint.workload_id", verdict.workload_id, 11),
+        evidence_node_at("perf_joint.host_id", verdict.host_id, 12),
+        evidence_node_at("perf_joint.fixture_digest", verdict.fixture_digest, 13),
+        evidence_node_at("perf_joint.baseline_binary_digest", verdict.baseline_binary_digest, 14),
+        evidence_node_at("perf_joint.candidate_binary_digest", verdict.candidate_binary_digest, 15),
+        evidence_node_at("perf_joint.output_digest", verdict.output_digest, 16),
+        evidence_node_at("perf_joint.cohort_kind", verdict.cohort_kind, 17),
+        evidence_node_at("perf_joint.warmup_count", "{verdict.warmup_count}", 18),
+        evidence_node_at("perf_joint.sample_count", "{verdict.sample_count}", 19),
+        evidence_node_at("perf_joint.max_p95_us", "{verdict.max_p95_us}", 20),
+        evidence_node_at("perf_joint.max_peak_rss_kib", "{verdict.max_peak_rss_kib}", 21),
+        evidence_node_at("perf_joint.noise_permille", "{verdict.noise_permille}", 22)
+    ])

@@ -3,6 +3,20 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## SPipe perf optimization rule
+
+Seek lower elapsed time and lower memory together. On matched baseline and
+candidate cohorts, record p50/p95 time and peak/steady RSS. If only one metric
+improves, the normalized sum
+`candidate_p95 / baseline_p95 + candidate_peak_RSS / baseline_peak_RSS`
+must be below `2` beyond measurement noise, and each metric must still pass
+its own hard budget. Report both ratios and the sum. Missing/unmatched evidence
+cannot establish overall improvement. See
+`doc/07_guide/compiler/performance_diagnostics.md` and
+`.codex/skills/optimize/SKILL.md`. SPipe's pure
+`perf_joint_compare_v1` helper checks the normalized sum and independent
+budgets from matched paired samples; release cohort floors still apply.
+
 ## Kernel plugin = core extension (same concept)
 
 - **Synonymy (project-owner terminology, recorded 2026-09-24):** "kernel

@@ -271,17 +271,39 @@ impl VersionedDynLib:
 
 var _multi_libs: {text: VersionedDynLib} = {}
 
-fn _host_offer_cache_key_v1(host: HostOfferV1) -> text:
-    var parts = ["schema={host.hdr.schema_name}@{host.hdr.schema_major}.{host.hdr.schema_minor}:{host.hdr.present}",
-        "abi={host.simple_abi_version}",
-        "deferred={host.simple_abi_deferred}", "producer={host.producer_identity}"]
+fn _loader_frame_v2(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn _host_offer_cache_key_v2(host: HostOfferV1) -> text:
+    var parts = ["host-offer-v2:", _loader_frame_v2(host.hdr.schema_name),
+        _loader_frame_v2("{host.hdr.schema_major}"),
+        _loader_frame_v2("{host.hdr.schema_minor}"),
+        _loader_frame_v2("{host.hdr.present}"),
+        _loader_frame_v2("{host.simple_abi_version}"),
+        _loader_frame_v2("{host.simple_abi_deferred}"),
+        _loader_frame_v2(host.producer_identity),
+        _loader_frame_v2("{host.ifaces.len()}")]
     for iface in host.ifaces:
-        parts.push("iface={iface.name}@{iface.major}.{iface.minor}:{iface.abi_digest}")
-    for digest in host.accepted_digests: parts.push("accept={digest}")
-    for capability in host.capabilities: parts.push("cap={capability}")
+        parts.push(_loader_frame_v2(iface.name))
+        parts.push(_loader_frame_v2("{iface.major}"))
+        parts.push(_loader_frame_v2("{iface.minor}"))
+        parts.push(_loader_frame_v2(iface.abi_digest))
+    parts.push(_loader_frame_v2("{host.accepted_digests.len()}"))
+    for digest in host.accepted_digests: parts.push(_loader_frame_v2(digest))
+    parts.push(_loader_frame_v2("{host.capabilities.len()}"))
+    for capability in host.capabilities: parts.push(_loader_frame_v2(capability))
+    parts.push(_loader_frame_v2("{host.ext.len()}"))
     for extension in host.ext:
-        parts.push("ext={extension.ext_name}@{extension.ext_major}:{extension.payload_schema_hash}")
-    parts.join(";")
+        parts.push(_loader_frame_v2(extension.ext_name))
+        parts.push(_loader_frame_v2("{extension.ext_major}"))
+        parts.push(_loader_frame_v2(extension.payload_schema_hash))
+    parts.join("")
+
+fn _loader_name_key_v2(name: text, version: LibVersion, host: HostOfferV1) -> text:
+    "name-v2:" + _loader_frame_v2(name) + _loader_frame_v2(lib_version_string(version)) + _host_offer_cache_key_v2(host)
+
+fn _loader_path_key_v2(path: text, name: text, host: HostOfferV1) -> text:
+    "path-v2:" + _loader_frame_v2(path) + _loader_frame_v2(name) + _host_offer_cache_key_v2(host)
 
 pub class MultiVersionLoader:
     pass_dn
@@ -294,7 +316,7 @@ impl MultiVersionLoader:
             host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
         if not host_offer_v1_schema_valid(host):
             return Err(SffiPluginLoadError.NegotiationRefused("PLUG-E-SCHEMA"))
-        val key = "{name}:{lib_version_string(version)}:{_host_offer_cache_key_v1(host)}"
+        val key = _loader_name_key_v2(name, version, host)
         if _multi_libs.contains(key):
             return Ok(_multi_libs[key])
         val loaded = VersionedDynLib.load_versioned(name, version, host)
@@ -309,7 +331,7 @@ impl MultiVersionLoader:
             host: HostOfferV1) -> Result<VersionedDynLib, SffiPluginLoadError>:
         if not host_offer_v1_schema_valid(host):
             return Err(SffiPluginLoadError.NegotiationRefused("PLUG-E-SCHEMA"))
-        val key = "{path}:{_host_offer_cache_key_v1(host)}"
+        val key = _loader_path_key_v2(path, name, host)
         if _multi_libs.contains(key):
             return Ok(_multi_libs[key])
         val loaded = VersionedDynLib.load_path(path, name, host)
@@ -319,7 +341,7 @@ impl MultiVersionLoader:
 
     pub fn get(name: text, version: LibVersion,
             host: HostOfferV1) -> VersionedDynLib?:
-        val key = "{name}:{lib_version_string(version)}:{_host_offer_cache_key_v1(host)}"
+        val key = _loader_name_key_v2(name, version, host)
         if _multi_libs.contains(key): return _multi_libs[key]
         nil
 

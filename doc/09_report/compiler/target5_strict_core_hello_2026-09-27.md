@@ -1,0 +1,102 @@
+# Target 5 strict core-C hello diagnostic (2026-09-27)
+
+The historical admitted pure-Simple Stage2 compiler (SHA-256
+`319c7bd2f4dc15a0209fc0f76b805ff27afeecb4a411f8ad68c743191f0103d9`)
+built `scripts/check/cert/redeploy_gate/fixtures/hello_world.spl` through
+Cranelift with `--runtime-bundle core-c-bootstrap --entry-closure --mode
+one-binary --threads 1` and `SIMPLE_NO_STUB_FALLBACK=1`. The build exited 0
+in 3.44 seconds, peaked at 192,088 KiB, and the output printed `hello`.
+
+| Artifact | Size | SHA-256 |
+| --- | ---: | --- |
+| Unstripped ELF | 35,344 bytes | `19043058dca9419419189d21731e10311c6ee5450d5beb7d274b428b2ec74993` |
+| `strip -s` ELF | 19,912 bytes | `c7111a26d3dfb7ec4e6fd0abf56d3f3c1b8c50472846d2eaf4a3599ec113f472` |
+
+The previous non-strict diagnostic of the same Simple fixture recorded a
+20,840-byte stripped ELF with 28 generated unresolved-symbol stubs. This
+strict artifact is 928 bytes smaller; `nm` shows no weak `accept4`, `globfree`,
+or `pthread_getspecific` stub definitions. `globfree` remains a dynamic libc
+reference. The two builds were not taken from an immutable paired source
+snapshot, so the size delta is diagnostic, not a controlled attribution.
+
+The strict stripped artifact still exceeds the Linux 15 KiB release-small
+hard budget by 4,552 bytes. This compiler's admission receipt names a deleted
+source snapshot; there is no current-source Stage4 product, matched C size
+cohort, startup p95, max RSS cohort, or optional-provider trace admission.
+The BS7 target remains open. The exact build log and artifacts are under
+`build/mini_builds/target5_strict_core_hello_20260927/`.
+
+## Size attribution lead
+
+`size -A` reports 7,664 bytes of `.text`, 4,536 bytes of `.dynsym`, and
+1,824 bytes of `.dynstr`. `nm -D` lists 188 undefined dynamic symbols and no
+defined dynamic symbols, while `.rela.plt` is only 408 bytes. This suggests
+the retained dynamic symbol inventory is a material size contributor even
+though the actual retained code is small; the exact link-owner cause still
+needs a current-source linker trace. `.bss` is 526,433 virtual bytes, led by
+the 524,288-byte `rt_literal_intern_table`, and does not explain the on-disk
+19,912-byte result. `objcopy --strip-unneeded` made no further size reduction.
+
+`readelf -rW` shows 17 PLT relocations and two data relocations in this
+artifact. Thus 169 of its 188 undefined dynamic symbols have no dynamic
+relocation in the final executable. The trace identifies GNU `ld` at
+`/usr/local/bin/ld` as the actual linker. This narrows the size lead to
+symbols retained from loaded runtime archive members after section GC; it
+does not establish that removing all 169 would save their full `.dynsym` and
+`.dynstr` contribution or meet the hard gate.
+
+An `execve` trace of a fresh strict diagnostic build shows the historical
+builder invokes clang/ld with `--gc-sections`, five forced roots
+(`__simple_runtime_init`, `__simple_runtime_shutdown`, `rt_function_not_found`,
+`rt_set_args`, `rt_string_bytes`), the core-C runtime archive, and an empty
+strict `_stubs.o`; the archive appears again after that object. It does not
+use `--whole-archive` or `--export-dynamic`. The old Rust bootstrap builder
+creates an empty `_stubs.o` when strict resolution needs no aliases. The
+remaining 188 dynamic imports therefore require archive/object-level
+retention analysis rather than a claim that stub definitions cause them.
+The trace is `build/mini_builds/target5_strict_core_hello_20260927/execve.log`.
+
+A same-host control under
+`build/mini_builds/target5_symbol_retention_20260927/` tests this link behavior.
+One archive member held a used function plus an unused `fopen`/`fclose`
+function, compiled with `-ffunction-sections -fdata-sections` and linked with
+`--gc-sections`. Its stripped executable was 4,400 bytes and still carried
+dynamic `fopen` and `fclose` imports. Splitting the functions into separate
+archive members made the executable 4,336 bytes and removed both imports;
+compiling the combined member with `-flto` did the same. This proves that
+section GC alone does not remove those unused imports on this toolchain. It
+supports testing object-level runtime splitting or size-mode LTO on the
+current-source core-C archive. The control does not prove that either change
+alone will satisfy the Simple 15 KiB budget or preserve all runtime behavior.
+
+The current pure-Simple runtime object builder is
+`src/compiler/70.backend/backend/runtime_compiler.spl`. It already emits
+function/data sections and keys the object cache by its compiler flags. Its
+objects feed `link_to_native` through the Stage4 native linker path in
+`llvm_native_link_orchestrator.spl`; adding `-flto` at compile time alone
+would hand bitcode to a linker path that expects native objects, and changing
+flags without changing the cache signature could reuse incompatible objects.
+Any LTO experiment must select a compatible link path and version the cache
+identity before it can be proposed as a product size fix. Archive-member
+splitting remains a separate route, subject to current-source build proof.
+
+## Isolated worktree linker attribution
+
+In `/home/yoon/dev/simple-target56-isolated`, the same historical Stage2
+compiler rebuilt strict core-C hello with retained native objects. The GNU ld
+link produced a 20,552-byte stripped ELF. Relinking those exact objects and
+runtime archive with LLD produced a working 13,944-byte stripped ELF and only
+23 dynamic symbols; mold produced 20,552 bytes and 206 dynamic symbols. The
+LLD result crosses the absolute 15 KiB diagnostic threshold. Its five runtime
+roots, object order, archive order, and `--gc-sections` flags were held fixed.
+The native objects are in `.simple/native-objects-MXZNCv`; artifacts are in
+`build/mini_builds/target5_iso_core_hello_20260927/`.
+
+A same-host C `puts("hello")` built with clang `-Oz`, `-fPIC -no-pie`,
+function/data sections, LLD, section GC, and strip was 4,864 bytes. The
+Simple/C size ratio is 2.87,
+so the 1.05x gate remains unmet. This comparison is diagnostic because the
+Simple build used a historical Stage2 compiler, not an admitted current-source
+Stage4 product. The isolated pure-Simple linker source now prefers LLD for
+Linux `opt_level == 1` when no explicit `SIMPLE_LINKER` override is set; that
+source path still needs a current-source native build and performance proof.
