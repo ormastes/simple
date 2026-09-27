@@ -1,6 +1,6 @@
 use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader, SHT_NULL, SHT_PROGBITS}
 use compiler.backend.linker.elf_parser.{ElfSymbol, ElfRelocation, ElfStringTable, ElfObject, elf_reloc_type}
-use compiler.backend.linker.elf.tls_relax.{elf_relax_tls}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 
 fn a64_tls_object(primary: i64, add: i64) -> ElfObject:
@@ -83,17 +83,21 @@ describe "AArch64 TLS relaxation":
         expect(u32_at(ld.raw, 8)).to_equal(0xd503201f)
         expect(ld.relocations.len()).to_equal(0)
 
-    it "relaxes canonical TLSDESC to a local-exec sequence":
+    it "relaxes canonical TLSDESC to a TP offset only (movz/movk), like lld":
+        # The caller adds tpidr_el0 itself after the descriptor call, so x0
+        # must hold only the TP offset: movz x0,#:tprel_g1:; movk x0,#:tprel_g0_nc:.
         val result = elf_relax_tls([a64_tlsdesc_object()], RelocArch.AArch64)
         expect(result.is_ok()).to_equal(true)
         val obj = result.unwrap()[0]
-        expect(u32_at(obj.raw, 0)).to_equal(0xd53bd040)
-        expect(u32_at(obj.raw, 4)).to_equal(0x91400000)
-        expect(u32_at(obj.raw, 8)).to_equal(0x91000000)
+        expect(u32_at(obj.raw, 0)).to_equal(0xd2a00000)
+        expect(u32_at(obj.raw, 4)).to_equal(0xf2800000)
+        expect(u32_at(obj.raw, 8)).to_equal(0xd503201f)
         expect(u32_at(obj.raw, 12)).to_equal(0xd503201f)
         expect(obj.relocations.len()).to_equal(2)
-        expect(elf_reloc_type(obj.relocations[0])).to_equal(549)
-        expect(elf_reloc_type(obj.relocations[1])).to_equal(551)
+        expect(elf_reloc_type(obj.relocations[0])).to_equal(545)
+        expect(obj.relocations[0].r_offset).to_equal(0)
+        expect(elf_reloc_type(obj.relocations[1])).to_equal(548)
+        expect(obj.relocations[1].r_offset).to_equal(4)
 
     it "rejects an unpaired TLSGD sequence":
         val base = a64_tls_object(513, 514)
@@ -108,3 +112,14 @@ describe "AArch64 TLS relaxation":
             relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab,
             raw: [1, 0, 0, 0x90, 0, 0, 0, 0x91, 0, 0, 0, 0x94])
         expect(elf_relax_tls([obj], RelocArch.AArch64).is_err()).to_equal(true)
+
+describe "ELF static TLS thread-pointer offset":
+    it "places the AArch64 variant-I block at align_up(16, p_align) past TP":
+        expect(elf_tls_tpoff(true, 0x1000, 0x1000, 8, 8)).to_equal(16)
+        expect(elf_tls_tpoff(true, 0x1000, 0x1000, 8, 32)).to_equal(32)
+        expect(elf_tls_tpoff(true, 0x1008, 0x1000, 8, 64)).to_equal(72)
+
+    it "places the x86-64 variant-II block at align_up(p_memsz, p_align) below TP":
+        expect(elf_tls_tpoff(false, 0x1000, 0x1000, 0x11, 0x10)).to_equal(-0x20)
+        expect(elf_tls_tpoff(false, 0x1010, 0x1000, 0x20, 0x10)).to_equal(-0x10)
+        expect(elf_tls_tpoff(false, 0x1000, 0x1000, 0x8, 1)).to_equal(-8)

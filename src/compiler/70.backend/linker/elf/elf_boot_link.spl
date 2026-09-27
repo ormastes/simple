@@ -51,7 +51,7 @@ use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_by
 use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained_wrapped}
 use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
-use compiler.backend.linker.elf.tls_relax.{elf_relax_tls}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.section_gc.{ElfSectionGc, elf_section_gc}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.elf_exec_writer.{
@@ -1159,8 +1159,11 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
     var has_tls = false
     var tls_start: i64 = 0
     var tls_end: i64 = 0
+    var tls_align: i64 = 1
     for o in outs:
         if o.sh_flags & SHF_TLS != 0:
+            if o.align > tls_align:
+                tls_align = o.align
             if not has_tls:
                 has_tls = true
                 tls_start = o.vma
@@ -1268,12 +1271,9 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
             elif rc == RC_TLS_LE:
                 if not has_tls:
                     return Err("object {names[oi]}: TLS local-exec relocation has no TLS image")
-                if a64:
-                    # AArch64 variant I: TP points 16 bytes before the TLS block.
-                    s = s + a - tls_start + 16
-                else:
-                    # x86-64 variant II: TP points immediately after the TLS block.
-                    s = s + a - tls_end
+                # Variant I (AArch64) / variant II (x86-64) with PT_TLS alignment.
+                s = elf_tls_tpoff(a64, s + a, tls_start, tls_end - tls_start, tls_align)
+                if not a64:
                     if rtype == 23:
                         rtype = 11
                     elif rtype != 18:
@@ -1329,10 +1329,7 @@ fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
                         v = _bl_obj_sym_addr(ins, outs, lay.plan_to_out, res.defined[tls_key])?
                 if not has_tls:
                     return Err("GOT TLS initial-exec entry has no TLS image")
-                if a64:
-                    v = v - tls_start + 16
-                else:
-                    v = v - tls_end
+                v = elf_tls_tpoff(a64, v, tls_start, tls_end - tls_start, tls_align)
             got = write_u64_le(got, v)
             gi = gi + 1
         contents[got_out] = got

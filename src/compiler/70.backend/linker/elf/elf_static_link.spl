@@ -53,7 +53,7 @@ use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
 use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
 use compiler.backend.linker.elf.section_gc.{elf_section_gc, elf_gc_undefined}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
-use compiler.backend.linker.elf.tls_relax.{elf_relax_tls}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.merge_strings.{
     ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
 }
@@ -819,18 +819,23 @@ fn elf_tls_start(plan: ElfExecPlan) -> i64:
         i = i + 1
     result
 
+fn elf_tls_align(plan: ElfExecPlan) -> i64:
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < plan.secs.len():
+        if plan.secs[i].sh_flags & SHF_TLS != 0 and plan.secs[i].align > result:
+            result = plan.secs[i].align
+        i = i + 1
+    result
+
 fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i64, text>:
-    if elf_target_is_a64(target):
-        val start = elf_tls_start(plan)
-        if start < 0:
-            return Err("TLS relocation has no PT_TLS image")
-        # AArch64 uses TLS variant I: TP addresses a 16-byte TCB immediately
-        # before the statically allocated TLS block.
-        return Ok(address - start + 16)
+    val start = elf_tls_start(plan)
     val end = elf_tls_end(plan)
-    if end < 0:
+    if start < 0 or end < 0:
         return Err("TLS relocation has no PT_TLS image")
-    Ok(address - end)
+    # Same p_memsz/p_align the writer publishes in PT_TLS.
+    Ok(elf_tls_tpoff(elf_target_is_a64(target), address, start, end - start,
+        elf_tls_align(plan)))
 
 fn elf_tls_dtprel(plan: ElfExecPlan, address: i64) -> Result<i64, text>:
     val start = elf_tls_start(plan)

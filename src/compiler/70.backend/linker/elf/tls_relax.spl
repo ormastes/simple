@@ -22,6 +22,8 @@ val R_AARCH64_TLSLD_ADR_PAGE21_TLS: i64 = 518
 val R_AARCH64_TLSLD_ADD_LO12_NC_TLS: i64 = 519
 val R_AARCH64_TLSLD_MOVW_G1_TLS: i64 = 520
 val R_AARCH64_TLSLD_MOVW_G0_NC_TLS: i64 = 521
+val R_AARCH64_TLSLE_MOVW_TPREL_G1_TLS: i64 = 545
+val R_AARCH64_TLSLE_MOVW_TPREL_G0_NC_TLS: i64 = 548
 val R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS: i64 = 549
 val R_AARCH64_TLSLE_ADD_TPREL_LO12_NC_TLS: i64 = 551
 val R_AARCH64_TLSDESC_ADR_PAGE21_TLS: i64 = 562
@@ -273,16 +275,18 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
                     _a64_read_u32(raw, at + 8) & 0xffc003ff != 0x91000000 or
                     _a64_read_u32(raw, at + 12) != 0xd63f0020:
                 return Err("UnsupportedFeature: non-canonical AArch64 TLSDESC instruction sequence")
-            raw = _a64_write_u32(raw, at, 0xd53bd040) # mrs x0, tpidr_el0
-            raw = _a64_write_u32(raw, at + 4, 0x91400000) # add x0, x0, #0, lsl #12
-            raw = _a64_write_u32(raw, at + 8, 0x91000000) # add x0, x0, #0
+            # The descriptor call returns a TP offset; the caller adds
+            # tpidr_el0 itself, so materialize only the offset (as lld does).
+            raw = _a64_write_u32(raw, at, 0xd2a00000) # movz x0, #:tprel_g1:
+            raw = _a64_write_u32(raw, at + 4, 0xf2800000) # movk x0, #:tprel_g0_nc:
+            raw = _a64_write_u32(raw, at + 8, 0xd503201f) # nop
             raw = _a64_write_u32(raw, at + 12, 0xd503201f) # nop
-            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 4,
-                r_info: (sym << 32) | R_AARCH64_TLSLE_ADD_TPREL_HI12_TLS,
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset,
+                r_info: (sym << 32) | R_AARCH64_TLSLE_MOVW_TPREL_G1_TLS,
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
-            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 8,
-                r_info: (sym << 32) | R_AARCH64_TLSLE_ADD_TPREL_LO12_NC_TLS,
+            relocs = relocs.push(ElfRelocation(r_offset: r.r_offset + 4,
+                r_info: (sym << 32) | R_AARCH64_TLSLE_MOVW_TPREL_G0_NC_TLS,
                 r_addend: r.r_addend, section_idx: r.section_idx,
                 target_section_idx: r.target_section_idx))
         else if rtype == R_AARCH64_TLSGD_ADR_PAGE21_TLS or
@@ -349,6 +353,22 @@ fn _tls_relax_object_a64(obj: ElfObject) -> Result<ElfObject, text>:
     Ok(ElfObject(header: obj.header, sections: obj.sections, symbols: obj.symbols,
         relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw))
 
+fn _tls_align_up(value: i64, alignment: i64) -> i64:
+    if alignment <= 1:
+        return value
+    ((value + alignment - 1) / alignment) * alignment
+
+fn elf_tls_tpoff(a64: bool, address: i64, tls_start: i64, tls_memsz: i64,
+        tls_align: i64) -> i64:
+    """Thread-pointer offset of a static-TLS address for an aligned PT_TLS.
+
+    AArch64 (variant I): the block starts align_up(16, p_align) past TP.
+    x86-64 (variant II): the block ends at TP and starts
+    align_up(p_memsz, p_align) below it."""
+    if a64:
+        return address - tls_start + _tls_align_up(16, tls_align)
+    address - tls_start - _tls_align_up(tls_memsz, tls_align)
+
 fn elf_relax_tls(objects: [ElfObject], target: RelocArch) -> Result<[ElfObject], text>:
     match target:
         case X86_64:
@@ -363,4 +383,4 @@ fn elf_relax_tls(objects: [ElfObject], target: RelocArch) -> Result<[ElfObject],
             Ok(out)
         case _: Ok(objects)
 
-export elf_relax_tls
+export elf_relax_tls, elf_tls_tpoff
