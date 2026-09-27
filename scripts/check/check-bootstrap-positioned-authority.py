@@ -420,8 +420,7 @@ bootstrap_stage3_write_authority_map
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.map_path.exists())
 
-    @unittest.skipIf(Path('/proc/self/stat').is_file(), 'non-procfs production runtime path')
-    def test_real_verifier_passes_runtime_boundary_and_rejects_wrong_bindings(self):
+    def real_verifier_fixture(self, canonical=False):
         cache2, cache3 = self.root / 'cache2', self.root / 'cache3'
         cache2.mkdir()
         cache3.mkdir()
@@ -432,8 +431,6 @@ bootstrap_stage3_write_authority_map
         for variable, path in [('BSTAGE3_STAGE2_CACHE_DIR', cache2), ('BSTAGE3_STAGE3_CACHE_DIR', cache3)]:
             overrides[variable] = str(path)
             overrides[variable + '_DISPLAY'] = str(path)
-        produced = self.produce(overrides=overrides)
-        self.assertEqual(produced.returncode, 0, produced.stderr)
         metadata_script = '''
 BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
 . "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
@@ -459,13 +456,24 @@ bootstrap_stage3_helper_bundle_fingerprint
             'provenance_helper_bundle_fingerprint': bundle,
             'source_snapshot_path': str(self.root / 'source-inputs-after.txt'),
             'bound_artifact_authority_map_path': str(self.map_path),
-            'bound_artifact_authority_map_sha256': hashlib.sha256(self.map_path.read_bytes()).hexdigest(),
             'platform': platform, 'backend': 'cranelift', 'mode': 'dynload', 'stage2_threads': '1', 'stage3_threads': '1',
             'stage2_native_cache_dir': str(cache2), 'stage3_native_cache_dir': str(cache3),
             'runtime_path': str(self.directory), 'stage2_path': str(self.artifact), 'stage3_path': str(self.artifact),
             'stage2_command_output': str(self.artifact), 'stage3_command_output': str(self.artifact),
         })
         manifest = self.root / 'manifest.env'
+        if canonical:
+            manifest = self.canonical_transcript_fixture(values, overrides, platform)
+        overrides['BSTAGE3_MANIFEST'] = str(manifest)
+        self.map_path = Path(str(manifest) + '.authority-map.env')
+        values['bound_artifact_authority_map_path'] = str(self.map_path)
+        def refresh_map():
+            if self.map_path.exists():
+                self.map_path.unlink()
+            produced = self.produce(overrides=overrides)
+            self.assertEqual(produced.returncode, 0, produced.stderr)
+            values['bound_artifact_authority_map_sha256'] = hashlib.sha256(self.map_path.read_bytes()).hexdigest()
+        refresh_map()
         script = '''
 BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$1
@@ -473,17 +481,22 @@ BOOTSTRAP_STAGE3_PHASE_STATUS_FD=159
 exec 159>"$2/phases"
 unset BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
 . "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
-bootstrap_stage3_verify_manifest "$2/manifest.env" "$2/manifest.env" "$1" "$2/artifact" "$2/artifact" "$2/manifest.env.authority-map.env"
+bootstrap_stage3_verify_manifest "$3" "$3" "$1" "$4" "$4" "$3.authority-map.env"
 '''
         def probe():
             manifest.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
-            return subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.root)], capture_output=True, text=True)
+            return subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.root), str(manifest), values['stage3_path']], capture_output=True, text=True)
+        return values, probe, refresh_map
+
+    @unittest.skipIf(Path('/proc/self/stat').is_file(), 'non-procfs production runtime path')
+    def test_real_verifier_passes_runtime_boundary_and_rejects_wrong_bindings(self):
+        values, probe, _ = self.real_verifier_fixture()
         result = probe()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('stage2-path-outside-canonical-lane', result.stderr)
         self.assertIn('aV6', (self.root / 'phases').read_text())
         self.assertNotIn('stat:', result.stderr)
-        values['runtime_path'] = str(cache2)
+        values['runtime_path'] = str(self.root / 'cache2')
         rejected = probe()
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('aV5', (self.root / 'phases').read_text())
@@ -495,6 +508,129 @@ bootstrap_stage3_verify_manifest "$2/manifest.env" "$2/manifest.env" "$1" "$2/ar
         self.assertNotEqual(replaced.returncode, 0)
         self.assertIn('portable-authority-role-', replaced.stderr)
         self.assertNotIn('stage2-path-outside-canonical-lane', replaced.stderr)
+
+    def canonical_transcript_fixture(self, values, overrides, platform):
+        stage_dir = self.root / 'output' / 'stage3' / platform
+        stage_dir.mkdir(parents=True)
+        stage2 = self.root / 'output' / 'stage2' / platform / 'simple'
+        admitted = stage_dir / 'stage2-admitted' / 'simple'
+        candidate = stage_dir / 'simple'
+        for path in (stage2, admitted, candidate):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Inert data, with the mode required by the early authority gate.
+            # The intentionally wrong output digest prevents candidate execution.
+            path.write_bytes(self.artifact.read_bytes())
+            path.chmod(0o500)
+        layout = [
+            ('BSTAGE3_STAGE2', 'stage2_path', stage2),
+            ('BSTAGE3_STAGE2_ADMITTED', 'stage2_admitted_path', admitted),
+            ('BSTAGE3_STAGE3', 'stage3_path', candidate),
+            ('BSTAGE3_GIT_AFTER', 'git_state_path', stage_dir / 'git-state-after.env'),
+            ('BSTAGE3_STAGE2_TRANSCRIPT', 'stage2_command_transcript_path', stage_dir / 'stage2-command.transcript'),
+            ('BSTAGE3_STAGE3_TRANSCRIPT', 'stage3_command_transcript_path', stage_dir / 'stage3-command.transcript'),
+            ('BSTAGE3_STAGE2_SANITY', 'stage2_sanity_evidence_path', stage_dir / 'stage2-sanity.env'),
+            ('BSTAGE3_STAGE2_RECEIVER', 'stage2_receiver_evidence_path', stage_dir / 'stage2-receiver.env'),
+            ('BSTAGE3_STAGE2_ADMISSION', 'stage2_admission_receipt_path', stage_dir / 'stage2-admitted' / 'admission.env'),
+            ('BSTAGE3_STAGE3_SANITY', 'stage3_sanity_evidence_path', stage_dir / 'stage3-sanity.env'),
+        ]
+        for variable, key, path in layout:
+            if not path.exists():
+                path.write_text('fixture receipt; not admitted\n')
+            overrides[variable] = overrides[variable + '_DISPLAY'] = str(path)
+            values[key] = str(path)
+        values.update({
+            'stage2_command_output': str(stage2), 'stage3_command_output': str(candidate),
+            'source_snapshot_path': str(stage_dir / 'source-inputs-after.txt'),
+            'build_rust_log': 'error', 'output_path': str(candidate),
+        })
+        common = ['RUST_LOG=error', 'LIBRARY_PATH=', 'SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=',
+                  'SIMPLE_BOOTSTRAP=1', 'SIMPLE_NO_DEPRECATED_WARNINGS=1']
+        progress = self.root / 'output' / 'bootstrap-build-progress.events'
+        env2 = common + ['SIMPLE_NATIVE_BUILD_RUST=1', 'SIMPLE_NO_STUB_FALLBACK=1',
+                         f'SIMPLE_BUILD_PROGRESS_EVENTS={progress}', f'SIMPLE_BINARY={self.artifact}']
+        env3 = common + [
+            'SIMPLE_STAGE3_STREAMING_SURFACES=1', 'SIMPLE_FRONTEND_CACHE=0',
+            'MALLOC_ARENA_MAX=2', 'MALLOC_TRIM_THRESHOLD_=0', 'SIMPLE_NATIVE_ARENA_DECLS=1',
+            'SIMPLE_NO_STUB_FALLBACK=1', 'SIMPLE_PACKAGE_INDEX_COLD_INIT=1',
+            f'SIMPLE_BUILD_PROGRESS_EVENTS={progress}', 'SIMPLE_COMPILER_PHASE_PROFILE=1',
+            f'SIMPLE_COMPILER_PHASE_PROFILE_FILE={stage_dir}/phase-profile-v1.events',
+            f'SIMPLE_MEM_SNAPSHOT_FILE={stage_dir}/memory-snapshot-v1.events',
+            'SIMPLE_EVIDENCE_RUN_ID=fixture', 'LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1',
+            f'SIMPLE_NATIVE_BUILD_TARGET={platform}', 'SIMPLE_NATIVE_BUILD_THREADS=1',
+            f'SIMPLE_NATIVE_BUILD_CACHE_DIR={self.root}/cache3', f'SIMPLE_RUNTIME_PATH={self.directory}',
+            'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap', f'SIMPLE_BINARY={admitted}',
+        ]
+        common_args = ['native-build', '--target', platform, '--backend', 'cranelift',
+                       '--runtime-bundle', 'core-c-bootstrap']
+        args2 = common_args + ['--source', 'src/compiler', '--source', 'src/app', '--source', 'src/lib',
+                              '--entry-closure', '--threads', '1', '--timeout', '0', '--compile-stack-mib', '8',
+                              '--cache-dir', str(self.root / 'cache2'), '--mode', 'dynload',
+                              '--entry', 'src/app/cli/bootstrap_main.spl', '--runtime-path', str(self.directory),
+                              '-o', str(stage2)]
+        args3 = common_args + ['--threads', '1', '--timeout', '0', '--cache-dir', str(self.root / 'cache3'),
+                              '--mode', 'dynload', '--runtime-path', str(self.directory), '-o', str(candidate),
+                              'src/app/cli/bootstrap_main.spl']
+        serializer = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+repo=$1 transcript=$2 stage_home=$3 stage_tmp=$4
+shift 4
+bootstrap_stage3_write_command_transcript "$transcript" "$repo" "$stage_home" "$stage_tmp" "$PATH" "$@" || exit 3
+'''
+        digest_script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+shift
+bootstrap_stage3_args_sha256 "$@"
+'''
+        for stage, env, args, executable in [(2, env2, args2, self.artifact), (3, env3, args3, admitted)]:
+            transcript = values[f'stage{stage}_command_transcript_path']
+            for suffix in ('home', 'tmp'):
+                (stage_dir / f'stage{stage}-{suffix}').mkdir()
+            serialized = subprocess.run(['sh', '-c', serializer, 'test', str(ROOT), transcript,
+                                         str(stage_dir / f'stage{stage}-home'), str(stage_dir / f'stage{stage}-tmp'),
+                                         *env, '--', str(executable), *args],
+                                        capture_output=True, text=True)
+            self.assertEqual(serialized.returncode, 0, serialized.stderr)
+            values[f'stage{stage}_build_args_sha256'] = subprocess.check_output(
+                ['sh', '-c', digest_script, 'test', str(ROOT), *env, *args], text=True).strip()
+        return stage_dir / 'manifest.env'
+
+    @unittest.skipIf(Path('/proc/self/stat').is_file(), 'non-procfs production transcript path')
+    def test_real_verifier_canonical_layout_and_serialized_transcript_binding(self):
+        values, probe, refresh_map = self.real_verifier_fixture(canonical=True)
+        def phases():
+            return (self.root / 'phases').read_text()
+        valid = probe()
+        self.assertNotEqual(valid.returncode, 0)
+        self.assertTrue(phases().endswith('C'), (phases(), valid.stderr))
+        # Phase C checks output_path, executable mode, then output_sha256.
+        # The fixture deliberately fails that digest gate before sanity execution.
+        self.assertEqual(values['output_path'], values['stage3_path'])
+        self.assertTrue(os.access(values['stage3_path'], os.X_OK))
+        self.assertNotEqual(values['output_sha256'], hashlib.sha256(Path(values['stage3_path']).read_bytes()).hexdigest())
+        for key in ('stage2_admitted_path', 'stage3_sanity_evidence_path'):
+            with self.subTest(path=key):
+                original = values[key]
+                values[key] = str(self.artifact)
+                rejected = probe()
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertNotIn('B', phases())
+                values[key] = original
+        for stage in (2, 3):
+            with self.subTest(transcript=stage):
+                transcript = Path(values[f'stage{stage}_command_transcript_path'])
+                original = transcript.read_bytes()
+                transcript.write_bytes(original.replace(b'argv:9:cranelift\n', b'argv:9:wrongback\n'))
+                # Rebind changed bytes in the real map: rejection must come from
+                # command semantics, not an earlier stale map/hash check.
+                refresh_map()
+                rejected = probe()
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(f'manifest-stage-stage{stage}-transcript', rejected.stderr)
+                self.assertTrue(phases().endswith('B'), phases())
+                transcript.write_bytes(original)
+                refresh_map()
 
     def test_snapshot_mutation_emits_no_receipt(self):
         pread = os.pread
