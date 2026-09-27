@@ -443,7 +443,10 @@ Implemented source slice:
   parameter while preserving the AMD64 compatibility wrapper, and ordinary
   ARM64 COFF members are admitted by the archive-closure parser. ARM64 `.pdata`
   validation and sorting uses its native 8-byte runtime-function rows rather
-  than the AMD64 12-byte format. Production ARM64 link routing,
+  than the AMD64 12-byte format. Shared link preparation now validates an
+  explicit target machine, and symbol/export/relocation address resolution
+  consumes an explicit image base instead of embedding the AMD64 constant.
+  Production ARM64 link routing,
   short-import/thunk synthesis, and `SECREL` resolution remain open and are not
   certified by this slice;
 - deterministic PE32+ section/image writer with import, exception, and base
