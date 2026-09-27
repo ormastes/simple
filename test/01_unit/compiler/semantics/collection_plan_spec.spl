@@ -1,0 +1,127 @@
+"""
+Logical CollectionPlan validation for compiler engineers. Run this spec with
+an admitted pure-Simple test runner. These assertions cover DAG shape and
+missing-proof reporting; they do not certify a MIR rewrite.
+"""
+# @req REQ-007
+# @cover src/compiler/35.semantics/perf/collection_plan.spl
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.semantics.perf_facts.types.{HirPerfEffectFacts, HirPerfCostClass, HirPerfCardinality, HirPerfAllocationClass}
+use compiler.semantics.perf.collection_plan.*
+
+fn plan_test_facts() -> CollectionPlanFacts:
+    CollectionPlanFacts(
+        effects: HirPerfEffectFacts(
+            reads: true, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: false),
+        cost: HirPerfCostClass.LinearReceiver,
+        cardinality: HirPerfCardinality.SameAsReceiver,
+        allocation: HirPerfAllocationClass.Unknown,
+        order: CollectionPlanOrder.PreservesInput,
+        uniqueness: CollectionPlanUniqueness.MayRepeat,
+        equality_proven: false, alias_proven: false,
+        callback_pure: false, escape_proven: false,
+        profitability_proven: false, evidence_receipt: "")
+
+fn plan_test_node(id: i64, kind: CollectionPlanKind, inputs: [i64]) -> CollectionPlanNode:
+    val output_type = HirType(kind: HirTypeKind.Unit, span: Span.default())
+    var source_expr: HirExpr? = nil
+    var operation_symbol_id: i64? = Some(id + 10)
+    match kind:
+        case CollectionPlanKind.Source:
+            source_expr = Some(HirExpr(
+                kind: HirExprKind.NamedVar(SymbolId(id: id + 20), "items"),
+                has_type_: true, type_: output_type, span: Span.default()))
+            operation_symbol_id = nil
+        case _: pass_do_nothing
+    CollectionPlanNode(
+        id: id, kind: kind, inputs: inputs, source_span: Span.default(),
+        source_expr: source_expr, call_arguments: [],
+        operation_symbol_id: operation_symbol_id,
+        output_type: Some(output_type), key_type: nil,
+        facts: plan_test_facts())
+
+fn plan_test_plan(nodes: [CollectionPlanNode], output_id: i64) -> CollectionPlan:
+    CollectionPlan(
+        function_symbol_id: 7, registry_version: "collection-cost-v1",
+        nodes: nodes, output_id: output_id)
+
+describe "CollectionPlan structural contract":
+    it "accepts a source followed by a unary filter":
+        step("Validate a backward-only logical plan")
+        val plan = plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.Filter, [0])
+        ], 1)
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+
+    it "rejects forward references and wrong operator arity":
+        step("Prevent cyclic and malformed plans before optimization")
+        val forward = plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.Filter, [1])
+        ], 1)
+        expect(validate_collection_plan(forward).is_err()).to_equal(true)
+        val wrong_arity = plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.JoinBy, [0])
+        ], 1)
+        expect(validate_collection_plan(wrong_arity).is_err()).to_equal(true)
+
+    it "rejects invalid roots and noncanonical node identities":
+        step("Keep plan references stable for the later MIR planner")
+        val source = plan_test_node(0, CollectionPlanKind.Source, [])
+        expect(validate_collection_plan(plan_test_plan([source], 1)).is_err()).to_equal(true)
+        val wrong_id = plan_test_node(3, CollectionPlanKind.Source, [])
+        expect(validate_collection_plan(plan_test_plan([wrong_id], 0)).is_err()).to_equal(true)
+
+    it "rejects missing bindings and disconnected plan nodes":
+        step("Require typed bindings and one path from each node to the output")
+        var missing_source = plan_test_node(0, CollectionPlanKind.Source, [])
+        missing_source.source_expr = nil
+        expect(validate_collection_plan(plan_test_plan([missing_source], 0)).is_err()).to_equal(true)
+        var missing_operation = plan_test_node(1, CollectionPlanKind.Filter, [0])
+        missing_operation.operation_symbol_id = nil
+        expect(validate_collection_plan(plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []), missing_operation
+        ], 1)).is_err()).to_equal(true)
+        expect(validate_collection_plan(plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.Source, []),
+            plan_test_node(2, CollectionPlanKind.Filter, [0])
+        ], 2)).is_err()).to_equal(true)
+
+    it "keeps missing typed keys visible while rejecting nonfinal outputs":
+        step("Retain unknown key evidence for explanation without authorizing a rewrite")
+        val keyed = plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.DistinctBy, [0])
+        ], 1)
+        expect(validate_collection_plan(keyed).is_ok()).to_equal(true)
+        expect(collection_plan_unproven_facts(keyed.nodes[1])).to_contain("key type")
+        expect(validate_collection_plan(plan_test_plan([
+            plan_test_node(0, CollectionPlanKind.Source, []),
+            plan_test_node(1, CollectionPlanKind.Filter, [0])
+        ], 0)).is_err()).to_equal(true)
+
+    it "reports missing rewrite proofs without authorizing a transform":
+        step("Expose absent equality, alias, and profitability evidence")
+        val node = plan_test_node(0, CollectionPlanKind.Source, [])
+        val missing = collection_plan_unproven_facts(node)
+        expect(missing).to_contain("equality")
+        expect(missing).to_contain("allocation")
+        expect(missing).to_contain("output type")
+        expect(missing).to_contain("source binding")
+        expect(missing).to_contain("alias")
+        expect(missing).to_contain("profitability")
+        expect(missing).to_contain("evidence receipt")
+
+    it "requires a typed key for equality planning":
+        step("Keep an index candidate blocked until its key type is resolved")
+        val node = plan_test_node(1, CollectionPlanKind.IndexBy, [0])
+        expect(collection_plan_unproven_facts(node)).to_contain("key type")
+        expect(collection_plan_unproven_facts(node)).to_contain("operation symbol")

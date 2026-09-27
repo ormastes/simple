@@ -17,6 +17,7 @@ use std.spec.step
 use std.spipe.*
 use std.df.*
 use std.ndarray.*
+use std.common.binary_io.{f64_from_bits}
 
 
 describe "Series unique_i64":
@@ -48,6 +49,16 @@ describe "Series unique_i64":
         val u = s.unique_i64()
         expect(u.len()).to_equal(Index.new(1))
 
+    it "keeps first-seen order when integer index slots collide":
+        step("Deduplicate colliding integer keys without dropping a distinct value")
+        val series = Series.from_i64_values(Symbol.from("key"),
+            [Int64.new(1), Int64.new(17), Int64.new(1), Int64.new(-15)])
+        val unique = series.unique_i64()
+        expect(unique.len()).to_equal(Index.new(3))
+        expect(unique.get(Index.new(0))).to_equal(Int64.new(1))
+        expect(unique.get(Index.new(1))).to_equal(Int64.new(17))
+        expect(unique.get(Index.new(2))).to_equal(Int64.new(-15))
+
 describe "Series nunique":
     it "returns count of distinct non-missing values for I64 series":
         # @req REQ-SSPEC-SYSTEM
@@ -73,6 +84,25 @@ describe "Series nunique":
         val empty: [Float64] = []
         val s = Series.from_values(name: Symbol.from("empty"), values: empty)
         expect(s.nunique()).to_equal(Index.new(0))
+
+    it "keeps missing and zero distinct while excluding missing from nunique":
+        step("Preserve real zero after a missing placeholder in both numeric dtypes")
+        val floating = Series.from_f64_masked(Symbol.from("f"),
+            [Float64.new(0.0), Float64.new(0.0)],
+            [Bool.new(true), Bool.new(false)]).unwrap()
+        val integer = Series.from_i64_masked(Symbol.from("i"),
+            [Int64.new(0), Int64.new(0)],
+            [Bool.new(true), Bool.new(false)]).unwrap()
+        val floating_unique = floating.unique_f64()
+        val integer_unique = integer.unique_i64()
+        expect(floating_unique.len()).to_equal(Index.new(2))
+        expect(integer_unique.len()).to_equal(Index.new(2))
+        expect(floating_unique.is_missing(Index.new(0)).unwrap()).to_equal(true)
+        expect(floating_unique.is_missing(Index.new(1)).unwrap()).to_equal(false)
+        expect(integer_unique.is_missing(Index.new(0)).unwrap()).to_equal(true)
+        expect(integer_unique.is_missing(Index.new(1)).unwrap()).to_equal(false)
+        expect(floating.nunique()).to_equal(Index.new(1))
+        expect(integer.nunique()).to_equal(Index.new(1))
 
 describe "value_counts":
     it "returns a two-column DataFrame with value and count columns":
@@ -121,3 +151,16 @@ describe "value_counts":
         expect(vc.num_rows()).to_equal(Index.new(1))
         val counts = vc.col(Symbol.from("count")).unwrap()
         expect(counts.get(Index.new(0))).to_equal(Int64.new(2))
+
+    it "counts signed zero together and leaves NaNs unmerged":
+        step("Apply floating equality semantics to unique and value counts")
+        val nan = Float64.new(f64_from_bits(0x7FF8000000000001u64))
+        val negative_zero = Float64.new(f64_from_bits(0x8000000000000000u64))
+        val series = Series.from_f64_values(Symbol.from("key"),
+            [Float64.new(0.0), negative_zero, nan, nan])
+        expect(series.unique_f64().len()).to_equal(Index.new(3))
+        val counts = value_counts(series).col(Symbol.from("count")).unwrap()
+        expect(counts.len()).to_equal(Index.new(3))
+        expect(counts.get(Index.new(0))).to_equal(Int64.new(2))
+        expect(counts.get(Index.new(1))).to_equal(Int64.new(1))
+        expect(counts.get(Index.new(2))).to_equal(Int64.new(1))

@@ -1,0 +1,75 @@
+# Canonical numeric-key row index for DataFrame equijoins.  The caller maps
+# values to i64 keys; duplicate keys form insertion-ordered row chains.
+
+use std.common.binary_io.{f64_to_bits}
+
+fn numeric_f64_key(value: f64) -> i64?:
+    if value != value:
+        return nil
+    if value == 0.0:
+        return Some(0)
+    Some(f64_to_bits(value) as i64)
+
+fn numeric_index_slot(key: i64, mask: i64) -> i64:
+    # IEEE integer-valued floats have mostly zero low bits. Avalanche the
+    # full key before masking, using i64 wrapping arithmetic as in xxh64.
+    var mixed = key ^ (key >> 33)
+    mixed = mixed * 0xC2B2AE3D27D4EB4F
+    mixed = mixed ^ (mixed >> 29)
+    mixed = mixed * 0x165667B19E3779F9
+    mixed = mixed ^ (mixed >> 32)
+    mixed & mask
+
+class NumericJoinIndex:
+    slot_keys: [i64]
+    slot_heads: [i64]
+    slot_tails: [i64]
+    next_rows: [i64]
+    mask: i64
+
+    static fn with_rows(row_count: i64) -> NumericJoinIndex:
+        var capacity = 16
+        while capacity <= row_count * 2:
+            capacity = capacity * 2
+        var slot_keys: [i64] = []
+        var slot_heads: [i64] = []
+        var slot_tails: [i64] = []
+        var next_rows: [i64] = []
+        var i = 0
+        while i < capacity:
+            slot_keys.push(0)
+            slot_heads.push(-1)
+            slot_tails.push(-1)
+            i = i + 1
+        i = 0
+        while i < row_count:
+            next_rows.push(-1)
+            i = i + 1
+        NumericJoinIndex(
+            slot_keys: slot_keys, slot_heads: slot_heads,
+            slot_tails: slot_tails, next_rows: next_rows,
+            mask: capacity - 1)
+
+    me insert(key: i64, row: i64):
+        var slot = numeric_index_slot(key, self.mask)
+        while self.slot_heads[slot] >= 0:
+            if self.slot_keys[slot] == key:
+                val tail = self.slot_tails[slot]
+                self.next_rows[tail] = row
+                self.slot_tails[slot] = row
+                return
+            slot = (slot + 1) & self.mask
+        self.slot_keys[slot] = key
+        self.slot_heads[slot] = row
+        self.slot_tails[slot] = row
+
+    fn first(key: i64) -> i64:
+        var slot = numeric_index_slot(key, self.mask)
+        while self.slot_heads[slot] >= 0:
+            if self.slot_keys[slot] == key:
+                return self.slot_heads[slot]
+            slot = (slot + 1) & self.mask
+        -1
+
+    fn next_row(row: i64) -> i64:
+        self.next_rows[row]
