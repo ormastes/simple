@@ -22,3 +22,21 @@
 - `doc/00_llm_process/knowledge_registry.sdn` has no exact `sosix_runtime_unification` feature route at this baseline, though a feature-expert file exists. The kernel route is `mdsoc_only`; avoid treating the expert file's existence as a registered selection receipt. The common SPipe locator resolved the reviewed legacy `.spipe/spipe` route; no company or private wiki scope was assumed.
 - Lower-model read-only research covered compiler, library, and OS paths; this synthesis checked the decisive Promise body and trap/source guard against committed main. The OS sidecar's initial inference that all live 134/135 routing existed was corrected by the failing guard. No source scanner or passing model test proves a native release.
 - The next implementation/evidence sequence is RU-001 completion, explicit requirement selection, verified trap/link/owner installation, task/Promise value propagation, cross-runtime dispatch, provider parity, then renderer/GPU and SimpleOS release gates. The full objective remains open.
+
+## 2026-09-28 current-main addendum
+
+At committed `main` `1cc5b43c07c`, the [dynamic-library and executable-memory
+route manifest](../runtime/sosix_unification/sosix_dynload_memory_route_manifest_v1_2026-09-28.md)
+adds SFFI, compiler WFFI/plugin, font, Metal transfer, Steam, SMF/JIT mapping,
+aspect-pack range I/O, native/seed, and SOSIX library-plan classifications to
+RU-001. The SOSIX host-library adapter remains a pure callback plan without a
+production loader provider; its presence does not qualify RU-042.
+
+The earlier Future/Promise row is dated to the older baseline: current
+`async/future.spl` publishes a value via `Future.complete`, current
+`async/promise.spl` calls it, and
+`test/01_unit/lib/nogc_async_mut/async_promise_pair_spec.spl` covers paired
+polling, duplicate completion, and pair isolation. This source/spec evidence
+narrows the open RU-021 issue to canonical task wake, lifetime/retirement, and
+cross-runtime qualification; no current runtime execution was available in
+this isolated worktree to claim that the spec passed.
