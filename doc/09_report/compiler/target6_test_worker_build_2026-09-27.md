@@ -63,3 +63,37 @@ Before publication cutover, a current-source worker must expose the first
 invalid event's source, operation, and identity and reproduce or clear this
 fixture failure. The resumed session used its three build attempts; do not
 repeat a fourth build in this session.
+
+## Cold-event isolation, resumed 2026-09-28 run
+
+The next scoped run built three focused binaries with separate cache entries;
+all builds set `SIMPLE_NO_STUB_FALLBACK=1` and used the same admitted historical
+Stage2 producer. No source edit from this diagnostic was retained.
+
+1. `event_inspection` constructed a Git event directly and through
+   `compiler_inventory_file_event_v1`, then applied each as one event. Both
+   carried `source=git`, `operation=create`, `identity=src/a.spl`, returned
+   `reason=ok`, and printed `Results: 2 passed, 0 failed`.
+2. A temporary failure-only fingerprint in cold replay caused the rebuilt
+   admission probe to segfault there. GDB found a tagged value
+   `0xf198715900000001` being dereferenced while formatting that failure at
+   `compile_source_inventory_apply_cold_events_v1+2484`. The fingerprint was
+   removed because it made a controlled rejection crash; it is not a fix.
+3. `cold_array_inspection` passed each event as a one-element Git array
+   directly to `compile_source_inventory_apply_observed_events_v1`. Both got
+   past cold replay and failed later with
+   `inventory-publication-failed:publish-untracked-cursor-invalid`. The probe
+   omitted the final defaulted cursor arguments, whose native values did not
+   behave as empty strings. Thus this probe does
+   not prove publication, but it does isolate the earlier `event-invalid`
+   away from the one-event constructor and reducer.
+
+The first `event-invalid` remains reproducible only through the full
+`compiler_inventory_refresh_v1` bridge in this historical Stage2 native
+fixture. The boxed `CompilerInventoryGitEventsV1?` return and subsequent
+event-array transfer are candidates, not proven causes. Next qualification
+needs an admitted current-source compiler or a focused bridge probe that
+passes every cursor argument explicitly and inspects the returned batch before
+replay. Logs, entries, binaries, and the tiny Git fixture remain under
+`build/mini_builds/target56_focused_worker/`. The three-build cap stops this
+run; Target 6 SPipe and performance gates remain unverified.
