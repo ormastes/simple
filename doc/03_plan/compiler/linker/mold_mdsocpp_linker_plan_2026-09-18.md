@@ -844,3 +844,6 @@ and their matching `DT_GNU_HASH`/`DT_HASH` tags are emitted together; unknown
 or conflicting requests fail before publication. Direct linker API callers
 retain the byte-compatible `both` default, while the production mold-compatible
 command line's existing `--hash-style=gnu` request now produces GNU-only output.
+GNU `--strip-all` and `-s` now select the existing typed internal-ELF symbol
+table stripping path instead of being rejected as unmodeled flags. Non-default
+dynamic hash policy on a static image fails closed rather than being ignored.
