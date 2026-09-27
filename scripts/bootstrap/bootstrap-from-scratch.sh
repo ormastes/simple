@@ -3478,22 +3478,13 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # mirroring stage3_timeout_args in resume-stage3-from-admitted.sh, whose
   # stage2 args-hash formula must stay word-for-word identical to this one.
   stage2_timeout_args=
-  bootstrap_stage2_darwin_cc_env=
-  bootstrap_stage2_darwin_cxx_env=
-  bootstrap_stage2_darwin_ar_env=
-  bootstrap_stage2_darwin_ld_env=
-  bootstrap_stage2_darwin_llvm_config_env=
-  bootstrap_stage2_darwin_llvm_version_env=
-  case "${PLATFORM}" in
-    *apple-darwin*)
-      [ -z "${CC:-}" ] || bootstrap_stage2_darwin_cc_env="CC=${CC}"
-      [ -z "${CXX:-}" ] || bootstrap_stage2_darwin_cxx_env="CXX=${CXX}"
-      [ -z "${AR:-}" ] || bootstrap_stage2_darwin_ar_env="AR=${AR}"
-      [ -z "${LD:-}" ] || bootstrap_stage2_darwin_ld_env="LD=${LD}"
-      [ -z "${LLVM_CONFIG:-}" ] || bootstrap_stage2_darwin_llvm_config_env="LLVM_CONFIG=${LLVM_CONFIG}"
-      [ -z "${SIMPLE_LLVM_REQUIRED_VERSION:-}" ] || bootstrap_stage2_darwin_llvm_version_env="SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION}"
-      ;;
-  esac
+  # Every macOS tool name is passed even when blank: the canonical env name
+  # list (bootstrap_stage3_stage2_canonical_env_names) and the resume args-hash
+  # in resume-stage3-from-admitted.sh both require all six. A blank CC/CXX is
+  # handled by the seed's cc_detect (nonblank_tool_override falls back to
+  # target detection), so omitting names here only broke the pre-exec check.
+  bootstrap_stage2_darwin_env=
+  case "${PLATFORM}" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
   case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
     '') ;;
     *[!0-9]*)
@@ -3527,12 +3518,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
-      ${bootstrap_stage2_darwin_cc_env:+"${bootstrap_stage2_darwin_cc_env}"} \
-      ${bootstrap_stage2_darwin_cxx_env:+"${bootstrap_stage2_darwin_cxx_env}"} \
-      ${bootstrap_stage2_darwin_ar_env:+"${bootstrap_stage2_darwin_ar_env}"} \
-      ${bootstrap_stage2_darwin_ld_env:+"${bootstrap_stage2_darwin_ld_env}"} \
-      ${bootstrap_stage2_darwin_llvm_config_env:+"${bootstrap_stage2_darwin_llvm_config_env}"} \
-      ${bootstrap_stage2_darwin_llvm_version_env:+"${bootstrap_stage2_darwin_llvm_version_env}"} \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \
@@ -3670,12 +3661,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
-      ${bootstrap_stage2_darwin_cc_env:+"${bootstrap_stage2_darwin_cc_env}"} \
-      ${bootstrap_stage2_darwin_cxx_env:+"${bootstrap_stage2_darwin_cxx_env}"} \
-      ${bootstrap_stage2_darwin_ar_env:+"${bootstrap_stage2_darwin_ar_env}"} \
-      ${bootstrap_stage2_darwin_ld_env:+"${bootstrap_stage2_darwin_ld_env}"} \
-      ${bootstrap_stage2_darwin_llvm_config_env:+"${bootstrap_stage2_darwin_llvm_config_env}"} \
-      ${bootstrap_stage2_darwin_llvm_version_env:+"${bootstrap_stage2_darwin_llvm_version_env}"} \
+      ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
+      ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
+      ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LD=${LD:-}"} \
+      ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=${LLVM_CONFIG:-}"} \
+      ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=${SIMPLE_LLVM_REQUIRED_VERSION:-}"} \
       ${bootstrap_windows_abi_env} \
       ${bootstrap_windows_cc_env:+"${bootstrap_windows_cc_env}"} \
       ${bootstrap_windows_include_env:+"${bootstrap_windows_include_env}"} \

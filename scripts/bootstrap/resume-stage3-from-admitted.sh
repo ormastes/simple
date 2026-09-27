@@ -486,6 +486,14 @@ if [ -n "$bootstrap_stage2_windows_env" ] &&
   bootstrap_stage2_windows_cc="CC=$bootstrap_stage2_windows_cc_value"
 fi
 stage2_args=$(bootstrap_stage3_args_sha256 \
+  "SIMPLE_LLVM_BIN=$(stage2_env_value SIMPLE_LLVM_BIN)" \
+  "SIMPLE_LLVM_PATH=$(stage2_env_value SIMPLE_LLVM_PATH)" \
+  "MIMALLOC_EAGER_COMMIT=$(stage2_env_value MIMALLOC_EAGER_COMMIT)" \
+  "MIMALLOC_ARENA_EAGER_COMMIT=$(stage2_env_value MIMALLOC_ARENA_EAGER_COMMIT)" \
+  "MIMALLOC_PURGE_DELAY=$(stage2_env_value MIMALLOC_PURGE_DELAY)" \
+  "MIMALLOC_PURGE_DECOMMITS=$(stage2_env_value MIMALLOC_PURGE_DECOMMITS)" \
+  "LLVM_SYS_231_PREFIX=$(stage2_env_value LLVM_SYS_231_PREFIX)" \
+  "PATH=$(stage2_env_value PATH)" \
   "RUST_LOG=$(stage2_env_value RUST_LOG)" \
   "LIBRARY_PATH=$stage2_library_path" \
   "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
