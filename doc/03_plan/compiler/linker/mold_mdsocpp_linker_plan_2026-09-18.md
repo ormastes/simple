@@ -676,8 +676,12 @@ placement. Malformed rpaths and every unmodelled extra flag still fail closed;
 debug policy remains unsupported until its output semantics are implemented.
 Linux internal routing also accepts explicit `--eh-frame-hdr`, `--build-id`,
 `--build-id=sha1`, and `--gc-sections` requests because those exact policies
-are intrinsic to every produced image. Alternate build-id algorithms and
-`--no-gc-sections` remain rejected rather than silently changing semantics.
+are the default produced-image policies. `--no-gc-sections` and its compiler-
+driver spelling now select a typed retain-all policy for allocatable input
+sections and COMMON definitions; undefined references in otherwise dead
+sections consequently become fatal, matching the requested semantics. Mixed
+enable/disable flags fail closed. Alternate build-id algorithms remain
+rejected rather than silently changing semantics.
 GNU `-z relro` spellings are accepted because dynamic metadata and GOT ranges
 already receive `PT_GNU_RELRO`. GNU `-z now` spellings now select typed eager
 binding and emit `DT_BIND_NOW`, `DF_BIND_NOW`, and `DF_1_NOW`; lazy binding

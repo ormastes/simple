@@ -705,6 +705,7 @@ fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     if internal_elf_runpath(config.extra_flags).is_err(): return "extra_flags"
     if internal_elf_hash_style(config.extra_flags).is_err(): return "extra_flags"
     if internal_elf_as_needed(config.extra_flags).is_err(): return "extra_flags"
+    if internal_elf_gc_sections(config.extra_flags).is_err(): return "extra_flags"
     if config.debug: return "debug"
     ""
 
@@ -724,13 +725,15 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
             i = i + 1
         elif flag == "--eh-frame-hdr" or flag == "--build-id" or
                 flag == "--build-id=sha1" or flag == "--gc-sections" or
+                flag == "--no-gc-sections" or flag == "-Wl,--gc-sections" or
+                flag == "-Wl,--no-gc-sections" or
                 flag == "--no-undefined" or
                 flag.starts_with("--hash-style=") or flag == "--strip-all" or
                 flag == "-s" or flag == "--as-needed" or flag == "--no-as-needed" or
                 flag == "-Wl,--as-needed" or flag == "-Wl,--no-as-needed":
-            # These are intrinsic internal-ELF policies: every image emits the
-            # sorted unwind header and GNU SHA-1 note, and the live-section
-            # graph is rooted before layout.
+            # These are modeled internal-ELF policies. Every image emits the
+            # sorted unwind header and GNU SHA-1 note; section-GC selection is
+            # projected into ElfLinkRequest before layout.
             i = i + 1
             continue
         elif flag == "-z":
@@ -792,6 +795,18 @@ fn internal_elf_as_needed(extra_flags: [text]) -> Result<bool, text>:
     if enabled and disabled:
         return Err("internal ELF cannot preserve mixed positional as-needed policy")
     Ok(enabled)
+
+fn internal_elf_gc_sections(extra_flags: [text]) -> Result<bool, text>:
+    """Return typed ELF section-GC policy; preserve the internal default."""
+    var enabled = false
+    var disabled = false
+    for flag in extra_flags:
+        if flag == "--gc-sections" or flag == "-Wl,--gc-sections": enabled = true
+        elif flag == "--no-gc-sections" or flag == "-Wl,--no-gc-sections": disabled = true
+    if enabled and disabled:
+        return Err("internal ELF section-GC flags conflict")
+    if disabled: return Ok(false)
+    Ok(true)
 
 fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
@@ -1414,11 +1429,12 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     val runpath = internal_elf_runpath(config.extra_flags)?
     val hash_style = internal_elf_hash_style(config.extra_flags)?
     val as_needed = internal_elf_as_needed(config.extra_flags)?
+    val gc_sections = internal_elf_gc_sections(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
         shared_names: shared_names,
         runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags),
-        hash_style: hash_style, as_needed: as_needed)
+        hash_style: hash_style, as_needed: as_needed, gc_sections: gc_sections)
     val linked = elf_link_configured(request,
         config.strip_output or internal_elf_strip_all(config.extra_flags),
         config.retained_symbols)

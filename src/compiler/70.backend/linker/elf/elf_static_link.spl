@@ -51,7 +51,9 @@ use compiler.backend.linker.reloc_engine.{
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
 use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared_named}
 use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
-use compiler.backend.linker.elf.section_gc.{elf_section_gc, elf_gc_undefined}
+use compiler.backend.linker.elf.section_gc.{
+    elf_section_gc, elf_section_keep_all, elf_gc_undefined
+}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.merge_strings.{
@@ -120,6 +122,7 @@ struct ElfLinkRequest:
     bind_now: bool = false # -z now: eager dynamic binding
     hash_style: text = "both" # gnu, sysv, or both
     as_needed: bool = false # emit DT_NEEDED only for provider DSOs
+    gc_sections: bool = true # false retains every allocatable input section
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -1264,7 +1267,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     for name in retained_symbols:
         if name != "" and not res.defined.has(name) and elf_lib_export(libs, name) < 0:
             return Err("retained symbol not found: {name}")
-    val gc = elf_section_gc(all, res, req.entry, retained_symbols, [])
+    val gc = if req.gc_sections:
+        elf_section_gc(all, res, req.entry, retained_symbols, [])
+    else:
+        elf_section_keep_all(all, res)
     val collected = elf_gc_eh_frames(all, gc.live, res)
     var undef: [text] = []
     for name in elf_gc_undefined(collected, gc.live, res):
