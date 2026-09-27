@@ -1303,7 +1303,26 @@ bootstrap_stage_sanity() (
   if [ "${sanity_status}" != pass ]; then
     echo "bootstrap-sanity-error: version_status=${version_status} version_output=${version} unsupported_status=${unsupported_status} frontend_status=${frontend_status} candidate_unchanged=$([ "${candidate_sha_before}" = "${candidate_sha_after}" ] && echo true || echo false)" >&2
   fi
-  rm -f "${frontend_log}"
+  if [ "${sanity_status}" != pass ]; then
+    if [ -s "${frontend_log}" ]; then
+      echo "bootstrap-sanity-error: frontend smoke log follows (first 65536 bytes):" >&2
+      head -c 65536 "${frontend_log}" >&2
+      echo "" >&2
+      if [ -n "${evidence_path}" ]; then
+        frontend_log_durable="${evidence_path}.frontend-failure.log"
+        if cp -f "${frontend_log}" "${frontend_log_durable}"; then
+          echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
+          rm -f "${frontend_log}"
+        else
+          echo "bootstrap-sanity-error: preserving original frontend smoke log at ${frontend_log}" >&2
+        fi
+      fi
+    else
+      echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
+    fi
+  else
+    rm -f "${frontend_log}"
+  fi
   [ "${sanity_status}" = pass ]
 )
 
