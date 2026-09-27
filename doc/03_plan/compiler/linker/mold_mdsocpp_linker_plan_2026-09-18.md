@@ -285,7 +285,9 @@ relocations.
 Hosted ELF and SimpleOS boot relocation collection now share explicit patch
 width/range validation across x86-64, ARM32, AArch64, and RISC-V widths. Patches
 that cross an input-section boundary and boot relocations with an invalid
-symbol-table index fail closed before mutation.
+symbol-table index fail closed before mutation. Named SIZE32/SIZE64 ABI
+constants prevent the raw SIZE64 relocation from being mistaken for a
+four-byte default before its later formula rewrite.
 
 ## 13. Windows/Linux/SimpleOS completion continuation — 2026-09-26
 

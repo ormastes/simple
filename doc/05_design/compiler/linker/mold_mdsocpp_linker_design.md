@@ -259,7 +259,9 @@ All hosted and boot ELF relocations pass a shared architecture-aware patch
 extent check against their input section before symbol resolution or byte
 mutation. A malformed symbol index or a one-, two-, four-, or eight-byte patch
 crossing the section boundary fails with an object-scoped diagnostic rather
-than truncating silently or indexing outside the symbol table.
+than truncating silently or indexing outside the symbol table. Raw
+`R_X86_64_SIZE64` is explicitly eight bytes even though its formula is lowered
+to the generic 64-bit absolute operator only after this validation.
 
 Remote interpreter placement is a target-filesystem decision, not a host-path
 guess. `remote-test` resolves automatic placement to `/usr/local/bin/simple`
