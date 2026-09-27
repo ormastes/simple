@@ -930,3 +930,14 @@ binary into a successful seed fallback: it requires a non-empty PE32+ result.
 The same run showed the Linux link lacked the required `llvm-nm`, so both
 Stage 2 tool installations now include the LLVM tools package. A new exact-head
 run is required before either Stage 2 lane is admitted.
+
+Exact-head run `36301842638` admitted the Linux Stage 2 build, smoke test, and
+artifact. Windows advanced past generated-C compilation and compiled all 914
+Simple units, then exposed a target/host policy leak in the compiler-driver
+fallback: a Linux-hosted MinGW link inherited ELF `-z relro`/`-z now` flags and
+Linux support libraries. The fallback now derives platform hardening, retained
+symbols, standard libraries, and native-all support libraries from the link
+target (`windows-mingw`), while retaining the host identity solely for driver
+selection and process dispatch. Windows target-policy tests pin the absence of
+ELF compiler-driver and standard-library flags. A new exact-head run remains
+required before the Windows Stage 2 artifact is admitted.
