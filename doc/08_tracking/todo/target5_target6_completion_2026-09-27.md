@@ -68,6 +68,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   The three bounded Stage2 build attempts reached a core-C/GPU link mismatch
   and then missed the required hosted-runtime archive directory; see
   `doc/09_report/compiler/target6_test_worker_build_2026-09-27.md`.
+- The shared SCV translator now rejects unknown/unpaired filesystem events
+  before publication and removes a source renamed to a non-source path.
+  Behavioral unit cases were added; run them on the current-source worker
+  before accepting the event-admission path.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
