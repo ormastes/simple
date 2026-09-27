@@ -41,6 +41,7 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_metal_")
         || name.starts_with("rt_torch_")
         || name.starts_with("rt_cranelift_")
+        || name.starts_with("spl_cranelift_")
         || name.starts_with("rt_par_")
         || name.starts_with("rt_simd_")
     {
@@ -2670,6 +2671,7 @@ mod tests {
         assert_eq!(tier_of("rt_vk_available"), Ext);
         assert_eq!(tier_of("rt_metal_is_available"), Ext);
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
+        assert_eq!(tier_of("spl_cranelift_aot_isa_feature_v2"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
         assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
     }
