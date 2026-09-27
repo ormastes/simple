@@ -181,3 +181,19 @@ this saving. The 6,584-byte diagnostic is still **1,477 bytes** above the
 current-source Simple program, and does not establish a Target 5 pass. The
 remaining work is a current-source Stage4 hello link map and an exact
 argv/startup/runtime closure analysis before changing their retention policy.
+
+## Startup argv allocation experiment
+
+The historical C bootstrap runtime's `spl_init_args` calls
+`simple_runtime_filter_startup_args`, which allocates a filtered argv array
+even when no `--startup-extension` argument is present. A local fast-path
+experiment reused the original argv on that no-option path and passed the
+seven-case C filter probe, including split/equal option forms, `--`
+termination, and repeated calls. With the same Clang `-Oz`, LLD, section GC,
+and strip flags, the standalone probe grew from **6,576 to 6,728 bytes**
+(+152 bytes). The experiment is retained only under
+`build/mini_builds/target5_startup_argv_fastpath/`; its source edit was
+reverted. The current pure-Simple core's `spl_init_args` already stores argv
+directly without allocating this filtered array, so changing the historical
+C filter would not reduce the current Stage4 hello footprint. The next size
+experiment must use the current-source pure-Simple link closure.
