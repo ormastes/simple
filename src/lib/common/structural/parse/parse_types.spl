@@ -172,14 +172,15 @@ fn parse_lex_program(
 fn parse_lex_program_valid(program: ParseLexProgram) -> bool:
     if program.schema_id != PARSE_SCHEMA_ID:
         return false
-    if program.class_count <= 0 or program.state_count <= 0:
+    if program.class_count <= 0 or program.class_count > 256 or program.state_count <= 0:
         return false
     if program.byte_class.len().to_i64() != 256:
         return false
-    # Bound multiplication by the actual table length before computing it.
-    if program.state_count > program.transition.len().to_i64() / program.class_count:
-        return false
-    if program.transition.len().to_i64() != program.state_count * program.class_count:
+    # Divide the existing bounded array length instead of multiplying untrusted
+    # dimensions, which could overflow before the malformed table is rejected.
+    val cell_count = program.transition.len().to_i64()
+    if cell_count % program.class_count != 0 or
+        cell_count / program.class_count != program.state_count:
         return false
     if program.state_token_kind.len().to_i64() != program.state_count:
         return false
@@ -193,14 +194,19 @@ fn parse_lex_program_valid(program: ParseLexProgram) -> bool:
             return false
         i = i + 1
     i = 0
-    while i < program.transition.len().to_i64():
+    while i < cell_count:
         val target = program.transition[i]
         if target != PARSE_NO_ID and target.to_i64() >= program.state_count:
             return false
         i = i + 1
     i = 0
     while i < program.state_count:
-        if (program.state_flags[i] & ~PARSE_STATE_FLAG_SKIP) != 0u16:
+        val flags = program.state_flags[i]
+        if (flags & ~PARSE_STATE_FLAG_SKIP) != 0u16:
+            return false
+        # A non-accepting state cannot skip a token.  Rejecting this shape
+        # keeps scalar, SIMD, and GPU executors from interpreting it differently.
+        if program.state_token_kind[i] == PARSE_TOKEN_NONE and flags != PARSE_STATE_FLAG_NONE:
             return false
         i = i + 1
     true
