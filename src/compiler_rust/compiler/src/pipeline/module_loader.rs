@@ -1369,6 +1369,21 @@ pub fn check_import_compatibility(
 /// Naive resolver for `use foo` when running single-file programs from the CLI.
 ///
 /// Recursively loads sibling modules and flattens their items into the root module.
+/// Fail a module that assigns a captured enclosing local from a nested fn or
+/// lambda (see `simple_parser::capture_write_check`). The message is shared
+/// verbatim with the pure-Simple twin in
+/// `src/compiler/10.frontend/core/interpreter/resolve.spl`.
+pub fn reject_captured_local_writes(module: &Module, path: &Path) -> Result<(), CompileError> {
+    match simple_parser::capture_write_check::find_captured_local_writes(module).into_iter().next() {
+        Some(write) => Err(CompileError::semantic(format!(
+            "in {}: {}",
+            crate::display_path::display_path(path),
+            write.message()
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub fn load_module_with_imports(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Module, CompileError> {
     load_module_with_imports_for_target(path, visited, simple_common::target::TargetArch::host())
 }
@@ -2362,6 +2377,12 @@ fn load_module_with_imports_internal(
         .parse()
         .map_err(|e| CompileError::Parse(format!("in {}: {e}", crate::display_path::display_path(&path))))?;
     crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut module, target_arch);
+
+    // Closures capture enclosing locals by value and are read-only
+    // (.claude/rules/language.md:22, owner ruling 2026-09-27): a nested fn or
+    // lambda assigning an enclosing local used to lose the write silently.
+    // Reject it for every loaded module (entry and imports) so the loss is loud.
+    reject_captured_local_writes(&module, &path)?;
 
     // Display error hints (warnings, etc.) from parser
     display_parser_hints(&parser, &source, &path);
