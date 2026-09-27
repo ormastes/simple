@@ -92,6 +92,104 @@ esac
 
 echo "land.shs: both gates PASS for owned branch $WORK_BRANCH" >&2
 
+# --- WP2 (push_hook_plan.md A.5/D, owner decision O3=a) ---------------------
+# The ~1-min "1-min remote must-check" local tier runs and gets SIGNED here,
+# before a PR is opened — NOT in the pre-push hook, which stays a <10s
+# report-only check of receipt presence (pre-push-conflict-tree-guard.shs).
+# A failing signing step here is a real refusal, never a silent skip: the
+# whole point of this WP is that an unsigned push is always visible as a rush,
+# never mistaken for "checked".
+if [ "${SIMPLE_PUSH_RUSH:-0}" = 1 ]; then
+    echo "land.shs: SIMPLE_PUSH_RUSH=1 — skipping the local must-check tier and signing; the remote will run full checks" >&2
+else
+    CI_KEY=${SIMPLE_CI_RECEIPT_KEY:-}
+    if [ -z "$CI_KEY" ]; then
+        CI_KEY=$(git config --get simple.ciReceiptKey 2>/dev/null) || CI_KEY=""
+    fi
+    CI_IDENTITY=${SIMPLE_CI_RECEIPT_IDENTITY:-}
+    if [ -z "$CI_IDENTITY" ]; then
+        CI_IDENTITY=$(git config --get simple.ciReceiptIdentity 2>/dev/null) || CI_IDENTITY=""
+    fi
+    if [ -z "$CI_KEY" ] || [ ! -f "$CI_KEY" ] || [ -z "$CI_IDENTITY" ]; then
+        echo "land.shs: REFUSING — no local-ci signing key/identity configured (set SIMPLE_CI_RECEIPT_KEY/SIMPLE_CI_RECEIPT_IDENTITY, or git config simple.ciReceiptKey/simple.ciReceiptIdentity); set SIMPLE_PUSH_RUSH=1 to explicitly acknowledge an unsigned rush landing instead" >&2
+        exit 1
+    fi
+
+    # HOOK POINT (WP3, being reworked to own the manifest placeholders + tier
+    # runner): scripts/check/run-gate-tier.shs is the intended tier runner once
+    # it lands on origin/main — it reads the manifest and substitutes
+    # {range}/{rev}/{base} placeholders per row, and writes `<id> <status>`
+    # lines in the exact format sign-local-ci-receipt.shs's --results expects.
+    # We call it WHEN PRESENT so this hook point stays compatible with WP3
+    # landing under us without another edit here. Until it lands,
+    # `sign-local-ci-receipt.shs --run` does the equivalent for a single host:
+    # it reads config/check/must_check_gates.sdn's `local` tier rows AS OF
+    # $TIP and runs each row's own command directly, the same way
+    # check-push-must-pass.shs's dispatch runs the push tier's rows.
+    NOTE_REMOTE=${LAND_CI_RECEIPT_NOTE_REMOTE:-origin}
+    # Only a real --submit may publish the note remotely: a --dry-run signs
+    # and attaches the receipt LOCALLY (so it can be inspected) but must never
+    # mutate any remote ref. Reviewer fix (coordinator batch review): the note
+    # push used to run unconditionally, before the dry-run/submit branch below
+    # even existed, so a plain `land.shs` (default = --dry-run) was pushing to
+    # refs/notes/ci-receipts on $NOTE_REMOTE.
+    if [ "$SUBMIT" -eq 1 ]; then
+        PUSH_NOTE_FLAG="--push-note"
+    else
+        PUSH_NOTE_FLAG=""
+    fi
+
+    if [ -f scripts/check/run-gate-tier.shs ]; then
+        echo "land.shs: scripts/check/run-gate-tier.shs found — using it for the local tier (WP3)" >&2
+        echo "land.shs: running the local must-check tier and signing a receipt for $TIP (up to ~60s)..." >&2
+        TIER_RESULTS=$(mktemp 2>/dev/null) || TIER_RESULTS="${TMPDIR:-/tmp}/land-tier-results.$$"
+        TIER_OUT=$(sh scripts/check/run-gate-tier.shs --tier local --rev "$TIP" 2>&1)
+        TIER_CODE=$?
+        printf '%s\n' "$TIER_OUT" >&2
+        TIER_VERDICT=$(printf '%s\n' "$TIER_OUT" | tail -1)
+        case "$TIER_VERDICT" in
+            PASS*) ;;
+            *)
+                rm -f "$TIER_RESULTS"
+                echo "land.shs: REFUSING — run-gate-tier.shs verdict: $TIER_VERDICT" >&2
+                exit 1
+                ;;
+        esac
+        if [ "$TIER_CODE" -ne 0 ]; then
+            rm -f "$TIER_RESULTS"
+            echo "land.shs: REFUSING — run-gate-tier.shs exited $TIER_CODE despite PASS text" >&2
+            exit 1
+        fi
+        # Every line but the trailing verdict line is a "<id> <status>" row —
+        # exactly the --results format (see run-gate-tier.shs's own contract).
+        printf '%s\n' "$TIER_OUT" | sed '$d' > "$TIER_RESULTS"
+        SIGN_OUT=$(sh scripts/check/sign-local-ci-receipt.shs --results "$TIER_RESULTS" --tier local \
+            --key "$CI_KEY" --identity "$CI_IDENTITY" --rev "$TIP" \
+            --note $PUSH_NOTE_FLAG --note-remote "$NOTE_REMOTE" 2>&1)
+        SIGN_CODE=$?
+        rm -f "$TIER_RESULTS"
+    else
+        echo "land.shs: running the local must-check tier and signing a receipt for $TIP (up to ~60s)..." >&2
+        SIGN_OUT=$(sh scripts/check/sign-local-ci-receipt.shs --run --tier local \
+            --key "$CI_KEY" --identity "$CI_IDENTITY" --rev "$TIP" \
+            --note $PUSH_NOTE_FLAG --note-remote "$NOTE_REMOTE" 2>&1)
+        SIGN_CODE=$?
+    fi
+    printf '%s\n' "$SIGN_OUT" >&2
+    SIGN_VERDICT=$(printf '%s\n' "$SIGN_OUT" | tail -1)
+    case "$SIGN_VERDICT" in
+        PASS*) ;;
+        *) echo "land.shs: REFUSING TO PUSH — local-ci receipt signing verdict: $SIGN_VERDICT" >&2; exit 1 ;;
+    esac
+    [ "$SIGN_CODE" -eq 0 ] ||
+        { echo "land.shs: REFUSING TO PUSH — sign-local-ci-receipt.shs exited $SIGN_CODE despite PASS text" >&2; exit 1; }
+    if [ "$SUBMIT" -eq 1 ]; then
+        echo "land.shs: local-ci receipt signed and published for $TIP" >&2
+    else
+        echo "land.shs: DRY-RUN — local-ci receipt signed and attached LOCALLY for $TIP; nothing was pushed. Rerun with --submit to also push refs/notes/ci-receipts to $NOTE_REMOTE" >&2
+    fi
+fi
+
 if [ "$SUBMIT" -ne 1 ]; then
     echo "land.shs: dry-run complete; use --submit to push only $WORK_BRANCH" >&2
     exit 0
