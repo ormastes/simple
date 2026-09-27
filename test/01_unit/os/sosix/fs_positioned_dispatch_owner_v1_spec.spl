@@ -91,3 +91,23 @@ describe "SOSIX positioned dispatcher owner seam v1":
         expect(state.accepted).to_be(false)
         expect(state.reason).to_equal("positioned-dispatch-owner-not-ready")
         expect(state.result.value).to_equal(-95)
+
+    it "stops before request token wrap without invoking the backend":
+        var owner = _owner()
+        owner.next_request_token = 18446744073709551614u64
+        val args = sosix_fs_positioned_syscall_args_v1(
+            SOSIX_FS_PREAD_REGISTERED_V1, 41, 73,
+            0x0000000900000004, 1, 0, 1)
+        val last = sosix_fs_dispatch_positioned_with_owner_v1(
+            args, true, 42, owner, OwnerBackend(bytes: [10, 20]))
+        expect(last.accepted).to_equal(true)
+        expect(last.owner.next_request_token).to_equal(18446744073709551615u64)
+        expect(last.owner.registry_owner.registry.buffers[0].bytes).to_equal([20, 0])
+
+        val exhausted = sosix_fs_dispatch_positioned_with_owner_v1(
+            args, true, 42, last.owner, OwnerBackend(bytes: [10, 30]))
+        expect(exhausted.accepted).to_equal(false)
+        expect(exhausted.reason).to_equal("positioned-request-token-exhausted")
+        expect(exhausted.result.value).to_equal(-95)
+        expect(exhausted.owner.next_request_token).to_equal(18446744073709551615u64)
+        expect(exhausted.owner.registry_owner.registry.buffers[0].bytes).to_equal([20, 0])
