@@ -262,6 +262,12 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
         val stage = _remote_windows_command_value(staged_path)
         if stage.is_err(): return Err(stage.unwrap_err())
         return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$stageParent = Get-Item -LiteralPath (Split-Path -Parent " + stage.unwrap() + ") -Force; " +
+            "while ($null -ne $stageParent) { " +
+            "if ((-not $stageParent.PSIsContainer) -or (($stageParent.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test uploaded Simple parent is redirected'; exit 74 }; " +
+            "$stageParent = $stageParent.Parent }; " +
             "$item = Get-Item -LiteralPath " + stage.unwrap() + " -Force -ErrorAction SilentlyContinue; " +
             "if (($null -eq $item) -or $item.PSIsContainer -or (($item.Attributes -band " +
             "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
@@ -274,7 +280,12 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
                 not _remote_path_has_file_leaf(staged_path, false):
             return Err("remote POSIX Simple staging path must be an exact absolute file path")
         val stage = _remote_posix_quote(staged_path)
-        return Ok("if [ -L " + stage + " ] || [ ! -f " + stage + " ]; then " +
+        val parent = _remote_posix_quote(_remote_posix_parent(staged_path))
+        return Ok("parent=" + parent + "; probe=$parent; while [ \"$probe\" != / ]; do " +
+            "if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test uploaded Simple parent is redirected' >&2; exit 74; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "if [ -L " + stage + " ] || [ ! -f " + stage + " ]; then " +
             "echo 'remote-test uploaded Simple is not a regular file' >&2; exit 74; fi; " +
             "actual=$(sha256sum -- " + stage + ") || exit 74; actual=${actual%% *}; " +
             "if [ \"$actual\" != '" + digest + "' ]; then " +
@@ -421,6 +432,12 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "if (($null -eq $sourceItem) -or $sourceItem.PSIsContainer -or " +
             "(($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
             "{ Write-Error 'remote-test staging path is not a regular non-reparse file'; exit 75 }; " +
+            "$sourceParent = Get-Item -LiteralPath (Split-Path -Parent $src) -Force; " +
+            "while ($null -ne $sourceParent) { " +
+            "if ((-not $sourceParent.PSIsContainer) -or (($sourceParent.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test staging parent is redirected'; exit 75 }; " +
+            "$sourceParent = $sourceParent.Parent }; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
             "$parentItem = Get-Item -LiteralPath (Split-Path -Parent $dst) -Force; " +
             "while ($null -ne $parentItem) { " +
@@ -449,8 +466,13 @@ fn remote_simple_install_command(remote_os: text, configured: text,
         val source = _remote_posix_quote(staged_path)
         val target = _remote_posix_quote(destination)
         val parent = _remote_posix_quote(_remote_posix_parent(destination))
+        val source_parent = _remote_posix_quote(_remote_posix_parent(staged_path))
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
-        return Ok("if [ -L " + source + " ] || [ ! -f " + source + " ]; then " +
+        return Ok("source_parent=" + source_parent + "; probe=$source_parent; " +
+            "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +
+            "echo 'remote-test staging parent is redirected' >&2; exit 75; fi; " +
+            "probe=${probe%/*}; if [ -z \"$probe\" ]; then probe=/; fi; done; " +
+            "if [ -L " + source + " ] || [ ! -f " + source + " ]; then " +
             "echo 'remote-test staging path is not a regular file' >&2; exit 75; fi; " +
             "parent=" + parent + "; mkdir -p -- \"$parent\" && { probe=$parent; " +
             "while [ \"$probe\" != / ]; do if [ -L \"$probe\" ] || [ ! -d \"$probe\" ]; then " +

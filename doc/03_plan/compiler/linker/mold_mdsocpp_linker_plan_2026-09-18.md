@@ -838,6 +838,12 @@ always a complete one-shot link. Their enabled counterparts remain named
 unsupported until those output contracts are implemented. Native
 Windows execution remains pending the host prerequisite recorded above.
 
+The post-upload digest verifier and publication command now independently walk
+the staging file's complete parent chain immediately before reopening it.
+POSIX symlink ancestors and Windows reparse/non-directory ancestors therefore
+fail closed even when an attacker swaps a staging directory after the initial
+absence preflight but before hashing or publication.
+
 The Linux internal route now projects `--hash-style=gnu`, `sysv`, or `both`
 into typed ELF layout policy. The selected `.gnu.hash` and/or `.hash` sections
 and their matching `DT_GNU_HASH`/`DT_HASH` tags are emitted together; unknown
