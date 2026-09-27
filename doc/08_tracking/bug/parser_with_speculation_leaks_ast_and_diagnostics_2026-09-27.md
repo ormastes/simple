@@ -29,6 +29,26 @@ retains that diagnostic. `with + 1` likewise creates speculative expression
 nodes before fallback. These fixtures need execution on a source-matched
 pure-Simple runtime before claiming observed output or exact arena growth.
 
+## Existing state APIs and implementation constraint
+
+The inspected owners have whole-pool serialization paths:
+`_AstExpr/nodes.spl:1032,1074` for expressions, `ast_stmt.spl:710,737` for
+statements, `_Ast/decl_nodes.spl:1534,1625` for declarations,
+`types.spl:1534,1595` for types, and `parser.spl:1270,1291` for parser state.
+These are cache-oriented dump/restore operations over entire pools. Calling
+them on each statement-start `with` would copy work proportional to all
+previously parsed nodes and introduce a full-pool scan into a hot parse path.
+They are unsuitable as a routine speculation checkpoint without separate
+performance design and evidence.
+
+The expression owner has `expr_count_set`, but `expr_alloc`
+(`_AstExpr/nodes.spl:515-543`) appends to many parallel arrays. Rewinding only
+the count would make the next allocation reuse an index while backing arrays
+append at a later index. An efficient owner-level checkpoint must truncate
+all appended arrays and environment mirror entries consistently, restore
+diagnostics and type registrations, and account for any nested
+statement/declaration/module effects reached through expression parsing.
+
 ## Required correction
 
 Make failed alternatives discard every speculative AST/type/module/diagnostic
