@@ -863,3 +863,7 @@ Shared objects without `DT_SONAME` now use their preserved linker-input
 identity for `DT_NEEDED`, matching GNU/mold behavior instead of rejecting a
 valid DSO. An embedded SONAME remains authoritative; searched `-l` inputs use
 the resolved file leaf, while explicitly supplied paths retain that path.
+Repeated byte-identical shared objects with the same effective SONAME are now
+idempotent and emit one dependency. Different payloads advertising the same
+SONAME fail closed before resolution, preventing link-time symbols from being
+bound to a second image the runtime loader could alias to the first SONAME.
