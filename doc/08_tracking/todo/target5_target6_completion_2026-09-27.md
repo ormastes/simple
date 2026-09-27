@@ -93,6 +93,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   behavior, old-cursor migration, and warm p95/RSS before closing this bug.
   The existing warm `ls-files --others` traversal remains a separate Target 6
   zero-scan cutover gap.
+- Cold refresh now derives the inventory and untracked membership cursor from
+  one tagged Git listing instead of two independently timed listings. Run the
+  disposable-Git cold/warm case on a current-source worker and prove concurrent
+  directory changes cannot publish an invalid source/content binding.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
