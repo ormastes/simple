@@ -57,3 +57,11 @@ physical GPU execution evidence; RU-001 remains open for other families.
 ### 2026-09-27 network route addendum
 
 The companion [network route manifest](sosix_network_route_manifest_v1_2026-09-27.md) classifies hosted TCP externs and selected SimpleOS socket routes. It records the baseline x86_64 live-trap capability gap, the subsequent source fix on main, and the remaining ARM64 exact-endpoint parity gap. The network provider and global RU-001 gates remain open.
+
+### 2026-09-28 dynamic library and memory route addendum
+
+The companion [dynamic library and executable-memory route manifest](sosix_dynload_memory_route_manifest_v1_2026-09-28.md)
+classifies the SFFI, compiler WFFI/plugin, hosted SMF/JIT mapping, native/seed,
+and pure SOSIX library-plan routes. It records the missing effectful SOSIX
+library provider and callable-generation lifetime gate. RU-001 and RU-042 remain
+open.
