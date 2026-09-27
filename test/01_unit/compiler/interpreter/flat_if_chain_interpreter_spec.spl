@@ -1,28 +1,25 @@
 """
 Executable coverage for the pure-Simple interpreter's linked if-chain arena.
 
-The first four examples run source through core_interpret, so they exercise the
-real parser, local resolver, and tree-walking evaluator. The final example is a
-structural supplement that pins the otherwise non-observable prescan/escape
-walk coverage; it is not a substitute for the executable examples.
+Every example runs source through core_interpret, so it exercises the real
+parser, local resolver, and tree-walking evaluator; the script's result is its
+last top-level expression.
+
+A former structural example pinned `flat_if_chain_*` / `flat_if_arm_*`
+accessors inside resolve.spl. Those existed only in the share-history merges
+a8244005f9b / e274cd33719 / e9da588ee61 and were removed on purpose by
+fcbec1c3b62 (restore src to origin); it was retired with owner approval on
+2026-09-27 rather than pinning code that no longer exists.
 """
 
 use std.spec.*
 use compiler.frontend.core.interpreter.mod.{core_interpret}
 use compiler.frontend.core.interpreter.value.{val_get_int}
 
-extern fn rt_file_read_text(path: text) -> text
-
 fn run_chain_int(source: text, path: text) -> i64:
     val result = core_interpret(source, path)
     if result < 0: return -9000001
     val_get_int(result)
-
-fn source_section(source: text, start_marker: text, end_marker: text) -> text:
-    val start = source.index_of(start_marker)
-    val finish = source.index_of(end_marker)
-    if start < 0 or finish <= start: return ""
-    source.substring(start, finish)
 
 fn long_mixed_chain_source(arm_count: i64, selected: i64) -> text:
     var source = "val candidate = nil\nval selected = {selected}\nvar result = -1\n" +
@@ -112,28 +109,3 @@ selected * 100 + item
     it "executes the selected tail of a 256-arm mixed chain":
         val source = long_mixed_chain_source(256, 255)
         expect(run_chain_int(source, "flat_if_chain_mixed_256.spl")).to_equal(255)
-
-    it "pins resolver prescan and escape walks across every linked field":
-        val source = rt_file_read_text(
-            "src/compiler/10.frontend/core/interpreter/resolve.spl") ?? ""
-        val prescan = source_section(source,
-            "fn resolve_prescan_expr", "fn resolve_expr")
-        val resolver = source_section(source,
-            "fn resolve_expr", "fn resolve_function")
-        val escape = source_section(source,
-            "fn esc_collect_expr_locals", "fn esc_analyze_function")
-
-        for section in [prescan, resolver, escape]:
-            expect(section).to_contain("flat_if_chain_first_arm_get")
-            expect(section).to_contain("flat_if_arm_next_get")
-            expect(section).to_contain("flat_if_arm_head_get")
-            expect(section).to_contain("flat_if_arm_init_get")
-            expect(section).to_contain("flat_if_arm_body_at")
-            expect(section).to_contain("flat_if_chain_else_stmt_at")
-
-        expect(prescan).to_contain("flat_if_arm_then_expr_get")
-        expect(prescan).to_contain("flat_if_chain_else_expr_get")
-        expect(resolver).to_contain("flat_if_arm_then_expr_get")
-        expect(resolver).to_contain("flat_if_chain_else_expr_get")
-        expect(escape).to_contain("flat_if_arm_then_expr_get")
-        expect(escape).to_contain("flat_if_chain_else_expr_get")
