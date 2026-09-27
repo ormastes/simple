@@ -1,7 +1,87 @@
 use std.spec.*
 use compiler.driver.canonical_target_registry_owner_v2.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+use std.nogc_sync_mut.composition.environment_variants.target_codegen_profile_v1.*
+
+fn target_digest_ctr2(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn x86_profile_ctr2() -> TargetCodegenProfileV1:
+    TargetCodegenProfileV1(
+        descriptor_size: TARGET_CODEGEN_PROFILE_DESCRIPTOR_BYTES_V1,
+        schema_version: TARGET_CODEGEN_PROFILE_SCHEMA_V1,
+        profile_identity: target_digest_ctr2(1u64),
+        target_identity: target_digest_ctr2(2u64),
+        target_architecture: ENV_ARCH_X86_64_V1,
+        target_abi_id: 1u32, target_object_format_id: 1u32,
+        target_endian_id: 1u16, target_pointer_width_bits: 64u16,
+        requested_features: EnvironmentFeatureSetV1(
+            architecture: ENV_ARCH_X86_64_V1,
+            words: EnvironmentArenaRangeV1(offset: 0u32, count: 1u32)),
+        strict_requested_features: true,
+        backend_identity: target_digest_ctr2(3u64),
+        semantic_identity: target_digest_ctr2(4u64),
+        numerical_contract_id: 1u32)
 
 describe "canonical target registry owner V2":
+    it "binds a live profile to canonical registry content across aliases and owners":
+        val owner = canonical_target_registry_owner_v2(81u64).unwrap()
+        val alias = canonical_target_registry_resolve_v2(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        val canonical = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val alias_use = canonical_target_registry_acquire_use_v2(owner, alias).unwrap()
+        val canonical_use = canonical_target_registry_acquire_use_v2(owner, canonical).unwrap()
+        val profile = x86_profile_ctr2()
+        val first = canonical_target_registry_bind_profile_v2(owner, alias_use,
+            profile, [1u64]).unwrap()
+        val second = canonical_target_registry_bind_profile_v2(owner, canonical_use,
+            profile, [1u64]).unwrap()
+        expect(first.canonical_target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(first.mapping_digest).to_equal(owner.candidate.mapping_digest)
+        expect(first.profile_binding_digest).to_equal(second.profile_binding_digest)
+        val other = canonical_target_registry_owner_v2(82u64).unwrap()
+        val other_resolution = canonical_target_registry_resolve_v2(other,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val other_use = canonical_target_registry_acquire_use_v2(other, other_resolution).unwrap()
+        val other_binding = canonical_target_registry_bind_profile_v2(other, other_use,
+            profile, [1u64]).unwrap()
+        expect(other_binding.profile_binding_digest).to_equal(first.profile_binding_digest)
+        val different_features = canonical_target_registry_bind_profile_v2(owner,
+            alias_use, profile, [2u64]).unwrap()
+        expect(different_features.profile_binding_digest == first.profile_binding_digest).to_be(false)
+        var mismatch = profile
+        mismatch.target_abi_id = 2u32
+        expect(canonical_target_registry_bind_profile_v2(owner, alias_use,
+            mismatch, [1u64])).to_equal(Err(CanonicalTargetRegistryErrorV2.InvalidTargetProfile))
+        expect(canonical_target_registry_release_v2(owner, alias_use).is_ok()).to_be(true)
+        expect(canonical_target_registry_bind_profile_v2(owner, alias_use,
+            profile, [1u64])).to_equal(Err(CanonicalTargetRegistryErrorV2.StaleToken))
+        expect(canonical_target_registry_release_v2(owner, canonical_use).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(other, other_use).is_ok()).to_be(true)
+
+    it "keeps a pinned profile bound to its original registry generation":
+        val owner = canonical_target_registry_owner_v2(91u64).unwrap()
+        val old = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val old_use = canonical_target_registry_acquire_use_v2(owner, old).unwrap()
+        val profile = x86_profile_ctr2()
+        val old_binding = canonical_target_registry_bind_profile_v2(owner, old_use,
+            profile, [1u64]).unwrap()
+        expect(canonical_target_registry_replace_v2(owner, owner.candidate,
+            owner.aliases).is_ok()).to_be(true)
+        val retained = canonical_target_registry_bind_profile_v2(owner, old_use,
+            profile, [1u64]).unwrap()
+        expect(retained.profile_binding_digest).to_equal(old_binding.profile_binding_digest)
+        val current = canonical_target_registry_resolve_v2(owner,
+            "x86_64-unknown-linux-gnu").unwrap()
+        val current_use = canonical_target_registry_acquire_use_v2(owner, current).unwrap()
+        val current_binding = canonical_target_registry_bind_profile_v2(owner, current_use,
+            profile, [1u64]).unwrap()
+        expect(current_binding.profile_binding_digest == old_binding.profile_binding_digest).to_be(false)
+        expect(canonical_target_registry_release_v2(owner, old_use).is_ok()).to_be(true)
+        expect(canonical_target_registry_release_v2(owner, current_use).is_ok()).to_be(true)
+
     it "binds aliases into owner-issued resolution and use tokens":
         val owner = canonical_target_registry_owner_v2(101u64).unwrap()
         val resolution = canonical_target_registry_resolve_v2(owner,

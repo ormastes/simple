@@ -1171,6 +1171,16 @@ their storage with a new serial and digest, so the 1024-record bound limits
 concurrent retained uses rather than the lifetime number of successful uses.
 An immediate duplicate release is reported as such; after storage reuse, the
 old token is stale.
+`canonical_target_registry_bind_profile_v2` consumes that live use to validate
+the profile's architecture, ABI, object format, endian, and pointer width.
+The resulting profile binding digest includes the versioned mapping content,
+alias table, registry generation, canonical tuple, profile facts, and selected
+feature words. It excludes the supplied alias, owner instance, resolution
+serial, and feature-arena offset, so equivalent targets share one cache identity.
+Each resolution retains its content digest across replacement; a pinned use can
+still bind to its old generation, while a new use binds to the new generation.
+The build/cache owner must consume the live use and binding together before
+this digest can authorize a plan or cache lookup.
 
 The native V3 process implementation must create all pipes atomically with
 close-on-exec, bound stdin work to one quantum per poll, and distinguish V2 from
