@@ -19,7 +19,13 @@ use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_c
 use app.cli.bootstrap_identity.{bootstrap_version}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
 use app.cli.native_build_main.{run_native_build_worker}
-use app.io._CliCompile.compile_targets.{cli_native_build}
+use app.io._CliCompile.compile_targets.{cli_native_build_with_environment_variant_policy_v1}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_full_static_backends_for_k1_policy_v1}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1,
+    environment_variant_policy_handoff_owner_error_label_v1
+}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists, dir_create}
 use std.nogc_sync_mut.io.file_ops.{file_append}
 
@@ -629,8 +635,24 @@ fn main() -> i64:
         # Deliberately not a general bootstrap `run` command. Only children
         # spawned by native_build_main's admitted coordinator may enter, and
         # only its two fixed internal entrypoints are accepted.
-        return cli_native_build(
-            bootstrap_internal_native_build_args(all_args, 2))
+        # Same preamble as native_build_worker.spl's main: without the backend
+        # table, codegen entry answers PLUG-E-NOTFOUND as a ud2/SIGILL.
+        if not install_selected_k1_backend_table_v1() or
+                not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
+            print "error: PLUG-E-TABLE: native-build worker backend composition refused: {selected_k1_backend_table_diagnostic_v1()}"
+            return 1
+        # The coordinator always attaches its one internal policy handoff
+        # argument; strip and decode it exactly as native_build_worker.spl's
+        # own main does, or the build rejects it as an unknown option.
+        val opened = match environment_variant_policy_handoff_extract_v1(
+            bootstrap_internal_native_build_args(all_args, 2)):
+            case Ok(value): value
+            case Err(failure):
+                val reason = environment_variant_policy_handoff_owner_error_label_v1(failure)
+                print "error: native-build worker rejected its internal policy handoff: {reason}"
+                return 1
+        return cli_native_build_with_environment_variant_policy_v1(
+            opened.user_args, opened.handoff.collection)
     if first == "run" and native_worker_marker == "1" and argc >= 3:
         # A marked coordinator child may never escape the internal allowlist
         # into ordinary command handling. Unmarked `run` is not internal and
