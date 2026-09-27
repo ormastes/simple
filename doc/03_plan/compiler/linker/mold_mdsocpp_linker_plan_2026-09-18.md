@@ -887,3 +887,9 @@ HIDDEN definitions cannot satisfy another image's undefined references.
 `STB_GNU_UNIQUE` definitions now participate in DSO lookup alongside GLOBAL
 and WEAK bindings, admitting the process-unique symbols emitted by C++
 toolchains without weakening the visibility filter.
+The DSO reader now validates the complete section-header table without
+overflow-prone offset arithmetic, every consumed section range, linked string
+table indices and types, and fixed-width `.dynsym`/`.dynamic` entry sizes.
+Malformed shared objects therefore return a typed linker error before any
+out-of-range byte read; mirrored x86_64 coverage corrupts a `.dynsym` string
+table link to prove the fail-closed path.

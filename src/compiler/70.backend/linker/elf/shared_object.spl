@@ -13,6 +13,7 @@ use compiler.backend.linker.elf_parser.{elf_strtab_get, elf_parse_string_table}
 
 val SHT_DYNSYM_SO: i64 = 11
 val SHT_DYNAMIC_SO: i64 = 6
+val SHT_STRTAB_SO: i64 = 3
 val SHT_GNU_VERSYM: i64 = 0x6fffffff
 val SHT_GNU_VERDEF: i64 = 0x6ffffffd
 val DT_SONAME_SO: i64 = 14
@@ -51,6 +52,26 @@ fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
 fn elf_so_link(bytes: [u8], shoff: i64, i: i64) -> i64:
     elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 40)
 
+fn elf_so_range_valid(bytes: [u8], offset: i64, size: i64) -> bool:
+    offset >= 0 and size >= 0 and offset <= bytes.len() and size <= bytes.len() - offset
+
+fn elf_so_checked_section(bytes: [u8], shoff: i64, shnum: i64, i: i64,
+        role: text) -> Result<ElfSectionHeader, text>:
+    if i < 0 or i >= shnum:
+        return Err("shared object {role} section index {i} is out of range")
+    val section = elf_so_shdr(bytes, shoff, i)
+    if not elf_so_range_valid(bytes, section.sh_addr, section.sh_size):
+        return Err("shared object {role} section range is out of file bounds")
+    Ok(section)
+
+fn elf_so_checked_linked_strtab(bytes: [u8], shoff: i64, shnum: i64,
+        owner_i: i64, role: text) -> Result<ElfSectionHeader, text>:
+    val link = elf_so_link(bytes, shoff, owner_i)
+    val section = elf_so_checked_section(bytes, shoff, shnum, link, role)?
+    if section.sh_type != SHT_STRTAB_SO:
+        return Err("shared object {role} does not reference a string table")
+    Ok(section)
+
 fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
     val header = elf_parse_header(bytes)?
@@ -58,7 +79,8 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
         return Err("not a shared object (e_type {header.e_type})")
     val shoff = header.e_shoff
     val shnum = header.e_shnum
-    if shoff <= 0 or shoff + shnum * ELF64_SHDR_SIZE > bytes.len():
+    if shoff <= 0 or shnum <= 0 or shoff > bytes.len() or
+            shnum > (bytes.len() - shoff) / ELF64_SHDR_SIZE:
         return Err("shared object has no usable section header table")
 
     var dynsym_i: i64 = -1
@@ -80,16 +102,25 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     if dynsym_i < 0:
         return Err("shared object has no .dynsym")
 
-    val symsec = elf_so_shdr(bytes, shoff, dynsym_i)
-    val strtab = elf_parse_string_table(bytes, elf_so_shdr(bytes, shoff, elf_so_link(bytes, shoff, dynsym_i)))
+    val symsec = elf_so_checked_section(bytes, shoff, shnum, dynsym_i, ".dynsym")?
+    if symsec.sh_size % 24 != 0:
+        return Err("shared object .dynsym size is not a multiple of 24")
+    val symstrsec = elf_so_checked_linked_strtab(bytes, shoff, shnum, dynsym_i,
+        ".dynsym string table")?
+    val strtab = elf_parse_string_table(bytes, symstrsec)
     var versym_off: i64 = -1
     if versym_i >= 0:
-        versym_off = elf_so_shdr(bytes, shoff, versym_i).sh_addr
+        val versymsec = elf_so_checked_section(bytes, shoff, shnum, versym_i,
+            ".gnu.version")?
+        versym_off = versymsec.sh_addr
 
     var version_names: {i64: text} = {}
     if verdef_i >= 0:
-        val vdsec = elf_so_shdr(bytes, shoff, verdef_i)
-        val vdstr = elf_parse_string_table(bytes, elf_so_shdr(bytes, shoff, elf_so_link(bytes, shoff, verdef_i)))
+        val vdsec = elf_so_checked_section(bytes, shoff, shnum, verdef_i,
+            ".gnu.version_d")?
+        val vdstrsec = elf_so_checked_linked_strtab(bytes, shoff, shnum, verdef_i,
+            ".gnu.version_d string table")?
+        val vdstr = elf_parse_string_table(bytes, vdstrsec)
         var vd: i64 = 0
         while vd + 20 <= vdsec.sh_size:
             val base = vdsec.sh_addr + vd
@@ -111,8 +142,11 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     var export_values: {text: i64} = {}
     var export_versions: {text: text} = {}
     val count = symsec.sh_size / 24
-    if versym_i >= 0 and elf_so_shdr(bytes, shoff, versym_i).sh_size < count * 2:
-        return Err("truncated .gnu.version table")
+    if versym_i >= 0:
+        val versymsec = elf_so_checked_section(bytes, shoff, shnum, versym_i,
+            ".gnu.version")?
+        if versymsec.sh_size < count * 2:
+            return Err("truncated .gnu.version table")
     var k: i64 = 1
     while k < count:
         val e = symsec.sh_addr + k * 24
@@ -148,8 +182,12 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
 
     var soname = ""
     if dynamic_i >= 0:
-        val dsec = elf_so_shdr(bytes, shoff, dynamic_i)
-        val dstr = elf_parse_string_table(bytes, elf_so_shdr(bytes, shoff, elf_so_link(bytes, shoff, dynamic_i)))
+        val dsec = elf_so_checked_section(bytes, shoff, shnum, dynamic_i, ".dynamic")?
+        if dsec.sh_size % 16 != 0:
+            return Err("shared object .dynamic size is not a multiple of 16")
+        val dstrsec = elf_so_checked_linked_strtab(bytes, shoff, shnum, dynamic_i,
+            ".dynamic string table")?
+        val dstr = elf_parse_string_table(bytes, dstrsec)
         var d: i64 = 0
         while d + 16 <= dsec.sh_size:
             val tag = elf_read_u64_le(bytes, dsec.sh_addr + d)
