@@ -38,6 +38,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NATIVE_ALL_PROVIDER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_SYMBOL_TABLE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RUNTIME_TLS");
 
     compile_c_runtime_sources();
 
@@ -52,6 +53,7 @@ fn main() {
     let runtime_c_dir = manifest_dir.join("../../runtime");
     let runtime_symbol_table = env::var_os("CARGO_FEATURE_RUNTIME_SYMBOL_TABLE").is_some();
     let runtime_regex = env::var_os("CARGO_FEATURE_RUNTIME_REGEX").is_some();
+    let runtime_tls = env::var_os("CARGO_FEATURE_RUNTIME_TLS").is_some();
 
     // Symbols provided by simple-native-all when driver-hooks is active.
     let driver_hooks = env::var_os("CARGO_FEATURE_DRIVER_HOOKS").is_some();
@@ -94,7 +96,7 @@ fn main() {
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, &target_os);
+    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, runtime_tls, &target_os);
 
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
@@ -360,18 +362,39 @@ fn compile_c_runtime_sources() {
     }
     build.compile("runtime_sffi_c");
 
-    // hosted_cocoa.c is Objective-C behind a .c extension (real NSWindow path
-    // on __APPLE__). Compile it separately with the ObjC language flag so the
-    // staticlib carries real rt_cocoa_* providers on macOS; AppKit/Foundation
-    // are already in the platform framework link set.
+    // Cocoa has one process-wide owner: the dynamic runtime. A normal
+    // rustc-link-lib would also bundle this provider into native-all through
+    // the runtime rlib. Link and export it only when producing the cdylib.
     if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "macos" {
         let cocoa = runtime_c_dir.join("hosted_cocoa.c");
         if cocoa.exists() {
             let mut objc = cc::Build::new();
             objc.opt_level(2).warnings(false).cargo_metadata(false);
+            // New upstream Clang can emit objc_msgSendClass selector stubs
+            // that the installed Apple linker cannot synthesize. Use ordinary
+            // libobjc calls so the bootstrap's Clang and SDK can differ.
+            objc.flag_if_supported("-fno-objc-msgsend-class-selector-stubs");
             objc.flag("-xobjective-c").file(cocoa);
             objc.compile("runtime_sffi_objc");
-            println!("cargo:rustc-link-lib=static=runtime_sffi_objc");
+            let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-force_load,{out_dir}/libruntime_sffi_objc.a");
+            println!("cargo:rustc-cdylib-link-arg=-Wl,-framework,Cocoa");
+            for name in [
+                "window_new",
+                "window_resize",
+                "window_close",
+                "layer_create",
+                "layer_fill_rect",
+                "layer_present",
+                "layer_free",
+                "layer_read_pixel",
+                "layer_blend_rect",
+                "layer_blur",
+                "layer_gradient_v",
+                "event_pump",
+            ] {
+                println!("cargo:rustc-cdylib-link-arg=-Wl,-exported_symbol,_rt_cocoa_{name}");
+            }
         }
     }
 
@@ -407,6 +430,7 @@ fn collect_defined_runtime_symbols(
     root: &Path,
     c_root: &Path,
     runtime_regex: bool,
+    runtime_tls: bool,
     target_os: &str,
 ) -> HashSet<String> {
     let mut exported = HashSet::new();
@@ -426,6 +450,11 @@ fn collect_defined_runtime_symbols(
                 continue;
             }
             if !runtime_regex && entry_path.file_name().and_then(|name| name.to_str()) == Some("regex.rs") {
+                continue;
+            }
+            // net_tls.rs is compiled only with runtime-tls. Do not register
+            // its exports when the module is absent from the runtime archive.
+            if !runtime_tls && entry_path.file_name().and_then(|name| name.to_str()) == Some("net_tls.rs") {
                 continue;
             }
             if let Ok(file) = fs::read_to_string(&entry_path) {
