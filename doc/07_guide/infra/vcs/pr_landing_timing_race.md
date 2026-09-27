@@ -109,7 +109,10 @@ fanned out to ~35 heavy workflows. Now:
   non-required siblings pick the label up on the next push.
 - Every heavy lane still runs on push to `main` (PR-only workflows gained a
   `push: branches: [main]` trigger with the same `paths:`), so nothing is
-  unenforced — it is enforced post-merge instead of pre-merge.
+  unenforced — it is enforced post-merge instead of pre-merge. The four
+  workflows whose `push:` had no branch filter (aot-lane-fences, rtl-toolchain,
+  rust-bootstrap-multiplatform, windows-build) now push-trigger on `main` only,
+  so pushing a `work/*` branch no longer queues them twice.
 - Every PR/push workflow has `concurrency` keyed on PR number or ref; test
   lanes use `cancel-in-progress: true` (latest commit wins, also on `main`),
   writers (`cache-main-writer`, `cache-promotion`, `release`,
