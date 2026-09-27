@@ -1,0 +1,32 @@
+#!/bin/sh
+# Focused native regression; pass --bootstrap-producer explicitly for a seed.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+if [ "${1:-}" = --bootstrap-producer ]; then
+    shift
+    export SIMPLE_NATIVE_BUILD_RUST=1
+fi
+candidate=${1:?usage: check-codec-key-array-type.shs [--bootstrap-producer] /absolute/compiler}
+case "$candidate" in /*) ;; *) echo 'compiler path must be absolute' >&2; exit 2;; esac
+work=$(mktemp -d "${TMPDIR:-/tmp}/codec-key-array.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+cd "$root"
+timeout_bin=$(command -v timeout || command -v gtimeout)
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$timeout_bin" 90 "$candidate" native-build \
+    --backend llvm --runtime-bundle core-c-bootstrap --entry-closure \
+    --entry scripts/check/cert/redeploy_gate/fixtures/codec_key_array_type.spl \
+    --cache-dir "$work/cache" --mode one-binary --output "$work/probe" >"$work/build.log" 2>&1 || {
+    head -c 65536 "$work/build.log" >&2; exit 1;
+}
+actual=$("$timeout_bin" 10 "$work/probe")
+expected=$(printf '42\n0')
+[ "$actual" = "$expected" ] || { echo "unexpected result: $actual" >&2; exit 1; }
+if [ "$(uname -sm)" = 'Darwin arm64' ]; then
+    objdump=${LLVM_OBJDUMP:-/opt/homebrew/opt/llvm/bin/llvm-objdump}
+    "$objdump" --disassemble "$work/probe" >"$work/disassembly"
+    if grep -Eq '#0xfffffff8([[:space:]]|$)' "$work/disassembly"; then
+        echo 'FAIL: truncated tagged-pointer mask in typed codec fixture' >&2
+        exit 1
+    fi
+fi
+echo 'PASS: native dictionary-key iteration preserves aggregate values'
