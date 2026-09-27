@@ -2586,45 +2586,15 @@ void rt_exit(spl_i64 code) {
     }
 }
 
-/* ---- atomics / atexit / signal (7) ----------------------------------------
- * The atomics are REAL: __atomic_* are clang builtins, not libc, and lower to
- * AArch64 LDAXR/STLXR (or LSE) inline — they need no runtime support and are
- * correct on this target today, single-core or not. The handle is a pointer to
- * an 8-byte cell from the bump allocator, matching how every other handle in
- * this file is minted.
- *
+/* ---- atomics / atexit / signal --------------------------------------------
+ * AArch64 and RV64 share the typed, freestanding atomic SFFI implementation.
  * Signals and atexit are honestly ABSENT. SimpleOS has no POSIX signal
  * delivery and no process teardown, and the caller
  * (src/lib/nogc_sync_mut/io/signal_stubs.spl:29,37) reads `installed <= 0` as
  * "not installed" and returns false. Returning 1 here would register a handler
  * that could never fire — a silent lie — so 0 is the honest answer, and
  * rt_signal_check/rt_atexit_check correspondingly report nothing pending. */
-spl_i64 rt_atomic_int_new(spl_i64 initial) {
-    spl_i64 *cell = (spl_i64 *)rt_alloc((spl_i64)sizeof(spl_i64));
-    if (!cell) {
-        return 0;
-    }
-    *cell = rt_index_arg(initial);
-    return (spl_i64)(spl_u64)cell;
-}
-
-spl_i64 rt_atomic_int_load(spl_i64 handle) {
-    spl_i64 *cell = (spl_i64 *)(spl_u64)handle;
-    if (!cell) {
-        return 0;
-    }
-    return __atomic_load_n(cell, __ATOMIC_SEQ_CST);
-}
-
-spl_i64 rt_atomic_int_compare_exchange(spl_i64 handle, spl_i64 current, spl_i64 new_value) {
-    spl_i64 *cell = (spl_i64 *)(spl_u64)handle;
-    spl_i64 expected = rt_index_arg(current);
-    if (!cell) {
-        return 0;
-    }
-    return __atomic_compare_exchange_n(cell, &expected, rt_index_arg(new_value),
-                                       0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST) ? 1 : 0;
-}
+#include "../../../../../../src/runtime/startup/baremetal/atomic_runtime.inc.c"
 
 spl_i64 rt_signal_install(spl_i64 signal_num) {
     (void)signal_num;
