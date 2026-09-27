@@ -58,8 +58,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   per-module receipts; emit those from HIR rather than deriving placeholder
   digests from the combined code image.
   The first typed ABI section now emits actual canonical HIR bytes and a
-  matching digest. Complete the other semantic sections and their artifact
-  receipts before connecting this producer to index publication.
+  matching digest. The package export builder now packs real caller-supplied
+  section bytes in canonical order and validates the complete payload against
+  offsets, extents, and digests. Complete the other semantic sections and
+  their artifact receipts before connecting this producer to index publication;
+  run its new tamper scenario on a current-source worker.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.
