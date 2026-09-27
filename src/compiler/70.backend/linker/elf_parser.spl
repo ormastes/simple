@@ -305,7 +305,7 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
 # Relocation Table Parser
 # ============================================================================
 
-fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_idx: i64) -> [ElfRelocation]:
+fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_idx: i64) -> Result<[ElfRelocation], text>:
     """Parse ELF32/ELF64 REL or RELA entries into canonical ELF64-style r_info.
 
     ELF64 Rela entry layout (24 bytes):
@@ -318,12 +318,8 @@ fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_id
     val sec_offset = rela_section.sh_addr
     val sec_size = rela_section.sh_size
 
-    if sec_size <= 0 or sec_offset < 0:
-        return relocs
-
-    val end = sec_offset + sec_size
-    if end > bytes.len():
-        return relocs
+    if sec_size < 0 or sec_offset < 0:
+        return Err("ELF relocation section has a negative offset or size")
 
     val elf32 = elf_is_32(bytes)
     val has_addend = rela_section.sh_type == SHT_RELA
@@ -331,6 +327,13 @@ fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_id
         if has_addend: ELF32_RELA_SIZE else: ELF32_REL_SIZE
     else:
         if has_addend: ELF64_RELA_SIZE else: 16
+    if sec_size % entry_size != 0:
+        return Err("ELF relocation section size is not a whole number of entries")
+
+    val end = sec_offset + sec_size
+    if end < sec_offset or end > bytes.len():
+        return Err("ELF relocation section extends beyond file end")
+
     val count = sec_size / entry_size
     var i: i64 = 0
     while i < count:
@@ -358,7 +361,7 @@ fn elf_parse_relocations(bytes: [u8], rela_section: ElfSectionHeader, section_id
         ))
         i = i + 1
 
-    relocs
+    Ok(relocs)
 
 # ============================================================================
 # Symbol Filter Helpers
@@ -514,7 +517,7 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     var sec_i: i64 = 0
     while sec_i < sections.len():
         if sections[sec_i].sh_type == SHT_RELA or sections[sec_i].sh_type == SHT_REL:
-            val rela_relocs = elf_parse_relocations(bytes, sections[sec_i], sec_i)
+            val rela_relocs = elf_parse_relocations(bytes, sections[sec_i], sec_i)?
             var k: i64 = 0
             while k < rela_relocs.len():
                 var reloc = rela_relocs[k]
