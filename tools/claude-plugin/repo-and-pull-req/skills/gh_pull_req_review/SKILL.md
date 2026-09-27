@@ -30,6 +30,42 @@ fixes code or replies, then branches by `--level`:
 
 `--level` is read from env `CLI_LEVEL` (set by the dispatcher) or
 defaults to `1`. Older state files with no `level` key default to `1`.
+**Same-author PR (`ACTOR_ID == AUTHOR_ID`) is always promoted to L2**: an
+independent approval can never arrive and the ruleset requires none, so L1's
+"wait for APPROVED" would park the PR forever. The L2 reviewer must be a
+higher model than the authoring session (Fable/Opus, effort `high`+).
+
+**A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
+`spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
+here is self-authored, so no provider approval will ever arrive and none is
+needed. When a PR sits `BLOCKED`, read the cause instead of waiting:
+`gh api repos/ormastes/simple/rulesets/21573643 --jq '.rules[]|select(.type=="pull_request").parameters.required_approving_review_count'`,
+`gh pr view <n> --json reviewDecision,statusCheckRollup` — a required context
+`QUEUED` means runner starvation (cancel
+in-progress runs whose PR is already merged or closed), a missing `SPipe Self Review Admission` means do the
+self review: a **higher model than the authoring session** (Fable/Opus, effort
+`high`+) reviews the exact head, posts it as `gh pr review --comment`, and on
+zero P0/P1 dispatches the admission. Never park a self-authored PR "awaiting
+review".
+
+**Resolve your own PR — the author lands it; nobody else will.** PR approval is
+impossible here (every PR is self-authored as `ormastes`; `gh pr review
+--approve` always fails) and not required (count 0). So the agent that opened a
+PR owns it until it is merged or closed:
+1. Review the exact head at high effort with a higher model than the author
+   (`claude -p --model claude-fable-5-1 "review PR #<n> ..."`); fix every P0/P1
+   on the branch; post the review with `gh pr review <n> --comment`.
+2. Draft -> `gh pr ready <n>`. Superseded/duplicate -> `gh pr close <n>
+   --comment "superseded by #<m>"`.
+3. Bring the branch up to date with `origin/main` (merge, keep both sides).
+4. Fire the admission check: `gh pr edit <n> --body-file <f>` with a body that
+   really differs (identical body = no event = no check-run).
+5. Poll `gh pr view <n> --json mergeable,mergeStateStatus` every 20 s; merge
+   with `gh pr merge <n> --merge --delete-branch` once `MERGEABLE` and
+   `CLEAN|UNSTABLE`; on "base advanced" repeat 3-5.
+6. Verify with `git ls-remote origin main`. Never end a session with your PR
+   parked "awaiting review".
+
 
 ## Prerequisites
 
@@ -162,7 +198,10 @@ REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
 INDEPENDENT_APPROVED=$(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" \
   '[.reviews[] | select(.state=="APPROVED" and .author.login != $author)] | length')
 if [ "$INDEPENDENT_APPROVED" -le 0 ]; then
-  echo "no independent approval; do not merge" >&2
+  # L1 never merges without an independent approval. A self-authored PR gets
+  # none (0 are required) — do not wait: hand off to the L2 self-review
+  # admission path, which does the review, head-SHA binding and dispatch.
+  echo "no independent approval; not merging at L1 — rerun with CLI_LEVEL=2 (L2 self-review admission)" >&2
   exit 0
 fi
 # Rebase onto latest main
