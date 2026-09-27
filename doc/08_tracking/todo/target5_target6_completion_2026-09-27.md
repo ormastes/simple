@@ -40,9 +40,13 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 ## Target 6 — persistent compile index
 
 - Build a real cold TLDR/SMF producer from frozen SCV inventory and typed HIR.
-  The V2-dependent draft preserved under
-  `build/mini_builds/target6_pending_v2/` needs an independently owned,
-  committed builder/schema before it can join production source.
+  A pure graph assembler and inventory-bound index builder now live in
+  `src/compiler/80.driver/cache/cold_hir_package_drafts_v1.spl` and
+  `package_module_index_builder.spl`. They require caller-supplied typed
+  HIR/SMF and archive receipts, bind a configuration variant into the V1
+  root identity, and refuse incomplete source coverage. The actual cold
+  compiler producer, generation publication, driver compatibility markers,
+  and current-source execution remain open.
 - Replace the binding-only empty index with a validated module/package graph,
   variant identity, exact reverse edges, reached SCC schedule, and complete
   action/archive receipts. Route compile, check, bootstrap, native-build,
