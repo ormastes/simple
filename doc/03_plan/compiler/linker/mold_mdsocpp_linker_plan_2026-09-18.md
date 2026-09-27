@@ -713,7 +713,14 @@ the false completion predicate.
 
 The internal Windows route now consumes case-insensitive `/SUBSYSTEM:CONSOLE`
 and `/SUBSYSTEM:WINDOWS`, `/STACK:reserve[,commit]`, and
-`/HEAP:reserve[,commit]` as typed PE32+ image policy. Decimal and `0x` values
+`/HEAP:reserve[,commit]` as typed PE32+ image policy. It also consumes the
+production toolchain's `/MACHINE:X64` or `/MACHINE:ARM64` flag as a typed
+validation against the selected target, rejecting cross-architecture policy
+instead of ignoring it. `/ENTRY:symbol` is carried unchanged into archive
+closure, selected-member default-library discovery, and final relocation, so a
+custom CRT entry is not replaced by the automatic entry heuristic. Identical
+entry requests deduplicate; empty, conflicting, whitespace/control-bearing
+entries fail closed. Decimal and `0x` values
 are bounds-checked, identical duplicate policy is harmless, and conflicting,
 zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
 before publication. The PE writer validates the policy and emits its subsystem,

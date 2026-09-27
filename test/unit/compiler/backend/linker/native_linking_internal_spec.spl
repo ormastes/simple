@@ -22,7 +22,8 @@ use std.spec.*
 
 use compiler.backend.linker.linker_wrapper.{
     link_to_native, link_simpleos_internal, NativeLinkConfig,
-    internal_coff_policy, internal_elf_runpath, internal_simpleos_flags}
+    internal_coff_flags, internal_coff_policy, internal_elf_runpath,
+    internal_simpleos_flags}
 use compiler.backend.linker.smf_writer.{SmfWriter}
 use std.io_runtime.{file_read_bytes, file_write_bytes, shell}
 
@@ -53,8 +54,8 @@ describe "native_linking - internal ELF RUNPATH flags":
 describe "native_linking - internal COFF optional-header flags":
     it "projects case-insensitive subsystem, stack, and heap flags":
         val parsed = internal_coff_policy([
-            "/SuBsYsTeM:WiNdOwS", "/STACK:0x200000,8192",
-            "/HEAP:3145728", "/heap:3145728"])
+            "/MaChInE:X64", "/SuBsYsTeM:WiNdOwS", "/STACK:0x200000,8192",
+            "/HEAP:3145728", "/heap:3145728"], "x86_64")
         expect(parsed.is_ok()).to_equal(true)
         expect(parsed.unwrap().subsystem).to_equal(2)
         expect(parsed.unwrap().stack_reserve).to_equal(0x200000)
@@ -62,16 +63,29 @@ describe "native_linking - internal COFF optional-header flags":
         expect(parsed.unwrap().heap_reserve).to_equal(3145728)
         expect(parsed.unwrap().heap_commit).to_equal(0x1000)
 
+    it "projects an exact entry symbol for closure and final resolution":
+        val parsed = internal_coff_flags([
+            "/MACHINE:X64", "/ENTRY:customCRTStartup",
+            "/ENTRY:customCRTStartup"], "amd64")
+        expect(parsed.is_ok()).to_equal(true)
+        expect(parsed.unwrap().entry).to_equal("customCRTStartup")
+
     it "rejects malformed, conflicting, overflowing, and unmodeled flags":
-        expect(internal_coff_policy(["/STACK:4096,8192"]).is_err()).to_equal(true)
-        expect(internal_coff_policy(["/HEAP:0"]).is_err()).to_equal(true)
-        expect(internal_coff_policy(["/SUBSYSTEM:NATIVE"]).is_err()).to_equal(true)
+        expect(internal_coff_policy(["/STACK:4096,8192"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/HEAP:0"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/SUBSYSTEM:NATIVE"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy([
-            "/SUBSYSTEM:CONSOLE", "/SUBSYSTEM:WINDOWS"]).is_err()).to_equal(true)
+            "/SUBSYSTEM:CONSOLE", "/SUBSYSTEM:WINDOWS"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy([
-            "/STACK:4096", "/STACK:8192"]).is_err()).to_equal(true)
-        expect(internal_coff_policy(["/STACK:0x8000000000000000"]).is_err()).to_equal(true)
-        expect(internal_coff_policy(["/DEBUG"]).is_err()).to_equal(true)
+            "/STACK:4096", "/STACK:8192"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/STACK:0x8000000000000000"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/MACHINE:ARM64"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/MACHINE:X86"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ENTRY:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/ENTRY:bad name"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy([
+            "/ENTRY:first", "/ENTRY:second"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/DEBUG"], "x86_64").is_err()).to_equal(true)
 
 describe "native_linking - internal SimpleOS linker flags":
     it "projects script and defsym spellings into typed boot policy":
