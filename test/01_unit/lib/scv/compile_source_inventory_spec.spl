@@ -57,6 +57,29 @@ describe "event-maintained compile source inventory":
         expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
         dir_remove(cache_root, true)
 
+    it "keeps the prior cursor when a writer publishes from a stale pointer":
+        val cache_root = "build/test-artifacts/scv-cas-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val inventory = empty_inventory()
+        val empty_pointer_digest = inventory_digest("")
+        val journal_digest = inventory_digest("")
+        val (first_digest, first_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, inventory, "0123456789abcdef0123456789abcdef01234567",
+            0, journal_digest, empty_pointer_digest)
+        expect(first_reason).to_equal("ok")
+        expect(first_digest != "").to_equal(true)
+        val first_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(first_pointer).to_contain("simple-compile-event-cursor-v1")
+        val (rejected_digest, rejected_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, inventory, "abcdef0123456789abcdef0123456789abcdef01",
+            0, journal_digest, empty_pointer_digest)
+        expect(rejected_digest).to_equal("")
+        expect(rejected_reason).to_equal("publish-cursor-superseded")
+        expect(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "").to_equal(first_pointer)
+        expect(compile_source_inventory_read_at_pointer_v1(
+            cache_root, first_pointer).digest).to_equal(first_digest)
+        dir_remove(cache_root, true)
+
     it "applies Git and filesystem events without source discovery":
         val created = compile_source_inventory_apply_event_v1(
             empty_inventory(), inventory_event(

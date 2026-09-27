@@ -3,7 +3,7 @@
 
 use app.io.mod.{file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
-use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_current_v1, compile_source_inventory_read_pointer_content_v1}
+use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_at_pointer_v1, compile_source_inventory_read_pointer_content_v1}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 
@@ -55,11 +55,12 @@ fn compiler_inventory_cursor_decode_v1(content: text) -> CompilerInventoryCursor
     CompilerInventoryCursorV1(
         valid, head, rows, filesystem_digest, inventory_digest, generation)
 
-fn compiler_inventory_cursor_read_v1(cache_root: text) -> CompilerInventoryCursorV1:
+fn compiler_inventory_cursor_read_v1(
+    cache_root: text, pointer_content: text
+) -> CompilerInventoryCursorV1:
     # New generations bind the cursor to the inventory in one CURRENT rename.
     # A bare digest is the legacy layout; only that layout may use the old
     # separate cursor during migration.
-    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     if pointer_content != "":
         val separator = pointer_content.index_of("\n")
         if separator >= 0:
@@ -241,14 +242,16 @@ fn compiler_inventory_journal_prefix_digest_v1(
 fn compiler_inventory_refresh_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
 ) -> CompilerInventoryRefreshV1:
-    val cursor = compiler_inventory_cursor_read_v1(cache_root)
+    val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    val cursor = compiler_inventory_cursor_read_v1(cache_root, pointer_content)
     if not cursor.valid and not cold_init:
         # Fail closed without event authority, but name the one-time opt-in
         # so a fresh checkout is not left with an opaque reason.
         return compiler_inventory_invalid_v1(
             "compile-event-journal-missing (first build in this checkout: rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)")
     if cursor.valid:
-        val current = compile_source_inventory_read_current_v1(cache_root)
+        val current = compile_source_inventory_read_at_pointer_v1(
+            cache_root, pointer_content)
         if (not current.valid or current.inventory == nil or
                 current.digest != cursor.inventory_digest or
                 current.inventory!.generation != cursor.inventory_generation):
@@ -304,7 +307,7 @@ fn compiler_inventory_refresh_v1(
     val rows = if journal == "": 0 else: journal.split("\n").len()
     val inventory = compile_source_inventory_apply_observed_events_v1(
         root, cache_root, git_events!, filesystem_events!, head, rows,
-        filesystem_digest)
+        filesystem_digest, sha256_text(pointer_content))
     if not inventory.valid:
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)

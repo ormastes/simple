@@ -36,6 +36,13 @@ current-source pure-Simple compiler candidate before SPipe, full-check,
 Stage4 size/startup cohorts, and native event-publication acceptance can be
 qualified. Do not treat the historical Stage2 checks as a PASS.
 
+A bounded 30-second follow-up with
+`SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_FILE=1` and
+`SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING=1` did not reach the source-closure
+phase. Its sole progress receipt was `bootstrap_ffi ... rt_native_build`.
+The log is `build/mini_builds/target56_closure_trace/events`; this run cannot
+attribute the earlier 704/1202 source-closure stall and was not retried.
+
 ## Follow-up
 
 The isolated `pipeline_fn.spl` now passes the enum variants directly for its
