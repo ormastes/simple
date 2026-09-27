@@ -387,8 +387,12 @@ push is rejected; `gh pr merge --admin` is refused for admins too. Two required
 checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
 Admission`**.
 
-**Push ONCE. Every force-push destroys an in-flight run.** `repo-hygiene.yml`
-(the idiom gate) declares `concurrency: group: ${{ github.workflow }}-${{
+**Push ONCE. Every force-push destroys an in-flight run.** Since 2026-09-27 the
+required idiom context is the one-job `required-gates.yml` ("Required Gates",
+job `fast-gates`); `repo-hygiene.yml` no longer runs on PRs, and every other
+non-required PR workflow runs only when the PR is labelled `ci:full`
+(`doc/07_guide/infra/vcs/pr_landing_timing_race.md`). `required-gates.yml`
+declares `concurrency: group: ${{ github.workflow }}-${{
 github.ref }}` with `cancel-in-progress: true`, and the repo has **0
 self-hosted runners** with **53 runs queued/in-progress** measured on
 2026-09-06 across the parallel agent sessions. So a re-push does not "retry" —
