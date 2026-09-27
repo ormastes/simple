@@ -3,6 +3,7 @@ use std.spec.step
 use app.remote_test.binary_placement.{
     remote_simple_binary_path, remote_simple_test_command,
     remote_simple_stage_guard_command, remote_simple_stage_verify_command,
+    remote_simple_installed_verify_command,
     remote_simple_stage_cleanup_command,
     remote_simple_publication_cleanup_command, remote_simple_install_command}
 extern fn rt_file_read_text(path: text) -> text
@@ -178,6 +179,27 @@ describe "remote interpreter binary placement":
         expect(remote_simple_stage_verify_command("windows", "C:\\Temp\\simple.exe ", zero_digest).is_err()).to_equal(true)
         expect(remote_simple_stage_verify_command("plan9", "/tmp/simple", zero_digest).is_err()).to_equal(true)
 
+    it "verifies the final installed interpreter after publication":
+        val linux = remote_simple_installed_verify_command(
+            "linux", "auto", TEST_SHA256).unwrap()
+        expect(linux).to_contain("[ ! -f '/usr/local/bin/simple' ]")
+        expect(linux).to_contain("sha256sum -- '/usr/local/bin/simple'")
+        expect(linux).to_contain("exit 79")
+
+        val windows = remote_simple_installed_verify_command(
+            "windows", "auto", TEST_SHA256.upper()).unwrap()
+        expect(windows).to_contain(
+            "Get-Item -LiteralPath 'C:\\Program Files\\Simple\\simple.exe' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain(
+            "Get-FileHash -LiteralPath 'C:\\Program Files\\Simple\\simple.exe' -Algorithm SHA256")
+        expect(windows).to_contain("exit 79")
+
+        expect(remote_simple_installed_verify_command(
+            "linux", "auto", "bad-digest").is_err()).to_equal(true)
+        expect(remote_simple_installed_verify_command(
+            "plan9", "auto", TEST_SHA256).is_err()).to_equal(true)
+
     it "renders race-aware cleanup for failed staging uploads":
         val linux = remote_simple_stage_cleanup_command(
             "linux", "/tmp/simple upload").unwrap()
@@ -218,6 +240,15 @@ describe "remote interpreter binary placement":
         expect(upload).to_be_greater_than(-1)
         expect(verify).to_be_greater_than(upload)
         expect(publish).to_be_greater_than(verify)
+
+    it "verifies the installed bytes after publishing the interpreter":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val publish = source.index_of("val result = terminal_execute(self.connection, command, timeout_ms)") ?? -1
+        val installed_verify = source.index_of("val installed_verified = terminal_execute") ?? -1
+        val success = source.index_of("Ok(self.simple_binary)") ?? -1
+        expect(publish).to_be_greater_than(-1)
+        expect(installed_verify).to_be_greater_than(publish)
+        expect(success).to_be_greater_than(installed_verify)
 
     it "cleans owned regular staging and publication leaves after failures":
         val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""

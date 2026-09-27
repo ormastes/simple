@@ -259,6 +259,32 @@ fn remote_simple_stage_verify_command(remote_os: text, staged_path: text,
             "echo 'remote-test uploaded Simple SHA-256 mismatch' >&2; exit 74; fi")
     Err("remote-test cannot verify an uploaded binary for remote OS '{remote_os}'")
 
+fn remote_simple_installed_verify_command(remote_os: text, configured: text,
+        expected_sha256: text) -> Result<text, text>:
+    """Render a target-side digest check for the published interpreter."""
+    val digest = expected_sha256.trim().lower()
+    if not _remote_sha256_valid(digest):
+        return Err("remote Simple expected SHA-256 must be 64 hexadecimal digits")
+    val destination = remote_simple_binary_path(remote_os, configured)?
+    val platform = remote_os.trim().lower()
+    if platform == "windows" or platform == "win":
+        val target = _remote_windows_command_value(destination)?
+        return Ok("powershell.exe -NoProfile -NonInteractive -Command \"$ErrorActionPreference = 'Stop'; " +
+            "$item = Get-Item -LiteralPath " + target + " -Force -ErrorAction SilentlyContinue; " +
+            "if (($null -eq $item) -or $item.PSIsContainer -or (($item.Attributes -band " +
+            "[System.IO.FileAttributes]::ReparsePoint) -ne 0)) " +
+            "{ Write-Error 'remote-test published Simple is not a regular non-reparse file'; exit 79 }; " +
+            "$actual = (Get-FileHash -LiteralPath " + target + " -Algorithm SHA256).Hash.ToLowerInvariant(); " +
+            "if ($actual -ne '" + digest + "') { Write-Error 'remote-test published Simple SHA-256 mismatch'; exit 79 }\"")
+    if platform == "linux" or platform == "simpleos" or platform == "simple-os":
+        val target = _remote_posix_quote(destination)
+        return Ok("if [ -L " + target + " ] || [ ! -f " + target + " ]; then " +
+            "echo 'remote-test published Simple is not a regular file' >&2; exit 79; fi; " +
+            "actual=$(sha256sum -- " + target + ") || exit 79; actual=${actual%% *}; " +
+            "if [ \"$actual\" != '" + digest + "' ]; then " +
+            "echo 'remote-test published Simple SHA-256 mismatch' >&2; exit 79; fi")
+    Err("remote-test cannot verify a published binary for remote OS '{remote_os}'")
+
 fn remote_simple_stage_cleanup_command(remote_os: text,
         staged_path: text) -> Result<text, text>:
     """Render best-effort cleanup for a staging leaf owned by this upload."""
@@ -374,5 +400,6 @@ fn remote_simple_install_command(remote_os: text, configured: text,
 
 export remote_simple_binary_path, remote_simple_test_command
 export remote_simple_stage_guard_command, remote_simple_stage_verify_command
+export remote_simple_installed_verify_command
 export remote_simple_stage_cleanup_command, remote_simple_publication_cleanup_command
 export remote_simple_install_command
