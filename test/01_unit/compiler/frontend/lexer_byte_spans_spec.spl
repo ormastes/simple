@@ -1,0 +1,52 @@
+# Purpose and audience: executable byte-span regression for the RC1 lexer.
+
+use std.spec
+use std.spec.step
+
+use compiler.frontend.core.lexer.*
+use compiler.core.tokens.{TOK_DEDENT, TOK_EOF}
+
+describe "Lexed source byte spans":
+    it "tracks token positions through a multibyte source character":
+        step("Verify: wrapper spans use source UTF-8 byte offsets")
+        val lexer = lexer_new("\"é\" fn")
+        val string_token = lexer_next_token(lexer)
+        val keyword_token = lexer_next_token(lexer)
+        expect(string_token.span.start).to_equal(0)
+        expect(string_token.span.end_pos).to_equal(4)
+        expect(keyword_token.span.start).to_equal(5)
+        expect(keyword_token.span.end_pos).to_equal(7)
+
+    it "uses the same source byte spans for record tokens":
+        step("Verify: record spans advance past a multibyte character")
+        lex_init("\"é\" fn")
+        val string_token = lex_next_token_record()
+        val keyword_token = lex_next_token_record()
+        expect(string_token.span.start).to_equal(0)
+        expect(string_token.span.end_pos).to_equal(4)
+        expect(keyword_token.span.start).to_equal(5)
+        expect(keyword_token.span.end_pos).to_equal(7)
+
+    it "places EOF after the last source byte":
+        step("Verify: EOF is zero width at the end of the source")
+        val lexer = lexer_new("fn")
+        lexer_next_token(lexer)
+        val eof = lexer_next_token(lexer)
+        expect(eof.kind).to_equal(TOK_EOF)
+        expect(eof.span.start).to_equal(2)
+        expect(eof.span.end_pos).to_equal(2)
+
+    it "places repeated dedents at the same source position":
+        step("Verify: pending dedents have zero-width byte spans")
+        val source = "fn a:\n    fn b:\n        \"é\"\n"
+        lex_init(source)
+        var dedents: i64 = 0
+        for i in 0..32:
+            val token = lex_next_token_record()
+            if token.kind == TOK_DEDENT:
+                expect(token.span.start).to_equal(source.len())
+                expect(token.span.end_pos).to_equal(source.len())
+                dedents = dedents + 1
+            if token.kind == TOK_EOF:
+                break
+        expect(dedents).to_equal(2)
