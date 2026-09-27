@@ -1,7 +1,7 @@
 # Cached SFFI slots and raw handle ownership are not yet unified
 
-**Status:** Open. The `fix/sffi-cached-slot-lifetime-20260928` worktree is an
-unpublished candidate, not release evidence.
+**Status:** Open. The `fix/sffi-cached-slot-lifetime-20260928` draft is a
+candidate, not release evidence.
 
 ## Evidence
 
@@ -18,15 +18,20 @@ candidate owner, leaving an entry that appears live after the native mapping
 is gone. `backend_plugin/dynamic_loader.spl` also exposes the raw handle to a
 tagged transport, although its own close path calls `DynLib.close()`; its
 in-flight transport lifetime must be covered before retiring that mapping.
-The candidate must not be published until those ownership routes are made
-explicit and checked together.
+The draft routes GPU/GUI closes through `DynLib.close()`, retains `DynLib` in
+their handles, and reserves a mapping use around cached native calls. The
+backend tagged transport reserves one use across a single call or the complete
+open/compile/finalize/close batch. These edits still need source-matched
+compilation and lifecycle tests before promotion. The GUI window/event-loop
+objects remain main-thread resources; the mapping lease alone does not make
+concurrent GUI object destruction safe.
 
 The candidate's owner takes a mutex on every cached-slot call. The selected
 environment variant NFR-003 forbids a lifecycle lock in dense provider batch
 dispatch and limits its overhead to 2% against a direct reference batch call.
-The existing `native_callable_owner_v1` also takes a mutex on each native
-invocation; it is a correctness staging point, not NFR evidence. No latency,
-allocation, or RSS comparison for the candidate has been run.
+The draft `native_callable_owner_v1` batch API reserves one use for the whole
+batch; the scalar path still takes a mutex per call. No latency, allocation,
+or RSS comparison for the draft has been run.
 
 ## Acceptance
 

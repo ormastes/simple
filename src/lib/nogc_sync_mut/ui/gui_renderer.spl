@@ -24,7 +24,7 @@
 # process main thread (winit requirement); the cdylib performs explicit
 # NSApplication activation so the window is frontmost and receives input.
 
-use std.sffi.dynamic.{DynLib, spl_dlclose}
+use std.sffi.dynamic.{DynLib}
 use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
 
 @unsafe(reason: "raw function address and dynamic integer ABI remain caller-owned", capabilities: [ffi, raw_ptr])
@@ -80,7 +80,7 @@ impl GuiEvent:
 
 class GuiRenderer:
     engine: text
-    lib_handle: i64
+    library: DynLib?
     el: i64
     win: i64
     width: i64
@@ -106,6 +106,19 @@ class GuiRenderer:
     fp_window_free: i64
     fp_loop_free: i64
 
+@unsafe(reason: "pins cached GUI symbols through one renderer operation", capabilities: [ffi, raw_ptr])
+fn _gui_begin_call(renderer: GuiRenderer) -> DynLib?:
+    if renderer.library == nil:
+        return nil
+    val library = renderer.library.?
+    if not library.begin_raw_call():
+        return nil
+    Some(library)
+
+@unsafe(reason: "releases a pinned GUI provider operation", capabilities: [ffi, raw_ptr])
+fn _gui_end_call(library: DynLib):
+    library.end_raw_call()
+
 # Candidate library paths, tried in order by actual dlopen attempt (platform
 # detection via env vars is unreliable — OSTYPE is usually not exported).
 fn gui_renderer_lib_candidates() -> [text]:
@@ -122,7 +135,7 @@ impl GuiRenderer:
     # Sentinel instance (win == 0) for non-optional storage slots.
     static fn empty() -> GuiRenderer:
         GuiRenderer(
-            engine: "", lib_handle: 0, el: 0, win: 0, width: 0, height: 0,
+            engine: "", library: nil, el: 0, win: 0, width: 0, height: 0,
             fp_poll: 0, fp_type: 0,
             fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
             fp_mouse_button: 0, fp_mouse_pressed: 0,
@@ -221,7 +234,7 @@ impl GuiRenderer:
         dbg_stage("gui", "winit_window_create_done")
         GuiRenderer(
             engine: "winit-dyn",
-            lib_handle: l.handle,
+            library: Some(l),
             el: el,
             win: win,
             width: w.to_i64(),
@@ -262,8 +275,12 @@ impl GuiRenderer:
     fn poll_event() -> GuiEvent:
         if self.win == 0:
             return GuiEvent.none()
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return GuiEvent.none()
         val ev = spl_wffi_call_i64(self.fp_poll, [self.el, 1], 2)
         if ev == 0:
+            _gui_end_call(lease.?)
             return GuiEvent.none()
         val ty = spl_wffi_call_i64(self.fp_type, [ev], 1)
         if dbg_events_on():
@@ -310,6 +327,7 @@ impl GuiRenderer:
         if dbg_events_on():
             dbg_event_hop("native-{ev}", "gui_event_decode", "kind={out.kind} keycode={out.keycode} button={out.btn} pressed={out.pressed} x={out.x} y={out.y}")
         spl_wffi_call_i64(self.fp_event_free, [ev], 1)
+        _gui_end_call(lease.?)
         out
 
     # Present an XRGB frame (one i64 per pixel, 0x00RRGGBB). The staging
@@ -318,8 +336,12 @@ impl GuiRenderer:
     fn present_rgba(w: i64, h: i64, pixels: [i64]) -> bool:
         if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
             return false
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
+            _gui_end_call(lease.?)
             return false
         val count = pixels.len()
         var i = 0
@@ -329,14 +351,20 @@ impl GuiRenderer:
             i = i + 2
         if i < count:
             rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i] as i32)
-        spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        val presented = spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        _gui_end_call(lease.?)
+        presented
 
     @unsafe(reason: "writes a validated frame into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn present_argb_u32(w: i64, h: i64, pixels: [u32]) -> bool:
         if self.win == 0 or not _gui_frame_extent_valid(w, h, pixels.len().to_i64()):
             return false
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, w, h], 3)
         if sp == 0:
+            _gui_end_call(lease.?)
             return false
         val count = pixels.len()
         var i = 0
@@ -346,15 +374,21 @@ impl GuiRenderer:
             i = i + 2
         if i < count:
             rt_ptr_write_i32(sp, (i * 4).to_i64(), pixels[i])
-        spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        val presented = spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        _gui_end_call(lease.?)
+        presented
 
     @unsafe(reason: "writes a bounded source rectangle into a foreign staging pointer", capabilities: [ffi, raw_ptr])
     fn stage_blit_argb_u32(x: i64, y: i64, w: i64, h: i64, dst_w: i64, dst_h: i64, pixels: [u32]) -> bool:
         if (self.win == 0 or dst_w <= 0 or dst_h <= 0 or
             not _gui_frame_extent_valid(w, h, pixels.len().to_i64())):
             return false
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
         val sp = spl_wffi_call_i64(self.fp_staging, [self.win, dst_w, dst_h], 3)
         if sp == 0 or w <= 0 or h <= 0:
+            _gui_end_call(lease.?)
             return false
         val src_len = pixels.len().to_i64()
         var row: i64 = 0
@@ -375,39 +409,59 @@ impl GuiRenderer:
                     dst_idx = dst_idx + 1
                     col = col + 1
             row = row + 1
+        _gui_end_call(lease.?)
         true
 
     @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_clear(w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_clear == 0:
             return false
-        spl_wffi_call_i64(self.fp_stage_clear, [self.win, w, h, color.to_i64()], 4) == 1
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
+        val cleared = spl_wffi_call_i64(self.fp_stage_clear, [self.win, w, h, color.to_i64()], 4) == 1
+        _gui_end_call(lease.?)
+        cleared
 
     @unsafe(reason: "invokes a cached foreign staging function with raw window authority", capabilities: [ffi, raw_ptr])
     fn stage_fill_rect(x: i64, y: i64, w: i64, h: i64, color: u32) -> bool:
         if self.win == 0 or self.fp_stage_fill_rect == 0:
             return false
-        spl_wffi_call_i64(self.fp_stage_fill_rect, [self.win, x, y, w, h, color.to_i64()], 6) == 1
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
+        val filled = spl_wffi_call_i64(self.fp_stage_fill_rect, [self.win, x, y, w, h, color.to_i64()], 6) == 1
+        _gui_end_call(lease.?)
+        filled
 
     @unsafe(reason: "invokes a cached foreign presentation function with raw window authority", capabilities: [ffi, raw_ptr])
     fn present_staged(w: i64, h: i64) -> bool:
         if self.win == 0:
             return false
-        spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return false
+        val presented = spl_wffi_call_i64(self.fp_present, [self.win, w, h], 3) == 1
+        _gui_end_call(lease.?)
+        presented
 
     # Destroy the window and event loop. Safe to call twice.
     @unsafe(reason: "destroys raw foreign objects and closes their provider library", capabilities: [ffi, raw_ptr])
     me close():
-        if self.win != 0:
+        val lease = _gui_begin_call(self)
+        if lease != nil and self.win != 0:
             spl_wffi_call_i64(self.fp_window_free, [self.win], 1)
-            self.win = 0
-        if self.el != 0:
+        self.win = 0
+        if lease != nil and self.el != 0:
             spl_wffi_call_i64(self.fp_loop_free, [self.el], 1)
-            self.el = 0
-        if self.lib_handle != 0:
+        self.el = 0
+        if lease != nil:
+            _gui_end_call(lease.?)
+        if self.library != nil:
+            var library = self.library.?
             unsafe(capabilities: [ffi]):
-                spl_dlclose(self.lib_handle)
-            self.lib_handle = 0
+                library.close()
+            self.library = nil
 
 export GUI_EVT_NONE
 export GUI_EVT_RESIZED

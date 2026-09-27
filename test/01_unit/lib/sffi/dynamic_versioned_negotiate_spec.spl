@@ -3,6 +3,7 @@ use std.spec.*
 use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.sffi.dynamic_versioned.{VersionedDynLib, MultiVersionLoader}
+use std.sffi.dynamic.{DynLib}
 
 extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -83,6 +84,54 @@ describe "versioned SFFI real plugin entry negotiation":
         var library = loaded.unwrap()
         unsafe(capabilities: [ffi]):
             library.lib.close()
+
+    it "revokes cached slots and aliased handles while preserving an independent load":
+        val path = build_fixture("slot-lifetime", "")
+        val first = unsafe(capabilities: [ffi]): DynLib.load_checked(path)
+        expect(first.is_ok()).to_be(true)
+        var library = first.unwrap()
+        var retained_copy = library
+        val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+            library.resolve_i64_checked("fixture_product_symbol", 0)
+        expect(resolved.is_ok()).to_be(true)
+        val slot = resolved.unwrap()
+        val retained_slot = slot
+        val before = unsafe(capabilities: [ffi, raw_ptr]): slot.call_checked([])
+        expect(before.is_ok()).to_be(true)
+        expect(before.unwrap()).to_equal(73)
+
+        val independent = unsafe(capabilities: [ffi]): DynLib.load_checked(path)
+        expect(independent.is_ok()).to_be(true)
+        var peer = independent.unwrap()
+        unsafe(capabilities: [ffi]): library.close()
+        val stale_slot = unsafe(capabilities: [ffi, raw_ptr]):
+            retained_slot.call_checked([])
+        expect(stale_slot.is_err()).to_be(true)
+        val stale_copy = unsafe(capabilities: [ffi, raw_ptr]):
+            retained_copy.call_checked("fixture_product_symbol", [])
+        expect(stale_copy.is_err()).to_be(true)
+        val peer_result = unsafe(capabilities: [ffi, raw_ptr]):
+            peer.call_checked("fixture_product_symbol", [])
+        expect(peer_result.is_ok()).to_be(true)
+        expect(peer_result.unwrap()).to_equal(73)
+        unsafe(capabilities: [ffi]):
+            retained_copy.close()
+            peer.close()
+
+    it "reloads a versioned cache entry after its library is retired":
+        val path = build_fixture("cache-retire", "")
+        val first = MultiVersionLoader.instance().load_path(path, "cache-retire", host())
+        expect(first.is_ok()).to_be(true)
+        var original = first.unwrap()
+        unsafe(capabilities: [ffi]): original.lib.close()
+        val reloaded = MultiVersionLoader.instance().load_path(path, "cache-retire", host())
+        expect(reloaded.is_ok()).to_be(true)
+        var second = reloaded.unwrap()
+        val value = unsafe(capabilities: [ffi, raw_ptr]):
+            second.lib.call_checked("fixture_product_symbol", [])
+        expect(value.is_ok()).to_be(true)
+        expect(value.unwrap()).to_equal(73)
+        unsafe(capabilities: [ffi]): second.lib.close()
 
     it "returns no handle when any full digest byte differs":
         val before = MultiVersionLoader.instance().loaded_keys().len()

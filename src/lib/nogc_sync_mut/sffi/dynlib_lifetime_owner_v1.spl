@@ -1,0 +1,131 @@
+# One lifetime authority for copied DynLib values and cached integer slots.
+# A call borrows the mapping under the owner lock, then executes outside it.
+# Closing any library copy revokes new borrows and defers dlclose until the
+# last admitted call returns. Identities never repeat within this process.
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+
+@unsafe(reason: "releases the native library after its final admitted use", capabilities: [ffi])
+extern fn spl_dlclose(handle: i64) -> i64
+
+const _DYNLIB_LIFETIME_CAPACITY_V1: i64 = 4096
+const _DYNLIB_LIFETIME_MAX_ID_V1: u64 = 18446744073709551615u64
+
+struct _DynlibLifetimeEntryV1:
+    identity: u64
+    handle: i64
+    active_uses: i64
+    retiring: bool
+
+struct _DynlibLifetimeStateV1:
+    next_identity: u64
+    entries: [_DynlibLifetimeEntryV1]
+    result_identity: u64
+    result_handle: i64
+    result_accepted: bool
+
+fn _dynlib_lifetime_initial_v1() -> _DynlibLifetimeStateV1:
+    _DynlibLifetimeStateV1(next_identity: 1u64, entries: [],
+        result_identity: 0u64, result_handle: 0, result_accepted: false)
+
+var _dynlib_lifetime_owner_v1: Mutex = mutex_new(_dynlib_lifetime_initial_v1())
+
+fn _dynlib_lifetime_index_v1(state: _DynlibLifetimeStateV1, identity: u64) -> i64:
+    var first = 0
+    var past_last = state.entries.len()
+    while first < past_last:
+        val middle = first + (past_last - first) / 2
+        val candidate = state.entries[middle].identity
+        if candidate == identity: return middle
+        if candidate < identity: first = middle + 1
+        else: past_last = middle
+    -1
+
+# Zero means no ownership was accepted. The caller must close the raw handle.
+pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
+    if handle <= 0: return 0u64
+    val updated = mutex_with_lock(_dynlib_lifetime_owner_v1, \state:
+        var next = state
+        next.result_identity = 0u64
+        if state.next_identity != 0u64 and
+           state.entries.len() < _DYNLIB_LIFETIME_CAPACITY_V1:
+            val identity = state.next_identity
+            next.next_identity = if identity == _DYNLIB_LIFETIME_MAX_ID_V1:
+                0u64
+            else:
+                identity + 1u64
+            next.entries.push(_DynlibLifetimeEntryV1(
+                identity: identity, handle: handle, active_uses: 0,
+                retiring: false))
+            next.result_identity = identity
+        next)
+    updated.result_identity
+
+# Returns the native handle only after reserving one use. Zero refuses stale
+# identities and prevents callers from resolving or invoking an unloaded map.
+pub(package) fn dynlib_lifetime_begin_v1(identity: u64) -> i64:
+    val updated = mutex_with_lock(_dynlib_lifetime_owner_v1, \state:
+        var next = state
+        next.result_handle = 0
+        val index = _dynlib_lifetime_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if not entry.retiring and entry.active_uses < 9223372036854775807:
+                entry.active_uses = entry.active_uses + 1
+                next.entries[index] = entry
+                next.result_handle = entry.handle
+        next)
+    updated.result_handle
+
+pub(package) fn dynlib_lifetime_end_v1(identity: u64):
+    val updated = mutex_with_lock(_dynlib_lifetime_owner_v1, \state:
+        var next = state
+        next.result_handle = 0
+        val index = _dynlib_lifetime_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if entry.active_uses > 0:
+                entry.active_uses = entry.active_uses - 1
+                if entry.retiring and entry.active_uses == 0:
+                    next.result_handle = entry.handle
+                    next.entries.remove(index)
+                else:
+                    next.entries[index] = entry
+        next)
+    if updated.result_handle > 0:
+        unsafe(capabilities: [ffi]):
+            spl_dlclose(updated.result_handle)
+
+# True only for the first live-to-retiring transition. A later close through
+# another DynLib copy cannot close the same native handle twice.
+pub(package) fn dynlib_lifetime_retire_v1(identity: u64) -> bool:
+    val updated = mutex_with_lock(_dynlib_lifetime_owner_v1, \state:
+        var next = state
+        next.result_handle = 0
+        next.result_accepted = false
+        val index = _dynlib_lifetime_index_v1(state, identity)
+        if index >= 0:
+            var entry = state.entries[index]
+            if not entry.retiring:
+                entry.retiring = true
+                next.result_accepted = true
+                if entry.active_uses == 0:
+                    next.result_handle = entry.handle
+                    next.entries.remove(index)
+                else:
+                    next.entries[index] = entry
+        next)
+    if updated.result_handle > 0:
+        unsafe(capabilities: [ffi]):
+            spl_dlclose(updated.result_handle)
+    updated.result_accepted
+
+pub(package) fn dynlib_lifetime_live_v1(identity: u64) -> bool:
+    val updated = mutex_with_lock(_dynlib_lifetime_owner_v1, \state:
+        var next = state
+        next.result_accepted = false
+        val index = _dynlib_lifetime_index_v1(state, identity)
+        if index >= 0 and not state.entries[index].retiring:
+            next.result_accepted = true
+        next)
+    updated.result_accepted

@@ -3,13 +3,13 @@
 Load discipline copied verbatim from `chromium_oracle_load`
 (`src/lib/nogc_sync_mut/gpu/chromium_reference_oracle_sffi.spl:236-287`):
 sha256 before -> `DynLib.load` -> resolve the EXACT declared symbol set -> sha256 after ->
-`spl_wffi_call_i64` -> `spl_dlclose`. No symbol outside the declared set is ever resolved.
+`spl_wffi_call_i64` -> `DynLib.close`. No symbol outside the declared set is ever resolved.
 
 This ABI is a sibling of, not a replacement for, the frozen 5-symbol
 `simple_chromium_oracle_*` broker ABI: disjoint prefix, same exact-set discipline.
 """
 
-use std.sffi.dynamic.{DynLib, spl_dlclose, spl_wffi_call_i64}
+use std.sffi.dynamic.{DynLib, spl_wffi_call_i64}
 use std.io_runtime.{file_hash_sha256}
 use std.common.string_core.{text_to_bytes}
 use std.common.browser.chrome_render_shim_twin.{chrome_render_create_status,
@@ -66,11 +66,27 @@ struct ChromeRenderLibraryProbe:
 
 struct ChromeRenderHandle:
     library_handle: i64
+    library: DynLib?
     session_handle: i64
     library_path: text
     abi_version: i64
     symbols: ChromeRenderResolvedSymbols
     released: bool
+
+fn _chrome_render_handle_live(handle: ChromeRenderHandle) -> bool:
+    if handle.released or handle.library == nil:
+        return false
+    handle.library.?.is_live()
+
+@unsafe(reason: "pins a cached Chrome render symbol through one provider call", capabilities: [ffi, raw_ptr])
+fn _chrome_render_begin_call(handle: ChromeRenderHandle) -> bool:
+    if handle.released or handle.library == nil:
+        return false
+    handle.library.?.begin_raw_call()
+
+@unsafe(reason: "releases a pinned Chrome render provider call", capabilities: [ffi, raw_ptr])
+fn _chrome_render_end_call(handle: ChromeRenderHandle):
+    handle.library.?.end_raw_call()
 
 struct ChromeRenderLoadResult:
     ok: bool
@@ -207,12 +223,12 @@ fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResul
         destroy: lib.sym(request.required_symbols[9]))
     val missing = chrome_render_missing_symbol(symbols)
     if missing != "":
-        spl_dlclose(lib.handle)
+        lib.close()
         return _chrome_render_result(request, false, "symbol-missing",
             _chrome_render_empty_abi(), "required-abi-v1-symbol-missing", missing)
     val digest_after_load = file_hash_sha256(request.library_path)
     if digest_after_load != digest:
-        spl_dlclose(lib.handle)
+        lib.close()
         return _chrome_render_result(request, false, "manifest-mismatch",
             _chrome_render_empty_abi(), "provider-artifact-changed-during-load", "")
     val abi_version = spl_wffi_call_i64(symbols.abi_version, [], 0)
@@ -222,10 +238,11 @@ fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResul
         manifest_sha256: digest, abi: abi, symbols: symbols)
     val admitted = chrome_render_validate_library_probe(request, probe)
     if not admitted.ok:
-        spl_dlclose(lib.handle)
+        lib.close()
         return admitted
     ChromeRenderLoadResult(ok: true, status: "ok", library_path: request.library_path,
         abi: abi, handle: Some(ChromeRenderHandle(library_handle: lib.handle,
+            library: Some(lib),
             session_handle: 0, library_path: request.library_path,
             abi_version: abi_version, symbols: symbols, released: false)),
         error: "", missing_symbol: "")
@@ -233,12 +250,17 @@ fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResul
 """Stage B: call the real `create()` with a bounded config payload. No fake success path."""
 @unsafe(reason: "invokes the admitted bounded Chrome render create ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_create(handle: ChromeRenderHandle, config_json: text) -> i64:
-    if handle.released or handle.library_handle <= 0 or handle.symbols.create <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.create <= 0:
         return 0 - 2
     if config_json == "" or config_json.len() > 1048576:
         return 0 - 1
     val payload: [u8] = text_to_bytes(config_json)
-    spl_wffi_call_i64_with_bytes(handle.symbols.create, [], payload, 0, payload.len(), [])
+    if not _chrome_render_begin_call(handle):
+        return 0 - 2
+    val result = spl_wffi_call_i64_with_bytes(handle.symbols.create, [], payload,
+        0, payload.len(), [])
+    _chrome_render_end_call(handle)
+    result
 
 """The frozen per-tab call sequence, in ABI order. Recorded in showcase receipts."""
 fn chrome_render_sequence_steps() -> [text]:
@@ -248,13 +270,17 @@ fn chrome_render_sequence_steps() -> [text]:
 """Calls `load_html` with a bounded HTML payload."""
 @unsafe(reason: "invokes the admitted bounded Chrome render load_html ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_load_html(handle: ChromeRenderHandle, session_handle: i64, html: text) -> i64:
-    if handle.released or handle.symbols.load_html <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.load_html <= 0:
         return 2
     if html == "" or html.len() > 1048576:
         return 1
     val payload: [u8] = text_to_bytes(html)
-    spl_wffi_call_i64_with_bytes(handle.symbols.load_html, [session_handle], payload, 0,
+    if not _chrome_render_begin_call(handle):
+        return 2
+    val result = spl_wffi_call_i64_with_bytes(handle.symbols.load_html, [session_handle], payload, 0,
         payload.len(), [])
+    _chrome_render_end_call(handle)
+    result
 
 """Calls `resize`. `scale` is milli-units here because the facade carries only i64 args.
 
@@ -265,20 +291,28 @@ than silently rounded. 1.0 is passed as the integer 1, which is exact.
 @unsafe(reason: "invokes the admitted Chrome render resize ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_resize(handle: ChromeRenderHandle, session_handle: i64,
                         width: i64, height: i64) -> i64:
-    if handle.released or handle.symbols.resize <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.resize <= 0:
         return 2
     if width <= 0 or height <= 0 or width > 8192 or height > 8192:
         return 1
-    spl_wffi_call_i64(handle.symbols.resize, [session_handle, width, height, 1], 4)
+    if not _chrome_render_begin_call(handle):
+        return 2
+    val result = spl_wffi_call_i64(handle.symbols.resize, [session_handle, width, height, 1], 4)
+    _chrome_render_end_call(handle)
+    result
 
 """Calls `render_frame` with a bounded timeout. A zero timeout is refused by the ABI."""
 @unsafe(reason: "invokes the admitted Chrome render frame ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_frame(handle: ChromeRenderHandle, session_handle: i64, timeout_ms: i64) -> i64:
-    if handle.released or handle.symbols.render_frame <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.render_frame <= 0:
         return 2
     if timeout_ms <= 0:
         return 1
-    spl_wffi_call_i64(handle.symbols.render_frame, [session_handle, timeout_ms], 2)
+    if not _chrome_render_begin_call(handle):
+        return 2
+    val result = spl_wffi_call_i64(handle.symbols.render_frame, [session_handle, timeout_ms], 2)
+    _chrome_render_end_call(handle)
+    result
 
 """One real bounded readback attempt: what the provider returned, and what it wrote.
 
@@ -311,17 +345,20 @@ would cost more than the whole showcase run and prove nothing.
 fn chrome_render_read_pixels_into(handle: ChromeRenderHandle, session_handle: i64,
                                   width: i64, height: i64,
                                   frame_ready: bool) -> ChromeRenderReadback:
-    if handle.released or handle.symbols.read_pixels_into <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.read_pixels_into <= 0:
         return ChromeRenderReadback(rc: 2, frame_bytes_needed: 0, pixels: [], pulled: false)
     # A zero-capacity window still needs a real buffer address, so the sizing call offers a
     # one-byte allocation with no room in it.
     var sizer: [u8] = [0]
     var needed: i64 = 0
+    if not _chrome_render_begin_call(handle):
+        return ChromeRenderReadback(rc: 2, frame_bytes_needed: 0, pixels: [], pulled: false)
     val size_rc = unsafe(capabilities: [ffi, raw_ptr]):
         spl_wffi_call_i64_into_bytes(handle.symbols.read_pixels_into, [session_handle],
             &mut sizer, 0, 0, &mut needed, [])
     val want = width * height * 4
     if not frame_ready or needed <= 0 or needed != want:
+        _chrome_render_end_call(handle)
         return ChromeRenderReadback(rc: size_rc, frame_bytes_needed: needed,
             pixels: [], pulled: false)
     var frame: [u8] = []
@@ -333,6 +370,7 @@ fn chrome_render_read_pixels_into(handle: ChromeRenderHandle, session_handle: i6
     val read_rc = unsafe(capabilities: [ffi, raw_ptr]):
         spl_wffi_call_i64_into_bytes(handle.symbols.read_pixels_into, [session_handle],
             &mut frame, 0, want, &mut written, [])
+    _chrome_render_end_call(handle)
     if read_rc != 0 or written != want:
         return ChromeRenderReadback(rc: read_rc, frame_bytes_needed: needed,
             pixels: [], pulled: false)
@@ -341,13 +379,17 @@ fn chrome_render_read_pixels_into(handle: ChromeRenderHandle, session_handle: i6
 """Dispatches one bounded JSON input event (`event`)."""
 @unsafe(reason: "invokes the admitted bounded Chrome render event ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_event(handle: ChromeRenderHandle, session_handle: i64, event_json: text) -> i64:
-    if handle.released or handle.symbols.event <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.event <= 0:
         return 2
     if event_json == "" or event_json.len() > 1048576:
         return 1
     val payload: [u8] = text_to_bytes(event_json)
-    spl_wffi_call_i64_with_bytes(handle.symbols.event, [session_handle], payload, 0,
+    if not _chrome_render_begin_call(handle):
+        return 2
+    val result = spl_wffi_call_i64_with_bytes(handle.symbols.event, [session_handle], payload, 0,
         payload.len(), [])
+    _chrome_render_end_call(handle)
+    result
 
 """A synthetic pointer-down event at (x, y), as the ABI's bounded JSON payload."""
 fn chrome_render_pointer_event_json(x: i64, y: i64) -> text:
@@ -364,15 +406,20 @@ actually CALLABLE, which merely resolving a symbol address does not.
 """
 @unsafe(reason: "invokes the admitted Chrome render destroy ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_destroy(handle: ChromeRenderHandle, session_handle: i64) -> i64:
-    if handle.released or handle.symbols.destroy <= 0:
+    if not _chrome_render_handle_live(handle) or handle.symbols.destroy <= 0:
         return 2
-    spl_wffi_call_i64(handle.symbols.destroy, [session_handle], 1)
+    if not _chrome_render_begin_call(handle):
+        return 2
+    val result = spl_wffi_call_i64(handle.symbols.destroy, [session_handle], 1)
+    _chrome_render_end_call(handle)
+    result
 
 """Destroys any session and closes the library. Always releases the dynlib handle."""
 @unsafe(reason: "releases the admitted Chrome render provider session and library", capabilities: [ffi, raw_ptr])
 fn chrome_render_release(handle: ChromeRenderHandle, session_handle: i64) -> bool:
-    if handle.released or handle.library_handle <= 0:
+    if not _chrome_render_handle_live(handle):
         return false
     chrome_render_destroy(handle, session_handle)
-    spl_dlclose(handle.library_handle)
+    var library = handle.library.?
+    library.close()
     true
