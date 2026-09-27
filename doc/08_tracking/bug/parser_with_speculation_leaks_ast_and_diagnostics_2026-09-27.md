@@ -78,3 +78,19 @@ The direct checkpoint survey in
 identifies this confirmed checkpoint site in which `parse_expr()` runs before
 a possible rollback. Other parser side-effect paths still require
 the full semantic review recorded in the rule survey.
+
+## 2026-09-27 candidate correction
+
+The stacked parser candidate first scans the contextual header with lexer and
+current-token state only, then restores that token snapshot. It calls
+`parse_expr()` only when a top-level colon follows `as NAME`. Rejected
+forms therefore enter the ordinary identifier path without an AST/type parse.
+If the selected resource parse nevertheless fails its cast-shape check, it
+reports an error and retains that single parse path instead of reparsing and
+leaking its effects. The scan stops at a top-level statement terminator and is
+bounded by source length.
+
+This is a source candidate, not an admitted correction: the clean worktree
+still lacks a source-matched pure-Simple runner. Execute the regression spec,
+malformed-header/recovery matrix, and parser differential checks before
+closing this bug or promoting a shared parser provider.
