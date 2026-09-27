@@ -793,6 +793,10 @@ Command-line `/DEFAULTLIB:name`, `/NODEFAULTLIB[:name]`, and
 object directives. Library suppression is case-insensitive and treats the
 optional `.lib` suffix canonically; bare `/NODEFAULTLIB` suppresses directive
 and command-line defaults without removing explicitly supplied libraries.
+The production `allow_duplicate_definitions` policy now reaches internal COFF
+as deterministic `/FORCE:MULTIPLE` semantics: the first external definition
+in input/archive order wins and later definitions become references to it.
+Strict COFF APIs still reject duplicates unless that policy is explicitly set.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
