@@ -2315,3 +2315,19 @@ stage, kernel cached from 16:47) graded itself before its qemu hit the old
 A manual long-budget boot (timeout 9600 s, image copy in
 `manual-longrun/`, same kernel/image provenance) started 17:53:20 to carry
 R7a through completion; the serial watcher reports WITNESS_STL_OK / errors.
+
+## Update 2026-09-27 20:25 — retry longrun (14400 s) in flight; R7a measured
+## >95 min; other sessions run parallel STL attempts
+
+- The 9600 s longrun (17:53-20:13) parsed ALL 475 unique headers with ZERO
+  errors (past the old 381-header kill watermark at __variant/monostate.h)
+  and died in cc1 codegen when `timeout` fired. R7a alone is >95 min; the
+  pure AST semantic/codegen tail dominates after I/O-quiet phase begins.
+- Script: BOOT_TIMEOUT default 9600 -> 14400 (second commit, same push lane).
+- Retry guest booted 20:19 on a verified image copy (root dir + payload
+  sizes host-checked), hard stop 00:19. Verdict expected ~22:30.
+- Parallel sessions' STL attempts observed on
+  build/os/elfexec_clang_arm64_r7verify/fat32-clang-arm64.img (PID 1887644)
+  and a new elfexec_clang_arm64_r7v12 stage (PID 2343647) — left untouched;
+  any guest emitting WITNESS_STL_OK + CLANG_IN_GUEST_ARM64_STL_OK counts as
+  the R7 self-host proof.
