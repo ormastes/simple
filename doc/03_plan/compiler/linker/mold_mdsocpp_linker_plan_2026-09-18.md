@@ -361,6 +361,9 @@ Remote publication now requires absolute staging and installed paths and
 compares lexical canonical forms before upload. Dot segments, repeated
 separators, slash direction, drive-letter case, and Windows path case can no
 longer disguise the live destination or its sibling publication file.
+Known-target explicit binary paths are also rejected at initial resolution
+unless target-absolute, keeping command planning and execution independent of
+the remote shell's working directory.
 Before transfer, the adapter now asks the remote host to prove that both the
 upload leaf and sibling publication leaf are absent, including POSIX symlinks
 and Windows reparse entries visible to `Get-Item`. A stale or redirected leaf

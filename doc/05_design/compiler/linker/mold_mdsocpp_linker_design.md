@@ -262,6 +262,9 @@ quoted test command, and `RemotePcAdapter.execute` consumes it instead of the
 old hardcoded checkout-relative `bin/simple` path. Windows execution is pinned
 to non-interactive PowerShell with single-quoted arguments and propagated
 `$LASTEXITCODE`; quote or line-break injection attempts fail closed.
+Explicit binary paths for known targets must be target-absolute at resolution
+time, so planning and execution cannot silently depend on the remote shell's
+working directory.
 Placement validation is target-lexical rather than host-canonical: both staging
 and installed paths must be absolute, and normalized dot segments, separators,
 Windows drive letters, and Windows case are compared before any upload begins.
