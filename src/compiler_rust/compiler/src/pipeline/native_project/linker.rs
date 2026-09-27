@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use simple_common::target::LinkerFlavor;
+use simple_common::target::{LinkerFlavor, Target, TargetOS};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::config::runtime_bundle_requests_core_c_bootstrap;
@@ -23,6 +23,18 @@ use super::tools::{
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
+}
+
+fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'static str] {
+    match target.os {
+        TargetOS::Linux | TargetOS::FreeBSD if exact_stage4 => &["-no-pie"],
+        TargetOS::Linux | TargetOS::FreeBSD => &["-no-pie", "-Wl,-z,muldefs"],
+        _ => &[],
+    }
+}
+
+fn is_linux_link_target(target: Target) -> bool {
+    target.os == TargetOS::Linux
 }
 
 // CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
@@ -1354,6 +1366,8 @@ int main(int argc, char** argv) {
         let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
+        let is_elf_target = matches!(cross_target.os, TargetOS::Linux | TargetOS::FreeBSD);
+        let is_linux_target = is_linux_link_target(cross_target);
         // Use the OS component of the resolved target to decide freestanding routing.
         // `self.config.target.is_some()` was previously used here but is incorrect:
         // it routes any --target (including hosted cross-compiles like
@@ -1652,13 +1666,7 @@ int main(int argc, char** argv) {
         #[cfg(target_os = "macos")]
         add_macos_base_link_args(&mut cmd)?;
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        cmd.arg("-no-pie");
-
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-        if !exact_stage4 {
-            cmd.arg("-Wl,-z,muldefs");
-        }
+        cmd.args(hosted_elf_link_args(cross_target, exact_stage4));
 
         if let Some(ref ls) = self.config.linker_script {
             cmd.arg(format!("-T{}", ls.display()));
@@ -1889,11 +1897,13 @@ int main(int argc, char** argv) {
                     // where --gc-sections later drops the referencing section;
                     // the runtime is loaded for its initializers too, not only
                     // for symbols the linker can see being used.
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    cmd.arg("-Wl,--no-as-needed");
+                    if is_elf_target {
+                        cmd.arg("-Wl,--no-as-needed");
+                    }
                     cmd.arg(format!("-l{stem}"));
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    cmd.arg("-Wl,--as-needed");
+                    if is_elf_target {
+                        cmd.arg("-Wl,--as-needed");
+                    }
                     // RUNPATH, not LD_LIBRARY_PATH: a binary that only runs
                     // with the right env var set is a trap the bootstrap would
                     // fall into. `$ORIGIN` only -- deliberately NOT the build
@@ -1901,8 +1911,7 @@ int main(int argc, char** argv) {
                     // copy-beside still look like it worked, and would bake a
                     // build path into a shipped compiler. The copy below is the
                     // single mechanism, and it is fail-closed.
-                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                    {
+                    if is_elf_target {
                         cmd.arg("-Wl,-rpath,$ORIGIN");
                         cmd.arg("-Wl,-rpath,$ORIGIN/../lib");
                     }
@@ -2154,29 +2163,22 @@ int main(int argc, char** argv) {
             cmd.arg("-Wl,--gc-sections");
         }
         let link_config = {
-            #[cfg(target_os = "windows")]
-            {
-                if !is_clang_cl && !is_msvc {
-                    simple_common::platform::link_config::PlatformLinkConfig::windows_mingw()
-                } else {
-                    simple_common::platform::link_config::PlatformLinkConfig::for_host()
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                simple_common::platform::link_config::PlatformLinkConfig::for_host()
+            if cross_target.os == TargetOS::Windows && !is_clang_cl && !is_msvc {
+                simple_common::platform::link_config::PlatformLinkConfig::windows_mingw()
+            } else {
+                simple_common::platform::link_config::PlatformLinkConfig::for_target(&cross_target)
             }
         };
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
-        let omit_unwind = cfg!(target_os = "linux")
+        let omit_unwind = is_linux_target
             && selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && self.runtime_bundle_prefers_core_lane();
-        let require_openssl = cfg!(target_os = "linux") && Self::entry_objects_require_openssl(object_paths)?;
-        let omit_sqlite = cfg!(target_os = "linux")
+        let require_openssl = is_linux_target && Self::entry_objects_require_openssl(object_paths)?;
+        let omit_sqlite = is_linux_target
             && selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
@@ -2189,8 +2191,7 @@ int main(int argc, char** argv) {
                 cmd.arg(format!("{}.lib", lib));
             }
         } else {
-            #[cfg(target_os = "linux")]
-            {
+            if is_linux_target {
                 cmd.arg("-Wl,--as-needed");
             }
             for lib in &link_config.libraries {
@@ -2209,8 +2210,7 @@ int main(int argc, char** argv) {
             if has_native_all {
                 cmd.args(terminfo_link_args(cross_target));
             }
-            #[cfg(target_os = "linux")]
-            {
+            if is_linux_target {
                 cmd.arg("-Wl,--no-as-needed");
             }
         }
@@ -3317,6 +3317,27 @@ mod linker_tests {
         assert!(simple_common::platform::cc_detect::is_msvc_target("clang-cl"));
         assert!(!uses_msvc_flags(LinkerFlavor::Gnu));
         assert!(uses_msvc_flags(LinkerFlavor::Msvc));
+    }
+
+    #[test]
+    fn hosted_link_args_follow_cross_target_os() {
+        let mingw = Target::parse("x86_64-w64-windows-gnu").unwrap();
+        assert_eq!(mingw.os, TargetOS::Windows);
+        assert!(hosted_elf_link_args(mingw, false).is_empty());
+        assert!(!is_linux_link_target(mingw));
+
+        let mingw_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&mingw);
+        assert!(mingw_config.libraries.contains(&"ws2_32"));
+        assert!(!mingw_config
+            .unresolved_symbol_flags
+            .contains(&"-Wl,--unresolved-symbols=ignore-all"));
+
+        let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
+        assert_eq!(
+            hosted_elf_link_args(linux, false),
+            &["-no-pie", "-Wl,-z,muldefs"]
+        );
+        assert!(is_linux_link_target(linux));
     }
 
     #[test]
