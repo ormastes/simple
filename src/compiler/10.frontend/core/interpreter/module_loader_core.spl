@@ -30,6 +30,7 @@ use compiler.core.interpreter.eval_tables.{
     func_register_return_type, func_table_lookup, func_table_register,
     func_table_register_owned, func_import_binding_register,
     func_import_binding_names, func_resolve_for_caller,
+    func_module_namespace_register, func_module_namespace_lookup,
     struct_table_lookup, struct_table_register,
     decl_owner_file_set
 }
@@ -162,6 +163,8 @@ fn force_deferred_module(name: text, caller_file: text) -> i64:
             else:
                 load_result = load_module_selective_with_unbraced_alias(
                     name, imported_names, current_file)
+            if load_result == 1 and imported_names.len() == 0:
+                module_bind_exports_for_caller(name, current_file)
             # Remove from deferred set (mark as loaded)
             deferred_module_set[deferred_module_key(name, caller_file)] = false
             return load_result
@@ -195,9 +198,11 @@ fn try_force_any_deferred_for(symbol_name: text, caller_file: text) -> i64:
                 # Bug: doc/08_tracking/bug/interp_lazy_import_global_first_use_unmaterialized_2026-07-15.md
                 val fn_decl = func_table_lookup(symbol_name)
                 val bound_decl = func_resolve_for_caller(caller_file, symbol_name)
+                val namespace_owner = func_module_namespace_lookup(caller_file, symbol_name)
                 val struct_decl = struct_table_lookup(symbol_name)
                 val global_vid = env_lookup(symbol_name)
-                if fn_decl >= 0 or bound_decl >= 0 or struct_decl >= 0 or global_vid >= 0:
+                if fn_decl >= 0 or bound_decl >= 0 or namespace_owner != "" or
+                   struct_decl >= 0 or global_vid >= 0:
                     return 1
         i = i + 1
     0
@@ -281,6 +286,15 @@ fn module_alias_loaded(alias_name: text, file_path: text) -> i64:
     val exports = loaded_module_exports[existing_idx]
     module_mark_loaded(alias_name, file_path, exports)
     1
+
+fn module_bind_exports_for_caller(module_name: text, caller_file: text):
+    val owner_file = module_get_file_path(module_name)
+    val owner_index = module_find_by_file_path(owner_file)
+    if owner_index < 0:
+        return
+    for name in loaded_module_exports[owner_index]:
+        if name != "" and name != "*" and not name.ends_with(".*"):
+            func_import_binding_register(caller_file, name, owner_file)
 
 # ===== Module Load Depth Guard =====
 
@@ -568,6 +582,8 @@ fn load_module(module_name: text, current_file: text) -> i64:
                 val dependency_owner = dependency_module[0:dependency_dot]
                 val dependency_member = dependency_module[dependency_dot + 1:dependency_module.len()]
                 dependency_ok = load_module_selective(dependency_owner, [dependency_member], resolved_path)
+        if dependency_ok == 1 and requested.len() == 0:
+            module_bind_exports_for_caller(dependency_module, resolved_path)
         if dependency_ok == 0:
             val dependency_path = resolve_module_path(dependency_module, resolved_path)
             print "error: module dependency failed: {module_name} -> {dependency_module} ({dependency_path})"
@@ -601,9 +617,15 @@ fn load_module_selective_with_unbraced_alias(
         val names = func_import_binding_names(imported_names[0])
         if names.0 == module_name and names.1 != module_name:
             val last_dot = module_name.last_index_of(".")
-            if last_dot > 0 and last_dot + 1 < module_name.len() and
-               module_is_loaded(module_name) == 0 and
-               not file_exists(resolve_module_path(module_name, current_file)):
+            val complete_module_exists = module_is_loaded(module_name) == 1 or
+                file_exists(resolve_module_path(module_name, current_file))
+            if complete_module_exists:
+                if load_module(module_name, current_file) == 0:
+                    return 0
+                func_module_namespace_register(
+                    current_file, names.1, module_get_file_path(module_name))
+                return 1
+            if last_dot > 0 and last_dot + 1 < module_name.len():
                 val parent_name = module_name[0:last_dot]
                 val member_name = module_name[last_dot + 1:module_name.len()]
                 if load_module(parent_name, current_file) == 0:

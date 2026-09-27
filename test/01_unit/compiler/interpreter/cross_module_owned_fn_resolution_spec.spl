@@ -33,7 +33,9 @@ use compiler.core.interpreter.eval_tables.{
     func_import_binding_register,
     func_import_binding_lookup,
     func_import_binding_reset,
-    func_resolve_for_caller
+    func_resolve_for_caller,
+    func_module_namespace_lookup,
+    func_resolve_module_member_for_caller
 }
 use compiler.core.interpreter.module_loader_core.{
     module_loader_init, module_mark_loaded, record_module_surface,
@@ -125,13 +127,34 @@ describe "(module path, name)-keyed function resolution":
         val parent_file = "spec/fixture/ru011_parent.spl"
         val complete_file = "spec/fixture/ru011_complete.spl"
         val facade_file = "spec/fixture/ru011_complete_facade.spl"
+        val origin = decl_fn("orig", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(complete_file, "orig", origin)
         module_mark_loaded("ru011_spec.provider", parent_file, [])
         module_mark_loaded("ru011_spec.provider.orig", complete_file, [])
         val loaded = load_module_selective_with_unbraced_alias(
             "ru011_spec.provider.orig",
             ["ru011_spec.provider.orig:local"], facade_file)
         expect(loaded).to_equal(1)
-        expect(func_import_binding_lookup(facade_file, "local")).to_equal(complete_file)
+        expect(func_module_namespace_lookup(facade_file, "local")).to_equal(complete_file)
+        expect(func_resolve_module_member_for_caller(facade_file, "local", "orig")).to_equal(origin)
+        expect(func_import_binding_lookup(facade_file, "local")).to_equal("")
+        expect(func_resolve_for_caller(facade_file, "orig")).to_equal(-1)
+
+    it "forces a lazy complete-module namespace before member lookup":
+        module_loader_init()
+        ast_reset()
+        func_table_reset()
+        func_import_binding_reset()
+        val owner_file = "spec/fixture/ru011_lazy_complete.spl"
+        val caller_file = "spec/fixture/ru011_lazy_complete_caller.spl"
+        val origin = decl_fn("answer", [], [], 0, [], 0, [], 0)
+        func_table_register_owned(owner_file, "answer", origin)
+        module_mark_loaded("ru011_spec.complete", owner_file, [])
+        register_deferred_module("ru011_spec.complete", caller_file,
+            ["ru011_spec.complete:ns"])
+        expect(try_force_any_deferred_for("ns", caller_file)).to_equal(1)
+        expect(func_module_namespace_lookup(caller_file, "ns")).to_equal(owner_file)
+        expect(func_resolve_module_member_for_caller(caller_file, "ns", "answer")).to_equal(origin)
 
     it "rejects a missing parent item without registering the alias":
         module_loader_init()
