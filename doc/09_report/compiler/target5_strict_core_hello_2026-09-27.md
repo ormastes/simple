@@ -123,6 +123,8 @@ A same-host C-entry probe called `rt_println_str("hello", 5)` against the same
 core runtime archive, with clang `-Oz`, LLD, section GC, and strip. It printed
 `hello`, measured 5,152 bytes on disk and 1 byte of `.bss`, and imported no
 `mmap`. The probe lives in `build/mini_builds/target5_literal_print_probe/`.
+It is 8,792 bytes (about 63%) smaller than the historical 13,944-byte
+LLD-linked Simple hello, but the artifacts have different entry points.
 It excludes the Simple entry wrapper and the historical builder's forced
 runtime roots, so it is directional evidence only. A current-source Stage4
 hello build and paired C cohort remain necessary to assess the 1.05x gate.
