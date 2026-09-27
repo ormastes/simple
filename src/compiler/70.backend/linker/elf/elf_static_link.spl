@@ -75,8 +75,9 @@ use compiler.backend.linker.elf.synthetic_sections.{
     DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
     DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_PLTREL, DT_DEBUG, DT_JMPREL,
     DT_INIT_ARRAY, DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH,
-    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS_1,
-    DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM, DF_1_PIE,
+    DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ, DT_GNU_HASH, DT_RELACOUNT, DT_FLAGS,
+    DT_FLAGS_1, DT_BIND_NOW, DT_VERSYM, DT_VERNEED, DT_VERNEEDNUM,
+    DF_BIND_NOW, DF_1_NOW, DF_1_PIE,
     SHT_RELA_S, SHT_HASH_S, SHT_GNU_HASH_S, SHT_GNU_VERNEED_S, SHT_GNU_VERSYM_S,
     SHT_DYNAMIC_S, SHT_DYNSYM_S, SHF_INFO_LINK_S,
     GOTPLT_RESERVED
@@ -115,6 +116,7 @@ struct ElfLinkRequest:
     mode: i64             # ELF_LINK_*
     interp: text          # PT_INTERP path (dynamic modes only)
     runpath: text = ""    # DT_RUNPATH payload (dynamic modes only)
+    bind_now: bool = false # -z now: eager dynamic binding
 
 struct ElfStaticInputs:
     """Every selected input object with per-section placement."""
@@ -135,6 +137,7 @@ struct ElfLinkCtx:
     copy_offsets: {text: i64}
     copy_out: i64
     runpath: text
+    bind_now: bool
 
 struct ElfCommonPlacement:
     inputs: ElfStaticInputs
@@ -790,8 +793,13 @@ fn elf_dynamic_tags(ctx: ElfLinkCtx, sc: ElfScan, dynstr: ElfDynStr, n_rela: [i6
         t = t.push([DT_PLTRELSZ, sc.plt_names.len() * 24])
         t = t.push([DT_PLTGOT, a.gotplt])
         t = t.push([DT_PLTREL, DT_RELA])
-    if elf_mode_pie(ctx.mode):
-        t = t.push([DT_FLAGS_1, DF_1_PIE])
+    if dynamic and ctx.bind_now:
+        t = t.push([DT_BIND_NOW, 0])
+        t = t.push([DT_FLAGS, DF_BIND_NOW])
+    var flags1: i64 = 0
+    if elf_mode_pie(ctx.mode): flags1 = flags1 | DF_1_PIE
+    if dynamic and ctx.bind_now: flags1 = flags1 | DF_1_NOW
+    if flags1 != 0: t = t.push([DT_FLAGS_1, flags1])
     t
 
 fn elf_plan_addr(plan: ElfExecPlan, name: text) -> i64:
@@ -1155,6 +1163,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         return Err("shared objects given to a static link")
     if not dynamic and req.runpath != "":
         return Err("RUNPATH given to a static link")
+    if not dynamic and req.bind_now:
+        return Err("bind-now policy given to a static link")
     if req.runpath.contains("\0"):
         return Err("RUNPATH contains NUL")
     if dynamic and req.interp == "":
@@ -1215,7 +1225,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val common = elf_place_common(elf_static_place(collected, gc.live)?, res, gc.common_live)
     val ctx0 = ElfLinkCtx(inputs: common.inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx, copy_offsets: {}, copy_out: -1,
-        runpath: req.runpath)
+        runpath: req.runpath, bind_now: req.bind_now)
     val initial_contents = elf_static_contents(common.inputs)
     val refs = elf_collect_refs(ctx0, initial_contents)?
     val sc = elf_reloc_scan(refs, target, mode)?
@@ -1231,7 +1241,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val inputs = copies.inputs
     val ctx = ElfLinkCtx(inputs: inputs, res: res, libs: libs, target: target, mode: mode,
         common_offsets: common.offsets, common_out: common.out_idx,
-        copy_offsets: copies.offsets, copy_out: copies.out_idx, runpath: req.runpath)
+        copy_offsets: copies.offsets, copy_out: copies.out_idx,
+        runpath: req.runpath, bind_now: req.bind_now)
     var contents = elf_static_contents(inputs)
     val eh_out = elf_find_out(inputs.outs, ".eh_frame")
     var eh_fdes: i64 = 0

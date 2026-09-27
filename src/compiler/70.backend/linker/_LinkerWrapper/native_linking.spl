@@ -727,12 +727,34 @@ fn internal_elf_runpath(extra_flags: [text]) -> Result<text, text>:
             # graph is rooted before layout.
             i = i + 1
             continue
+        elif flag == "-z":
+            if i + 1 >= extra_flags.len() or
+                    (extra_flags[i + 1] != "relro" and extra_flags[i + 1] != "now"):
+                return Err("internal ELF -z supports only relro or now")
+            i = i + 2
+            continue
+        elif flag == "-zrelro" or flag == "-znow" or
+                flag == "-Wl,-z,relro" or flag == "-Wl,-z,now":
+            i = i + 1
+            continue
         else:
             return Err("unsupported internal ELF linker flag '{flag}'")
         if path == "" or path.contains("\0"):
             return Err("internal ELF RUNPATH entry is empty or contains NUL")
         if not paths.contains(path): paths = paths.push(path)
     Ok(paths.join(":"))
+
+fn internal_elf_bind_now(extra_flags: [text]) -> bool:
+    var i: i64 = 0
+    while i < extra_flags.len():
+        val flag = extra_flags[i]
+        if flag == "-z" and i + 1 < extra_flags.len():
+            if extra_flags[i + 1] == "now": return true
+            i = i + 2
+            continue
+        if flag == "-znow" or flag == "-Wl,-z,now": return true
+        i = i + 1
+    false
 
 fn internal_coff_unsupported_config_field(config: NativeLinkConfig) -> text:
     # internal:coff consumes libraries, library_paths, and runtime provider
@@ -1342,7 +1364,7 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     val runpath = internal_elf_runpath(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
-        runpath: runpath)
+        runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags))
     val linked = elf_link_configured(request, config.strip_output, config.retained_symbols)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")

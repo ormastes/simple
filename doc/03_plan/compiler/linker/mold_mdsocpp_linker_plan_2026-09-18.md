@@ -678,6 +678,10 @@ Linux internal routing also accepts explicit `--eh-frame-hdr`, `--build-id`,
 `--build-id=sha1`, and `--gc-sections` requests because those exact policies
 are intrinsic to every produced image. Alternate build-id algorithms and
 `--no-gc-sections` remain rejected rather than silently changing semantics.
+GNU `-z relro` spellings are accepted because dynamic metadata and GOT ranges
+already receive `PT_GNU_RELRO`. GNU `-z now` spellings now select typed eager
+binding and emit `DT_BIND_NOW`, `DF_BIND_NOW`, and `DF_1_NOW`; lazy binding
+remains the default and unmodeled `-z` policies fail closed.
 Hosted ELF and Windows retained-symbol roots seed
 archive extraction; SimpleOS validates roots against its object and script
 definitions and retains their section graph under `--gc-sections`; every route
