@@ -25,8 +25,8 @@ reviewed.
 |---|---:|
 | Direct declarations | 216 |
 | Distinct symbols | 90 |
-| Symbols with an interpreter registration | 75 |
-| Symbols without an interpreter registration | 15 |
+| Symbols with an interpreter registration | 78 |
+| Symbols without an interpreter registration | 12 |
 | Symbols with conflicting declared result types | 3 |
 
 The three declaration conflicts are `rt_env_get` (`text` versus `text?`),
@@ -36,11 +36,11 @@ not assert that every variant reaches execution. Draft PR #1819 removes the
 compiler cache's struct-shaped `rt_process_run` declaration, but it is not part
 of the pinned main commit.
 
-The missing interpreter registrations are `rt_file_read_regular_no_follow_bounded`,
-`rt_file_write`, two parser mask calls, five pinned-archive calls,
-`rt_process_start_identity`, two Simple ABI version calls, `rt_time_millis`,
-`rt_time_now_iso`, and `rt_uuid_v4`. Absence from the registry is a routing gap
-to classify, not proof that each operation should be interpreter-callable.
+The missing interpreter registrations are `rt_file_write`, five
+pinned-archive calls, `rt_process_start_identity`, two Simple ABI version
+calls, `rt_time_millis`, `rt_time_now_iso`, and `rt_uuid_v4`. Absence from the
+registry is a routing gap to classify, not proof that each operation should be
+interpreter-callable.
 
 ## Migration consequences
 
