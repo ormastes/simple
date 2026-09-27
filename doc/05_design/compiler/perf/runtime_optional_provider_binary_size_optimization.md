@@ -36,7 +36,9 @@ Promotion requires:
 
 ## Size Attribution
 
-For Simple and same-toolchain C hello, retain:
+For Simple and same-host, same-toolchain C hello built with the same required
+startup wrapper, core runtime archive, linker options, section GC, and strip
+policy, retain:
 
 - unstripped and stripped bytes;
 - segment/section table;
