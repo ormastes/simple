@@ -764,6 +764,19 @@ fn _internal_coff_reserve_commit(value: text,
         return Err("internal COFF /{kind} requires positive commit <= reserve")
     Ok((reserve, commit))
 
+fn _internal_coff_version(value: text, kind: text) -> Result<(i64, i64), text>:
+    val parts = value.split(".")
+    if parts.len() < 1 or parts.len() > 2 or parts[0] == "":
+        return Err("internal COFF /{kind} requires major[.minor]")
+    val major = _internal_coff_number(parts[0])?
+    var minor: i64 = 0
+    if parts.len() == 2:
+        if parts[1] == "": return Err("internal COFF /{kind} requires major[.minor]")
+        minor = _internal_coff_number(parts[1])?
+    if major > 0xffff or minor > 0xffff:
+        return Err("internal COFF /{kind} version components must fit 16 bits")
+    Ok((major, minor))
+
 fn _internal_coff_entry_valid(entry: text) -> bool:
     if entry == "": return false
     var index: i64 = 0
@@ -793,6 +806,9 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var saw_heap = false
     var saw_align = false
     var saw_file_align = false
+    var saw_os_version = false
+    var saw_image_version = false
+    var saw_subsystem_version = false
     var saw_machine = ""
     var saw_dynamic_base: i64 = -1
     var saw_high_entropy: i64 = -1
@@ -883,8 +899,27 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
                 return Err("conflicting internal COFF /FILEALIGN flags")
             policy.file_alignment = selected
             saw_file_align = true
+        elif normalized.starts_with("/osversion:"):
+            val selected = _internal_coff_version(flag.substring(11), "OSVERSION")?
+            if saw_os_version and (policy.os_version_major != selected.0 or
+                    policy.os_version_minor != selected.1):
+                return Err("conflicting internal COFF /OSVERSION flags")
+            policy.os_version_major = selected.0
+            policy.os_version_minor = selected.1
+            saw_os_version = true
+        elif normalized.starts_with("/version:"):
+            val selected = _internal_coff_version(flag.substring(9), "VERSION")?
+            if saw_image_version and (policy.image_version_major != selected.0 or
+                    policy.image_version_minor != selected.1):
+                return Err("conflicting internal COFF /VERSION flags")
+            policy.image_version_major = selected.0
+            policy.image_version_minor = selected.1
+            saw_image_version = true
         elif normalized.starts_with("/subsystem:"):
-            val name = normalized.substring(11)
+            val parts = flag.substring(11).split(",")
+            if parts.len() < 1 or parts.len() > 2:
+                return Err("internal COFF /SUBSYSTEM requires name[,major[.minor]]")
+            val name = parts[0].lower()
             var subsystem: i64 = 0
             if name == "console": subsystem = PE_SUBSYSTEM_CONSOLE
             elif name == "windows": subsystem = PE_SUBSYSTEM_WINDOWS
@@ -893,6 +928,15 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
                 return Err("conflicting internal COFF /SUBSYSTEM flags")
             policy.subsystem = subsystem
             saw_subsystem = true
+            if parts.len() == 2:
+                val selected = _internal_coff_version(parts[1], "SUBSYSTEM")?
+                if saw_subsystem_version and (
+                        policy.subsystem_version_major != selected.0 or
+                        policy.subsystem_version_minor != selected.1):
+                    return Err("conflicting internal COFF /SUBSYSTEM versions")
+                policy.subsystem_version_major = selected.0
+                policy.subsystem_version_minor = selected.1
+                saw_subsystem_version = true
         elif normalized.starts_with("/stack:"):
             val values = _internal_coff_reserve_commit(
                 flag.substring(7), PeImagePolicy.default().stack_commit, "STACK")?

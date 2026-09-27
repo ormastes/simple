@@ -761,6 +761,11 @@ values. Section alignment is a bounded power of two from 512 bytes through 256 M
 file alignment is a power of two from 512 bytes through 64 KiB and cannot exceed
 section alignment; a sub-page section alignment must equal file alignment.
 Duplicate equal values deduplicate and conflicts fail closed.
+`/OSVERSION:major[.minor]`, `/VERSION:major[.minor]`, and the optional
+`,major[.minor]` suffix on `/SUBSYSTEM` now populate the six corresponding
+PE32+ optional-header fields. Components are decimal or `0x` values bounded to
+16 bits; malformed, overflowing, and conflicting repeats fail before output.
+Defaults remain OS 6.0, image 0.0, and subsystem 6.0 for byte compatibility.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
