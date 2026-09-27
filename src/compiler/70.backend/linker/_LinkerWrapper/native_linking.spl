@@ -75,7 +75,7 @@ use compiler.backend.linker.crt_discovery.*
 
 # Import helpers (SMF linking, self-contained, binary utils)
 use compiler.backend.linker.linker_wrapper_helpers.{SelfContainedConfig}
-use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths}
+use compiler.backend.linker.msvc.{MsvcConfig, MsvcLinker, find_visual_studio, find_link_exe, find_msvc_crt_paths, find_msvc_crt_paths_for_arch, msvc_lib_arch_dir}
 use compiler.backend.linker.linker_wrapper_helpers.{SMFE_MAGIC, SMFE_TRAILER_SIZE, SMFE_VERSION}
 use compiler.backend.linker.linker_wrapper_helpers.{link_to_smf, link_to_self_contained}
 use compiler.backend.linker.linker_wrapper_helpers.{detect_self_contained, find_runtime_binary, find_runtime_lib_dir}
@@ -2054,6 +2054,13 @@ fn _windows_link_arch(config: NativeLinkConfig) -> text:
     if detected == "amd64": return "x86_64"
     detected
 
+fn internal_coff_runtime_is_msvc(os: text, mingw_env: bool) -> bool:
+    """Whether the internal COFF engine links MSVC-named runtime archives
+    (simple_*.lib) rather than the MinGW ones (libsimple_*.a)."""
+    if os == "windows-mingw": return false
+    if os == "windows-msvc": return true
+    not mingw_env
+
 fn link_native_windows(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     if requested_linker_override().trim().lower() == "internal":
         val target_arch = _windows_link_arch(config)
@@ -2077,7 +2084,7 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             else: objects = objects.push(bytes)
         var search_paths: [text] = []
         for path in config.library_paths: search_paths.push(path)
-        for path in _find_msvc_lib_paths():
+        for path in _find_msvc_lib_paths_for_arch(target_arch):
             if not search_paths.contains(path): search_paths.push(path)
         var runtime_dir = config.runtime_path
         if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
@@ -2088,8 +2095,11 @@ fn link_native_windows(object_files: [text], output: text, config: NativeLinkCon
             val path = internal_coff_library_file(library, search_paths)
             if path == "": return Err("internal engine: COFF library '{library}' was not found")
             if not library_files.contains(path): library_files = library_files.push(path)
+        val runtime_msvc = internal_coff_runtime_is_msvc(
+            native_effective_link_os(host_os(), config.target_triple, config.linker_abi),
+            _is_mingw_env())
         val runtime_archives = native_runtime_archive_inputs_for_platform(
-            runtime_dir, config.runtime_bundle, true)
+            runtime_dir, config.runtime_bundle, runtime_msvc)
         for path in runtime_archives:
             if not library_files.contains(path): library_files = library_files.push(path)
         var support_inputs = object_files
@@ -2175,10 +2185,14 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
     """Link using MSVC toolchain (link.exe or lld-link)."""
     var msvc_config: MsvcConfig = MsvcConfig.default()
     msvc_config.debug = config.debug
-    if _windows_link_arch(config) == "aarch64": msvc_config.machine = "ARM64"
+    val link_arch = _windows_link_arch(config)
+    if link_arch == "aarch64":
+        msvc_config.machine = "ARM64"
+        # MsvcConfig.default() pre-populates the x64 CRT/SDK directories.
+        msvc_config.lib_paths = []
 
     # Populate CRT library paths from VS/SDK detection
-    val crt_paths = _find_msvc_lib_paths()
+    val crt_paths = _find_msvc_lib_paths_for_arch(link_arch)
     for p in crt_paths:
         msvc_config.lib_paths.push(p)
 
@@ -2281,3 +2295,7 @@ fn _find_msvc_lib_paths() -> [text]:
     """Find MSVC CRT and Windows SDK library paths."""
     use compiler.backend.linker.msvc.{find_msvc_crt_paths}
     find_msvc_crt_paths()
+
+fn _find_msvc_lib_paths_for_arch(arch: text) -> [text]:
+    """Find MSVC CRT and Windows SDK library paths for the target architecture."""
+    find_msvc_crt_paths_for_arch(msvc_lib_arch_dir(arch))
