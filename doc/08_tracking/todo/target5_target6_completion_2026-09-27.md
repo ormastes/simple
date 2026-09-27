@@ -57,6 +57,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   The executable AOT SMF writer cannot supply typed export sections or
   per-module receipts; emit those from HIR rather than deriving placeholder
   digests from the combined code image.
+  The first typed ABI section now emits actual canonical HIR bytes and a
+  matching digest. Complete the other semantic sections and their artifact
+  receipts before connecting this producer to index publication.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.

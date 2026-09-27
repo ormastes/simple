@@ -5,7 +5,12 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
     cold_hir_semantic_seeds_v1
 }
-use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use compiler.hir.abi_interface.{
+    hir_abi_interface_digest_v1, hir_abi_interface_encoded_v1
+}
+use compiler.driver.cache.cold_hir_abi_smf_section_v1.{
+    cold_hir_abi_smf_section_v1
+}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
     compile_source_inventory_digest_v1
@@ -31,6 +36,24 @@ fn test_inventory(content: text, duplicate: bool = false) -> CompileSourceInvent
     CompileSourceInventoryV1(1, 1, entries)
 
 describe "cold HIR semantic seed":
+    it "emits a real ABI section from canonical typed HIR bytes":
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val result = cold_hir_abi_smf_section_v1(module)
+        expect(result.is_ok()).to_be(true)
+        val produced = result.unwrap()
+        expect(produced.section.kind).to_equal("abi_interface")
+        expect(produced.section.offset).to_equal(0)
+        expect(produced.section.extent).to_equal(produced.payload.len())
+        expect(produced.section.digest).to_equal(sha256_text(produced.payload))
+        expect(produced.payload).to_equal(
+            hir_abi_interface_encoded_v1(module).unwrap())
+        expect(produced.abi_digest).to_equal(
+            hir_abi_interface_digest_v1(module).unwrap())
+        var changed = test_module("/repo/pkg/mod.spl", [])
+        changed.exports = ["visible"]
+        val changed_section = cold_hir_abi_smf_section_v1(changed).unwrap()
+        expect(changed_section.section.digest == produced.section.digest).to_be(false)
+
     it "binds typed ABI and imports to a frozen source inventory":
         val content = "fn entry() -> i64: 1\n"
         val inventory = test_inventory(content)

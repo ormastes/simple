@@ -9,7 +9,7 @@ ownership gap before any driver cutover.
 | Required fact | Current production evidence | Required cutover work |
 |---|---|---|
 | Typed module identity, ABI, and direct imports | `cold_hir_semantic_seed_v1.spl` derives these from a `HirModule` and verified source content. `driver_hir_pipeline_lowering.spl` retains HIR for the current request's `ctx.sources`. | Prove that the selected index inventory is covered by those HIR modules, or define an exact package-scoped partition bound to the parent SCV snapshot. Do not fabricate rows for sources outside the lowered set. |
-| TLDR section directory and SMF payload | `package_tldr_metadata.spl` defines and validates `PackageSmfSectionV1` and `PackageExportSmfV1`. A source search found no production constructor of either record. The existing watcher `smf_manifest.spl` maps source paths to compiled SMF artifacts; it is not the typed section producer. | Emit real sections from compiler-owned SMF bytes, with offsets and digests checked against the artifact before building a TLDR header. |
+| TLDR section directory and SMF payload | `cold_hir_abi_smf_section_v1.spl` now emits one actual ABI section from the canonical typed-HIR interface payload; its extent and digest bind those bytes. `package_tldr_metadata.spl` still has no complete `PackageExportSmfV1` producer. The watcher `smf_manifest.spl` maps source paths to compiled SMF artifacts; it is not the typed export producer. | Emit initializer, provider, generated-source, reverse-reference, and deep export sections from their real owners, with offsets and digests checked against the complete artifact before building a TLDR header. |
 | Interface/action archive receipts | `interface_action_archive.spl` decodes and admits pinned archives. The only production constructor of `InterfaceActionArchiveV1` is its decoder. | Produce archive members and receipts from typed compiler outputs, then pass their actual digests to the cold draft assembler. |
 | Persistent generation | `compiler_entrypoint/admission.spl` is the only production caller of `package_module_index_publish_v1`; it publishes an empty snapshot-binding generation. | Publish a validated graph generation from the cold builder after artifact production, and preserve one immutable generation for each request. |
 | Warm compatibility markers | `driver_source_pipeline_loading.spl` reads producer, root-generation, and variant-digest environment markers. No production owner sets those three markers. | Set markers from the admitted graph generation and configuration variant, then remove the binding-only cold fallback when the full route is qualified. |
@@ -24,6 +24,9 @@ uses a zero extent in the table, while the TLDR section-directory validator
 requires a positive extent. The cold producer must issue typed export bytes
 from HIR and validate their own bounded section directory; treating the AOT
 image as a package TLDR would bind unrelated or absent semantic facts.
+The new ABI section uses `hir_abi_interface_encoded_v1` so its digest equals
+the existing typed ABI identity. It is a partial producer with actual bytes;
+it cannot be published as a complete package export SMF on its own.
 
 The isolated archive reader now validates digest bytes and canonicalizes
 dependency digests with the shared heap sort. This removes native text
