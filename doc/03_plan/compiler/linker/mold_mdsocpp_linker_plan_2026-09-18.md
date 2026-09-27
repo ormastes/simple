@@ -377,11 +377,14 @@ after mode changes but before rename. A copy mismatch removes that sibling and
 leaves the installed interpreter untouched.
 Windows publication no longer relies on `Move-Item -Force`: an existing file
 is replaced with sibling-volume `System.IO.File.Replace`, an absent path uses
-`File.Move`, and a non-file destination fails closed. This preserves the old
-binary until the verified candidate is atomically committed.
+`File.Move`, and a reparse point or non-file destination fails closed before
+the staged upload is consumed. The sibling is created through
+`FileMode.CreateNew`, so a post-preflight leaf cannot be overwritten. This
+preserves the old binary until the verified candidate is atomically committed.
 Linux and SimpleOS publication now reject symlink and non-regular installed
-leaves and use `mv -T`, preventing a destination directory from silently
-turning replacement into a move beneath the intended installed path.
+leaves, create the sibling under shell noclobber mode before copying into that
+owned regular file, and use `mv -T`, preventing a raced sibling or destination
+directory from redirecting publication.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and

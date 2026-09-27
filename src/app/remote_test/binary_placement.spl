@@ -188,22 +188,30 @@ fn remote_simple_install_command(remote_os: text, configured: text,
             "$src = " + source.unwrap() + "; $dst = " + target.unwrap() + "; " +
             "$tmp = $dst + '.remote-test-new'; " +
             "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null; " +
-            "Copy-Item -LiteralPath $src -Destination $tmp -Force; " +
+            "$input = [System.IO.File]::OpenRead($src); try { " +
+            "$output = [System.IO.File]::Open($tmp, [System.IO.FileMode]::CreateNew, " +
+            "[System.IO.FileAccess]::Write, [System.IO.FileShare]::None); try { " +
+            "$input.CopyTo($output); $output.Flush($true) } finally { $output.Dispose() } " +
+            "} finally { $input.Dispose() }; " +
             "$actual = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLowerInvariant(); " +
             "if ($actual -ne '" + digest + "') { Remove-Item -LiteralPath $tmp -Force; " +
             "Write-Error 'remote-test publication copy SHA-256 mismatch'; exit 75 }; " +
+            "$existing = Get-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue; " +
+            "if (($null -ne $existing) -and ($existing.PSIsContainer -or " +
+            "(($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0))) " +
+            "{ Remove-Item -LiteralPath $tmp -Force; " +
+            "Write-Error 'remote-test installed path is not a regular non-reparse file'; exit 76 }; " +
             "Remove-Item -LiteralPath $src -Force; " +
-            "if (Test-Path -LiteralPath $dst -PathType Leaf) " +
+            "if ($null -ne $existing) " +
             "{ [System.IO.File]::Replace($tmp, $dst, $null, $true) } " +
-            "elseif (Test-Path -LiteralPath $dst) " +
-            "{ Write-Error 'remote-test installed path is not a file'; exit 76 } " +
             "else { [System.IO.File]::Move($tmp, $dst) }\"")
     if platform == "linux" or platform == "simpleos" or platform == "simple-os":
         val source = _remote_posix_quote(staged_path)
         val target = _remote_posix_quote(destination)
         val temporary = _remote_posix_quote(destination + ".remote-test-new")
-        return Ok("mkdir -p -- $(dirname -- " + target + ") && cp -- " + source + " " +
-            temporary + " && chmod 0755 -- " + temporary + " && { actual=$(sha256sum -- " +
+        return Ok("mkdir -p -- $(dirname -- " + target + ") && (set -C; : > " + temporary +
+            ") && cp -- " + source + " " + temporary + " && chmod 0755 -- " + temporary +
+            " && { actual=$(sha256sum -- " +
             temporary + ") || { rm -f -- " + temporary + "; exit 75; }; " +
             "actual=${actual%% *}; if [ \"$actual\" != '" + digest + "' ]; then rm -f -- " +
             temporary + "; echo 'remote-test publication copy SHA-256 mismatch' >&2; exit 75; fi; }" +

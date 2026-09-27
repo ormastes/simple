@@ -283,10 +283,14 @@ the immutable atomic-replacement candidate.
 On Windows, an existing installed file is committed through
 `System.IO.File.Replace` and a first install through `System.IO.File.Move`;
 `Move-Item -Force` is not used because its overwrite sequence does not provide
-the required replace-without-an-absent-window contract.
+the required replace-without-an-absent-window contract. The sibling candidate
+is opened with `FileMode.CreateNew`, so a leaf introduced after preflight cannot
+be overwritten, and an installed reparse point or directory is rejected before
+the staged upload is consumed.
 Linux and SimpleOS likewise reject symlink and non-regular installed leaves,
-then use `mv -T` so a destination directory can never reinterpret publication
-as a move into that directory.
+create the sibling under shell noclobber mode before copying into that owned
+regular file, then use `mv -T` so neither a raced publication leaf nor a
+destination directory can reinterpret publication.
 
 ## 14. Linux runtime and library input completion (2026-09-27)
 
