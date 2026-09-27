@@ -404,6 +404,11 @@ read failures, malformed local digests, or byte mismatches stop publication.
 The publication command carries the same digest and re-hashes the sibling copy
 after mode changes but before rename. A copy mismatch removes that sibling and
 leaves the installed interpreter untouched.
+After the atomic replacement, the adapter independently revalidates that the
+live destination is a regular non-symlink/non-reparse file and that its SHA-256
+still matches the selected local interpreter. A final-path mismatch stops the
+remote run without deleting the destination, preserving evidence and avoiding
+an unsafe cleanup of a path that may have changed ownership after publication.
 Windows publication no longer relies on `Move-Item -Force`: an existing file
 is replaced with sibling-volume `System.IO.File.Replace`, an absent path uses
 `File.Move`, and a reparse point or non-file destination fails closed before
@@ -461,10 +466,15 @@ and signed PREL31 compact-unwind references are also decoded and applied, with
 PREL31 preserving its high compact-model flag bit. A deterministic ARM32 raw
 image linker now lays out allocatable PROGBITS/NOBITS sections from ELF32 ARM
 objects, resolves local/global/weak symbols across inputs, preserves Thumb entry
-bits, applies the shared ARM relocation engine, and rejects common symbols,
+bits, applies the shared ARM relocation engine, and rejects
 unsupported allocatable sections, malformed bounds, undefined strong symbols,
 and duplicate strong definitions. This connects parsed LLVM-style ARM32 objects
 to the raw-image boundary required by remote and bare-metal placement. The
+raw linker now also coalesces `SHN_COMMON` tentative definitions into one
+zero-filled tail allocation per name, selecting maximum size/alignment in
+encounter order. Strong section definitions suppress tentative storage, weak
+section definitions yield to strong commons, and malformed non-power-of-two
+alignment fails before image mutation.
 raw path also decodes and applies narrow Thumb-1 `R_ARM_THM_JUMP11` and
 `R_ARM_THM_JUMP8` REL branches with signed range checks while preserving their
 opcode and condition fields. Width-correct `R_ARM_ABS8`/`R_ARM_ABS16` data
@@ -778,6 +788,15 @@ resolved relocation identities match. The conservative identity rule declines
 self-recursive or merely structurally similar graphs instead of risking an
 incorrect address merge. `/OPT:NOICF`, combined `/OPT:REF,ICF`, and conflict
 validation are typed through both AMD64 and ARM64 production routes.
+Command-line `/DEFAULTLIB:name`, `/NODEFAULTLIB[:name]`, and
+`/INCLUDE:symbol` now share the archive-closure and retained-root path used by
+object directives. Library suppression is case-insensitive and treats the
+optional `.lib` suffix canonically; bare `/NODEFAULTLIB` suppresses directive
+and command-line defaults without removing explicitly supplied libraries.
+The production `allow_duplicate_definitions` policy now reaches internal COFF
+as deterministic `/FORCE:MULTIPLE` semantics: the first external definition
+in input/archive order wins and later definitions become references to it.
+Strict COFF APIs still reject duplicates unless that policy is explicitly set.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is

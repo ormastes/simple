@@ -46,6 +46,18 @@ fn arm32_raw_object(symbols: [ElfSymbol], relocations: [ElfRelocation],
 fn arm32_raw_blank_symbol() -> ElfSymbol:
     arm32_raw_symbol("", STB_LOCAL, 0, 0, STT_NOTYPE)
 
+fn arm32_raw_common_symbol(name: text, size: i64,
+        alignment: i64) -> ElfSymbol:
+    ElfSymbol(st_name: 0, st_info: (STB_GLOBAL << 4) | STT_NOTYPE,
+        st_other: 0, st_shndx: 0xfff2, st_value: alignment,
+        st_size: size, name: name)
+
+fn arm32_raw_common_object(size: i64, alignment: i64) -> ElfObject:
+    arm32_raw_object([
+        arm32_raw_blank_symbol(),
+        arm32_raw_common_symbol("target", size, alignment)
+    ], [], [])
+
 fn arm32_raw_main_object(target_binding: i64) -> ElfObject:
     val symbols = [
         arm32_raw_blank_symbol(),
@@ -167,6 +179,39 @@ describe "ARM32 raw ELF linker":
         ], 0x2000, "main")
         expect(linked.is_ok()).to_equal(true)
         expect(linked.unwrap().bytes[0]).to_equal(0)
+
+    it "coalesces common symbols into aligned zero-filled image storage":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(4, 4),
+            arm32_raw_common_object(12, 8)
+        ], 0x2000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.bytes.len()).to_equal(20)
+        expect(image.bytes[0]).to_equal(0x08)
+        expect(image.bytes[1]).to_equal(0x20)
+        expect(image.bytes[8:20]).to_equal([0; 12])
+
+    it "lets a strong section definition override tentative common storage":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(64, 16),
+            arm32_raw_target_object(STB_GLOBAL)
+        ], 0x3000, "main")
+        expect(linked.is_ok()).to_equal(true)
+        val image = linked.unwrap()
+        expect(image.bytes.len()).to_equal(8)
+        expect(image.bytes[0]).to_equal(0x04)
+        expect(image.bytes[1]).to_equal(0x30)
+
+    it "rejects malformed common alignment before placement":
+        val linked = elf_arm32_link_parsed([
+            arm32_raw_main_object(STB_GLOBAL),
+            arm32_raw_common_object(4, 3)
+        ], 0x2000, "main")
+        expect(linked.is_err()).to_equal(true)
+        expect(linked.unwrap_err()).to_contain("non-power-of-two alignment")
 
     it "rejects an absent strong relocation target":
         val linked = elf_arm32_link_parsed([

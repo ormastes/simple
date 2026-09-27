@@ -23,6 +23,7 @@ use std.spec.*
 use compiler.backend.linker.linker_wrapper.{
     link_to_native, link_simpleos_internal, NativeLinkConfig,
     internal_coff_flags, internal_coff_policy, internal_elf_runpath,
+    internal_coff_retained_symbols, internal_coff_selected_default_libraries,
     internal_simpleos_flags, internal_coff_runtime_is_msvc}
 use compiler.backend.linker.msvc.{msvc_lib_arch_dir}
 use compiler.backend.linker.smf_writer.{SmfWriter}
@@ -92,6 +93,33 @@ describe "native_linking - internal COFF optional-header flags":
         val icf_disabled = internal_coff_flags(["/OPT:NOICF"], "x86_64").unwrap()
         expect(icf_disabled.opt_icf).to_equal(false)
 
+    it "projects command-line default libraries, exclusions, and include roots":
+        val parsed = internal_coff_flags([
+            "/DEFAULTLIB:Runtime.lib", "/defaultlib:runtime.LIB",
+            "/DEFAULTLIB:Explicit.lib", "/NODEFAULTLIB:RUNTIME",
+            "/nodefaultlib:legacy.lib", "/INCLUDE:forced_symbol",
+            "/include:forced_symbol"], "x86_64").unwrap()
+        expect(parsed.default_libraries.len()).to_equal(2)
+        expect(parsed.default_libraries[0]).to_equal("Runtime.lib")
+        expect(parsed.nodefault_libraries.len()).to_equal(2)
+        expect(parsed.nodefault_libraries).to_contain("runtime")
+        expect(parsed.nodefault_libraries).to_contain("legacy")
+        expect(parsed.nodefault_all).to_equal(false)
+        expect(parsed.include_symbols.len()).to_equal(1)
+        expect(parsed.include_symbols[0]).to_equal("forced_symbol")
+        expect(internal_coff_retained_symbols(
+            parsed, ["configured_root", "forced_symbol"])).to_equal(
+                ["configured_root", "forced_symbol"])
+        expect(internal_coff_selected_default_libraries(
+            parsed, ["runtime.lib", "Legacy.LIB", "embedded.lib"])).to_equal(
+                ["Explicit.lib", "embedded.lib"])
+
+        val all_suppressed = internal_coff_flags(
+            ["/NODEFAULTLIB"], "arm64").unwrap()
+        expect(all_suppressed.nodefault_all).to_equal(true)
+        expect(internal_coff_selected_default_libraries(
+            all_suppressed, ["runtime.lib"])).to_equal([])
+
     it "projects an exact entry symbol for closure and final resolution":
         val parsed = internal_coff_flags([
             "/MACHINE:X64", "/ENTRY:customCRTStartup",
@@ -135,6 +163,9 @@ describe "native_linking - internal COFF optional-header flags":
         expect(internal_coff_policy([
             "/OPT:ICF", "/OPT:NOICF"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy(["/OPT:ICF=2"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/DEFAULTLIB:"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/NODEFAULTLIB:bad name"], "x86_64").is_err()).to_equal(true)
+        expect(internal_coff_policy(["/INCLUDE:"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy(["/ALIGN:4097"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy(["/FILEALIGN:256"], "x86_64").is_err()).to_equal(true)
         expect(internal_coff_policy(["/OSVERSION:6."], "x86_64").is_err()).to_equal(true)
