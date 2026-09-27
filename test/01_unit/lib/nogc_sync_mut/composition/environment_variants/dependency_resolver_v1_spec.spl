@@ -116,6 +116,51 @@ describe "Environment dependency resolver V1":
             cycle_root, [cycle_node, cycle_root], cycle_requirements))
             .to_equal(Err(EnvironmentDependencyResolutionErrorV1.CycleDetected))
 
+    it "rejects conflicting candidate identities independent of candidate and requirement order":
+        val root = root_descriptor(0u32, 2u32)
+        val first = descriptor(10u64, 20u64, 410u64, 2u32, 0u32, 1u16, 0u16)
+        val second = descriptor(10u64, 20u64, 411u64, 2u32, 0u32, 1u16, 0u16)
+        val first_requirement = requirement(10u64, 300u64, 410u64)
+        val second_requirement = requirement(10u64, 300u64, 411u64)
+        expect(environment_dependency_resolve_v1(
+            root, [first, second], [first_requirement, second_requirement]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+        expect(environment_dependency_resolve_v1(
+            root, [second, first], [first_requirement, second_requirement]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+        expect(environment_dependency_resolve_v1(
+            root, [first, second], [second_requirement, first_requirement]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+        expect(environment_dependency_resolve_v1(
+            root, [second, first], [second_requirement, first_requirement]))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+
+    it "rejects duplicate identities even when no candidate is selected":
+        val root = root_descriptor(0u32, 0u32)
+        val first = descriptor(10u64, 20u64, 410u64, 0u32, 0u32, 1u16, 0u16)
+        val second = descriptor(10u64, 20u64, 411u64, 0u32, 0u32, 1u16, 0u16)
+        expect(environment_dependency_resolve_v1(root, [first, second], []))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+        expect(environment_dependency_resolve_v1(root, [first, first], []))
+            .to_equal(Err(EnvironmentDependencyResolutionErrorV1.DuplicateCandidate))
+
+    it "resolves a diamond once while allowing distinct provider variant pairs":
+        val root = root_descriptor(0u32, 2u32)
+        val left = descriptor(10u64, 20u64, 410u64, 2u32, 1u32, 1u16, 0u16)
+        val right = descriptor(10u64, 21u64, 411u64, 3u32, 1u32, 1u16, 0u16)
+        val shared = descriptor(12u64, 20u64, 412u64, 4u32, 0u32, 1u16, 0u16)
+        val requirements = [
+            requirement(10u64, 300u64, 410u64), requirement(10u64, 300u64, 411u64),
+            requirement(12u64, 300u64, 412u64), requirement(12u64, 300u64, 412u64)]
+        val resolved = environment_dependency_resolve_v1(root, [left, right, shared], requirements).unwrap()
+        val reordered = environment_dependency_resolve_v1(root, [shared, right, left], requirements).unwrap()
+        expect(resolved.resolved_dependencies.len()).to_equal(3)
+        expect(resolved.resolved_dependencies[0].artifact_digest).to_equal(d(412u64))
+        expect(resolved.resolved_dependencies[1].artifact_digest).to_equal(d(410u64))
+        expect(resolved.resolved_dependencies[2].artifact_digest).to_equal(d(411u64))
+        expect(resolved.resolved_dependencies).to_equal(reordered.resolved_dependencies)
+        expect(resolved.closure_identity).to_equal(reordered.closure_identity)
+
     it "fails closed on depth and resolved-count overflow":
         var chain: [VariantDescriptorV1] = []
         var chain_requirements: [VariantDependencyV1] = [
