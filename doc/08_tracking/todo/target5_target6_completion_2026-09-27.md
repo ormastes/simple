@@ -52,6 +52,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   inventory partition before it may publish this generation. The builder
   retains inventory entries once and stores only scalar source indices in its
   lookup table.
+- TLDR digest admission and SMF section order now compare bytes rather than
+  native text handles. The shared canonical identity comparator also reads
+  bytes in place instead of allocating two byte arrays per comparison.
+  Qualify these checks and the warm/cold time-RSS effect on a current-source
+  worker before treating the producer as admitted.
 - Replace the binding-only empty index with a validated module/package graph,
   variant identity, exact reverse edges, reached SCC schedule, and complete
   action/archive receipts. Route compile, check, bootstrap, native-build,
