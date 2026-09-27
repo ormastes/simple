@@ -153,6 +153,22 @@ fn _binding_digest_ctr2(owner: CanonicalTargetRegistryOwnerV2, serial: u64,
         row.object_format_id.to_text() + ":" + row.endian_id.to_text() + ":" +
         row.pointer_width_bits.to_text())
 
+# Cold-path reclamation. Serial numbers never repeat, so a discarded retired
+# resolution or released use cannot become live through a later allocation.
+fn _reclaim_retired_resolutions_ctr2(owner: CanonicalTargetRegistryOwnerV2):
+    var retained: [_CanonicalTargetResolutionRecordV2] = []
+    for record in owner.resolutions:
+        if record.state != CanonicalTargetRegistryStateV2.Retired:
+            retained.push(record)
+    owner.resolutions = retained
+
+fn _reclaim_released_uses_ctr2(owner: CanonicalTargetRegistryOwnerV2):
+    var retained: [_CanonicalTargetUseRecordV2] = []
+    for record in owner.uses:
+        if record.live:
+            retained.push(record)
+    owner.uses = retained
+
 pub fn canonical_target_registry_owner_v2(owner_instance: u64
 ) -> Result<CanonicalTargetRegistryOwnerV2, CanonicalTargetRegistryErrorV2>:
     canonical_target_registry_owner_generation_v2(owner_instance, 1u64)
@@ -174,7 +190,9 @@ pub fn canonical_target_registry_resolve_v2(owner: CanonicalTargetRegistryOwnerV
 ) -> Result<CanonicalTargetResolutionTokenV2, CanonicalTargetRegistryErrorV2>:
     if not _owner_content_valid_ctr2(owner): return Err(CanonicalTargetRegistryErrorV2.InvalidOwner)
     if owner.resolutions.len() >= CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2:
-        return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
+        _reclaim_retired_resolutions_ctr2(owner)
+        if owner.resolutions.len() >= CANONICAL_TARGET_REGISTRY_MAX_RESOLUTIONS_V2:
+            return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
     if owner.next_serial == 0xffffffffffffffffu64:
         return Err(CanonicalTargetRegistryErrorV2.SerialOverflow)
     val canonical = _canonical_ctr2(owner, supplied)
@@ -208,7 +226,9 @@ pub fn canonical_target_registry_acquire_use_v2(owner: CanonicalTargetRegistryOw
     if owner.resolutions[index].state != CanonicalTargetRegistryStateV2.Active:
         return Err(CanonicalTargetRegistryErrorV2.Draining)
     if owner.uses.len() >= CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
-        return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
+        _reclaim_released_uses_ctr2(owner)
+        if owner.uses.len() >= CANONICAL_TARGET_REGISTRY_MAX_USES_V2:
+            return Err(CanonicalTargetRegistryErrorV2.CapacityExceeded)
     if owner.next_serial == 0xffffffffffffffffu64:
         return Err(CanonicalTargetRegistryErrorV2.SerialOverflow)
     val use_serial = owner.next_serial
