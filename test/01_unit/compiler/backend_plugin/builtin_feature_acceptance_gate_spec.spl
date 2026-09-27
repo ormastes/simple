@@ -1,0 +1,37 @@
+# @req REQ-010
+
+use std.spec.*
+use std.spec.step
+use compiler.common.backend_plugin.model.{
+    BackendRole, BackendCapability, BackendPluginRequestV1
+}
+use compiler.common.backend_plugin.receipt.{BackendPluginError}
+use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend.backend_plugin.loader.{load_backend}
+use compiler.backend.backend_plugin.session.{BackendSession}
+
+fn builtin_feature_request(features: [text], provider: text = "llvm") -> BackendPluginRequestV1:
+    BackendPluginRequestV1(
+        BackendRole.CompilerAot, provider, "host", "generic", features, "debug",
+        BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit], "", false)
+
+fn builtin_feature_error_code(result: Result<BackendSession, BackendPluginError>) -> text:
+    match result:
+        case Err(error): error.code()
+        case Ok(_): "admitted"
+
+describe "built-in backend feature acceptance gate":
+    it "rejects requested SIMD features without backend confirmation":
+        # @req REQ-010
+        step("Request a feature the V1 builtin adapter cannot confirm")
+        for provider in ["llvm", "cranelift"]:
+            val result = load_backend(builtin_feature_request(["avx2"], provider))
+            expect(builtin_feature_error_code(result)).to_equal(
+                "BACKEND_PLUGIN_PROVIDER_REJECTED")
+
+    it "keeps ordinary feature-free compilation available":
+        # @req REQ-010
+        step("Admit the existing baseline provider without an optimized claim")
+        var session = load_backend(builtin_feature_request([])).ok().unwrap()
+        expect(session.provider_name()).to_equal("llvm")
+        expect(session.close()).to_equal(true)
