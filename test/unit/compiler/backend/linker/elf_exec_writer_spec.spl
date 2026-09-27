@@ -11,6 +11,9 @@ use compiler.backend.linker.elf.elf_static_link.{
     elf_static_link, elf_link_configured, ElfLinkRequest, ELF_LINK_STATIC_EXEC
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_inspect.{ElfHeader, ElfSectionHeader}
+use compiler.backend.linker.elf_parser.{ElfObject, ElfStringTable}
+use compiler.backend.linker.elf.merge_strings.{elf_merge_sections}
 use std.io_runtime.{file_read_bytes}
 use std.common.crypto.sha1.{sha1_bytes}
 
@@ -117,6 +120,29 @@ fn load_mem_size_with_flags(b: [i64], flags: i64) -> i64:
             return rd64(b, p + 40)
         i = i + 1
     -1
+
+fn merge_string_object(alignment: i64) -> ElfObject:
+    # ELF64 ET_REL with one SHF_ALLOC|SHF_MERGE|SHF_STRINGS section holding
+    # "ab\0cd\0" at 0x100; section headers at 0x200 carry sh_addralign and
+    # sh_entsize=1 (the parsed header struct does not carry either field).
+    var raw: [u8] = []
+    while raw.len() < 0x280:
+        raw = raw.push(0u8)
+    raw[4] = 2u8
+    raw[0x100] = 0x61u8
+    raw[0x101] = 0x62u8
+    raw[0x103] = 0x63u8
+    raw[0x104] = 0x64u8
+    raw[0x200 + 64 + 48] = alignment as u8
+    raw[0x200 + 64 + 56] = 1u8
+    val empty = ElfStringTable(data: [], offset: 0)
+    ElfObject(
+        header: ElfHeader(e_type: 1, e_machine: 62, e_entry: 0, e_phoff: 0,
+            e_shoff: 0x200, e_shnum: 2, e_shstrndx: 0),
+        sections: [
+            ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0, sh_addr: 0, sh_size: 0, sh_info: 0),
+            ElfSectionHeader(sh_name: 0, sh_type: 1, sh_flags: 0x32, sh_addr: 0x100, sh_size: 6, sh_info: 0)],
+        symbols: [], relocations: [], strtab: empty, shstrtab: empty, raw: raw)
 
 fn link_a64() -> [i64]:
     val objs = [load_fixture("start_a64.o"), load_fixture("lib_a64.o")]
@@ -574,6 +600,16 @@ describe "elf_exec_writer - two-object static x86_64 exec":
         expect(count_bytes(b, [0x70, 0x72, 0x65, 0x66, 0x69, 0x78, 0x2d,
             0x73, 0x75, 0x66, 0x66, 0x69, 0x78, 0])).to_equal(1)
         expect(has_section_shape(b, 14, 0x32, 1, 1)).to_equal(true)
+
+    it "keeps each merged string piece aligned to the section's sh_addralign":
+        # lld places every string piece of a .rodata.str1.8 section on an
+        # 8-byte boundary; compilers rely on that alignment for the literal.
+        val plan = elf_merge_sections([merge_string_object(8)], [[false, true]]).unwrap()
+        expect(plan.entries.len()).to_equal(2)
+        expect(plan.entries[0].output_offset).to_equal(0)
+        expect(plan.entries[1].output_offset).to_equal(8)
+        val packed = elf_merge_sections([merge_string_object(1)], [[false, true]]).unwrap()
+        expect(packed.entries[1].output_offset).to_equal(3)
 
     it "deduplicates aligned fixed-size SHF_MERGE entities":
         val r = elf_static_link([load_fixture("merge_const_a_x64.o"),
