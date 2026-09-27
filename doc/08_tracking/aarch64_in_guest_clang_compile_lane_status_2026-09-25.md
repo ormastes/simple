@@ -2331,3 +2331,22 @@ R7a through completion; the serial watcher reports WITNESS_STL_OK / errors.
   and a new elfexec_clang_arm64_r7v12 stage (PID 2343647) — left untouched;
   any guest emitting WITNESS_STL_OK + CLANG_IN_GUEST_ARM64_STL_OK counts as
   the R7 self-host proof.
+
+## Update 2026-09-28 — retry2 timeout post-mortem; survivor run launched
+
+- retry2 (14400 s, 20:19 boot) ran solo-competing; R7a parsed all 475
+  headers clean (zero errors) by 22:15, then cc1 codegen ran 112+ minutes
+  at 100% vCPU without finishing before the 00:19 budget wall. Two prior
+  runs (9600 s longrun, another session's r7v12 attempt) died the same way
+  after full clean parses. Measured R7a floor: parse ~75-111 min +
+  codegen >112 min and unbounded — the codegen tail (template instantiation
+  + IR gen for the sort/find/string witness over the full libc++ AST, in the
+  fork's cc1) is the current wall, NOT I/O, NOT memory (guest RSS ~1.4 GB of
+  32G; bump heap + sosix mmap arena both healthy).
+- Survivor attempt: setsid-detached qemu (survives sessions), timeout 21600,
+  KVM 32G/10, same kernel/image provenance (image root verified pre-boot).
+  Serial: build/os/elfexec_clang_arm64_r7verify/manual-longrun/serial-survivor.log
+  Verdict markers: WITNESS_STL_OK + CLANG_IN_GUEST_ARM64_STL_OK
+  (grep; zero `error:` expected). Whoever grades it: also grep
+  'rung=R7a-cc1-stl-compile rc=0', 'rung=R7b-lld-stl-link rc=0',
+  'rung=R7c-run-witness-stl rc=0'.
