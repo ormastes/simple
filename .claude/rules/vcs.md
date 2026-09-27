@@ -286,7 +286,7 @@ tree-size, conflict-markers, sdn-crc32-sealed, rust-duplicate-reexport
 parse + new guard wired), runtime-api-regression, rt-dual-implementation (delta
 vs base, content-keyed census cache). The required status context
 "Code Idiom & Structural Ratchet Gates" is now carried by the `fast-gates` job
-in `repo-hygiene.yml`, which runs all 9 against the PR's base..head with a
+in `required-gates.yml` (its own one-job workflow since 2026-09-27; `repo-hygiene.yml` no longer runs per PR), which runs all 9 against the PR's base..head with a
 sparse checkout. `no-stale-snapshot-rewind` is included: it is BLOCKING at push
 and the push tier is bypassable, so a class with no automatic lane would be
 unenforced. It consults up to 40 first-parent ancestors as contributors, so that
@@ -294,7 +294,11 @@ job fetches `PR_COMMITS + 41` rather than `PR_COMMITS + 1` — a shallower fetch
 would have left it exiting 0 over a near-empty window, which is a silent
 weakening rather than a FAIL. The extended job runs it too (`--range`, in the
 "Push-tier core gates" step). The 47-step ratchet lane is the non-required
-"(extended)" job and still runs on every PR and on main, including the FROZEN
+"(extended)" job and runs on every main push and on PRs labelled `ci:full`
+(since 2026-09-27 every non-required PR workflow triggers only on the
+`labeled` event and runs only for `ci:full`, so a plain PR push starts just
+"Required Gates" and the admission broker; see `doc/07_guide/infra/vcs/pr_landing_timing_race.md`
+§ "PR-path CI is required checks only"), including the FROZEN
 rt-dual comparison so main's own single-lane debt stays a red verdict there.
 Local-CI receipts now only affect the extended job. Classes that moved
 out of the blocking push tier (C runtime compile, whole-tree guard wiring,
