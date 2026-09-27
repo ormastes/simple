@@ -122,3 +122,26 @@ functions in the config owner, and applies those values in
 retain the existing environment parsing and validation semantics, and CLI
 overrides still apply last. It requires a new source-matched Stage 2 admission
 and Stage 3 run; neither is claimed by this note.
+
+## Source-matched Stage 3 HIR verdict
+
+Commit `b50885e1a99` passed canonical Stage 2 admission and received a new
+planner admission bound to that binary. Stage 3 crossed MC/DC validation,
+fingerprinted and parsed its source closure, and reached HIR without the old
+early `AsmTargetSpec`/`HirModule` ambiguity. It then collected 1797 HIR errors
+across 117 poisoned modules in a 717-source build. The emitted error rows included
+1685 unresolved names, 109 unresolved types, and two unsupported generic
+method errors. There were 182 distinct unresolved symbol spellings; leading
+counts included `mir_operand_copy` (483), `MirInstKind` (256),
+`module_add_decl` (58), `expr_ident` (39), `ByteOrder` (38), and `Effect` (37).
+
+The first failures include `env_get_opt` from the explicit re-export in
+`std.io_runtime`, `char_code` from `std.string_core`'s export surface, and
+`MirInstKind` from `compiler.mir.mir_data`. Their source declarations exist.
+This suggests a common HIR import-origin/materialization gap rather than 182
+missing implementations; it remains an inference until a targeted resolver
+test and source-matched Stage 3 run prove it. Current `main` has later frozen
+import and module-alias work, so the next investigation should compare those
+resolver contracts with this RC1 lane before selecting a backport. The
+three-cycle verify/fix cap is reached for this session. Stage 3 and Mac release
+remain unadmitted.
