@@ -1,0 +1,65 @@
+#!/bin/sh
+# Build the hosted pure-Simple CLI used by the SimpleOS QEMU checks.
+# A Rust seed alone cannot run `simple os test`.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$repo_root"
+STORAGE_ROOTS_REPO_ROOT=$repo_root
+export STORAGE_ROOTS_REPO_ROOT
+. scripts/lib/storage-roots.shs
+storage_roots_init
+bootstrap_root=$SIMPLE_WORKTREE_STORAGE_ROOT/build/bootstrap
+
+SIMPLE_NO_STUB_FALLBACK=1
+export SIMPLE_NO_STUB_FALLBACK
+
+# The seed fingerprint binds llvm-config by canonical path and rejects a
+# symlinked leaf (anti-alias). Ubuntu ships /usr/bin/llvm-config as a symlink
+# into /usr/lib/llvm-<N>/bin, so bind LLVM_CONFIG to the physical executable.
+if llvm_config_cmd=$(command -v "${LLVM_CONFIG:-llvm-config}" 2>/dev/null); then
+  LLVM_CONFIG=$(readlink -f -- "$llvm_config_cmd")
+  test -f "$LLVM_CONFIG" && test -x "$LLVM_CONFIG"
+  export LLVM_CONFIG
+  echo "prepare-simpleos-ci-host: LLVM_CONFIG=$LLVM_CONFIG (from $llvm_config_cmd)"
+fi
+
+if sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --backend=cranelift --mode=dynload --full-bootstrap \
+  --stop-after-stage2 --no-mcp --jobs=2; then
+  :
+else
+  bootstrap_status=$?
+  fingerprint_error=$bootstrap_root/rust-authority-fingerprint-error.log
+  if [ -f "$fingerprint_error" ]; then
+    sed -n '1,80p' "$fingerprint_error" >&2
+  fi
+  exit "$bootstrap_status"
+fi
+
+stage2=$(find "$bootstrap_root/stage2" -type f -name simple -print -quit)
+test -n "$stage2" && test -x "$stage2"
+stage3_receipt="$bootstrap_root/simpleos-ci-stage3-planner-admission-v2.env"
+sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+  --target=//bootstrap:stage3 \
+  --reason=verify-landed-compiler-fix \
+  --parent-compiler="$stage2" \
+  --out="$stage3_receipt"
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt="$stage3_receipt" \
+  --resume-stage3-from-admitted="$bootstrap_root"
+
+stage4_receipt="$bootstrap_root/simpleos-ci-stage4-planner-admission-v2.env"
+sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs \
+  --target=//bootstrap:stage4 \
+  --reason=release-trust-verification \
+  --parent-compiler="$stage2" \
+  --out="$stage4_receipt"
+sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt="$stage4_receipt" \
+  --resume-stage4-from-admitted="$bootstrap_root" \
+  --backend=cranelift --mode=dynload --no-mcp --deploy --strategy=full
+
+sh scripts/setup/setup.shs
+test -x bin/simple
+bin/simple --version
