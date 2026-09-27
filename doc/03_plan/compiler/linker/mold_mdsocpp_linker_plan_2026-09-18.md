@@ -372,7 +372,9 @@ separators, slash direction, drive-letter case, and Windows path case can no
 longer disguise the live destination or its sibling publication file.
 Known-target explicit binary paths are also rejected at initial resolution
 unless target-absolute, keeping command planning and execution independent of
-the remote shell's working directory.
+the remote shell's working directory. POSIX roots, Windows drive roots, and
+bare UNC shares are rejected as installed or staging paths because they do not
+name a binary file leaf.
 Before transfer, the adapter now asks the remote host to prove that both the
 upload leaf and sibling publication leaf are absent, including POSIX symlinks
 and Windows reparse entries visible to `Get-Item`. A stale or redirected leaf

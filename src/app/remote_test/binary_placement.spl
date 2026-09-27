@@ -8,9 +8,15 @@ fn remote_simple_binary_path(remote_os: text, configured: text) -> Result<text, 
         if (platform == "windows" or platform == "win") and
                 not _remote_path_is_absolute(requested, true):
             return Err("explicit remote Windows Simple binary path must be absolute")
+        if (platform == "windows" or platform == "win") and
+                not _remote_path_has_file_leaf(requested, true):
+            return Err("explicit remote Windows Simple binary path must name a file")
         if (platform == "linux" or platform == "simpleos" or
                 platform == "simple-os") and not _remote_path_is_absolute(requested, false):
             return Err("explicit remote POSIX Simple binary path must be absolute")
+        if (platform == "linux" or platform == "simpleos" or
+                platform == "simple-os") and not _remote_path_has_file_leaf(requested, false):
+            return Err("explicit remote POSIX Simple binary path must name a file")
         return Ok(requested)
     if platform == "linux": return Ok("/usr/local/bin/simple")
     if platform == "windows" or platform == "win": return Ok("C:\\Program Files\\Simple\\simple.exe")
@@ -39,6 +45,19 @@ fn _remote_path_is_absolute(value: text, windows: bool) -> bool:
             (path.len() >= 3 and drive >= "a" and drive <= "z" and
                 path[1:2] == ":" and path[2:3] == "/")
     path.starts_with("/")
+
+fn _remote_path_has_file_leaf(value: text, windows: bool) -> bool:
+    val lexical = value.trim().replace("\\", "/")
+    if lexical.ends_with("/"): return false
+    val normalized = _remote_normalize_path(value, windows)
+    if windows and normalized.len() >= 3 and normalized[1:3] == ":/":
+        return normalized.len() > 3
+    if windows and normalized.starts_with("//"):
+        # A UNC file needs server, share, and leaf components.
+        val unc_tail = normalized.substring(2)
+        val unc_parts = unc_tail.split("/")
+        return unc_parts.len() >= 3
+    normalized != "/" and normalized != ""
 
 fn _remote_normalize_path(value: text, windows: bool) -> text:
     """Lexically normalize a target path without consulting the local host."""
@@ -75,6 +94,9 @@ fn _remote_validate_staging_path(remote_os: text, staged_path: text,
         if not _remote_path_is_absolute(staged, true) or
                 not _remote_path_is_absolute(destination, true):
             return Err("remote Windows Simple staging and installed paths must be absolute")
+        if not _remote_path_has_file_leaf(staged, true) or
+                not _remote_path_has_file_leaf(destination, true):
+            return Err("remote Windows Simple staging and installed paths must name files")
         if _remote_windows_same_path(staged, destination) or
                 _remote_windows_same_path(staged, temporary):
             return Err("remote Simple staging path must differ from the installed and publication paths")
@@ -82,6 +104,9 @@ fn _remote_validate_staging_path(remote_os: text, staged_path: text,
         if not _remote_path_is_absolute(staged, false) or
                 not _remote_path_is_absolute(destination, false):
             return Err("remote POSIX Simple staging and installed paths must be absolute")
+        if not _remote_path_has_file_leaf(staged, false) or
+                not _remote_path_has_file_leaf(destination, false):
+            return Err("remote POSIX Simple staging and installed paths must name files")
         val normalized = _remote_normalize_path(staged, false)
         if normalized == _remote_normalize_path(destination, false) or
                 normalized == _remote_normalize_path(temporary, false):
