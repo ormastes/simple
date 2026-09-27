@@ -129,6 +129,25 @@ fn package_index_route_current_v1(
     var selected_members: Dict<text, bool> = {}
     for module_identity in selected_modules:
         selected_members[module_identity] = true
+    # Entries are stored by module identity, so members of one package need
+    # not be adjacent. Link selected entry indices in that existing order.
+    # The warm archive path can then visit each package without rescanning the
+    # full generation or copying entry aggregates into a second map.
+    var package_heads: Dict<text, i64> = {}
+    var package_tails: Dict<text, i64> = {}
+    var package_next: [i64] = []
+    var entry_index = 0
+    for selected_entry in generation.entries:
+        package_next.push(-1)
+        if selected_members.has(selected_entry.module_identity):
+            val package_identity = selected_entry.package_identity
+            if package_heads.has(package_identity):
+                val tail = package_tails[package_identity]
+                package_next[tail] = entry_index
+            else:
+                package_heads[package_identity] = entry_index
+            package_tails[package_identity] = entry_index
+        entry_index = entry_index + 1
 
     var schedule: [text] = []
     var dirty_packages: [text] = []
@@ -165,30 +184,33 @@ fn package_index_route_current_v1(
     # Missing archives dirty only their SCC. Corrupt or mismatched archives
     # fail closed and are never replaced by a global source scan.
     var ordered_packages: [text] = []
+    var ordered_package_seen: Dict<text, bool> = {}
     for module_identity in ordered_modules:
         val module_entry = package_module_index_find_v1(generation, module_identity)
         if module_entry == nil:
             return PackageIndexRouteV1(false, "indexed-module-missing", [], [], [], [])
-        if not ordered_packages.contains(module_entry!.package_identity):
+        if not ordered_package_seen.has(module_entry!.package_identity):
             ordered_packages.push(module_entry!.package_identity)
+            ordered_package_seen[module_entry!.package_identity] = true
     for package_identity in ordered_packages:
         if dirty_packages.contains(package_identity):
             continue
         var package_entries: [PackageModuleIndexEntryV1] = []
         var dependency_digests: [text] = []
-        for candidate in generation.entries:
-            if (candidate.package_identity == package_identity and
-                    selected_members.has(candidate.module_identity)):
-                package_entries.push(candidate)
-                for imported in candidate.direct_imports:
-                    val dependency = package_module_index_find_v1(
-                        generation, imported)
-                    if dependency == nil:
-                        return PackageIndexRouteV1(
-                            false, "archive-dependency-missing", [], [], [], [])
-                    if not dependency_digests.contains(
-                            dependency!.smf_metadata_digest):
-                        dependency_digests.push(dependency!.smf_metadata_digest)
+        var candidate_index = package_heads[package_identity] ?? -1
+        while candidate_index >= 0:
+            val candidate = generation.entries[candidate_index]
+            package_entries.push(candidate)
+            for imported in candidate.direct_imports:
+                val dependency = package_module_index_find_v1(
+                    generation, imported)
+                if dependency == nil:
+                    return PackageIndexRouteV1(
+                        false, "archive-dependency-missing", [], [], [], [])
+                if not dependency_digests.contains(
+                        dependency!.smf_metadata_digest):
+                    dependency_digests.push(dependency!.smf_metadata_digest)
+            candidate_index = package_next[candidate_index]
         val aggregate = package_archive_aggregate_entry_v1(package_entries)
         if aggregate == nil:
             return PackageIndexRouteV1(
@@ -235,20 +257,21 @@ fn package_index_route_current_v1(
         var package_entries: [PackageModuleIndexEntryV1] = []
         var module_identities: [text] = []
         var dependency_digests: [text] = []
-        for candidate in generation.entries:
-            if (candidate.package_identity == entry!.package_identity and
-                    selected_members.has(candidate.module_identity)):
-                package_entries.push(candidate)
-                module_identities.push(candidate.module_identity)
-                for imported in candidate.direct_imports:
-                    val dependency = package_module_index_find_v1(
-                        generation, imported)
-                    if dependency == nil:
-                        return PackageIndexRouteV1(
-                            false, "archive-dependency-missing", [], [], [], [])
-                    if not dependency_digests.contains(
-                            dependency!.smf_metadata_digest):
-                        dependency_digests.push(dependency!.smf_metadata_digest)
+        var candidate_index = package_heads[entry!.package_identity] ?? -1
+        while candidate_index >= 0:
+            val candidate = generation.entries[candidate_index]
+            package_entries.push(candidate)
+            module_identities.push(candidate.module_identity)
+            for imported in candidate.direct_imports:
+                val dependency = package_module_index_find_v1(
+                    generation, imported)
+                if dependency == nil:
+                    return PackageIndexRouteV1(
+                        false, "archive-dependency-missing", [], [], [], [])
+                if not dependency_digests.contains(
+                        dependency!.smf_metadata_digest):
+                    dependency_digests.push(dependency!.smf_metadata_digest)
+            candidate_index = package_next[candidate_index]
         val aggregate = package_archive_aggregate_entry_v1(package_entries)
         if aggregate == nil:
             return PackageIndexRouteV1(
