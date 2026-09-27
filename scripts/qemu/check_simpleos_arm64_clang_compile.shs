@@ -25,6 +25,16 @@
 #
 #   sh scripts/qemu/check_simpleos_arm64_clang_compile.shs            # full run
 #   sh scripts/qemu/check_simpleos_arm64_clang_compile.shs --r1-only  # stage+verify image only
+#
+# KVM access on this host: the working qemu + libslirp live under ~/.local
+# (the system /usr/bin/qemu-system-aarch64 is broken), and `sg kvm` resets
+# PATH/LD_LIBRARY_PATH. If the invoking session cannot open /dev/kvm (e.g.
+# it predates the user's kvm-group membership), the script re-execs itself
+# once under `sg kvm` with a sanitized environment. To run it manually:
+#   sg kvm -c 'export PATH="$HOME/.local/bin:$PATH" \
+#              LD_LIBRARY_PATH="$HOME/.local/lib"; \
+#              sh scripts/qemu/check_simpleos_arm64_clang_compile.shs'
+# ACCEL=tcg GUEST_CPU=max stays available as the no-KVM fallback.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -51,10 +61,29 @@ R1_ONLY=0
 note()  { echo "[a64-clang] $*"; }
 fail()  { echo "[a64-clang] FAIL: $*" >&2; exit 1; }
 
+# ------------------------------------------------- KVM access self-wrap --
+# /dev/kvm exists but THIS process cannot open it (invoking session predates
+# the kvm-group membership) => re-exec once under `sg kvm` with the sanitized
+# PATH/LD_LIBRARY_PATH documented in the header. sg(1) resets the environment,
+# and the working qemu + libslirp live under ~/.local (system qemu is broken).
+if [ "${ACCEL:-kvm}" = "kvm" ] && [ -e /dev/kvm ] && [ ! -w /dev/kvm ] \
+    && [ -z "${A64_CLANG_SGKVM:-}" ] \
+    && command -v sg >/dev/null 2>&1 && sg kvm true </dev/null 2>/dev/null; then
+    note "re-exec under 'sg kvm' (/dev/kvm present but not openable here)"
+    ROOT_Q=$(printf '%s' "$ROOT_DIR" | sed "s/'/'\\\\''/g")
+    exec sg kvm -c "A64_CLANG_SGKVM=1; export PATH=\"\$HOME/.local/bin:\$PATH\" LD_LIBRARY_PATH=\"\$HOME/.local/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"; cd '$ROOT_Q' && exec sh '$ROOT_Q/scripts/qemu/check_simpleos_arm64_clang_compile.shs' $*"
+fi
+
 # ---------------------------------------------------------------- preflight --
 note "preflight: host arch + tools"
 [ "$(uname -m)" = aarch64 ] || fail "aarch64 host required (host rule)"
 [ -e /dev/kvm ] || fail "/dev/kvm missing"
+if [ "${ACCEL:-kvm}" = "kvm" ] && [ ! -w /dev/kvm ]; then
+    fail "/dev/kvm not writable by this process (kvm group missing?).
+Re-run via: sg kvm -c 'export PATH=\"\$HOME/.local/bin:\$PATH\" \\
+LD_LIBRARY_PATH=\"\$HOME/.local/lib\"; \\
+sh scripts/qemu/check_simpleos_arm64_clang_compile.shs'"
+fi
 command -v qemu-system-aarch64 >/dev/null 2>&1 || fail "qemu-system-aarch64 missing"
 SEED=$(readlink -f "$SEED") || fail "SEED unresolvable: $SEED"
 [ -x "$SEED" ] || fail "compiler missing: $SEED"

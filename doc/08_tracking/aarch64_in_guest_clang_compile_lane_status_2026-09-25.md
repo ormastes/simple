@@ -1936,3 +1936,121 @@ the virtual dispatch — a real computed result, not a literal.
    no libc++ TEMPLATE is instantiated in-guest (the lean witness uses none).
    Instantiating a libc++ template still requires its header → the AST wall.
 3. Exceptions remain the documented libc++ gap (unchanged; not exercised).
+
+
+
+
+# 2026-09-27 (agent-49) session — KVM bring-up: guest exit made KVM-safe; gate green under KVM at native speed
+
+Boot cycles this session: 9 (2 KVM pre-fix repro/diagnosis, 2 fix-#1 [PSCI-only]
+KVM+TCG, 2 fix-#2 [CurrentEL dispatch] KVM+TCG, 2 final [exit-probe vector]
+KVM+TCG, 1 stale-kernel TCG misattribution). Kernel rebuilds: 3. Final state:
+**ALL RUNGS PASS under KVM and TCG, clean guest power-off on both, 0 fault
+dumps.**
+
+## The KVM "crash" was the exit path, not the virtio-blk driver
+
+Symptom on the first KVM boots (run-20260927_121425 + this session's repro):
+all rungs R1-R6c printed, then `FAULT @ 0x40207988` + a register dump, then
+silence until the host-side `timeout` killed QEMU.
+
+Symbolization (`nm -n build/os/simpleos_arm64_clang_bringup.elf`; the ELF is
+NOT stripped despite initial expectations):
+
+- `FAULT @ 0x40207988` = `rt_qemu_exit_success+0x14` = the `hlt #0xf000`
+  semihosting-exit instruction (`objdump -d` of the function confirms).
+- `ESR=0x02000000` = EC 0 ("Unknown"): a real vCPU took the HLT as an
+  in-guest exception — QEMU did NOT intercept it.
+- `sp-288 = 0x4020cb1c` = `rt_contains` — stack residue from the SPL entry's
+  call chain, not the crash site.
+- Two independent KVM boots produced BYTE-IDENTICAL dumps (same X regs, same
+  SP values). A virtio/MMIO race would be nondeterministic; this was a
+  deterministic trap.
+
+Root cause: semihosting `hlt` is a QEMU TCG translation-time hook. Under TCG
+the translator diverts it; under KVM the instruction executes on a real vCPU
+and vectors into the guest's own EL1 handler (`_fault_handler` in
+`arch/arm64/boot/crt0.S`), which prints the dump and parks in WFE. The gate
+passed by serial markers but burned the full `BOOT_TIMEOUT` (300-600 s) per
+run. **The virtio-blk driver was already spec-correct** (audit below) — TCG's
+slowness was never masking a driver race.
+
+### Why the obvious fixes don't work (measured, not assumed)
+
+- **SMC PSCI SYSTEM_OFF only**: KVM services it and powers off (run-123637,
+  0 faults, 38 s) — but under TCG the SMC takes an in-guest EC=0 exception
+  (run-123917/124748, FAULT at the SMC).
+- **CurrentEL dispatch**: dead end — BOTH accelerators run this guest at EL1
+  (QEMU `-kernel` enters at EL2, but crt0 drops to EL1; KVM only ever runs
+  guests at EL1). Proven by run-125618: the CurrentEL check took the EL1/SMC
+  branch under TCG and faulted at the SMC anyway.
+- Empirical law: KVM = SMC-works/HLT-faults; TCG = HLT-works/SMC-faults, and
+  no guest-readable register distinguishes them.
+
+### Driver audit (task item 2 — barriers/completion), found sound
+
+`rt_arm_virtio_blk_read_sector_direct` (baremetal_stubs.c:3467) and helpers:
+desc + DMA writeback via `arm64_clean_dcache_range` (`dc cvac` + `dsb sy`)
+BEFORE `dsb sy` + MMIO doorbell + `dsb sy` (spec: wmb before notify ✓);
+used-ring poll re-invalidates (`dc ivac`) each iteration and snapshots
+`last_used_idx` before submitting (✓ tolerates immediate completion);
+device-written data read only after `dc ivac` on the DMA buffer (✓ rmb side).
+The net virtq helpers (rt_arm64_virtio_net_send/recv) follow the same shape.
+No driver changes needed.
+
+## Fix: exit-probe vector (baremetal_stubs.c:2350)
+
+`rt_exit_probe_vectors` — a 2KB-aligned, 16-slot EL1 vector in .text; every
+slot skips the faulting instruction (`ELR_EL1 += 4; eret`). Exit sequence in
+`rt_qemu_exit_success` (baremetal_stubs.c:2369): mask interrupts (`daifset
+#0xF`), install the vector (`msr vbar_el1`), then:
+
+1. `smc #0` with x0 = 0x84000008 (PSCI SYSTEM_OFF): KVM services it and the
+   VM powers off — never returns. Under TCG the SMC faults into the probe
+   vector, which skips it and falls through.
+2. Semihosting `hlt #0xF000` (+ legacy MMU-off preamble): QEMU's TCG
+   translator hooks it — never returns. Under KVM it would fault → skipped →
+   WFE loop (graceful degradation identical to the pre-fix behavior).
+
+## Gate script: sg-kvm self-wrap (check_simpleos_arm64_clang_compile.shs)
+
+`sg kvm` resets PATH/LD_LIBRARY_PATH and the system /usr/bin qemu is broken;
+the working qemu + libslirp live under ~/.local. The script now:
+
+- header documents the manual `sg kvm -c 'export PATH=...; sh ...'` invocation;
+- when ACCEL=kvm, /dev/kvm exists but is not openable by this process (session
+  predates the kvm-group membership), it re-execs itself once under
+  `sg kvm` with ~/.local/bin prepended and ~/.local/lib on LD_LIBRARY_PATH
+  (sentinel `A64_CLANG_SGKVM=1` prevents loops);
+- preflight fails with the exact remediation when /dev/kvm is unwritable.
+
+Verified live: this session's processes lack group 994, the wrap fired
+("re-exec under 'sg kvm'") and the gate completed under the re-exec.
+
+## Verification (final code, exit-probe vector)
+
+| Run | Accel | Faults | Rungs | Boot+rungs wall |
+|---|---|---|---|---|
+| run-20260927_130929 | KVM (REBUILD_KERNEL=1) | 0 | ALL PASS | 41 s |
+| run-20260927_131021 | TCG (same kernel) | 0 | ALL PASS | 99 s |
+
+Pre-fix KVM runs passed the rungs too but burned the full 300-600 s
+BOOT_TIMEOUT in the WFE park (the fault dump was the last serial output; e.g.
+run-20260927_121425 and this session's repro, byte-identical dumps). Wall now
+ends at the final marker: **KVM 41 s vs TCG 99 s for the complete gate**.
+
+## Rung table (unchanged — gate semantics identical)
+
+| Rung | Status (KVM run-130929) | Status (TCG run-131021) |
+|---|---|---|
+| R1-R5 + R6a/R6b/R6c + R6marker + FINAL | PASS | PASS |
+
+## Honest remaining-gap list for the clang-by-clang self-rebuild
+
+Unchanged from the agent-48 session: the STL/libc++-AST cc1 throughput wall is
+the binding constraint for self-host work; the lean witness still proves the
+C++ toolchain end to end but instantiating libc++ templates in-guest still
+needs the headers. KVM now removes the "guest CPU is emulated" multiplier from
+that wall (the AST-read that took ~90 min under TCG runs on a native-speed
+vCPU), but re-staging the STL witness needs the reverted PCH machinery and is
+follow-up work. Exceptions remain unexercised.
