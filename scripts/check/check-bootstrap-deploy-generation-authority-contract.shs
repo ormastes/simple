@@ -1,0 +1,77 @@
+#!/bin/sh
+# Exercise the deployment wrapper with controlled provenance boundaries.
+# This verifies argument binding and rejection propagation, not admission.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/deploy-authority-contract.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/scripts/bootstrap" "$fixture/scripts/check/lib" "$fixture/generation"
+cp "$root/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs" \
+  "$fixture/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs"
+cat >"$fixture/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'EOF'
+bootstrap_stage3_manifest_value() {
+  awk -F= -v key="$1" '$1 == key {print substr($0, length(key) + 2)}' "$2"
+}
+bootstrap_stage3_hash_file() {
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+bootstrap_stage3_verify_manifest() {
+  [ "$#" -eq 6 ] || return 1
+  [ "$1" = "$repo_root/stage3.env" ] || return 1
+  [ "$2" = "$1" ] || return 1
+  [ "$3" = "$repo_root" ] || return 1
+  [ "$4" = "$repo_root/parent" ] || return 1
+  [ "$5" = "$4" ] || return 1
+  [ "$6" = "$1.authority-map.env" ] || return 1
+  [ -f "$6" ] || return 1
+  [ ! -f "$repo_root/reject-stage3" ] || return 1
+  printf 'stage3-verified\n'
+}
+EOF
+cat >"$fixture/scripts/check/lib/stage4-candidate-provenance.shs" <<'EOF'
+stage4_verify_candidate_provenance() {
+  [ "$#" -eq 3 ] || return 1
+  [ "$1" = "$repo_root/source.provenance.env" ] || return 1
+  [ "$2" = "$repo_root/source" ] || return 1
+  [ "$3" = "$repo_root" ] || return 1
+  [ ! -f "$repo_root/reject-stage4" ] || return 1
+}
+EOF
+. "$fixture/scripts/check/lib/bootstrap-stage3-provenance.shs"
+printf 'candidate\n' >"$fixture/source"
+cp "$fixture/source" "$fixture/generation/simple"
+printf 'parent\n' >"$fixture/parent"
+touch "$fixture/stage3.env" "$fixture/stage3.env.authority-map.env"
+printf 'output_path=%s/source\nparent_compiler_path=%s/parent\n' \
+  "$fixture" "$fixture" >"$fixture/source.provenance.env"
+cp "$fixture/source.provenance.env" "$fixture/generation/authority.stage4-provenance.env"
+{
+  printf 'schema=simple-bootstrap-stage3-current-acceptance-v1\nstatus=verified\n'
+  printf 'stage4_candidate_sha256=%s\n' "$(bootstrap_stage3_hash_file "$fixture/source")"
+  printf 'stage4_provenance_sha256=%s\n' "$(bootstrap_stage3_hash_file "$fixture/source.provenance.env")"
+  printf 'stage3_provenance_path=%s/stage3.env\n' "$fixture"
+} >"$fixture/generation/authority.stage3-acceptance.env"
+run_verifier() {
+  sh "$fixture/scripts/bootstrap/verify-bootstrap-deploy-generation-authority.shs" \
+    "$fixture/generation" "$1"
+}
+expect_rejection() {
+  if run_verifier "$1" >"$fixture/result" 2>&1; then
+    echo "FAIL: accepted $1 with $2" >&2
+    exit 1
+  fi
+}
+for operation in publication rollback; do
+  [ "$(run_verifier "$operation")" = stage3-verified ]
+  mv "$fixture/stage3.env.authority-map.env" "$fixture/map.saved"
+  expect_rejection "$operation" missing-map
+  mv "$fixture/map.saved" "$fixture/stage3.env.authority-map.env"
+  touch "$fixture/reject-stage3"
+  expect_rejection "$operation" rejected-stage3
+  rm "$fixture/reject-stage3"
+  touch "$fixture/reject-stage4"
+  expect_rejection "$operation" rejected-stage4
+  rm "$fixture/reject-stage4"
+done
+printf 'PASS: publication and rollback bind six Stage-3 arguments and propagate rejections\n'
