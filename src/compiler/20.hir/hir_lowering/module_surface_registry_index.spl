@@ -335,22 +335,55 @@ pub(package) fn module_surfaces_freeze(registry: ModuleSurfacesByName) -> Result
         var import_index = 0
         while import_index < surface.imports.len():
             val import_decl = surface.imports[import_index]
-            val target_name = module_surface_resolve_import_key(
-                registry, surface, import_decl.module)
-            var target_index = -1
-            if target_name != "":
-                target_index = module_surface_registry_index(registry, target_name)
-            import_target_indices = import_target_indices.push(target_index)
-            import_target_names = import_target_names.push(target_name)
             val item_start = surface.import_item_offsets[import_index]
             val item_end = surface.import_item_offsets[import_index + 1]
             if (item_start < 0 or item_start > item_end or
                 item_end > surface.import_item_names.len()):
                 return Err("pre-freeze import item range is invalid: surface={surface_index} import={import_index}")
+            var target_name = module_surface_resolve_import_key(
+                registry, surface, import_decl.module)
+            var fallback_item_name = ""
+            if target_name == "" and item_end == item_start + 1 and
+               surface.import_item_has_alias[item_start] and
+               surface.import_item_names[item_start] == import_decl.module:
+                val path_parts = import_decl.module.split(".")
+                if path_parts.len() > 1:
+                    val member_name = path_parts[path_parts.len() - 1]
+                    var parent_name = ""
+                    var part_index = 0
+                    while part_index < path_parts.len() - 1:
+                        if part_index > 0:
+                            parent_name = parent_name + "."
+                        parent_name = parent_name + path_parts[part_index]
+                        part_index = part_index + 1
+                    var parent_lookup = parent_name
+                    var leading_dots = 0
+                    while leading_dots < import_decl.module.len() and
+                          import_decl.module.substring(leading_dots, leading_dots + 1) == ".":
+                        leading_dots = leading_dots + 1
+                    if leading_dots > 0 and leading_dots == parent_name.len() + 1:
+                        parent_lookup = surface.canonical_name
+                        var dot_index = 0
+                        while dot_index < leading_dots:
+                            parent_lookup = module_surface_package_name_from_name(parent_lookup)
+                            dot_index = dot_index + 1
+                    if parent_lookup != "" and member_name != "":
+                        val parent_key = module_surface_resolve_import_key(
+                            registry, surface, parent_lookup)
+                        if parent_key != "":
+                            target_name = parent_key
+                            fallback_item_name = member_name
+            var target_index = -1
+            if target_name != "":
+                target_index = module_surface_registry_index(registry, target_name)
+            import_target_indices = import_target_indices.push(target_index)
+            import_target_names = import_target_names.push(target_name)
             var item_index = item_start
             while item_index < item_end:
-                import_item_names = import_item_names.push(
-                    surface.import_item_names[item_index])
+                val projected_item_name = if fallback_item_name != "":
+                    fallback_item_name
+                else: surface.import_item_names[item_index]
+                import_item_names = import_item_names.push(projected_item_name)
                 import_item_aliases = import_item_aliases.push(
                     surface.import_item_aliases[item_index])
                 import_item_has_alias = import_item_has_alias.push(
