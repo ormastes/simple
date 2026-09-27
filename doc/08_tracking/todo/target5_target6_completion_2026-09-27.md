@@ -1,6 +1,13 @@
 # Target 5/6 completion
 
-Status: OPEN
+Status: SESSION CLOSED BY USER (2026-09-28); production qualification remains OPEN.
+
+The user accepted the matched-startup C reference for the Linux 1.05x size
+limit and asked to consider this isolated effort done after a commit/performance
+review. This closes the requested session and does not convert the diagnostic
+probes into a Stage4, SPipe, native performance, or release PASS. The remaining
+technical items below remain follow-up work; see
+`doc/09_report/compiler/target56_user_closeout_2026-09-28.md`.
 
 Owner lane: `codex/target56-isolated`. This TODO carries the unfinished work
 from `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`,
@@ -20,10 +27,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   native roots. Keep explicit `SIMPLE_LINKER` precedence while qualifying the
   Linux size-mode LLD selection on current source.
 - Run the BS7 matched cohorts and Phase 7 one-binary/dynload rows. Require
-  Linux stripped hello <=15 KiB **and** <=1.05x same-toolchain C, accepted
+  Linux stripped hello <=15 KiB **and** <=1.05x matched-startup, same-toolchain C, accepted
   startup/RSS budgets, 30 development or 100 release samples, and empty
   forbidden/optional-provider traces. The historical LLD diagnostic was
-  13,944 bytes versus 4,864-byte C hello (2.87x), so the C ratio is open.
+  13,944 bytes versus 4,864-byte bare C hello (2.87x); this remains advisory.
 - Verify the plain-literal print lowering in a current-source Stage4 hello build:
   confirm the binary no longer retains `rt_string_new_literal`,
   `rt_to_string`, or `rt_literal_intern_table`; then measure paired size,

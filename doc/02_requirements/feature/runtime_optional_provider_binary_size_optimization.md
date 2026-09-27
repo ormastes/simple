@@ -23,7 +23,7 @@ Status: selected by user on 2026-09-02.
 ## Non-Functional Requirements
 
 - **NFR-001:** Same-host NoGC hello unstripped executable is below 2 MiB on every supported native target.
-- **NFR-002:** Linux ELF release-small NoGC hello is at most 15 KiB and no larger than 1.05 times the same-toolchain C baseline.
+- **NFR-002:** Linux ELF release-small NoGC hello is at most 15 KiB and no larger than 1.05 times a same-host, same-toolchain C hello with the same startup wrapper, required core runtime archive, linker options, section GC, and strip policy. The C user entry prints the same bytes through `puts`; the Simple user entry uses the required Simple print path. A bare C `main` is an advisory size comparison, not the ratio denominator.
 - **NFR-003:** On non-ELF targets, release-small NoGC hello is no larger than same-host C plus a target-specific admitted fixed format allowance; the allowance may not hide retained runtime features.
 - **NFR-004:** Minimal interpreter warm hello startup and max RSS are no worse than the admitted same-host Python baseline by more than 10%; the target is parity or better.
 - **NFR-005:** A no-import hello loads zero optional provider DSOs and performs zero optional-provider initializations.

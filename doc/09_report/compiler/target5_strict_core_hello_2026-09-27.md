@@ -224,11 +224,11 @@ because both user objects were authored in C. Its 80-byte difference from the
 earlier 6,584-byte direct writer reflects a different probe link command;
 compare only binaries built in the same pair.
 
-Decision: the 15 KiB absolute gate remains meaningful, and the 1.05x ratio is
-plausible when C carries the same required startup semantics. The current
-bare-C ratio mixes Simple startup and optional extension support into only
-one side, so these diagnostics do not justify claiming that its 1.05x target
-is reachable. Do not silently change the requirement or cohort checker:
-the user must choose the C reference. A current-source Stage4 hello, exact
-closure map, and qualified 30/100-sample cohorts are still required before
-Target 5 can pass.
+Decision (user-selected 2026-09-28): retain the 15 KiB absolute gate and use
+the matched-startup C binary as the 1.05x denominator. The 6,504-byte
+direct-writer probe is 136 bytes (2.1%) above its 6,368-byte paired C
+reference. Bare C remains advisory: the probe is 1,640 bytes (33.7%) above
+the 4,864-byte bare C binary. Both user objects in this pair were authored in
+C, so this is a size-policy decision, not a current-source Stage4 qualification.
+A current-source Stage4 hello, exact closure map, and qualified 30/100-sample
+cohorts are still required before the production Target 5 gate can pass.

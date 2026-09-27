@@ -2,7 +2,7 @@
 
 ## Goal
 
-Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and matching same-host C hello size in release-small.
+Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
 
 ## Phase 0 — Baselines and Attribution
 
@@ -58,7 +58,7 @@ Gate: injected exception, unwind, RTTI, personality, or foreign-boundary require
 ## Phase 5 — Size and Loading Gates
 
 - Unstripped NoGC hello below 2 MiB on all native targets.
-- Linux stripped release-small hello at most 15 KiB and at most 1.05x same-toolchain C.
+- Linux stripped release-small hello at most 15 KiB and at most 1.05x same-host, same-toolchain C with the same startup wrapper, required runtime archive, linker options, section GC, and strip policy.
 - Other targets use same-host C plus an admitted format allowance.
 - Minimal interpreter startup/RSS at most 110% of same-host Python baseline.
 - Run 30-sample development and 100-sample release cohorts.
@@ -68,7 +68,7 @@ Gate: binary hashes, toolchains, checksums, p50/p95, RSS, and attribution eviden
 Implementation status (2026-09-02): BS7 cohort production and checking are
 implemented by `scripts/check/produce-runtime-binary-size-startup-cohort.shs`
 and `scripts/check/check-runtime-binary-size-startup-cohort.shs`. The checker
-recomputes p50/p95 startup and max RSS, enforces same-host C size limits,
+recomputes p50/p95 startup and max RSS, enforces the declared matched-startup C size limit,
 requires empty NoGC-forbidden and optional-provider traces, requires 30
 development or 100 release samples per lane, and rejects Rust seed or
 pre-Stage4 evidence. The focused mutation suite passes. No heavy cohort has
