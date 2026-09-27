@@ -28,25 +28,40 @@ fn compile_source_inventory_apply_and_publish_v1(
     cache_root: text, events: [CompileSourceEventV1],
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
-    expected_pointer_digest: text = ""
+    expected_pointer_digest: text = "",
+    cold_rebuild: bool = false
 ) -> CompileSourceInventoryReadV1:
     val current = compile_source_inventory_read_current_v1(cache_root)
     var inventory = if current.valid:
         current.inventory!
     else:
         CompileSourceInventoryV1(COMPILE_SOURCE_INVENTORY_SCHEMA_V1, 0, [])
-    val initial = if inventory.generation == 0 and inventory.entries.len() == 0:
-        compile_source_inventory_initial_events_v1(events)
+    if cold_rebuild:
+        # A cold listing is complete authority, not a delta. Replaying it on
+        # top of the old generation leaves disappeared sources indexed.
+        val rebuilt = compile_source_inventory_apply_cold_events_v1(0, events)
+        if not rebuilt.valid:
+            return CompileSourceInventoryReadV1(false, rebuilt.reason, "", nil)
+        val next_generation = if current.valid:
+            current.inventory!.generation + 1
+        else:
+            1
+        inventory = CompileSourceInventoryV1(
+            COMPILE_SOURCE_INVENTORY_SCHEMA_V1,
+            next_generation, rebuilt.inventory!.entries)
     else:
-        nil
-    match initial:
-        case Some(seed): inventory = seed
-        case _:
-            for event in events:
-                val changed = compile_source_inventory_apply_event_v1(inventory, event)
-                if not changed.valid:
-                    return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
-                inventory = changed.inventory!
+        val initial = if inventory.generation == 0 and inventory.entries.len() == 0:
+            compile_source_inventory_initial_events_v1(events)
+        else:
+            nil
+        match initial:
+            case Some(seed): inventory = seed
+            case _:
+                for event in events:
+                    val changed = compile_source_inventory_apply_event_v1(inventory, event)
+                    if not changed.valid:
+                        return CompileSourceInventoryReadV1(false, changed.reason, "", nil)
+                    inventory = changed.inventory!
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory, cursor_head, cursor_rows,
         cursor_filesystem_digest, expected_pointer_digest)
@@ -147,7 +162,8 @@ fn compile_source_inventory_apply_observed_events_v1(
     git_events: [CompileSourceEventV1], filesystem_events: [FsWatchEvent],
     cursor_head: text = "", cursor_rows: i64 = -1,
     cursor_filesystem_digest: text = "",
-    expected_pointer_digest: text = ""
+    expected_pointer_digest: text = "",
+    cold_rebuild: bool = false
 ) -> CompileSourceInventoryReadV1:
     # Translation can fail on overflow or an unreadable source. Complete it
     # before one immutable inventory publication so a rejected journal cannot
@@ -161,7 +177,8 @@ fn compile_source_inventory_apply_observed_events_v1(
                 events.push(event)
             compile_source_inventory_apply_and_publish_v1(
                 cache_root, events, cursor_head, cursor_rows,
-                cursor_filesystem_digest, expected_pointer_digest)
+                cursor_filesystem_digest, expected_pointer_digest,
+                cold_rebuild)
 
 # Cold replay retains one slot per distinct identity rather than constructing
 # successively larger inventories for every event. Reuse the one-event authority

@@ -76,6 +76,13 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   before publication and removes a source renamed to a non-source path.
   Behavioral unit cases were added; run them on the current-source worker
   before accepting the event-admission path.
+- An explicit cold refresh now rebuilds a complete inventory from the listed
+  source events and publishes a successor generation, dropping paths absent
+  from that listing. The CLI's cold inventory listing includes both `src` and
+  `test` even when the current snapshot selects only one; warm replay remains
+  incremental. The unit spec covers a disappeared source; verify the production
+  cold path and journal recovery on a current-source worker before marking
+  cold rebuild complete.
 - Run current-source SPipe and native performance cohorts for cold, warm,
   private edit, public edit, SCC, and variant cases. Require exact outputs,
   p95 time and max RSS hard budgets, plus the normalized time/RSS sum rule in
