@@ -319,3 +319,43 @@ and `_MirLoweringExpr/{method_calls_literals,switch_operators_calls}.spl` update
 `module_global_fn_pointer_lowered_as_direct_call_2026-08-21.md`.
 
 **Owning feature expert:** `feature_expert/compiler_hardening/skill.md`.
+
+## 2026-09-26 — Stage-2 admission family: `@export("C")`, `__module_init_*` naming, text predicates
+
+- **`@export("C")` never reached HIR through the flat-AST bridge**
+  (`c8e4edd84c4`). The parser carried only the asm-placement decorator subset
+  into the flat decl pool, so `HirFunction.has_export_attr` was always false.
+  Harmless until `59cba6907ad` made `mir_provider_function_name`
+  (`_MirLowering/provider_metadata.spl`) module-qualify every non-exported
+  function — then each C-ABI export became `os.kernel...cm33_policy_*` and
+  Cortex-M images stopped linking. `export` is now part of
+  `parser_pending_asm_placement`
+  ([enum_module_body.spl](../../../../src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl) ~:743)
+  and `function_lowering.spl:781` reads the flag. Rule: a decorator that fixes
+  a symbol's linkage name must be in that placement subset, or MIR provider
+  naming silently renames it.
+- **`__module_init_*` was derived from the raw parsed path.** Under
+  `SIMPLE_BOOTSTRAP=1` + `SIMPLE_SCV_FREEZE_FALLBACK=1` that is the ABSOLUTE
+  SCV snapshot path, so the symbol embedded a host directory and a content
+  hash — for an external ABI a C shim declares by fixed name.
+  `mir_dynamic_module_init_name`
+  ([module_lowering.spl](../../../../src/compiler/50.mir/_MirLowering/module_lowering.spl) :91)
+  now goes through `module_source_relative_path`
+  ([module_path_naming.spl](../../../../src/compiler/00.common/module_path_naming.spl) :61).
+- **`starts_with`/`ends_with` returned the WRONG BOOLEAN on the native path —
+  the most dangerous shape in this family.** Both re-tagged their prefix/suffix
+  argument unconditionally (`rt_string_new(ptr, rt_strlen(ptr))`), but the
+  pure-Simple cranelift adapter emits every `Str` constant already tagged
+  (`rt_string_new_literal`), so the RtCoreString header bytes were compared as
+  the prefix and `x.starts_with("lit")` compiled by a Stage-2 candidate
+  answered `false` while the interpreter answered `true`. No crash, no
+  diagnostic — a silent wrong answer inside a self-hosting compiler (Stage-2
+  admission arm 2, "positional Stage-3 route returned unexpected output").
+  Fixed by routing the argument through the idempotent `ensure_tagged_str`
+  (runtime tagged-or-raw check via `rt_interp_cstr`, then re-tag):
+  [method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
+  :2238 (`starts_with`) and :2311 (`ends_with`); the receiver side had been
+  fixed the same way earlier (task #178, docstring at :95). Spec:
+  `test/01_unit/compiler/backend/text_predicate_argument_shapes_native_spec.spl`.
+  Rule: **never `tag_str_local_if_raw` a value whose producer may already be
+  tagged; the only safe normaliser is `ensure_tagged_str`.**
