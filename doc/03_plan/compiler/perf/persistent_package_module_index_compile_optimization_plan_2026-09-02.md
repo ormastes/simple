@@ -233,6 +233,9 @@ Required assertions:
   sections, and opens zero dependency source files;
 - missing/corrupt/stale index fails with an attributed code and zero fallback
   scans;
+- deleting an untracked source without an SCV journal event cannot reuse a
+  snapshot containing that source; warm admission either applies an exact
+  membership deletion or requires an explicit cold rebuild;
 - private-body, public-export, initializer/provider, generated-source, and
   config-variant edits produce exact distinct invalidation closures;
 - one-package edit leaves unrelated package keys/artifacts byte-identical;
