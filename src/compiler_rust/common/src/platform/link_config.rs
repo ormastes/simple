@@ -236,7 +236,6 @@ impl PlatformLinkConfig {
             asm_label_extra_chars: vec!['.', '$'],
             unresolved_symbol_flags: vec![
                 "-Wl,--allow-multiple-definition",
-                "-Wl,--warn-unresolved-symbols",
                 "-Wl,--no-fatal-warnings",
             ],
             disable_pie: false,
