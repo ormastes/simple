@@ -909,3 +909,11 @@ derives symbol counts from either validated SysV `DT_HASH` or GNU hash tables,
 and preserves SONAME, visibility, size/value, and GNU symbol-version behavior.
 The x86_64 fixture is exercised with its section table removed through both
 the SysV-hash and GNU-hash-only discovery paths.
+
+The focused Linux+MinGW binary workflow exposed a pre-link Windows GNU
+bootstrap failure: its native-support build implicitly selected
+`x86_64-w64-mingw32-gcc`, while the admitted bootstrap contract requires
+Clang. The workflow now installs Clang/LLD plus the MinGW sysroot and exports
+`CC_x86_64_pc_windows_gnu=clang`; the target-qualified Clang invocation remains
+owned by the native-support build script. This removes the compiler-selection
+blocker so the Windows binary lane can proceed to Simple compilation/linking.
