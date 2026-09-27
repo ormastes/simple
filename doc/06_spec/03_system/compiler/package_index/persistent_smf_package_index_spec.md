@@ -41,9 +41,12 @@ events; it never grants permission to mutate Git or user-authored files.
 1. Reuse dependency export headers without opening source bodies.
 2. Confirm bounded `PackageTldrHeaderV1` records locate only demanded indexed
    `PackageExportSmfV1` sections.
-3. Reuse admitted package actions/archives and confirm input, ordered member
+3. Validate the complete export SMF payload digest and each demanded section's
+   byte extent and digest before admitting its bytes; reject a mismatched
+   section or trailing payload bytes.
+4. Reuse admitted package actions/archives and confirm input, ordered member
    payload, producer, target, toolchain, and variant identities match.
-4. Confirm dependency source-body reads and dependency recompiles are zero.
+5. Confirm dependency source-body reads and dependency recompiles are zero.
 
 ### Invalidate one package at a time
 

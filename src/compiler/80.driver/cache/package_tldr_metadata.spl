@@ -28,6 +28,14 @@ struct PackageExportSmfV1:
     sections: [PackageSmfSectionV1]
     payload_digest: text
 
+struct PackageSmfPayloadSectionV1:
+    kind: text
+    payload: text
+
+struct PackageExportSmfBytesV1:
+    record: PackageExportSmfV1
+    payload: text
+
 struct PackageTldrHeaderV1:
     schema_version: i64
     producer_digest: text
@@ -139,6 +147,61 @@ fn package_export_smf_validate_v1(record: PackageExportSmfV1) -> text:
             not package_tldr_digest_valid_v1(record.payload_digest)):
         return "smf-identity-or-digest-invalid"
     package_smf_sections_validate_v1(record.sections)
+
+fn package_export_smf_payload_validate_v1(
+    record: PackageExportSmfV1, payload: text
+) -> text:
+    val metadata_reason = package_export_smf_validate_v1(record)
+    if metadata_reason != "ok":
+        return metadata_reason
+    if sha256_text(payload) != record.payload_digest:
+        return "smf-payload-digest-mismatch"
+    var cursor = 0
+    for section in record.sections:
+        if section.offset != cursor:
+            return "smf-section-gap"
+        val end = section.offset + section.extent
+        if end > payload.len():
+            return "smf-section-out-of-bounds"
+        if sha256_text(payload.slice(section.offset, end)) != section.digest:
+            return "smf-section-digest-mismatch"
+        cursor = end
+    if cursor != payload.len():
+        return "smf-payload-trailing-bytes"
+    "ok"
+
+fn package_export_smf_build_v1(
+    package_identity: text, module_identity: text, variant_digest: text,
+    parts: [PackageSmfPayloadSectionV1]
+) -> Result<PackageExportSmfBytesV1, text>:
+    if parts.len() == 0:
+        return Err("smf-section-directory-empty")
+    var by_kind: Dict<text, text> = {}
+    var kinds: [text] = []
+    for part in parts:
+        if not package_tldr_text_valid_v1(part.kind) or part.payload.len() == 0:
+            return Err("smf-section-invalid")
+        if by_kind.has(part.kind):
+            return Err("smf-section-order-or-duplicate")
+        by_kind[part.kind] = part.payload
+        kinds.push(part.kind)
+    var payload_chunks: [text] = []
+    var offset = 0
+    var sections: [PackageSmfSectionV1] = []
+    for kind in canonical_identity_sort_texts(kinds):
+        val bytes = by_kind[kind]
+        sections.push(PackageSmfSectionV1(
+            kind, offset, bytes.len(), sha256_text(bytes)))
+        payload_chunks.push(bytes)
+        offset = offset + bytes.len()
+    val payload = payload_chunks.join("")
+    val record = PackageExportSmfV1(
+        PACKAGE_TLDR_SCHEMA_V1, package_identity, module_identity,
+        variant_digest, sections, sha256_text(payload))
+    val reason = package_export_smf_payload_validate_v1(record, payload)
+    if reason != "ok":
+        return Err(reason)
+    Ok(PackageExportSmfBytesV1(record, payload))
 
 fn package_export_smf_section_v1(
     record: PackageExportSmfV1, kind: text
@@ -289,9 +352,11 @@ fn package_tldr_early_cutoff_v1(
 
 export PACKAGE_TLDR_SCHEMA_V1
 export ConfigVariantKeyV1, PackageSmfSectionV1, PackageExportSmfV1
+export PackageSmfPayloadSectionV1, PackageExportSmfBytesV1
 export PackageTldrHeaderV1, PackageMetadataAdmissionV1
 export config_variant_encode_v1, config_variant_digest_v1
 export package_smf_sections_validate_v1, package_export_smf_validate_v1
+export package_export_smf_payload_validate_v1, package_export_smf_build_v1
 export package_export_smf_section_v1
 export package_tldr_header_validate_v1, package_tldr_interface_key_v1
 export package_tldr_action_key_v1, package_tldr_admit_v1

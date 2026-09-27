@@ -1,9 +1,11 @@
 use app.spipe.testing.*
 use compiler.driver.cache.package_tldr_metadata.{
     ConfigVariantKeyV1, PackageExportSmfV1, PackageSmfSectionV1,
+    PackageSmfPayloadSectionV1,
     PackageTldrHeaderV1,
     config_variant_digest_v1, package_tldr_action_key_v1,
     package_export_smf_section_v1, package_export_smf_validate_v1,
+    package_export_smf_build_v1, package_export_smf_payload_validate_v1,
     package_tldr_admit_v1, package_tldr_early_cutoff_v1,
     package_tldr_header_validate_v1, package_tldr_interface_key_v1
 }
@@ -51,6 +53,37 @@ fn metadata_header(
         action_archive_digest: sha256_text("action-archive"))
 
 describe "typed package TLDR metadata":
+    it "binds canonical SMF sections to exact emitted bytes":
+        val variant = config_variant_digest_v1(metadata_variant("cranelift"))
+        val built = package_export_smf_build_v1(
+            "pkg.alpha", "pkg.alpha.main", variant, [
+                PackageSmfPayloadSectionV1("providers", "provider:gpu"),
+                PackageSmfPayloadSectionV1("abi_interface", "typed:public-fn")])
+        expect(built.is_ok()).to_be(true)
+        val artifact = built.unwrap()
+        expect(artifact.payload).to_equal("typed:public-fnprovider:gpu")
+        expect(artifact.record.sections[0].kind).to_equal("abi_interface")
+        expect(artifact.record.sections[1].offset).to_equal(15)
+        expect(package_export_smf_payload_validate_v1(
+            artifact.record, artifact.payload)).to_equal("ok")
+
+        var changed = artifact.record
+        var changed_sections = changed.sections
+        changed_sections[1] = PackageSmfSectionV1(
+            "providers", 15, 12, sha256_text("other-provider"))
+        changed.sections = changed_sections
+        expect(package_export_smf_payload_validate_v1(
+            changed, artifact.payload)).to_equal("smf-section-digest-mismatch")
+        expect(package_export_smf_payload_validate_v1(
+            artifact.record, artifact.payload + "tail")).to_equal(
+                "smf-payload-digest-mismatch")
+
+        val duplicate = package_export_smf_build_v1(
+            "pkg.alpha", "pkg.alpha.main", variant, [
+                PackageSmfPayloadSectionV1("abi_interface", "first"),
+                PackageSmfPayloadSectionV1("abi_interface", "second")])
+        expect(duplicate.unwrap_err()).to_equal("smf-section-order-or-duplicate")
+
     it "admits independently sealed SMF sections for lazy access":
         val sections = [
             PackageSmfSectionV1("exports", 0, 64, sha256_text("exports")),
