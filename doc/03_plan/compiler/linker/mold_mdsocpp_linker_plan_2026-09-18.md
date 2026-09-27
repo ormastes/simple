@@ -793,6 +793,9 @@ Command-line `/DEFAULTLIB:name`, `/NODEFAULTLIB[:name]`, and
 object directives. Library suppression is case-insensitive and treats the
 optional `.lib` suffix canonically; bare `/NODEFAULTLIB` suppresses directive
 and command-line defaults without removing explicitly supplied libraries.
+Command-line `/EXPORT:public[=internal][,@ordinal][,NONAME][,DATA][,PRIVATE]`
+now uses the same typed parser, conflict checks, archive roots, and `.edata`
+builder as object-embedded directives on both AMD64 and ARM64 routes.
 The production `allow_duplicate_definitions` policy now reaches internal COFF
 as deterministic `/FORCE:MULTIPLE` semantics: the first external definition
 in input/archive order wins and later definitions become references to it.

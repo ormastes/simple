@@ -85,6 +85,23 @@ fn _coff_first_definition_objects(objects: [CoffObject]) -> [CoffObject]:
             symbol_table_count: object.symbol_table_count))
     result
 
+fn _coff_merge_exports(base: [CoffExportDirective],
+        added: [CoffExportDirective]) -> Result<[CoffExportDirective], text>:
+    var result = base
+    for candidate in added:
+        var duplicate = false
+        for existing in result:
+            if existing.public_name == candidate.public_name:
+                if (existing.internal_name != candidate.internal_name or
+                        existing.ordinal != candidate.ordinal or
+                        existing.noname != candidate.noname or
+                        existing.data != candidate.data or
+                        existing.private_export != candidate.private_export):
+                    return Err("conflicting COFF /EXPORT for '{candidate.public_name}'")
+                duplicate = true
+        if not duplicate: result = result.push(candidate)
+    Ok(result)
+
 fn _coff_read_u32(section: [u8], offset: i64) -> Result<i64, text>:
     if offset < 0 or offset + 4 > section.len(): return Err("32-bit relocation patch is outside its section")
     Ok((section[offset] as i64) | ((section[offset + 1] as i64) << 8) |
@@ -1249,7 +1266,7 @@ fn coff_link_amd64_retained_image_policy_opt(request: CoffLinkRequest,
     """Link AMD64 COFF with typed REF and safe ICF policy."""
     _coff_link_retained(
         request, retained_symbols, COFF_MACHINE_AMD64, policy, image_base,
-        gc_sections, icf_sections, false)
+        gc_sections, icf_sections, false, [])
 
 fn coff_link_amd64_retained_image_policy_options(request: CoffLinkRequest,
         retained_symbols: [text], policy: PeImagePolicy,
@@ -1258,7 +1275,17 @@ fn coff_link_amd64_retained_image_policy_options(request: CoffLinkRequest,
     """Link AMD64 COFF with REF, ICF, and `/FORCE:MULTIPLE` policy."""
     _coff_link_retained(
         request, retained_symbols, COFF_MACHINE_AMD64, policy, image_base,
-        gc_sections, icf_sections, allow_multiple_definitions)
+        gc_sections, icf_sections, allow_multiple_definitions, [])
+
+fn coff_link_amd64_retained_image_policy_full(request: CoffLinkRequest,
+        retained_symbols: [text], policy: PeImagePolicy,
+        image_base: i64, gc_sections: bool, icf_sections: bool,
+        allow_multiple_definitions: bool,
+        command_exports: [CoffExportDirective]) -> Result<[u8], text>:
+    """Link AMD64 COFF with complete typed command-line policy."""
+    _coff_link_retained(
+        request, retained_symbols, COFF_MACHINE_AMD64, policy, image_base,
+        gc_sections, icf_sections, allow_multiple_definitions, command_exports)
 
 fn coff_link_arm64(request: CoffLinkRequest) -> Result<[u8], text>:
     """Link ARM64 COFF objects and libraries into a PE32+ console executable."""
@@ -1297,7 +1324,7 @@ fn coff_link_arm64_retained_image_policy_opt(request: CoffLinkRequest,
     """Link ARM64 COFF with typed REF and safe ICF policy."""
     _coff_link_retained(
         request, retained_symbols, COFF_MACHINE_ARM64, policy, image_base,
-        gc_sections, icf_sections, false)
+        gc_sections, icf_sections, false, [])
 
 fn coff_link_arm64_retained_image_policy_options(request: CoffLinkRequest,
         retained_symbols: [text], policy: PeImagePolicy,
@@ -1306,18 +1333,33 @@ fn coff_link_arm64_retained_image_policy_options(request: CoffLinkRequest,
     """Link ARM64 COFF with REF, ICF, and `/FORCE:MULTIPLE` policy."""
     _coff_link_retained(
         request, retained_symbols, COFF_MACHINE_ARM64, policy, image_base,
-        gc_sections, icf_sections, allow_multiple_definitions)
+        gc_sections, icf_sections, allow_multiple_definitions, [])
+
+fn coff_link_arm64_retained_image_policy_full(request: CoffLinkRequest,
+        retained_symbols: [text], policy: PeImagePolicy,
+        image_base: i64, gc_sections: bool, icf_sections: bool,
+        allow_multiple_definitions: bool,
+        command_exports: [CoffExportDirective]) -> Result<[u8], text>:
+    """Link ARM64 COFF with complete typed command-line policy."""
+    _coff_link_retained(
+        request, retained_symbols, COFF_MACHINE_ARM64, policy, image_base,
+        gc_sections, icf_sections, allow_multiple_definitions, command_exports)
 
 fn _coff_link_retained(request: CoffLinkRequest,
         retained_symbols: [text], machine: i64,
         policy: PeImagePolicy, image_base: i64,
         gc_sections: bool, icf_sections: bool,
-        allow_multiple_definitions: bool) -> Result<[u8], text>:
+        allow_multiple_definitions: bool,
+        command_exports: [CoffExportDirective]) -> Result<[u8], text>:
     val valid_policy = pe_validate_policy(policy)
     if valid_policy.is_err(): return Err(valid_policy.unwrap_err())
     val machine_name = if machine == COFF_MACHINE_ARM64: "ARM64" else: "AMD64"
+    var effective_roots = retained_symbols
+    for exported in command_exports:
+        if not effective_roots.contains(exported.internal_name):
+            effective_roots = effective_roots.push(exported.internal_name)
     val prepared_result = _coff_prepare_link_machine(
-        request, retained_symbols, machine, machine_name)
+        request, effective_roots, machine, machine_name)
     if prepared_result.is_err(): return Err(prepared_result.unwrap_err())
     val prepared = prepared_result.unwrap()
     val objects = if allow_multiple_definitions:
@@ -1327,7 +1369,9 @@ fn _coff_link_retained(request: CoffLinkRequest,
     val selected = prepared.selected
     val closure_roots = prepared.closure_roots
     val aliases = prepared.aliases
-    val exports = prepared.exports
+    val exports_result = _coff_merge_exports(prepared.exports, command_exports)
+    if exports_result.is_err(): return Err(exports_result.unwrap_err())
+    val exports = exports_result.unwrap()
     for name in closure_roots:
         if name == "": continue
         var found = false
@@ -1673,6 +1717,8 @@ export coff_link_amd64_retained_image_policy_opt
 export coff_link_arm64_retained_image_policy_opt
 export coff_link_amd64_retained_image_policy_options
 export coff_link_arm64_retained_image_policy_options
+export coff_link_amd64_retained_image_policy_full
+export coff_link_arm64_retained_image_policy_full
 export coff_link_default_libraries, coff_link_arm64_default_libraries
 export coff_attach_amd64_tls_directory
 export coff_attach_amd64_load_config

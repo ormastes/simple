@@ -6,6 +6,7 @@ use compiler.backend.linker.coff.coff_link.{
     coff_link_amd64_retained_image_policy_gc,
     coff_link_amd64_retained_image_policy_opt,
     coff_link_amd64_retained_image_policy_options,
+    coff_link_amd64_retained_image_policy_full,
     coff_link_arm64, coff_link_arm64_retained_policy,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
@@ -13,6 +14,7 @@ use compiler.backend.linker.coff.coff_link.{
     coff_validate_resource_sections, coff_validate_export_sections}
 use compiler.backend.linker.coff.pe_image_writer.{
     PeImageSection, PeImagePolicy, PE_SUBSYSTEM_WINDOWS}
+use compiler.backend.linker.coff.coff_directives.{CoffExportDirective}
 use compiler.backend.linker.pe_inspect.{IMAGE_FILE_MACHINE_ARM64, pe_inspect}
 use std.io_runtime.{file_read_bytes}
 
@@ -801,6 +803,26 @@ describe "internal freestanding Windows linker":
         expect(inspected.data_directories[0].rva).to_equal(
             inspected.sections[1].virtual_address)
         expect(inspected.data_directories[0].size).to_be_greater_than(40)
+
+        val command_linked = coff_link_amd64_retained_image_policy_full(
+            CoffLinkRequest(objects: [_cl_object("_start", 1)],
+                archives: [], entry: "_start"), [], PeImagePolicy.default(),
+            0x140000000, false, false, false, [CoffExportDirective(
+                public_name: "api", internal_name: "_start", ordinal: 7,
+                noname: false, data: false, private_export: false)]).unwrap()
+        val command_inspected = pe_inspect(command_linked).unwrap()
+        expect(command_inspected.sections[1].name).to_equal(".edata")
+        expect(command_inspected.data_directories[0].size).to_be_greater_than(40)
+
+        val conflicting = coff_link_amd64_retained_image_policy_full(
+            CoffLinkRequest(objects: [
+                _cl_object_with_directive("_start", " /EXPORT:api=_start")],
+                archives: [], entry: "_start"), [], PeImagePolicy.default(),
+            0x140000000, false, false, false, [CoffExportDirective(
+                public_name: "api", internal_name: "_start", ordinal: 7,
+                noname: false, data: false, private_export: false)])
+        expect(conflicting.is_err()).to_equal(true)
+        expect(conflicting.unwrap_err()).to_contain("conflicting COFF /EXPORT")
 
         val missing = coff_link_amd64(CoffLinkRequest(objects: [
             _cl_object_with_directive("_start", " /EXPORT:missing")],
