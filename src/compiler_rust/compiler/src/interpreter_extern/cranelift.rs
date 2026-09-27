@@ -175,6 +175,52 @@ pub fn rt_cranelift_new_aot_module_triple(args: &[Value]) -> Result<Value, Compi
     Ok(Value::Int(handle))
 }
 
+/// Create a V2 AOT module using the exact requested ISA configuration.
+pub fn spl_cranelift_new_aot_module_config_v2(args: &[Value]) -> Result<Value, CompileError> {
+    const SYMBOL: &str = "spl_cranelift_new_aot_module_config_v2";
+    if args.len() != 9 {
+        return Err(CompileError::runtime(format!("{SYMBOL}: expected 9 arguments")));
+    }
+    let mut values = [0_i64; 9];
+    for (index, slot) in values.iter_mut().enumerate() {
+        *slot = expect_i64(args, index, SYMBOL)?;
+    }
+    for (ptr, len) in [(0, 1), (2, 3), (4, 5), (7, 8)] {
+        validate_raw_span(values[ptr], values[len], SYMBOL)?;
+    }
+    let handle = unsafe {
+        cranelift_sffi::spl_cranelift_new_aot_module_config_v2(
+            values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7], values[8],
+        )
+    };
+    Ok(Value::Int(handle))
+}
+
+pub fn spl_cranelift_aot_isa_feature_v2(args: &[Value]) -> Result<Value, CompileError> {
+    const SYMBOL: &str = "spl_cranelift_aot_isa_feature_v2";
+    if args.len() != 3 {
+        return Err(CompileError::runtime(format!("{SYMBOL}: expected 3 arguments")));
+    }
+    let module = expect_i64(args, 0, SYMBOL)?;
+    let ptr = expect_i64(args, 1, SYMBOL)?;
+    let len = expect_i64(args, 2, SYMBOL)?;
+    validate_raw_span(ptr, len, SYMBOL)?;
+    Ok(Value::Int(unsafe {
+        cranelift_sffi::spl_cranelift_aot_isa_feature_v2(module, ptr, len)
+    }))
+}
+
+pub fn spl_cranelift_aot_opt_level_v2(args: &[Value]) -> Result<Value, CompileError> {
+    const SYMBOL: &str = "spl_cranelift_aot_opt_level_v2";
+    if args.len() != 1 {
+        return Err(CompileError::runtime(format!("{SYMBOL}: expected 1 argument")));
+    }
+    let module = expect_i64(args, 0, SYMBOL)?;
+    Ok(Value::Int(unsafe {
+        cranelift_sffi::spl_cranelift_aot_opt_level_v2(module)
+    }))
+}
+
 /// Finalize module (JIT: compile; AOT: finalize)
 pub fn rt_cranelift_finalize_module(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {

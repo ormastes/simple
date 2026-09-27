@@ -1028,6 +1028,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_cranelift_new_aot_module_triple",
         cranelift::rt_cranelift_new_aot_module_triple
     );
+    insert_simple!(
+        "spl_cranelift_new_aot_module_config_v2",
+        cranelift::spl_cranelift_new_aot_module_config_v2
+    );
+    insert_simple!("spl_cranelift_aot_isa_feature_v2", cranelift::spl_cranelift_aot_isa_feature_v2);
+    insert_simple!("spl_cranelift_aot_opt_level_v2", cranelift::spl_cranelift_aot_opt_level_v2);
     insert_simple!("rt_cranelift_new_module", cranelift::rt_cranelift_new_module);
     insert_simple!("rt_cranelift_new_signature", cranelift::rt_cranelift_new_signature);
     insert_simple!("rt_cranelift_null", cranelift::rt_cranelift_null);

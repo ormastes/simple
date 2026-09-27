@@ -1809,6 +1809,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cranelift_new_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (JIT)
     RuntimeFuncSpec::new("rt_cranelift_new_aot_module", &[I64, I64, I64], &[I64]), // name_ptr, name_len, target -> module_handle (legacy AOT)
     RuntimeFuncSpec::new("rt_cranelift_new_aot_module_triple", &[I64, I64, I64, I64], &[I64]), // name_ptr, name_len, target_ptr, target_len -> module_handle (AOT)
+    RuntimeFuncSpec::new("spl_cranelift_new_aot_module_config_v2", &[I64, I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_cranelift_aot_isa_feature_v2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_cranelift_aot_opt_level_v2", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cranelift_finalize_module", &[I64], &[I64]),                      // module -> success
     RuntimeFuncSpec::new("rt_cranelift_free_module", &[I64], &[]),                             // module -> ()
     // Signature building
