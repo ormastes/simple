@@ -730,7 +730,12 @@ entry requests deduplicate; empty, conflicting, whitespace/control-bearing
 entries fail closed. `/BASE:address` now drives symbol addresses, address-based
 relocations, and the emitted PE32+ image base through one value; it requires a
 positive 64 KiB-aligned address with 4 GiB headroom, deduplicates equivalent
-decimal/hex spellings, and rejects conflicting or unsafe bases. Decimal and `0x` values
+decimal/hex spellings, and rejects conflicting or unsafe bases. The route also
+models `/DYNAMICBASE`, `/HIGHENTROPYVA`, `/NXCOMPAT`,
+`/LARGEADDRESSAWARE`, and `/TSAWARE`, including each `:NO` spelling. These
+drive the PE file/DLL characteristic bits; ASLR/high-entropy bits remain absent
+without a relocation directory, explicit high entropy without dynamic base is
+rejected, and conflicting repeats fail closed. Decimal and `0x` values
 are bounds-checked, identical duplicate policy is harmless, and conflicting,
 zero, overflowing, commit-over-reserve, malformed, or unmodeled flags fail
 before publication. The PE writer validates the policy and emits its subsystem,

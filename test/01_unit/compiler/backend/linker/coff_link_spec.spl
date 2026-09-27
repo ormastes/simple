@@ -371,7 +371,10 @@ describe "internal freestanding Windows linker":
         val policy = PeImagePolicy(
             subsystem: PE_SUBSYSTEM_WINDOWS,
             stack_reserve: 0x200000, stack_commit: 0x2000,
-            heap_reserve: 0x300000, heap_commit: 0x3000)
+            heap_reserve: 0x300000, heap_commit: 0x3000,
+            dynamic_base: false, high_entropy_va: false,
+            nx_compat: false, large_address_aware: false,
+            terminal_server_aware: false)
         val image = coff_link_amd64_retained_image_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], policy, 0x180000000).unwrap()
@@ -381,12 +384,18 @@ describe "internal freestanding Windows linker":
         expect(_cl_read_u64(image, 0xe8)).to_equal(0x2000)
         expect(_cl_read_u64(image, 0xf0)).to_equal(0x300000)
         expect(_cl_read_u64(image, 0xf8)).to_equal(0x3000)
+        expect(image[0x96] as i64).to_equal(0x02)
+        expect(image[0xde] as i64).to_equal(0x00)
+        expect(image[0xdf] as i64).to_equal(0x00)
 
     it "rejects invalid PE reserve and commit policy":
         val invalid = PeImagePolicy(
             subsystem: PE_SUBSYSTEM_WINDOWS,
             stack_reserve: 0x1000, stack_commit: 0x2000,
-            heap_reserve: 0x100000, heap_commit: 0x1000)
+            heap_reserve: 0x100000, heap_commit: 0x1000,
+            dynamic_base: true, high_entropy_va: true,
+            nx_compat: true, large_address_aware: true,
+            terminal_server_aware: true)
         val linked = coff_link_amd64_retained_policy(CoffLinkRequest(
             objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
             [], invalid)
@@ -398,6 +407,14 @@ describe "internal freestanding Windows linker":
             [], PeImagePolicy.default(), 0x180001000)
         expect(bad_base.is_err()).to_equal(true)
         expect(bad_base.unwrap_err()).to_contain("image base")
+
+        var inconsistent = PeImagePolicy.default()
+        inconsistent.dynamic_base = false
+        val bad_aslr = coff_link_amd64_retained_policy(CoffLinkRequest(
+            objects: [_cl_object("_start", 1)], archives: [], entry: "_start"),
+            [], inconsistent)
+        expect(bad_aslr.is_err()).to_equal(true)
+        expect(bad_aslr.unwrap_err()).to_contain("high-entropy")
     it "attaches TLS metadata only to a complete file-backed directory":
         var directory: [u8] = []
         while directory.len() < 48: directory = directory.push(0)
@@ -707,6 +724,9 @@ describe "internal freestanding Windows linker":
         val text = inspected.sections[0]
         expect(image[text.raw_pointer + 4] as i64).to_equal(0x14)
         expect(inspected.data_directories[5].size).to_be_greater_than(0)
+        expect(image[0x96] as i64).to_equal(0x22)
+        expect(image[0xde] as i64).to_equal(0x60)
+        expect(image[0xdf] as i64).to_equal(0x81)
 
     it "links the compiler-generated Windows corpus with unwind metadata":
         val linked = coff_link_amd64(CoffLinkRequest(objects: [

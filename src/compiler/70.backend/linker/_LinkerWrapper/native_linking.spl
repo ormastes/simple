@@ -772,6 +772,17 @@ fn _internal_coff_entry_valid(entry: text) -> bool:
         index = index + 1
     true
 
+fn _internal_coff_switch(value: text, name: text) -> i64:
+    if value == name: return 1
+    if value == name + ":no": return 0
+    -1
+
+fn _internal_coff_set_switch(previous: i64, selected: i64,
+        name: text) -> Result<i64, text>:
+    if previous >= 0 and previous != selected:
+        return Err("conflicting internal COFF {name} flags")
+    Ok(selected)
+
 fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<InternalCoffFlags, text>:
     """Project modeled case-insensitive MSVC flags into typed COFF policy."""
     var policy = PeImagePolicy.default()
@@ -781,9 +792,39 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
     var saw_stack = false
     var saw_heap = false
     var saw_machine = ""
+    var saw_dynamic_base: i64 = -1
+    var saw_high_entropy: i64 = -1
+    var saw_nx_compat: i64 = -1
+    var saw_large_address: i64 = -1
+    var saw_ts_aware: i64 = -1
     for flag in extra_flags:
         val normalized = flag.lower()
-        if normalized.starts_with("/machine:"):
+        val dynamic_base = _internal_coff_switch(normalized, "/dynamicbase")
+        val high_entropy = _internal_coff_switch(normalized, "/highentropyva")
+        val nx_compat = _internal_coff_switch(normalized, "/nxcompat")
+        val large_address = _internal_coff_switch(normalized, "/largeaddressaware")
+        val ts_aware = _internal_coff_switch(normalized, "/tsaware")
+        if dynamic_base >= 0:
+            saw_dynamic_base = _internal_coff_set_switch(
+                saw_dynamic_base, dynamic_base, "/DYNAMICBASE")?
+            policy.dynamic_base = dynamic_base == 1
+        elif high_entropy >= 0:
+            saw_high_entropy = _internal_coff_set_switch(
+                saw_high_entropy, high_entropy, "/HIGHENTROPYVA")?
+            policy.high_entropy_va = high_entropy == 1
+        elif nx_compat >= 0:
+            saw_nx_compat = _internal_coff_set_switch(
+                saw_nx_compat, nx_compat, "/NXCOMPAT")?
+            policy.nx_compat = nx_compat == 1
+        elif large_address >= 0:
+            saw_large_address = _internal_coff_set_switch(
+                saw_large_address, large_address, "/LARGEADDRESSAWARE")?
+            policy.large_address_aware = large_address == 1
+        elif ts_aware >= 0:
+            saw_ts_aware = _internal_coff_set_switch(
+                saw_ts_aware, ts_aware, "/TSAWARE")?
+            policy.terminal_server_aware = ts_aware == 1
+        elif normalized.starts_with("/machine:"):
             val machine = normalized.substring(9)
             var canonical = ""
             if machine == "x64" or machine == "amd64": canonical = "x86_64"
@@ -844,6 +885,10 @@ fn internal_coff_flags(extra_flags: [text], target_arch: text) -> Result<Interna
             saw_heap = true
         else:
             return Err("unsupported internal COFF flag '{flag}'")
+    if not policy.dynamic_base:
+        if saw_high_entropy == 1:
+            return Err("internal COFF /HIGHENTROPYVA requires /DYNAMICBASE")
+        policy.high_entropy_va = false
     Ok(InternalCoffFlags(policy: policy, entry: entry, image_base: image_base))
 
 fn internal_coff_policy(extra_flags: [text], target_arch: text) -> Result<PeImagePolicy, text>:

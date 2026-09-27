@@ -15,6 +15,11 @@ struct PeImagePolicy:
     stack_commit: i64
     heap_reserve: i64
     heap_commit: i64
+    dynamic_base: bool
+    high_entropy_va: bool
+    nx_compat: bool
+    large_address_aware: bool
+    terminal_server_aware: bool
 
 impl PeImagePolicy:
     static fn default() -> PeImagePolicy:
@@ -23,7 +28,12 @@ impl PeImagePolicy:
             stack_reserve: 0x100000,
             stack_commit: 0x1000,
             heap_reserve: 0x100000,
-            heap_commit: 0x1000)
+            heap_commit: 0x1000,
+            dynamic_base: true,
+            high_entropy_va: true,
+            nx_compat: true,
+            large_address_aware: true,
+            terminal_server_aware: true)
 
 struct PeImageSection:
     name: text
@@ -108,6 +118,8 @@ fn _pe_validate_policy(policy: PeImagePolicy) -> Result<bool, text>:
         return Err("PE heap reserve must be positive")
     if policy.heap_commit <= 0 or policy.heap_commit > policy.heap_reserve:
         return Err("PE heap commit must be positive and no greater than its reserve")
+    if policy.high_entropy_va and not policy.dynamic_base:
+        return Err("PE high-entropy VA policy requires dynamic base policy")
     Ok(true)
 
 fn _pe_directory(sections: [PeImageSection], directory: i64) -> (i64, i64):
@@ -188,7 +200,16 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     val size_of_image = pe_align_up(last.virtual_address + last_size, PE_SECTION_ALIGNMENT)
     val relocation_directory = _pe_directory(sections, 5)
     # ASLR flags are only truthful when the image carries base relocations.
-    val dll_characteristics = if relocation_directory.1 > 0: 0x8160 else: 0x8100
+    var dll_characteristics: i64 = 0
+    if policy.terminal_server_aware: dll_characteristics = dll_characteristics | 0x8000
+    if policy.nx_compat: dll_characteristics = dll_characteristics | 0x0100
+    if relocation_directory.1 > 0 and policy.dynamic_base:
+        dll_characteristics = dll_characteristics | 0x0040
+        if policy.high_entropy_va:
+            dll_characteristics = dll_characteristics | 0x0020
+    var file_characteristics: i64 = 0x0002
+    if policy.large_address_aware:
+        file_characteristics = file_characteristics | 0x0020
 
     var output: [u8] = []
     output = _pe_put_u16(output, 0x5a4d)
@@ -203,7 +224,7 @@ fn pe_write_image_policy(sections: [PeImageSection], entry_rva: i64,
     output = _pe_put_u32(output, 0)
     output = _pe_put_u32(output, 0)
     output = _pe_put_u16(output, optional_header_size)
-    output = _pe_put_u16(output, 0x0022)
+    output = _pe_put_u16(output, file_characteristics)
 
     output = _pe_put_u16(output, 0x20b)
     output = _pe_put_u8(output, 0)
