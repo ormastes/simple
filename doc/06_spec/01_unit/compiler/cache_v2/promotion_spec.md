@@ -515,6 +515,7 @@ assert_false(result.reachable)
 <summary>Executable SSpec</summary>
 
 ```simple
+# @req REQ-SSPEC-UNIT
 step("A successful local rev-parse cannot stand in for a failed fetch")
 assert_false(git_ancestry_fetch_accepted_v1(
     "https://example.invalid/repo.git", "https://example.invalid/repo.git",
@@ -531,6 +532,7 @@ assert_false(git_ancestry_fetch_accepted_v1(
 <summary>Executable SSpec</summary>
 
 ```simple
+# @req REQ-SSPEC-UNIT
 step("A local or substituted remote cannot authorize promotion")
 assert_false(git_ancestry_fetch_accepted_v1(
     "https://example.invalid/repo.git", "file:///tmp/repo.git",
