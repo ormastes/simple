@@ -84,3 +84,19 @@ unundoable effect. A private action/diagnostic journal per checkpoint is one
 possible implementation; its semantics must be proven by differential tests
 before candidate admission. The independent legacy oracle remains the parity
 reference and the production provider remains unavailable until then.
+
+## 2026-09-28 addendum — rollback edge versus AST publication
+
+**Source baseline:** `origin/main` at `7ab226395c5cb637901f77350d9d32de395d4ba6`. This addendum preserves the earlier inventory rather than replacing it. The current parser still has 18 direct `lex_snapshot_save()` sites, but `parser_stmts.spl:105` now adds `parser_stmt_with_header_ahead`, and line anchors elsewhere have moved. This is a direct-site control-flow review; it does not prove effects in every indirect callee.
+
+| Snapshot sites in current source | Decision and effect boundary |
+|---|---|
+| `_ParserDecls/fn_struct_decls.spl:106,152,463,477,491`; `parser_expr.spl:722,775`; `parser_stmts.spl:105,736,1526` | Ten token-shape probes. Rejected alternatives restore lexer and parser-token state before any direct AST construction, existing-node update, module insertion, or parser diagnostic. `try_skip_ident_generic_args` at `parser_expr.spl:775` only walks tokens; it reports the unsupported const-generic diagnostic after committing the recognized shape. |
+| `parser_expr.spl:349,609`; `_ParserDecls/fn_struct_decls.spl:936` | Three successful alternatives parse expressions or emit `parser_expect`/`parser_error` while the snapshot is live. Each rejected branch rolls back **before** those effects; once effectful parsing starts, the branch commits without a later rollback. The `@layer_field` branch can report malformed syntax and still commit its recognized shape. |
+| `parser_stmts.spl:270,501,575,1022,1073` | Five successful alternatives call `parse_expr`, `parse_block`, `parse_contract_clause_body`, or `parse_fn_lambda_after_kw` while the snapshot is live. The negative shape exits roll back first; the effectful path commits and does not backtrack afterward. `try_parse_contract_stmt` has multiple negative exits before body parsing. |
+
+This commit-before-effects ordering is a property of these 18 handwritten probes, not a general grammar rule. A declarative `Choice` may enter an alternative that emits actions or diagnostics before it learns the branch fails. The canonical executor must keep those effects private until commit, or carry a bounded undo record that restores expression/statement/declaration arenas, module publication, spans, warnings, errors, and first-error state. Merely restoring the lexical cursor would leak abandoned syntax into the candidate result.
+
+Independent direct mutation surfaces already visible outside the local probes include `expr_call_args_set` in `parser_expr.spl:663`, `expr_set_span` in `parser_expr.spl:245,257,267,279` and `parser_stmts.spl:479`, declaration metadata setters in `_ParserDecls/enum_module_body.spl:951-990`, and `module_add_decl` in the same module at `:959,978,992` plus its synthesized-declaration branches near `:1394-1505`. The action inventory must distinguish node allocation, existing-node rewrite, declaration metadata update, and module publication. A count of constructor calls alone would miss the latter three classes.
+
+**Next implementation gate:** bind each direct and indirect AST write to a typed candidate action with a source span and a rollback/publication policy; then compare isolated semantic snapshots against the retained legacy oracle. This addendum assigns no opcode numbers and does not admit a canonical Simple provider.
