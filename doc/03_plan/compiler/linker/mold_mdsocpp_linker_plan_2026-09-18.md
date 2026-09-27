@@ -665,6 +665,11 @@ collection rooted by the entry, retained symbols, `SHF_GNU_RETAIN`, lifecycle
 arrays, and script `KEEP` patterns. Dead unwind FDEs are compacted through the
 shared hosted-ELF collector, dead-section undefined references do not poison
 the boot link, and live common symbols remain placeable through `*(COMMON)`.
+The route also consumes `-nostdlib`, `-static`/`-Bstatic`, balanced archive
+group markers, and `--no-gc-sections` as typed policy: the boot engine is
+intrinsically freestanding/static, archive extraction is already a fixpoint,
+and the last GC toggle wins. `--wrap` remains rejected until references and
+archive selection share one symbol-rewrite implementation.
 Duplicate identical policy is deduplicated; conflicting scripts, conflicting
 symbol expressions, malformed values, and every unmodeled flag fail closed.
 An explicit flag and `SIMPLE_LINKER_SCRIPT` must name the same script when both

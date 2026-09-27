@@ -546,6 +546,9 @@ struct InternalSimpleOsFlags:
     defsym_names: [text]
     defsym_exprs: [text]
     gc_sections: bool
+    nostdlib: bool
+    static_link: bool
+    archive_group: bool
 
 fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
     if name == "": return false
@@ -564,6 +567,10 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
     var names: [text] = []
     var exprs: [text] = []
     var gc_sections = false
+    var nostdlib = false
+    var static_link = false
+    var group_depth: i64 = 0
+    var archive_group = false
     var i: i64 = 0
     while i < extra_flags.len():
         val flag = extra_flags[i]
@@ -571,6 +578,29 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
         var defsym_value = ""
         if flag == "--gc-sections":
             gc_sections = true
+            i = i + 1
+            continue
+        elif flag == "--no-gc-sections":
+            gc_sections = false
+            i = i + 1
+            continue
+        elif flag == "-nostdlib":
+            nostdlib = true
+            i = i + 1
+            continue
+        elif flag == "-static" or flag == "-Bstatic":
+            static_link = true
+            i = i + 1
+            continue
+        elif flag == "--start-group":
+            group_depth = group_depth + 1
+            archive_group = true
+            i = i + 1
+            continue
+        elif flag == "--end-group":
+            if group_depth <= 0:
+                return Err("internal SimpleOS archive group closes before it opens")
+            group_depth = group_depth - 1
             i = i + 1
             continue
         elif flag == "-T" or flag == "--script":
@@ -620,8 +650,11 @@ fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags,
         if existing < 0:
             names = names.push(name)
             exprs = exprs.push(expr)
+    if group_depth != 0:
+        return Err("internal SimpleOS archive group is not closed")
     Ok(InternalSimpleOsFlags(script: script, defsym_names: names,
-        defsym_exprs: exprs, gc_sections: gc_sections))
+        defsym_exprs: exprs, gc_sections: gc_sections, nostdlib: nostdlib,
+        static_link: static_link, archive_group: archive_group))
 
 fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
