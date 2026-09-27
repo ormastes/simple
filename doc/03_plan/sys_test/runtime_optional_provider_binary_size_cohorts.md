@@ -3,7 +3,7 @@
 ## Scope
 
 - Require an admitted pure-Simple Stage4 receipt; old seed results are diagnostic only.
-- Compare release-small NoGC hello with a same-host, same-toolchain C hello.
+- Compare release-small NoGC hello with a same-host, same-toolchain C hello using the same required startup wrapper, runtime archive, linker options, section GC, and strip policy.
 - Compare checksum-equivalent Simple and Python interpreter startup and max RSS.
 - Require empty collector/init and optional-provider load traces.
 - Require 30 samples per lane for development and 100 for release.
@@ -30,7 +30,7 @@ current-source pure-Simple runner before it can claim an executed PASS.
 
 | Requirement | Evidence | Acceptance |
 | --- | --- | --- |
-| NFR-002, REQ-014 | Admitted current-source Stage4 hello output, unstripped retained-section map, stripped ELF, paired C ELF, BS7 receipt | Exact `hello` output; no literal boxing/formatting/cache retention; Simple <=15,360 bytes and <=105% of C |
+| NFR-002, REQ-014 | Admitted current-source Stage4 hello output, unstripped retained-section map, stripped ELF, paired matched-startup C ELF, BS7 receipt | Exact `hello` output; no literal boxing/formatting/cache retention; Simple <=15,360 bytes and <=105% of matched-startup C |
 | NFR-004, NFR-007 | Same-host Simple/Python startup and RSS samples | 30 development or 100 release samples per lane; BS7 p50/p95 and RSS gates pass |
 | NFR-005, REQ-007 | NoGC inventory and optional-provider trace | Both inventories empty |
 

@@ -7,7 +7,9 @@ each. The checker recomputes p50 and p95 startup and max RSS and requires Simple
 to remain within 110% of the same-host Python baseline.
 
 The NoGC binary must be below 2 MiB. Linux release-small additionally requires
-at most 15 KiB and at most 105% of the same-toolchain C hello. Other native
+at most 15 KiB and at most 105% of a same-toolchain C hello with the same
+startup wrapper, required runtime archive, linker options, section GC, and
+strip policy. A bare C `main` remains an advisory comparison. Other native
 formats use an admitted fixed format allowance. Collector sections,
 constructors, initialization roots, optional-provider mappings, and provider
 initializations must all be absent.
@@ -24,10 +26,10 @@ Stage4 binary is available.
    newline. Inspect the retained-section map from its unstripped build: the
    plain-literal path must not retain `rt_string_new_literal`, `rt_to_string`,
    or `rt_literal_intern_table`.
-2. Strip that Simple ELF and a same-host, same-toolchain C hello. Feed their
+2. Strip that Simple ELF and a same-host, same-toolchain matched-startup C hello. Feed their
    exact paths, hashes, Stage4 admission receipt, empty NoGC/provider traces,
    and startup/RSS samples to the production BS7 cohort checker. Require both
-   Linux limits: at most **15,360 bytes** and at most **105% of C**.
+   Linux limits: at most **15,360 bytes** and at most **105% of matched-startup C**.
 3. Reject a C-entry runtime probe as Simple compiler evidence, even when the
    probe calls the same runtime writer and prints the same output.
 
@@ -43,7 +45,7 @@ analysis is in
 
 The companion `test/05_perf/compiler/runtime_optional_provider_binary_size_spec.spl`
 contains two `describe`/`it` examples with assertions. One runs the production
-BS7 producer/checker fixture and requires its clean cohort plus five rejected
+BS7 producer/checker fixture and requires its clean cohort plus six rejected
 mutations. The other invokes the production checker without admission inputs
 and requires a failing exit and the missing-input diagnostic. These examples
 test the checker using synthetic evidence; they do not measure a Stage4 hello.
