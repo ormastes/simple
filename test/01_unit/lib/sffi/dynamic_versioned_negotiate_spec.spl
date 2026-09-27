@@ -3,7 +3,7 @@ use std.spec.*
 use common.plugin.iface_id.{IfaceId, ParamHeader}
 use common.plugin.negotiation.{HostOfferV1}
 use std.sffi.dynamic_versioned.{VersionedDynLib, MultiVersionLoader}
-use std.sffi.dynamic.{DynLib}
+use std.sffi.dynamic.{DynLib, spl_wffi_call_i64}
 
 extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -117,6 +117,33 @@ describe "versioned SFFI real plugin entry negotiation":
         unsafe(capabilities: [ffi]):
             retained_copy.close()
             peer.close()
+
+    it "keeps a borrowed mapping callable until its final use ends":
+        val marker = "{FIXTURE_DIR}/borrowed-retire.closed"
+        rt_file_delete(marker)
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", marker)).to_be(true)
+        val path = build_fixture("borrowed-retire", "")
+        val loaded = unsafe(capabilities: [ffi]): DynLib.load_checked(path)
+        expect(loaded.is_ok()).to_be(true)
+        var library = loaded.unwrap()
+        val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+            library.resolve_i64_checked("fixture_product_symbol", 0)
+        expect(resolved.is_ok()).to_be(true)
+        val slot = resolved.unwrap()
+        val admitted = unsafe(capabilities: [ffi, raw_ptr]):
+            library.begin_raw_call()
+        expect(admitted).to_be(true)
+        unsafe(capabilities: [ffi]): library.close()
+        expect(rt_file_exists(marker)).to_be(false)
+        val stale = unsafe(capabilities: [ffi, raw_ptr]): slot.call_checked([])
+        expect(stale.is_err()).to_be(true)
+        val borrowed_result = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_call_i64(slot.fptr, [], 0)
+        expect(borrowed_result).to_equal(73)
+        unsafe(capabilities: [ffi, raw_ptr]): library.end_raw_call()
+        expect(library.is_live()).to_be(false)
+        expect(rt_file_exists(marker)).to_be(true)
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", "")).to_be(true)
 
     it "reloads a versioned cache entry after its library is retired":
         val path = build_fixture("cache-retire", "")
