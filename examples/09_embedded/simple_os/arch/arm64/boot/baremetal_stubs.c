@@ -2344,7 +2344,48 @@ RuntimeValue serial_println(RuntimeValue val) {
     return NIL_VALUE;
 }
 
+/* Exit-probe vector: 16 slots, each skips the faulting instruction and
+ * erets. Installed by rt_qemu_exit_success so the exit can PROBE the SMC
+ * PSCI SYSTEM_OFF path — under KVM the SMC is serviced and the VM powers
+ * off (never returns); under TCG the SMC takes an in-guest synchronous
+ * exception (QEMU's TCG does not service PSCI there), the skip vector
+ * advances ELR past the SMC, and execution falls through to the
+ * semihosting HLT, which QEMU's translator hooks. Placed in .text so any
+ * linker script that keeps .text collects it; 2KB-aligned for VBAR_EL1. */
+__asm__(
+    ".balign 2048\n\t"
+    ".globl rt_exit_probe_vectors\n\t"
+    "rt_exit_probe_vectors:\n\t"
+    ".rept 16\n\t"
+    "  mrs x17, elr_el1\n\t"
+    "  add x17, x17, #4\n\t"
+    "  msr elr_el1, x17\n\t"
+    "  eret\n\t"
+    ".balign 128\n\t"
+    ".endr\n\t"
+);
+extern uint8_t rt_exit_probe_vectors[];
+
 RuntimeValue rt_qemu_exit_success(void) {
+    /* Accelerator-agnostic exit. Neither CurrentEL nor any guest-readable
+     * register distinguishes TCG from KVM (both run this guest at EL1), and
+     * the two accelerators need opposite instructions:
+     *   KVM: SMC PSCI SYSTEM_OFF is serviced and powers the VM off; the
+     *        semihosting HLT vectors into the guest ("FAULT @", ESR EC=0)
+     *        and parks until the host-side timeout kills QEMU.
+     *   TCG: QEMU's translator hooks the HLT; a bare SMC faults (EC=0).
+     * So: mask interrupts, install the skip-probe vector, try SMC first
+     * (KVM never comes back), then HLT (TCG never comes back). If neither
+     * is intercepted the skips chain into the WFE loop below. */
+    uint64_t vec = (uint64_t)(uintptr_t)rt_exit_probe_vectors;
+    __asm__ volatile("msr daifset, #0xF" ::: "memory");
+    __asm__ volatile("msr vbar_el1, %0\n\tisb" :: "r"(vec) : "memory");
+    __asm__ volatile(
+        "movz x0, #0x0008\n\t"
+        "movk x0, #0x8400, lsl #16\n\t"
+        "smc #0\n\t"
+        ::: "x0", "memory"
+    );
     __asm__ volatile(
         "mrs x1, sctlr_el1\n\t"
         "bic x1, x1, #1\n\t"
@@ -4784,6 +4825,10 @@ RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_val
 #define SVC_MAX_FDS 16
 #define SVC_MAX_RAM_FILES 16
 #define SVC_RAM_FILE_MAX (2048u * 1024u)
+/* Whole-file bounce buffer for FAT32 image reads (the big ELFs bypass this
+ * path via the streaming payload-resident loader). Sized for the largest file
+ * this lane reads: /CXX.PCH (~11 MiB, rung R6a) — give it 3x headroom. */
+#define SVC_FAT_BOUNCE_MAX (32u * 1024u * 1024u)
 #define SVC_O_CREAT 64
 #define SVC_O_ACCMODE 3
 #define SVC_O_WRONLY 1
@@ -5099,7 +5144,7 @@ static int64_t arm64_svc_file_read(uint64_t fd_v, uint64_t buf_va, uint64_t coun
     /* FAT32 file: lazily load the whole file into a bounce buffer, then
      * serve offset reads from it. */
     if (!g_svc_fds[fd].bounce) {
-        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > (4u * 1024u * 1024u))
+        if (g_svc_fds[fd].size == 0 || g_svc_fds[fd].size > SVC_FAT_BOUNCE_MAX)
             return -27; /* EFBIG — not a file this lane reads */
         g_svc_fds[fd].bounce = (uint8_t *)malloc(g_svc_fds[fd].size);
         if (!g_svc_fds[fd].bounce) return -12;
