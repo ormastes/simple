@@ -442,9 +442,10 @@ Implemented source slice:
   using `IMAGE_SCN_LNK_NRELOC_OVFL` decode the first relocation record as the
   extended count marker, validate its reserved fields, and expose only the real
   relocation rows downstream. Merged `$` subsections preserve each input
-  section's encoded power-of-two alignment, including zero-filled padding in
-  the PE image, and reject the reserved alignment encoding rather than silently
-  weakening it;
+  section's encoded power-of-two alignment against its absolute RVA, including
+  zero-filled padding and the legal 8 KiB maximum when the group begins on a
+  4 KiB PE boundary, and reject the reserved alignment encoding rather than
+  silently weakening it;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
 - ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,
