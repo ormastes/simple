@@ -171,6 +171,11 @@ comparison image, while the installed lld 23.1 rejects relocation 28.
 linker-defined `_GLOBAL_OFFSET_TABLE_` without allocating a per-symbol slot.
 Hosted ELF binds that symbol to `.got.plt`; SimpleOS binds it to its minimal
 `.got`. A type-29 Clang `.reloc` fixture matches Mold 2.42's emitted value.
+`R_X86_64_PLTOFF64` now applies full-width `L + A - GOT`: local functions use
+their definition, imported functions receive a PLT entry, hosted ELF uses its
+`.got.plt` base, and SimpleOS uses its minimal `.got`. A type-31 Clang `.reloc`
+fixture matches Mold 2.42's emitted value. `R_X86_64_GOTPLT64` remains outside
+the compatibility surface because Mold 2.42 rejects relocation type 30.
 
 `R_X86_64_32S` now rejects values outside `[-2^31, 2^31-1]` instead of
 The AArch64 local-exec slice also covers checked and `_NC` TLSLE

@@ -42,6 +42,7 @@ use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_o
 use compiler.backend.linker.reloc_engine.{
     RelocArch, reloc_apply, reloc_patch_bytes,
     R_X86_64_GOT32, R_X86_64_GOT64,
+    R_X86_64_PLTOFF64,
     R_AARCH64_MOVW_GOTOFF_G0, R_AARCH64_MOVW_GOTOFF_G3,
     R_AARCH64_GOTREL64, R_AARCH64_GOTREL32,
     R_AARCH64_GOTPCREL32,
@@ -61,7 +62,7 @@ use compiler.backend.linker.elf.reloc_scan.{
     elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
-    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE
+    RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
 }
 use compiler.backend.linker.elf.synthetic_sections.{
     ElfDynStr, elf_dyn_relative, elf_dyn_glob_dat, elf_dyn_jump_slot, elf_dyn_abs64, elf_dyn_copy, elf_dyn_tpoff64,
@@ -1204,6 +1205,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     var need_got_base = false
     for r in refs:
         if r.name == "_GLOBAL_OFFSET_TABLE_" or
+                r.rtype == R_X86_64_PLTOFF64 or
                 (elf_target_is_a64(target) and
                 (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)):
             need_got_base = true
@@ -1410,11 +1412,13 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             contents[k] = buf
             rtype = 2  # R_X86_64_PC32: lea foo(%rip)
         else if r.kind == SYMREF_IMPORT and sc.plt_idx.has(r.name) and
-                (r.rclass == RC_BRANCH or (not pie and (r.stype == 2 or r.stype == 10))):
+                (r.rclass == RC_BRANCH or r.rclass == RC_PLTOFF or
+                    (not pie and (r.stype == 2 or r.stype == 10))):
             s = plt_v + elf_plt0_size(target) + sc.plt_idx[r.name] * elf_plt_entry_size(target)
         else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
             # ld.lld: a branch to an undefined weak symbol targets the next instruction
             s = p + 4 - a
+        if not a64 and r.rtype == R_X86_64_PLTOFF64: p = gotplt_v
         val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
         if not applied.success:
             return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")

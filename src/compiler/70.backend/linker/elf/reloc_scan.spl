@@ -15,7 +15,8 @@
 # ElfScanRef first; this file only classifies and allocates.
 
 use compiler.backend.linker.reloc_engine.{
-    RelocArch, R_X86_64_GOT32, R_X86_64_GOT64, R_X86_64_GOTPCREL64}
+    RelocArch, R_X86_64_GOT32, R_X86_64_GOT64, R_X86_64_GOTPCREL64,
+    R_X86_64_PLTOFF64}
 use compiler.backend.linker.elf.synthetic_sections.{elf_gnu_hash_sort}
 
 # ============================================================================
@@ -58,6 +59,7 @@ val RC_TLS_IE: i64 = 8       # initial-exec GOT slot containing a TPOFF
 val RC_SIZE: i64 = 9         # link-time symbol extent plus addend
 val RC_TLS_LD: i64 = 10      # local-dynamic offset from the PT_TLS block start
 val RC_TLS_MOD: i64 = 11     # statically known TLS module identifier
+val RC_PLTOFF: i64 = 12      # function/PLT address relative to the GOT base
 
 fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
     match target:
@@ -76,6 +78,8 @@ fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
                 return RC_GOT
             if rtype == R_X86_64_GOTPCREL64:
                 return RC_GOT
+            if rtype == R_X86_64_PLTOFF64:
+                return RC_PLTOFF
             if rtype == 16:
                 return RC_TLS_MOD
             if rtype == 17:
@@ -249,6 +253,8 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
             if c == RC_SIZE:
                 j = j + 1
                 continue
+            if c == RC_PLTOFF and r.stype != 2 and r.stype != 10:
+                return Err("R_X86_64_PLTOFF64 requires a function symbol: '{r.name}'")
             if copy_idx.has(r.name):
                 if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
                     if not got_idx.has(r.key):
@@ -259,7 +265,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                 continue
             val canonical_plt = not pie and (r.stype == 2 or r.stype == 10) and
                 c != RC_GOT and c != RC_GOT_RELAX and c != RC_TLS_IE
-            if c == RC_BRANCH or canonical_plt:
+            if c == RC_BRANCH or c == RC_PLTOFF or canonical_plt:
                 if not plt_idx.has(r.name):
                     plt_idx[r.name] = plt_names.len()
                     plt_names = plt_names.push(r.name)
@@ -331,4 +337,4 @@ export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax
 export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
-export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD
+export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF
