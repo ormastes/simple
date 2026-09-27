@@ -269,6 +269,14 @@ pub(crate) fn hosted_linux_cross_compiler(
 }
 
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
+    // Windows GNU bootstrap is Clang-only.  The MinGW GCC driver rejects the
+    // target-qualified flags used by the generated-C and hosted-link paths,
+    // and using two driver families makes their ABI/toolchain policy diverge.
+    if target.os == simple_common::target::TargetOS::Windows
+        && target.linker_flavor() == simple_common::target::LinkerFlavor::Gnu
+    {
+        return "clang".to_string();
+    }
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
         .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
