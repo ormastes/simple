@@ -198,9 +198,11 @@ REVIEWS_JSON=$(gh pr view "${PR_NUMBER}" --json reviews)
 INDEPENDENT_APPROVED=$(printf '%s\n' "$REVIEWS_JSON" | jq --arg author "$AUTHOR" \
   '[.reviews[] | select(.state=="APPROVED" and .author.login != $author)] | length')
 if [ "$INDEPENDENT_APPROVED" -le 0 ]; then
-  # Self-authored: approval never comes and 0 are required — do not wait.
-  echo "no independent approval; promoting to L2 self-review admission" >&2
-  LEVEL=2   # continue at L2 below
+  # L1 never merges without an independent approval. A self-authored PR gets
+  # none (0 are required) — do not wait: hand off to the L2 self-review
+  # admission path, which does the review, head-SHA binding and dispatch.
+  echo "no independent approval; not merging at L1 — rerun with CLI_LEVEL=2 (L2 self-review admission)" >&2
+  exit 0
 fi
 # Rebase onto latest main
 jj git fetch
