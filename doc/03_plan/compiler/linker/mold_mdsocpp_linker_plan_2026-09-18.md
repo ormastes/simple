@@ -958,3 +958,13 @@ skip package mutation; missing tools use noninteractive `sudo -n` and fail with
 the setup error rather than hanging or prompting. GCC remains only the package
 that supplies the MinGW sysroot/binutils on Debian; it is never selected as the
 compiler driver.
+
+Exact-head run `36307823355` passed both seeds and Linux Stage 2, and compiled
+all 915 Windows units with Clang before exposing the next target-projection
+gap. The generated `_init_all.o` and `_stubs.o` helper objects were compiled as
+Linux ELF while the final output was MinGW COFF, so `ld.lld` rejected both as
+unknown file types. All generated helper-C paths now select policy from the
+output target and add Clang's explicit `--target=x86_64-w64-windows-gnu` flag;
+the canonical hosted target spelling is pinned by a focused regression test.
+A new exact-head run remains required before the Windows Stage 2 PE32+ artifact
+is admitted.
