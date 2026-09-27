@@ -691,14 +691,20 @@ fn is_llvm_debug(llvm_config_path: &Path) -> bool {
 }
 
 const REQUIRED_LLVM_VERSION: &str = "23.1.1";
+// Native FreeBSD's llvm23 package ships 23.1.2. Mirrors
+// `_llvm23_version_admitted` in scripts/setup/platform-detect.shs: admitted
+// only when the build HOST is FreeBSD (in a build script `cfg!(target_os)` is
+// the host), so a cross-target build cannot grant it.
+const FREEBSD_ADMITTED_LLVM_VERSION: &str = "23.1.2";
 
 fn require_pinned_llvm_version(llvm_config_path: &Path) {
     let actual = llvm_config(llvm_config_path, ["--version"]);
-    assert_eq!(
-        actual.trim(),
-        REQUIRED_LLVM_VERSION,
-        "aya-llvm-sys is pinned to LLVM {REQUIRED_LLVM_VERSION}; llvm-config reported {}",
-        actual.trim()
+    let actual = actual.trim();
+    let admitted = actual == REQUIRED_LLVM_VERSION
+        || (cfg!(target_os = "freebsd") && actual == FREEBSD_ADMITTED_LLVM_VERSION);
+    assert!(
+        admitted,
+        "aya-llvm-sys is pinned to LLVM {REQUIRED_LLVM_VERSION} (native FreeBSD host: {FREEBSD_ADMITTED_LLVM_VERSION}); llvm-config reported {actual}"
     );
 }
 
