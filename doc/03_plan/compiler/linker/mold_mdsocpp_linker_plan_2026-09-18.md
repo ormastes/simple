@@ -867,3 +867,6 @@ Repeated byte-identical shared objects with the same effective SONAME are now
 idempotent and emit one dependency. Different payloads advertising the same
 SONAME fail closed before resolution, preventing link-time symbols from being
 bound to a second image the runtime loader could alias to the first SONAME.
+The DSO export reader now honors the low two `st_other` visibility bits:
+DEFAULT and PROTECTED symbols remain eligible providers, while INTERNAL and
+HIDDEN definitions cannot satisfy another image's undefined references.

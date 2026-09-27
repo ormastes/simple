@@ -21,7 +21,8 @@ use compiler.backend.linker.elf.elf_static_link.{
     ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
-use compiler.backend.linker.elf.shared_object.{elf_parse_shared, elf_shared_effective_soname}
+use compiler.backend.linker.elf.shared_object.{
+    elf_parse_shared, elf_shared_effective_soname, elf_shared_symbol_visible}
 use std.io_runtime.{file_read_bytes}
 use std.string_core.{char_from_code}
 
@@ -127,6 +128,17 @@ fn structural(mode: i64) -> [i64]:
     r.unwrap()
 
 describe "elf_link - x86_64 dynamic gate":
+    it "does not bind hidden or internal DSO symbols":
+        expect(elf_shared_symbol_visible(0)).to_equal(true)
+        expect(elf_shared_symbol_visible(1)).to_equal(false)
+        expect(elf_shared_symbol_visible(2)).to_equal(false)
+        expect(elf_shared_symbol_visible(3)).to_equal(true)
+        var hidden = file_read_bytes("{FIX}/libadd_x64.so.1")
+        hidden[0x21d] = 2u8
+        val parsed = elf_parse_shared(hidden).unwrap()
+        expect(parsed.exports.has("add_val")).to_equal(false)
+        expect(parsed.exports.has("scratch")).to_equal(true)
+
     it "deduplicates identical DSOs and rejects conflicting same-SONAME bytes":
         val lib = file_read_bytes("{FIX}/libadd_x64.so.1")
         val duplicate = elf_link_structural(ElfLinkRequest(

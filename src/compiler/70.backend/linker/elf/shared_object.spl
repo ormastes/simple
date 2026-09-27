@@ -32,6 +32,11 @@ fn elf_shared_effective_soname(embedded: text, fallback_name: text) -> Result<te
         return Err("shared object has no DT_SONAME and no usable input name")
     Ok(fallback_name)
 
+fn elf_shared_symbol_visible(st_other: i64) -> bool:
+    """Only STV_DEFAULT (0) and STV_PROTECTED (3) bind from another image."""
+    val visibility = st_other & 3
+    visibility == 0 or visibility == 3
+
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
     val h = shoff + i * ELF64_SHDR_SIZE
@@ -108,9 +113,11 @@ fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedL
     while k < count:
         val e = symsec.sh_addr + k * 24
         val info = bytes[e + 4] as i64
+        val other = bytes[e + 5] as i64
         val shndx = elf_read_u16_le(bytes, e + 6)
         val bind = info >> 4
-        val linkable = shndx != 0 and (bind == 1 or bind == 2)
+        val linkable = shndx != 0 and (bind == 1 or bind == 2) and
+            elf_shared_symbol_visible(other)
         if linkable:
             val name = elf_strtab_get(strtab, elf_read_u32_le(bytes, e))
             var hidden = false
@@ -158,4 +165,4 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
     elf_parse_shared_named(bytes, "")
 
 export ElfSharedLib, elf_parse_shared, elf_parse_shared_named
-export elf_shared_effective_soname
+export elf_shared_effective_soname, elf_shared_symbol_visible
