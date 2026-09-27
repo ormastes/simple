@@ -838,6 +838,12 @@ always a complete one-shot link. Their enabled counterparts remain named
 unsupported until those output contracts are implemented. Native
 Windows execution remains pending the host prerequisite recorded above.
 
+Remote placement now requires the selected local interpreter to be a regular
+no-follow file before rendering commands, hashing, or uploading it. Local
+symlinks, directories, and missing paths therefore cannot become upload
+sources; the target-side staging digest still detects replacement after this
+local preflight.
+
 The post-upload digest verifier and publication command now independently walk
 the staging file's complete parent chain immediately before reopening it.
 POSIX symlink ancestors and Windows reparse/non-directory ancestors therefore
