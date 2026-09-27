@@ -238,6 +238,12 @@ impl CompilerDriver:
         if not rt_heap_ref_wellformed(surfaces):
             self.ctx.add_error("E-DRIVER-HIR-OWNER-MALFORMED: streaming module surface owner payload malformed after phase 2 (heap-typed payload word is 0 or in the zero page)")
             return false
+        # Stage 3 requests this durable sink even when phase 2 selected the
+        # streaming surface owner. Without opening it here, the RSS verifier
+        # receives no HIR records for the path that the bootstrap actually runs.
+        if mem_snapshot_begin() < 0:
+            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+            return false
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
@@ -284,18 +290,28 @@ impl CompilerDriver:
                 module_name: self.ctx.source_module_names_owner[source_index])
             if not surfaces.index_by_name.contains_key(source.module_name):
                 self.ctx.add_error("Missing module surface alias for {source.module_name}")
+                mem_snapshot_abort()
                 return false
             val surface_index = surfaces.index_by_name[source.module_name]
             val is_requested_bootstrap_entry = source_index == entry_source_index
 
             if surface_index < 0 or surface_index >= surfaces.surfaces.len():
                 self.ctx.add_error("Invalid module surface index for {source.module_name}: {surface_index}")
+                mem_snapshot_abort()
                 return false
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
                 if not phase_hir_modules.contains_key(source.module_name):
                     streaming_hir_module_count = streaming_hir_module_count + 1
                 phase_hir_modules[source.module_name] = alias_hir
+                if not driver_hir_mem_snapshot(
+                    "hir-alias-reuse", source_index, source.path,
+                    streaming_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-alias-reuse")
+                    mem_snapshot_abort()
+                    return false
                 hir_loop_pos = hir_loop_pos + 1
                 continue
             if poisoned_by_surface.contains_key(surface_index):
@@ -340,6 +356,7 @@ impl CompilerDriver:
                         surfaces.surfaces[surface_index].content_hash,
                         source_index, source.path, source.module_name,
                         source_content_length, source_content_hash))
+                mem_snapshot_abort()
                 return false
 
             val hir_stream_key: text = if hir_closure_digest != "":
@@ -357,6 +374,14 @@ impl CompilerDriver:
             if (env_get("SIMPLE_M4_WORK_RECEIPT") ?? "") == "1":
                 val hir_stream_work = if hir_stream_cached == nil: 1 else: 0
                 print "[M4 lower] module={source.module_name} work={hir_stream_work}"
+            if not driver_hir_mem_snapshot(
+                "hir-file-start", source_index, source.path,
+                streaming_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-file-start")
+                mem_snapshot_abort()
+                return false
             lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # In-flight receipt, same reasoning as the parse loop: HIR lowering
@@ -378,6 +403,14 @@ impl CompilerDriver:
                 if not hir_bootstrap_mode_gate:
                     for hir_cached_warning in hir_cache_last_warnings():
                         self.ctx.add_warning(hir_cached_warning)
+                if not driver_hir_mem_snapshot(
+                    "hir-post-lowering", source_index, source.path,
+                    streaming_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                    mem_snapshot_abort()
+                    return false
             else:
                 val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
                 if lower_result.is_err():
@@ -391,10 +424,19 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
+                        mem_snapshot_abort()
                         return false
                     hir_loop_pos = hir_loop_pos + 1
                     continue
                 hir_module = lower_result.unwrap()
+                if not driver_hir_mem_snapshot(
+                    "hir-post-lowering", source_index, source.path,
+                    streaming_hir_module_count,
+                    validation_module_keys.len(), validation_module_values.len(),
+                    lowering.lowered_trait_count_value):
+                    self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                    mem_snapshot_abort()
+                    return false
                 # Keep the aggregate diagnostic array inside its canonical
                 # HirLowering owner. Transporting `lowering.errors` or comparing a
                 # before/after CompileContext scalar both mis-lower under the
@@ -432,6 +474,7 @@ impl CompilerDriver:
                     val poison_ctx: CompileContext = self.ctx
                     poison_ctx.mark_module_poisoned(source.module_name)
                     if poison_ctx.poison_budget_exhausted():
+                        mem_snapshot_abort()
                         return false
                     hir_loop_pos = hir_loop_pos + 1
                     continue
@@ -442,6 +485,14 @@ impl CompilerDriver:
                 if hir_stream_key != "":
                     if hir_cache_store(hir_stream_key, hir_module, hir_module_warnings):
                         hir_shard_lowered = hir_shard_lowered + 1
+            if not driver_hir_mem_snapshot(
+                "hir-post-diagnostics", source_index, source.path,
+                streaming_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
+                mem_snapshot_abort()
+                return false
             driver_log_typed_hir_abi_interface_v1(hir_module, source.path)
             lowered_by_surface[surface_index] = hir_module
             progress_hir_done = progress_hir_done + 1
@@ -456,6 +507,14 @@ impl CompilerDriver:
             validation_module_values.push(hir_module)
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
+            if not driver_hir_mem_snapshot(
+                "hir-post-store", source_index, source.path,
+                streaming_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
+                mem_snapshot_abort()
+                return false
             # Concrete key count, not `.len()`: the seed-compiled Stage-2 binary
             # returns -1 from Dict.len() on aarch64 (every one of the 771
             # Stage-3 modules logged funcs=-1), which the non-streaming loop
@@ -482,6 +541,9 @@ impl CompilerDriver:
             print hir_shard_summary(hir_level_count, hir_shard_lowered)
             rt_stdout_flush()
             exit(0)
+        if not mem_snapshot_finish():
+            self.ctx.add_error("durable memory snapshot terminal publication failed")
+            return false
         # Collect-all summary (streaming surfaces path). Same provenance marker
         # as the non-streaming loop -- see the comment there.
         val poisoned_count = self.ctx.poisoned_module_count_value
