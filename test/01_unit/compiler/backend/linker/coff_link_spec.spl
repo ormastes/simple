@@ -4,6 +4,7 @@ use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64, coff_link_amd64_retained,
     coff_link_amd64_retained_policy, coff_link_amd64_retained_image_policy,
     coff_link_amd64_retained_image_policy_gc,
+    coff_link_amd64_retained_image_policy_opt,
     coff_link_arm64, coff_link_arm64_retained_policy,
     coff_link_default_libraries, coff_attach_amd64_tls_directory,
     coff_attach_amd64_load_config, coff_sort_amd64_exception_table,
@@ -492,6 +493,32 @@ describe "internal freestanding Windows linker":
             reachable_reference, [], PeImagePolicy.default(),
             0x140000000, true).unwrap()
         expect(_cl_read_u32(reachable, 0x188)).to_equal(5)
+
+    it "folds byte- and relocation-identical COMDATs under OPT ICF":
+        val plain_request = CoffLinkRequest(objects: [
+            _cl_comdat_object("_start", 0xc3),
+            _cl_comdat_object("twin", 0xc3)], archives: [], entry: "_start")
+        val plain = coff_link_amd64_retained_image_policy_opt(
+            plain_request, [], PeImagePolicy.default(), 0x140000000,
+            false, false).unwrap()
+        val folded = coff_link_amd64_retained_image_policy_opt(
+            plain_request, [], PeImagePolicy.default(), 0x140000000,
+            false, true).unwrap()
+        expect(_cl_read_u32(plain, 0x188)).to_equal(2)
+        expect(_cl_read_u32(folded, 0x188)).to_equal(1)
+
+        val relocated_request = CoffLinkRequest(objects: [
+            _cl_comdat_reference_object("_start", "helper"),
+            _cl_comdat_reference_object("twin", "helper"),
+            _cl_comdat_object("helper", 0xc3)], archives: [], entry: "_start")
+        val relocated_plain = coff_link_amd64_retained_image_policy_opt(
+            relocated_request, [], PeImagePolicy.default(), 0x140000000,
+            false, false).unwrap()
+        val relocated_folded = coff_link_amd64_retained_image_policy_opt(
+            relocated_request, [], PeImagePolicy.default(), 0x140000000,
+            false, true).unwrap()
+        expect(_cl_read_u32(relocated_plain, 0x188)).to_equal(9)
+        expect(_cl_read_u32(relocated_folded, 0x188)).to_equal(5)
 
     it "writes typed optional-header and alignment policy into PE32+":
         val policy = PeImagePolicy(

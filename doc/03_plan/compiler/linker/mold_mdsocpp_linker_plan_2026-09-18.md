@@ -772,10 +772,15 @@ graph; relocations and associative COMDAT parentage retain reachable packaged
 sections, while undefined references owned only by discarded sections do not
 poison the link. `/OPT:NOREF` preserves all selected sections, and conflicting
 REF policy fails closed.
+`/OPT:ICF` now folds live COMDATs only when their bytes, virtual size, complete
+section characteristics, output class, alignment, relocation sites/types, and
+resolved relocation identities match. The conservative identity rule declines
+self-recursive or merely structurally similar graphs instead of risking an
+incorrect address merge. `/OPT:NOICF`, combined `/OPT:REF,ICF`, and conflict
+validation are typed through both AMD64 and ARM64 production routes.
 The internal route also consumes `/NOLOGO`, `/DEBUG:NONE`, `/INCREMENTAL:NO`,
 and `/MANIFEST:NO`
 because it is quiet, emits neither debug/PDB nor manifest directories, and is
-always a complete one-shot link. Their enabled counterparts and `/OPT:ICF`
-(including `/OPT:REF,ICF`) remain named unsupported until relocation-aware
-identical COMDAT folding is implemented. Native
+always a complete one-shot link. Their enabled counterparts remain named
+unsupported until those output contracts are implemented. Native
 Windows execution remains pending the host prerequisite recorded above.
