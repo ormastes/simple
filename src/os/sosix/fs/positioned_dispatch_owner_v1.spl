@@ -28,12 +28,6 @@ pub struct SosixFsPositionedDispatchStateV1:
 
 export SosixFsPositionedDispatchOwnerV1, SosixFsPositionedDispatchStateV1
 
-fn _next_nonzero_token_v1(token: u64) -> u64:
-    val advanced = token + 1
-    if advanced == 0:
-        return 1
-    advanced
-
 pub fn sosix_fs_dispatch_positioned_with_owner_v1(
     args: SyscallArgs, caller_authenticated: bool, caller_process_id: u64,
     owner: SosixFsPositionedDispatchOwnerV1,
@@ -46,6 +40,12 @@ pub fn sosix_fs_dispatch_positioned_with_owner_v1(
         owner.next_request_token == 0):
         return SosixFsPositionedDispatchStateV1(
             accepted: false, reason: "positioned-dispatch-owner-not-ready",
+            result: SyscallResult(value: -95), owner: owner)
+    # A wrapped token would reuse an old request identity under the same
+    # operation generation. Require a new owner generation instead.
+    if owner.next_request_token == 18446744073709551615u64:
+        return SosixFsPositionedDispatchStateV1(
+            accepted: false, reason: "positioned-request-token-exhausted",
             result: SyscallResult(value: -95), owner: owner)
 
     val dispatched = sosix_fs_dispatch_positioned_registered_v1(
@@ -64,7 +64,7 @@ pub fn sosix_fs_dispatch_positioned_with_owner_v1(
     # moved through the value-semantic transaction chain.
     val dispatch_succeeded = dispatched.syscall_result.value >= 0
     val next_token = if dispatch_succeeded:
-        _next_nonzero_token_v1(owner.next_request_token)
+        owner.next_request_token + 1u64
     else:
         owner.next_request_token
     val next_owner = SosixFsPositionedDispatchOwnerV1(

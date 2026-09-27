@@ -204,6 +204,29 @@ fn _release_timed_ends_before_v1(
     first.duration_ms <= second.observed_at_unix_ms and
         first.observed_at_unix_ms <= second.observed_at_unix_ms - first.duration_ms
 
+fn _release_timed_receipts_distinct_v1(
+    manifest: SimpleOsReleaseEvidenceManifestV1
+) -> bool:
+    # A single owner receipt cannot attest two distinct release stages. This
+    # is a structural replay check; the live producer must still authenticate
+    # each receipt and its contents before it enters this value contract.
+    val receipts = [
+        manifest.boot, manifest.sosix_filesystem.timed,
+        manifest.version.timed, manifest.run.timed, manifest.build.timed,
+        manifest.native_execute.timed, manifest.persistence.write_receipt,
+        manifest.persistence.reboot_receipt, manifest.persistence.read_receipt
+    ]
+    var i = 0
+    while i < receipts.len():
+        var j = i + 1
+        while j < receipts.len():
+            if receipts[i].receipt_id == receipts[j].receipt_id or
+               receipts[i].receipt_digest == receipts[j].receipt_digest:
+                return false
+            j = j + 1
+        i = i + 1
+    true
+
 fn _release_workflow_valid_v1(
     value: SimpleOsReleaseGuestWorkflowEvidenceV1,
     expected_kind: SimpleOsReleaseWorkflowKindV1,
@@ -401,6 +424,8 @@ pub fn simpleos_release_evidence_validate_v1(
        persistence.read_state_digest != manifest.derived_state.final_state_digest or
        not persistence.same_derived_state:
         return SimpleOsReleaseEvidenceErrorV1.PersistenceStateMismatch
+    if not _release_timed_receipts_distinct_v1(manifest):
+        return SimpleOsReleaseEvidenceErrorV1.ReplayDetected
     if not _release_timed_ends_before_v1(
            manifest.boot, manifest.sosix_filesystem.timed) or
        not _release_timed_ends_before_v1(
