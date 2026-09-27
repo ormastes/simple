@@ -2298,7 +2298,14 @@ seed_inputs_hash() {
     "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
     "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
     "${repo_root}" \
-    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"
+    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}" || return 1
+  # Every phase writes the same observation path, so a `post` run destroys the
+  # `pre` categories at exactly the moment the pre/post comparison below needs
+  # them -- the refusal could say only THAT an input changed, never WHICH.
+  # Keep one copy per phase; they are ~20 lines each.
+  cp -f "${seed_fingerprint_observation_details}" \
+    "${seed_fingerprint_observation_details}.${seed_fingerprint_phase}" \
+    2>/dev/null || :
 }
 seed_stale=0
 rust_rebuilt=0
@@ -2927,6 +2934,15 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
   }
   if [ "${seed_inputs_fingerprint_after}" != "${seed_inputs_fingerprint}" ]; then
     echo "error: Rust inputs changed during full bootstrap; refusing to publish a stale seed" >&2
+    echo "  pre=${seed_inputs_fingerprint}" >&2
+    echo "  post=${seed_inputs_fingerprint_after}" >&2
+    if [ -f "${seed_fingerprint_observation_details}.pre" ] &&
+      [ -f "${seed_fingerprint_observation_details}.post" ]; then
+      echo "  categories that differ:" >&2
+      diff "${seed_fingerprint_observation_details}.pre" \
+        "${seed_fingerprint_observation_details}.post" |
+        grep -E '^[<>] category_' | sed 's/^/    /' >&2
+    fi
     exit 1
   fi
   seed_inputs_fingerprint="${seed_inputs_fingerprint_after}"
@@ -3311,8 +3327,45 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   bootstrap_stage3_tool_authority_snapshot \
     "$(absolute_path "${tool_authority_before}")" "${PATH}" \
     "${repo_root}" || {
-    echo "error: could not bind bootstrap tool authority" >&2
-    exit 1
+    # Bounded retry, for the same reason bootstrap_stage3_native_metadata_probe
+    # already retries: the snapshot runs ~15 `env -i <tool> --version` probes,
+    # and on MSYS a fork/exec can transiently fail under memory pressure --
+    # `env` itself exits 125 without the tool ever running. Measured
+    # 2026-09-26: a bind that aborted phase 1 succeeded in full on the very
+    # next call, with cargo-version probes reporting shell-status=125 just
+    # before it. A transient fork failure must not abort a 15-minute run.
+    #
+    # Retrying is safe: the snapshot truncates its own `.tmp.$$` and only
+    # renames it over the receipt once every probe has succeeded, so a failed
+    # attempt leaves no partial authority behind.
+    #
+    # The snapshot has ~20 distinct `return 1` sites (PATH canonicality,
+    # rustc/cargo resolution, the clang admission, per-tool abs_path/file
+    # probes) and its bare failure message names none of them -- which sent
+    # two separate investigations looking at PATH. So the final attempt runs
+    # under xtrace and reports the last commands that ran.
+    tool_authority_bound=0
+    for tool_authority_attempt in 2 3; do
+      sleep 2
+      if bootstrap_stage3_tool_authority_snapshot         "$(absolute_path "${tool_authority_before}")" "${PATH}"         "${repo_root}"; then
+        echo "warning: bootstrap tool authority bound on attempt ${tool_authority_attempt}" >&2
+        tool_authority_bound=1
+        break
+      fi
+    done
+    [ "${tool_authority_bound}" -eq 1 ] || {
+      tool_authority_trace="${log_dir}/tool-authority-bind.trace"
+      (
+        set -x
+        bootstrap_stage3_tool_authority_snapshot           "$(absolute_path "${tool_authority_before}")" "${PATH}"           "${repo_root}"
+      ) >"${tool_authority_trace}" 2>&1 || {
+        echo "error: could not bind bootstrap tool authority" >&2
+        echo "  last commands (${tool_authority_trace}):" >&2
+        tail -n 15 "${tool_authority_trace}" | sed 's/^/  /' >&2
+        exit 1
+      }
+      echo "warning: bootstrap tool authority bound on the traced attempt" >&2
+    }
   }
   bootstrap_step_mark tool-authority-before
   bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
