@@ -7,6 +7,7 @@ sh -n "$installer"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-llvm-provision-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 mkdir "$tmp/bin"
+mkdir "$tmp/core"
 export PROVISION_TEST_ROOT=$tmp
 cat >"$tmp/bin/uname" <<'SH'
 #!/bin/sh
@@ -29,6 +30,19 @@ case ${TEST_DOWNLOAD_HASH:-}:$3 in
   *) exit 1 ;;
 esac
 SH
+cat >"$tmp/bin/git" <<'SH'
+#!/bin/sh
+set -eu
+[ "$1" = -C ] && [ "$2" = "$PROVISION_TEST_ROOT/core" ] || exit 71
+case "$3:$4:$5:${6:-}" in
+  fetch:--depth=1:origin:7383a810b541351e197e114b3de06490b5357dbc)
+    echo fetch-core >>"$PROVISION_TEST_ROOT/calls" ;;
+  checkout:--detach:FETCH_HEAD:)
+    echo checkout-core >>"$PROVISION_TEST_ROOT/calls"
+    : >"$PROVISION_TEST_ROOT/core-pinned" ;;
+  *) exit 72 ;;
+esac
+SH
 cat >"$tmp/bin/brew" <<'SH'
 #!/bin/sh
 set -eu
@@ -39,17 +53,20 @@ case "$*" in
     [ "${TEST_UPDATE_FAIL:-0}" = 0 ]
     echo update >>"$PROVISION_TEST_ROOT/calls"
     ;;
+  '--repo homebrew/core') echo "$PROVISION_TEST_ROOT/core" ;;
   'info --json=v2 llvm lld')
-    [ "$(cat "$PROVISION_TEST_ROOT/calls")" = update ]
+    [ "$(cat "$PROVISION_TEST_ROOT/calls" | tr '\n' ' ')" = 'update fetch-core checkout-core ' ]
+    [ "${HOMEBREW_NO_INSTALL_FROM_API:-}" = 1 ]
+    [ -f "$PROVISION_TEST_ROOT/core-pinned" ]
     echo info >>"$PROVISION_TEST_ROOT/calls"
     cat "$PROVISION_TEST_ROOT/metadata.json"
     ;;
-  'fetch --force-bottle --bottle-tag=arm64_sequoia llvm lld')
+  'fetch --bottle-tag=arm64_sequoia llvm lld')
     echo fetch >>"$PROVISION_TEST_ROOT/calls"
     ;;
   '--cache --bottle-tag=arm64_sequoia llvm') echo "$PROVISION_TEST_ROOT/llvm.tar.gz" ;;
   '--cache --bottle-tag=arm64_sequoia lld') echo "$PROVISION_TEST_ROOT/lld.tar.gz" ;;
-  "reinstall --force-bottle $PROVISION_TEST_ROOT/llvm.tar.gz $PROVISION_TEST_ROOT/lld.tar.gz")
+  'reinstall --force-bottle llvm lld')
     [ "${HOMEBREW_NO_AUTO_UPDATE:-}" = 1 ]
     [ -z "${HOMEBREW_NO_INSTALL_UPGRADE:-}" ]
     [ -z "${HOMEBREW_FORCE_API_AUTO_UPDATE:-}" ]
@@ -84,7 +101,7 @@ RUBY
 }
 fixture accepted
 PATH="$tmp/bin:$PATH" HOMEBREW_NO_INSTALL_UPGRADE=1 HOMEBREW_FORCE_API_AUTO_UPDATE=1 sh "$installer" >"$tmp/out"
-[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info fetch reinstall ' ]
+[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update fetch-core checkout-core info fetch reinstall ' ]
 grep -F 'admitted_bottle=llvm version=23.1.1 revision=1 sha256=4ca75cd' "$tmp/out" >/dev/null
 for mode in stale digest url missing-bottle revision tap; do
   fixture "$mode"
@@ -92,14 +109,14 @@ for mode in stale digest url missing-bottle revision tap; do
   if PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then
     echo "FAIL: accepted $mode" >&2; exit 1
   fi
-  [ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info ' ]
+  [ "$(tr '\n' ' ' <"$tmp/calls")" = 'update fetch-core checkout-core info ' ]
 done
 fixture accepted
 : >"$tmp/calls"
 if TEST_DOWNLOAD_HASH=corrupt PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then
   echo 'FAIL: installed unadmitted bottle bytes' >&2; exit 1
 fi
-[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update info fetch ' ]
+[ "$(tr '\n' ' ' <"$tmp/calls")" = 'update fetch-core checkout-core info fetch ' ]
 for assignment in TEST_ARCH=x86_64 TEST_OS_VERSION=26.0 TEST_FREE_KIB=1024 TEST_UPDATE_FAIL=1; do
   : >"$tmp/calls"
   if env "$assignment" PATH="$tmp/bin:$PATH" sh "$installer" >"$tmp/out" 2>&1; then

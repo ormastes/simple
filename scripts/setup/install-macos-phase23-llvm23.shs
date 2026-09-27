@@ -3,6 +3,7 @@
 # Bottle authority: Homebrew/homebrew-core@7383a810b541351e197e114b3de06490b5357dbc
 # Formula/l/{llvm,lld}.rb; arm64_sequoia is the macos-15 runner platform.
 set -eu
+core_commit=7383a810b541351e197e114b3de06490b5357dbc
 fail() { echo "LLVM provisioning: $*" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || fail 'macOS arm64 required'
 case $(sw_vers -productVersion) in 15.*) ;; *) fail 'macOS 15 required' ;; esac
@@ -15,6 +16,13 @@ available_kib=$(df -Pk /opt/homebrew | awk 'END {print $4}')
 export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
 unset HOMEBREW_NO_INSTALL_UPGRADE HOMEBREW_FORCE_API_AUTO_UPDATE
 brew update
+# Formula API responses track current Homebrew/core and can move independently
+# of the bottle authority above. Resolve formula metadata from the reviewed commit.
+core_repo=$(brew --repo homebrew/core)
+case $core_repo in /*) ;; *) fail 'Homebrew/core tap path must be absolute' ;; esac
+git -C "$core_repo" fetch --depth=1 origin "$core_commit"
+git -C "$core_repo" checkout --detach FETCH_HEAD
+export HOMEBREW_NO_INSTALL_FROM_API=1
 metadata=$(mktemp "${TMPDIR:-/tmp}/simple-llvm-bottles.XXXXXX")
 trap 'rm -f "$metadata"' EXIT HUP INT TERM
 brew info --json=v2 llvm lld >"$metadata"
@@ -39,8 +47,7 @@ expected.each do |name, (revision, digest)|
 end
 RUBY
 # Bind installation to the admitted bytes, even if formula metadata later changes.
-brew fetch --force-bottle --bottle-tag=arm64_sequoia llvm lld
-set --
+brew fetch --bottle-tag=arm64_sequoia llvm lld
 for name in llvm lld; do
     bottle=$(brew --cache --bottle-tag=arm64_sequoia "$name")
     case $bottle in /*.tar.gz) ;; *) fail "invalid $name cache path" ;; esac
@@ -50,8 +57,9 @@ for name in llvm lld; do
     ' "$metadata" "$name")
     actual=$(shasum -a 256 "$bottle" | awk '{print $1}')
     [ "$actual" = "$digest" ] || fail "downloaded $name bottle hash differs from admission"
-    set -- "$@" "$bottle"
 done
 # Reinstall prevents a preinstalled same-version source build being accepted.
-# Local verified bottles supply the formula and bytes; Homebrew installs dependencies.
-brew reinstall --force-bottle "$@"
+# Homebrew's reinstall command accepts formula names, not cached bottle paths.
+# The pinned formula supplies the admitted SHA and the verified bottles remain
+# cached with auto-update and install cleanup disabled.
+brew reinstall --force-bottle llvm lld
