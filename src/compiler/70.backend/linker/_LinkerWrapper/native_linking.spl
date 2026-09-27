@@ -2061,6 +2061,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
     val os_name = host_os()
     val arch_name = host_arch()
+    # Platform flags and libraries belong to the link TARGET, not to the host
+    # running the compiler driver.  A Linux -> MinGW link previously inherited
+    # ELF-only -Wl,-z,relro/-z,now and Linux support libraries, reaching
+    # x86_64-w64-mingw32-ld as an invalid bare `-z` option.
+    val link_os = native_effective_link_os(os_name, target, config.linker_abi)
     val compiler_plan = hosted_c_compiler_plan(target, os_name, arch_name)
     if not compiler_plan.supported:
         return Err("hosted C target '" + target + "' is unsupported on '" + arch_name + "-" + os_name + "'")
@@ -2081,6 +2086,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
                 return Err("required cross C compiler '" + compiler_plan.command + "' was not found")
         else:
             cc = "cc"
+    if link_os == "windows-mingw" and not cc.lower().contains("clang"):
+        return Err("Windows GNU native links require clang or clang-cl; selected compiler was '" + cc + "'")
     if os_name == "macos" or os_name == "darwin":
         val cc_requested = cc
         cc = darwin_resolve_link_tool(cc_requested)
@@ -2097,7 +2104,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # Link ALL object files (user objects + compiled runtime objects +
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
-        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        var args = native_retained_symbol_cc_args(config.retained_symbols, link_os)
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
@@ -2108,7 +2115,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # "ignoring duplicate libraries: '-lSystem'" warning that preceded
         # `ld: library 'c' not found`).
         # doc/08_tracking/bug/stage2_sanity_darwin_link_passes_lc_2026-09-13.md
-        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+        for flag in native_link_std_lib_args(link_os, "cc-pre"):
             args.push(flag)
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
@@ -2117,11 +2124,11 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for path in object_files: support_inputs.push(path)
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, os_name, brew_prefix):
+        for flag in native_all_gnu_support_args(support_inputs, link_os, brew_prefix):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        for flag in native_cc_platform_flags(os_name, config.strip_output):
+        for flag in native_cc_platform_flags(link_os, config.strip_output):
             args.push(flag)
         for flag in ["-o", output]:
             args.push(flag)
@@ -2136,7 +2143,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
-        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        var args = native_retained_symbol_cc_args(config.retained_symbols, link_os)
         if requested_fuse_ld != "":
             args.push(requested_fuse_ld)
         for obj in cc_fallback_object_args(object_files):
@@ -2146,12 +2153,12 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+        for flag in native_link_std_lib_args(link_os, "cc-pre"):
             args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
+        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
@@ -2169,6 +2176,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         return Err("cc linking failed: {err_msg}")
     else:
         var args: [text] = []
+        if link_os == "windows-mingw":
+            args.push("--target=x86_64-w64-windows-gnu")
         # An explicit SIMPLE_LINKER request wins over this arm's historical
         # default. With neither set, behaviour is byte-identical to before.
         if requested_fuse_ld != "":
@@ -2177,23 +2186,23 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
-        for flag in native_retained_symbol_cc_args(config.retained_symbols, os_name):
+        for flag in native_retained_symbol_cc_args(config.retained_symbols, link_os):
             args.push(flag)
         for obj in object_files:
             args.push(obj)
         val runtime_args = _cc_fallback_runtime_lib_args(config)
         for flag in runtime_args:
             args.push(flag)
-        for flag in native_link_std_lib_args(os_name, "cc-pre"):
+        for flag in native_link_std_lib_args(link_os, "cc-pre"):
             args.push(flag)
         var support_inputs = object_files
         for runtime_arg in runtime_args:
             support_inputs.push(runtime_arg)
-        for flag in native_all_gnu_support_args(support_inputs, os_name, ""):
+        for flag in native_all_gnu_support_args(support_inputs, link_os, ""):
             args.push(flag)
         for flag in cc_fallback_extra_flags(config.extra_flags):
             args.push(flag)
-        for flag in native_link_std_lib_args(os_name, "cc-post"):
+        for flag in native_link_std_lib_args(link_os, "cc-post"):
             args.push(flag)
         # -lSDL2 removed here for the same reason as the direct-lld Linux arm
         # above: runtime_sdl2.c dlopens SDL at first use, the runtime archive has

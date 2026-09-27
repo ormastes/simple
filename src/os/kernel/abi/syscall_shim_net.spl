@@ -18,22 +18,59 @@ fn spl_shim_current_task_id() -> u64:
 
 @export("C", name: "spl_shim_net_capability_check")
 fn spl_shim_net_capability_check(syscall_id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64:
-    """Legacy ARM64 direct-path precheck; exact shim policy lives in the
-    portable socket owner below. ARM64 direct binding still needs migration.
+    """Reject unknown operations before ARM64 chooses its direct or fallback.
+
+    The C dispatcher has no authenticated endpoint snapshot. Its check must
+    not substitute a port-zero grant for the exact check in either owner.
     """
     val caller = g_shim_scheduler.get_current()
     var ipc = g_shim_ipc
     val allowed = match syscall_id:
-        case 70: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
-        case 71: ipc.cap_check(caller, CapabilityKind.NetListen(port: 0))
-        case 72: ipc.cap_check(caller, CapabilityKind.NetListen(port: 0))
-        case 73: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
-        case 74: ipc.cap_check(caller, CapabilityKind.NetListen(port: 0))
-        case 75: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
-        case 76: ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))
+        case 70: ipc.cap_check(caller, CapabilityKind.NetSocketCreate)
+        case 71: true
+        case 72: true
+        case 73: true
+        case 74: true
+        case 75: true
+        case 76: true
         case 77: ipc.cap_check(caller, CapabilityKind.NetRaw)
         case _: false
     if allowed: 0 else: _EPERM
+
+@export("C", name: "spl_shim_net_direct_socket_check")
+fn spl_shim_net_direct_socket_check() -> i64:
+    val caller = g_shim_scheduler.get_current()
+    var ipc = g_shim_ipc
+    if ipc.cap_check(caller, CapabilityKind.NetSocketCreate):
+        return 0
+    _EPERM
+
+@export("C", name: "spl_shim_net_direct_bind_check")
+fn spl_shim_net_direct_bind_check(address: u32, port: u16) -> i64:
+    """Authorize the exact copied bind endpoint before the direct effect."""
+    val caller = g_shim_scheduler.get_current()
+    var ipc = g_shim_ipc
+    if ipc.cap_check(caller, CapabilityKind.NetBindIpv4(
+        address: address, port: port)) and
+       ipc.cap_check(caller, CapabilityKind.NetListen(port: port)):
+        return 0
+    _EPERM
+
+@export("C", name: "spl_shim_net_direct_listener_check")
+fn spl_shim_net_direct_listener_check(port: u16) -> i64:
+    val caller = g_shim_scheduler.get_current()
+    var ipc = g_shim_ipc
+    if ipc.cap_check(caller, CapabilityKind.NetListen(port: port)):
+        return 0
+    _EPERM
+
+@export("C", name: "spl_shim_net_direct_outbound_check")
+fn spl_shim_net_direct_outbound_check() -> i64:
+    val caller = g_shim_scheduler.get_current()
+    var ipc = g_shim_ipc
+    if ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0)):
+        return 0
+    _EPERM
 
 # ===========================================================================
 # syscall 70 — net_socket   [IMPLEMENTED]

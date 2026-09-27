@@ -909,3 +909,52 @@ derives symbol counts from either validated SysV `DT_HASH` or GNU hash tables,
 and preserves SONAME, visibility, size/value, and GNU symbol-version behavior.
 The x86_64 fixture is exercised with its section table removed through both
 the SysV-hash and GNU-hash-only discovery paths.
+
+The focused Linux+MinGW binary workflow exposed a pre-link Windows GNU
+bootstrap failure: its native-support build implicitly selected
+`x86_64-w64-mingw32-gcc`, while the admitted bootstrap contract requires
+Clang. The workflow now installs Clang/LLD plus the MinGW sysroot and exports
+`CC_x86_64_pc_windows_gnu=clang`; the target-qualified Clang invocation remains
+owned by the native-support build script. This removes the compiler-selection
+blocker so the Windows binary lane can proceed to Simple compilation/linking.
+
+Exact-head workflow run `36300453546` refined that diagnosis. Both Linux and
+MinGW seed builds passed, and both Stage 2 legs compiled all 914 Simple units.
+The Windows link then failed because generated-C compilation correctly chose
+the target-prefixed `x86_64-w64-mingw32-gcc` but incorrectly appended Clang's
+`--target=x86_64-w64-windows-gnu` option. Generated main/init/security stubs,
+core runtime sources, inline assembly, and the hosted link now add that option
+only for Clang-family drivers; GNU cross drivers carry the target in their
+executable name. The workflow no longer converts a missing Windows Stage 2
+binary into a successful seed fallback: it requires a non-empty PE32+ result.
+The same run showed the Linux link lacked the required `llvm-nm`, so both
+Stage 2 tool installations now include the LLVM tools package. A new exact-head
+run is required before either Stage 2 lane is admitted.
+
+Exact-head run `36301842638` admitted the Linux Stage 2 build, smoke test, and
+artifact. Windows advanced past generated-C compilation and compiled all 914
+Simple units, then exposed a target/host policy leak in the compiler-driver
+fallback: a Linux-hosted MinGW link inherited ELF `-z relro`/`-z now` flags and
+Linux support libraries. The fallback now derives platform hardening, retained
+symbols, standard libraries, and native-all support libraries from the link
+target (`windows-mingw`), while retaining the host identity solely for driver
+selection and process dispatch. Windows target-policy tests pin the absence of
+ELF compiler-driver and standard-library flags. A new exact-head run remains
+required before the Windows Stage 2 artifact is admitted.
+
+The Windows GNU bootstrap toolchain is now explicitly Clang-only across both
+bootstrap generations. The Rust seed selects `clang` for generated C and the
+hosted link; the pure-Simple compiler plan selects `clang`, adds the explicit
+MinGW target to runtime C compilation and the final compiler-driver link, and
+rejects a non-Clang `SIMPLE_CC` override. CI pins `SIMPLE_CC=clang` on the
+Windows Stage 2 invocation so the chosen driver is visible and reproducible;
+`x86_64-w64-mingw32-gcc` is no longer an admitted Windows bootstrap driver.
+
+Exact-head run `36303267955` was assigned to a self-hosted `ubuntu-latest`
+runner whose `sudo` requires a password, so its MinGW seed stopped during
+package installation before Clang selection or compilation. Tool provisioning
+is now capability-based: preinstalled Clang/LLD/LLVM and MinGW sysroot tools
+skip package mutation; missing tools use noninteractive `sudo -n` and fail with
+the setup error rather than hanging or prompting. GCC remains only the package
+that supplies the MinGW sysroot/binutils on Debian; it is never selected as the
+compiler driver.

@@ -780,3 +780,43 @@ loop as the next pattern — parsing "cleanly" and wrong. The parser must hand
 the lexer `lex_mark_current_token_as_generic_close()` before advancing past a
 token that looks like a binary operator but opens a block. Record:
 [stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md](../../../08_tracking/bug/stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md).
+
+## Stage-2 candidate SIGILL family + phase-1 script traps (2026-09-26/27)
+
+Three distinct SIGILLs in the Stage-2 candidate, all "mid-parse", all
+invisible under `simple run`, each with a record and a landed fix:
+
+| symptom | root cause | fix / record |
+|---|---|---|
+| `ud2` on the first bare `return` executed | seed cranelift lowered bare `return` in an inferred-`ANY` fn to the fail-fast trap | seed `body.rs` returns tagged nil `3` — [backend](../backend/skill.md) § 2026-09-26 |
+| OOB on `lex_env_save_enabled[0]` | module-level array empty because `__module_init_*` never ran for this consumer | `lex_env_save_on()` guard — [compiler_driver](../compiler_driver/skill.md) § 2026-09-26 |
+| stack overflow under `env`/`host_os` | `host_os -> shell_output("uname -s") -> _io_runtime_process_run_raw -> host_os` | the primitive branches on compiled-in `platform_name()` (`rt_platform_name`, no spawn): [io_runtime.spl](../../../../src/lib/nogc_sync_mut/io_runtime.spl) :37-46, `e52371ff594`; record [stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26](../../../08_tracking/bug/stage2_candidate_env_get_infinite_recursion_sigill_2026-09-26.md) |
+
+Rule: a candidate SIGILL that "never reproduces under `simple run`" is evidence
+about the SEED's codegen or about module-init ordering, not about the file the
+backtrace names.
+
+Phase-1 entrypoint traps (`1b66acd7379`, `6870c4a6039`):
+- `run-phase1-local.shs` exec'd `bootstrap-windows.sh` (a `#!/usr/bin/env bash`
+  script with `set -o pipefail`) via `sh` — fatal where `/bin/sh` is dash
+  (`set: Illegal option -o pipefail`, exit 2 before any step). It is
+  `exec bash ...` now; Git Bash hid this because there `sh` IS bash.
+- `bootstrap-windows.sh` exported `SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT`
+  unconditionally. On Linux the materializer is a no-op that writes no
+  receipt, and `bootstrap_stage3_git_state` treats a non-empty value as "a
+  receipt exists" and chased the absent file — surfacing only as "could not
+  bind preflight source and git state" after every Rust stage had built
+  green. The export is now guarded by `[ -f "$materialized_receipt" ]`.
+- `check-bootstrap-preflight.shs` `capture_bindings` returned a bare `1` from
+  five steps; each now names the failing step on stderr
+  (`preflight bind: <step> failed`).
+
+**`VAR=` in POSIX shell sets EMPTY, not unset** (`dced8d0dd80`; 4 scripts:
+`cert/redeploy_gate/candidate_frontend_admission.shs`,
+`check-phase2-low-memory-source-reclaim.shs`,
+`check-rocm-engine2d-font-readback.shs`, `check-seed-native-build-invariant.shs`).
+`SIMPLE_EXECUTION_MODE=` was meant as "use the default", but
+`src/compiler_rust/driver/src/exec_core.rs` ~:223 takes the JIT default only
+on `Err(_)` (var UNSET); `Ok("")` goes to `parse_str_checked`, which rejects
+the empty spelling and hard-exits 2. Use `env -u SIMPLE_EXECUTION_MODE ...` or
+a scoped `unset`. The same rule applies to every fail-closed selector variable.

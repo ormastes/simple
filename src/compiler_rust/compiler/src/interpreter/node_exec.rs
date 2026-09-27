@@ -943,7 +943,7 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         // Get the object name (must be an identifier for now)
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            if let Some(obj_val) = env.remove(obj_name) {
+            if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::ClassInstance(instance) => {
                         instance.set_field(field.clone(), value);
@@ -980,7 +980,7 @@ pub(crate) fn exec_assignment(
                 Ok(Control::Next)
             } else {
                 let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
-                if let Some(obj_val) = global_obj {
+                if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::ClassInstance(instance) => {
                             instance.set_field(field.clone(), value);
@@ -1117,7 +1117,7 @@ pub(crate) fn exec_assignment(
         } = receiver.as_ref()
         {
             if let Expr::Identifier(obj_name) = inner_receiver.as_ref() {
-                if let Some(obj_val) = env.remove(obj_name) {
+                if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                     match obj_val {
                         Value::Object { class, mut fields } => {
                             // Get the inner object
@@ -2264,7 +2264,7 @@ pub(crate) fn exec_augmented_assignment(
             if is_suspend {
                 rhs_value = await_value(rhs_value)?;
             }
-            if let Some(obj_val) = env.remove(obj_name) {
+            if let Some(obj_val) = env.remove(obj_name).map(Value::into_option_payload) {
                 match obj_val {
                     Value::Object { class, mut fields } => {
                         let new_value = if let Some(op) = bin_op {
@@ -2331,7 +2331,7 @@ pub(crate) fn exec_augmented_assignment(
                 }
             } else {
                 let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
-                if let Some(obj_val) = global_obj {
+                if let Some(obj_val) = global_obj.map(Value::into_option_payload) {
                     match obj_val {
                         Value::Object { class, mut fields } => {
                             let new_value = if let Some(op) = bin_op {

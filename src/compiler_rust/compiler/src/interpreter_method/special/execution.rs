@@ -227,7 +227,7 @@ pub fn exec_function_with_self_return(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| crate::interpreter::interpreter_call::name_callee(e, func))?;
     outer_env.release_scope();
     let result = execute_function_body(
         func,
@@ -406,7 +406,7 @@ pub fn exec_function_with_self_return_values(
         enums,
         impl_methods,
         self_mode,
-    )?;
+    ).map_err(|e| crate::interpreter::interpreter_call::name_callee(e, func))?;
     outer_env.release_scope();
     let result = execute_function_body(
         func,

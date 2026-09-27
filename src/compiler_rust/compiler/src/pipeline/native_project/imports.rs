@@ -129,8 +129,19 @@ fn record_method_return_type(
     }
 }
 
+/// Parameter count of an imported method AS THE CALLEE IS COMPILED, receiver
+/// included. Must mirror `inject_implicit_self` in
+/// hir/lower/module_lowering/function.rs exactly: the parser marks every
+/// self-less method `is_static` (parser/types_def/mod.rs), but HIR still
+/// injects an implicit `self` when the BODY uses `self`. Counting only
+/// `!is_static` here declared such methods one parameter short, so every
+/// cross-module call dropped the receiver (`closures_structs.rs`
+/// `sig_params == args.len()`): the callee read `self` from the first user
+/// argument — the stage-2 `NativeModuleCacheFactSetV1.witness` SIGSEGV.
 fn method_arity(method: &simple_parser::ast::FunctionDef) -> usize {
-    method.params.len() + usize::from(!method.is_static && !method.params.iter().any(|param| param.name == "self"))
+    let has_self = method.params.iter().any(|param| param.name == "self");
+    let implicit_self = !has_self && (!method.is_static || crate::hir::block_uses_self(&method.body));
+    method.params.len() + usize::from(implicit_self)
 }
 
 /// Try alternate name forms to resolve a call target through use_map/import_map.
