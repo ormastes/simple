@@ -93,6 +93,24 @@ describe "Series construction":
             )
             expect(s.len()).to_equal(Index.new(3))
 
+        it "preserves a fractional value after an integral first value":
+            step("Infer dtype from every value before coercing a numeric column")
+            val series = Series.from_values(Symbol.from("mixed"),
+                [Float64.new(1.0), Float64.new(2.5)])
+            expect(series.dtype()).to_equal(DType.F64)
+            expect(series.get(Index.new(1))).to_equal(Float64.new(2.5))
+
+        it "keeps explicit numeric constructors typed":
+            step("Construct explicit floating and integer Series without inference")
+            val floating = Series.from_f64_values(Symbol.from("floating"),
+                [Float64.new(1.0), Float64.new(2.0)])
+            val integer = Series.from_i64_values(Symbol.from("integer"),
+                [Int64.new(1), Int64.new(2)])
+            expect(floating.dtype()).to_equal(DType.F64)
+            expect(integer.dtype()).to_equal(DType.I64)
+            expect(floating.get(Index.new(0))).to_equal(Float64.new(1.0))
+            expect(integer.get(Index.new(0))).to_equal(Int64.new(1))
+
         it "returns DType.F64 for Float64 series":  # T-DF-04
             # @req REQ-SSPEC-SYSTEM
             step("returns DType.F64 for Float64 series")
@@ -284,6 +302,17 @@ describe "DataFrame construction from rows":
             val df = DataFrame.from_rows(rows).unwrap()
             expect(df.num_rows()).to_equal(Index.new(3))
 
+        it "preserves row value tags when numeric values happen to be integral":
+            step("Keep DfValue.F64 columns floating even when all values are whole numbers")
+            val key = Symbol.from("price")
+            val rows = [
+                [RowEntry.new(key, DfValue.F64(Float64.new(1.0)))],
+                [RowEntry.new(key, DfValue.F64(Float64.new(2.0)))]
+            val df = DataFrame.from_rows(rows).unwrap()
+            val series = df.col(key).unwrap()
+            expect(series.dtype()).to_equal(DType.F64)
+            expect(series.get(Index.new(1))).to_equal(Float64.new(2.0))
+
 
 # ============================================================================
 # Test Group 4: Empty DataFrame edge cases (T-DF-06)
@@ -358,3 +387,71 @@ describe "DataFrame construction error paths":
             case Ok(_):
                 observed_error = DfError.ColumnNotFound
         expect(observed_error).to_equal(DfError.ShapeMismatch)
+
+    it "rejects duplicate column names and inconsistent missing masks":
+        step("Validate names and per-column masks before publishing a DataFrame")
+        val key = Symbol.from("same")
+        val first = Series.from_f64_values(key, [Float64.new(1.0)])
+        val second = Series.from_i64_values(key, [Int64.new(2)])
+        val duplicate = DataFrame.from_columns([
+            SeriesErased.F64Series(first), SeriesErased.I64Series(second)])
+        match duplicate:
+            case Err(error): expect(error).to_equal(DfError.DuplicateColumn)
+            case Ok(_): expect(false).to_equal(true)
+        val malformed = Series(name: Symbol.from("mask"),
+            values: array([Float64.new(1.0)]), dtype: DType.F64, missing: [])
+        expect(DataFrame.from_columns([SeriesErased.F64Series(malformed)]).is_err()).to_equal(true)
+
+    it "rejects an erased column whose tag disagrees with its dtype":
+        step("Keep typed column tags consistent with their stored arrays")
+        val integer = Series.from_i64_values(Symbol.from("integer"), [Int64.new(7)])
+        val floating = Series.from_f64_values(Symbol.from("floating"), [Float64.new(7.0)])
+        expect(DataFrame.from_columns([SeriesErased.F64Series(integer)]).is_err()).to_equal(true)
+        expect(DataFrame.from_columns([SeriesErased.I64Series(floating)]).is_err()).to_equal(true)
+        val mistyped_storage = Series(name: Symbol.from("mistyped"),
+            values: array_i64([Int64.new(7)]), dtype: DType.F64,
+            missing: [Bool.new(false)])
+        expect(DataFrame.from_columns([SeriesErased.F64Series(mistyped_storage)]).is_err()).to_equal(true)
+
+    it "rejects duplicate, missing, and type-changing row fields":
+        step("Validate every row against the first row's typed schema")
+        val key = Symbol.from("x")
+        val other = Symbol.from("y")
+        val duplicate = DataFrame.from_rows([[
+            RowEntry.new(key, DfValue.F64(Float64.new(1.0))),
+            RowEntry.new(key, DfValue.F64(Float64.new(2.0)))
+        ]])
+        match duplicate:
+            case Err(error): expect(error).to_equal(DfError.DuplicateColumn)
+            case Ok(_): expect(false).to_equal(true)
+        val missing = DataFrame.from_rows([
+            [RowEntry.new(key, DfValue.F64(Float64.new(1.0))),
+             RowEntry.new(other, DfValue.I64(Int64.new(2)))],
+            [RowEntry.new(key, DfValue.F64(Float64.new(3.0)))]
+        ])
+        expect(missing.is_err()).to_equal(true)
+        val changed_type = DataFrame.from_rows([
+            [RowEntry.new(key, DfValue.F64(Float64.new(1.0)))],
+            [RowEntry.new(key, DfValue.I64(Int64.new(2)))]
+        ])
+        expect(changed_type.is_err()).to_equal(true)
+
+    it "infers numeric row types across missing values":
+        step("Keep missing masks when the first observed row value is NA")
+        val floating = Symbol.from("floating")
+        val integer = Symbol.from("integer")
+        val frame = DataFrame.from_rows([
+            [RowEntry.new(floating, DfValue.Na),
+             RowEntry.new(integer, DfValue.I64(Int64.new(7)))],
+            [RowEntry.new(floating, DfValue.F64(Float64.new(1.5))),
+             RowEntry.new(integer, DfValue.Na)]
+        ]).unwrap()
+        expect(frame.dtypes().dtype_at(Index.new(0))).to_equal(DType.F64)
+        expect(frame.dtypes().dtype_at(Index.new(1))).to_equal(DType.I64)
+        expect(frame.col(floating).unwrap().is_missing(Index.new(0)).unwrap()).to_equal(true)
+        expect(frame.col(floating).unwrap().get(Index.new(1))).to_equal(Float64.new(1.5))
+        expect(frame.col(integer).unwrap().get(Index.new(0))).to_equal(Int64.new(7))
+        expect(frame.col(integer).unwrap().is_missing(Index.new(1)).unwrap()).to_equal(true)
+        expect(DataFrame.from_rows([[
+            RowEntry.new(floating, DfValue.Na)
+        ]]).is_err()).to_equal(true)

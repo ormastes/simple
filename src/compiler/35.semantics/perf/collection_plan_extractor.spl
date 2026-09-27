@@ -1,0 +1,149 @@
+# Normalize a resolved unary collection-call chain into a logical plan. This
+# does not authorize a physical rewrite: callback, alias, escape and target
+# proofs remain false until their owning analyses provide evidence.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfOperationKind, HirPerfCostClass, HirPerfCardinality,
+    HirPerfAllocationClass, HirPerfEffectFacts}
+use compiler.semantics.perf_facts.collector.{
+    hir_perf_receiver_kind, hir_perf_receiver_matches,
+    hir_perf_resolved_method_symbol}
+use compiler.semantics.perf.collection_plan.*
+
+struct PendingUnaryCollectionCall:
+    kind: CollectionPlanKind
+    span: Span
+    result_type: HirType
+    key_type: HirType?
+    arguments: [HirCallArg]
+    symbol_id: i64
+    summary: CollectionOperationSummary
+
+fn collection_plan_kind_for_operation(operation: HirPerfOperationKind) -> CollectionPlanKind?:
+    match operation:
+        case HirPerfOperationKind.Map: Some(CollectionPlanKind.Map)
+        case HirPerfOperationKind.Filter: Some(CollectionPlanKind.Filter)
+        case HirPerfOperationKind.FlatMap: Some(CollectionPlanKind.FlatMap)
+        case HirPerfOperationKind.DistinctBy: Some(CollectionPlanKind.DistinctBy)
+        case HirPerfOperationKind.CollectArray: Some(CollectionPlanKind.CollectArray)
+        case _: nil
+
+fn collection_plan_key_type_for_call(
+    kind: CollectionPlanKind, arguments: [HirCallArg]
+) -> HirType?:
+    match kind:
+        case CollectionPlanKind.DistinctBy:
+            if arguments.len() == 0 or not arguments[0].value.has_type_:
+                return nil
+            match arguments[0].value.type_.kind:
+                case HirTypeKind.Function(_, result, _): Some(result)
+                case _: nil
+        case _: nil
+
+fn collection_plan_unknown_source_facts() -> CollectionPlanFacts:
+    CollectionPlanFacts(
+        effects: HirPerfEffectFacts(
+            reads: false, writes: false, allocates: false, throws: false,
+            suspends: false, observable: false, unknown: true),
+        cost: HirPerfCostClass.Unknown("source cost unavailable"),
+        cardinality: HirPerfCardinality.Unknown("source cardinality unavailable"),
+        allocation: HirPerfAllocationClass.Unknown,
+        order: CollectionPlanOrder.Unknown("source order unavailable"),
+        uniqueness: CollectionPlanUniqueness.Unknown("source uniqueness unavailable"),
+        equality_proven: false, alias_proven: false,
+        callback_pure: false, escape_proven: false,
+        profitability_proven: false, evidence_receipt: "")
+
+fn collection_plan_facts_for_operation(summary: CollectionOperationSummary) -> CollectionPlanFacts:
+    CollectionPlanFacts(
+        effects: summary.effects,
+        cost: summary.cost,
+        cardinality: summary.output_cardinality,
+        allocation: summary.allocation,
+        order: if summary.preserves_order:
+            CollectionPlanOrder.PreservesInput
+        else:
+            CollectionPlanOrder.Unknown("operation order unavailable"),
+        uniqueness: CollectionPlanUniqueness.Unknown("operation uniqueness unavailable"),
+        equality_proven: false, alias_proven: false,
+        callback_pure: false, escape_proven: false,
+        profitability_proven: false,
+        evidence_receipt: summary.evidence_receipt)
+
+fn extract_unary_collection_plan(
+    expr: HirExpr, function_symbol_id: i64,
+    registry: CollectionOperationRegistry
+) -> Result<CollectionPlan, text>:
+    if not registry.is_structurally_valid():
+        return Err("collection operation registry is invalid")
+    var calls: [PendingUnaryCollectionCall] = []
+    var source = expr
+    var scanning = true
+    while scanning:
+        match source.kind:
+            case HirExprKind.MethodCall(receiver, _, args, resolution):
+                if calls.len() >= 128:
+                    return Err("collection call chain exceeds plan bound")
+                if not source.has_type_:
+                    return Err("collection operation has no resolved result type")
+                val symbol = hir_perf_resolved_method_symbol(resolution)
+                if not symbol.?:
+                    return Err("collection operation has no resolved symbol")
+                val found = registry.lookup(symbol.unwrap())
+                if not found.?:
+                    return Err("collection operation has no admitted metadata")
+                val summary = found.unwrap()
+                if args.len() != summary.explicit_argument_count or
+                   not hir_perf_receiver_matches(
+                       summary.expected_receiver, hir_perf_receiver_kind(receiver)):
+                    return Err("collection operation metadata does not match typed call")
+                val kind = collection_plan_kind_for_operation(summary.operation)
+                if not kind.?:
+                    return Err("collection operation has no logical plan mapping")
+                calls.push(PendingUnaryCollectionCall(
+                    kind: kind.unwrap(), span: source.span,
+                    result_type: source.type_,
+                    key_type: collection_plan_key_type_for_call(kind.unwrap(), args),
+                    arguments: args,
+                    symbol_id: symbol.unwrap(), summary: summary))
+                source = receiver
+            case _:
+                scanning = false
+    if calls.len() == 0:
+        return Err("expression is not a collection call chain")
+    if not source.has_type_:
+        return Err("collection source has no resolved type")
+    val source_span = source.span
+    val source_type = source.type_
+    var nodes: [CollectionPlanNode] = [CollectionPlanNode(
+        id: 0, kind: CollectionPlanKind.Source, inputs: [],
+        source_span: source_span, source_expr: Some(source),
+        call_arguments: [],
+        operation_symbol_id: nil,
+        output_type: Some(source_type), key_type: nil,
+        facts: collection_plan_unknown_source_facts())]
+    var i = calls.len() - 1
+    while i >= 0:
+        val call = calls[i]
+        val previous_id = nodes.len() - 1
+        nodes.push(CollectionPlanNode(
+            id: nodes.len(), kind: call.kind, inputs: [previous_id],
+            source_span: call.span, source_expr: nil,
+            call_arguments: call.arguments,
+            operation_symbol_id: Some(call.symbol_id),
+            output_type: Some(call.result_type), key_type: call.key_type,
+            facts: collection_plan_facts_for_operation(call.summary)))
+        i = i - 1
+    val plan = CollectionPlan(
+        function_symbol_id: function_symbol_id,
+        registry_version: registry.metadata_version,
+        nodes: nodes, output_id: nodes.len() - 1)
+    match validate_collection_plan(plan):
+        case Ok(_): Ok(plan)
+        case Err(reason): Err(reason)
+
+export extract_unary_collection_plan

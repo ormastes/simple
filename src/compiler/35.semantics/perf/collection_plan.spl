@@ -1,0 +1,206 @@
+# Logical collection plan between typed HIR and MIR. Node inputs refer only to
+# earlier nodes, so the plan has an explicit acyclic evaluation order.
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirCallArg}
+use compiler.hir.hir_types.{HirType}
+use compiler.semantics.perf_facts.types.{HirPerfEffectFacts, HirPerfCostClass, HirPerfCardinality, HirPerfAllocationClass}
+
+enum CollectionPlanKind:
+    Source
+    Map
+    Filter
+    CompactMap
+    FlatMap
+    Find
+    Any
+    All
+    Fold
+    Count
+    Take
+    Drop
+    DistinctBy
+    IndexBy
+    GroupBy
+    SemiJoinBy
+    AntiJoinBy
+    JoinBy
+    LeftJoinBy
+    IntersectBy
+    DifferenceBy
+    CartesianProduct
+    SortBy
+    MergeBy
+    CollectArray
+    CollectSet
+    CollectMap
+
+enum CollectionPlanOrder:
+    PreservesInput
+    Sorted
+    Unordered
+    Unknown(reason: text)
+
+enum CollectionPlanUniqueness:
+    Unique
+    MayRepeat
+    Unknown(reason: text)
+
+struct CollectionPlanFacts:
+    effects: HirPerfEffectFacts
+    cost: HirPerfCostClass
+    cardinality: HirPerfCardinality
+    allocation: HirPerfAllocationClass
+    order: CollectionPlanOrder
+    uniqueness: CollectionPlanUniqueness
+    equality_proven: bool
+    alias_proven: bool
+    callback_pure: bool
+    escape_proven: bool
+    profitability_proven: bool
+    evidence_receipt: text
+
+struct CollectionPlanNode:
+    id: i64
+    kind: CollectionPlanKind
+    inputs: [i64]
+    source_span: Span
+    source_expr: HirExpr?
+    call_arguments: [HirCallArg]
+    operation_symbol_id: i64?
+    output_type: HirType?
+    key_type: HirType?
+    facts: CollectionPlanFacts
+
+struct CollectionPlan:
+    function_symbol_id: i64
+    registry_version: text
+    nodes: [CollectionPlanNode]
+    output_id: i64
+
+fn collection_plan_expected_inputs(kind: CollectionPlanKind) -> i64:
+    match kind:
+        case CollectionPlanKind.Source: 0
+        case CollectionPlanKind.SemiJoinBy: 2
+        case CollectionPlanKind.AntiJoinBy: 2
+        case CollectionPlanKind.JoinBy: 2
+        case CollectionPlanKind.LeftJoinBy: 2
+        case CollectionPlanKind.IntersectBy: 2
+        case CollectionPlanKind.DifferenceBy: 2
+        case CollectionPlanKind.CartesianProduct: 2
+        case CollectionPlanKind.MergeBy: 2
+        case _: 1
+
+fn collection_plan_requires_key(kind: CollectionPlanKind) -> bool:
+    match kind:
+        case CollectionPlanKind.DistinctBy: true
+        case CollectionPlanKind.IndexBy: true
+        case CollectionPlanKind.GroupBy: true
+        case CollectionPlanKind.SemiJoinBy: true
+        case CollectionPlanKind.AntiJoinBy: true
+        case CollectionPlanKind.JoinBy: true
+        case CollectionPlanKind.LeftJoinBy: true
+        case CollectionPlanKind.IntersectBy: true
+        case CollectionPlanKind.DifferenceBy: true
+        case _: false
+
+fn validate_collection_plan(plan: CollectionPlan) -> Result<bool, text>:
+    if plan.function_symbol_id < 0:
+        return Err("collection plan has no valid function symbol")
+    if plan.registry_version == "":
+        return Err("collection plan has no registry version")
+    if plan.nodes.len() == 0:
+        return Err("collection plan has no nodes")
+    if plan.output_id < 0 or plan.output_id >= plan.nodes.len():
+        return Err("collection plan output is not a node")
+    if plan.output_id != plan.nodes.len() - 1:
+        return Err("collection plan output is not the final node")
+    var uses: [i64] = []
+    var i = 0
+    while i < plan.nodes.len():
+        uses.push(0)
+        i = i + 1
+    var source_count = 0
+    i = 0
+    while i < plan.nodes.len():
+        val node = plan.nodes[i]
+        if node.id != i:
+            return Err("collection plan node id differs from its position: " + i.to_text())
+        if node.inputs.len() != collection_plan_expected_inputs(node.kind):
+            return Err("collection plan node has wrong input count: " + i.to_text())
+        if not node.output_type.?:
+            return Err("collection plan node has no output type: " + i.to_text())
+        match node.kind:
+            case CollectionPlanKind.Source:
+                source_count = source_count + 1
+                if (not node.source_expr.? or node.operation_symbol_id.? or
+                    node.call_arguments.len() != 0):
+                    return Err("collection plan source has invalid binding: " + i.to_text())
+            case _:
+                if node.source_expr.? or not node.operation_symbol_id.?:
+                    return Err("collection plan operation has invalid binding: " + i.to_text())
+                if node.operation_symbol_id.unwrap() < 0:
+                    return Err("collection plan operation has invalid symbol: " + i.to_text())
+        for input in node.inputs:
+            if input < 0 or input >= i:
+                return Err("collection plan has a forward, cyclic, or invalid input: " + i.to_text())
+            uses[input] = uses[input] + 1
+        i = i + 1
+    if source_count == 0:
+        return Err("collection plan has no source")
+    i = 0
+    while i < plan.output_id:
+        if uses[i] == 0:
+            return Err("collection plan has an unused node: " + i.to_text())
+        i = i + 1
+    Ok(true)
+
+# This is an evidence inventory, not an authorization to rewrite. A physical
+# planner must also check operation-specific legality and target cost.
+fn collection_plan_unproven_facts(node: CollectionPlanNode) -> [text]:
+    var missing: [text] = []
+    if node.facts.effects.unknown:
+        missing.push("effects")
+    match node.facts.cost:
+        case HirPerfCostClass.Unknown(_): missing.push("cost")
+        case _: pass_do_nothing
+    match node.facts.cardinality:
+        case HirPerfCardinality.Unknown(_): missing.push("cardinality")
+        case _: pass_do_nothing
+    match node.facts.allocation:
+        case HirPerfAllocationClass.Unknown: missing.push("allocation")
+        case _: pass_do_nothing
+    match node.facts.order:
+        case CollectionPlanOrder.Unknown(_): missing.push("order")
+        case _: pass_do_nothing
+    match node.facts.uniqueness:
+        case CollectionPlanUniqueness.Unknown(_): missing.push("uniqueness")
+        case _: pass_do_nothing
+    if not node.facts.equality_proven:
+        missing.push("equality")
+    if not node.output_type.?:
+        missing.push("output type")
+    match node.kind:
+        case CollectionPlanKind.Source:
+            if not node.source_expr.?:
+                missing.push("source binding")
+        case _:
+            if not node.operation_symbol_id.?:
+                missing.push("operation symbol")
+    if collection_plan_requires_key(node.kind) and not node.key_type.?:
+        missing.push("key type")
+    if not node.facts.alias_proven:
+        missing.push("alias")
+    if not node.facts.callback_pure:
+        missing.push("callback purity")
+    if not node.facts.escape_proven:
+        missing.push("escape")
+    if not node.facts.profitability_proven:
+        missing.push("profitability")
+    if node.facts.evidence_receipt == "":
+        missing.push("evidence receipt")
+    missing
+
+export CollectionPlanKind, CollectionPlanOrder, CollectionPlanUniqueness
+export CollectionPlanFacts, CollectionPlanNode, CollectionPlan
+export validate_collection_plan, collection_plan_unproven_facts
