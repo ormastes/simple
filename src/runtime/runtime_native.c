@@ -103,7 +103,7 @@ static int rt_msvc_ftruncate(int fd, long long length) {
  * 1970); CLOCK_MONOTONIC from QueryPerformanceCounter, the only genuinely
  * monotonic Windows source. Any other clock id is refused rather than silently
  * answered with the wrong timebase. */
-static int rt_windows_clock_gettime(int clock_id, struct timespec* ts) {
+static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
     if (!ts) return -1;
     if (clock_id == CLOCK_REALTIME) {
         FILETIME ft;
@@ -126,7 +126,7 @@ static int rt_windows_clock_gettime(int clock_id, struct timespec* ts) {
     }
     return -1;
 }
-#define clock_gettime rt_windows_clock_gettime
+#define clock_gettime rt_msvc_clock_gettime
 #endif
 /* Deprecated in C17 and REMOVED in C23; MinGW's <stdatomic.h> no longer
  * defines it, while glibc/libc++ still do. Defining it only when absent keeps
