@@ -941,3 +941,11 @@ target (`windows-mingw`), while retaining the host identity solely for driver
 selection and process dispatch. Windows target-policy tests pin the absence of
 ELF compiler-driver and standard-library flags. A new exact-head run remains
 required before the Windows Stage 2 artifact is admitted.
+
+The Windows GNU bootstrap toolchain is now explicitly Clang-only across both
+bootstrap generations. The Rust seed selects `clang` for generated C and the
+hosted link; the pure-Simple compiler plan selects `clang`, adds the explicit
+MinGW target to runtime C compilation and the final compiler-driver link, and
+rejects a non-Clang `SIMPLE_CC` override. CI pins `SIMPLE_CC=clang` on the
+Windows Stage 2 invocation so the chosen driver is visible and reproducible;
+`x86_64-w64-mingw32-gcc` is no longer an admitted Windows bootstrap driver.

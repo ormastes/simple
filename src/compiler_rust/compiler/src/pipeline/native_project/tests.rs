@@ -2952,6 +2952,7 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
 #[test]
 fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
     let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+    assert_eq!(target_c_compiler(target), "clang");
     assert_eq!(
         windows_gnu_target_flag(target, "clang"),
         Some("--target=x86_64-w64-windows-gnu")
