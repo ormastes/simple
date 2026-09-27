@@ -14,8 +14,7 @@ use compiler.driver.cache.package_tldr_metadata.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory_core.{
-    CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
-    compile_source_inventory_digest_v1
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1
 }
 
 val PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1: text = sha256_text(
@@ -85,12 +84,18 @@ fn package_module_index_build_from_inventory_v1(
     if drafts.len() == 0:
         return Err("index-builder-drafts-empty")
 
-    var sources: Dict<text, CompileSourceInventoryEntryV1> = {}
+    # Keep one inventory array as the value authority. A map of full entry
+    # aggregates duplicates graph-sized metadata and exercises the native
+    # aggregate-in-Dict path; a path-to-index map retains only scalar slots.
+    var sources: Dict<text, i64> = {}
     var source_count = 0
-    for source in inventory.entries:
-        sources[source.source_identity] = source
+    var source_index = 0
+    while source_index < inventory.entries.len():
+        val source = inventory.entries[source_index]
+        sources[source.source_identity] = source_index
         if source.source_identity.ends_with(".spl"):
             source_count = source_count + 1
+        source_index = source_index + 1
 
     var draft_by_module: Dict<text, i64> = {}
     var source_seen: Dict<text, bool> = {}
@@ -111,7 +116,8 @@ fn package_module_index_build_from_inventory_v1(
         if not sources.has(header.source_identity) or
                 not header.source_identity.ends_with(".spl"):
             return Err("index-builder-source-absent:{header.source_identity}")
-        if sources[header.source_identity].content_digest != header.source_digest:
+        if inventory.entries[sources[header.source_identity]].content_digest !=
+                header.source_digest:
             return Err("index-builder-source-digest-mismatch:{header.source_identity}")
         if not _index_builder_digest_valid_v1(draft.manifest_digest):
             return Err("index-builder-manifest-digest-invalid:{header.module_identity}")
@@ -124,7 +130,8 @@ fn package_module_index_build_from_inventory_v1(
                     not manifest_path.ends_with("/simple.sdn")) or
                     not sources.has(manifest_path):
                 return Err("index-builder-manifest-absent:{header.module_identity}")
-            if sources[manifest_path].content_digest != draft.manifest_digest:
+            if inventory.entries[sources[manifest_path]].content_digest !=
+                    draft.manifest_digest:
                 return Err("index-builder-manifest-digest-mismatch:{header.module_identity}")
         draft_by_module[header.module_identity] = index
         source_seen[header.source_identity] = true
