@@ -46,7 +46,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   HIR/SMF and archive receipts, bind a configuration variant into the V1
   root identity, and refuse incomplete source coverage. The actual cold
   compiler producer, generation publication, driver compatibility markers,
-  and current-source execution remain open.
+  and current-source execution remain open. HIR lowering currently visits
+  `ctx.sources` (the reached compile closure); a producer must prove complete
+  coverage of the frozen inventory, or define and admit an exact package-scoped
+  inventory partition before it may publish this generation. The builder
+  retains inventory entries once and stores only scalar source indices in its
+  lookup table.
 - Replace the binding-only empty index with a validated module/package graph,
   variant identity, exact reverse edges, reached SCC schedule, and complete
   action/archive receipts. Route compile, check, bootstrap, native-build,
