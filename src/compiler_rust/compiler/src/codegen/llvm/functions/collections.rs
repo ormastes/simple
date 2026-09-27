@@ -65,7 +65,7 @@ impl LlvmBackend {
                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_array_push", &e))?;
             if fam_push_returns_header {
                 if let Some(new_handle) = push_call.try_as_basic_value().basic() {
-                    collection = new_handle.into_int_value();
+                    collection = new_handle;
                 }
             }
         }

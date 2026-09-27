@@ -11,7 +11,7 @@ use crate::interpreter::{
     evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
     record_decision_coverage_here, BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS,
     GLOBAL_ENUMS, IMMUTABLE_VARS, MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
-    MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    MODULE_GLOBALS_BY_OWNER, CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{register_standalone_unit_locals, register_unit_family_locals};
 use crate::value::*;
@@ -404,6 +404,13 @@ pub(super) fn exec_block_closure_into(
                     if let Some((obj_name, new_self)) = update {
                         local_env.insert(obj_name, new_self);
                     }
+                    // A `val`/`var` in a block body is a LOCAL of this frame. Mark it
+                    // before binding: `Env::insert` alone leaves `is_local` false, and
+                    // the identifier read (interpreter/expr/literals.rs) prefers
+                    // MODULE_GLOBALS over any non-local binding, so a body local named
+                    // like an imported module (`types`, `spec`) read back as the module
+                    // namespace. Same class as the `if val` fix below.
+                    visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     // Use bind_pattern_value to handle all pattern types including tuples
                     let is_mutable = let_stmt.mutability.is_mutable();
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, &mut local_env);
@@ -1452,6 +1459,8 @@ fn exec_block_closure_mut_inner(
                     // Use bind_pattern_value so typed (val x: T = ...), tuple, and
                     // array patterns bind here too — hand-rolling only the identifier
                     // forms silently dropped annotated bindings in nested closure blocks.
+                    // Mark the names local first; see the `exec_block_closure_into` twin.
+                    visit_pattern_binding_names(&let_stmt.pattern, &mut |name| local_env.mark_local(name.to_owned()));
                     let is_mutable = let_stmt.mutability.is_mutable();
                     bind_pattern_value(&let_stmt.pattern, val, is_mutable, local_env);
                 }

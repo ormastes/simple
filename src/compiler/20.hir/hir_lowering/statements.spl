@@ -112,6 +112,31 @@ impl HirLowering:
             case AssignOp.Div: HirAssignOp.Div
             case AssignOp.Mod: HirAssignOp.Mod
 
+    me lower_for_iter(iter: Expr) -> HirExpr:
+        """Lower a `for` iterable. `range(a, b)` whose `range` resolves to no
+        symbol (no prelude/import/local definition, e.g. the Stage 4 no-prelude
+        closure) is the builtin half-open range the type checker already
+        accepts (30.types checker `env["range"]`, builtin_registry). Lower it
+        to the same HIR range that `a..b` produces instead of failing with
+        "unresolved name: range". A resolvable `range` always wins."""
+        match iter.kind:
+            case ExprKind.Call(callee, args):
+                val range_args: [CallArg] = args
+                match callee.kind:
+                    case ExprKind.Ident(callee_name):
+                        if callee_name == "range" and range_args.len() == 2 and not range_args[0].has_name and not range_args[1].has_name:
+                            val range_resolves = self.symbols.lookup_or_invalid("range").is_valid() or
+                                self.try_register_bootstrap_global_symbol("range", iter.span)
+                            if not range_resolves:
+                                val range_start = self.lower_hir_expr(range_args[0].value)
+                                val range_end = self.lower_hir_expr(range_args[1].value)
+                                return HirExpr(kind: HirExprKind.Range(range_start, range_end, false, nil), type_: nil, span: iter.span)
+                    case _:
+                        pass
+            case _:
+                pass
+        self.lower_hir_expr(iter)
+
     me lower_hir_assign_op_opt(op: AssignOp?) -> HirAssignOp?:
         # Returns a PLAIN NULLABLE, not an Option box. All three call sites (:455,
         # :482, :538) feed the result straight into `HirStmtKind.Assign`, whose `op`
@@ -557,7 +582,7 @@ impl HirLowering:
             case StmtKind.For(var_, iter, body):
                 self.symbols.push_scope(ScopeKind.Loop)
                 self.loop_depth = self.loop_depth + 1
-                val hir_iter = self.lower_hir_expr(iter)
+                val hir_iter = self.lower_for_iter(iter)
                 # Tuple destructuring: `for (k, v) in pairs:` -- the parser
                 # (parse_for_stmt, G40) encodes the pattern as the joined
                 # string "(k,v)" in `var_`, mirroring the `val (a, b) = ...`

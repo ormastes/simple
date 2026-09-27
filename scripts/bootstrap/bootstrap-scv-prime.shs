@@ -32,11 +32,24 @@ bootstrap_scv_journal_valid() {
     ' "$1"
 }
 
-# bootstrap_scv_prime <source_root> <cli> <home> <tmp> <log> <probe_file>
+# bootstrap_scv_prime <source_root> <cli> <home> <tmp> <log>
 # Prints one `scv-inventory-prime:` line with the outcome and timing.
 # Returns 0 when the journal is valid AND a warm admission (snapshot +
 # package index) passes, 1 otherwise.
-# bsp_run_cli <cold 0|1> <log>: one bounded `check` with the prime's env.
+# bsp_run_cli <cold 0|1> <log>: one bounded `check --help` with the prime's env.
+#
+# Why `check --help` and not `check <file>`: the CLI runs
+# compiler_entrypoint_admit_v1 for `check` BEFORE parsing its arguments
+# (_CliMain/main_and_help.spl), so `--help` exercises the exact admission a
+# spec child pays (no journal -> SCV-E-ADMISSION, measured) and then exits.
+# `check <file>` additionally semantic-checks the file and runs the repo
+# hygiene gate (repo_hygiene_gate.spl -> sh check-repo-hygiene.shs). That
+# gate never actually executed on Windows until dac914d9306 gave process_run
+# real exit codes; since then it adds ~155 s (idle host) to every prime and
+# fails on a bootstrap worktree (15 violations), which is why bootstrap47's
+# prime reported `check rc=1`. Neither is admission evidence. `--help` still
+# performs the warm snapshot materialization: from bootstrap47's pre-run
+# build/scv it took 987 s (rc=0), after which a spec child admitted in 14 s.
 bsp_run_cli() {
     (
         cd "$bsp_root" || exit 125
@@ -54,13 +67,13 @@ bsp_run_cli() {
             unset SIMPLE_SCV_INVENTORY_COLD_INIT
         fi
         if command -v timeout >/dev/null 2>&1; then
-            exec timeout "${BOOTSTRAP_SCV_PRIME_TIMEOUT:-3600}" "$bsp_cli" check "$bsp_probe"
+            exec timeout "${BOOTSTRAP_SCV_PRIME_TIMEOUT:-3600}" "$bsp_cli" check --help
         fi
-        exec "$bsp_cli" check "$bsp_probe"
+        exec "$bsp_cli" check --help
     ) >"$2" 2>&1
 }
 bootstrap_scv_prime() {
-    bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5 bsp_probe=$6
+    bsp_root=$1 bsp_cli=$2 bsp_home=$3 bsp_tmp=$4 bsp_log=$5
     bsp_cursor="$bsp_root/build/scv/compile-events/CURRENT"
     # A cursor that records filesystem rows while .scv/journal/events.log is
     # absent can never be refreshed (filesystem-event-journal-missing); older
@@ -97,7 +110,7 @@ bootstrap_scv_prime() {
         echo "scv-inventory-prime: FAILED warm admission after ${bsp_warm}s (rc=$bsp_rc): $(grep -m1 'SCV-E-ADMISSION' "$bsp_log.warm"). Log: $bsp_log.warm" >&2
         return 1
     fi
-    echo "scv-inventory-prime: ready in $(( $(date +%s) - bsp_start ))s (cold init: $bsp_cold; warm admission ${bsp_warm}s, check rc=$bsp_rc)"
+    echo "scv-inventory-prime: ready in $(( $(date +%s) - bsp_start ))s (cold init: $bsp_cold; warm admission ${bsp_warm}s, admission probe rc=$bsp_rc)"
     return 0
 }
 
@@ -120,28 +133,31 @@ bootstrap_scv_prime_selftest() {
     # good_cli: writes a valid cursor, exits 1 (check verdict is irrelevant).
     printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\nhead40=%s d64=%s\nmkdir -p build/scv/compile-events\nprintf "simple-compile-event-cursor-v1\\ngit_head=$head40\\nfilesystem_rows=0\\nfilesystem_digest=$d64\\ninventory_digest=$d64\\ninventory_generation=0" >build/scv/compile-events/CURRENT\nexit 1\n' \
         "$st" "$head40" "$d64" >"$st/good_cli"
-    # bad_cli: writes nothing, admission itself passes.
-    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\nexit 0\n' "$st" >"$st/bad_cli"
+    # bad_cli: writes nothing, admission itself passes; records its argv.
+    printf '#!/bin/sh\necho "cold=${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" >>"%s/called"\necho "$*" >>"%s/argv"\nexit 0\n' "$st" "$st" >"$st/bad_cli"
     # admit_fail_cli: warm admission refused.
     printf '#!/bin/sh\necho "SCV-E-ADMISSION: package-index:publish-failed" >&2\nexit 1\n' >"$st/admit_fail_cli"
     chmod +x "$st/good_cli" "$st/bad_cli" "$st/admit_fail_cli"
 
     # 1. valid journal present -> cold step skipped, warm admission still runs
-    mkdir -p "$st/r1"; write_cursor "$st/r1"; rm -f "$st/called"
-    bootstrap_scv_prime "$st/r1" "$st/bad_cli" "$st" "$st" "$st/l1" probe >/dev/null; expect "valid journal: success" 0 $?
+    mkdir -p "$st/r1"; write_cursor "$st/r1"; rm -f "$st/called" "$st/argv"
+    bootstrap_scv_prime "$st/r1" "$st/bad_cli" "$st" "$st" "$st/l1" >/dev/null; expect "valid journal: success" 0 $?
     ! grep -q '^cold=1' "$st/called"; expect "valid journal: cold init skipped" 0 $?
     [ "$(grep -c '^cold=$' "$st/called")" = 1 ]; expect "valid journal: one warm admission pass" 0 $?
+    # The probe is admission-only: `check --help`, never a file check (which
+    # would also run the repo hygiene gate).
+    [ "$(cat "$st/argv")" = "check --help" ]; expect "admission probe is check --help" 0 $?
     # 2. no journal -> CLI primes -> success even though check rc != 0
     mkdir -p "$st/r2"; rm -f "$st/called"
-    bootstrap_scv_prime "$st/r2" "$st/good_cli" "$st" "$st" "$st/l2" probe >/dev/null; expect "prime writes journal -> success" 0 $?
+    bootstrap_scv_prime "$st/r2" "$st/good_cli" "$st" "$st" "$st/l2" >/dev/null; expect "prime writes journal -> success" 0 $?
     [ "$(sed -n 1p "$st/called")" = "cold=1" ] && [ "$(sed -n 2p "$st/called")" = "cold=" ]
     expect "cold pass then warm pass without cold env" 0 $?
     # 2b. warm admission refused -> fail closed
     mkdir -p "$st/r2b"; write_cursor "$st/r2b"
-    bootstrap_scv_prime "$st/r2b" "$st/admit_fail_cli" "$st" "$st" "$st/l2b" probe >/dev/null 2>&1; expect "warm SCV-E-ADMISSION -> fail closed" 1 $?
+    bootstrap_scv_prime "$st/r2b" "$st/admit_fail_cli" "$st" "$st" "$st/l2b" >/dev/null 2>&1; expect "warm SCV-E-ADMISSION -> fail closed" 1 $?
     # 3. no journal and CLI writes none -> fail closed
     mkdir -p "$st/r3"
-    bootstrap_scv_prime "$st/r3" "$st/bad_cli" "$st" "$st" "$st/l3" probe >/dev/null 2>&1; expect "no journal after prime -> fail closed" 1 $?
+    bootstrap_scv_prime "$st/r3" "$st/bad_cli" "$st" "$st" "$st/l3" >/dev/null 2>&1; expect "no journal after prime -> fail closed" 1 $?
     # 4. malformed journals are not valid (re-prime rather than skip)
     mkdir -p "$st/r4/build/scv/compile-events"
     printf 'simple-compile-event-cursor-v1\ngit_head=abc\n' >"$st/r4/build/scv/compile-events/CURRENT"
@@ -156,12 +172,12 @@ bootstrap_scv_prime_selftest() {
     mkdir -p "$st/r6"; write_cursor "$st/r6"
     sed 's/^filesystem_rows=0/filesystem_rows=1/' "$st/r6/build/scv/compile-events/CURRENT" >"$st/r6c" &&
         mv "$st/r6c" "$st/r6/build/scv/compile-events/CURRENT"; rm -f "$st/called"
-    bootstrap_scv_prime "$st/r6" "$st/good_cli" "$st" "$st" "$st/l6" probe >/dev/null 2>&1; expect "unrefreshable cursor is cleared and re-primed" 0 $?
+    bootstrap_scv_prime "$st/r6" "$st/good_cli" "$st" "$st" "$st/l6" >/dev/null 2>&1; expect "unrefreshable cursor is cleared and re-primed" 0 $?
     grep -q "^cold=1" "$st/called"; expect "re-prime runs cold init" 0 $?
 
     rm -rf "$st"
     if [ "$fails" -eq 0 ]; then
-        echo "PASS — 12 scv-prime check(s)"
+        echo "PASS — 13 scv-prime check(s)"
         return 0
     fi
     echo "FAIL — $fails scv-prime check(s) failed"
