@@ -1,113 +1,107 @@
 """
 ## Purpose and audience
-Regression contract for nested `fn` assignment to an ENCLOSING local under
-the interpreter: the write-back half (a call's assignment is visible to the
-caller) and the fresh-read half (the SECOND call sees the FIRST call's
-result, not the declaration-time snapshot). Written for the compiler
-engineers who own node_exec and the closure-capture lowering.
+Regression contract for a nested `fn` or lambda assigning a local of an
+ENCLOSING function. Owner ruling 2026-09-27: closures capture enclosing
+locals by value and are READ-ONLY (.claude/rules/language.md:22), so such a
+write is a loud compile error in the Rust seed (module loader and native
+build) and in the pure-Simple interpreter (resolve.spl
+capture_write_check_module), with one shared diagnostic. Written for the
+compiler engineers who own closure capture in either engine.
 ## Operator workflow
-Run the file with the pure-Simple CLI:
-./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl
+Run the file with the seeded runner:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
 ## Compatibility and limitations
-Exercises interpreter closure semantics only; native-codegen closure
-capture has its own lanes. The bug record this spec reproduces lives at
-doc/08_tracking/bug/nested_fn_cannot_mutate_enclosing_it_block_var_2026-08-04.md.
+The seed half runs the sibling probes as subprocesses because the rejected
+program cannot load at all; the pure-Simple half feeds source text to
+core_interpret in-process. Colon-blocks (`describe`/`it`/hooks) are scopes,
+not closures, and are out of this rule's scope.
 ## Verification guidance and troubleshooting
-A failure in the accumulate scenario means capture fell back to a
-declaration-time snapshot (the original defect printed 0; a partial fix
-printed 7); a failure in the shadow scenario means parameter binding now
-clobbers the enclosing local. Rerun the single file above after any
-node_exec or capture-related edit.
+Before the ruling this spec asserted the opposite (write-through), and the
+original defect was that the write was silently lost (the caller read 0).
+See doc/08_tracking/bug/nested_fn_cannot_mutate_enclosing_it_block_var_2026-08-04.md.
+If the seed examples fail with `total=`/`count=` in the output, the running
+seed predates the fix (rebuild it); if they fail with a different message,
+the two engines' diagnostics have drifted.
 """
-# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
-# doc/03_plan/sspec_modernization_plan.md ;
-# doc/04_architecture/interpreter_shared_text.md ;
-# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
 # @manual_section: interpreter-closure-mutation
 
 use std.spec.{describe, it, expect, step}
+use std.io_runtime.{process_run, env_get}
+use compiler.frontend.core.interpreter.mod.{core_interpret}
+use compiler.frontend.core.interpreter.value.{val_get_int}
+use compiler.frontend.core.interpreter.eval.{eval_get_error}
 
-describe "nested fn mutation of an enclosing local":
+val NESTED_FN_PROBE: text = "test/01_unit/compiler/interpreter/probe_nested_fn_capture_write.spl"
+val LAMBDA_PROBE: text = "test/01_unit/compiler/interpreter/probe_lambda_capture_write.spl"
+val NESTED_FN_DIAGNOSTIC: text = "cannot assign to captured variable `total` inside nested fn `bump` (line 13): closures capture enclosing locals by value and are read-only; return the new value or use a module-level `var`"
+val LAMBDA_DIAGNOSTIC: text = "cannot assign to captured variable `count` inside a closure (line 11)"
 
-    it "propagates a single assignment back to the enclosing scope":
+fn test_binary() -> text:
+    var bin = env_get("SIMPLE_TEST_BINARY")
+    if bin == "":
+        bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    bin
+
+fn run_probe(path: text, mode: text) -> text:
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        test_binary() + " run " + path + " 2>&1"
+    process_run("sh", ["-c", cmd]).0
+
+fn core_run(source: text) -> text:
+    val r = core_interpret(source, "nested_fn_capture_probe.spl")
+    if r < 0: return "ERR:" + eval_get_error()
+    "VAL:" + val_get_int(r).to_text()
+
+describe "nested fn / lambda writes to an enclosing local":
+
+    it "rejects a nested fn assigning an enclosing local, on both seed engines":
         # @req REQ-INTERP-CLOSURE-001
-        # @capture(statistics): enclosing local observed after one nested-fn call
-        step("Call a nested fn that assigns the enclosing total and read it back")
-        var total = 0
-        fn bump(n: i64):
-            total = total + n
-        bump(5)
-        expect(total).to_equal(5)  # oracle: write-back must make the single assignment visible to the caller
+        step("Run the nested-fn probe under the interpreter and the JIT")
+        val interp = run_probe(NESTED_FN_PROBE, "interpreter")
+        val jit = run_probe(NESTED_FN_PROBE, "jit")
+        step("Both report the shared diagnostic, naming the variable, the nested fn and the line")
+        expect(interp).to_contain(NESTED_FN_DIAGNOSTIC)
+        expect(jit).to_contain(NESTED_FN_DIAGNOSTIC)
+        step("The module never ran: the old silent-loss path printed total=0")
+        expect(interp).to_not_contain("total=")
+        expect(jit).to_not_contain("total=")
 
-    it "accumulates across repeated calls (second call sees the first result)":
+    it "rejects a lambda assigning an enclosing local":
         # @req REQ-INTERP-CLOSURE-002
-        # @capture(statistics): enclosing local observed after two nested-fn calls
-        step("Call the nested fn twice and require the second call to see the first result")
-        # THE ORIGINAL DEFECT: this printed 0. A partial fix printed 7 (the last
-        # call only), because each call re-read the declaration-time snapshot.
-        var total = 0
-        fn bump(n: i64):
-            total = total + n
-        bump(5)
-        bump(7)
-        expect(total).to_equal(12)  # oracle: 5 + 7 accumulated across frames, not re-read from the snapshot
+        val out = run_probe(LAMBDA_PROBE, "interpreter")
+        expect(out).to_contain(LAMBDA_DIAGNOSTIC)
+        expect(out).to_not_contain("count=")
 
-    it "supports plain assignment, not only compound assignment":
+    it "reports the identical diagnostic from the pure-Simple interpreter":
         # @req REQ-INTERP-CLOSURE-003
-        # @capture(statistics): enclosing local observed after a plain store
-        step("Assign the enclosing local with a plain store and read it back")
-        var seen = 0
-        fn record(n: i64):
-            seen = n
-        record(42)
-        expect(seen).to_equal(42)  # oracle: the plain store must land in the caller's binding
+        step("Feed the same shape to core_interpret in-process")
+        val src = "fn outer() -> i64:\n    var total = 0\n    fn bump(n: i64):\n        total = total + n\n    bump(5)\n    total\nfn main() -> i64:\n    outer()\n"
+        val out = core_run(src)
+        expect(out).to_start_with("ERR:cannot assign to captured variable `total` inside nested fn `bump` (line 4): closures capture enclosing locals by value and are read-only")
 
-    it "mutates an enclosing text variable":
+    it "rejects a lambda write in the pure-Simple interpreter too":
         # @req REQ-INTERP-CLOSURE-004
-        # @capture(statistics): enclosing text local observed after two appends
-        step("Append to an enclosing text local from two nested-fn calls")
-        var log = ""
-        fn append(s: text):
-            log = log + s
-        append("a")
-        append("b")
-        expect(log).to_equal("ab")  # oracle: both appends land on the caller's text binding in order
+        val src = "fn outer() -> i64:\n    var n = 0\n    val f = fn(x):\n        n = n + x\n    f(2)\n    n\nfn main() -> i64:\n    outer()\n"
+        expect(core_run(src)).to_start_with("ERR:cannot assign to captured variable `n` inside nested fn `f`")
 
-    it "mutates an enclosing bool variable":
+    it "still lets a nested fn READ an enclosing local":
         # @req REQ-INTERP-CLOSURE-005
-        # @capture(statistics): enclosing bool local observed after the nested call
-        step("Raise an enclosing bool local from inside a nested fn")
-        var flag = false
-        fn raise():
-            flag = true
-        raise()
-        expect(flag).to_equal(true)  # oracle: the callee's store must flip the caller's bool
+        step("Read-only capture is the specified semantics and keeps working")
+        val base = 40
+        fn plus(n: i64) -> i64:
+            base + n
+        expect(plus(2)).to_equal(42)
 
-    it "leaves a callee-only local invisible to the caller":
+    it "keeps module-level vars writable from a nested fn":
         # @req REQ-INTERP-CLOSURE-006
-        # @capture(statistics): enclosing total observed after a call using a callee scratch
-        step("Let the callee use its own scratch local and check nothing escapes")
-        # The write-back must be restricted to names the CALLER already binds.
-        # A callee local escaping into the caller would be the opposite defect.
-        var total = 0
-        fn bump(n: i64):
-            var scratch = n * 100
-            total = total + scratch
-        bump(1)
-        expect(total).to_equal(100)  # oracle: only the enclosing total is written back, through the callee scratch
+        step("A module global is not a capture: the documented alternative")
+        val src = "var g = 0\nfn outer() -> i64:\n    fn setg():\n        g = 5\n    setg()\n    g\nfn main() -> i64:\n    outer()\n"
+        expect(core_run(src)).to_equal("VAL:5")
 
-    it "lets a parameter shadow an enclosing name without clobbering it":
+    it "lets a nested fn assign its own locals and parameters":
         # @req REQ-INTERP-CLOSURE-007
-        # @capture(statistics): parameter result and enclosing local after a shadowing call
-        step("Shadow an enclosing name with a parameter and verify neither view bleeds")
-        # Parameter binding happens AFTER the enclosing-local refresh, so the
-        # parameter must win inside the body and the outer variable must be
-        # untouched by that shadowing. The seed is mediated through a named
-        # product call so the oracle observes the interpreter, not a literal.
-        val caller_seed = "10".to_int() ?? 0
-        var value = caller_seed
-        fn shadow(value: i64) -> i64:
-            value * 2
-        val doubled = shadow(3)
-        expect(doubled).to_equal(6)  # oracle: the parameter binding wins inside the body (3 * 2)
-        expect(value).to_equal(10)  # oracle: the caller's seed of 10 must survive the shadowing call untouched
+        val src = "fn outer() -> i64:\n    fn inner(k: i64) -> i64:\n        var scratch = k * 100\n        k = k + 1\n        scratch + k\n    inner(1)\nfn main() -> i64:\n    outer()\n"
+        step("No captured-write error: only the nested fn's own names are assigned")
+        expect(core_run(src)).to_start_with("VAL:")

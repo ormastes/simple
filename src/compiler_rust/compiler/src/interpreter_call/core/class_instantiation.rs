@@ -74,19 +74,26 @@ fn pick_fitting_class_def(class_name: &str, primary: Arc<ClassDef>, args: &[Argu
 /// Decide whether the shorthand `Class(...)` form may implicitly dispatch to
 /// a static `new` method.
 ///
-/// A named argument is an unambiguous field-construction signal.  This is
-/// deliberately fail-closed for mixed calls too: field construction owns the
-/// validation and reports an unknown field instead of letting an unrelated
-/// static factory consume it.  Positional construction keeps the historical
-/// exact-arity policy.  An injection marker may fill missing parameters, but
-/// it cannot make an over-arity call compatible.
+/// `new_is_static` means a static FACTORY `new` (static and returning a value;
+/// see the call site for why a self-less initializer does not count).
+/// For a STATIC `new`, a named argument is an unambiguous field-construction
+/// signal.  This is deliberately fail-closed for mixed calls too: field
+/// construction owns the validation and reports an unknown field instead of
+/// letting an unrelated static factory consume it.  A NON-static `new` is a
+/// Python-style initializer (`fn new(label: text): self.label = ...`), which
+/// runs against the constructed instance and keeps being auto-called for
+/// named arguments (owner ruling 2026-09-27; spec
+/// struct_literal_not_routed_to_static_new_spec).  Positional construction
+/// keeps the historical exact-arity policy.  An injection marker may fill
+/// missing parameters, but it cannot make an over-arity call compatible.
 fn should_implicitly_call_new(
     has_named_arg: bool,
+    new_is_static: bool,
     supplied_arg_count: usize,
     new_param_count: usize,
     has_inject: bool,
 ) -> bool {
-    if has_named_arg {
+    if has_named_arg && new_is_static {
         return false;
     }
 
@@ -173,7 +180,19 @@ pub(crate) fn instantiate_class(
         let new_param_count = new_method.params.len();
         let has_inject = has_inject_attr(new_method);
         let has_named_arg = args.iter().any(|arg| arg.name.is_some());
-        let should_call_new = should_implicitly_call_new(has_named_arg, args.len(), new_param_count, has_inject);
+        // A static `new` is a FACTORY only when it returns a value. Since
+        // df9f0ef20ca the parser marks every self-less `fn new(...)` static, so
+        // a Python-style initializer (`fn new(label: text): self.label = ...`,
+        // no return type) also carries `is_static`; it is not a factory that
+        // could hijack a field literal, and keeps being auto-called.
+        let new_is_static_factory = new_method.is_static && new_method.return_type.is_some();
+        let should_call_new = should_implicitly_call_new(
+            has_named_arg,
+            new_is_static_factory,
+            args.len(),
+            new_param_count,
+            has_inject,
+        );
 
         if should_call_new && !already_in_new {
             let self_val = Value::aggregate(class_name.to_string(), fields.clone(), class_def.is_value_type);
@@ -496,25 +515,40 @@ pub fn clear_class_instantiation_state() {
 mod tests {
     use super::should_implicitly_call_new;
 
+    // Arguments: (has_named_arg, new_is_static, supplied, new_params, has_inject)
+
     #[test]
-    fn implicit_new_route_rejects_every_named_shape() {
-        assert!(!should_implicitly_call_new(true, 1, 1, false));
-        assert!(!should_implicitly_call_new(true, 2, 2, false));
-        assert!(!should_implicitly_call_new(true, 1, 2, true));
+    fn implicit_new_route_rejects_every_named_shape_for_static_new() {
+        assert!(!should_implicitly_call_new(true, true, 1, 1, false));
+        assert!(!should_implicitly_call_new(true, true, 2, 2, false));
+        assert!(!should_implicitly_call_new(true, true, 1, 2, true));
+    }
+
+    #[test]
+    fn implicit_new_route_auto_calls_non_static_python_style_new_with_named_args() {
+        // `class C: label: text; fn new(label: text): self.label = label + "!"`
+        // `C(label: "hi")` must run the initializer (label == "hi!").
+        assert!(should_implicitly_call_new(true, false, 1, 1, false));
+        assert!(should_implicitly_call_new(true, false, 2, 2, false));
+        assert!(!should_implicitly_call_new(true, false, 3, 2, false));
     }
 
     #[test]
     fn implicit_new_route_preserves_positional_exact_arity() {
-        assert!(should_implicitly_call_new(false, 2, 2, false));
-        assert!(!should_implicitly_call_new(false, 1, 2, false));
-        assert!(!should_implicitly_call_new(false, 3, 2, false));
+        for is_static in [true, false] {
+            assert!(should_implicitly_call_new(false, is_static, 2, 2, false));
+            assert!(!should_implicitly_call_new(false, is_static, 1, 2, false));
+            assert!(!should_implicitly_call_new(false, is_static, 3, 2, false));
+        }
     }
 
     #[test]
     fn implicit_new_route_allows_only_compatible_injection_arity() {
-        assert!(should_implicitly_call_new(false, 0, 2, true));
-        assert!(should_implicitly_call_new(false, 1, 2, true));
-        assert!(should_implicitly_call_new(false, 2, 2, true));
-        assert!(!should_implicitly_call_new(false, 3, 2, true));
+        for is_static in [true, false] {
+            assert!(should_implicitly_call_new(false, is_static, 0, 2, true));
+            assert!(should_implicitly_call_new(false, is_static, 1, 2, true));
+            assert!(should_implicitly_call_new(false, is_static, 2, 2, true));
+            assert!(!should_implicitly_call_new(false, is_static, 3, 2, true));
+        }
     }
 }

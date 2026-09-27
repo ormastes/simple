@@ -10,7 +10,7 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 use compiler.core.parser.{parser_error}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.string_interpolation_expand.{
-    parse_interpolation_fragment
+    parse_interpolation_fragment, interpolation_literalize_region
 }
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
@@ -729,6 +729,11 @@ fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
     )
 
 fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
+    # Interpolations only; see flat_bridge_build_string_regions.
+    val (_rewritten, interps) = flat_bridge_build_string_regions(value, span)
+    interps
+
+fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpolation]):
     # Bug #136 (normal native path): the core lexer copies each `{expr}`
     # interpolation region VERBATIM into the string token and never parses the
     # inner expression, so the bridge previously emitted StringLit(value, nil)
@@ -736,11 +741,18 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     # parts to splice -- `{expr}` printed literally. Scan top-level `{...}`
     # regions here (brace-depth tracked so nested braces stay in one region,
     # mirroring the MIR split logic) and sub-parse each inner into a real Expr
-    # so the HIR/MIR interpolation chain can evaluate and splice it. If any
-    # region is not a clean single expression, return [] so the string is
-    # treated as a plain literal (preserves brace-bearing non-interp strings
-    # like CSS/JSON).
+    # so the HIR/MIR interpolation chain can evaluate and splice it.
+    #
+    # Region-only fallback (seed parity, owner ruling 2026-09-27): a region
+    # that is not a clean single expression (CSS/JSON text) is literalized
+    # ALONE -- its braces are doubled in the returned text, which the MIR
+    # split_interpolation_segments `{{`/`}}` rule reads back verbatim -- while
+    # valid neighbouring regions still interpolate. An unbalanced string stays
+    # wholly literal: `(value, [])`.
     var interps: [Interpolation] = []
+    var chunks: [text] = []
+    var copied_until = 0
+    var region_start = 0
     var depth = 0
     var inner_parts: [text] = []
     var i = 0
@@ -762,6 +774,7 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             i = i + 1
         elif depth == 0 and ch == "{":
             depth = 1
+            region_start = i
             inner_parts = []
         elif depth > 0 and ch == "{":
             depth = depth + 1
@@ -771,21 +784,28 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             if depth == 0:
                 val part_idx = parse_interpolation_fragment(inner_parts.join(""))
                 if part_idx < 0:
-                    return []
-                interps.push(Interpolation(
-                    expr: convert_flat_expr(part_idx),
-                    has_format: false,
-                    format: "",
-                    span: span
-                ))
+                    chunks.push(value.substring(copied_until, region_start))
+                    chunks.push(interpolation_literalize_region(
+                        value.substring(region_start, i + 1)))
+                    copied_until = i + 1
+                else:
+                    interps.push(Interpolation(
+                        expr: convert_flat_expr(part_idx),
+                        has_format: false,
+                        format: "",
+                        span: span
+                    ))
             else:
                 inner_parts.push(ch)
         elif depth > 0:
             inner_parts.push(ch)
         i = i + 1
     if depth != 0:
-        return []
-    interps
+        return (value, [])
+    if copied_until == 0:
+        return (value, interps)
+    chunks.push(value.substring(copied_until, n))
+    (chunks.join(""), interps)
 
 fn flat_bridge_decode_brace_escapes(value: text) -> text:
     """Bug interp_brace_literal_collides_with_string_interpolation: a string
@@ -849,9 +869,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # brace-decoder allocation when no brace can affect either operation.
         if not str_val.contains("{") and not str_val.contains("}"):
             return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
-        val str_interps = flat_bridge_build_string_interps(str_val, span)
+        val (str_regions_val, str_interps) = flat_bridge_build_string_regions(str_val, span)
         if str_interps.len() > 0:
-            return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
+            return Expr(kind: ExprKind.StringLit(str_regions_val, str_interps), span: span)
         else:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
