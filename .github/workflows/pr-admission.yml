@@ -371,20 +371,20 @@ jobs:
           file_array() {
             jq -Rsc 'split("\n") | map(select(length > 0))' "$1"
           }
-          main_inventory=$(file_array convergence-receipt/main.inventory)
-          release_inventory=$(file_array convergence-receipt/release.inventory)
+          file_array convergence-receipt/main.inventory > convergence-receipt/main.inventory.json
+          file_array convergence-receipt/release.inventory > convergence-receipt/release.inventory.json
 
           jq -r '.release_to_main.classifications[].commit_sha' "$manifest" |
             sort > convergence-receipt/release.classified
           sort convergence-receipt/release.inventory > convergence-receipt/release.inventory.sorted
           diff -u convergence-receipt/release.inventory.sorted convergence-receipt/release.classified
           jq -e --arg release_ref "$RELEASE_REF" \
-            --argjson main_inventory "$main_inventory" \
-            --argjson release_inventory "$release_inventory" '
+            --slurpfile main_inventory convergence-receipt/main.inventory.json \
+            --slurpfile release_inventory convergence-receipt/release.inventory.json'
             (.main_to_release.selected_shas | length) ==
               (.main_to_release.selected_shas | unique | length) and
             all(.main_to_release.selected_shas[];
-                test("^[0-9a-f]{40}$") and ($main_inventory | index(.) != null)) and
+                test("^[0-9a-f]{40}$") and ($main_inventory[0] | index(.) != null)) and
             (.main_to_release.backports | length) ==
               (.main_to_release.backports | map(.source_commit_sha) | unique | length) and
             ((.main_to_release.selected_shas | sort) ==
@@ -393,8 +393,8 @@ jobs:
                 ($backport.source_commit_sha | test("^[0-9a-f]{40}$")) and
                 ($backport.result_commit_sha | test("^[0-9a-f]{40}$")) and
                 $backport.target_ref == $release_ref and
-                ($main_inventory | index($backport.source_commit_sha) != null) and
-                ($release_inventory | index($backport.result_commit_sha) != null)) and
+                ($main_inventory[0] | index($backport.source_commit_sha) != null) and
+                ($release_inventory[0] | index($backport.result_commit_sha) != null)) and
             (.release_to_main.classifications | length) ==
               (.release_to_main.classifications | map(.commit_sha) | unique | length) and
             all(.release_to_main.classifications[];
@@ -617,6 +617,11 @@ jobs:
           fix_sources=$(jq -c '[.[] | select(.kind == "fix") | .commit_sha]' <<<"$classifications")
           forward_sources=$(jq -c '[.[].source_commit_sha]' <<<"$forward_ports")
           test "$(jq -cS 'sort' <<<"$fix_sources")" = "$(jq -cS 'sort' <<<"$forward_sources")"
+          file_array() {
+            jq -Rsc 'split("\n") | map(select(length > 0))' "$1"
+          }
+          file_array convergence-receipt/main.inventory > convergence-receipt/main.inventory.json
+          file_array convergence-receipt/release.inventory > convergence-receipt/release.inventory.json
           main_selected=$(jq -c '.main_to_release.selected_shas' "$manifest")
           backport_sources=$(jq -c '[.[].source_commit_sha]' <<<"$backports")
           test "$(jq -cS 'sort' <<<"$main_selected")" = "$(jq -cS 'sort' <<<"$backport_sources")"
@@ -635,9 +640,9 @@ jobs:
             --arg integration_base_sha "$BASE_SHA" --arg integration_head_sha "$HEAD_SHA" \
             --arg release_inventory_head_sha "$inventory_head" \
             --arg manifest_blob_sha "$manifest_blob_sha" --arg manifest_sha256 "$manifest_sha256" \
-            --argjson main_inventory "$main_inventory" --argjson main_selected "$main_selected" \
+            --slurpfile main_inventory convergence-receipt/main.inventory.json --argjson main_selected "$main_selected" \
             --argjson backports "$backports" --argjson backport_sources "$backport_sources" \
-            --argjson release_inventory "$release_inventory" --argjson classifications "$classifications" \
+            --slurpfile release_inventory convergence-receipt/release.inventory.json --argjson classifications "$classifications" \
             --argjson forward_ports "$forward_ports" --argjson fix_sources "$fix_sources" \
             --argjson forward_sources "$forward_sources" \
             --arg authority_class "$authority_class" \
@@ -660,10 +665,10 @@ jobs:
                 release_inventory_head_sha:$release_inventory_head_sha,
                 reviewed_manifest_blob_sha:$manifest_blob_sha,
                 reviewed_manifest_sha256:$manifest_sha256},
-              main_to_release:{inventory_shas:$main_inventory,shared_fix_shas:$main_selected,
+              main_to_release:{inventory_shas:$main_inventory[0],shared_fix_shas:$main_selected,
                 selected_shas:$main_selected,backported_shas:$backport_sources,
                 backport_receipt_sha256s:[$backports[].receipt_sha256],backports:$backports},
-              release_to_main:{inventory_shas:$release_inventory,shared_fix_shas:$fix_sources,
+              release_to_main:{inventory_shas:$release_inventory[0],shared_fix_shas:$fix_sources,
                 forward_ported_shas:$forward_sources,
                 forward_port_receipt_sha256s:[$forward_ports[].receipt_sha256],
                 classifications:$classifications,forward_ports:$forward_ports},
