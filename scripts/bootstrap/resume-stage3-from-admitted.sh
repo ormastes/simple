@@ -823,6 +823,22 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
+  # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
+  # Enforce the same per-process maximum on the whole worker tree with the RSS
+  # watchdog Stage 2 already uses on this platform.
+  perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode=new --rss-cap-mode=enforce \
+    --max-rss-kib="$stage3_process_max_kib" \
+    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+    --receipt="$stage3_log.rss.env" -- \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
