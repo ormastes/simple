@@ -9376,3 +9376,45 @@ fn test_method_owner_matches_accepts_both_mangled_spellings() {
     ));
     assert!(!super::mangle::method_owner_matches("store", "U16le"));
 }
+
+#[test]
+#[cfg(windows)]
+fn respell_strips_verbatim_prefix_from_every_link_argument() {
+    // Replays the 2026-09-26 Stage 2 link failure: GNU ld reported
+    // "cannot find \\_main_stub.o" because each object arrived verbatim.
+    let mut cmd = std::process::Command::new("clang");
+    cmd.arg(r"\\?\C:\repo\objects\_main_stub.o")
+        .arg("-Wl,--allow-multiple-definition")
+        .arg(r"\\?\C:\repo\objects\libspl_objects.a")
+        .arg("-lkernel32")
+        .env("SIMPLE_TEST_ENV", "kept")
+        .current_dir(r"C:\repo");
+
+    let respelled = super::tools::respell_args_for_external_tool(&cmd);
+    let args: Vec<String> = respelled
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(
+        args,
+        vec![
+            r"C:\repo\objects\_main_stub.o".to_string(),
+            "-Wl,--allow-multiple-definition".to_string(),
+            r"C:\repo\objects\libspl_objects.a".to_string(),
+            "-lkernel32".to_string(),
+        ],
+        "every verbatim argument must be respelled; non-path flags must be untouched"
+    );
+    assert_eq!(respelled.get_program().to_string_lossy(), "clang");
+    assert_eq!(
+        respelled.get_current_dir().map(|d| d.to_string_lossy().into_owned()),
+        Some(r"C:\repo".to_string()),
+        "the working directory must survive the rebuild"
+    );
+    assert!(
+        respelled.get_envs().any(|(k, v)| k == "SIMPLE_TEST_ENV"
+            && v.map(|v| v.to_string_lossy().into_owned()) == Some("kept".to_string())),
+        "explicit environment must survive the rebuild"
+    );
+}

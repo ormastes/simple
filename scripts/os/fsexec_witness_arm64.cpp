@@ -1,81 +1,40 @@
-// SimpleOS in-guest C++ toolchain witness (lane-C1 aarch64, rung R6).
+// SimpleOS in-guest C++ witness (lane-C1 aarch64, rungs R6a/R6b/R6c).
 //
-// Canonical source. The gate (scripts/qemu/check_simpleos_arm64_clang_compile.shs)
-// preprocesses this file ON THE HOST with the lane-C1 cross clang against the
-// staged sysroot headers (libc++ v1 + SimpleOS libc), producing the
-// self-contained /WITNESS.CPP staged into the guest FAT32 image (the roadmap
-// B1 method: the guest FAT32 is root-only 8.3 — the 568-header libc++ closure
-// cannot live there; the in-guest cc1 then parses+codegen this real libc++
-// translation unit with no #include resolution left to do).
+// LEANEST possible C++ TU — self-contained, NO #includes, NO STL. Proves the
+// in-guest C++ frontend + link + run with the minimum AST: one virtual base
+// class (vtable emission + dynamic dispatch), operator new/delete (libc++abi
+// runtime), and printf. std::string/std::vector/iostreams are deliberately
+// absent: their libc++ header closure is what made the earlier witness a
+// ~10 MiB AST/PCH that the guest cc1 could not read inside the boot budget
+// under TCG (agent-47, run-20260927_024414). This file compiles in ~seconds.
 //
-// C++17 against libc++ (std::string/std::vector), printf for output (no
-// iostreams — less libc++ surface), a class with virtuals, templates.
+// The virtual + new + delete still pull the minimal libc++abi runtime at
+// LINK time (rung R6b: operator new/delete, the vtable's key function) — that
+// is the C++ proof. Compiled -fno-rtti (matches the prebuilt guest libc++;
+// the fork's cc1 compiles exceptions OUT by default and REJECTS an explicit
+// -fno-exceptions, so no such flag is passed — the guest R6a cc1 line omits
+// it). throw/catch remains the documented gap and is not exercised.
 //
-// Compiled -fno-exceptions -fno-rtti: the prebuilt guest libc++ was built
-// -fno-exceptions -fno-rtti and, at witness time, libc++abi lacked the
-// exception runtime (cxa_exception/cxa_personality) and libc++ emitted no
-// RTTI typeinfo objects, so throw/catch is the documented remaining gap
-// (lane doc 2026-09-26 R6), not exercised here.
-#include <string>
-#include <vector>
-#include <cstdio>
-
-// A class with virtuals: vtable emission + virtual dispatch.
-struct Greeter {
-    virtual ~Greeter() {}
-    virtual const char *name() const = 0;
-    virtual int value() const = 0;
-};
-
-struct Adder : Greeter {
-    int base;
-    explicit Adder(int b) : base(b) {}
-    const char *name() const override { return "adder"; }
-    int value() const override { return base + 1; }
-};
-
-// Templates: instantiated twice.
-template <typename T>
-T twice(T x) { return x + x; }
-
-static int check(bool ok, const char *what) {
-    if (!ok) {
-        std::printf("WITNESS_FAIL %s\n", what);
-        return 1;
-    }
-    return 0;
-}
-
 // main(int, char**): this toolchain's freestanding C++ emits main with C++
-// linkage (clang/lld driver.cpp does the same — see main_shim.S in the
-// sysroot build), and the crt0 main shim branches main -> _Z4mainiPPc. A
-// no-arg main would mangle to _Z4mainv and never be reached (the R5b
-// hollow-green trap).
+// linkage (the crt0 main shim branches main -> _Z4mainiPPc); a no-arg main
+// would mangle to _Z4mainv and never be reached (the R5b hollow-green trap).
+// The product prints WITNESS_CXX_42 (b->value() == 42 through the virtual).
+
+struct Base {
+    virtual ~Base() {}
+    virtual int value() const { return 1; }
+};
+
+struct Derived : Base {
+    int value() const override { return 42; }
+};
+
+extern "C" int printf(const char *fmt, ...);
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
-    int rc = 0;
-
-    // std::string: heap allocation, SSO, append/compare.
-    std::string s = "WITNESS";
-    s += "_CXX";
-    rc |= check(s == "WITNESS_CXX", "string-eq");
-    rc |= check(s.size() == 10u, "string-size");
-
-    // std::vector: growth, iterators, indexing.
-    std::vector<int> v;
-    for (int i = 0; i < 8; ++i) v.push_back(twice(i));
-    rc |= check(v.size() == 8u, "vector-size");
-    rc |= check(v[7] == 14, "vector-elem");
-
-    // Virtual dispatch through a base pointer.
-    Adder a(41);
-    Greeter *g = &a;
-    rc |= check(std::string(g->name()) == "adder", "virtual-name");
-    rc |= check(g->value() == 42, "virtual-value");
-
-    if (rc == 0) {
-        std::printf("WITNESS_CXX_OK\n");
-        return 0;
-    }
-    return 1;
+    Base *b = new Derived();
+    printf("WITNESS_CXX_%d\n", b->value());
+    delete b;
+    return 0;
 }
