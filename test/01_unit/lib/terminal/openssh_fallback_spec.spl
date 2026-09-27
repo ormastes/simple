@@ -1,0 +1,33 @@
+use std.spec.*
+use std.nogc_sync_mut.terminal.types.{make_ssh_config, make_ssh_pubkey_config}
+use std.nogc_sync_mut.terminal.ssh_terminal.{openssh_execute_args, openssh_upload_args, openssh_download_args}
+
+describe "OpenSSH terminal fallback planning":
+    it "builds bounded agent-authenticated SSH execution arguments":
+        val config = make_ssh_config("linux", "remote.example", 2222,
+            "builder", "agent", "")
+        val args = openssh_execute_args(config, "true").unwrap()
+        expect(args).to_equal(["-o", "BatchMode=yes", "-p", "2222", "--",
+            "builder@remote.example", "true"])
+
+    it "adds an explicit private key and quotes the remote upload path":
+        val config = make_ssh_pubkey_config("windows", "win.example", 22,
+            "builder", "C:\\keys\\builder")
+        val args = openssh_upload_args(config, "C:\\build\\simple.exe",
+            "C:\\Temp\\simple upload.exe").unwrap()
+        expect(args).to_equal(["-o", "BatchMode=yes", "-i", "C:\\keys\\builder",
+            "-P", "22", "--", "C:\\build\\simple.exe",
+            "builder@win.example:C:\\Temp\\simple upload.exe"])
+        val download = openssh_download_args(config,
+            "C:\\Temp\\simple upload.exe", "C:\\evidence\\simple.exe").unwrap()
+        expect(download).to_equal(["-o", "BatchMode=yes", "-i", "C:\\keys\\builder",
+            "-P", "22", "--", "builder@win.example:C:\\Temp\\simple upload.exe",
+            "C:\\evidence\\simple.exe"])
+
+    it "fails closed for password auth and missing public keys":
+        val password = make_ssh_config("host", "remote.example", 22,
+            "builder", "password", "secret")
+        expect(openssh_execute_args(password, "true").is_err()).to_equal(true)
+        val missing_key = make_ssh_config("host", "remote.example", 22,
+            "builder", "pubkey", "")
+        expect(openssh_execute_args(missing_key, "true").is_err()).to_equal(true)

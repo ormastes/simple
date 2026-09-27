@@ -1,6 +1,6 @@
 # GHDL RV32 RTL Simulation JIT End-to-End (Unified Adapter)
 
-> End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter pattern. Uses GhdlRv32Adapter for simulation lifecycle, CompilerBridge for compilation, and the standard connect/disconnect pattern.
+> End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter pattern. Uses GhdlRv32Adapter for simulation lifecycle, the compiler-owned RV32 adapter for compilation, and the standard connect/disconnect pattern.
 
 <!-- sdn-diagram:id=ghdl_rv32_jit_e2e_spec.arch -->
 <details class="sdn-source">
@@ -35,7 +35,7 @@ ghdl_rv32_jit_e2e_spec -> hardware
 
 # GHDL RV32 RTL Simulation JIT End-to-End (Unified Adapter)
 
-End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter pattern. Uses GhdlRv32Adapter for simulation lifecycle, CompilerBridge for compilation, and the standard connect/disconnect pattern.
+End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter pattern. Uses GhdlRv32Adapter for simulation lifecycle, the compiler-owned RV32 adapter for compilation, and the standard connect/disconnect pattern.
 
 ## At a Glance
 
@@ -52,8 +52,8 @@ End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter patt
 ## Overview
 
 End-to-end JIT verification on GHDL-simulated RV32I CPU via unified adapter
-pattern. Uses GhdlRv32Adapter for simulation lifecycle, CompilerBridge for
-compilation, and the standard connect/disconnect pattern.
+pattern. Uses GhdlRv32Adapter for simulation lifecycle, the compiler-owned
+RV32 adapter for compilation, and the standard connect/disconnect pattern.
 
 The adapter stores uploaded code in a local buffer, then runs a full GHDL
 simulation on resume(). Semihosting output is parsed from simulation stdout.
@@ -125,7 +125,7 @@ else:
 
 1. var adapter = GhdlRv32Adapter new
    - Expected: connect_result.is_ok() is true
-2. print "SKIP: compilation failed — {compile result err
+2. print "FAIL: compilation failed — {compile result err
 3. adapter disconnect
    - Expected: write_result.is_ok() is true
 4. print "SKIP: simulation failed — {resume result err
@@ -149,9 +149,10 @@ else:
     expect(connect_result.is_ok()).to_equal(true)
 
     val source = "fn main() -> i64:\n    0\n"
-    val compile_result = CompilerBridge.compile(source, Architecture.RiscV32, adapter.memory_map.code_start)
+    val compile_result = compile_remote_riscv32_binary(source, adapter.memory_map.code_start)
     if compile_result.is_err():
-        print "SKIP: compilation failed — {compile_result.err().unwrap()}"
+        print "FAIL: compilation failed — {compile_result.err().unwrap()}"
+        expect(compile_result.is_ok()).to_equal(true)
         adapter.disconnect()
     else:
         val bytes = compile_result.unwrap()

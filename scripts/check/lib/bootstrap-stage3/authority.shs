@@ -508,7 +508,11 @@ bootstrap_stage3_stage2_canonical_env_names() {
     # 180 name here only, so every Stage 2 run refused pre-exec with
     # "missing: LLVM_SYS_180_PREFIX". This list and bootstrap_run_stage2_native
     # must name the same set.
-    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT LLVM_SYS_231_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
+    # Keep the four mimalloc controls together and ordered exactly as the
+    # Stage 2 invocation.  On Windows the arena/decommit settings bound
+    # committed pages; omitting their names makes the fail-closed transcript
+    # guard refuse the build before the compiler can start.
+    printf '%s' 'SIMPLE_LLVM_BIN SIMPLE_LLVM_PATH MIMALLOC_EAGER_COMMIT MIMALLOC_ARENA_EAGER_COMMIT MIMALLOC_PURGE_DELAY MIMALLOC_PURGE_DECOMMITS LLVM_SYS_231_PREFIX PATH RUST_LOG LIBRARY_PATH SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256 SIMPLE_BOOTSTRAP SIMPLE_ABI_POLICY SIMPLE_PLUGIN_MANIFEST_POLICY SIMPLE_KERNEL_K1_POLICY SIMPLE_COVERAGE_CUTOVER_STATE SIMPLE_K1_COMPOSITION_SHA256_BEFORE SIMPLE_NO_DEPRECATED_WARNINGS SIMPLE_NATIVE_BUILD_RUST SIMPLE_NO_STUB_FALLBACK SIMPLE_BUILD_PROGRESS_EVENTS SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR'
     case "$1" in
         *apple-darwin*)
             printf ' %s' 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION'
@@ -1232,6 +1236,10 @@ bootstrap_stage3_rust_toolchain_trace() {
 # Native metadata commands are read-only. Recorded Windows launch failures have
 # not reproduced in focused probes of the same installed executable and PATH.
 # Permit one immediate second launch with identical argv and clean environment.
+# Native Windows process creation can return shell status 125 for several
+# consecutive launches even when the executable remains byte-identical; that
+# transient class (and only it) gets up to three additional bounded attempts.
+# Any other non-zero status retains the two-attempt contract.
 # Bind the executable's bytes around each launch; publish only successful stdout
 # and retain both attempt statuses/stderr when recovery is needed. This helper
 # must not wrap builds or other commands with side effects.
@@ -2432,12 +2440,12 @@ bootstrap_stage3_tool_authority_snapshot() (
         ) || return 1
         [ -f "$bootstrap_stage3_tool_llvm_canonical" ] || return 1
         bootstrap_stage3_tool_llvm_version=$(
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_tool_llvm_requested" --version
+            bootstrap_stage3_native_metadata_probe llvm-config-tool-version \
+                "$bootstrap_stage3_tool_llvm_canonical" --version
         ) || return 1
         bootstrap_stage3_tool_llvm_prefix=$(
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_tool_llvm_requested" --prefix
+            bootstrap_stage3_native_metadata_probe llvm-config-tool-prefix \
+                "$bootstrap_stage3_tool_llvm_canonical" --prefix
         ) || return 1
         printf 'llvm-config-requested=%s|canonical=%s|sha256=%s|version=%s|prefix=%s\n' \
             "$bootstrap_stage3_tool_llvm_requested" \
@@ -5084,7 +5092,9 @@ bootstrap_stage3_git_state() {
 # The aggregate fingerprint remains the exact hash of `records`; this sidecar
 # deliberately does not alter that compatibility-sensitive byte stream.  It is
 # enough to explain a later aggregate mismatch without retaining source text,
-# command output, or credentials.
+# command output, or credentials. Native-tool categories additionally retain
+# ordered per-record hashes so a small unstable tool observation can be
+# localized without disclosing its path, version text, or command output.
 bootstrap_stage3_write_seed_fingerprint_details() (
     [ "$#" -eq 3 ] || return 64
     bootstrap_stage3_detail_path=$1
@@ -5140,6 +5150,20 @@ bootstrap_stage3_write_seed_fingerprint_details() (
             bootstrap_stage3_detail_hash=$(bootstrap_stage3_hash_file "$bootstrap_stage3_detail_file") || return 1
             printf 'category_%s_count=%s\n' "$bootstrap_stage3_detail_category" "$bootstrap_stage3_detail_count"
             printf 'category_%s_sha256=%s\n' "$bootstrap_stage3_detail_category" "$bootstrap_stage3_detail_hash"
+            if [ "$bootstrap_stage3_detail_category" = native_tools ]; then
+                bootstrap_stage3_detail_record_index=0
+                while IFS= read -r bootstrap_stage3_detail_record; do
+                    bootstrap_stage3_detail_record_index=$((bootstrap_stage3_detail_record_index + 1))
+                    bootstrap_stage3_detail_record_hash=$(printf '%s\n' \
+                        "$bootstrap_stage3_detail_record" | bootstrap_stage3_hash_stdin) || return 1
+                    # The pipeline status is the formatter's, not the hash
+                    # tool's: require a real SHA-256 digest.
+                    [ "${#bootstrap_stage3_detail_record_hash}" -eq 64 ] || return 1
+                    printf 'category_native_tools_record_%s_sha256=%s\n' \
+                        "$bootstrap_stage3_detail_record_index" \
+                        "$bootstrap_stage3_detail_record_hash"
+                done <"$bootstrap_stage3_detail_file"
+            fi
         done
     } >"$bootstrap_stage3_detail_out" || return 1
     chmod 400 "$bootstrap_stage3_detail_out" || return 1
@@ -5452,14 +5476,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             bootstrap_stage3_seed_trace native-cc-identity-recorded
             bootstrap_stage3_seed_cc_version=\
 "$bootstrap_stage3_seed_tmp/cc-version"
-            bootstrap_stage3_seed_cc_status=0
-            env -i PATH="$PATH" LC_ALL=C LANG=C \
-                "$bootstrap_stage3_seed_cc" --version \
-                >"$bootstrap_stage3_seed_cc_version" 2>&1 ||
-                bootstrap_stage3_seed_cc_status=$?
-            bootstrap_stage3_seed_trace "native-cc-version-status=$bootstrap_stage3_seed_cc_status"
-            printf 'cc-version-status=%s\n' \
-                "$bootstrap_stage3_seed_cc_status" \
+            bootstrap_stage3_native_metadata_probe cc-fingerprint-version \
+                "$bootstrap_stage3_seed_cc_canonical" --version \
+                >"$bootstrap_stage3_seed_cc_version" || exit 1
+            bootstrap_stage3_seed_trace native-cc-version-status=0
+            printf 'cc-version-status=0\n' \
                 >>"$bootstrap_stage3_seed_records" || exit 1
             sed -n '1p' "$bootstrap_stage3_seed_cc_version" \
                 >>"$bootstrap_stage3_seed_records" || exit 1

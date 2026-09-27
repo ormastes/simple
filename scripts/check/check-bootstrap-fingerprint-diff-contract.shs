@@ -25,7 +25,7 @@ printf '%s\n' \
 cp "$records" "$current_records"
 bootstrap_stage3_write_seed_fingerprint_details "$details" "$records" "$scratch"
 aggregate=$(sed -n 's/^aggregate_sha256=//p' "$details")
-[ "$(wc -l <"$details" | tr -d ' ')" = 19 ]
+[ "$(wc -l <"$details" | tr -d ' ')" = 20 ]
 [ "$(wc -c <"$details" | tr -d ' ')" -lt 4096 ]
 if grep -Eq 'src/|/fixture/|recipe\.1=fixture' "$details"; then
   echo 'FAIL: bounded sidecar retained raw fingerprint inputs' >&2
@@ -41,7 +41,19 @@ printf 'schema=simple-bootstrap-seed-artifact-stamp-v2\ninputs_fingerprint=%s\nf
 [ "$(sed -n 's/^category_policy_count=//p' "$details")" = 2 ]
 [ "$(sed -n 's/^category_toolchain_count=//p' "$details")" = 1 ]
 [ "$(sed -n 's/^category_native_tools_count=//p' "$details")" = 1 ]
+[ "$(sed -n 's/^category_native_tools_record_1_sha256=//p' "$details" | wc -c | tr -d ' ')" = 65 ]
 [ "$(sed -n 's/^category_recipes_count=//p' "$details")" = 1 ]
+# A hash tool that fails without output must fail the sidecar write closed;
+# a pipeline status taken from awk would record an empty record hash.
+shim="$fixture/failing-hash-tool"
+mkdir -p "$shim"
+printf '#!/bin/sh\nexit 1\n' >"$shim/sha256sum"
+chmod +x "$shim/sha256sum"
+if (PATH="$shim:$PATH"; bootstrap_stage3_write_seed_fingerprint_details \
+    "$fixture/failing-hash.details.env" "$records" "$scratch"); then
+  echo 'FAIL: failing sha256sum produced a fingerprint sidecar' >&2
+  exit 1
+fi
 [ "$(sed -n 's/^category_unclassified_count=//p' "$details")" = 0 ]
 sed 's/^aaaaaaaa/eeeeeeee/' "$current_records" >"$current_records.tmp"
 mv "$current_records.tmp" "$current_records"

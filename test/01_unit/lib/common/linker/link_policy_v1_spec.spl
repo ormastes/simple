@@ -64,6 +64,12 @@ describe "LinkExecutionPolicyV1 validation":
     it "rejects Bounded mode with job_memory_limit_bytes = 0":
         expect(link_policy_v1_validate(bounded_policy(0), REQUIREMENT)).to_contain("job_memory_limit_bytes")
 
+    it "rejects enforced Auto without an admitted limit":
+        var policy = fast_policy(0)
+        policy.mode = LinkExecutionModeV1.Auto
+        policy.enforcement_requirement = 1
+        expect(link_policy_v1_validate(policy, REQUIREMENT)).to_contain("job_memory_limit_bytes")
+
     it "accepts Bounded mode with the design §8 6 GB budget":
         expect(link_policy_v1_validate(bounded_policy(6000000000), REQUIREMENT)).to_equal("")
 
@@ -87,3 +93,35 @@ describe "LinkExecutionPolicyV1 validation":
             max_workers: 1, allowed_placements: 0, enforcement_requirement: 0
         )
         expect(link_policy_v1_validate(policy, REQUIREMENT)).to_contain("schema header invalid")
+
+describe "LinkExecutionPolicyV1 Auto decision":
+    it "preserves explicit modes and records their reason":
+        val fast = link_policy_resolve_mode_v1(fast_policy(0), 7000000000)
+        expect(fast.selected_mode).to_equal(LinkExecutionModeV1.Fast)
+        expect(fast.reason).to_equal("explicit-fast")
+        val bounded = link_policy_resolve_mode_v1(bounded_policy(6000000000), 1)
+        expect(bounded.selected_mode).to_equal(LinkExecutionModeV1.Bounded)
+        expect(bounded.reason).to_equal("explicit-bounded")
+
+    it "selects bounded before execution when enforcement or estimate requires it":
+        var enforced = fast_policy(6000000000)
+        enforced.mode = LinkExecutionModeV1.Auto
+        enforced.enforcement_requirement = 1
+        val enforcement_decision = link_policy_resolve_mode_v1(enforced, 1)
+        expect(enforcement_decision.selected_mode).to_equal(LinkExecutionModeV1.Bounded)
+        expect(enforcement_decision.reason).to_equal("auto-enforcement-required")
+        var estimated = enforced
+        estimated.enforcement_requirement = 0
+        val estimate_decision = link_policy_resolve_mode_v1(estimated, 6000000001)
+        expect(estimate_decision.selected_mode).to_equal(LinkExecutionModeV1.Bounded)
+        expect(estimate_decision.reason).to_equal("auto-estimate-exceeds-limit")
+
+    it "keeps Auto fast when the estimate fits or is unavailable":
+        var policy = fast_policy(6000000000)
+        policy.mode = LinkExecutionModeV1.Auto
+        val within = link_policy_resolve_mode_v1(policy, 5999999999)
+        expect(within.selected_mode).to_equal(LinkExecutionModeV1.Fast)
+        expect(within.reason).to_equal("auto-estimate-within-limit")
+        val unknown = link_policy_resolve_mode_v1(policy, 0)
+        expect(unknown.selected_mode).to_equal(LinkExecutionModeV1.Fast)
+        expect(unknown.reason).to_equal("auto-no-estimate-fast")

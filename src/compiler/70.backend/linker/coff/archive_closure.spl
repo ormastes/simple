@@ -1,0 +1,242 @@
+# COFF archive closure for the pure-Simple Windows linker.
+#
+# MSVC .lib files use the ar container.  Linker-index and long-name members are
+# metadata; ordinary COFF members are selected to a fixpoint when they define a
+# still-unresolved external symbol.  Short import objects are deliberately
+# rejected by the object parser and skipped here until import-table synthesis
+# owns them explicitly.
+
+use compiler.backend.linker.archive_parser.{ar_parse, ar_member_data}
+use compiler.backend.linker.coff.coff_object.{
+    CoffObject, COFF_MACHINE_AMD64, COFF_MACHINE_ARM64, COFF_WEAK_SEARCH_LIBRARY,
+    coff_parse_object, coff_is_bigobj,
+    coff_symbol_resolution_name, coff_weak_primary_for_fallback,
+    coff_weak_primary_searches_library_for_fallback,
+    coff_symbol_is_relocated}
+use compiler.backend.linker.coff.coff_import.{
+    CoffImportObject, coff_is_short_import, coff_parse_short_import}
+use compiler.backend.linker.coff.coff_directives.{coff_resolve_alternate_name}
+
+struct CoffArchiveMember:
+    archive_index: i64
+    name: text
+    bytes: [u8]
+    object: CoffObject
+
+struct CoffArchiveClosure:
+    members: [CoffArchiveMember]
+    imports: [CoffImportObject]
+    passes: i64
+
+fn _coff_archive_i64(bytes: [u8]) -> [i64]:
+    var result: [i64] = []
+    for b in bytes: result = result.push(b as i64)
+    result
+
+fn _coff_archive_u8(bytes: [i64]) -> [u8]:
+    var result: [u8] = []
+    for b in bytes: result = result.push(b as u8)
+    result
+
+fn _coff_archive_is_object(bytes: [i64]) -> bool:
+    if bytes.len() < 20: return false
+    val machine = bytes[0] | (bytes[1] << 8)
+    if machine == COFF_MACHINE_AMD64 or machine == COFF_MACHINE_ARM64: return true
+    coff_is_bigobj(_coff_archive_u8(bytes))
+
+fn coff_archive_members(archives: [[u8]]) -> Result<[CoffArchiveMember], text>:
+    """Decode ordinary AMD64/ARM64 COFF members; skip metadata/import rows."""
+    var result: [CoffArchiveMember] = []
+    var archive_index: i64 = 0
+    while archive_index < archives.len():
+        val reader = ar_parse(_coff_archive_i64(archives[archive_index]))
+        if reader.is_err(): return Err("COFF archive {archive_index}: {reader.unwrap_err()}")
+        val parsed_reader = reader.unwrap()
+        for member in parsed_reader.members:
+            if member.name == "" or member.name.starts_with("/"): continue
+            val data = ar_member_data(parsed_reader, member)
+            if not _coff_archive_is_object(data): continue
+            val bytes = _coff_archive_u8(data)
+            val parsed = coff_parse_object(bytes)
+            if parsed.is_err():
+                return Err("COFF archive {archive_index} member '{member.name}': {parsed.unwrap_err()}")
+            result = result.push(CoffArchiveMember(archive_index: archive_index,
+                name: member.name, bytes: bytes, object: parsed.unwrap()))
+        archive_index = archive_index + 1
+    Ok(result)
+
+fn coff_archive_imports(archives: [[u8]]) -> Result<[CoffImportObject], text>:
+    """Decode short-import members from every input library."""
+    var result: [CoffImportObject] = []
+    var archive_index: i64 = 0
+    while archive_index < archives.len():
+        val reader = ar_parse(_coff_archive_i64(archives[archive_index]))
+        if reader.is_err(): return Err("COFF archive {archive_index}: {reader.unwrap_err()}")
+        val parsed_reader = reader.unwrap()
+        for member in parsed_reader.members:
+            if member.name == "" or member.name.starts_with("/"): continue
+            val bytes = _coff_archive_u8(ar_member_data(parsed_reader, member))
+            if not coff_is_short_import(bytes): continue
+            val parsed = coff_parse_short_import(bytes)
+            if parsed.is_err():
+                return Err("COFF archive {archive_index} member '{member.name}': {parsed.unwrap_err()}")
+            result = result.push(parsed.unwrap())
+        archive_index = archive_index + 1
+    Ok(result)
+
+fn _coff_archive_add_definitions(defined: {text: bool}, object: CoffObject) -> {text: bool}:
+    var result = defined
+    for symbol in object.symbols:
+        if symbol.name != "" and symbol.is_external() and
+                (symbol.is_defined() or symbol.is_absolute()):
+            result[symbol.name] = true
+    result
+
+fn _coff_archive_add_undefined(undefined: {text: bool}, defined: {text: bool},
+        library_symbols: {text: bool}, object: CoffObject,
+        aliases: {text: text}) -> Result<{text: bool}, text>:
+    var result = undefined
+    for symbol in object.symbols:
+        if symbol.name != "" and symbol.is_external() and not symbol.is_defined() and
+                not symbol.is_absolute():
+            if symbol.value > 0: continue
+            val weak_primary = coff_weak_primary_for_fallback(object, symbol.table_index)
+            if weak_primary != nil and defined.has(weak_primary ?? "") and
+                    not coff_symbol_is_relocated(object, symbol.table_index):
+                continue
+            if weak_primary != nil and library_symbols.has(weak_primary ?? "") and
+                    coff_weak_primary_searches_library_for_fallback(
+                        object, symbol.table_index) and
+                    not coff_symbol_is_relocated(object, symbol.table_index):
+                continue
+            if defined.has(symbol.name): continue
+            var resolved: Result<text, text> = Ok(symbol.name)
+            if not symbol.is_weak_external() or
+                    symbol.weak_characteristics != COFF_WEAK_SEARCH_LIBRARY or
+                    not library_symbols.has(symbol.name):
+                resolved = coff_symbol_resolution_name(object, symbol)
+            if resolved.is_err(): return Err(resolved.unwrap_err())
+            val alternate = coff_resolve_alternate_name(resolved.unwrap(), aliases)
+            if alternate.is_err(): return Err(alternate.unwrap_err())
+            if not defined.has(alternate.unwrap()): result[alternate.unwrap()] = true
+    Ok(result)
+
+fn _coff_archive_satisfies(object: CoffObject, undefined: {text: bool}) -> bool:
+    for symbol in object.symbols:
+        if symbol.name != "" and symbol.is_external() and
+                (symbol.is_defined() or symbol.is_absolute()) and
+                undefined.has(symbol.name):
+            return true
+    false
+
+fn _coff_archive_defines(members: [CoffArchiveMember], name: text) -> bool:
+    for member in members:
+        for symbol in member.object.symbols:
+            if symbol.name == name and symbol.is_external() and
+                    (symbol.is_defined() or symbol.is_absolute()):
+                return true
+    false
+
+fn coff_archive_closure(roots: [CoffObject], archives: [[u8]]) -> Result<CoffArchiveClosure, text>:
+    """Select archive members until no unresolved external gains a provider."""
+    coff_archive_closure_retained(roots, archives, [])
+
+fn coff_archive_closure_retained(roots: [CoffObject], archives: [[u8]],
+        retained_symbols: [text]) -> Result<CoffArchiveClosure, text>:
+    """Closure with `/INCLUDE`-style roots for ordinary and import members."""
+    coff_archive_closure_retained_aliases(roots, archives, retained_symbols, {})
+
+fn coff_archive_closure_retained_aliases(roots: [CoffObject], archives: [[u8]],
+        retained_symbols: [text], aliases: {text: text}) -> Result<CoffArchiveClosure, text>:
+    """Closure with retained roots and `/ALTERNATENAME` fallback resolution."""
+    val candidates = coff_archive_members(archives)
+    if candidates.is_err(): return Err(candidates.unwrap_err())
+    val candidate_members = candidates.unwrap()
+    val import_candidates = coff_archive_imports(archives)
+    if import_candidates.is_err(): return Err(import_candidates.unwrap_err())
+    val available_imports = import_candidates.unwrap()
+    var library_symbols: {text: bool} = {}
+    for candidate in candidate_members:
+        library_symbols = _coff_archive_add_definitions(
+            library_symbols, candidate.object)
+    for import_object in available_imports:
+        library_symbols[import_object.public_name] = true
+        library_symbols[import_object.iat_symbol()] = true
+    var effective_retained = retained_symbols
+    for special in ["_tls_used", "_load_config_used"]:
+        if _coff_archive_defines(candidate_members, special) and
+                not effective_retained.contains(special):
+            effective_retained = effective_retained.push(special)
+    var taken: [bool] = []
+    for _candidate in candidate_members: taken = taken.push(false)
+    var selected: [CoffArchiveMember] = []
+    var passes: i64 = 0
+    var changed = true
+    while changed:
+        changed = false
+        var defined: {text: bool} = {}
+        for root in roots: defined = _coff_archive_add_definitions(defined, root)
+        for member in selected: defined = _coff_archive_add_definitions(defined, member.object)
+        var undefined: {text: bool} = {}
+        for root in roots:
+            val added = _coff_archive_add_undefined(
+                undefined, defined, library_symbols, root, aliases)
+            if added.is_err(): return Err(added.unwrap_err())
+            undefined = added.unwrap()
+        for member in selected:
+            val added = _coff_archive_add_undefined(
+                undefined, defined, library_symbols, member.object, aliases)
+            if added.is_err(): return Err(added.unwrap_err())
+            undefined = added.unwrap()
+        for name in effective_retained:
+            if name != "" and not defined.has(name):
+                val alternate = coff_resolve_alternate_name(name, aliases)
+                if alternate.is_err(): return Err(alternate.unwrap_err())
+                if not defined.has(alternate.unwrap()): undefined[alternate.unwrap()] = true
+        if undefined.len() == 0: break
+        var index: i64 = 0
+        while index < candidate_members.len():
+            val candidate = candidate_members[index]
+            if not taken[index] and _coff_archive_satisfies(candidate.object, undefined):
+                taken[index] = true
+                selected = selected.push(candidate)
+                changed = true
+                for symbol in candidate.object.symbols:
+                    if symbol.is_external() and (symbol.is_defined() or symbol.is_absolute()) and
+                            undefined.has(symbol.name):
+                        undefined.remove(symbol.name)
+            index = index + 1
+        if changed: passes = passes + 1
+    var final_defined: {text: bool} = {}
+    for root in roots: final_defined = _coff_archive_add_definitions(final_defined, root)
+    for member in selected: final_defined = _coff_archive_add_definitions(final_defined, member.object)
+    var final_undefined: {text: bool} = {}
+    for root in roots:
+        val added = _coff_archive_add_undefined(
+            final_undefined, final_defined, library_symbols, root, aliases)
+        if added.is_err(): return Err(added.unwrap_err())
+        final_undefined = added.unwrap()
+    for member in selected:
+        val added = _coff_archive_add_undefined(
+            final_undefined, final_defined, library_symbols, member.object, aliases)
+        if added.is_err(): return Err(added.unwrap_err())
+        final_undefined = added.unwrap()
+    for name in effective_retained:
+        if name != "" and not final_defined.has(name):
+            val alternate = coff_resolve_alternate_name(name, aliases)
+            if alternate.is_err(): return Err(alternate.unwrap_err())
+            if not final_defined.has(alternate.unwrap()): final_undefined[alternate.unwrap()] = true
+    var selected_imports: [CoffImportObject] = []
+    var imported_symbols: {text: bool} = {}
+    for import_object in available_imports:
+        val direct = import_object.public_name
+        val indirect = import_object.iat_symbol()
+        if (final_undefined.has(direct) or final_undefined.has(indirect)) and
+                not imported_symbols.has(indirect):
+            selected_imports = selected_imports.push(import_object)
+            imported_symbols[indirect] = true
+    Ok(CoffArchiveClosure(members: selected, imports: selected_imports, passes: passes))
+
+export CoffArchiveMember, CoffArchiveClosure
+export coff_archive_members, coff_archive_imports, coff_archive_closure, coff_archive_closure_retained
+export coff_archive_closure_retained_aliases

@@ -1,0 +1,48 @@
+#!/bin/sh
+# The Windows Stage 2 memory controls are part of the sealed command, not
+# ambient tuning.  Prove their names are accepted once, in invocation order,
+# by the same fail-closed environment contract used before execution.
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "${repo_root}/scripts/check/lib/bootstrap-stage3/authority.shs"
+
+platform=x86_64-pc-windows-gnu
+actual=$(bootstrap_stage3_env_assignment_names \
+  SIMPLE_LLVM_BIN= SIMPLE_LLVM_PATH= MIMALLOC_EAGER_COMMIT=0 \
+  MIMALLOC_ARENA_EAGER_COMMIT=0 MIMALLOC_PURGE_DELAY=0 \
+  MIMALLOC_PURGE_DECOMMITS=1 LLVM_SYS_231_PREFIX= PATH=/tools \
+  RUST_LOG=error LIBRARY_PATH= SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent \
+  SIMPLE_BOOTSTRAP=1 SIMPLE_ABI_POLICY=v1 \
+  SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_KERNEL_K1_POLICY=llvm-cranelift \
+  SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only \
+  SIMPLE_K1_COMPOSITION_SHA256_BEFORE=absent SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_BUILD_PROGRESS_EVENTS=none SIMPLE_FRONTEND_CACHE=1 \
+  SIMPLE_FRONTEND_CACHE_DIR=/cache SIMPLE_WINDOWS_ABI=gnu \
+  SIMPLE_LINKER_FLAVOR=gnu CC=/tools/clang \
+  SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=/out/compatibility.sdn \
+  SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=/cache/stage3 SIMPLE_BINARY=/seed/simple)
+expected=$(bootstrap_stage3_stage2_canonical_env_names "$platform")
+
+[ "$actual" = "$expected" ] || {
+  printf 'FAIL: Windows Stage 2 environment contract differs\nactual:   %s\nexpected: %s\n' \
+    "$actual" "$expected" >&2
+  exit 1
+}
+
+producer="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
+for name in MIMALLOC_ARENA_EAGER_COMMIT MIMALLOC_PURGE_DELAY MIMALLOC_PURGE_DECOMMITS; do
+  # Exactly two bindings are required: one in the sealed args digest and one
+  # in the executed environment.  A third binding is rejected by the runtime
+  # name derivation as a duplicate; one binding leaves evidence and execution
+  # disagreeing.
+  count=$(grep -c "\"${name}=" "$producer")
+  [ "$count" -eq 2 ] || {
+    echo "FAIL: ${name} occurs ${count} times in Stage 2 producer (expected 2)" >&2
+    exit 1
+  }
+done
+
+printf '%s\n' 'PASS: Windows Stage 2 mimalloc environment contract'

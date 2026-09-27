@@ -49,6 +49,29 @@ use compiler.backend.linker.linker_wrapper_helpers.{write_bytes_to_file, write_e
 # Configuration Structs
 # ============================================================================
 
+pub fn mingw_driver_path(path: text) -> text:
+    """Render a filesystem path for clang's MinGW driver and GNU ld.
+
+    Win32 file APIs accept the verbatim ``\\\\?\\C:\\...`` spelling returned by
+    ``rt_path_absolute``.  GNU ld does not: clang forwards it after treating the
+    question mark/drive prefix as a driver path, collapsing it to a root-relative
+    ``\\name.o``.  Forward slashes plus removal of the verbatim prefix preserve
+    drive and UNC identities across the clang -> ld boundary."""
+    val normalized = path.replace("\\", "/")
+    if not normalized.starts_with("//?/"):
+        return normalized
+    val rest = normalized.substring(4)
+    if rest.starts_with("UNC/"):
+        return "/" + rest.substring(3)
+    if rest.len() >= 3 and rest.char_code_at(1) == 58 and rest.char_code_at(2) == 47:
+        return rest
+    normalized
+
+fn mingw_driver_input_arg(arg: text) -> text:
+    if arg.starts_with("-"):
+        return arg
+    mingw_driver_path(arg)
+
 fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     """Link using the bootstrap-owned Windows GNU Clang driver.
 
@@ -64,11 +87,11 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
     for flag in native_retained_symbol_cc_args(config.retained_symbols, "windows-mingw"):
         args = args.push(flag)
     for obj in object_files:
-        args = args.push(obj)
+        args = args.push(mingw_driver_path(obj))
 
     # Library paths
     for lp in config.library_paths:
-        args = args.push("-L{lp}")
+        args = args.push("-L" + mingw_driver_path(lp))
 
     # Auto-detect runtime library
     var runtime_dir = config.runtime_path
@@ -79,11 +102,13 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
         val runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
         for arg in native_runtime_archive_link_args(
                 runtime_dir, config.runtime_bundle, runtime_archives, true, true, false):
-            args = args.push(arg)
+            args = args.push(mingw_driver_input_arg(arg))
             support_inputs.push(arg)
 
     # Windows system libraries (MinGW names)
-    val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll", "ole32", "synchronization", "d3d11", "dxgi", "SDL2"]
+    # SDL is runtime-loaded through runtime_sdl2.c; requiring its import library
+    # makes every otherwise self-contained compiler link depend on an optional SDK.
+    val mingw_libs = ["kernel32", "ws2_32", "bcrypt", "userenv", "ntdll", "ole32", "synchronization", "d3d11", "dxgi"]
     for lib in mingw_libs:
         args = args.push("-l{lib}")
     for flag in native_all_gnu_support_args(support_inputs, "windows-mingw", ""):
@@ -91,7 +116,10 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     # Libraries from config
     for lib in config.libraries:
-        args = args.push("-l{lib}")
+        if lib.contains("/") or lib.contains("\\") or lib.lower().ends_with(".a") or lib.lower().ends_with(".lib"):
+            args = args.push(mingw_driver_path(lib))
+        else:
+            args = args.push("-l{lib}")
 
     # Dead code elimination is always safe; symbol stripping follows the
     # public native-build --strip contract instead of happening implicitly.
@@ -109,7 +137,7 @@ fn _link_native_mingw(object_files: [text], output: text, config: NativeLinkConf
         args = args.push(flag)
 
     args = args.push("-o")
-    args = args.push(output)
+    args = args.push(mingw_driver_path(output))
 
     val cmd_text = cc + " " + args.join(" ")
     if config.verbose:
@@ -330,11 +358,11 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
     args = args.push("-DSPL_SHARED_LIBRARY")
 
     for obj in object_files:
-        args = args.push(obj)
+        args = args.push(mingw_driver_path(obj))
 
     # Library paths
     for lp in config.library_paths:
-        args = args.push("-L{lp}")
+        args = args.push("-L" + mingw_driver_path(lp))
 
     # Runtime library
     var runtime_dir = config.runtime_path
@@ -346,7 +374,7 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
             runtime_dir, config.runtime_bundle)
         for arg in native_runtime_archive_link_args(
                 runtime_dir, config.runtime_bundle, runtime_archives, true, true, false):
-            args = args.push(arg)
+            args = args.push(mingw_driver_input_arg(arg))
             support_inputs.push(arg)
 
     # Windows system libraries
@@ -358,7 +386,10 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
 
     # User libraries
     for lib in config.libraries:
-        args = args.push("-l{lib}")
+        if lib.contains("/") or lib.contains("\\") or lib.lower().ends_with(".a") or lib.lower().ends_with(".lib"):
+            args = args.push(mingw_driver_path(lib))
+        else:
+            args = args.push("-l{lib}")
 
     # Dead code elimination and strip (size reduction)
     args = args.push("-Wl,--gc-sections")
@@ -369,7 +400,7 @@ fn _link_shared_mingw(object_files: [text], output: text, config: NativeLinkConf
         args = args.push(flag)
 
     args = args.push("-o")
-    args = args.push(output)
+    args = args.push(mingw_driver_path(output))
     val cmd_text = cc + " " + args.join(" ")
 
     if config.verbose:

@@ -1,0 +1,125 @@
+# Deterministic PE32+ export-directory synthesis for `/EXPORT` directives.
+
+use compiler.backend.linker.coff.coff_directives.{CoffExportDirective}
+
+fn _pex_align(value: i64, alignment: i64) -> i64:
+    ((value + alignment - 1) / alignment) * alignment
+
+fn _pex_put_u16(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    result[offset] = (value & 0xff) as u8
+    result[offset + 1] = ((value >> 8) & 0xff) as u8
+    result
+
+fn _pex_put_u32(bytes: [u8], offset: i64, value: i64) -> [u8]:
+    var result = bytes
+    var index: i64 = 0
+    while index < 4:
+        result[offset + index] = ((value >> (index * 8)) & 0xff) as u8
+        index = index + 1
+    result
+
+fn _pex_append_string(bytes: [u8], value: text) -> Result<[u8], text>:
+    if value == "": return Err("PE export names must be non-empty")
+    var result = bytes
+    var index: i64 = 0
+    while index < value.len():
+        val byte = value.byte_at(index)
+        if byte == 0: return Err("PE export names must contain no NUL")
+        result = result.push(byte)
+        index = index + 1
+    Ok(result.push(0))
+
+fn _pex_sorted_exports(exports: [CoffExportDirective]) -> [CoffExportDirective]:
+    var result = exports
+    var left: i64 = 0
+    while left < result.len():
+        var right = left + 1
+        while right < result.len():
+            if result[right].public_name < result[left].public_name:
+                val temporary = result[left]
+                result[left] = result[right]
+                result[right] = temporary
+            right = right + 1
+        left = left + 1
+    result
+
+fn pe_build_amd64_exports(exports: [CoffExportDirective],
+        symbol_rvas: {text: i64}, edata_rva: i64,
+        module_name: text) -> Result<[u8], text>:
+    """Build one IMAGE_EXPORT_DIRECTORY and its tables without forwarders."""
+    if exports.len() == 0: return Ok([])
+    if edata_rva <= 0: return Err("PE export directory requires a positive RVA")
+    val ordered = _pex_sorted_exports(exports)
+    var used_ordinals: {i64: bool} = {}
+    var assigned: [i64] = []
+    for exported in ordered:
+        if not symbol_rvas.has(exported.internal_name):
+            return Err("COFF /EXPORT symbol not found: {exported.internal_name}")
+        if exported.ordinal >= 0:
+            if used_ordinals.has(exported.ordinal):
+                return Err("duplicate COFF /EXPORT ordinal {exported.ordinal}")
+            used_ordinals[exported.ordinal] = true
+        assigned = assigned.push(exported.ordinal)
+    var next_ordinal: i64 = 1
+    var index: i64 = 0
+    while index < assigned.len():
+        if assigned[index] < 0:
+            while used_ordinals.has(next_ordinal): next_ordinal = next_ordinal + 1
+            assigned[index] = next_ordinal
+            used_ordinals[next_ordinal] = true
+        index = index + 1
+    var base = assigned[0]
+    var maximum = assigned[0]
+    for ordinal in assigned:
+        if ordinal < base: base = ordinal
+        if ordinal > maximum: maximum = ordinal
+    val address_count = maximum - base + 1
+    if address_count > 65536:
+        return Err("COFF /EXPORT ordinal span exceeds 65536 entries")
+
+    var named_count: i64 = 0
+    for exported in ordered:
+        if not exported.noname: named_count = named_count + 1
+    var data: [u8] = []
+    while data.len() < 40: data = data.push(0)
+    val module_offset = data.len()
+    data = _pex_append_string(data, module_name)?
+    var name_offsets: [i64] = []
+    index = 0
+    while index < ordered.len():
+        if not ordered[index].noname:
+            name_offsets = name_offsets.push(data.len())
+            data = _pex_append_string(data, ordered[index].public_name)?
+        index = index + 1
+    while data.len() < _pex_align(data.len(), 4): data = data.push(0)
+    val address_offset = data.len()
+    while data.len() < address_offset + address_count * 4: data = data.push(0)
+    val names_offset = data.len()
+    while data.len() < names_offset + named_count * 4: data = data.push(0)
+    val ordinals_offset = data.len()
+    while data.len() < ordinals_offset + named_count * 2: data = data.push(0)
+
+    data = _pex_put_u32(data, 12, edata_rva + module_offset)
+    data = _pex_put_u32(data, 16, base)
+    data = _pex_put_u32(data, 20, address_count)
+    data = _pex_put_u32(data, 24, named_count)
+    data = _pex_put_u32(data, 28, edata_rva + address_offset)
+    data = _pex_put_u32(data, 32, if named_count > 0: edata_rva + names_offset else: 0)
+    data = _pex_put_u32(data, 36, if named_count > 0: edata_rva + ordinals_offset else: 0)
+    var named_index: i64 = 0
+    index = 0
+    while index < ordered.len():
+        val ordinal_index = assigned[index] - base
+        data = _pex_put_u32(data, address_offset + ordinal_index * 4,
+            symbol_rvas[ordered[index].internal_name])
+        if not ordered[index].noname:
+            data = _pex_put_u32(data, names_offset + named_index * 4,
+                edata_rva + name_offsets[named_index])
+            data = _pex_put_u16(data, ordinals_offset + named_index * 2,
+                ordinal_index)
+            named_index = named_index + 1
+        index = index + 1
+    Ok(data)
+
+export pe_build_amd64_exports

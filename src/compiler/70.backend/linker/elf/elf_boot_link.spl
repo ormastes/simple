@@ -23,11 +23,12 @@
 #     segment offset + (VMA - segment VMA); NOBITS takes no file space
 #   - output carries a .symtab of global and script symbols (values only)
 #
-# Slice limits (Err, never silently degraded): no section GC (keep-all; KEEP
-# roots are therefore always present), no orphan placement other than .got
-# (an unplaced allocatable input section is an Err), no linker relaxation, no
-# COMMON, no TLS, no dynamic relocations, file patterns other than `*` need
-# elf_boot_link_named, EXCLUDE_FILE / SORT are rejected.
+# Configured links can garbage-collect relocation-unreachable sections from
+# entry/retained/KEEP roots; compatibility entry points retain keep-all policy.
+# Slice limits (Err, never silently degraded): no orphan placement other than
+# .got (an unplaced live allocatable input section is an Err), no linker
+# relaxation, and dynamic TLS/import relocations are unsupported; file patterns
+# other than `*` need elf_boot_link_named, EXCLUDE_FILE / SORT are rejected.
 
 use compiler.backend.linker.boot_layout.boot_layout_plan.{
     BootLayoutPlan, BootOp, BootEvalCtx,
@@ -42,12 +43,22 @@ use compiler.backend.linker.elf_parser.{
 }
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
-use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
-use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes,
+    reloc_patch_width, reloc_patch_range_valid,
+    R_X86_64_GOT32, R_X86_64_GOT64, R_X86_64_GOTPLT64, R_X86_64_GOTOFF64,
+    R_X86_64_PLTOFF64, R_X86_64_SIZE64,
+    R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC}
+use compiler.backend.linker.elf.reloc_scan.{elf_reloc_class, RC_NONE, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE}
+use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained_wrapped}
+use compiler.backend.linker.elf.symbol_wrap.{elf_wrap_object}
+use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
+use compiler.backend.linker.elf.section_gc.{ElfSectionGc, elf_section_gc}
+use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.elf_exec_writer.{
     ElfOutSec, ElfExecSegment, ElfExecPlan, elf_write_image,
-    ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_GNU_STACK, PF_R, PF_W, PF_X,
-    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
+    ELF_SEG_R, PT_LOAD, PT_NOTE, PT_PHDR, PT_TLS, PT_GNU_STACK, PF_R, PF_W, PF_X,
+    SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_TLS,
+    SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOBITS_E
 }
 use compiler.backend.linker.elf_writer.{write_zeros, write_u16_le, write_u32_le, write_u64_le}
 use std.string_core.{char_code}
@@ -55,7 +66,6 @@ use std.string_core.{char_code}
 val BOOT_SHN_ABS: i64 = 0xfff1
 val BOOT_SHN_COMMON: i64 = 0xfff2
 val BOOT_SHN_LORESERVE: i64 = 0xff00
-val BOOT_SHF_TLS: i64 = 0x400
 val BOOT_SHT_SYMTAB: i64 = 2
 val BOOT_ET_EXEC: i64 = 2
 val BOOT_EHDR: i64 = 64
@@ -100,6 +110,8 @@ struct _BootIn:
     out_of: [i64]      # flat -> plan section index / BOOT_UNPLACED / BOOT_DISCARDED
     op_of: [i64]       # flat -> body op index inside that section
     off_of: [i64]      # flat -> offset inside the output section (after layout)
+    common_plan: {text: i64} # coalesced COMMON symbol -> plan output section
+    common_off: {text: i64}  # coalesced COMMON symbol -> offset in that section
 
 # ============================================================================
 # Small helpers
@@ -206,7 +218,11 @@ fn _bl_matches(op: BootOp, file: text, sec_name: text) -> Result<bool, text>:
             return Ok(true)
     Ok(false)
 
-fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Result<_BootIn, text>:
+fn _bl_matches_common(op: BootOp) -> bool:
+    op.kind == BOOT_OP_INPUT and op.patterns.contains("COMMON")
+
+fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan,
+        live: [[bool]], gc_sections: bool) -> Result<_BootIn, text>:
     var base: [i64] = []
     var out_of: [i64] = []
     var op_of: [i64] = []
@@ -238,7 +254,9 @@ fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Resul
                     while si < obj.sections.len():
                         val flat = base[oi] + si
                         val sh = obj.sections[si]
-                        if out_of[flat] == BOOT_UNPLACED and sh.sh_type != 0:
+                        val alive = not gc_sections or
+                            (oi < live.len() and si < live[oi].len() and live[oi][si])
+                        if alive and out_of[flat] == BOOT_UNPLACED and sh.sh_type != 0:
                             val m = _bl_matches(op, names[oi], elf_section_name(obj, si))?
                             if m:
                                 if sec.discard:
@@ -258,13 +276,14 @@ fn _bl_place(objects: [ElfObject], names: [text], plan: BootLayoutPlan) -> Resul
         var si: i64 = 0
         while si < obj.sections.len():
             val sh = obj.sections[si]
-            if out_of[base[oi] + si] == BOOT_UNPLACED and sh.sh_flags & SHF_ALLOC != 0 and sh.sh_size > 0:
+            val alive = not gc_sections or
+                (oi < live.len() and si < live[oi].len() and live[oi][si])
+            if alive and out_of[base[oi] + si] == BOOT_UNPLACED and sh.sh_flags & SHF_ALLOC != 0 and sh.sh_size > 0:
                 return Err("elf_boot_link: orphan section {elf_section_name(obj, si)} in {names[oi]} is not placed by the script (orphan placement is not modelled)")
-            if out_of[base[oi] + si] >= 0 and sh.sh_flags & BOOT_SHF_TLS != 0:
-                return Err("elf_boot_link: section {elf_section_name(obj, si)}: TLS is unsupported")
             si = si + 1
         oi = oi + 1
-    Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of))
+    Ok(_BootIn(objects: objects, names: names, base: base, out_of: out_of, op_of: op_of, off_of: off_of,
+        common_plan: {}, common_off: {}))
 
 # ============================================================================
 # Symbols
@@ -301,9 +320,35 @@ fn _bl_script_defines(plan: BootLayoutPlan, objects: [ElfObject], res: SymResolu
             out = out.push(true)
     out
 
+fn _bl_gc_symbol_roots(plan: BootLayoutPlan, retained: [text]) -> [text]:
+    """Object symbols consumed by script expressions are live linker inputs."""
+    var roots = retained
+    for symbol in plan.symbols:
+        for word in _bl_words(symbol.expr):
+            if not roots.contains(word): roots = roots.push(word)
+    for assertion in plan.assertions:
+        for word in _bl_words(assertion.expr):
+            if not roots.contains(word): roots = roots.push(word)
+    for section in plan.sections:
+        for expr in [section.vma_expr, section.lma_expr, section.align_expr]:
+            for word in _bl_words(expr):
+                if not roots.contains(word): roots = roots.push(word)
+    for op in plan.ops:
+        if op.kind == BOOT_OP_DOT:
+            for word in _bl_words(op.expr):
+                if not roots.contains(word): roots = roots.push(word)
+    roots
+
 fn _bl_obj_sym_addr(ins: _BootIn, outs: [_BootOut], plan_to_out: [i64], e: SymEntry) -> Result<i64, text>:
     if e.section_idx == BOOT_SHN_ABS:
         return Ok(e.offset)
+    if e.section_idx == BOOT_SHN_COMMON:
+        if not ins.common_plan.has(e.name):
+            return Err("elf_boot_link: common symbol {e.name} is not placed by *(COMMON)")
+        val ok = plan_to_out[ins.common_plan[e.name]]
+        if ok < 0:
+            return Err("elf_boot_link: common symbol {e.name} has no output section")
+        return Ok(outs[ok].vma + ins.common_off[e.name])
     val flat = ins.base[e.obj_idx] + e.section_idx
     val k = ins.out_of[flat]
     if k < 0:
@@ -328,7 +373,12 @@ fn _bl_bind_obj_syms(ctx: BootEvalCtx, wanted: [text], res: SymResolution, ins: 
     for w in wanted:
         if res.defined.has(w):
             val e = res.defined[w]
-            if e.section_idx != BOOT_SHN_ABS and e.section_idx < BOOT_SHN_LORESERVE:
+            if e.section_idx == BOOT_SHN_COMMON:
+                if ins.common_plan.has(e.name) and ins.common_plan[e.name] == k:
+                    match _bl_obj_sym_addr(ins, outs, plan_to_out, e):
+                        case Ok(v): c = boot_eval_bind(c, w, v)
+                        case Err(_): pass
+            else if e.section_idx != BOOT_SHN_ABS and e.section_idx < BOOT_SHN_LORESERVE:
                 if ins.out_of[ins.base[e.obj_idx] + e.section_idx] == k:
                     match _bl_obj_sym_addr(ins, outs, plan_to_out, e):
                         case Ok(v): c = boot_eval_bind(c, w, v)
@@ -339,7 +389,9 @@ fn _bl_ctx_at(ctx: BootEvalCtx, dot: i64) -> BootEvalCtx:
     BootEvalCtx(dot: dot, names: ctx.names, values: ctx.values)
 
 # reason: layout replays the plan with all link state; positional by design
-fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: [bool], got_size: i64) -> Result<_BootLayout, text>:
+fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution,
+        defines: [bool], got_size: i64, common_live: {text: bool},
+        gc_sections: bool) -> Result<_BootLayout, text>:
     var ins = ins0
     var off_of = ins0.off_of
     var ctx = boot_eval_ctx(0)
@@ -401,6 +453,20 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
             var any_prog = false
             var any_member = false
             var flags: i64 = SHF_ALLOC
+            var common_align: i64 = 1
+            for bop in sec.body:
+                if _bl_matches_common(bop):
+                    for obj in ins.objects:
+                        for sym in obj.symbols:
+                            if sym.name != "" and res.defined.has(sym.name):
+                                val e = res.defined[sym.name]
+                                if e.section_idx == BOOT_SHN_COMMON and not ins.common_plan.has(sym.name):
+                                    any_member = true
+                                    flags = flags | SHF_WRITE
+                                    if e.offset > common_align:
+                                        common_align = e.offset
+            if common_align > align:
+                align = common_align
             var oi: i64 = 0
             while oi < ins.objects.len():
                 val obj = ins.objects[oi]
@@ -414,7 +480,7 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                             align = al
                         if sh.sh_type != SHT_NOBITS:
                             any_prog = true
-                        flags = flags | (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR))
+                        flags = flags | (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR | SHF_TLS))
                     si = si + 1
                 oi = oi + 1
             var region_idx: i64 = -1
@@ -480,6 +546,21 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                                 cur = cur + obj.sections[si].sh_size
                             si = si + 1
                         oi = oi + 1
+                    if _bl_matches_common(bop):
+                        for obj in ins.objects:
+                            for sym in obj.symbols:
+                                if sym.name != "" and res.defined.has(sym.name):
+                                    val e = res.defined[sym.name]
+                                    if e.section_idx == BOOT_SHN_COMMON and
+                                            (not gc_sections or common_live.has(sym.name)) and
+                                            not ins.common_plan.has(sym.name):
+                                        var al = e.offset
+                                        if al < 1:
+                                            al = 1
+                                        cur = boot_align_up(addr + cur, al) - addr
+                                        ins.common_plan[sym.name] = k
+                                        ins.common_off[sym.name] = cur
+                                        cur = cur + e.size
                 else if bop.kind == BOOT_OP_PAD:
                     cur = cur + bop.value
                 else if bop.kind == BOOT_OP_ALIGN:
@@ -497,7 +578,8 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                     if boot_eval(a.expr, _bl_ctx_at(ctx, addr + cur))? == 0:
                         return Err("elf_boot_link: ASSERT failed: {a.message}")
 
-            ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of, off_of: off_of)
+            ins = _BootIn(objects: ins.objects, names: ins.names, base: ins.base, out_of: ins.out_of, op_of: ins.op_of,
+                off_of: off_of, common_plan: ins.common_plan, common_off: ins.common_off)
             # lld drops an output section with no bytes and no symbol assignment.
             if cur == 0 and not has_sym:
                 dot = addr
@@ -526,6 +608,11 @@ fn _bl_layout(plan: BootLayoutPlan, ins0: _BootIn, res: SymResolution, defines: 
                 _bl_region_fits(plan, lma_ri, region_cur[lma_ri], sec.name)?
 
     # Synthetic .got: lld's orphan position — after every command, in the last segment.
+    for name in res.defined.keys():
+        if res.defined[name].section_idx == BOOT_SHN_COMMON and
+                (not gc_sections or common_live.has(name)) and
+                not ins.common_plan.has(name):
+            return Err("elf_boot_link: common symbol {name} is not placed by *(COMMON)")
     if got_size > 0:
         val gaddr = boot_align_up(dot, 8)
         outs = outs.push(_BootOut(name: ".got", sh_type: SHT_PROGBITS_E, sh_flags: SHF_ALLOC | SHF_WRITE, align: 8,
@@ -660,7 +747,24 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
                 at_exprs = at_exprs.push("")
                 prev_key = key
             seg_of = seg_of.push(types.len() - 1)
-    val phnum = types.len()
+    # TLS occupies one contiguous memory image and gets an overlapping PT_TLS.
+    # Its bytes remain owned by the ordinary PT_LOAD segment.
+    var tls_first: i64 = -1
+    var tls_last: i64 = -1
+    var tls_align: i64 = 1
+    var ti: i64 = 0
+    while ti < outs.len():
+        if outs[ti].sh_flags & SHF_TLS != 0:
+            if tls_first < 0:
+                tls_first = ti
+            elif ti != tls_last + 1:
+                return Err("elf_boot_link: TLS output sections must be contiguous")
+            tls_last = ti
+            if outs[ti].align > tls_align:
+                tls_align = outs[ti].align
+        ti = ti + 1
+    val primary_phnum = types.len()
+    val phnum = primary_phnum + (if tls_first >= 0: 1 else: 0)
     val hdr_end = BOOT_EHDR + phnum * BOOT_PHDR
 
     # 2. file offsets (lld: first section of a load congruent to its VMA mod page)
@@ -697,7 +801,7 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
     var hdr_load_vaddr: i64 = 0
     var hdr_load_paddr: i64 = 0
     var has_hdr_load = false
-    while sj < phnum:
+    while sj < primary_phnum:
         var first: i64 = -1
         var last: i64 = -1
         var last_file_end: i64 = -1
@@ -740,9 +844,24 @@ fn _bl_segments(plan: BootLayoutPlan, outs: [_BootOut], page: i64, ctx: BootEval
                 p_paddr: p_p, p_filesz: filesz, p_memsz: memsz, p_align: al))
         sj = sj + 1
 
+    if tls_first >= 0:
+        var tls_file_end: i64 = -1
+        ti = tls_first
+        while ti <= tls_last:
+            if outs[ti].sh_type != SHT_NOBITS_E:
+                tls_file_end = offsets[ti] + outs[ti].size
+            ti = ti + 1
+        var tls_filesz: i64 = 0
+        if tls_file_end >= 0:
+            tls_filesz = tls_file_end - offsets[tls_first]
+        segs = segs.push(ElfExecSegment(p_type: PT_TLS, p_flags: PF_R,
+            p_offset: offsets[tls_first], p_vaddr: outs[tls_first].vma, p_paddr: outs[tls_first].lma,
+            p_filesz: tls_filesz, p_memsz: outs[tls_last].vma + outs[tls_last].size - outs[tls_first].vma,
+            p_align: tls_align))
+
     # PT_PHDR / PHDRS keyword: the table inside the FILEHDR load.
     sj = 0
-    while sj < phnum:
+    while sj < primary_phnum:
         if types[sj] == PT_PHDR:
             if not has_hdr_load:
                 return Err("elf_boot_link: PT_PHDR needs a PT_LOAD with FILEHDR PHDRS")
@@ -784,6 +903,67 @@ fn elf_boot_link(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> R
     val im = elf_boot_link_image(objects, plan, target)?
     Ok(im.bytes)
 
+fn elf_boot_link_stripped(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<[i64], text>:
+    """Link a boot image without non-allocated .symtab/.strtab sections."""
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        names = names.push("object{i}.o")
+        i = i + 1
+    val im = _elf_boot_link_named(objects, names, plan, target, true, [], false, [])?
+    Ok(im.bytes)
+
+fn elf_boot_link_configured(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch,
+        strip_output: bool, retained_symbols: [text]) -> Result<[i64], text>:
+    """Link with wrapper-owned strip and retained-symbol policy."""
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        names = names.push("object{i}.o")
+        i = i + 1
+    val im = _elf_boot_link_named(objects, names, plan, target,
+        strip_output, retained_symbols, false, [])?
+    Ok(im.bytes)
+
+fn elf_boot_link_archives_configured(objects: [[i64]], archives: [[i64]],
+        plan: BootLayoutPlan, target: RelocArch, strip_output: bool,
+        retained_symbols: [text]) -> Result<[i64], text>:
+    elf_boot_link_archives_configured_gc(objects, archives, plan, target,
+        strip_output, retained_symbols, false)
+
+fn elf_boot_link_archives_configured_gc(objects: [[i64]], archives: [[i64]],
+        plan: BootLayoutPlan, target: RelocArch, strip_output: bool,
+        retained_symbols: [text], gc_sections: bool) -> Result<[i64], text>:
+    elf_boot_link_archives_policy(objects, archives, plan, target,
+        strip_output, retained_symbols, gc_sections, [])
+
+fn elf_boot_link_archives_policy(objects: [[i64]], archives: [[i64]],
+        plan: BootLayoutPlan, target: RelocArch, strip_output: bool,
+        retained_symbols: [text], gc_sections: bool,
+        wraps: [text]) -> Result<[i64], text>:
+    """Link root objects plus the symbol-reachable members of static archives."""
+    var roots: [ElfObject] = []
+    var names: [text] = []
+    var i: i64 = 0
+    while i < objects.len():
+        val parsed = elf_parse_object(objects[i])
+        if parsed.is_err(): return Err("object object{i}.o: {parsed.unwrap_err()}")
+        roots = roots.push(parsed.unwrap())
+        names = names.push("object{i}.o")
+        i = i + 1
+    var closure_roots = retained_symbols
+    if plan.entry != "" and not closure_roots.contains(plan.entry):
+        closure_roots = closure_roots.push(plan.entry)
+    val closure = elf_archive_closure_retained_wrapped(
+        roots, archives, closure_roots, wraps)?
+    var all = objects
+    for member in closure.members:
+        all = all.push(member.raw)
+        names = names.push("archive{member.archive_idx}({member.name})")
+    val im = _elf_boot_link_named(all, names, plan, target,
+        strip_output, retained_symbols, gc_sections, wraps)?
+    Ok(im.bytes)
+
 fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     var names: [text] = []
     var i: i64 = 0
@@ -794,6 +974,12 @@ fn elf_boot_link_image(objects: [[i64]], plan: BootLayoutPlan, target: RelocArch
 
 fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, target: RelocArch) -> Result<ElfBootImage, text>:
     """As elf_boot_link, with a file name per object for script file patterns."""
+    _elf_boot_link_named(objects, names, plan, target, false, [], false, [])
+
+fn _elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan,
+        target: RelocArch, strip_output: bool,
+        retained_symbols: [text], gc_sections: bool,
+        wraps: [text]) -> Result<ElfBootImage, text>:
     val machine = _bl_machine(target)?
     val a64 = _bl_is_a64(target)
     var parsed: [ElfObject] = []
@@ -807,9 +993,10 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
             return Err("object {names[i]}: not a relocatable object (e_type {obj.header.e_type})")
         if obj.header.e_machine != machine:
             return Err("object {names[i]}: e_machine {obj.header.e_machine} does not match target {machine}")
-        parsed = parsed.push(obj)
+        parsed = parsed.push(elf_wrap_object(obj, wraps))
         i = i + 1
 
+    parsed = elf_relax_tls(parsed, target)?
     val res = sym_resolve_objects(parsed)
     if res.errors.len() > 0:
         return Err(res.errors.join("; "))
@@ -822,20 +1009,26 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
         si = si + 1
     # Like ld.lld, an undefined symbol is an error only when a relocation in a
     # placed section refers to it (checked while relocating, below).
-    for obj in parsed:
-        for s in obj.symbols:
-            if s.st_shndx == BOOT_SHN_COMMON:
-                return Err("symbol {s.name}: SHN_COMMON is unsupported (compile with -fno-common)")
     if not res.defined.has(plan.entry) and not script_defined.has(plan.entry):
         return Err("entry symbol not defined: {plan.entry}")
+    for name in retained_symbols:
+        if name != "" and not res.defined.has(name) and not script_defined.has(name):
+            return Err("retained SimpleOS symbol not found: {name}")
 
-    val ins0 = _bl_place(parsed, names, plan)?
+    var gc = ElfSectionGc(live: [], common_live: {})
+    if gc_sections:
+        val gc_symbols = _bl_gc_symbol_roots(plan, retained_symbols)
+        gc = elf_section_gc(parsed, res, plan.entry, gc_symbols, plan.gc_roots)
+        parsed = elf_gc_eh_frames(parsed, gc.live, res)
+    val ins0 = _bl_place(parsed, names, plan, gc.live, gc_sections)?
 
     # GOT slots (identity only; addresses come after layout).
     var got_keys: [text] = []
     var got_oi: [i64] = []      # -1 for a global symbol key
     var got_si: [i64] = []
+    var got_tls: [bool] = []
     var got_idx: {text: i64} = {}
+    var need_got_base = false
     var oi: i64 = 0
     while oi < parsed.len():
         val obj = parsed[oi]
@@ -843,18 +1036,27 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
             val t = r.target_section_idx
             if t >= 0 and t < obj.sections.len() and ins0.out_of[ins0.base[oi] + t] >= 0:
                 val rc = elf_reloc_class(target, elf_reloc_type(r))
-                if rc == RC_GOT or rc == RC_GOT_RELAX:
-                    val sym = obj.symbols[elf_reloc_sym(r)]
+                val rsym = obj.symbols[elf_reloc_sym(r)]
+                if rsym.name == "_GLOBAL_OFFSET_TABLE_":
+                    need_got_base = true
+                if elf_reloc_type(r) == R_X86_64_GOTOFF64 or
+                        elf_reloc_type(r) == R_X86_64_PLTOFF64:
+                    need_got_base = true
+                if rc == RC_GOT or rc == RC_GOT_RELAX or rc == RC_TLS_IE:
+                    val sym = rsym
                     var key = "{oi}#{elf_reloc_sym(r)}"
                     var koi = oi
                     if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                         key = sym.name
                         koi = -1
+                    if rc == RC_TLS_IE:
+                        key = "tls#" + key
                     if not got_idx.has(key):
                         got_idx[key] = got_keys.len()
                         got_keys = got_keys.push(key)
                         got_oi = got_oi.push(koi)
                         got_si = got_si.push(elf_reloc_sym(r))
+                        got_tls = got_tls.push(rc == RC_TLS_IE)
         oi = oi + 1
 
     # ld.lld allocates GOT slots in symbol-table order (globals by first
@@ -872,13 +1074,17 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
     while gk < got_keys.len():
         var r: i64 = nrank + gk
         if got_oi[gk] < 0:
-            r = rank[got_keys[gk]]
+            var rank_key = got_keys[gk]
+            if rank_key.starts_with("tls#"): rank_key = rank_key.substring(4)
+            r = rank[rank_key]
         var pos = order.len()
         while pos > 0:
             val q = order[pos - 1]
             var rq: i64 = nrank + q
             if got_oi[q] < 0:
-                rq = rank[got_keys[q]]
+                var rank_key = got_keys[q]
+                if rank_key.starts_with("tls#"): rank_key = rank_key.substring(4)
+                rq = rank[rank_key]
             if rq <= r:
                 break
             pos = pos - 1
@@ -896,16 +1102,23 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
     var keys2: [text] = []
     var oi2: [i64] = []
     var si2: [i64] = []
+    var tls2: [bool] = []
     for q in order:
         got_idx[got_keys[q]] = keys2.len()
         keys2 = keys2.push(got_keys[q])
         oi2 = oi2.push(got_oi[q])
         si2 = si2.push(got_si[q])
+        tls2 = tls2.push(got_tls[q])
     got_keys = keys2
     got_oi = oi2
     got_si = si2
+    got_tls = tls2
 
-    val lay = _bl_layout(plan, ins0, res, defines, got_keys.len() * 8)?
+    var got_size = got_keys.len() * 8
+    if need_got_base and got_size == 0:
+        got_size = 8
+    val lay = _bl_layout(plan, ins0, res, defines, got_size,
+        gc.common_live, gc_sections)?
     val ins = lay.ins
     val outs = lay.outs
     var script_val: {text: i64} = {}
@@ -943,6 +1156,24 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
     if got_out >= 0:
         got_vma = outs[got_out].vma
 
+    var has_tls = false
+    var tls_start: i64 = 0
+    var tls_end: i64 = 0
+    var tls_align: i64 = 1
+    for o in outs:
+        if o.sh_flags & SHF_TLS != 0:
+            if o.align > tls_align:
+                tls_align = o.align
+            if not has_tls:
+                has_tls = true
+                tls_start = o.vma
+                tls_end = o.vma + o.size
+            else:
+                if o.vma < tls_start:
+                    tls_start = o.vma
+                if o.vma + o.size > tls_end:
+                    tls_end = o.vma + o.size
+
     # --- relocate ---
     var undef: [text] = []
     oi = 0
@@ -956,28 +1187,40 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
             if k < 0:
                 continue
             val ok = lay.plan_to_out[k]
-            val rtype = elf_reloc_type(r)
+            var rtype = elf_reloc_type(r)
             val rc = elf_reloc_class(target, rtype)
             if rc == RC_NONE:
                 continue
             if outs[ok].sh_type == SHT_NOBITS_E:
                 return Err("object {names[oi]}: relocation type {rtype} targets a NOBITS section")
+            val patch_width = reloc_patch_width(target, rtype)
+            if not reloc_patch_range_valid(obj.sections[t].sh_size, r.r_offset, patch_width):
+                return Err("object {names[oi]}: relocation type {rtype} patch [{r.r_offset}, {r.r_offset + patch_width}) exceeds target section size {obj.sections[t].sh_size}")
             val place = ins.off_of[ins.base[oi] + t] + r.r_offset
-            val p = outs[ok].vma + place
+            var p = outs[ok].vma + place
             val sidx = elf_reloc_sym(r)
+            if sidx < 0 or sidx >= obj.symbols.len():
+                return Err("object {names[oi]}: relocation symbol index {sidx} out of range")
             val sym = obj.symbols[sidx]
             var s: i64 = 0
+            var z = sym.st_size
             if sidx != 0:
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     if script_val.has(sym.name):
                         s = script_val[sym.name]
+                        z = 0
                     else if res.defined.has(sym.name):
-                        s = _bl_obj_sym_addr(ins, outs, lay.plan_to_out, res.defined[sym.name])?
+                        val definition = res.defined[sym.name]
+                        s = _bl_obj_sym_addr(ins, outs, lay.plan_to_out, definition)?
+                        z = definition.size
                     else if elf_symbol_binding(sym) == STB_WEAK:
                         s = 0
+                        z = 0
                         if a64 and rc == RC_BRANCH:
                             # ld.lld: a branch to an undefined weak symbol targets the next instruction
                             s = p + 4 - r.r_addend
+                    else if sym.name == "_GLOBAL_OFFSET_TABLE_" and got_out >= 0:
+                        s = got_vma
                     else:
                         if not undef.contains(sym.name):
                             undef = undef.push(sym.name)
@@ -998,8 +1241,53 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
                 if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
                     key = sym.name
                 s = got_vma + got_idx[key] * 8
+                if not a64 and (rtype == R_X86_64_GOT32 or
+                        rtype == R_X86_64_GOT64 or
+                        rtype == R_X86_64_GOTPLT64): s = s - got_vma
                 if a64:
                     a = 0
+            elif rc == RC_TLS_IE:
+                var key = "{oi}#{sidx}"
+                if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "":
+                    key = sym.name
+                key = "tls#" + key
+                s = got_vma + got_idx[key] * 8
+                if a64:
+                    a = 0
+                    if rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
+                            rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
+                        p = got_vma
+                else:
+                    rtype = 2
+            elif rc == RC_TLS_MOD:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS module relocation has no TLS image")
+                s = 1
+                a = 0
+            elif rc == RC_TLS_LD:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS local-dynamic relocation has no TLS image")
+                s = s + a - tls_start
+                a = 0
+            elif rc == RC_TLS_LE:
+                if not has_tls:
+                    return Err("object {names[oi]}: TLS local-exec relocation has no TLS image")
+                # Variant I (AArch64) / variant II (x86-64) with PT_TLS alignment.
+                s = elf_tls_tpoff(a64, s + a, tls_start, tls_end - tls_start, tls_align)
+                if not a64:
+                    if rtype == 23:
+                        rtype = 11
+                    elif rtype != 18:
+                        return Err("object {names[oi]}: unsupported x86 boot TLS local-exec relocation type {rtype}")
+                a = 0
+            elif rc == RC_SIZE:
+                s = z
+                if rtype == R_X86_64_SIZE64:
+                    rtype = 1   # R_X86_64_64 applies Z + A.
+                else:
+                    rtype = 10  # R_X86_64_32 applies Z + A with width checking.
+            if not a64 and (rtype == R_X86_64_GOTOFF64 or
+                    rtype == R_X86_64_PLTOFF64): p = got_vma
             val applied = reloc_apply(target, contents[ok], place, rtype, s, a, p)
             if not applied.success:
                 return Err("object {names[oi]}: relocation type {rtype} against '{sym.name}' at {p}: {applied.error}")
@@ -1031,6 +1319,18 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
                 v = script_val[key]
             else if res.defined.has(key):
                 v = _bl_obj_sym_addr(ins, outs, lay.plan_to_out, res.defined[key])?
+            if got_tls[gi]:
+                var tls_key = key
+                if tls_key.starts_with("tls#"):
+                    tls_key = tls_key.substring(4)
+                if got_oi[gi] < 0:
+                    if script_val.has(tls_key):
+                        v = script_val[tls_key]
+                    elif res.defined.has(tls_key):
+                        v = _bl_obj_sym_addr(ins, outs, lay.plan_to_out, res.defined[tls_key])?
+                if not has_tls:
+                    return Err("GOT TLS initial-exec entry has no TLS image")
+                v = elf_tls_tpoff(a64, v, tls_start, tls_end - tls_start, tls_align)
             got = write_u64_le(got, v)
             gi = gi + 1
         contents[got_out] = got
@@ -1060,6 +1360,16 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
             sym_values = sym_values.push(e.offset)
             sym_info = sym_info.push(STB_GLOBAL << 4)
             sym_shndx = sym_shndx.push(BOOT_SHN_ABS)
+            continue
+        if e.section_idx == BOOT_SHN_COMMON:
+            if not ins.common_plan.has(name):
+                continue
+            val ok = lay.plan_to_out[ins.common_plan[name]]
+            sym_names = sym_names.push(name)
+            sym_values = sym_values.push(outs[ok].vma + ins.common_off[name])
+            val osym = _bl_obj_symbol(ins.objects[e.obj_idx], name)
+            sym_info = sym_info.push((STB_GLOBAL << 4) | elf_symbol_type(osym))
+            sym_shndx = sym_shndx.push(ok + 1)
             continue
         val flat = ins.base[e.obj_idx] + e.section_idx
         if ins.out_of[flat] < 0:
@@ -1109,21 +1419,24 @@ fn elf_boot_link_named(objects: [[i64]], names: [text], plan: BootLayoutPlan, ta
         vaddrs = vaddrs.push(o.vma)
         out_contents = out_contents.push(contents[i])
         i = i + 1
-    val symtab_off = boot_align_up(sg.file_end, 8)
-    secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
-        size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
-    offs = offs.push(symtab_off)
-    vaddrs = vaddrs.push(0)
-    out_contents = out_contents.push(symtab)
-    val strtab_off = symtab_off + symtab.len()
-    secs = secs.push(ElfOutSec(name: ".strtab", sh_type: SHT_STRTAB_E, sh_flags: 0, align: 1,
-        size: strtab.len(), entsize: 0, link: "", info: 0, seg: ELF_SEG_R))
-    offs = offs.push(strtab_off)
-    vaddrs = vaddrs.push(0)
-    out_contents = out_contents.push(strtab)
+    var final_end = sg.file_end
+    if not strip_output:
+        val symtab_off = boot_align_up(sg.file_end, 8)
+        secs = secs.push(ElfOutSec(name: ".symtab", sh_type: BOOT_SHT_SYMTAB, sh_flags: 0, align: 8,
+            size: symtab.len(), entsize: 24, link: ".strtab", info: 1, seg: ELF_SEG_R))
+        offs = offs.push(symtab_off)
+        vaddrs = vaddrs.push(0)
+        out_contents = out_contents.push(symtab)
+        val strtab_off = symtab_off + symtab.len()
+        secs = secs.push(ElfOutSec(name: ".strtab", sh_type: SHT_STRTAB_E, sh_flags: 0, align: 1,
+            size: strtab.len(), entsize: 0, link: "", info: 0, seg: ELF_SEG_R))
+        offs = offs.push(strtab_off)
+        vaddrs = vaddrs.push(0)
+        out_contents = out_contents.push(strtab)
+        final_end = strtab_off + strtab.len()
 
     val xplan = ElfExecPlan(secs: secs, offsets: offs, vaddrs: vaddrs, segments: sg.segs,
-        file_end: strtab_off + strtab.len())
+        file_end: final_end)
     val bytes = elf_write_image(BOOT_ET_EXEC, machine, entry, xplan, out_contents)
 
     var sec_names: [text] = []
@@ -1160,4 +1473,7 @@ fn _bl_ult(a: i64, b: i64) -> bool:
     b < 0
 
 export ElfBootImage
-export elf_boot_link, elf_boot_link_image, elf_boot_link_named
+export elf_boot_link, elf_boot_link_stripped, elf_boot_link_configured, elf_boot_link_archives_configured
+export elf_boot_link_archives_configured_gc
+export elf_boot_link_archives_policy
+export elf_boot_link_image, elf_boot_link_named

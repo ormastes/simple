@@ -1,6 +1,7 @@
 extern fn rt_file_read_text(path: text) -> text
 
 use compiler.backend.linker.linker_wrapper.{hosted_native_link_os_supported, hosted_native_link_unsupported_error}
+use compiler.backend.linker._LinkerWrapper.shared_linking.{mingw_driver_path}
 
 describe "hosted native-link OS gate":
     it "accepts only implemented hosted link families":
@@ -23,3 +24,45 @@ describe "hosted native-link OS gate":
         expect(gate_pos).to_be_greater_than(-1)
         expect(smf_pos).to_be_greater_than(-1)
         expect(gate_pos).to_be_less_than(smf_pos)
+
+    it "routes explicit internal SimpleOS before host-specific dispatch":
+        val source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        val simpleos_pos = source.index_of("requested_linker_override().trim().lower() == \"internal\" and is_simpleos_target()") ?? -1
+        val windows_pos = source.index_of("if os == \"windows-mingw\":") ?? -1
+        expect(simpleos_pos).to_be_greater_than(-1)
+        expect(windows_pos).to_be_greater_than(-1)
+        expect(simpleos_pos).to_be_less_than(windows_pos)
+        expect(source).to_contain("return internal_link_simpleos(object_files, output, simpleos_target,")
+        expect(source).to_contain("simpleos_target, config)")
+        expect(source).to_contain("elf_boot_link_archives_configured(objects, archives, boot_plan,")
+        expect(source).to_contain("internal_simpleos_archive_file(library, config.library_paths)")
+        expect(source).to_contain("simpleos-runtime-provider-selection")
+
+    it "routes explicit internal Windows through the COFF engine":
+        val source = rt_file_read_text("src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl") ?? ""
+        val mingw_dispatch = source.index_of("if os == \"windows-mingw\":") ?? -1
+        val internal_windows = source.index_of("return link_native_windows(object_files, output, config)", mingw_dispatch) ?? -1
+        val external_mingw = source.index_of("return _link_native_mingw(object_files, output, config)", mingw_dispatch) ?? -1
+        expect(mingw_dispatch).to_be_greater_than(-1)
+        expect(internal_windows).to_be_greater_than(mingw_dispatch)
+        expect(internal_windows).to_be_less_than(external_mingw)
+        expect(source).to_contain("coff_link_amd64(CoffLinkRequest(objects: objects, archives: archives, entry: \"auto\"))")
+        expect(source).to_contain("internal_coff_library_file")
+        expect(source).to_contain("filenames.push(base + \".lib\")")
+        expect(source).to_contain("filenames.push(\"lib\" + base + \".a\")")
+        expect(source).to_contain("native_runtime_archive_inputs_for_platform(runtime_dir, config.runtime_bundle, true)")
+        expect(source).to_contain("for path in _find_msvc_lib_paths()")
+        expect(source).to_contain("native_all_msvc_support_libraries(support_inputs)")
+        expect(source).to_contain("coff_link_default_libraries(")
+        expect(source).to_contain("while default_libraries_changed:")
+        expect(source).to_contain("for library in dependencies.unwrap():")
+        expect(source).to_contain("val explicit_archives = archives")
+        expect(source).to_contain("archives = explicit_archives")
+        expect(source).to_contain("COFF default-library directives did not converge")
+        expect(source).to_contain("COFF /DEFAULTLIB '{library}' was not found")
+
+    it "renders Win32 verbatim paths for the clang to GNU ld boundary":
+        expect(mingw_driver_path("\\\\?\\C:\\work\\obj\\main.o")).to_equal("C:/work/obj/main.o")
+        expect(mingw_driver_path("\\\\?\\UNC\\server\\share\\runtime.a")).to_equal("//server/share/runtime.a")
+        expect(mingw_driver_path("C:\\work\\out.exe")).to_equal("C:/work/out.exe")
+        expect(mingw_driver_path("/tmp/main.o")).to_equal("/tmp/main.o")

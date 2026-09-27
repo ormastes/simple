@@ -1,0 +1,99 @@
+# Compiler-owned Simple source to raw ARM32 Thumb image composition.
+#
+# The remote execution library stays compiler-independent.  This adapter owns
+# frontend/MIR/LLVM composition, links the emitted ELF32 object in-process, and
+# returns only the bytes written at the caller-selected code base.
+
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, llvm_object_code_bytes}
+use compiler.backend.linker.elf.arm32_raw_link.{elf_arm32_link_raw}
+
+val REMOTE_ARM32_ENTRY: text = "__simple_main"
+val REMOTE_ARM32_DATALAYOUT: text = "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
+
+fn remote_arm32_first_hir_error(lowering: HirLowering) -> text:
+    if lowering.errors.len() == 0:
+        return ""
+    lowering.errors[0].message
+
+fn remote_arm32_first_mir_error(lowering: MirLowering) -> text:
+    if lowering.errors.len() == 0:
+        return ""
+    lowering.errors[0].message
+
+fn remote_arm32_target_config() -> LlvmTargetConfig:
+    LlvmTargetConfig(
+        triple: LlvmTargetTriple(
+            arch: "thumbv7m", vendor: "unknown", os: "none", env: Some("eabi")),
+        cpu: "cortex-m3",
+        features: [],
+        abi: nil
+    )
+
+fn remote_arm32_translate(mir: MirModule) -> text:
+    var translator = MirToLlvm.create_explicit_target(
+        mir.name,
+        CodegenTarget.Arm,
+        "thumbv7m",
+        "unknown",
+        "none",
+        "eabi",
+        true,
+        REMOTE_ARM32_DATALAYOUT,
+        true
+    )
+    translator.translate_module_with_entry(mir, true)
+
+pub fn compile_remote_arm32_binary(source: text, base_addr: i64) -> Result<[i32], text>:
+    if source.trim() == "":
+        return Err("remote arm32 source must not be empty")
+    if base_addr < 0 or base_addr % 4 != 0:
+        return Err("remote arm32 base address must be non-negative and 4-byte aligned")
+
+    val path = "remote_arm32_payload.spl"
+    val parsed = parse_full_frontend(source, path, "remote_arm32_payload", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    val hir_error = remote_arm32_first_hir_error(hir_lowering)
+    if hir_error != "":
+        return Err("remote arm32 HIR lowering failed: " + hir_error)
+
+    val target = mir_target_context_from(
+        "thumbv7m-unknown-none-eabi", "thumbv7m", "baremetal", "llvm", -1)
+    var mir_lowering = MirLowering.new_for_target(hir.symbols, target)
+    val mir = mir_lowering.lower_module(hir)
+    val mir_error = remote_arm32_first_mir_error(mir_lowering)
+    if mir_error != "":
+        return Err("remote arm32 MIR lowering failed: " + mir_error)
+
+    val object_result = compile_ir_to_object(
+        remote_arm32_translate(mir), remote_arm32_target_config(), OptimizationLevel.Size)
+    if object_result.is_err():
+        return Err("remote arm32 LLVM object emission failed: " + object_result.unwrap_err())
+    val object_bytes = llvm_object_code_bytes(object_result.unwrap())
+    if object_bytes.len() == 0:
+        return Err("remote arm32 LLVM backend emitted an empty object")
+
+    var object_i64: [i64] = []
+    for byte in object_bytes:
+        object_i64.push(byte as i64)
+    val linked = elf_arm32_link_raw([object_i64], base_addr, REMOTE_ARM32_ENTRY)?
+    if (linked.entry_addr & 0xfffffffe) != base_addr:
+        return Err("remote arm32 entry must be placed at the requested code base")
+
+    var image: [i32] = []
+    for byte in linked.bytes:
+        if byte < 0 or byte > 255:
+            return Err("remote arm32 linker emitted a non-byte value")
+        image.push(byte.to_i32())
+    if image.len() == 0:
+        return Err("remote arm32 linker emitted an empty image")
+    Ok(image)

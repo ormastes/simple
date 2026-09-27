@@ -17,7 +17,9 @@ use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_s
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.linker.linker_wrapper.{
+    link_to_native, link_simpleos_internal, NativeLinkConfig,
+    hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -33,6 +35,22 @@ use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, 
 use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
 use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, compile_simpleos_arm64, simpleos_spl_start_symbol}
 use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
+
+fn _simpleos_internal_requested() -> bool:
+    (env_get("SIMPLE_LINKER") ?? "").trim().lower() == "internal"
+
+fn _simpleos_internal_link(objects: [text], archives: [text], output: text,
+        target: text, flags: [text], verbose: bool) -> Result<text, text>:
+    var config = NativeLinkConfig.default()
+    config.libraries = archives
+    config.runtime_path = "none"
+    config.pie = false
+    config.verbose = verbose
+    config.allow_duplicate_definitions = false
+    config.allow_cc_fallback = false
+    config.extra_flags = flags
+    link_simpleos_internal(objects, output, target, config)
+
 fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_level: i64) -> Result<text, text>:
     val pid = getpid()
     val crt_o = "build/os/simpleos_arm64_crt0_{pid}.o"
@@ -81,6 +99,20 @@ fn link_simpleos_arm64(user_objects: [text], output: text, verbose: bool, opt_le
         args.push("--defsym=spl_start={spl_start}")
     for obj in user_objects:
         args.push(obj)
+    if _simpleos_internal_requested():
+        var internal_objects = [crt_o, stubs_o, scheduler_o, value_o]
+        for obj in user_objects: internal_objects.push(obj)
+        var internal_flags = ["-T", linker_script, "-nostdlib", "--gc-sections"]
+        if spl_start != "": internal_flags.push("--defsym=spl_start={spl_start}")
+        val internal = _simpleos_internal_link(internal_objects, [], output,
+            "simpleos-aarch64", internal_flags, verbose)
+        file_delete(crt_o)
+        file_delete(stubs_o)
+        file_delete(scheduler_o)
+        file_delete(value_o)
+        if internal.is_err():
+            return Err("SimpleOS ARM64 internal link failed: {internal.unwrap_err()}")
+        return internal
     val (_out, err, code) = process_run("ld.lld", args)
     file_delete(crt_o)
     file_delete(stubs_o)
@@ -225,6 +257,22 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         user_args.push(support[1])
         user_args.push(support[2])
         user_args.push("--end-group")
+        if _simpleos_internal_requested():
+            var internal_objects = [support0, entry_object]
+            if init_o != "": internal_objects.push(init_o)
+            for obj in user_objects: internal_objects.push(obj)
+            var internal_flags = [
+                "-T", linker_script, "-nostdlib", "-static", "--gc-sections",
+                "--start-group", "--end-group"]
+            if init_o != "":
+                internal_flags.push("--wrap=__simple_call_module_inits")
+            val internal = _simpleos_internal_link(
+                internal_objects, [support[1], support[2]], output,
+                "simpleos-x86_64", internal_flags, verbose)
+            file_delete(entry_object)
+            if internal.is_err():
+                return Err("SimpleOS x86_64 user internal link failed: {internal.unwrap_err()}")
+            return internal
         val linker = if file_exists("/usr/bin/ld.lld"): "/usr/bin/ld.lld" else: "ld.lld"
         val (_user_out, user_err, user_code) = process_run(linker, user_args)
         file_delete(entry_object)
@@ -318,6 +366,23 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
     ]
     for obj in user_objects:
         args.push(obj)
+    if _simpleos_internal_requested():
+        var internal_objects = [
+            crt_o, stubs_o, service_owners_o, registry_o, type_o, auto_o, init_o]
+        for obj in user_objects: internal_objects.push(obj)
+        val internal = _simpleos_internal_link(internal_objects, [], output,
+            "simpleos-x86_64",
+            ["-T", linker_script, "-nostdlib", "--gc-sections"], verbose)
+        file_delete(crt_o)
+        file_delete(stubs_o)
+        file_delete(registry_o)
+        file_delete(type_o)
+        file_delete(auto_o)
+        file_delete(init_o)
+        file_delete(service_owners_o)
+        if internal.is_err():
+            return Err("SimpleOS x86_64 freestanding internal link failed: {internal.unwrap_err()}")
+        return internal
     val (_link_out, link_err, link_code) = process_run("ld.lld", args)
     file_delete(crt_o)
     file_delete(stubs_o)

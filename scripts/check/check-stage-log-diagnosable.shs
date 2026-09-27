@@ -77,7 +77,7 @@ EV_TRANSCRIPT=""
 # `[hir-fatal]` is included because the driver now emits fatal HIR diagnostics
 # with their text at the moment they are recorded, which is the only thing that
 # survives a stage that dies before its end-of-phase summary.
-diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct'
+diag_pattern='error:|\[hir-fatal\]|\[hir-poisoned\]|\[collect-all\]|panicked|segmentation fault|sigsegv|assertion|fatal|memory allocation of [0-9]+ bytes failed|undefined reference|cannot find|no space left|failed files|build failed|unsupported .*construct'
 
 usage() {
     echo "usage: $0 --log PATH [--log PATH...] --status N [--stage NAME] [--transcript PATH]"
@@ -286,6 +286,13 @@ selftest() {
     # line with lowercase `error:`.
     printf 'FAILED FILES (1):\nBuild failed: Unsupported HIR construct: TypeTest\n' > "${_dir}/native-summary.log"
     _assert "native-summary-must-pass" 0 --log "${_dir}/native-summary.log" --status 1 --stage t5b
+
+    # Rust's allocator abort does not prefix its terminal line with `error:` or
+    # `fatal`, but it is the complete cause of an exhausted bootstrap process.
+    # Treat the exact runtime wording as diagnostic evidence rather than
+    # misreporting a non-empty OOM log as silent/undiagnosable.
+    printf 'memory allocation of 59904 bytes failed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n' > "${_dir}/allocator-oom.log"
+    _assert "allocator-oom-must-pass" 0 --log "${_dir}/allocator-oom.log" --status 127 --stage t5c
 
     # 6. the driver's own mid-phase fatal line must count as diagnostic text
     printf '[hir-fatal] source_idx=2 path=a.spl error_idx=0 text=HIR lowering error in m (a.spl:9:1): unresolved type X\n' > "${_dir}/hirfatal.log"

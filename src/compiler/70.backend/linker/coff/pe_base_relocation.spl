@@ -1,0 +1,57 @@
+# PE32+ base-relocation directory synthesis.
+
+val PE_BASE_RELOCATION_DIR64: i64 = 10
+val PE_BASE_RELOCATION_PAGE_SIZE: i64 = 0x1000
+
+fn _pbr_put_u16(bytes: [u8], value: i64) -> [u8]:
+    bytes.push((value & 0xff) as u8).push(((value >> 8) & 0xff) as u8)
+
+fn _pbr_put_u32(bytes: [u8], value: i64) -> [u8]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 4:
+        result = result.push(((value >> (i * 8)) & 0xff) as u8)
+        i = i + 1
+    result
+
+fn pe_build_amd64_base_relocations(relocation_rvas: [i64]) -> Result<[u8], text>:
+    """Build deterministic IMAGE_REL_BASED_DIR64 blocks from patch RVAs."""
+    var sorted: [i64] = []
+    for rva in relocation_rvas:
+        if rva < 0 or rva >= 4294967296:
+            return Err("PE base-relocation RVA {rva} is outside the PE32+ RVA range")
+        if not sorted.contains(rva): sorted = sorted.push(rva)
+    var a: i64 = 0
+    while a < sorted.len():
+        var b = a + 1
+        while b < sorted.len():
+            if sorted[b] < sorted[a]:
+                val temporary = sorted[a]
+                sorted[a] = sorted[b]
+                sorted[b] = temporary
+            b = b + 1
+        a = a + 1
+
+    var output: [u8] = []
+    var index: i64 = 0
+    while index < sorted.len():
+        val page = (sorted[index] / PE_BASE_RELOCATION_PAGE_SIZE) *
+            PE_BASE_RELOCATION_PAGE_SIZE
+        var end = index
+        while end < sorted.len() and sorted[end] < page + PE_BASE_RELOCATION_PAGE_SIZE:
+            end = end + 1
+        val entry_count = end - index
+        val padded_count = if entry_count % 2 == 0: entry_count else: entry_count + 1
+        output = _pbr_put_u32(output, page)
+        output = _pbr_put_u32(output, 8 + padded_count * 2)
+        var entry = index
+        while entry < end:
+            output = _pbr_put_u16(output,
+                (PE_BASE_RELOCATION_DIR64 << 12) | (sorted[entry] - page))
+            entry = entry + 1
+        if entry_count % 2 != 0: output = _pbr_put_u16(output, 0)
+        index = end
+    Ok(output)
+
+export PE_BASE_RELOCATION_DIR64, PE_BASE_RELOCATION_PAGE_SIZE
+export pe_build_amd64_base_relocations

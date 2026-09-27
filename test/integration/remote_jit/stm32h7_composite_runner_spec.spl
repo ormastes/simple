@@ -6,6 +6,7 @@ Verifies the shared baremetal library workload on STM32H7 through the HAL-backed
 use app.io.file_ops.{file_read}
 use std.io_runtime.{shell}
 use std.nogc_sync_mut.jit.jit_hal_stm32h7.{stm32h7_connect, stm32h7_disconnect, stm32h7_write_code, stm32h7_write_register, stm32h7_read_register, stm32h7_resume}
+use compiler.backend.backend.native.remote_arm32_compile.{compile_remote_arm32_binary}
 
 fn hardware_ready() -> bool:
     val ocd = shell("command -v openocd >/dev/null 2>&1")
@@ -29,10 +30,6 @@ fn stm32h7_stack_top() -> i64:
 
 fn stm32h7_code_capacity() -> i64:
     stm32h7_code_end() - stm32h7_code_start()
-
-fn compile_stub_arm32(source: text, base_addr: i64) -> Result<[i32], text>:
-    # Temporary ARM32 Thumb stub: movs r0, #0
-    Ok([0x00, 0x20])
 
 fn append_halt_trampoline_arm32_local(bytes_arg: [i32]) -> [i32]:
     var bytes = bytes_arg
@@ -65,10 +62,11 @@ describe "STM32H7 Baremetal Workload":
 
         val code_start = stm32h7_code_start()
         val stack_top = stm32h7_stack_top()
-        val compile_result = compile_stub_arm32(source, code_start)
+        val compile_result = compile_remote_arm32_binary(source, code_start)
         if compile_result.is_err():
             stm32h7_disconnect(openocd_pid)
-            print "[skip] compile failed: {compile_result.err().unwrap()}"
+            print "[fail] compile failed: {compile_result.err().unwrap()}"
+            expect(compile_result.is_ok()).to_equal(true)
             return
 
         var compiled_bytes: [i32] = []

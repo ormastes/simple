@@ -1,0 +1,132 @@
+# GNU .eh_frame_hdr construction for the internal ELF linker.
+#
+# The admitted compiler corpus uses DWARF32 CIEs with augmentation "zR" and
+# DW_EH_PE_pcrel|DW_EH_PE_sdata4 (0x1b). Unsupported encodings fail closed.
+
+use compiler.backend.linker.elf_writer.{write_u32_le}
+use std.string_core.{char_from_code}
+
+struct ElfEhFrameEntry:
+    pc: i64
+    fde: i64
+
+fn _eh_u32(b: [i64], off: i64) -> Result<i64, text>:
+    if off < 0 or off + 4 > b.len():
+        return Err("truncated .eh_frame word at {off}")
+    Ok((b[off] & 0xff) | ((b[off + 1] & 0xff) << 8) |
+        ((b[off + 2] & 0xff) << 16) | ((b[off + 3] & 0xff) << 24))
+
+fn _eh_s32(v: i64) -> i64:
+    if v >= 0x80000000:
+        return v - 0x100000000
+    v
+
+fn _eh_s32_fits(v: i64) -> bool:
+    v >= -0x80000000 and v <= 0x7fffffff
+
+fn _eh_uleb_end(b: [i64], off: i64) -> Result<i64, text>:
+    var i = off
+    var n: i64 = 0
+    while i < b.len() and n < 10:
+        val byte = b[i]
+        i = i + 1
+        if byte & 0x80 == 0:
+            return Ok(i)
+        n = n + 1
+    Err("invalid LEB128 in .eh_frame")
+
+fn _eh_cie_encoding(b: [i64], cie: i64) -> Result<i64, text>:
+    val length = _eh_u32(b, cie)?
+    val end = cie + 4 + length
+    if length < 12 or end > b.len() or _eh_u32(b, cie + 4)? != 0:
+        return Err("invalid CIE at .eh_frame+{cie}")
+    if b[cie + 8] != 1:
+        return Err("UnsupportedFeature: .eh_frame CIE version {b[cie + 8]}")
+    var p = cie + 9
+    var augmentation = ""
+    while p < end and b[p] != 0:
+        augmentation = augmentation + char_from_code(b[p])
+        p = p + 1
+    if p >= end:
+        return Err("unterminated CIE augmentation at .eh_frame+{cie}")
+    p = p + 1
+    p = _eh_uleb_end(b, p)?       # code alignment
+    p = _eh_uleb_end(b, p)?       # signed data alignment has the same terminator rule
+    p = _eh_uleb_end(b, p)?       # return register
+    if augmentation != "zR":
+        return Err("UnsupportedFeature: .eh_frame CIE augmentation '{augmentation}'")
+    if p >= end or b[p] != 1 or p + 1 >= end:
+        return Err("invalid zR augmentation data at .eh_frame+{cie}")
+    val encoding = b[p + 1]
+    if encoding != 0x1b:
+        return Err("UnsupportedFeature: .eh_frame FDE encoding {encoding}; expected pcrel sdata4")
+    Ok(encoding)
+
+fn elf_eh_frame_fde_count(b: [i64]) -> Result<i64, text>:
+    var count: i64 = 0
+    var off: i64 = 0
+    while off + 4 <= b.len():
+        val length = _eh_u32(b, off)?
+        if length == 0:
+            off = off + 4
+            continue
+        if length == 0xffffffff:
+            return Err("UnsupportedFeature: DWARF64 .eh_frame record")
+        if length < 4 or off + 4 + length > b.len():
+            return Err("truncated .eh_frame record at {off}")
+        if _eh_u32(b, off + 4)? != 0:
+            count = count + 1
+        off = off + 4 + length
+    if off != b.len():
+        return Err("trailing bytes in .eh_frame")
+    Ok(count)
+
+fn _eh_insert_sorted(entries: [ElfEhFrameEntry], value: ElfEhFrameEntry) -> [ElfEhFrameEntry]:
+    var pos = entries.len()
+    while pos > 0 and entries[pos - 1].pc > value.pc:
+        pos = pos - 1
+    var out: [ElfEhFrameEntry] = []
+    var i: i64 = 0
+    while i < entries.len():
+        if i == pos:
+            out = out.push(value)
+        out = out.push(entries[i])
+        i = i + 1
+    if pos == entries.len():
+        out = out.push(value)
+    out
+
+fn elf_build_eh_frame_hdr(b: [i64], eh_addr: i64, hdr_addr: i64) -> Result<[i64], text>:
+    var entries: [ElfEhFrameEntry] = []
+    var off: i64 = 0
+    while off + 4 <= b.len():
+        val length = _eh_u32(b, off)?
+        if length == 0:
+            off = off + 4
+            continue
+        if length == 0xffffffff or length < 4 or off + 4 + length > b.len():
+            return Err("unsupported or truncated .eh_frame record at {off}")
+        val id = _eh_u32(b, off + 4)?
+        if id != 0:
+            val cie = off + 4 - id
+            _eh_cie_encoding(b, cie)?
+            val field = off + 8
+            val pc = eh_addr + field + _eh_s32(_eh_u32(b, field)?)
+            entries = _eh_insert_sorted(entries, ElfEhFrameEntry(pc: pc, fde: eh_addr + off))
+        off = off + 4 + length
+    var out: [i64] = [1, 0x1b, 0x03, 0x3b]
+    val eh_delta = eh_addr - (hdr_addr + 4)
+    if not _eh_s32_fits(eh_delta):
+        return Err(".eh_frame is out of pcrel-sdata4 range from .eh_frame_hdr")
+    out = write_u32_le(out, eh_delta)
+    out = write_u32_le(out, entries.len())
+    for e in entries:
+        val pc_delta = e.pc - hdr_addr
+        val fde_delta = e.fde - hdr_addr
+        if not _eh_s32_fits(pc_delta) or not _eh_s32_fits(fde_delta):
+            return Err("FDE is out of datarel-sdata4 range from .eh_frame_hdr")
+        out = write_u32_le(out, pc_delta)
+        out = write_u32_le(out, fde_delta)
+    Ok(out)
+
+export elf_eh_frame_fde_count, elf_build_eh_frame_hdr

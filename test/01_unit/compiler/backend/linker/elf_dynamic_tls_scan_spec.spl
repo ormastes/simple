@@ -1,0 +1,36 @@
+use std.spec.*
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.reloc_scan.{
+    ElfScanRef, elf_reloc_scan, elf_reloc_class,
+    ELF_LINK_STATIC_EXEC, ELF_LINK_DYNAMIC_EXEC, SYMREF_IMPORT}
+
+fn _tls_ref(target: RelocArch, rtype: i64, offset: i64) -> ElfScanRef:
+    ElfScanRef(oi: 0, sym_idx: 1, out_sec: 0, out_off: offset,
+        writable: true, rtype: rtype,
+        rclass: elf_reloc_class(target, rtype), kind: SYMREF_IMPORT,
+        key: "shared_tls", name: "shared_tls", stype: 6, size: 8,
+        alignment: 8, weak: false, addend: 3, relax: false)
+
+describe "dynamic raw TLS relocation scan":
+    it "admits x86-64 DTPMOD64 DTPREL64 and TPOFF64 words":
+        val refs = [_tls_ref(RelocArch.X86_64, 16, 0),
+            _tls_ref(RelocArch.X86_64, 17, 8),
+            _tls_ref(RelocArch.X86_64, 18, 16)]
+        val scan = elf_reloc_scan(
+            refs, RelocArch.X86_64, ELF_LINK_DYNAMIC_EXEC).unwrap()
+        expect(scan.tls_dynamic).to_equal([0, 1, 2])
+        expect(scan.imports).to_equal(["shared_tls"])
+
+    it "admits AArch64 DTPREL64 DTPMOD64 and TPREL64 words":
+        val refs = [_tls_ref(RelocArch.AArch64, 1029, 0),
+            _tls_ref(RelocArch.AArch64, 1028, 8),
+            _tls_ref(RelocArch.AArch64, 1030, 16)]
+        val scan = elf_reloc_scan(
+            refs, RelocArch.AArch64, ELF_LINK_DYNAMIC_EXEC).unwrap()
+        expect(scan.tls_dynamic).to_equal([0, 1, 2])
+
+    it "keeps static and instruction-field imported TLS fail-closed":
+        expect(elf_reloc_scan([_tls_ref(RelocArch.X86_64, 16, 0)],
+            RelocArch.X86_64, ELF_LINK_STATIC_EXEC).is_err()).to_equal(true)
+        expect(elf_reloc_scan([_tls_ref(RelocArch.X86_64, 23, 0)],
+            RelocArch.X86_64, ELF_LINK_DYNAMIC_EXEC).is_err()).to_equal(true)
