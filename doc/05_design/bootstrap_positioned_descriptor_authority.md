@@ -121,11 +121,47 @@ published map or temporary file; symlinks reject; mutation during capture emits
 no receipt. Shell syntax and diff checks passed. These fixtures exercise real
 map generation without constructing an admitted compiler or running bootstrap.
 
+## Retained runtime snapshot follow-up
+
+The ordinary macOS runtime path did not enter the Linux `/proc` fd6 arm: that
+arm only accepts descriptor-shaped paths. A real fixture established that an
+ordinary directory passed the runtime boundary and reached the later canonical
+Stage 2 lane check. Incorrect runtime display binding and replaced directory
+identity still rejected. The fixture's Stage 2 path is intentionally outside
+the production lane; its rejection is not evidence of a compiler defect.
+
+There was a separate identity gap: the early role check established a root
+inode, while the later content snapshot reopened the root pathname. Equal
+contents alone cannot bind that later read to the earlier inode. The portable
+verifier now retains directory fd6, compares its identity with the map, and
+uses it for that later runtime snapshot. The existing Linux branch is retained.
+
+The reader traverses using `dir_fd` relative opens with no-follow semantics.
+Each directory listing obtains a fresh open-file description through `openat`
+on `.`; it does not consume the inherited descriptor offset. Source and held
+identity are checked before and after reads, root replacement rejects, and file
+bytes use positioned reads. The portable snapshot preserves the existing sorted
+`file-hex:<relative-bytes-hex>:<effective-executable-bit>:<sha256>` format. It
+rejects symlinks, mutation, unsupported descendant types, and empty authority.
+Publication uses a completed temporary file and exclusive link, refusing an
+existing destination. No `/dev/fd` pathname traversal or authority fallback is
+introduced.
+
+Five dedicated snapshot tests passed on Darwin, including byte-for-byte parity
+against the real existing snapshot helper on nested, executable, spaced, and
+newline-containing filenames; repeated reads with unchanged inherited offset;
+identical root replacement before and during traversal; mutation and symlink
+rejection; and actual shell helper publication. Snapshot construction currently
+uses one process for walking and hashing; full runtime-tree performance has not
+been measured. The full bootstrap cap remains in force.
+
 ## Remaining integration
 
-The runtime directory descriptor-6 branch, parent/source/helper descriptor
-transport, and descriptor-capsule admission remain Linux-specific. The shared
-runner and standalone provenance verifier need corresponding descriptor
-transport support. Existing parent and source validation has not been disabled
-or replaced. No full bootstrap or source-matched macOS runtime admission has
-been performed.
+`bootstrap_stage3_verify_hosted_runtime_authority`, reached later through Stage
+2 admission validation, still consumes the runtime pathname. It must use the
+retained root for its receipt and library reads before complete runtime authority
+binding can be claimed. Parent/source/helper descriptor transport and capsule
+admission also remain Linux-specific. Existing parent and source checks remain
+in force. No full bootstrap or source-matched macOS runtime admission has been
+performed. The focused fixture establishes progression through selected gates,
+not a new observed normal-lane bootstrap failure or complete admission.

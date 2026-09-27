@@ -110,3 +110,14 @@ all 31 role identities, correct digests, missing first/middle/last roles, symlin
 and mid-read mutation. This removes the previously recorded producer GNU-stat
 barrier for ordinary file/directory maps. Runtime/parent/capsule handling remains
 separate work; no full bootstrap was run.
+
+## Runtime-path assessment and retained snapshot
+
+The ordinary Darwin directory path already passes the runtime binding boundary;
+the Linux fd6 arm only applies to descriptor-shaped paths. A separate root-inode
+race existed between the earlier role check and later pathname-based snapshot.
+The portable verifier now holds fd6 and builds that snapshot through descriptor-
+relative traversal, preserving snapshot bytes and rejecting root replacement.
+Five focused snapshot tests passed. Later hosted-runtime receipt/library reads
+still use the pathname and require a separate retained-root change; this repair
+does not claim complete runtime binding or full bootstrap admission.

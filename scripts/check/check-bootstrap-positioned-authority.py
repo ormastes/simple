@@ -337,7 +337,7 @@ class ProducerAuthority(unittest.TestCase):
         self.directory.mkdir(mode=0o750)
         self.map_path = self.root / 'manifest.env.authority-map.env'
 
-    def produce(self, backfill='absent', missing=None):
+    def produce(self, backfill='absent', missing=None, overrides=None):
         writer = (ROOT / 'scripts/check/lib/bootstrap-stage3/manifest-write.shs').read_text()
         rows = writer.split('bootstrap_stage3_write_authority_map_rows() {', 1)[1].split('\n}', 1)[0]
         variables = set(re.findall(r'\$(BSTAGE3_[A-Z0-9_]+)', rows))
@@ -347,6 +347,7 @@ class ProducerAuthority(unittest.TestCase):
             environment[name] = str(path)
         environment['BSTAGE3_MANIFEST'] = str(self.root / 'manifest.env')
         environment['bootstrap_stage3_backfill_status'] = backfill
+        environment.update(overrides or {})
         if missing:
             environment[missing] = str(self.root / 'missing')
         script = '''
@@ -419,6 +420,82 @@ bootstrap_stage3_write_authority_map
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.map_path.exists())
 
+    @unittest.skipIf(Path('/proc/self/stat').is_file(), 'non-procfs production runtime path')
+    def test_real_verifier_passes_runtime_boundary_and_rejects_wrong_bindings(self):
+        cache2, cache3 = self.root / 'cache2', self.root / 'cache3'
+        cache2.mkdir()
+        cache3.mkdir()
+        interpreter = Path(sys.executable).resolve()
+        tools = self.root / 'tools.env'
+        tools.write_text(f'tool=python3|canonical={interpreter}|sha256={hashlib.sha256(interpreter.read_bytes()).hexdigest()}\n')
+        overrides = {'BSTAGE3_TOOL_AUTHORITY': str(tools), 'BSTAGE3_TOOL_AUTHORITY_DISPLAY': str(tools)}
+        for variable, path in [('BSTAGE3_STAGE2_CACHE_DIR', cache2), ('BSTAGE3_STAGE3_CACHE_DIR', cache3)]:
+            overrides[variable] = str(path)
+            overrides[variable + '_DISPLAY'] = str(path)
+        produced = self.produce(overrides=overrides)
+        self.assertEqual(produced.returncode, 0, produced.stderr)
+        metadata_script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_host_platform
+bootstrap_stage3_helper_bundle_fingerprint
+'''
+        platform, bundle = subprocess.check_output(['sh', '-c', metadata_script, 'test', str(ROOT)], text=True).splitlines()
+        source = VERIFIER.read_text()
+        required = source.split('for bootstrap_stage3_key in ', 1)[1].split('; do', 1)[0].replace('\\', '').split()
+        values = {key: 'fixture' for key in required}
+        for key in values:
+            if key.endswith(('sha256', 'fingerprint')) or key == 'stage2_admission_identity':
+                values[key] = '0' * 64
+        values.update({
+            'schema': 'simple-bootstrap-stage3-provenance-v4', 'status': 'pass',
+            'artifact_kind': 'pure-simple-bootstrap-compiler', 'full_cli_status': 'separate-not-proven',
+            'native_build_backfill_status': 'bound-bootstrap-native-all', 'source_roots': 'src/compiler:src/app:src/lib',
+            'stage2_sanity_status': 'pass', 'stage2_receiver_status': 'pass', 'stage3_sanity_status': 'pass',
+            'stage2_check_policy': 'identity-scoped-receipt-reuse', 'stage2_checks_executed_at_admission': '1',
+            'stage2_checks_replayed_during_stage3': '0',
+            'bootstrap_script_path': str(ROOT / 'scripts/bootstrap/bootstrap-from-scratch.sh'),
+            'provenance_helper_path': str(ROOT / 'scripts/check/lib/bootstrap-stage3-provenance.shs'),
+            'provenance_helper_bundle_fingerprint': bundle,
+            'source_snapshot_path': str(self.root / 'source-inputs-after.txt'),
+            'bound_artifact_authority_map_path': str(self.map_path),
+            'bound_artifact_authority_map_sha256': hashlib.sha256(self.map_path.read_bytes()).hexdigest(),
+            'platform': platform, 'backend': 'cranelift', 'mode': 'dynload', 'stage2_threads': '1', 'stage3_threads': '1',
+            'stage2_native_cache_dir': str(cache2), 'stage3_native_cache_dir': str(cache3),
+            'runtime_path': str(self.directory), 'stage2_path': str(self.artifact), 'stage3_path': str(self.artifact),
+            'stage2_command_output': str(self.artifact), 'stage3_command_output': str(self.artifact),
+        })
+        manifest = self.root / 'manifest.env'
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_VERSION_ROOT=$1
+BOOTSTRAP_STAGE3_PHASE_STATUS_FD=159
+exec 159>"$2/phases"
+unset BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_verify_manifest "$2/manifest.env" "$2/manifest.env" "$1" "$2/artifact" "$2/artifact" "$2/manifest.env.authority-map.env"
+'''
+        def probe():
+            manifest.write_text(''.join(f'{key}={value}\n' for key, value in values.items()))
+            return subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(self.root)], capture_output=True, text=True)
+        result = probe()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('stage2-path-outside-canonical-lane', result.stderr)
+        self.assertIn('aV6', (self.root / 'phases').read_text())
+        self.assertNotIn('stat:', result.stderr)
+        values['runtime_path'] = str(cache2)
+        rejected = probe()
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn('aV5', (self.root / 'phases').read_text())
+        self.assertNotIn('stage2-path-outside-canonical-lane', rejected.stderr)
+        values['runtime_path'] = str(self.directory)
+        self.directory.rename(self.root / 'old-directory')
+        self.directory.mkdir()
+        replaced = probe()
+        self.assertNotEqual(replaced.returncode, 0)
+        self.assertIn('portable-authority-role-', replaced.stderr)
+        self.assertNotIn('stage2-path-outside-canonical-lane', replaced.stderr)
+
     def test_snapshot_mutation_emits_no_receipt(self):
         pread = os.pread
         def mutate(fd, count, offset):
@@ -430,6 +507,100 @@ bootstrap_stage3_write_authority_map
             with self.assertRaises(ValueError):
                 NAMESPACE['main'](['0', 'file', 'role-receipt', str(self.artifact)])
         self.assertEqual(output.getvalue(), '')
+
+
+class RetainedRuntimeSnapshot(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='runtime-fd-authority-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.runtime = self.root / 'runtime'
+        self.runtime.mkdir()
+        (self.runtime / 'nested').mkdir()
+        (self.runtime / 'plain file').write_bytes(b'plain\n')
+        executable = self.runtime / 'nested' / 'execute'
+        executable.write_bytes(b'executable\n')
+        executable.chmod(0o755)
+        (self.runtime / 'line\nname').write_bytes(b'newline filename\n')
+        self.fd = os.open(self.runtime, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, self.fd)
+        st = os.fstat(self.fd)
+        self.binding = f'directory:{st.st_dev}:{st.st_ino}:{st.st_mode & 0o7777:o}:-'
+
+    def snapshot(self):
+        return NAMESPACE['directory_snapshot'](self.fd, self.binding, str(self.runtime))
+
+    def test_snapshot_matches_existing_format_and_preserves_offset(self):
+        reference = self.root / 'reference'
+        script = '''
+BOOTSTRAP_STAGE3_FACADE_PATH="$1/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH" || exit 2
+bootstrap_stage3_directory_snapshot "$2" "$3"
+'''
+        result = subprocess.run(['sh', '-c', script, 'test', str(ROOT), str(reference), str(self.runtime)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        offset = os.lseek(self.fd, 0, os.SEEK_CUR)
+        for _ in range(2):
+            self.assertEqual(self.snapshot(), reference.read_bytes())
+            self.assertEqual(os.lseek(self.fd, 0, os.SEEK_CUR), offset)
+
+    def test_identical_root_replacement_is_rejected(self):
+        old = self.root / 'old-runtime'
+        self.runtime.rename(old)
+        shutil.copytree(old, self.runtime)
+        with self.assertRaises(ValueError):
+            self.snapshot()
+
+    def test_replacement_during_snapshot_is_rejected(self):
+        pread = os.pread
+        changed = False
+        def replace(fd, count, offset):
+            nonlocal changed
+            data = pread(fd, count, offset)
+            if not changed:
+                changed = True
+                old = self.root / 'old-runtime'
+                self.runtime.rename(old)
+                shutil.copytree(old, self.runtime)
+            return data
+        with patch.object(os, 'pread', replace), self.assertRaises(ValueError):
+            self.snapshot()
+
+    def test_descendant_mutation_and_symlink_are_rejected(self):
+        pread = os.pread
+        def mutate(fd, count, offset):
+            data = pread(fd, count, offset)
+            held = os.fstat(fd)
+            for candidate in self.runtime.rglob('*'):
+                current = candidate.stat()
+                if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
+                    candidate.write_bytes(b'changed size during snapshot')
+                    break
+            return data
+        with patch.object(os, 'pread', mutate), self.assertRaises(ValueError):
+            self.snapshot()
+        (self.runtime / 'alias').symlink_to(self.runtime / 'plain file')
+        with self.assertRaises(ValueError):
+            self.snapshot()
+
+    def test_shell_snapshot_publishes_exclusively_and_rejects_replaced_root(self):
+        output = self.root / 'snapshot'
+        script = '''
+. "$1"
+exec 6<"$2/."
+bootstrap_stage3_descriptor_read 6 "$3" directory-check "$2" || exit 1
+bootstrap_stage3_descriptor_read 6 "$3" directory-snapshot "$2" "$4" || exit 1
+if bootstrap_stage3_descriptor_read 6 "$3" directory-snapshot "$2" "$4"; then exit 1; fi
+mv "$2" "$2.old"
+mkdir "$2"
+if bootstrap_stage3_descriptor_read 6 "$3" directory-snapshot "$2" "$4.rejected"; then exit 1; fi
+'''
+        expected = self.snapshot()
+        result = subprocess.run(['sh', '-c', script, 'test', str(VERIFIER), str(self.runtime), self.binding, str(output)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_bytes(), expected)
+        self.assertFalse(Path(str(output) + '.rejected').exists())
+        self.assertFalse(list(self.root.glob('.stage3-runtime-*')))
 
 
 if __name__ == '__main__':
