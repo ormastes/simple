@@ -414,6 +414,10 @@ Linux and SimpleOS publication now reject symlink and non-regular installed
 leaves, create the sibling under shell noclobber mode before copying into that
 owned regular file, and use `mv -T`, preventing a raced sibling or destination
 directory from redirecting publication.
+POSIX parent-directory creation is rendered from the already validated
+destination path and quoted independently. It no longer uses an unquoted
+`$(dirname ...)` result, so explicit install parents containing whitespace,
+apostrophes, or glob metacharacters cannot be split or expanded by the shell.
 The terminal layer now backs agent/public-key remote placement with bounded
 host OpenSSH `ssh`/`scp` processes because its legacy SSH SFFI externs have no
 runtime definitions. Connection probes, command execution, upload, and
