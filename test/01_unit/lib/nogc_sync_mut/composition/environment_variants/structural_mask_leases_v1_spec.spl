@@ -77,6 +77,138 @@ describe "owner-backed structural mask leases V1":
         expect(stable_source_buffer_lease_create_v1(owner, 903u64, [1u8], 1u32).unwrap_err()).to_equal(
             STRUCTURAL_MASK_LEASE_INVALID_V1)
 
+    it "reclaims all lease tables through more than 256 sequential lifetimes":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, lease_candidate(4096))
+        val owner = StructuralMaskLeaseOwnerV1.create()
+        val first_kernel = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+            active.generation, 257u64, 4096, 32u64, true).unwrap()
+        val first_source = stable_source_buffer_lease_create_v1(owner, 905u64, [1u8], 0u32).unwrap()
+        val first_session = structural_mask_session_create_v1(owner, manager,
+            first_kernel, first_source, 1u8, 2u8).unwrap()
+        expect(structural_mask_session_release_v1(owner, first_session)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(stable_source_buffer_lease_release_v1(owner, first_source)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, first_kernel)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        var previous_lease = first_source.lease_id
+        var previous_generation = first_source.lease_generation
+        var previous_session = first_session.session_id
+        var previous_session_generation = first_session.session_generation
+        var i = 0
+        while i < 257:
+            val kernel = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+                active.generation, 257u64, 4096, 32u64, true).unwrap()
+            val source = stable_source_buffer_lease_create_v1(owner, 905u64, [1u8], 0u32).unwrap()
+            val session = structural_mask_session_create_v1(owner, manager, kernel, source, 1u8, 2u8).unwrap()
+            val scalar = structural_mask_scalar_session_create_v1(owner, source, 1u8, 2u8).unwrap()
+            expect(kernel.lease_id).to_be_greater_than(previous_lease)
+            expect(source.lease_id).to_be_greater_than(kernel.lease_id)
+            expect(source.lease_generation).to_be_greater_than(previous_generation)
+            expect(session.session_id).to_be_greater_than(previous_session)
+            expect(session.session_generation).to_be_greater_than(previous_session_generation)
+            expect(scalar.session_id).to_be_greater_than(session.session_id)
+            expect(scalar.session_generation).to_be_greater_than(session.session_generation)
+            expect(structural_mask_session_release_v1(owner, session)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+            expect(structural_mask_session_release_v1(owner, scalar)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+            expect(stable_source_buffer_lease_release_v1(owner, source)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+            expect(executable_kernel_lease_release_v1(owner, manager, kernel)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+            previous_lease = source.lease_id
+            previous_generation = source.lease_generation
+            previous_session = scalar.session_id
+            previous_session_generation = scalar.session_generation
+            i = i + 1
+        expect(manager.pins.len()).to_equal(0)
+        expect(structural_mask_session_release_v1(owner, first_session)).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+        expect(stable_source_buffer_lease_release_v1(owner, first_source)).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, first_kernel)).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+        expect(stable_source_buffer_transfer_issue_v1(owner, first_source).unwrap_err()).to_equal(
+            STRUCTURAL_MASK_LEASE_INVALID_V1)
+
+    it "bounds concurrent live records and reuses only the released slot":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, lease_candidate(4096))
+        val owner = StructuralMaskLeaseOwnerV1.create()
+        var kernels: [ExecutableKernelLeaseV1] = []
+        var sources: [StableSourceBufferLeaseV1] = []
+        var sessions: [StructuralMaskSessionV1] = []
+        var i = 0
+        while i < 256:
+            val kernel = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+                active.generation, 257u64, 4096, 32u64, true).unwrap()
+            val source = stable_source_buffer_lease_create_v1(owner, 906u64, [1u8], 0u32).unwrap()
+            val session = structural_mask_session_create_v1(owner, manager, kernel, source, 1u8, 2u8).unwrap()
+            kernels.push(kernel); sources.push(source); sessions.push(session)
+            i = i + 1
+        expect(executable_kernel_lease_issue_v1(owner, manager, 41u64,
+            active.generation, 257u64, 4096, 32u64, true).unwrap_err()).to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(stable_source_buffer_lease_create_v1(owner, 906u64, [1u8], 0u32).unwrap_err()).to_equal(
+            STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(structural_mask_session_create_v1(owner, manager, kernels[0], sources[0], 1u8, 2u8).unwrap_err())
+            .to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(structural_mask_scalar_session_create_v1(owner, sources[0], 1u8, 2u8).unwrap_err())
+            .to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(structural_mask_session_release_v1(owner, sessions[128])).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(stable_source_buffer_lease_release_v1(owner, sources[128])).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, kernels[128])).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        val replacement_kernel = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+            active.generation, 257u64, 4096, 32u64, true).unwrap()
+        val replacement_source = stable_source_buffer_lease_create_v1(owner, 906u64, [1u8], 0u32).unwrap()
+        val replacement = structural_mask_scalar_session_create_v1(owner, replacement_source, 1u8, 2u8).unwrap()
+        expect(replacement_kernel.lease_id).to_be_greater_than(kernels[255].lease_id)
+        expect(replacement_source.lease_id).to_be_greater_than(sources[255].lease_id)
+        expect(replacement.session_id).to_be_greater_than(sessions[255].session_id)
+        expect(owner.kernels.len()).to_equal(256)
+        expect(owner.sources.len()).to_equal(256)
+        expect(owner.sessions.len()).to_equal(256)
+        expect(structural_mask_batch_validate_v1(owner, manager, sessions[255], 0u64, 1u64).status)
+            .to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(stable_source_buffer_lease_release_v1(owner, sources[255])).to_equal(STRUCTURAL_MASK_LEASE_IN_USE_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, kernels[255])).to_equal(STRUCTURAL_MASK_LEASE_IN_USE_V1)
+        expect(structural_mask_session_release_v1(owner, sessions[128])).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+        expect(stable_source_buffer_lease_release_v1(owner, sources[128])).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, kernels[128])).to_equal(STRUCTURAL_MASK_LEASE_RETIRED_V1)
+
+    it "retains a kernel after failed pin release through compaction and permits retry":
+        val manager = ProviderGenerationManagerV1.create()
+        val active = provider_generation_activate_v1(manager, lease_candidate(4096))
+        val wrong_manager = ProviderGenerationManagerV1.create()
+        val owner = StructuralMaskLeaseOwnerV1.create()
+        val retained = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+            active.generation, 257u64, 4096, 32u64, true).unwrap()
+        expect(executable_kernel_lease_release_v1(owner, wrong_manager, retained)).to_equal(
+            STRUCTURAL_MASK_LEASE_STALE_GENERATION_V1)
+        var i = 0
+        while i < 255:
+            val temporary = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+                active.generation, 257u64, 4096, 32u64, true).unwrap()
+            expect(executable_kernel_lease_release_v1(owner, manager, temporary)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+            i = i + 1
+        val replacement = executable_kernel_lease_issue_v1(owner, manager, 41u64,
+            active.generation, 257u64, 4096, 32u64, true).unwrap()
+        expect(owner.kernels.len()).to_equal(2)
+        expect(manager.pins.len()).to_equal(2)
+        expect(executable_kernel_lease_release_v1(owner, manager, retained)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(executable_kernel_lease_release_v1(owner, manager, replacement)).to_equal(STRUCTURAL_MASK_LEASE_OK_V1)
+        expect(manager.pins.len()).to_equal(0)
+
+    it "rejects zero and exhausted transfer counters without consuming source authority":
+        val owner = StructuralMaskLeaseOwnerV1.create()
+        val first = stable_source_buffer_lease_create_v1(owner, 907u64, [1u8], 0u32).unwrap()
+        val second = stable_source_buffer_lease_create_v1(owner, 908u64, [2u8], 0u32).unwrap()
+        owner.next_lease_id = 0u64
+        expect(stable_source_buffer_transfer_issue_v1(owner, first).unwrap_err()).to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(owner.next_lease_id).to_equal(0u64)
+        owner.next_lease_id = STRUCTURAL_MASK_MAX_COUNTER_V1
+        expect(stable_source_buffer_transfer_issue_v1(owner, first).unwrap_err()).to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(owner.next_lease_id).to_equal(STRUCTURAL_MASK_MAX_COUNTER_V1)
+        owner.next_lease_id = STRUCTURAL_MASK_MAX_COUNTER_V1 - 1u64
+        val transfer = stable_source_buffer_transfer_issue_v1(owner, first).unwrap()
+        expect(transfer.transfer_id).to_equal(STRUCTURAL_MASK_MAX_COUNTER_V1 - 1u64)
+        expect(owner.next_lease_id).to_equal(STRUCTURAL_MASK_MAX_COUNTER_V1)
+        expect(stable_source_buffer_transfer_validate_v1(owner, transfer)).to_equal(true)
+        expect(stable_source_buffer_transfer_issue_v1(owner, second).unwrap_err()).to_equal(STRUCTURAL_MASK_LEASE_CAPACITY_V1)
+        expect(stable_source_buffer_transfer_consume_v1(owner, transfer)).to_equal(true)
+        expect(stable_source_buffer_transfer_consume_v1(owner, transfer)).to_equal(false)
+
     it "fails closed before lease and session counters wrap":
         val manager = ProviderGenerationManagerV1.create()
         val active = provider_generation_activate_v1(manager, lease_candidate(4096))
