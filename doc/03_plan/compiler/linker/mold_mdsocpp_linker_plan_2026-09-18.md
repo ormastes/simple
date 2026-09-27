@@ -863,6 +863,10 @@ command line's existing `--hash-style=gnu` request now produces GNU-only output.
 GNU `--strip-all` and `-s` now select the existing typed internal-ELF symbol
 table stripping path instead of being rejected as unmodeled flags. Non-default
 dynamic hash policy on a static image fails closed rather than being ignored.
+GNU `--no-undefined`/`-z defs` are admitted because every unresolved strong
+symbol already fails before layout. `-z noexecstack` is admitted with a
+fixture-backed assertion that `PT_GNU_STACK` is RW and lacks execute permission;
+the opposite undefined/execstack policies remain fail-closed.
 GNU `--as-needed` now becomes typed ELF request policy: relocation-selected
 provider DSOs and providers named by retained-symbol roots keep one ordered
 `DT_NEEDED`, while unused shared libraries are omitted after the complete scan.
