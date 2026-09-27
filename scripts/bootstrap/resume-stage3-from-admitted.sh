@@ -823,6 +823,28 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
     "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
+  # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
+  # The watchdog must honor a Stage 3 process cap configured below the tree
+  # cap, while retaining the stricter existing tree cap by default.
+  stage3_darwin_rss_cap_kib=$(bootstrap_stage3_memory_darwin_rss_cap_kib \
+    "$stage3_process_max_kib" \
+    "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}") ||
+    bootstrap_stage3_error 'invalid Darwin Stage 3 RSS cap'
+  stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
+  perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode="$stage3_darwin_rss_session_mode" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    --max-rss-kib="$stage3_darwin_rss_cap_kib" \
+    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+    --receipt="$stage3_log.rss.env" -- \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \

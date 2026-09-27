@@ -958,3 +958,23 @@ skip package mutation; missing tools use noninteractive `sudo -n` and fail with
 the setup error rather than hanging or prompting. GCC remains only the package
 that supplies the MinGW sysroot/binutils on Debian; it is never selected as the
 compiler driver.
+
+Exact-head run `36307823355` passed both seeds and Linux Stage 2, and compiled
+all 915 Windows units with Clang before exposing the next target-projection
+gap. The generated `_init_all.o` and `_stubs.o` helper objects were compiled as
+Linux ELF while the final output was MinGW COFF, so `ld.lld` rejected both as
+unknown file types. All generated helper-C paths now select policy from the
+output target and add Clang's explicit `--target=x86_64-w64-windows-gnu` flag;
+the canonical hosted target spelling is pinned by a focused regression test.
+A new exact-head run remains required before the Windows Stage 2 PE32+ artifact
+is admitted.
+
+Exact-head run `36309670417` confirmed that the generated helper objects are
+now valid COFF and advanced the Windows link to MinGW CRT resolution. It then
+exposed host-based system-symbol classification, which fabricated duplicate
+stubs for MinGW-owned CRT/libm symbols, plus runtime references to unavailable
+MinGW `clock_gettime` and `_set_fmode` entry points. System-symbol filtering now
+uses the output target, Windows uses the existing QueryPerformanceCounter/
+FILETIME clock shim for both MSVC and MinGW, and MinGW selects binary stdio via
+its `_fmode` accessor. Focused Rust tests and a Clang 23 MinGW runtime-object
+probe cover these contracts. A new exact-head run remains required.

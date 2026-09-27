@@ -40,7 +40,13 @@ case "$platform" in
     ;;
 esac
 
-ulimit -v "$process_max_kib" || exit 125
+case "$platform" in
+  # Darwin rejects RLIMIT_AS (`ulimit -v`: Invalid argument). The resume
+  # launcher runs this worker under process-tree-rss-watchdog.pl with the same
+  # per-process maximum instead, so the cap is enforced, not dropped.
+  *-apple-darwin*) ;;
+  *) ulimit -v "$process_max_kib" || exit 125 ;;
+esac
 timeout_args=
 [ -z "$timeout_seconds" ] || timeout_args="--timeout $timeout_seconds"
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \

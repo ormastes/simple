@@ -90,6 +90,9 @@ static int rt_msvc_ftruncate(int fd, long long length) {
 }
 #define ftruncate rt_msvc_ftruncate
 
+#endif
+
+#if defined(_WIN32)
 #ifndef CLOCK_REALTIME
 #define CLOCK_REALTIME 0
 #endif
@@ -2959,7 +2962,11 @@ static void rt_win_set_binary_stdio(void) {
      * had already broken inventory generations. Make binary the process
      * default, which is the POSIX and Rust-std contract every caller assumes;
      * an explicit "t" still opts into translation. */
+#if defined(_MSC_VER)
     _set_fmode(_O_BINARY);
+#else
+    _fmode = _O_BINARY;
+#endif
     _setmode(_fileno(stdin), _O_BINARY);
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stderr), _O_BINARY);

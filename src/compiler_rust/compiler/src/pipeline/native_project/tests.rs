@@ -6926,6 +6926,32 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
 }
 
 #[test]
+fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
+    let target = simple_common::target::Target::parse("x86_64-pc-windows-gnu").unwrap();
+    for symbol in [
+        "__main",
+        "_tls_index",
+        "__mingw_strtod",
+        "cbrt",
+        "cosh",
+        "fma",
+        "fmaf",
+        "hypot",
+        "raise",
+        "sinh",
+        "tanh",
+        "wcscmp",
+        "wcscpy",
+    ] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from the MinGW CRT, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("app__main", target));
+}
+
+#[test]
 fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(super::stubs::is_inline_asm_symbol("__simple_asm_Hf5014a9fdb029e11"));
     assert!(super::stubs::is_inline_asm_symbol("___simple_asm_Hf5014a9fdb029e11"));

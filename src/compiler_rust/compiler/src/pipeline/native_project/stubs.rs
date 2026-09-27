@@ -7,7 +7,8 @@ use simple_common::target::TargetOS;
 use super::{effective_target, ModuleImports};
 use super::tools::{
     archive_create_command, find_archive_tool, find_c_compiler, find_runtime_library,
-    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, nm_command, target_c_compiler,
+    external_tool_path, is_compiler_rt_builtin_symbol, is_system_symbol, is_system_symbol_for_target,
+    nm_command, target_c_compiler, windows_gnu_target_flag,
 };
 
 pub(crate) fn is_inline_asm_symbol(symbol: &str) -> bool {
@@ -1033,7 +1034,8 @@ pub(crate) fn generate_stub_object(
         }
     }
 
-    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+    let target = effective_target();
+    let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&target);
     for lib_path in &plat_config.system_scan_libs {
         if std::path::Path::new(lib_path).exists() {
             let mut nm_cmd = nm_command()?;
@@ -1095,7 +1097,7 @@ pub(crate) fn generate_stub_object(
         .filter(|s| !is_optional_weak_hook_symbol(s))
         .filter(|s| !is_compiler_provided_runtime_symbol(s))
         .filter(|s| !is_linker_provided_symbol(s, &defined))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !is_runtime_optional_symbol(s))
         .cloned()
         .collect();
@@ -1156,7 +1158,7 @@ or set {}=1 to bypass at your own risk.",
         // final linker to diagnose.
         .filter(|s| !is_inline_asm_symbol(s))
         .filter(|s| stub_missing_runtime || !is_runtime_owned_symbol(s))
-        .filter(|s| !is_system_symbol(s))
+        .filter(|s| !is_system_symbol_for_target(s, target))
         .filter(|s| !s.starts_with('?') && !s.starts_with("__imp_"))
         .collect();
 
@@ -1241,14 +1243,19 @@ the old fabricating behaviour.",
         let stub_c = temp_dir.join("_stubs.c");
         std::fs::write(&stub_c, "/* no stubs needed */\n").map_err(|e| format!("write stubs: {e}"))?;
         let stub_o = temp_dir.join("_stubs.o");
-        let empty_cc = target_c_compiler(effective_target());
-        let status = std::process::Command::new(&empty_cc)
-            .arg("-c")
+        let target = effective_target();
+        let empty_cc = target_c_compiler(target);
+        let mut command = std::process::Command::new(&empty_cc);
+        command.arg("-c")
             .arg("-ffunction-sections")
             .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
-            .arg(&stub_c)
+            .arg(&stub_c);
+        if let Some(flag) = windows_gnu_target_flag(target, &empty_cc) {
+            command.arg(flag);
+        }
+        let status = command
             .status()
             .map_err(|e| format!("compile stubs: {e}"))?;
         if !status.success() {
@@ -1467,15 +1474,19 @@ the old fabricating behaviour.",
         let stub_o = temp_dir.join("_stubs.o");
         // GNU-style driver flags and `__asm__` labels below: clang's GNU
         // driver, never gcc (clang-only toolchain). Fail fast if it is absent.
-        let stub_cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+        let stub_cc = target_c_compiler(target);
         simple_common::platform::cc_detect::require_compiler(&stub_cc)?;
-        let output = std::process::Command::new(&stub_cc)
-            .arg("-c")
+        let mut command = std::process::Command::new(&stub_cc);
+        command.arg("-c")
             .arg("-ffunction-sections")
             .arg("-fdata-sections")
             .arg("-o")
             .arg(&stub_o)
-            .arg(&stub_c)
+            .arg(&stub_c);
+        if let Some(flag) = windows_gnu_target_flag(target, &stub_cc) {
+            command.arg(flag);
+        }
+        let output = command
             .output()
             .map_err(|e| format!("compile stubs ({stub_cc}): {e}"))?;
 
