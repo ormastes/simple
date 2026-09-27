@@ -657,6 +657,13 @@ missing libraries, malformed archives, and incomplete named runtime providers
 fail before publication. `debug` and unmodelled `extra_flags` remain explicit
 unsupported policy rather than being ignored.
 
+Modeled SimpleOS `extra_flags` now project GNU `-T`/`--script` spellings into
+the BootLayoutPlan script input and `--defsym=name=expression` into typed
+post-layout symbol assignments. Duplicate identical policy is deduplicated;
+conflicting scripts, conflicting symbol expressions, malformed values, and
+every unmodeled flag fail closed. An explicit flag and
+`SIMPLE_LINKER_SCRIPT` must name the same script when both are present.
+
 Remote interpreter placement now validates the exact path bytes later quoted
 into target commands. Known-target explicit and staging paths reject outer
 whitespace instead of validating a trimmed alias and executing the original;

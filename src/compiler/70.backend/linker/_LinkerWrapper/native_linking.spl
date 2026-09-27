@@ -59,7 +59,7 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # one shared implementation both callers now use.
 use compiler.backend.linker.elf.elf_static_link.{elf_link_configured, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_configured}
-use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text}
+use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.coff.coff_link.{
     CoffLinkRequest, coff_link_amd64_retained, coff_link_arm64_retained,
@@ -536,11 +536,85 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
 # (design D4: reject, never mask). allow_duplicate_definitions is not listed:
 # internal:elf is stricter (duplicate strong definitions are a loud error).
 fn internal_simpleos_unsupported_config_field(config: NativeLinkConfig) -> text:
-    if config.extra_flags.len() > 0:
-        return "extra_flags"
+    if internal_simpleos_flags(config.extra_flags).is_err(): return "extra_flags"
     if config.debug:
         return "debug"
     ""
+
+struct InternalSimpleOsFlags:
+    script: text
+    defsym_names: [text]
+    defsym_exprs: [text]
+
+fn _internal_simpleos_symbol_name_valid(name: text) -> bool:
+    if name == "": return false
+    var i: i64 = 0
+    while i < name.len():
+        val ch = name[i:i + 1]
+        val valid = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+            (ch >= "0" and ch <= "9") or ch == "_" or ch == "." or ch == "$"
+        if not valid or (i == 0 and ch >= "0" and ch <= "9"): return false
+        i = i + 1
+    true
+
+fn internal_simpleos_flags(extra_flags: [text]) -> Result<InternalSimpleOsFlags, text>:
+    """Project modeled GNU boot-link flags into typed SimpleOS policy."""
+    var script = ""
+    var names: [text] = []
+    var exprs: [text] = []
+    var i: i64 = 0
+    while i < extra_flags.len():
+        val flag = extra_flags[i]
+        var script_value = ""
+        var defsym_value = ""
+        if flag == "-T" or flag == "--script":
+            if i + 1 >= extra_flags.len(): return Err("{flag} requires a linker script path")
+            script_value = extra_flags[i + 1]
+            i = i + 2
+        elif flag.starts_with("--script="):
+            script_value = flag.substring(9)
+            i = i + 1
+        elif flag.starts_with("-T"):
+            script_value = flag.substring(2)
+            i = i + 1
+        elif flag == "--defsym":
+            if i + 1 >= extra_flags.len(): return Err("--defsym requires name=expression")
+            defsym_value = extra_flags[i + 1]
+            i = i + 2
+        elif flag.starts_with("--defsym="):
+            defsym_value = flag.substring(9)
+            i = i + 1
+        else:
+            return Err("unsupported internal SimpleOS linker flag '{flag}'")
+
+        if script_value != "":
+            if script_value.contains("\0"):
+                return Err("internal SimpleOS linker script path contains NUL")
+            if script != "" and script != script_value:
+                return Err("internal SimpleOS link names conflicting linker scripts")
+            script = script_value
+            continue
+
+        var equals: i64 = 0
+        while equals < defsym_value.len() and defsym_value[equals:equals + 1] != "=":
+            equals = equals + 1
+        if equals <= 0 or equals + 1 >= defsym_value.len():
+            return Err("internal SimpleOS --defsym requires non-empty name=expression")
+        val name = defsym_value[0:equals]
+        val expr = defsym_value.substring(equals + 1)
+        if not _internal_simpleos_symbol_name_valid(name) or expr.contains("\0"):
+            return Err("internal SimpleOS --defsym has an invalid symbol name or expression")
+        var existing: i64 = -1
+        var n: i64 = 0
+        while n < names.len():
+            if names[n] == name: existing = n
+            n = n + 1
+        if existing >= 0 and exprs[existing] != expr:
+            return Err("internal SimpleOS --defsym '{name}' has conflicting expressions")
+        if existing < 0:
+            names = names.push(name)
+            exprs = exprs.push(expr)
+    Ok(InternalSimpleOsFlags(script: script, defsym_names: names, defsym_exprs: exprs))
 
 fn internal_elf_unsupported_config_field(config: NativeLinkConfig) -> text:
     # ELF consumes user libraries/search paths and the selected runtime
@@ -692,8 +766,12 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         default_script = "src/os/kernel/arch/arm64/linker.ld"
     elif normalized != "" and not normalized.contains("x86_64") and not normalized.contains("amd64") and normalized != "simpleos":
         return Err("internal engine: unsupported SimpleOS target '{target}' (internal:simpleos supports x86_64 and arm64)")
+    val flags = internal_simpleos_flags(config.extra_flags)?
     val configured_script = env_get("SIMPLE_LINKER_SCRIPT") ?? ""
-    val script_path = if configured_script != "": configured_script else: default_script
+    if flags.script != "" and configured_script != "" and flags.script != configured_script:
+        return Err("internal engine: SimpleOS linker script flag conflicts with SIMPLE_LINKER_SCRIPT")
+    val selected_script = if flags.script != "": flags.script else: configured_script
+    val script_path = if selected_script != "": selected_script else: default_script
     if not file_exists(script_path): return Err("internal engine: SimpleOS linker script not found: {script_path}")
     var objects: [[i64]] = []
     for path in object_files:
@@ -715,7 +793,12 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         archives = archives.push(internal_link_native_read_i64(path))
     val plan = boot_layout_from_text(file_read(script_path))
     if plan.is_err(): return Err("internal engine: SimpleOS linker script: {plan.unwrap_err()}")
-    val boot_plan = plan.unwrap()
+    var boot_plan = plan.unwrap()
+    var defsym_i: i64 = 0
+    while defsym_i < flags.defsym_names.len():
+        boot_plan = boot_layout_add_defsym(boot_plan,
+            flags.defsym_names[defsym_i], flags.defsym_exprs[defsym_i])
+        defsym_i = defsym_i + 1
     val linked = elf_boot_link_archives_configured(objects, archives, boot_plan,
         target_arch, config.strip_output, config.retained_symbols)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
