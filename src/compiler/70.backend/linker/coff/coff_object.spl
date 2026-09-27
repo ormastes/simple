@@ -1,13 +1,16 @@
 # Raw PE/COFF object parser for the internal Windows linker.
 # This is intentionally separate from pe_parser.spl, which parses linked PE
 # images with a DOS header and optional header. A compiler-produced `.obj`
-# starts directly with the 20-byte COFF file header.
+# starts directly with either the 20-byte classic header or the 56-byte
+# anonymous bigobj header.
 
 val COFF_MACHINE_AMD64: i64 = 0x8664
 val COFF_MACHINE_ARM64: i64 = 0xaa64
 val COFF_HEADER_SIZE: i64 = 20
+val COFF_BIGOBJ_HEADER_SIZE: i64 = 56
 val COFF_SECTION_HEADER_SIZE: i64 = 40
 val COFF_SYMBOL_SIZE: i64 = 18
+val COFF_BIGOBJ_SYMBOL_SIZE: i64 = 20
 val COFF_RELOCATION_SIZE: i64 = 10
 
 val COFF_STORAGE_CLASS_EXTERNAL: i64 = 2
@@ -122,6 +125,22 @@ fn _coff_i16(data: [u8], offset: i64) -> i64:
     val value = _coff_u16(data, offset)
     if value >= 32768: value - 65536 else: value
 
+fn _coff_i32(data: [u8], offset: i64) -> i64:
+    val value = _coff_u32(data, offset)
+    if value >= 2147483648: value - 4294967296 else: value
+
+fn _coff_is_bigobj(data: [u8]) -> bool:
+    if data.len() < COFF_BIGOBJ_HEADER_SIZE: return false
+    if _coff_u16(data, 0) != 0 or _coff_u16(data, 2) != 0xffff: return false
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    var i: i64 = 0
+    while i < magic.len():
+        if data[12 + i] as i64 != magic[i]: return false
+        i = i + 1
+    true
+
 fn _coff_fixed_name(data: [u8], offset: i64, count: i64) -> text:
     var result = ""
     var i: i64 = 0
@@ -188,22 +207,29 @@ fn _coff_relocations(data: [u8], offset: i64, count: i64, symbol_count: i64) -> 
 fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
     """Parse one raw compiler-produced COFF object and reject malformed ranges."""
     if data.len() < COFF_HEADER_SIZE: return Err("COFF object is shorter than its 20-byte header")
-    val machine = _coff_u16(data, 0)
+    val bigobj = _coff_is_bigobj(data)
+    if _coff_u16(data, 0) == 0 and _coff_u16(data, 2) == 0xffff and not bigobj:
+        return Err("invalid COFF bigobj signature, version, or class identifier")
+    val machine = if bigobj: _coff_u16(data, 6) else: _coff_u16(data, 0)
     if machine != COFF_MACHINE_AMD64 and machine != COFF_MACHINE_ARM64:
         return Err("unsupported COFF machine {machine}")
-    val section_count = _coff_u16(data, 2)
-    val timestamp = _coff_u32(data, 4)
-    val symbol_table_offset = _coff_u32(data, 8)
-    val symbol_count = _coff_u32(data, 12)
-    val optional_header_size = _coff_u16(data, 16)
-    val characteristics = _coff_u16(data, 18)
+    if bigobj and _coff_u16(data, 4) < 2:
+        return Err("COFF bigobj version must be at least 2")
+    val header_size = if bigobj: COFF_BIGOBJ_HEADER_SIZE else: COFF_HEADER_SIZE
+    val symbol_size = if bigobj: COFF_BIGOBJ_SYMBOL_SIZE else: COFF_SYMBOL_SIZE
+    val section_count = if bigobj: _coff_u32(data, 44) else: _coff_u16(data, 2)
+    val timestamp = if bigobj: _coff_u32(data, 8) else: _coff_u32(data, 4)
+    val symbol_table_offset = if bigobj: _coff_u32(data, 48) else: _coff_u32(data, 8)
+    val symbol_count = if bigobj: _coff_u32(data, 52) else: _coff_u32(data, 12)
+    val optional_header_size = if bigobj: 0 else: _coff_u16(data, 16)
+    val characteristics = if bigobj: 0 else: _coff_u16(data, 18)
     if section_count < 0 or symbol_table_offset < 0 or symbol_count < 0:
         return Err("truncated COFF header")
     if optional_header_size != 0:
         return Err("COFF object unexpectedly contains a {optional_header_size}-byte optional header")
-    val section_table_end = COFF_HEADER_SIZE + section_count * COFF_SECTION_HEADER_SIZE
+    val section_table_end = header_size + section_count * COFF_SECTION_HEADER_SIZE
     if section_table_end > data.len(): return Err("COFF section table is out of bounds")
-    val symbol_table_end = symbol_table_offset + symbol_count * COFF_SYMBOL_SIZE
+    val symbol_table_end = symbol_table_offset + symbol_count * symbol_size
     if symbol_count > 0 and (symbol_table_offset < section_table_end or symbol_table_end + 4 > data.len()):
         return Err("COFF symbol table is out of bounds")
     val string_table = symbol_table_end
@@ -226,14 +252,14 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         selection_index = selection_index + 1
     var symbol_index: i64 = 0
     while symbol_index < symbol_count:
-        val base = symbol_table_offset + symbol_index * COFF_SYMBOL_SIZE
+        val base = symbol_table_offset + symbol_index * symbol_size
         val name_result = _coff_symbol_name(data, base, string_table)
         if name_result.is_err(): return Err(name_result.unwrap_err())
         val value = _coff_u32(data, base + 8)
-        val section_number = _coff_i16(data, base + 12)
-        val symbol_type = _coff_u16(data, base + 14)
-        val storage_class = data[base + 16] as i64
-        val auxiliary_count = data[base + 17] as i64
+        val section_number = if bigobj: _coff_i32(data, base + 12) else: _coff_i16(data, base + 12)
+        val symbol_type = _coff_u16(data, base + (if bigobj: 16 else: 14))
+        val storage_class = data[base + (if bigobj: 18 else: 16)] as i64
+        val auxiliary_count = data[base + (if bigobj: 19 else: 17)] as i64
         if symbol_index + auxiliary_count >= symbol_count:
             return Err("COFF symbol {symbol_index} auxiliary records exceed table size {symbol_count}")
         var weak_default_index: i64 = -1
@@ -241,8 +267,8 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
         if storage_class == COFF_STORAGE_CLASS_WEAK_EXTERNAL:
             if section_number != 0 or auxiliary_count != 1:
                 return Err("weak external COFF symbol '{name_result.unwrap()}' must be undefined with one auxiliary record")
-            weak_default_index = _coff_u32(data, base + COFF_SYMBOL_SIZE)
-            weak_characteristics = _coff_u32(data, base + COFF_SYMBOL_SIZE + 4)
+            weak_default_index = _coff_u32(data, base + symbol_size)
+            weak_characteristics = _coff_u32(data, base + symbol_size + 4)
             if weak_default_index < 0 or weak_default_index >= symbol_count:
                 return Err("weak external COFF symbol '{name_result.unwrap()}' fallback index is out of bounds")
         symbols = symbols.push(CoffSymbol(name: name_result.unwrap(), value: value,
@@ -255,16 +281,18 @@ fn coff_parse_object(data: [u8]) -> Result<CoffObject, text>:
             comdat_keys[section_number - 1] = name_result.unwrap()
         if storage_class == COFF_STORAGE_CLASS_STATIC and section_number > 0 and
                 section_number <= section_count and auxiliary_count > 0:
-            val auxiliary = base + COFF_SYMBOL_SIZE
+            val auxiliary = base + symbol_size
             comdat_selections[section_number - 1] = data[auxiliary + 14] as i64
-            associative_sections[section_number - 1] = _coff_u16(data, auxiliary + 12)
+            var associative = _coff_u16(data, auxiliary + 12)
+            if bigobj: associative = associative | (_coff_u16(data, auxiliary + 16) << 16)
+            associative_sections[section_number - 1] = associative
             comdat_checksums[section_number - 1] = _coff_u32(data, auxiliary + 8)
         symbol_index = symbol_index + 1 + auxiliary_count
 
     var sections: [CoffSection] = []
     var section_index: i64 = 0
     while section_index < section_count:
-        val base = COFF_HEADER_SIZE + section_index * COFF_SECTION_HEADER_SIZE
+        val base = header_size + section_index * COFF_SECTION_HEADER_SIZE
         val name_result = _coff_section_name(data, base, string_table)
         if name_result.is_err(): return Err(name_result.unwrap_err())
         var virtual_size = _coff_u32(data, base + 8)

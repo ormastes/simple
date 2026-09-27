@@ -70,6 +70,42 @@ fn _minimal_amd64_object(relocation_symbol_index: i64) -> [u8]:
     bytes = bytes.push(0)              # external, no aux record
     _push_u32(bytes, 4)               # empty string table
 
+fn _minimal_bigobj() -> [u8]:
+    var bytes: [u8] = []
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0xffff)
+    bytes = _push_u16(bytes, 2)
+    bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
+    bytes = _push_u32(bytes, 0)
+    val magic: [i64] = [
+        0xc7, 0xa1, 0xba, 0xd1, 0xee, 0xba, 0xa9, 0x4b,
+        0xaf, 0x20, 0xfa, 0xf6, 0x6a, 0xa4, 0xdc, 0xb8]
+    for byte in magic: bytes = bytes.push(byte as u8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 97)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_fixed(bytes, ".text", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u32(bytes, 96)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u16(bytes, 0)
+    bytes = _push_u32(bytes, 0x60000020)
+    bytes = bytes.push(0xc3)
+    bytes = _push_fixed(bytes, "_start", 8)
+    bytes = _push_u32(bytes, 0)
+    bytes = _push_u32(bytes, 1)
+    bytes = _push_u16(bytes, 0x20)
+    bytes = bytes.push(2).push(0)
+    _push_u32(bytes, 4)
+
 fn _minimal_bss_object() -> [u8]:
     var bytes: [u8] = []
     bytes = _push_u16(bytes, COFF_MACHINE_AMD64)
@@ -160,6 +196,22 @@ fn _weak_external_object(fallback_index: i64, characteristics: i64 = 3) -> [u8]:
     _push_u32(bytes, 4)
 
 describe "raw COFF object parser":
+    it "parses a bounded bigobj header and 32-bit section symbol":
+        val parsed = coff_parse_object(_minimal_bigobj())
+        expect(parsed.is_ok()).to_equal(true)
+        val object = parsed.unwrap()
+        expect(object.machine).to_equal(COFF_MACHINE_AMD64)
+        expect(object.sections.len()).to_equal(1)
+        expect(object.symbols[0].section_number).to_equal(1)
+        expect(object.symbols[0].name).to_equal("_start")
+
+    it "rejects a malformed bigobj class identifier":
+        var bytes = _minimal_bigobj()
+        bytes[12] = 0
+        val parsed = coff_parse_object(bytes)
+        expect(parsed.is_err()).to_equal(true)
+        expect(parsed.unwrap_err()).to_contain("bigobj")
+
     it "parses the reproducible LLVM Windows ARM64 relocation census":
         val parsed = coff_parse_object(
             file_read_bytes("{COFF_OBJECT_FIX}/windows_arm64_relocs.obj"))

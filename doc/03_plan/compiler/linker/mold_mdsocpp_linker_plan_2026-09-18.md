@@ -432,7 +432,11 @@ backend plus QEMU/target GDB or hardware.
 Implemented source slice:
 
 - raw AMD64/ARM64 COFF object decoding with section, primary/aux symbol, long
-  name, BSS, and relocation bounds checks;
+  name, BSS, and relocation bounds checks. Classic 20-byte COFF headers and
+  anonymous 56-byte bigobj headers share the same bounded parser; bigobj uses
+  20-byte symbols, signed 32-bit section numbers, and the high half of
+  associative COMDAT section indices rather than truncating them to classic
+  COFF widths;
 - AMD64 `ADDR64`, `ADDR32`, `ADDR32NB`, and `REL32..REL32_5` formulas with
   truncation rejection;
 - ARM64 `ADDR32`, `ADDR32NB`, `BRANCH26`, `PAGEBASE_REL21`, `REL21`,
