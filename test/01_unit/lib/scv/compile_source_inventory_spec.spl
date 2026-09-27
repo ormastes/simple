@@ -2,6 +2,10 @@ use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.*
 use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+
+extern fn rt_getpid() -> i64
 
 fn inventory_digest(label: text) -> text:
     sha256_text(label)
@@ -21,6 +25,24 @@ fn empty_inventory() -> CompileSourceInventoryV1:
     CompileSourceInventoryV1(1, 0, [])
 
 describe "event-maintained compile source inventory":
+    it "does not publish Git changes when the filesystem journal overflows":
+        val cache_root = "build/test-artifacts/scv-observed-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val rejected = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 1, kind: "overflow", path: "", related: "")])
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("inventory-event-overflow")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val accepted = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git], [])
+        expect(accepted.valid).to_equal(true)
+        if accepted.valid:
+            expect(accepted.inventory!.entries[0].source_identity).to_equal("src/a.spl")
+        dir_remove(cache_root, true)
+
     it "applies Git and filesystem events without source discovery":
         val created = compile_source_inventory_apply_event_v1(
             empty_inventory(), inventory_event(
