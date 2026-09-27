@@ -16,7 +16,7 @@
 # doc/08_tracking/bug/lexer_position_unification_2026-07-29.md.
 
 val _NL: text = "\n"
-use compiler.core.tokens.{keyword_lookup}
+use compiler.core.tokens.{keyword_lookup, TOK_DEDENT, TOK_EOF}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use compiler.core.lexer_types.{Token, TokenKind, LexSpan, lex_span_new, lex_token_new, lex_token_eof, token_kind_from_code, token_kind_code}
 use std.string_core.{char_code, char_from_code}
@@ -81,6 +81,11 @@ var lex_cur_col_direct: [i64] = [0]
 var lex_cur_suffix_direct: [text] = [""]
 var lex_token_start_direct: [i64] = [0]
 var lex_token_end_direct: [i64] = [0]
+# CoreLexer positions index source_chars, while LexSpan positions index UTF-8
+# bytes. Keep a forward cursor so token span conversion visits each character
+# once during normal scanning; speculative restores can rewind it.
+var lex_span_char_cursor: [i64] = [0]
+var lex_span_byte_cursor: [i64] = [0]
 var lex_cur_no_interp_direct: [bool] = [false]
 
 # Pure, independently testable: returns slot[0], or `default` when slot is
@@ -107,13 +112,46 @@ fn lexer_new(source: text) -> Lexer:
     lex_init(source)
     Lexer(dummy: 0)
 
+fn lex_source_byte_offset(char_offset: i64) -> i64:
+    if current_core_lexer_slot.len() == 0:
+        return 0
+    if lex_span_char_cursor.len() == 0:
+        lex_span_char_cursor = [0]
+    if lex_span_byte_cursor.len() == 0:
+        lex_span_byte_cursor = [0]
+    var target = char_offset
+    if target < 0:
+        target = 0
+    val char_count = current_core_lexer_slot[0].source_chars.len()
+    if target > char_count:
+        target = char_count
+    if target < lex_span_char_cursor[0]:
+        lex_span_char_cursor[0] = 0
+        lex_span_byte_cursor[0] = 0
+    while lex_span_char_cursor[0] < target:
+        # Read one character in place. Passing source_chars as an argument
+        # would copy or scan the full source on every token.
+        lex_span_byte_cursor[0] = lex_span_byte_cursor[0] + current_core_lexer_slot[0].source_chars[lex_span_char_cursor[0]].len()
+        lex_span_char_cursor[0] = lex_span_char_cursor[0] + 1
+    lex_span_byte_cursor[0]
+
+fn lex_current_token_byte_span(kind: i64, line: i64, col: i64) -> LexSpan:
+    # EOF and dedents do not consume source. Their cur_start may still name
+    # the previous token, including across multiple pending dedents.
+    if kind == TOK_DEDENT or kind == TOK_EOF:
+        val position = lex_source_byte_offset(lex_token_end_get())
+        return lex_span_new(position, position, line, col)
+    val start = lex_source_byte_offset(lex_token_start_get())
+    val end_pos = lex_source_byte_offset(lex_token_end_get())
+    lex_span_new(start, end_pos, line, col)
+
 fn lexer_next_token(self: Lexer) -> Token:
     # Advance the global lexer and build a Token record.
     val kind: i64 = lex_next()
     val text = lex_token_text()
     val line = lex_token_line()
     val col = lex_token_col()
-    val span = lex_span_new(0, text.len(), line, col)
+    val span = lex_current_token_byte_span(kind, line, col)
     Token(kind: token_kind_from_code(kind), span: span, text: text)
 
 impl Lexer:
@@ -155,6 +193,10 @@ fn lex_init_with_path(source: text, source_path: text):
         lex_token_start_direct = [0]
     if lex_token_end_direct.len() == 0:
         lex_token_end_direct = [0]
+    # Replace the cursor with each new source; a prior file may have owned the
+    # backing storage of the old module-global array.
+    lex_span_char_cursor = [0]
+    lex_span_byte_cursor = [0]
     lex_env_save_enabled[0] = (env_get_nullable("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
@@ -546,7 +588,7 @@ fn lex_next_token_record() -> Token:
     val text = lex_cur_text_get_slot()
     val line = lex_cur_line_get_slot()
     val col = lex_cur_col_get_slot()
-    val span = lex_span_new(0, text.len(), line, col)
+    val span = lex_current_token_byte_span(kind, line, col)
     Token(kind: token_kind_from_code(kind), span: span, text: text)
 
 # ===== Token Construction =====
