@@ -859,3 +859,7 @@ provider DSOs and providers named by retained-symbol roots keep one ordered
 The wrapper rejects mixed positional enable/disable flags because its normalized
 library list cannot reconstruct their original interleaving; `--no-as-needed`
 retains the existing all-input behavior.
+Shared objects without `DT_SONAME` now use their preserved linker-input
+identity for `DT_NEEDED`, matching GNU/mold behavior instead of rejecting a
+valid DSO. An embedded SONAME remains authoritative; searched `-l` inputs use
+the resolved file leaf, while explicitly supplied paths retain that path.

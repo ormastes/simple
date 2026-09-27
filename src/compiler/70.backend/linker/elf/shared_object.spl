@@ -26,6 +26,12 @@ struct ElfSharedLib:
     export_values: {text: i64}
     export_versions: {text: text} # reference spelling -> required version name
 
+fn elf_shared_effective_soname(embedded: text, fallback_name: text) -> Result<text, text>:
+    if embedded != "": return Ok(embedded)
+    if fallback_name == "" or fallback_name.contains("\0"):
+        return Err("shared object has no DT_SONAME and no usable input name")
+    Ok(fallback_name)
+
 fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
     """Section header i with sh_addr repurposed as the FILE offset (elf_parser convention)."""
     val h = shoff + i * ELF64_SHDR_SIZE
@@ -36,7 +42,7 @@ fn elf_so_shdr(bytes: [u8], shoff: i64, i: i64) -> ElfSectionHeader:
 fn elf_so_link(bytes: [u8], shoff: i64, i: i64) -> i64:
     elf_read_u32_le(bytes, shoff + i * ELF64_SHDR_SIZE + 40)
 
-fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
+fn elf_parse_shared_named(bytes: [u8], fallback_name: text) -> Result<ElfSharedLib, text>:
     """Parse an ET_DYN shared object's SONAME and dynamic exports."""
     val header = elf_parse_header(bytes)?
     if header.e_type != ET_DYN:
@@ -142,10 +148,14 @@ fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
                 if tag == DT_SONAME_SO:
                     soname = elf_strtab_get(dstr, elf_read_u64_le(bytes, dsec.sh_addr + d + 8))
                 d = d + 16
-    if soname == "":
-        return Err("shared object has no DT_SONAME (needed for DT_NEEDED)")
+    soname = elf_shared_effective_soname(soname, fallback_name)?
     Ok(ElfSharedLib(soname: soname, machine: header.e_machine, exports: exports,
         export_sizes: export_sizes, export_values: export_values,
         export_versions: export_versions))
 
-export ElfSharedLib, elf_parse_shared
+fn elf_parse_shared(bytes: [u8]) -> Result<ElfSharedLib, text>:
+    """Strict byte-only parser; callers with an input filename use the named form."""
+    elf_parse_shared_named(bytes, "")
+
+export ElfSharedLib, elf_parse_shared, elf_parse_shared_named
+export elf_shared_effective_soname

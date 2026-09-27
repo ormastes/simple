@@ -49,7 +49,7 @@ use compiler.backend.linker.reloc_engine.{
     R_AARCH64_TLSIE_MOVW_GOTTPREL_G1, R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC,
     R_AARCH64_LD64_GOTOFF_LO15, R_AARCH64_LD64_GOTPAGE_LO15}
 use compiler.backend.linker.elf.archive_closure.{elf_archive_closure_retained}
-use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared}
+use compiler.backend.linker.elf.shared_object.{ElfSharedLib, elf_parse_shared_named}
 use compiler.backend.linker.elf.eh_frame_hdr.{elf_eh_frame_fde_count, elf_build_eh_frame_hdr}
 use compiler.backend.linker.elf.section_gc.{elf_section_gc, elf_gc_undefined}
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
@@ -115,6 +115,7 @@ struct ElfLinkRequest:
     target: RelocArch
     mode: i64             # ELF_LINK_*
     interp: text          # PT_INTERP path (dynamic modes only)
+    shared_names: [text] = [] # command-line identities for DSOs lacking SONAME
     runpath: text = ""    # DT_RUNPATH payload (dynamic modes only)
     bind_now: bool = false # -z now: eager dynamic binding
     hash_style: text = "both" # gnu, sysv, or both
@@ -1223,9 +1224,12 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         i = i + 1
 
     var libs: [ElfSharedLib] = []
+    if req.shared_names.len() != 0 and req.shared_names.len() != req.shared.len():
+        return Err("shared object names must be empty or match the shared-object count")
     i = 0
     while i < req.shared.len():
-        val lib = elf_parse_shared(req.shared[i])
+        val fallback = if req.shared_names.len() == 0: "" else: req.shared_names[i]
+        val lib = elf_parse_shared_named(req.shared[i], fallback)
         if lib.is_err():
             return Err("shared object {i}: {lib.unwrap_err()}")
         val l = lib.unwrap()

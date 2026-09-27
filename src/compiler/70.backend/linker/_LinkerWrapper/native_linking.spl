@@ -1193,6 +1193,16 @@ fn internal_elf_library_file(name: text, search_paths: [text]) -> text:
             if internal_elf_library_kind(candidate) != 0: return candidate
     ""
 
+fn internal_elf_library_needed_name(requested: text, resolved: text) -> text:
+    """GNU semantics: explicit paths survive; -l/search results use the file leaf."""
+    if file_exists(requested) and (requested.contains("/") or requested.contains("\\")):
+        return requested
+    var slash = resolved.last_index_of("/") ?? -1
+    val backslash = resolved.last_index_of("\\") ?? -1
+    if backslash > slash: slash = backslash
+    if slash < 0: return resolved
+    resolved.substring(slash + 1)
+
 fn internal_simpleos_archive_file(name: text, search_paths: [text]) -> text:
     """Resolve a static archive without admitting hosted shared objects."""
     if internal_elf_library_kind(name) == 1: return name
@@ -1377,6 +1387,7 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
             if not library_paths.contains(directory): library_paths.push(directory)
     var shared: [[u8]] = [file_read_bytes(libc)]
+    var shared_names: [text] = [internal_elf_library_needed_name(libc, libc)]
     for library in config.libraries:
         val path = internal_elf_library_file(library, library_paths)
         if path == "": return Err("internal engine: ELF library '{library}' was not found")
@@ -1385,6 +1396,8 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
             archives = archives.push(internal_link_native_read_i64(path))
         elif kind == 2:
             shared = shared.push(file_read_bytes(path))
+            shared_names = shared_names.push(
+                internal_elf_library_needed_name(library, path))
         else:
             return Err("internal engine: ELF library '{path}' is neither an ar archive nor an ET_DYN object")
     var target_arch = RelocArch.X86_64
@@ -1398,6 +1411,7 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     val as_needed = internal_elf_as_needed(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
         entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
+        shared_names: shared_names,
         runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags),
         hash_style: hash_style, as_needed: as_needed)
     val linked = elf_link_configured(request,
