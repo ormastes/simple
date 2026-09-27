@@ -678,6 +678,14 @@ symbol expressions, malformed values, and every unmodeled flag fail closed.
 An explicit flag and `SIMPLE_LINKER_SCRIPT` must name the same script when both
 are present.
 
+The production LLVM SimpleOS entrypoints no longer bypass this route when the
+user selects `SIMPLE_LINKER=internal`. ARM64 freestanding images, canonical
+x86-64 userspace images (including sysroot archives and module-init wrapping),
+and legacy x86-64 kernel images call one host-independent
+`link_simpleos_internal` facade with their exact objects and typed policy.
+Their default path still invokes external `ld.lld`; RISC-V remains on its
+separate unsupported internal-linker lane.
+
 Remote interpreter placement now validates the exact path bytes later quoted
 into target commands. Known-target explicit and staging paths reject outer
 whitespace instead of validating a trimmed alias and executing the original;
