@@ -67,12 +67,12 @@ BenchmarkEvidence -> AutoThresholds ------------^
 | Public surface | `src/lib/nogc_async_mut/structural/parse/__init__.spl` | Explicit common-contract and default-runtime exports |
 | Simple schema | `src/compiler/10.frontend/canonical_ast/simple_schema.spl` | Simple token/node/action kind IDs and SoA payload columns |
 | Simple dialect | `src/compiler/10.frontend/structural_adapter/simple_dialect.spl` | Builds the declarative Simple `ParseDialect` |
-| Legacy bridge | `src/compiler/10.frontend/structural_adapter/legacy_bridge.spl` | Temporary parity conversion to current `ParserModule`; no grammar fork |
+| Legacy bridge | `src/compiler/10.frontend/structural_adapter/legacy_bridge.spl` | Converts canonical output to current frontend objects; the existing recursive-descent path remains an independent reference oracle |
 
 ## Current in-tree status
 
 - `src/lib/common/structural/parse/parse_types.spl` and `src/lib/common/structural/parse/parse_cpu_reference.spl` implement the current wave-1 CPU-reference foundation (schema, request/result types, action sink, and scalar oracle).
-- `src/lib/nogc_async_mut/structural/parse` executors and additional common modules (`contracts`, `model`, `dialect`, `output_plan`) are still documented as planned work in the architecture; they are not yet present in this worktree.
+- `src/lib/nogc_async_mut/structural/parse/` and the additional common modules now exist. Their current scalar engine executes lexical DFA work; `ParseDialect` still carries opaque grammar/action IDs rather than an executable Simple grammar/action program. Presence of these modules does not qualify a canonical Simple frontend provider.
 - `doc/03_plan/platform/structural_compute/parser_framework_plan.md` owns the merge order for the planned follow-up waves.
 
 ## Dependency rules
@@ -88,7 +88,7 @@ BenchmarkEvidence -> AutoThresholds ------------^
 
 - **ADR-PARSE-1 — Declarative dialect bundle.** `ParseDialect` is a validated data class, not a trait/factory. The initial Simple dialect and future consumer dialects supply program tables; executors stay generic and GPU-serializable.
 - **ADR-PARSE-2 — Snapshot-owned bytes.** Source is `[u8]` plus newline starts; tokens hold half-open byte spans and optional string-table IDs. Line/column is derived, never token identity.
-- **ADR-PARSE-3 — Owned immutable segments, one canonical result.** Common parse arenas contain immutable typed SoA segments with relative spans and scoped identities. The legacy object tree is an output bridge during cutover, not retained storage or a second grammar.
+- **ADR-PARSE-3 — Owned immutable segments, one canonical result.** Common parse arenas contain immutable typed SoA segments with relative spans and scoped identities. The current recursive-descent frontend remains an independently executable oracle and fallback through qualification. After promotion, it remains a reference implementation for differential verification; the declarative Simple program is the sole production grammar authority. The bridge may construct legacy frontend objects from canonical output without calling the oracle.
 - **ADR-PARSE-4 — Ordered two-pass emission.** Executors count, exclusive-scan exact integer offsets, then emit into disjoint source-ordered ranges. Atomic append and scheduler-order commit are invalid.
 - **ADR-PARSE-5 — Optimization below parity gate.** SIMD emits only structural indexes. GPU handles bounded lexical state plus eligible regions. Unsupported cases return an observable fallback reason before output mutation.
 - **ADR-PARSE-6 — Segment-granular incrementality.** Immutable arena segments carry region and complete continuation-state fingerprints. Reuse requires matching region bytes, entry/exit lexical state, grammar rule, parent region, schema, and generation; otherwise the region reparses.
@@ -96,7 +96,7 @@ BenchmarkEvidence -> AutoThresholds ------------^
 
 ## MDSOC evaluation
 
-The stable model/dialect/runtime forms a virtual capsule shared across compiler and consumer dialects. SIMD, GPU, incremental, tags, mappings, diagnostics, and measurement are feature transforms that write through the same sink/result contract. Runtime composition is limited to explicit executor selection; grammar remains single-source in the Simple dialect program.
+The stable model/dialect/runtime forms a virtual capsule shared across compiler and consumer dialects. SIMD, GPU, incremental, tags, mappings, diagnostics, and measurement are feature transforms that write through the same sink/result contract. Runtime composition is limited to explicit executor selection. The Simple dialect program is the single production grammar after admission, while the retained handwritten frontend remains the independent oracle required by the later platform and dynload requirements. The migration boundary and parity gates are specified in `doc/05_design/compiler/canonical_scalar_simple_grammar_action_provider_2026-09-27.md`.
 
 ## Startup, hot path, caches, invalidation
 
