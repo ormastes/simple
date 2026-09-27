@@ -46,3 +46,10 @@ The companion [async completion route manifest](sosix_async_completion_route_man
 ### 2026-09-26 compiler/interpreter/loader addendum
 
 The companion [compiler, interpreter, and SMF loader route manifest](sosix_compiler_interpreter_loader_route_manifest_v1_2026-09-26.md) inventories selected file, environment, process, and executable-memory effects across those owners. RU-001 remains open for all unclassified services and providers.
+
+### 2026-09-26 display/input/GPU queue addendum
+
+The companion [hosted display, input, and GPU queue route manifest](sosix_render_input_route_manifest_v1_2026-09-26.md)
+classifies SOSIX display state, toolkit adapters, native present and input
+routes, and Engine2D compatibility queue bookkeeping. A queued packet is not
+physical GPU execution evidence; RU-001 remains open for other families.
