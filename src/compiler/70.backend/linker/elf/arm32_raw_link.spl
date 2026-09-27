@@ -34,6 +34,7 @@ struct Arm32RawImage:
 
 struct Arm32RawLayout:
     offsets: [[i64]]
+    common_offsets: {text: i64}
     size: i64
 
 fn arm32_raw_align(value: i64, alignment: i64) -> i64:
@@ -66,14 +67,58 @@ fn arm32_raw_layout(objects: [ElfObject]) -> Result<Arm32RawLayout, text>:
             si = si + 1
         offsets = offsets.push(object_offsets)
         oi = oi + 1
-    Ok(Arm32RawLayout(offsets: offsets, size: cursor))
+    var strong_regular: {text: bool} = {}
+    for object in objects:
+        for sym in object.symbols:
+            val binding = elf_symbol_binding(sym)
+            if (sym.name != "" and binding != STB_LOCAL and binding != STB_WEAK and
+                    sym.st_shndx != SHN_UNDEF and
+                    sym.st_shndx != ARM32_RAW_SHN_COMMON):
+                strong_regular[sym.name] = true
+    var common_sizes: {text: i64} = {}
+    var common_alignments: {text: i64} = {}
+    var common_names: [text] = []
+    for object in objects:
+        for sym in object.symbols:
+            if (sym.name == "" or elf_symbol_binding(sym) == STB_LOCAL or
+                    sym.st_shndx != ARM32_RAW_SHN_COMMON or
+                    strong_regular.has(sym.name)):
+                continue
+            var alignment = sym.st_value
+            if alignment <= 0: alignment = 1
+            if (alignment & (alignment - 1)) != 0:
+                return Err("ARM32 raw link: common symbol '{sym.name}' has non-power-of-two alignment {alignment}")
+            if alignment > 0x80000000:
+                return Err("ARM32 raw link: common symbol '{sym.name}' alignment exceeds ARM32 address space")
+            if sym.st_size < 0 or sym.st_size > 0xffffffff:
+                return Err("ARM32 raw link: common symbol '{sym.name}' size is outside ARM32 range")
+            if not common_sizes.has(sym.name):
+                common_names = common_names.push(sym.name)
+                common_sizes[sym.name] = sym.st_size
+                common_alignments[sym.name] = alignment
+            else:
+                if sym.st_size > common_sizes[sym.name]:
+                    common_sizes[sym.name] = sym.st_size
+                if alignment > common_alignments[sym.name]:
+                    common_alignments[sym.name] = alignment
+    var common_offsets: {text: i64} = {}
+    for name in common_names:
+        cursor = arm32_raw_align(cursor, common_alignments[name])
+        if cursor > 0xffffffff - common_sizes[name]:
+            return Err("ARM32 raw link: common symbol '{name}' exceeds ARM32 image range")
+        common_offsets[name] = cursor
+        cursor = cursor + common_sizes[name]
+    Ok(Arm32RawLayout(
+        offsets: offsets, common_offsets: common_offsets, size: cursor))
 
 fn arm32_raw_symbol_addr(sym: ElfSymbol, oi: i64, layout: Arm32RawLayout,
         base_addr: i64) -> Result<i64, text>:
     if sym.st_shndx == ARM32_RAW_SHN_ABS:
         return Ok(sym.st_value)
     if sym.st_shndx == ARM32_RAW_SHN_COMMON:
-        return Err("ARM32 raw link: common symbol '{sym.name}' is unsupported")
+        if not layout.common_offsets.has(sym.name):
+            return Err("ARM32 raw link: common symbol '{sym.name}' has no allocation")
+        return Ok(base_addr + layout.common_offsets[sym.name])
     if sym.st_shndx == SHN_UNDEF:
         return Err("ARM32 raw link: symbol '{sym.name}' is undefined")
     if sym.st_shndx < 0 or sym.st_shndx >= layout.offsets[oi].len():
@@ -91,7 +136,8 @@ fn arm32_raw_globals(objects: [ElfObject], layout: Arm32RawLayout,
     while oi < objects.len():
         for sym in objects[oi].symbols:
             val binding = elf_symbol_binding(sym)
-            if sym.name == "" or binding == STB_LOCAL or sym.st_shndx == SHN_UNDEF:
+            if sym.name == "" or binding == STB_LOCAL or sym.st_shndx == SHN_UNDEF or
+                    sym.st_shndx == ARM32_RAW_SHN_COMMON:
                 continue
             val address = arm32_raw_symbol_addr(sym, oi, layout, base_addr)?
             val is_weak = binding == STB_WEAK
@@ -102,6 +148,20 @@ fn arm32_raw_globals(objects: [ElfObject], layout: Arm32RawLayout,
                     addresses[sym.name] = address
                     weak[sym.name] = false
             else:
+                addresses[sym.name] = address
+                weak[sym.name] = is_weak
+        oi = oi + 1
+    oi = 0
+    while oi < objects.len():
+        for sym in objects[oi].symbols:
+            val binding = elf_symbol_binding(sym)
+            if (sym.name == "" or binding == STB_LOCAL or
+                    sym.st_shndx != ARM32_RAW_SHN_COMMON or
+                    not layout.common_offsets.has(sym.name)):
+                continue
+            val address = base_addr + layout.common_offsets[sym.name]
+            val is_weak = binding == STB_WEAK
+            if not addresses.has(sym.name) or (weak[sym.name] and not is_weak):
                 addresses[sym.name] = address
                 weak[sym.name] = is_weak
         oi = oi + 1
