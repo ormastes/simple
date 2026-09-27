@@ -870,3 +870,6 @@ bound to a second image the runtime loader could alias to the first SONAME.
 The DSO export reader now honors the low two `st_other` visibility bits:
 DEFAULT and PROTECTED symbols remain eligible providers, while INTERNAL and
 HIDDEN definitions cannot satisfy another image's undefined references.
+`STB_GNU_UNIQUE` definitions now participate in DSO lookup alongside GLOBAL
+and WEAK bindings, admitting the process-unique symbols emitted by C++
+toolchains without weakening the visibility filter.
