@@ -1,8 +1,10 @@
 use std.spec
 use std.nogc_sync_mut.gpu.native_session_owner_v1.{native_session_owner_new_v1,
+    native_session_owner_new_for_library_v1,
     native_session_owner_register_v1, native_session_owner_begin_v1,
     native_session_owner_end_v1, native_session_owner_claim_destroy_v1,
-    native_session_owner_finish_destroy_v1}
+    native_session_owner_finish_destroy_v1, native_session_owner_claim_create_v1,
+    native_session_owner_end_create_v1, native_session_owner_claim_close_v1}
 
 describe "Native session owner V1":
     it "refuses release and reentrant calls while one foreign call is admitted":
@@ -53,3 +55,39 @@ describe "Native session owner V1":
             expect(native_session_owner_finish_destroy_v1(owner, first)).to_equal(true)
             expect(native_session_owner_begin_v1(owner, second)).to_equal(22)
             expect(native_session_owner_end_v1(owner, second)).to_equal(true)
+
+    it "refuses close during create or a live session and closes exactly once":
+        unsafe(capabilities: [raw_ptr]):
+            val owner = native_session_owner_new_v1()
+            expect(native_session_owner_claim_create_v1(owner)).to_equal(true)
+            expect(native_session_owner_claim_create_v1(owner)).to_equal(false)
+            expect(native_session_owner_claim_close_v1(owner)).to_equal(false)
+            val ticket = native_session_owner_register_v1(owner, 101)
+            expect(ticket > 0u64).to_equal(true)
+            expect(native_session_owner_end_create_v1(owner)).to_equal(true)
+            expect(native_session_owner_claim_close_v1(owner)).to_equal(false)
+            expect(native_session_owner_claim_destroy_v1(owner, ticket)).to_equal(101)
+            expect(native_session_owner_claim_close_v1(owner)).to_equal(false)
+            expect(native_session_owner_finish_destroy_v1(owner, ticket)).to_equal(true)
+            expect(native_session_owner_claim_close_v1(owner)).to_equal(true)
+            expect(native_session_owner_claim_close_v1(owner)).to_equal(false)
+            expect(native_session_owner_claim_create_v1(owner)).to_equal(false)
+            expect(native_session_owner_register_v1(owner, 101)).to_equal(0u64)
+
+    it "isolates ticket ranges between provider mappings":
+        unsafe(capabilities: [raw_ptr]):
+            val first = native_session_owner_new_for_library_v1(3u64).?
+            val second = native_session_owner_new_for_library_v1(4u64).?
+            val first_ticket = native_session_owner_register_v1(first, 73)
+            val second_ticket = native_session_owner_register_v1(second, 74)
+            expect(first_ticket > 0u64).to_equal(true)
+            expect(second_ticket > first_ticket).to_equal(true)
+            expect(native_session_owner_begin_v1(second, first_ticket)).to_equal(0)
+            expect(native_session_owner_begin_v1(first, second_ticket)).to_equal(0)
+            expect(native_session_owner_begin_v1(first, first_ticket)).to_equal(73)
+            expect(native_session_owner_end_v1(first, first_ticket)).to_equal(true)
+            expect(native_session_owner_new_for_library_v1(0u64) == nil).to_equal(true)
+            expect(native_session_owner_new_for_library_v1(2147483648u64) == nil).to_equal(true)
+            val maximum = native_session_owner_new_for_library_v1(2147483647u64).?
+            val upper_ticket = native_session_owner_register_v1(maximum, 75)
+            expect(upper_ticket.to_i64() > 0).to_equal(true)

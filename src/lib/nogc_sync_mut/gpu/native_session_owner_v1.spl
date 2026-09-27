@@ -9,7 +9,9 @@ a native provider reuses an address for a later session.
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
 
 const _NATIVE_SESSION_CAPACITY_V1: i64 = 4096
-const _NATIVE_SESSION_MAX_ID_V1: u64 = 18446744073709551615u64
+const _NATIVE_SESSION_MAX_ID_V1: u64 = 9223372036854775807u64
+const _NATIVE_SESSION_MAX_NAMESPACE_V1: u64 = 2147483647u64
+const _NATIVE_SESSION_NAMESPACE_WIDTH_V1: u64 = 4294967296u64
 const _NATIVE_SESSION_IDLE_V1: i64 = 0
 const _NATIVE_SESSION_CALLING_V1: i64 = 1
 const _NATIVE_SESSION_DESTROYING_V1: i64 = 2
@@ -21,7 +23,10 @@ struct _NativeSessionEntryV1:
 
 struct _NativeSessionStateV1:
     next_ticket: u64
+    ticket_limit: u64
     entries: [_NativeSessionEntryV1]
+    creating: bool
+    close_claimed: bool
     result_ticket: u64
     result_raw: i64
     result_ok: bool
@@ -29,10 +34,61 @@ struct _NativeSessionStateV1:
 class NativeSessionOwnerV1:
     gate: Mutex
 
-fn native_session_owner_new_v1() -> NativeSessionOwnerV1:
+fn _native_session_owner_with_range_v1(start: u64, limit: u64) -> NativeSessionOwnerV1:
     NativeSessionOwnerV1(gate: mutex_new(_NativeSessionStateV1(
-        next_ticket: 1u64, entries: [], result_ticket: 0u64,
+        next_ticket: start, ticket_limit: limit, entries: [], creating: false,
+        close_claimed: false, result_ticket: 0u64,
         result_raw: 0, result_ok: false)))
+
+fn native_session_owner_new_v1() -> NativeSessionOwnerV1:
+    _native_session_owner_with_range_v1(1u64, _NATIVE_SESSION_MAX_ID_V1)
+
+# A DynLib mapping identity is unique across loaded mappings. Reserve a
+# disjoint signed-positive ticket range for each mapping, so a ticket from one
+# Chrome render handle cannot select a session under another handle.
+fn native_session_owner_new_for_library_v1(mapping_identity: u64) -> NativeSessionOwnerV1?:
+    if mapping_identity == 0u64 or
+       mapping_identity > _NATIVE_SESSION_MAX_NAMESPACE_V1:
+        return nil
+    val base = mapping_identity * _NATIVE_SESSION_NAMESPACE_WIDTH_V1
+    Some(_native_session_owner_with_range_v1(base + 1u64,
+        base + _NATIVE_SESSION_NAMESPACE_WIDTH_V1 - 1u64))
+
+# A provider create runs outside the mutex. Its claim prevents library close
+# until registration or failed-create cleanup has finished.
+@unsafe(reason: "claims exclusive creation while a native provider may enter foreign code", capabilities: [raw_ptr])
+fn native_session_owner_claim_create_v1(owner: NativeSessionOwnerV1) -> bool:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ok = false
+        if not state.creating and not state.close_claimed:
+            next.creating = true
+            next.result_ok = true
+        next)
+    updated.result_ok
+
+@unsafe(reason: "ends a native provider create only after registration or cleanup", capabilities: [raw_ptr])
+fn native_session_owner_end_create_v1(owner: NativeSessionOwnerV1) -> bool:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ok = state.creating
+        next.creating = false
+        next)
+    updated.result_ok
+
+# Closing is a one-way claim. Live sessions, an in-flight create, or a prior
+# close claim all refuse, including through retained copies of a handle.
+@unsafe(reason: "claims retirement of a native provider after all sessions drain", capabilities: [raw_ptr])
+fn native_session_owner_claim_close_v1(owner: NativeSessionOwnerV1) -> bool:
+    val updated = mutex_with_lock(owner.gate, \state:
+        var next = state
+        next.result_ok = false
+        if not state.creating and not state.close_claimed and
+           state.entries.len() == 0:
+            next.close_claimed = true
+            next.result_ok = true
+        next)
+    updated.result_ok
 
 fn _native_session_index_v1(state: _NativeSessionStateV1, ticket: u64) -> i64:
     var index = 0
@@ -50,10 +106,10 @@ fn native_session_owner_register_v1(owner: NativeSessionOwnerV1, raw_session: i6
     val updated = mutex_with_lock(owner.gate, \state:
         var next = state
         next.result_ticket = 0u64
-        if state.next_ticket != 0u64 and
+        if state.next_ticket != 0u64 and not state.close_claimed and
            state.entries.len() < _NATIVE_SESSION_CAPACITY_V1:
             val ticket = state.next_ticket
-            next.next_ticket = if ticket == _NATIVE_SESSION_MAX_ID_V1:
+            next.next_ticket = if ticket == state.ticket_limit:
                 0u64
             else:
                 ticket + 1u64
@@ -134,6 +190,9 @@ fn native_session_owner_finish_destroy_v1(owner: NativeSessionOwnerV1,
     updated.result_ok
 
 export NativeSessionOwnerV1, native_session_owner_new_v1
+export native_session_owner_new_for_library_v1
+export native_session_owner_claim_create_v1, native_session_owner_end_create_v1
+export native_session_owner_claim_close_v1
 export native_session_owner_register_v1, native_session_owner_begin_v1
 export native_session_owner_end_v1, native_session_owner_claim_destroy_v1
 export native_session_owner_finish_destroy_v1
