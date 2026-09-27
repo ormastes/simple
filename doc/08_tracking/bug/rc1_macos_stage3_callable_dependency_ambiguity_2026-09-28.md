@@ -21,3 +21,13 @@ named-over-glob precedence, with a direct sweep regression fixture.
 
 Next gate: rebuild and admit Stage 2 on the fixed commit, then resume Stage 3
 from its path-bound receipt. The fix is not admitted by this report alone.
+
+## Second Stage 3 boundary
+
+The resolver-only backport passed Stage 2 admission. Stage 3 no longer failed
+on the initial `AsmTargetSpec` and `Span` imports, but its first remaining
+fatal was `HirModule` in `compiler.backend.backend.env` at source 10/717.
+`main`'s same fix includes explicit import-origin rows in that module and ten
+other frontend, HIR, and backend owners. Those small source declarations are
+backported with the resolver. A third source-matched admission run is required;
+the second Stage 3 run was stopped while collecting the new first error.
