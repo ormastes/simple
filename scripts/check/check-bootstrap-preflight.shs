@@ -22,7 +22,20 @@
 set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 MIN_FREE_GB=${MIN_FREE_GB:-20}
-CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/mnt/data/tmp/cargo-seed-rebuild}
+
+# The bootstrap may export a shared Cargo target. Let this preflight use an
+# isolated target when that cache contains artifacts from another toolchain.
+select_preflight_cargo_target_dir() {
+  if [ -n "${SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR:-}" ]; then
+    printf '%s\n' "$SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR"
+  elif [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    printf '%s\n' "$CARGO_TARGET_DIR"
+  else
+    printf '%s\n' /mnt/data/tmp/cargo-seed-rebuild
+  fi
+}
+
+CARGO_TARGET_DIR=$(select_preflight_cargo_target_dir)
 export CARGO_TARGET_DIR
 NO_CARGO=0
 SELFTEST_ONLY=0
@@ -106,18 +119,32 @@ selftest() {
   if probe_ok "$TMP/p_bad"; then echo "selftest FAIL: probe must-fail fixture passed"; st_fail=1; fi
   printf 'PROBE_BYTEORDER=little,little\n' > "$TMP/p_wrong"
   if probe_ok "$TMP/p_wrong"; then echo "selftest FAIL: probe wrong-value fixture passed"; st_fail=1; fi
+  # preflight-local target wins over the shared Cargo target
+  [ "$(SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR="$TMP/isolated" CARGO_TARGET_DIR="$TMP/shared" select_preflight_cargo_target_dir)" = "$TMP/isolated" ] || {
+    echo "selftest FAIL: isolated preflight Cargo target not selected"; st_fail=1;
+  }
+  # preserve an explicit Cargo target when the preflight override is absent
+  [ "$(CARGO_TARGET_DIR="$TMP/explicit" select_preflight_cargo_target_dir)" = "$TMP/explicit" ] || {
+    echo "selftest FAIL: explicit Cargo target changed"; st_fail=1;
+  }
+  # preserve this release branch's default when both variables are absent
+  default_target=$(unset CARGO_TARGET_DIR SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR; select_preflight_cargo_target_dir)
+  [ "$default_target" = /mnt/data/tmp/cargo-seed-rebuild ] || {
+    echo "selftest FAIL: release Cargo target default changed"; st_fail=1;
+  }
   # disk arithmetic: must-FAIL when below threshold, must-PASS above
   [ 5 -ge 3 ] || st_fail=1
   if [ 2 -ge 3 ]; then echo "selftest FAIL: disk threshold arithmetic"; st_fail=1; fi
   return $st_fail
 }
 
-if ! selftest; then
+# Keep default fixtures independent of an opt-in preflight target.
+if ! (unset SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR; selftest); then
   echo "ERROR — nothing was checked (selftest failed)"
   exit 2
 fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-  echo "PASS — selftest only: 9 fixture(s) checked, 0 failed"
+  echo "PASS — selftest only: 12 fixture(s) checked, 0 failed"
   exit 0
 fi
 
