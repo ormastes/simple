@@ -36,3 +36,15 @@ remaining investigation are in
 Next step: inspect the recomputed projection and artifact digest in the draft
 check. Require all four examples, including positive publication and stale
 payload rejection, to pass before calling the publication path verified.
+
+Later evidence: the two recomputed reverse section digests matched, while the
+artifact's reverse digest was zero because another `match Ok(value): value`
+struct binding projected the wrong field. Explicit unwrap moved that check
+forward. A module-level SHA-256 sentinel then arrived as zero in the native
+binary; replacing it with its verified literal moved the spec forward again.
+The graph validator's optional lookup required explicit binding. The current
+native textual verdict is **2 passes, 2 failures**: the graph and negative
+input cases pass, while persisted publication and stale payload rejection do
+not. Both remaining cases lack a CAS archive generation. A raw file create
+returns success but its Simple boolean wrapper returns false; see
+`native_file_create_excl_wrapper_success_false_2026-09-29.md`.
