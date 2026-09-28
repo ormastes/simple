@@ -380,7 +380,6 @@ pub(crate) fn mangle_mir(
             || extern_fns.contains(&func.name)
             || func.name.starts_with("__simple_")
             || func.name.starts_with("__module_init_")
-            || func.name.starts_with("spl_")
             || func.name.starts_with("__get_global_")
             || func.name.starts_with("__set_global_");
         if keeps_abi_name {
@@ -448,6 +447,12 @@ pub(crate) fn mangle_mir(
         }
     }
 
+    // local_globals also includes function/type metadata from HIR. Only
+    // declared data globals take precedence over lexical function values.
+    let local_global_names: std::collections::HashSet<String> = mir.globals.iter()
+        .filter(|(name, _, _)| mir.local_globals.contains(name))
+        .map(|(name, _, _)| name.clone())
+        .collect();
     // Build a mapping from raw name -> mangled name for local globals.
     let mut local_global_mangled: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (name, _ty, _is_mut) in &mir.globals {
@@ -687,6 +692,19 @@ pub(crate) fn mangle_mir(
                         }
                     }
                     MirInst::GlobalLoad { global_name, .. } | MirInst::GlobalStore { global_name, .. } => {
+                        // Function values use global references too. Resolve a
+                        // lexical function before an ambiguous imported suffix,
+                        // while a real local global retains precedence.
+                        if let Some(mangled) = local_global_mangled.get(global_name).or_else(|| {
+                            if local_global_names.contains(global_name) {
+                                None
+                            } else {
+                                local_mangled.get(global_name)
+                            }
+                        }) {
+                            *global_name = mangled.clone();
+                            continue;
+                        }
                         if is_runtime_or_builtin(global_name) || known_mangled.contains(global_name.as_str()) {
                             continue;
                         }
@@ -1530,6 +1548,10 @@ fn is_runtime_or_builtin_name(name: &str, extern_fns: &std::collections::HashSet
                 | "mp_segments"
         )
 }
+
+#[cfg(test)]
+#[path = "mangle_symbol_tests.rs"]
+mod symbol_tests;
 
 #[cfg(test)]
 mod tests {

@@ -778,6 +778,10 @@ pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf
 /// Flags mirror `build_c_runtime_library` exactly so the object is ABI-identical
 /// to the archive members it links beside.
 pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
+    build_sqlite_runtime_object_with_include(build_dir, None)
+}
+
+fn build_sqlite_runtime_object_with_include(build_dir: &Path, sqlite_include: Option<&Path>) -> Option<PathBuf> {
     let runtime_root = find_core_c_runtime_source_root()?;
     let source = "runtime_sqlite.c";
     let source_path = runtime_root.join(source);
@@ -811,6 +815,9 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     // MSVC its own spelling of the same intent; the GNU branch is unchanged.
     let msvc = simple_common::platform::cc_detect::is_msvc_compiler(&cc);
     let mut command = std::process::Command::new(&cc);
+    if let Some(include) = sqlite_include {
+        command.arg(format!("-I{}", include.display()));
+    }
     if msvc {
         command
             .arg("-c")
@@ -850,6 +857,71 @@ pub(crate) fn build_sqlite_runtime_object(build_dir: &Path) -> Option<PathBuf> {
     (status.success() && std::fs::metadata(&object).map(|m| m.len() > 0).unwrap_or(false)).then_some(object)
 }
 
+pub(crate) struct BootstrapToolsSqliteInputs {
+    pub object: PathBuf,
+    pub library: Option<PathBuf>,
+    pub runtime_dll: Option<PathBuf>,
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn prepare_bootstrap_tools_sqlite_sdk(build_dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    // Copy only sqlite3.h: adding a whole MinGW include tree to MSVC would
+    // select foreign stdint/stdlib headers. The real COFF import archive is
+    // copied byte-for-byte under a suffix understood by clang-cl.
+    for prefix in ["C:/msys64/clang64", "C:/msys64/ucrt64", "C:/msys64/mingw64"] {
+        let prefix = Path::new(prefix);
+        let header = prefix.join("include/sqlite3.h");
+        let library = prefix.join("lib/libsqlite3.dll.a");
+        let dll = prefix.join("bin/libsqlite3-0.dll");
+        if !(header.is_file() && library.is_file() && dll.is_file()) {
+            continue;
+        }
+        let include = build_dir.join("sqlite-sdk-include");
+        std::fs::create_dir_all(&include).map_err(|e| format!("create private SQLite include: {e}"))?;
+        let copied_library = build_dir.join("sqlite3.lib");
+        for (source, destination) in [(&header, include.join("sqlite3.h")), (&library, copied_library.clone())] {
+            std::fs::copy(source, &destination).map_err(|e| format!("stage SQLite SDK {}: {e}", source.display()))?;
+            let original = std::fs::read(source).map_err(|e| format!("read SQLite SDK input {}: {e}", source.display()))?;
+            let copied = std::fs::read(&destination).map_err(|e| format!("read SQLite SDK copy {}: {e}", destination.display()))?;
+            if original != copied {
+                return Err(format!("SQLite SDK copy differs: {}", destination.display()));
+            }
+        }
+        return Ok((include, copied_library, dll));
+    }
+    Err("bootstrap-tools requires a complete real Windows SQLite SDK (sqlite3.h, x86-64 COFF import archive, and matching DLL); checked installed MSYS2 clang64/ucrt64/mingw64 SDKs".to_string())
+}
+
+pub(crate) fn build_bootstrap_tools_sqlite_runtime(build_dir: &Path) -> Result<BootstrapToolsSqliteInputs, String> {
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    let (include, library, runtime_dll) = {
+        let (include, library, dll) = prepare_bootstrap_tools_sqlite_sdk(build_dir)?;
+        (Some(include), Some(library), Some(dll))
+    };
+    #[cfg(not(all(target_os = "windows", target_env = "msvc")))]
+    let (include, library, runtime_dll): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) = (None, None, None);
+    let object = build_sqlite_runtime_object_with_include(build_dir, include.as_deref())
+        .ok_or_else(|| "bootstrap-tools cannot compile the real SQLite provider; install target sqlite3 headers and library".to_string())?;
+    Ok(BootstrapToolsSqliteInputs { object, library, runtime_dll })
+}
+
+pub(crate) fn stage_sqlite_runtime_dll(dll: &Path, output: &Path) -> Result<(), String> {
+    let directory = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = dll.file_name().ok_or_else(|| "SQLite DLL has no file name".to_string())?;
+    let destination = directory.join(name);
+    let bytes = std::fs::read(dll).map_err(|e| format!("read SQLite DLL {}: {e}", dll.display()))?;
+    if std::fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::copy(dll, &destination).map_err(|e| format!("place SQLite DLL beside {}: {e}", output.display()))?;
+    }
+    if std::fs::read(&destination).map_err(|e| format!("verify staged SQLite DLL: {e}"))? != bytes {
+        return Err("staged SQLite DLL differs from selected SDK dependency".to_string());
+    }
+    let hash = ring::digest::digest(&ring::digest::SHA256, &bytes);
+    let hash = hash.as_ref().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    eprintln!("[native-link] SQLite dependency {} sha256={hash}", destination.display());
+    Ok(())
+}
+
 pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf> {
     let bootstrap_root = if runtime_path.file_name() == Some(OsStr::new("bootstrap")) {
         runtime_path.to_path_buf()
@@ -880,7 +952,7 @@ pub(crate) fn rlib_rustc_version(rlib: &Path) -> Option<String> {
 }
 
 /// Build the Rust standard library + allocator shim the hosted runtime rlib
-/// needs when it is linked into a non-Rust (C / Simple) image on Windows.
+/// needs when it is linked into a non-Rust (C / Simple) image.
 ///
 /// A bare `.rlib` carries none of its dependencies, and `std`'s
 /// `__rust_alloc` family is only emitted by rustc for a final artifact. Linking
@@ -898,7 +970,7 @@ pub(crate) fn build_rust_std_shim_for_rlib(rlib: &Path, temp_dir: &Path) -> Resu
     let source = dir.join("spl_std_shim.rs");
     std::fs::write(&source, "#![no_std]\nextern crate std;\n#[doc(hidden)]\npub fn spl_std_shim_anchor() {}\n")
         .map_err(|e| format!("write {}: {e}", source.display()))?;
-    let output = dir.join("spl_std_shim.lib");
+    let output = dir.join(if cfg!(target_env = "msvc") { "spl_std_shim.lib" } else { "libspl_std_shim.a" });
     let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
     if let Ok(rustc) = std::env::var("RUSTC") {
         candidates.push((rustc, Vec::new()));
@@ -4080,7 +4152,33 @@ fn is_known_system_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod llvm_tool_policy_tests {
-    use super::{is_llvm_archive_tool, missing_llvm_tool_error};
+    use super::{build_rust_std_shim_for_rlib, is_llvm_archive_tool, missing_llvm_tool_error};
+
+    #[cfg(all(target_os = "windows", target_env = "msvc"))]
+    #[test]
+    fn bootstrap_tools_sqlite_sdk_loads_adjacent_dll_without_sdk_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let (include, library, dll) = super::prepare_bootstrap_tools_sqlite_sdk(directory.path()).unwrap();
+        assert_eq!(std::fs::read_dir(&include).unwrap().count(), 1, "only sqlite3.h may be placed on MSVC's include path");
+        let source = directory.path().join("sqlite_sdk_version.c");
+        let executable = directory.path().join("sqlite_sdk_version.exe");
+        std::fs::write(&source, "#include <sqlite3.h>\n#include <stdio.h>\nint main(void) { int v = sqlite3_libversion_number(); printf(\"SQLite SDK version %d\\n\", v); return v >= 3000000 ? 0 : 1; }\n").unwrap();
+        let compiler = super::target_c_compiler(super::effective_target());
+        let link = std::process::Command::new(&compiler)
+            .arg("-O1").arg("-MD").arg(format!("-I{}", include.display()))
+            .arg(&source).arg(&library).arg(format!("-Fe{}", executable.display()))
+            .args(["-link", "-OPT:REF"]).output().unwrap();
+        assert!(link.status.success(), "real SQLite SDK link failed: {} {}", String::from_utf8_lossy(&link.stdout), String::from_utf8_lossy(&link.stderr));
+        super::stage_sqlite_runtime_dll(&dll, &executable).unwrap();
+        let system_root = std::env::var_os("SystemRoot").expect("Windows system root");
+        let system_path = std::path::Path::new(&system_root).join("System32");
+        let run = std::process::Command::new(&executable).env_clear()
+            .env("SystemRoot", &system_root).env("PATH", &system_path)
+            .env("TEMP", directory.path()).env("TMP", directory.path())
+            .current_dir(directory.path()).output().unwrap();
+        assert!(run.status.success(), "adjacent real SQLite DLL execution failed: {:?} {}", run.status.code(), String::from_utf8_lossy(&run.stderr));
+        assert!(String::from_utf8_lossy(&run.stdout).contains("SQLite SDK version "));
+    }
 
     #[test]
     fn missing_tool_error_names_the_tool_and_the_install_command() {
@@ -4098,5 +4196,33 @@ mod llvm_tool_policy_tests {
         assert!(!is_llvm_archive_tool("/usr/bin/ar"));
         assert!(!is_llvm_archive_tool("lib"));
         assert!(!is_llvm_archive_tool(r"C:\msys64\mingw64\bin\ar.exe"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn bootstrap_tools_hosted_rlib_links_with_real_matching_std() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("hosted_probe.rs");
+        std::fs::write(&source, "#[no_mangle]\npub extern \"C\" fn hosted_probe_env_len() -> i64 { std::env::var(\"SIMPLE_BOOTSTRAP_STD_LINK_PROBE\").map(|text| text.len() as i64).unwrap_or(-1) }\n").unwrap();
+        let rlib = directory.path().join("libhosted_probe.rlib");
+        let result = std::process::Command::new("rustc")
+            .args(["--edition=2021", "--crate-type=rlib", "--crate-name=hosted_probe", "-Cpanic=abort", "-Copt-level=1"])
+            .arg(&source).arg("-o").arg(&rlib).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let c_source = directory.path().join("main.c");
+        std::fs::write(&c_source, "extern long long hosted_probe_env_len(void); int main(void) { return hosted_probe_env_len() == 7 ? 0 : 1; }\n").unwrap();
+        let executable = directory.path().join("probe");
+        let no_std = std::process::Command::new("clang").arg(&c_source).arg(&rlib)
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(!no_std.status.success(), "a bare hosted rlib must not accidentally resolve from untracked std inputs");
+        let shim = build_rust_std_shim_for_rlib(&rlib, directory.path()).unwrap();
+        assert_eq!(shim.extension().and_then(|extension| extension.to_str()), Some("a"));
+        let link = std::process::Command::new("clang").arg(&c_source).arg(&rlib).arg(&shim)
+            .args(["-ldl", "-lpthread", "-lm", "-lrt", "-lutil"])
+            .arg("-o").arg(&executable).output().unwrap();
+        assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+        let run = std::process::Command::new(&executable)
+            .env("SIMPLE_BOOTSTRAP_STD_LINK_PROBE", "ownerok").output().unwrap();
+        assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     }
 }

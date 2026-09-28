@@ -67,6 +67,7 @@ pub fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host-gpu"
             | "host_gpu"
             | "gpu"
+            | "bootstrap-tools"
     )
 }
 
@@ -212,7 +213,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
                 println!("  --list-optimizations Print implemented optimization groups and levels");
                 println!(
-                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), simple-core, or core-c-bootstrap"
+                    "  --runtime-bundle <mode> Runtime lane: auto (default), simple-core, core-c-bootstrap, host-gpu, or admitted bootstrap-tools"
                 );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
@@ -339,7 +340,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = args_vec[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap)");
+                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools)");
                     return 1;
                 }
             }
@@ -520,7 +521,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools, runtime",
             runtime_bundle
         );
         return 1;

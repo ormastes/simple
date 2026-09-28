@@ -1,0 +1,88 @@
+# Real socket regression: imports the production probe, with no hardware daemon.
+use std.spec.*
+use app.test_daemon.adapters.hardware_tcp_probe.{hardware_tcp_probe}
+use std.nogc_sync_mut.sffi.net.{
+    io_tcp_bind, io_tcp_local_addr, io_tcp_accept_timeout,
+    io_tcp_set_read_timeout, io_tcp_read, io_tcp_close, io_tcp_connect_timeout
+}
+use app.io.time_ops.{time_now_micros}
+
+fn probe_listener_port(listener: i64) -> i64:
+    expect(listener).to_be_greater_than(-1)
+    val address = match io_tcp_local_addr(listener):
+        Some(value): value
+        nil:
+            expect("listener has no local address").to_equal("")
+            ""
+    val parts = address.split(":")
+    val port = parts[parts.len() - 1].to_i64() ?? 0
+    expect(port).to_be_greater_than(0)
+    port
+
+fn probe_expect_closed_peer(listener: i64):
+    val peer = io_tcp_accept_timeout(listener, 1000)
+    expect(peer).to_be_greater_than(-1)
+    expect(io_tcp_set_read_timeout(peer, 500)).to_equal(true)
+    match io_tcp_read(peer, 1):
+        Some(bytes): expect(bytes.len()).to_equal(0)
+        nil: expect("peer read failed instead of observing EOF").to_equal("")
+    expect(io_tcp_close(peer)).to_equal(true)
+    expect(io_tcp_close(peer)).to_equal(false)
+
+describe "hardware TCP readiness probe":
+    it "connects to an open loopback port and immediately closes the handle":
+        val listener = io_tcp_bind("127.0.0.1:0")
+        val port = probe_listener_port(listener)
+        expect(hardware_tcp_probe("127.0.0.1", port)).to_equal(true)
+        probe_expect_closed_peer(listener)
+        expect(io_tcp_close(listener)).to_equal(true)
+
+    it "returns false for a refused loopback port within the bounded probe":
+        val listener = io_tcp_bind("127.0.0.1:0")
+        val port = probe_listener_port(listener)
+        expect(io_tcp_close(listener)).to_equal(true)
+        val started_us = time_now_micros()
+        expect(hardware_tcp_probe("127.0.0.1", port)).to_equal(false)
+        expect((time_now_micros() - started_us) / 1000).to_be_less_than(5000)
+
+    it "closes every successful probe across repeated connections":
+        val listener = io_tcp_bind("127.0.0.1:0")
+        val port = probe_listener_port(listener)
+        for attempt in 0..16:
+            expect(hardware_tcp_probe("127.0.0.1", port)).to_equal(true)
+            probe_expect_closed_peer(listener)
+        expect(io_tcp_close(listener)).to_equal(true)
+
+    it "accepts bare and already bracketed IPv6 loopback hosts":
+        val listener = io_tcp_bind("[::1]:0")
+        val port = probe_listener_port(listener)
+        expect(hardware_tcp_probe("::1", port)).to_equal(true)
+        probe_expect_closed_peer(listener)
+        expect(hardware_tcp_probe("[::1]", port)).to_equal(true)
+        probe_expect_closed_peer(listener)
+        expect(io_tcp_close(listener)).to_equal(true)
+
+    it "resolves localhost and tries numeric candidates until one connects":
+        val listener = io_tcp_bind("127.0.0.1:0")
+        val port = probe_listener_port(listener)
+        # The provider itself is numeric-only: this exact error triggers DNS.
+        expect(io_tcp_connect_timeout("localhost:{port}", 500)).to_equal(-101)
+        val started_us = time_now_micros()
+        expect(hardware_tcp_probe("localhost", port)).to_equal(true)
+        expect((time_now_micros() - started_us) / 1000).to_be_less_than(10000)
+        probe_expect_closed_peer(listener)
+        expect(io_tcp_close(listener)).to_equal(true)
+
+    it "bounds DNS failure for an unresolved hostname":
+        val started_us = time_now_micros()
+        expect(hardware_tcp_probe("hardware-probe.invalid", 3333)).to_equal(false)
+        expect((time_now_micros() - started_us) / 1000).to_be_less_than(10000)
+
+    it "rejects empty hosts, invalid ports and unmatched IPv6 brackets":
+        expect(hardware_tcp_probe("", 3333)).to_equal(false)
+        expect(hardware_tcp_probe("  ", 3333)).to_equal(false)
+        expect(hardware_tcp_probe("127.0.0.1", 0)).to_equal(false)
+        expect(hardware_tcp_probe("127.0.0.1", -1)).to_equal(false)
+        expect(hardware_tcp_probe("127.0.0.1", 65536)).to_equal(false)
+        expect(hardware_tcp_probe("[::1", 3333)).to_equal(false)
+        expect(hardware_tcp_probe("::1]", 3333)).to_equal(false)

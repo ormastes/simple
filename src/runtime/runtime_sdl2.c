@@ -756,8 +756,11 @@ bool rt_sdl2_set_window_title(int64_t handle, const char* title) {
  * Converts to SDL surface format and blits to the window surface.
  */
 
-bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
-                          int64_t width, int64_t height) {
+typedef int64_t (*SdlPixelAt)(const void*, int64_t);
+
+static bool sdl2_present_rgba_view(int64_t window_handle, const void* pixels,
+                                  int64_t pixel_count, SdlPixelAt pixel_at,
+                                  int64_t width, int64_t height) {
     if (window_handle == 0 || !pixels) return false;
     if (width <= 0 || height <= 0) return false;
     if (width > INT_MAX / 4 || height > INT_MAX) return false;
@@ -767,9 +770,7 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
     if (!win) return false;
 
     int64_t expected = width * height;
-    if (pixels->len < expected || pixels->len < 0 || pixels->cap < pixels->len)
-        return false;
-    if (expected > 0 && !pixels->items) return false;
+    if (pixel_count < expected) return false;
     if ((uint64_t)expected > SIZE_MAX / 4) return false;
 
     /* Allocate a temporary 32-bit RGBA pixel buffer */
@@ -779,7 +780,7 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
 
     /* Unpack i64 packed pixels to RGBA bytes */
     for (int64_t i = 0; i < expected; i++) {
-        int64_t packed = spl_array_get_i64(pixels, i);
+        int64_t packed = pixel_at(pixels, i);
         rgba_buf[i * 4 + 0] = (uint8_t)((packed >> 24) & 0xFF); /* R */
         rgba_buf[i * 4 + 1] = (uint8_t)((packed >> 16) & 0xFF); /* G */
         rgba_buf[i * 4 + 2] = (uint8_t)((packed >> 8)  & 0xFF); /* B */
@@ -826,6 +827,33 @@ bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
     SDL_FreeSurface(src);
     free(rgba_buf);
     return presented;
+}
+
+#if !defined(SIMPLE_RUNTIME_RUST_SDL_PROVIDER)
+static int64_t sdl2_core_pixel_at(const void* pixels, int64_t index) {
+    return spl_array_get_i64((SplArray*)pixels, index);
+}
+
+bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
+                         int64_t width, int64_t height) {
+    if (!pixels || pixels->len < 0 || pixels->cap < pixels->len ||
+            (pixels->len > 0 && !pixels->items)) return false;
+    return sdl2_present_rgba_view(window_handle, pixels, pixels->len,
+                                 sdl2_core_pixel_at, width, height);
+}
+#endif
+
+static int64_t sdl2_raw_pixel_at(const void* pixels, int64_t index) {
+    return ((const int64_t*)pixels)[index];
+}
+
+/* Borrowed, unboxed pixel view. The runtime owner validates its allocation
+ * and keeps it alive throughout this call; the C engine never inspects a
+ * foreign runtime's array header or tagged integer representation. */
+bool spl_sdl2_present_rgba_i64_view(int64_t window_handle, const int64_t* pixels,
+                                   int64_t count, int64_t width, int64_t height) {
+    return sdl2_present_rgba_view(window_handle, pixels, count,
+                                 sdl2_raw_pixel_at, width, height);
 }
 
 /* ================================================================
@@ -1433,9 +1461,11 @@ void rt_sdl_set_window_title(int64_t handle, const char* title) {
     rt_sdl2_set_window_title(handle, title);
 }
 
+#if !defined(SIMPLE_RUNTIME_RUST_SDL_PROVIDER)
 bool rt_sdl_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
     return rt_sdl2_present_rgba(window_handle, pixels, width, height);
 }
+#endif
 
 int64_t rt_sdl_poll_event(void) {
     return rt_sdl2_poll_event();

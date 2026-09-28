@@ -1,0 +1,44 @@
+# Hardware readiness probes borrow a socket only for one bounded connection.
+use std.nogc_sync_mut.sffi.net.{io_tcp_connect_timeout, io_tcp_close}
+use std.nogc_sync_mut.io.browser_net_runtime.{browser_dns_lookup}
+use app.io.time_ops.{time_now_micros}
+
+# Native NetError::InvalidAddress = 101, value/net.rs; the public rt_io wrapper
+# negates that code. Use the provider's real SocketAddr parser for this branch.
+val HARDWARE_TCP_INVALID_ADDRESS: i64 = -101
+
+pub fn hardware_tcp_probe(host: text, port: i64) -> bool:
+    """Probe numeric IPs within 500ms; hostnames share a 5.5s DNS/connect budget."""
+    val trimmed_host = host.trim()
+    if trimmed_host == "" or port < 1 or port > 65535:
+        return false
+    var address_host = trimmed_host
+    if trimmed_host.contains("[") or trimmed_host.contains("]"):
+        if not trimmed_host.starts_with("[") or not trimmed_host.ends_with("]"):
+            return false
+    elif trimmed_host.contains(":"):
+        address_host = "[{trimmed_host}]"
+    val deadline_us = time_now_micros() + 5_500_000
+    val handle = io_tcp_connect_timeout("{address_host}:{port}", 500)
+    if handle >= 0:
+        io_tcp_close(handle)
+        return true
+    if handle != HARDWARE_TCP_INVALID_ADDRESS:
+        return false
+    # The DNS owner bounds its lookup to 5s and returns comma-separated IPs.
+    # Numeric connection errors never enter DNS; unparsed hostnames do.
+    val resolved = browser_dns_lookup(trimmed_host)
+    for candidate in resolved.split(","):
+        val address = candidate.trim()
+        if address == "":
+            continue
+        val remaining_ms = (deadline_us - time_now_micros()) / 1000
+        if remaining_ms <= 0:
+            return false
+        val connect_ms = if remaining_ms < 500: remaining_ms else: 500
+        val numeric_host = if address.contains(":"): "[{address}]" else: address
+        val connected = io_tcp_connect_timeout("{numeric_host}:{port}", connect_ms)
+        if connected >= 0:
+            io_tcp_close(connected)
+            return time_now_micros() <= deadline_us
+    false
