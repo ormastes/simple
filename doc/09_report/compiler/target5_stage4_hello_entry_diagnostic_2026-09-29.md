@@ -6,6 +6,26 @@ fixes. Its one hello AOT smoke still fails with
 `PLUG-E-NOTFOUND: backend=llvm` after MIR/AOP processing. The K1 composition
 binding remains the next blocker; no hello size/startup/RSS cohort exists.
 
+Later continuation (2026-09-29): the standalone entry now installs its
+selected K1 backend table before JIT/AOT work. Hello AOT passes that gate,
+then exposed the positional AOT empty-MIR stub. Lowering positional AOT
+sources moves the same request into backend compilation, where the newly
+opened session lease is rejected. A trial that skipped the copied `retired`
+flag still failed the authority token check and was reverted. The exact
+Stage4 compiler still links (3 compiled, 863 cached, zero failures); no
+working hello or matched size/startup/RSS measurement is claimed. See
+`doc/08_tracking/bug/stage4_standalone_aot_backend_session_lease_2026-09-29.md`.
+The unstripped compiler diagnostic grew from 23,596,040 to 23,599,976 bytes
+(+3,936 bytes, +0.017%) after the entry and MIR changes. This is compiler
+size, not the release-small hello size gate.
+The required ancillary smokes were attempted with the installed self-hosted
+runtime because this isolated worktree has no `bin/simple`: core eval/source
+passed, but `check-core-runtime-smoke.shs` expected `42` in compile output
+and observed only `Compiled ... -> ...smf`; the MCP native smoke stopped at
+`raw-source launch in t32_mcp_server`. Neither check validates this new
+Stage4 source, and neither is claimed PASS. The Stage4 hello blocker above
+remains the next focused implementation step.
+
 Status: BLOCKED for production qualification. This is an investigation of the
 standalone compiler entry, not an admitted Stage4 build or a size result.
 

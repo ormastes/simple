@@ -2,6 +2,14 @@
 
 **Status:** OPEN (loader/composition redesign pending)
 
+Update (2026-09-29): the exact standalone Stage4 entry built with the
+committed `src/compositions/kernel_llvm_cranelift` root contains the real
+composition backend table. After the entry calls
+`install_selected_k1_backend_table_v1()`, hello AOT passes backend selection
+and reaches native compilation. This does not prove that the generated
+composition root shadows the stub in the full-CLI route described below;
+that separate binding/receipt contract remains open.
+
 **Found:** 2026-09-16, during full-bootstrap verification of the K1 kernel-closure
 receipt gate (`scripts/bootstrap/write-k1-composition-receipt.shs`) on lane
 `fix/bootstrap-k1-receipt-seed-stage2` (PR #1028).
