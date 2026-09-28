@@ -85,3 +85,23 @@ peak build RSS. Its native receipt probe exited 0 with
 offsets/extents, digest roundtrip, malformed offset/extent, overflow, and
 noncanonical leading zero. This is a focused decoder PASS. The cold HIR
 four-example publication spec and realistic time/RSS cohort remain pending.
+
+## Full native publication retry
+
+The immutable Stage2 pure-Simple capsule built the original four-example cold
+HIR spec with no stub fallback: 323 units compiled in 21.27 seconds at
+1,255,796 KiB peak build RSS. It reports **2 passes, 2 failures**; the first
+publication case now reaches `cold-publish-archive-member-digest-mismatch`.
+The runner exits 0 despite that textual failure. The persisted 542-byte
+archive and 808-byte receipt each match their CAS SHA-256. Independently
+slicing the archive by the receipt's three byte ranges yields the recorded
+member SHA-256 for all three members, so stored bytes and offsets are sound.
+
+A two-unit native probe found that `"abcDEF".bytes().slice(0, 3)` has length 3
+but `validated_utf8_bytes_to_text_linear` converts it to empty text; copying
+those same three bytes into a fresh array with `push` converts to `abc`. This
+is tracked in `doc/08_tracking/bug/native_byte_slice_text_conversion_2026-09-29.md`.
+A trial preallocated member copy built with 3 changed and 320 cached units
+but the full spec stayed at 2/4 with the same digest mismatch; the trial was
+reverted. The specific native operation losing bytes is still unproven. Do
+not count this as a cold publication PASS or a memory/performance improvement.
