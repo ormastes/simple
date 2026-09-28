@@ -755,8 +755,38 @@ else
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
 
-    info "Running canonical full bootstrap in VM..."
-    if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then
+    # The bootstrap policy (bootstrap-from-scratch.sh) rejects a full
+    # bootstrap without a planner receipt: reason-receipt-required, exit 64
+    # (observed on this check's --full lane, 2026-09-28). Mirror the admitted
+    # candidate.yml lane: receipt-free Stage 2 trust root, then a typed Stage 3
+    # receipt + Stage 3 resume (Stage 4 resume requires admitted Stage 3
+    # provenance), then a typed Stage 4 receipt + Stage 4 resume. Reasons must
+    # be in bootstrap_planner_v2_reason_allowed
+    # (scripts/check/lib/bootstrap-planner-admission-bound.shs).
+    GUEST_ENV="env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"
+    GUEST_STAGE2='stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit) && test -n "$stage2"'
+    info "Building receipt-free admitted Stage 2 trust root in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=2"; then
+        copy_guest_bootstrap_logs
+        fail "Canonical FreeBSD stage2 trust-root bootstrap failed"
+    fi
+    info "Producing Stage 3 planner admission receipt in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_STAGE2} && sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage3 --reason=verify-landed-compiler-fix --parent-compiler=\"\$stage2\" --out=\"\$PWD/build/bootstrap/freebsd-stage3-planner-admission-v2.env\""; then
+        copy_guest_bootstrap_logs
+        fail "Canonical FreeBSD Stage 3 planner receipt production failed"
+    fi
+    info "Resuming admitted Stage 3 in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=\"\$PWD/build/bootstrap/freebsd-stage3-planner-admission-v2.env\" --resume-stage3-from-admitted=build/bootstrap --mode=dynload --no-mcp --jobs=2"; then
+        copy_guest_bootstrap_logs
+        fail "Canonical FreeBSD Stage 3 resume failed"
+    fi
+    info "Producing Stage 4 planner admission receipt in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_STAGE2} && sh scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage4 --reason=self-host-convergence-check --parent-compiler=\"\$stage2\" --out=\"\$PWD/build/bootstrap/freebsd-stage4-planner-admission-v2.env\""; then
+        copy_guest_bootstrap_logs
+        fail "Canonical FreeBSD Stage 4 planner receipt production failed"
+    fi
+    info "Running canonical full bootstrap (Stage 4 resume) in VM..."
+    if ! $VM_SSH "cd ${VM_HOME}/simple && ${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=\"\$PWD/build/bootstrap/freebsd-stage4-planner-admission-v2.env\" --resume-stage4-from-admitted=build/bootstrap --release --strategy=full --mode=dynload --no-mcp --jobs=2"; then
         copy_guest_bootstrap_logs
         fail "Canonical FreeBSD bootstrap failed"
     fi
