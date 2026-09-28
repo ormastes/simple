@@ -57,6 +57,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Next-session TODO
 
+- [x] Link a current-source pure-Simple Stage4 diagnostic compiler through the
+  dynamic runtime lane, run a hello `--check` smoke, and retain a paired static
+  diagnostic size/startup/RSS comparison. The 30-pair Linux ARM64 result is in
+  `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve

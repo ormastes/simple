@@ -1,7 +1,8 @@
 # Target 5 diagnostic compiler cannot link with staged core runtime bundle
 
-Status: open; blocks a current-source diagnostic compiler and full CLI Stage4
-qualification. The focused 48-unit declaration accessor regression passes.
+Status: partially resolved. A current-source diagnostic compiler now links and
+passes a hello `--check` smoke; full CLI Stage4 qualification remains open. The
+focused 48-unit declaration accessor regression passes.
 
 Using the staged pure-Simple compiler with `--entry-closure`, `--threads 8`,
 `--source src/compiler`, `--source src/lib`, and entry
@@ -122,3 +123,33 @@ The default LLVM check remains unqualified on this host: `llvm-config-23`
 reports 23.1.0, while `aya-llvm-sys` admits 23.1.1 or native Linux/FreeBSD
 23.1.2. The LLVM-enabled seed build stopped at that pinned-version check.
 This does not qualify a Stage4 compiler binary, startup, or size gate.
+
+## Current-source pure-Simple Stage4 compiler (2026-09-29)
+
+A September 27 pure-Simple Stage2 capsule built the current-source
+`src/app/cli/bootstrap_main.spl` with a diagnostic `simple-core` link to the
+current `libsimple_native_all.a`. The resulting 42,163,336-byte intermediate
+bootstrap tool passed the Cranelift dynamic-lane dispatch check: three
+assertions, including denial outside Stage4. The archive was used only to
+construct this bootstrap tool; its size is not a Stage4 product result.
+
+That tool compiled the current `src/compiler/80.driver/main.spl` entry closure
+with `--runtime-bundle dynamic-runtime`, explicit shared runtime/backfill
+provider path, `SIMPLE_COMPILER_ENTRY_STAGE4=1`, no-stub mode, and the host
+`aarch64-unknown-linux-gnu` target. It compiled 860 units with no source
+failures and linked in 60.58 seconds at 1,761,976 KiB peak build RSS. The
+unstripped executable is 23,067,424 bytes. It depends on
+`libsimple_runtime.so.0`; the current shared runtime is 10,072,672 bytes
+unstripped. The executable's `--version` and a hello-source `--check` both
+exit zero. The first attempt supplied an x86_64 target on this ARM64 host and
+failed at the expected incompatible-object link boundary; it is not a source
+or ABI failure.
+
+The same entry closure was built with `--runtime-bundle simple-core` and the
+current `libsimple_native_all.a` as a **diagnostic** static comparator. That
+archive is hosted bootstrap material, not an admitted production core. A
+stripped deployment comparison and 30 paired startup/RSS samples are in
+`doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+This resolves the missing diagnostic compiler but does not qualify the full
+CLI, zero optional-provider startup, matched hello size, an admitted runtime
+baseline, or Phase 7 release receipts. Keep the PR draft.
