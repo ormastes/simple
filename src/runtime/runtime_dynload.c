@@ -95,7 +95,9 @@ static atomic_flag simple_gpu_provider_lock = ATOMIC_FLAG_INIT;
 #if defined(__linux__)
 /* dlopen may retain NODELETE/external references after a successful close.
  * Never reuse an authenticated /proc/self/fd pathname in this process. */
-static uint64_t simple_dynload_snapshot_fd_floor_v1 = 1024;
+/* Leave ordinary low descriptors available while supporting processes whose
+ * RLIMIT_NOFILE is 1024 or lower. The floor rises after every admission. */
+static uint64_t simple_dynload_snapshot_fd_floor_v1 = 64;
 #endif
 
 static void simple_gpu_lock(void) {

@@ -19,6 +19,8 @@ the hash of the same sealed memfd that `dlopen` maps, then requires ABI v1 and
 all 27 `rt_sqlite_*` functions. A shared monotonic snapshot fd namespace
 prevents an old `dlopen` pathname from being reused for newer bytes. The
 provider stays mapped for the process lifetime to keep live handles valid.
+The allocator begins at fd 64 so a process with a 1024-fd limit can admit
+the provider; a constrained-limit native run is part of the focused gate.
 
 The rejection spec passed separately for a missing path, wrong SHA-256,
 incompatible ABI, and missing symbols (1 example, 0 failures for each fresh
