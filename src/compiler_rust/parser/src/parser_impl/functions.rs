@@ -160,6 +160,7 @@ impl<'a> Parser<'a> {
             false
         };
 
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (body, contract, bounds_block) = if is_abstract {
             // Abstract method has no body
             let empty_span = Span::new(start_span.start, start_span.end, start_span.line, start_span.column);
@@ -258,6 +259,7 @@ impl<'a> Parser<'a> {
                 (body, None, None)
             }
         };
+        self.collection_owner = previous_collection_owner;
 
         // Effect inference: if body contains suspension operators, infer async effect
         let inferred_effects = if !is_abstract && has_suspension_in_body(&body) {

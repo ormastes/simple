@@ -1,0 +1,78 @@
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, corpus, fail_closed
+"""Pinned corpus case 01 uses real Web layout and source-bound GPU rectangles."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    upstream_skia_ganesh_vulkan_preflight}
+use common.renderdoc.corpus_case01_oracle.{
+    CORPUS_CASE01_SOURCE_SHA256, CORPUS_CASE01_WIDTH,
+    CORPUS_CASE01_HEIGHT}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case01_gpu_scene_from_html}
+
+val FIXTURE: text =
+    "test/fixtures/html_css/corpus/cases/01-solid-boxes.html"
+
+describe "pinned Web corpus case 01 Stage-1 lowering":
+    it "rejects changed CSS before producer admission":
+        step("Reject a source byte change before running Web layout")
+        val html = read_file(FIXTURE)
+        expect(sha256_text(html)).to_equal(CORPUS_CASE01_SOURCE_SHA256)
+        val changed = html.replace("#0000ff", "#0000fe")
+        expect(changed == html).to_be(false)
+        match web_corpus_case01_gpu_scene_from_html(changed):
+            case Err(reason):
+                expect(reason).to_equal("web-corpus-case01-html-sha256-mismatch")
+            case Ok(_): fail_test("changed corpus CSS must not be admitted")
+
+    it "admits seven source-bound rectangles with three authored colored divs":
+        step("Run pinned corpus case 01 through real Web layout")
+        val html = read_file(FIXTURE)
+        match web_corpus_case01_gpu_scene_from_html(html):
+            case Err(reason): fail_test("pinned corpus producer admission blocked: {reason}")
+            case Ok(scene):
+                expect(scene.html_sha256).to_equal(CORPUS_CASE01_SOURCE_SHA256)
+                expect(scene.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(scene.source_draw_ir)))
+                expect(scene.source_draw_ir.batches.len()).to_equal(1)
+        expect(scene.gpu_draw_ir.batches.len()).to_equal(1)
+        expect(draw_ir_to_ui_ir(scene.gpu_draw_ir).accepted).to_equal(true)
+        expect(upstream_skia_ganesh_vulkan_preflight(
+            scene.gpu_draw_ir).accepted).to_equal(true)
+                expect(scene.source_command_count).to_equal(7)
+                expect(scene.gpu_command_count).to_equal(7)
+                expect(scene.source_command_indexes.len()).to_equal(7)
+                expect(scene.gpu_draw_ir.batches[0].embedding.width).to_equal(
+                    CORPUS_CASE01_WIDTH)
+                expect(scene.gpu_draw_ir.batches[0].embedding.height).to_equal(
+                    CORPUS_CASE01_HEIGHT)
+                var white_count = 0
+                var colored_count = 0
+                var i = 0
+                while i < scene.gpu_draw_ir.batches[0].commands.len():
+                    val source_index = scene.source_command_indexes[i]
+                    val source = scene.source_draw_ir.batches[0].commands[source_index]
+                    val gpu = scene.gpu_draw_ir.batches[0].commands[i]
+                    expect(source_index).to_equal(i.to_i64())
+                    expect(gpu.component_id).to_equal(source.component_id)
+                    expect(gpu.x).to_equal(source.x)
+                    expect(gpu.y).to_equal(source.y)
+                    expect(gpu.width).to_equal(source.width)
+                    expect(gpu.height).to_equal(source.height)
+                    expect(gpu.color).to_equal(source.color)
+                    expect(gpu.parent_id).to_equal("")
+                    if source.color == 0xFFFFFFFFu32:
+                        white_count = white_count + 1
+                    else:
+                        expect(source.parent_id).to_equal("scene")
+                        colored_count = colored_count + 1
+                    i = i + 1
+                expect(white_count).to_equal(4)
+                expect(colored_count).to_equal(3)

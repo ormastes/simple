@@ -40,6 +40,12 @@ types/layouts/constants, annotations/macro/AOP inputs, initializer ordering and
 effects, runtime providers, and deep referenced public-type definitions. A
 section index supports lazy decoding without loading unrelated exports.
 
+The cold `reverse_projection` section is a versioned, length-framed encoding
+of the module identity, canonical direct imports, and canonical reached-graph
+reverse dependents. Cold draft admission recomputes its digest from the graph
+and requires both the SMF section directory and TLDR receipt to match. The
+payload is built from graph facts, not from an executable SMF code image.
+
 ### `ConfigVariantKeyV1`
 
 Length-framed fields bind target, backend, selected features, build mode,

@@ -1,0 +1,154 @@
+"""Validated three-word instruction programs. Offsets are absolute word offsets.
+
+Production/action offsets include the terminal offset. Grammar branches stay
+inside their production. Unknown operations reject; no legacy fallback exists.
+The descriptor classes are copied into value records, never retained by the VM.
+"""
+use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
+
+pub val PG_MATCH_KIND_V1: i64 = 1
+pub val PG_MATCH_BYTE_V1: i64 = 2
+pub val PG_CALL_V1: i64 = 3
+pub val PG_RETURN_V1: i64 = 4
+pub val PG_CHOICE_V1: i64 = 5
+pub val PG_COMMIT_V1: i64 = 6
+pub val PG_FAIL_V1: i64 = 7
+pub val PG_ACTION_V1: i64 = 8
+pub val PG_END_V1: i64 = 9
+pub val PA_CAPTURE_V1: i64 = 1
+pub val PA_NODE_V1: i64 = 2
+pub val PA_SET_VALUE_V1: i64 = 3
+pub val PA_DIAGNOSTIC_V1: i64 = 4
+pub val PA_DROP_V1: i64 = 5
+pub val PA_DUP_V1: i64 = 6
+
+pub struct ParseProgramLimitsV1:
+    max_program_words: i64
+    max_source_bytes: i64
+    max_tokens: i64
+    max_nodes: i64
+    max_children: i64
+    max_diagnostics: i64
+    max_values: i64
+    max_calls: i64
+    max_choices: i64
+    max_steps: i64
+
+pub struct ParseProgramV1:
+    contract_version: i64
+    entry_rules: [i64]
+    production_offsets: [i64]
+    grammar_words: [i64]
+    action_offsets: [i64]
+    action_words: [i64]
+
+pub fn parse_program_words_copy_v1(words: [i64]) -> [i64]:
+    var out: [i64] = []
+    for word in words: out.push(word)
+    out
+
+fn _positive_bound_v1(value: i64) -> bool:
+    value > 0 and value <= 0x7fffffff
+
+pub fn parse_program_limits_valid_v1(limits: ParseProgramLimitsV1) -> bool:
+    _positive_bound_v1(limits.max_program_words) and
+        _positive_bound_v1(limits.max_source_bytes) and
+        _positive_bound_v1(limits.max_tokens) and
+        _positive_bound_v1(limits.max_nodes) and
+        _positive_bound_v1(limits.max_children) and
+        _positive_bound_v1(limits.max_diagnostics) and
+        _positive_bound_v1(limits.max_values) and
+        _positive_bound_v1(limits.max_calls) and
+        _positive_bound_v1(limits.max_choices) and
+        _positive_bound_v1(limits.max_steps)
+
+fn _offsets_valid_v1(offsets: [i64], words: i64) -> bool:
+    if offsets.len() == 0 or offsets[0] != 0: return false
+    if offsets[offsets.len() - 1] != words or words % 3 != 0: return false
+    var i = 1
+    while i < offsets.len():
+        if offsets[i] <= offsets[i - 1] or offsets[i] % 3 != 0: return false
+        i = i + 1
+    true
+
+pub fn parse_program_shape_valid_v1(program: ParseProgramV1, limits: ParseProgramLimitsV1) -> bool:
+    if not parse_program_limits_valid_v1(limits) or program.contract_version != 1: return false
+    val grammar_size = program.grammar_words.len()
+    val action_size = program.action_words.len()
+    if grammar_size > limits.max_program_words or
+        action_size > limits.max_program_words - grammar_size: return false
+    if program.production_offsets.len() < 2 or program.entry_rules.len() == 0: return false
+    if program.entry_rules.len() > limits.max_program_words: return false
+    if not _offsets_valid_v1(program.production_offsets, grammar_size): return false
+    if not _offsets_valid_v1(program.action_offsets, action_size): return false
+    val rule_count = program.production_offsets.len() - 1
+    val action_count = program.action_offsets.len() - 1
+    for entry in program.entry_rules:
+        if entry < 0 or entry >= rule_count: return false
+    var rule = 0
+    while rule < rule_count:
+        val start = program.production_offsets[rule]
+        val end = program.production_offsets[rule + 1]
+        var pc = start
+        while pc < end:
+            val op = program.grammar_words[pc]
+            val a = program.grammar_words[pc + 1]
+            val b = program.grammar_words[pc + 2]
+            if b != 0: return false
+            if op == PG_MATCH_KIND_V1:
+                if a <= 0 or a > 65535: return false
+            elif op == PG_MATCH_BYTE_V1:
+                if a < 0 or a > 255: return false
+            elif op == PG_CALL_V1:
+                if a < 0 or a >= rule_count: return false
+            elif op == PG_CHOICE_V1 or op == PG_COMMIT_V1:
+                if a < start or a >= end or a % 3 != 0: return false
+            elif op == PG_ACTION_V1:
+                if a < 0 or a >= action_count: return false
+            elif op == PG_RETURN_V1 or op == PG_FAIL_V1 or op == PG_END_V1:
+                if a != 0: return false
+            else:
+                return false
+            pc = pc + 3
+        rule = rule + 1
+    var pc = 0
+    while pc < action_size:
+        val op = program.action_words[pc]
+        val a = program.action_words[pc + 1]
+        val b = program.action_words[pc + 2]
+        if a < 0: return false
+        if op == PA_CAPTURE_V1 or op == PA_DROP_V1 or op == PA_DUP_V1:
+            if b != 0: return false
+        elif op == PA_NODE_V1 or op == PA_DIAGNOSTIC_V1:
+            if b < 0: return false
+        elif op != PA_SET_VALUE_V1:
+            return false
+        pc = pc + 3
+    true
+
+pub fn parse_program_validate_v1(grammar: GrammarProgram, actions: ActionProgram,
+    limits: ParseProgramLimitsV1) -> Result<ParseProgramV1, text>:
+    if grammar.contract_version != 1 or actions.contract_version != 1:
+        return Err("program_version")
+    # Reject oversized descriptors before copying their class-owned arrays.
+    if not parse_program_limits_valid_v1(limits): return Err("invalid_limits")
+    if grammar.opcodes.len() > limits.max_program_words or
+        actions.opcodes.len() > limits.max_program_words - grammar.opcodes.len() or
+        grammar.entry_rules.len() > limits.max_program_words or
+        grammar.production_offsets.len() > limits.max_program_words or
+        actions.action_offsets.len() > limits.max_program_words:
+        return Err("program_capacity")
+    val program = ParseProgramV1(contract_version: 1,
+        entry_rules: parse_program_words_copy_v1(grammar.entry_rules),
+        production_offsets: parse_program_words_copy_v1(grammar.production_offsets),
+        grammar_words: parse_program_words_copy_v1(grammar.opcodes),
+        action_offsets: parse_program_words_copy_v1(actions.action_offsets),
+        action_words: parse_program_words_copy_v1(actions.opcodes))
+    if not parse_program_shape_valid_v1(program, limits): return Err("invalid_program")
+    Ok(program)
+
+export ParseProgramV1, ParseProgramLimitsV1, parse_program_validate_v1
+export parse_program_shape_valid_v1, parse_program_limits_valid_v1, parse_program_words_copy_v1
+export PG_MATCH_KIND_V1, PG_MATCH_BYTE_V1, PG_CALL_V1, PG_RETURN_V1, PG_CHOICE_V1
+export PG_COMMIT_V1, PG_FAIL_V1, PG_ACTION_V1, PG_END_V1
+export PA_CAPTURE_V1, PA_NODE_V1, PA_SET_VALUE_V1, PA_DIAGNOSTIC_V1, PA_DROP_V1, PA_DUP_V1

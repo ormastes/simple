@@ -1,0 +1,817 @@
+# REQ-2D-006 / NFR-2D-002: physical Linux controlled-rectangle workers.
+# This application never promotes a caller-supplied capture to physical PASS.
+mod app.test.vulkan_2d_qualification.main
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.mod.{host_os, file_exists, file_is_regular_no_follow,
+    file_hash_sha256, file_atomic_write, file_create_exclusive,
+    file_read_regular_no_follow_bounded,
+    process_run_bounded, env_get, env_set, getpid, time_now_unix_micros}
+use std.io_runtime.{mkdir_p, file_write_bytes}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.types.{json_to_array, json_to_number, json_to_string}
+use std.fs.{read_file}
+use common.renderdoc.controlled_rect_oracle.{controlled_rect_capture_matches_oracle}
+use common.renderdoc.controlled_clip_oracle.{controlled_clip_capture_matches_oracle}
+use common.renderdoc.gui_button_qualification.{
+    GUI_BUTTON_RESTING_SHA256, GUI_BUTTON_PRESSED_SHA256,
+    gui_button_capture_matches_oracle}
+use common.renderdoc.web_opaque_box_oracle.{web_opaque_box_capture_matches_oracle}
+use common.renderdoc.corpus_case01_oracle.{corpus_case01_capture_matches_oracle}
+use common.renderdoc.corpus_case06_oracle.{corpus_case06_capture_matches_oracle}
+use common.renderdoc.corpus_case02_polygon_oracle.{case02_capture_matches_oracle}
+use common.renderdoc.physical_vulkan_2d_qualification.{VulkanBackendCaptureArtifact}
+use common.renderdoc.final_output_pixels.{
+    final_output_canonical_rgba, final_output_validate}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_strict_vulkan_submit_with_images}
+use std.gc_async_mut.gpu.engine2d.final_output_capture.{
+    engine2d_strict_vulkan_capture_completed_submission}
+use std.gc_async_mut.gpu.engine2d.physical_capture_artifact.{
+    engine2d_controlled_rectangle_artifact, engine2d_controlled_clip_artifact}
+use std.gc_async_mut.gpu.engine2d.gui_button_capture_artifact.{engine2d_gui_button_artifact}
+use std.gc_async_mut.gpu.engine2d.web_opaque_box_capture_artifact.{engine2d_web_opaque_box_artifact}
+use std.gc_async_mut.gpu.engine2d.corpus_case01_capture_artifact.{engine2d_corpus_case01_artifact}
+use std.gc_async_mut.gpu.engine2d.corpus_case06_capture_artifact.{engine2d_corpus_case06_artifact}
+use std.gc_async_mut.gpu.engine2d.corpus_case02_capture_artifact.{engine2d_corpus_case02_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY,
+    upstream_skia_ganesh_vulkan_render,
+    upstream_skia_ganesh_vulkan_render_affine_v3_candidate}
+use std.skia.backend.upstream_ganesh_vulkan.physical_capture_artifact.{
+    upstream_skia_controlled_rectangle_artifact,
+    upstream_skia_controlled_clip_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.gui_button_capture_artifact.{upstream_skia_gui_button_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.web_opaque_box_capture_artifact.{upstream_skia_web_opaque_box_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.corpus_case01_capture_artifact.{upstream_skia_corpus_case01_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.corpus_case06_capture_artifact.{upstream_skia_corpus_case06_artifact}
+use std.skia.backend.upstream_ganesh_vulkan.corpus_case02_capture_artifact.{upstream_skia_corpus_case02_artifact}
+use std.nogc_sync_mut.gpu.provider.{GPU_PROVIDER_BACKEND_VULKAN, gpu_provider_info}
+use app.test.vulkan_2d_qualification.scene_contract.{
+    SCENE_RECT, SCENE_CLIP, SCENE_GUI_RESTING, SCENE_GUI_PRESSED,
+    SCENE_WEB_BOX, SCENE_CORPUS_CASE01, SCENE_CORPUS_CASE06,
+    SCENE_CORPUS_CASE02, SCENE_CORPUS_CASE31,
+    WebWorkerScene, scene_is_gui, scene_gui_pressed, scene_is_web,
+    scene_width, scene_height, scene_pixel_length, scene_reference_sha,
+    scene_oracle_sha, scene_fixture_id, scene_fixture_sha,
+    scene_scope, scene_input_state_sha, web_worker_scene,
+    scene_draw_ir, prepared_scene}
+use app.test.vulkan_2d_qualification.candidate_receipts.{
+    SKIA_REVISION, safe_output_dir, path_components_no_symlink,
+    lowercase_hex, read_candidate, verify_candidates}
+
+struct SkiaBuildProvenance:
+    revision: text
+    receipt_sha256: text
+    deps_sha256: text
+    checkout_sha256: text
+    archive_sha256: text
+    affine_v3_enabled: bool
+
+fn blocked(reason: text) -> i64:
+    print "status=blocked reason={reason}"
+    3
+
+fn failed(reason: text) -> i64:
+    print "status=fail reason={reason}"
+    1
+
+fn provider_build_revision(provider_path: text,
+    provider_sha: text, kind: i64) -> Result<SkiaBuildProvenance, text>:
+    val receipt_path = provider_path + ".receipt.json"
+    if not file_is_regular_no_follow(receipt_path) or
+        not file_is_regular_no_follow(
+            "tools/upstream-skia-ganesh-vulkan/skia-pin.json"):
+        return Err("pinned-skia-build-receipt-missing")
+    val source = match file_read_regular_no_follow_bounded(receipt_path, 32768):
+        case Ok(value): value
+        case Err(reason): return Err("skia-build-receipt-read:" + reason)
+    val parsed = json_parse_with_error(source)
+    if parsed.1 != "":
+        return Err("skia-build-receipt-json-invalid")
+    val record = parsed.0
+    val revision = json_to_string(json_object_get(record, "skia_revision")) ?? ""
+    val claimed_provider = json_to_string(
+        json_object_get(record, "provider_sha256")) ?? ""
+    val archive_sha = json_to_string(
+        json_object_get(record, "skia_archive_sha256")) ?? ""
+    val deps_sha = json_to_string(
+        json_object_get(record, "skia_deps_sha256")) ?? ""
+    val checkout_sha = json_to_string(
+        json_object_get(record, "skia_dependency_checkouts_sha256")) ?? ""
+    var checkout_count: i64 = 0
+    if val checkouts = json_to_array(json_object_get(record,
+        "skia_dependency_checkouts")):
+        checkout_count = checkouts.len()
+    val provider_name = json_to_string(
+        json_object_get(record, "provider")) ?? ""
+    val gn_args = json_to_string(
+        json_object_get(record, "gn_args")) ?? ""
+    val affine_v3 = json_to_number(
+        json_object_get(record, "affine_v3_enabled")) ?? -1.0
+    val receipt_sha = file_hash_sha256(receipt_path)
+    val pin_parsed = json_parse_with_error(read_file(
+        "tools/upstream-skia-ganesh-vulkan/skia-pin.json"))
+    if pin_parsed.1 != "" or revision != SKIA_REVISION or
+        revision != (json_to_string(json_object_get(pin_parsed.0,
+            "revision")) ?? "") or
+        provider_name != "upstream-skia-ganesh-vulkan" or
+        gn_args != "is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false" or
+        claimed_provider != provider_sha or
+        (affine_v3 != 0.0 and affine_v3 != 1.0) or
+        (kind == SCENE_CORPUS_CASE02 and affine_v3 != 1.0) or
+        not lowercase_hex(archive_sha, 64) or
+        not lowercase_hex(deps_sha, 64) or
+        not lowercase_hex(checkout_sha, 64) or
+        checkout_count == 0 or
+        not lowercase_hex(receipt_sha, 64):
+        return Err("pinned-skia-build-provenance-mismatch")
+    Ok(SkiaBuildProvenance(revision: revision,
+        receipt_sha256: receipt_sha, deps_sha256: deps_sha,
+        checkout_sha256: checkout_sha, archive_sha256: archive_sha,
+        affine_v3_enabled: affine_v3 == 1.0))
+
+fn single_line(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn save_candidate(artifact: VulkanBackendCaptureArtifact, output_dir: text,
+    executable_sha: text, provider_sha: text, nonce: text,
+    skia_revision: text, build_receipt_sha: text,
+    deps_sha: text, archive_sha: text,
+    kind: i64, web_scene: WebWorkerScene?) -> Result<text, text>:
+    if not safe_output_dir(output_dir) or
+        not path_components_no_symlink(output_dir) or nonce.len() != 64:
+        return Err("output-directory-or-nonce-invalid")
+    if artifact.fixture_id != scene_fixture_id(kind) or
+        artifact.fixture_sha256 != scene_fixture_sha(kind) or
+        not artifact.producer_authenticated or artifact.fallback_required or
+        artifact.readback_source != "device_readback" or
+        artifact.physical_device_uuid == "" or artifact.driver_uuid == "":
+        return Err("owner-bound artifact incomplete")
+    var web_receipt = ""
+    if scene_is_web(kind):
+        val web = match web_scene:
+            case Some(value): value
+            case nil: return Err("web-layout-admission-absent")
+        if web.admitted.html_sha256 != artifact.fixture_sha256 or
+            web.admitted.source_draw_ir_sha256.len() != 64 or
+            web.gpu_draw_ir_sha256.len() != 64 or
+            web.source_command_indexes == "":
+            return Err("web-layout-projection-receipt-invalid")
+        web_receipt = "web_source_draw_ir_sha256: {web.admitted.source_draw_ir_sha256}\n" +
+            "web_gpu_draw_ir_sha256: {web.gpu_draw_ir_sha256}\n" +
+            "web_source_command_count: {web.admitted.source_command_count}\n" +
+            "web_gpu_command_count: {web.admitted.gpu_command_count}\n" +
+            "web_source_command_indexes: {web.source_command_indexes}\n"
+    val capture = match artifact.capture:
+        case Some(value): value
+        case nil: return Err("final pixels absent")
+    if not single_line(artifact.device_name) or
+        not single_line(artifact.driver_identity) or
+        not single_line(artifact.physical_device_uuid) or
+        not single_line(artifact.driver_uuid) or
+        not single_line(capture.metadata.frame_id) or
+        not single_line(capture.metadata.resource_id) or
+        not single_line(capture.metadata.submission_token) or
+        not single_line(capture.metadata.completion_token):
+        return Err("capture-metadata-line-invalid")
+    match final_output_validate(capture):
+        case Err(error): return Err("final pixels invalid: " + error.code)
+        case Ok(_): ()
+    if kind == SCENE_CORPUS_CASE02:
+        val verdict = case02_capture_matches_oracle(capture)?
+        if not verdict.passed:
+            return Err("analytic-controlled-oracle-mismatch")
+    val oracle = if kind == SCENE_CORPUS_CASE02:
+        Ok(true)
+    elif kind == SCENE_CLIP:
+        controlled_clip_capture_matches_oracle(capture)
+    elif scene_is_gui(kind):
+        gui_button_capture_matches_oracle(capture, scene_gui_pressed(kind))
+    elif kind == SCENE_CORPUS_CASE01:
+        corpus_case01_capture_matches_oracle(capture)
+    elif kind == SCENE_CORPUS_CASE06:
+        corpus_case06_capture_matches_oracle(capture)
+    elif scene_is_web(kind):
+        web_opaque_box_capture_matches_oracle(capture)
+    else:
+        controlled_rect_capture_matches_oracle(capture)
+    match oracle:
+        case Err(reason): return Err("analytic-controlled-oracle:" + reason)
+        case Ok(matches):
+            if not matches:
+                return Err("analytic-controlled-oracle-mismatch")
+    val canonical = match final_output_canonical_rgba(capture):
+        case Ok(value): value
+        case Err(error): return Err("canonical-pixel-conversion:" + error.code)
+    var bytes: [u8] = []
+    for value in canonical:
+        bytes.push(value as u8)
+    if not mkdir_p(output_dir):
+        return Err("output-directory-unavailable")
+    val pixel_path = output_dir + "/" + artifact.backend_id + ".rgba"
+    val receipt_path = output_dir + "/" + artifact.backend_id + ".sdn"
+    if file_exists(pixel_path) or file_exists(receipt_path):
+        return Err("output-already-exists")
+    if not file_write_bytes(pixel_path, bytes):
+        return Err("pixel-write-failed")
+    val pixel_sha = file_hash_sha256(pixel_path)
+    if pixel_sha.len() != 64:
+        return Err("pixel-hash-failed")
+    val metadata = capture.metadata
+    val width = scene_width(kind)
+    val height = scene_height(kind)
+    val row_stride = width.to_i64() * 4
+    val receipt = "schema: simple-2d-physical-worker/v1\n" +
+        "status: candidate\n" +
+        "backend_id: {artifact.backend_id}\n" +
+        "fixture_id: {artifact.fixture_id}\n" +
+        "fixture_sha256: {artifact.fixture_sha256}\n" +
+        "reference_sha256: {scene_reference_sha(kind)}\n" +
+        "oracle_rgba_sha256: {scene_oracle_sha(kind)}\n" +
+        "input_state_sha256: {scene_input_state_sha(kind)}\n" +
+        web_receipt +
+        "run_nonce: {nonce}\n" +
+        "executable_sha256: {executable_sha}\n" +
+        "provider_sha256: {provider_sha}\n" +
+        "skia_revision: {skia_revision}\n" +
+        "skia_build_receipt_sha256: {build_receipt_sha}\n" +
+        "skia_deps_sha256: {deps_sha}\n" +
+        "skia_archive_sha256: {archive_sha}\n" +
+        "provider_identity: {artifact.provider_identity}\n" +
+        "device_name: {artifact.device_name}\n" +
+        "device_type: {artifact.device_type}\n" +
+        "driver_identity: {artifact.driver_identity}\n" +
+        "physical_device_uuid: {artifact.physical_device_uuid}\n" +
+        "driver_uuid: {artifact.driver_uuid}\n" +
+        "device_identity: {artifact.device_identity}\n" +
+        "backend_handle: {artifact.backend_handle}\n" +
+        "submit_count: {artifact.submit_count}\n" +
+        "fence_count: {artifact.fence_count}\n" +
+        "readback_source: {artifact.readback_source}\n" +
+        "frame_id: {metadata.frame_id}\n" +
+        "resource_id: {metadata.resource_id}\n" +
+        "selected_resource_count: {metadata.selected_resource_count}\n" +
+        "mip_level: {metadata.mip_level}\n" +
+        "array_layer: {metadata.array_layer}\n" +
+        "submission_token: {metadata.submission_token}\n" +
+        "completion_token: {metadata.completion_token}\n" +
+        "frame_complete: {metadata.frame_complete}\n" +
+        "readback_complete: {metadata.readback_complete}\n" +
+        "device_status: {metadata.device_status}\n" +
+        "width: {width}\nheight: {height}\n" +
+        "stride: {row_stride}\n" +
+        "pixel_format: R8G8B8A8_UNORM\n" +
+        "alpha_mode: straight\n" +
+        "color_space: {metadata.color_space}\n" +
+        "color_primaries: {metadata.color_primaries}\n" +
+        "transfer_function: {metadata.transfer_function}\n" +
+        "origin: top-left\n" +
+        "crop_x: 0\n" +
+        "crop_y: 0\n" +
+        "crop_width: {width}\n" +
+        "crop_height: {height}\n" +
+        "source_width: {metadata.width}\n" +
+        "source_height: {metadata.height}\n" +
+        "source_stride: {metadata.stride}\n" +
+        "source_pixel_format: {metadata.pixel_format}\n" +
+        "source_alpha_mode: {metadata.alpha_mode}\n" +
+        "source_origin: {metadata.origin}\n" +
+        "source_crop_x: {metadata.crop_x}\n" +
+        "source_crop_y: {metadata.crop_y}\n" +
+        "source_crop_width: {metadata.crop_width}\n" +
+        "source_crop_height: {metadata.crop_height}\n" +
+        "pixel_sha256: {pixel_sha}\n" +
+        "pixel_length: {bytes.len()}\n"
+    if not file_atomic_write(receipt_path, receipt):
+        return Err("receipt-write-failed")
+    Ok(receipt_path)
+
+fn worker_engine2d(output_dir: text, executable: text, nonce: text,
+    kind: i64) -> i64:
+    if host_os() != "linux":
+        return blocked("physical-linux-required")
+    if not safe_output_dir(output_dir) or
+        not path_components_no_symlink(output_dir) or
+        not path_components_no_symlink(executable) or nonce.len() != 64:
+        return blocked("worker-output-domain-invalid")
+    if not file_is_regular_no_follow(executable):
+        return blocked("worker-executable-missing-or-symlink")
+    val executable_sha = file_hash_sha256(executable)
+    if executable_sha.len() != 64 or
+        file_hash_sha256("/proc/self/exe") != executable_sha:
+        return blocked("worker-executable-hash-unavailable")
+    # Case 31 text has no physical gate yet: the upstream provider rejects
+    # every text command and the native glyph contract record is not wired
+    # to either backend owner. Fail closed instead of submitting a
+    # rectangle-only stand-in under the text fixture id.
+    if kind == SCENE_CORPUS_CASE31:
+        return blocked("corpus-case31-physical-text-gate-absent")
+    val scene = match prepared_scene(kind):
+        case Ok(value): value
+        case Err(reason): return blocked(reason)
+    var web_scene: WebWorkerScene? = nil
+    if scene_is_web(kind):
+        match web_worker_scene(kind):
+            case Ok(value): web_scene = Some(value)
+            case Err(reason): return blocked("web-admission:" + reason)
+    val draw = match web_scene:
+        case Some(value): value.admitted.gpu_draw_ir
+        case nil:
+            match scene_draw_ir(kind):
+                case Ok(value): value
+                case Err(reason): return blocked(reason)
+    var engine = Engine2D.create_with_backend(
+        scene_width(kind), scene_height(kind), "vulkan")
+    if engine.backend_name() != "vulkan":
+        engine.shutdown()
+        return blocked("engine2d-vulkan-unavailable")
+    val submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+        engine, draw, [])
+    val captured = match engine2d_strict_vulkan_capture_completed_submission(
+        submission, scene.fixture_id, scene.source_sha256,
+        "{scene.fixture_id}-engine2d"):
+        case Ok(value): value
+        case Err(reason):
+            var owner = submission.engine
+            owner.shutdown()
+            return blocked("engine2d-capture:" + reason)
+    val artifact_result = if kind == SCENE_CLIP:
+        engine2d_controlled_clip_artifact(captured, scene)
+    elif scene_is_gui(kind):
+        engine2d_gui_button_artifact(captured, scene, scene_gui_pressed(kind))
+    elif kind == SCENE_CORPUS_CASE01:
+        match web_scene:
+            case Some(value): engine2d_corpus_case01_artifact(
+                captured, scene, value.admitted)
+            case nil: Err("corpus-case01-layout-admission-absent")
+    elif kind == SCENE_CORPUS_CASE06:
+        match web_scene:
+            case Some(value): engine2d_corpus_case06_artifact(
+                captured, scene, value.admitted)
+            case nil: Err("corpus-case06-layout-admission-absent")
+    elif kind == SCENE_CORPUS_CASE02:
+        match web_scene:
+            case Some(value): engine2d_corpus_case02_artifact(
+                captured, scene, value.admitted)
+            case nil: Err("corpus-case02-layout-admission-absent")
+    elif scene_is_web(kind):
+        match web_scene:
+            case Some(value): engine2d_web_opaque_box_artifact(
+                captured, scene, value.admitted)
+            case nil: Err("web-layout-admission-absent")
+    else:
+        engine2d_controlled_rectangle_artifact(captured, scene)
+    val artifact = match artifact_result:
+        case Ok(value): value
+        case Err(reason):
+            var owner = captured.engine
+            owner.shutdown()
+            return blocked("engine2d-owner:" + reason)
+    var owner = captured.engine
+    owner.shutdown()
+    if owner.vulkan_backend != nil:
+        return blocked("engine2d-vulkan-owner-retirement-incomplete")
+    val saved = save_candidate(artifact, output_dir, executable_sha,
+        executable_sha, nonce, "none", "none", "none", "none", kind,
+        web_scene)
+    match saved:
+        case Ok(path):
+            print "status=candidate backend=engine2d-vulkan receipt={path}"
+            0
+        case Err(reason): failed(reason)
+
+fn worker_skia(output_dir: text, executable: text,
+    provider_path: text, expected_provider_sha: text, nonce: text,
+    kind: i64) -> i64:
+    if host_os() != "linux":
+        return blocked("physical-linux-required")
+    if not safe_output_dir(output_dir) or nonce.len() != 64 or
+        not provider_path.starts_with("/") or
+        not path_components_no_symlink(output_dir) or
+        not path_components_no_symlink(executable) or
+        not path_components_no_symlink(provider_path):
+        return blocked("worker-output-or-provider-domain-invalid")
+    if not file_is_regular_no_follow(executable) or
+        not file_is_regular_no_follow(provider_path):
+        return blocked("worker-or-provider-missing-or-symlink")
+    val executable_sha = file_hash_sha256(executable)
+    val provider_sha = file_hash_sha256(provider_path)
+    if executable_sha.len() != 64 or provider_sha != expected_provider_sha or
+        file_hash_sha256("/proc/self/exe") != executable_sha:
+        return blocked("worker-or-provider-hash-mismatch")
+    val skia_build = match provider_build_revision(provider_path,
+        provider_sha, kind):
+        case Ok(value): value
+        case Err(reason): return blocked(reason)
+    val scene = match prepared_scene(kind):
+        case Ok(value): value
+        case Err(reason): return blocked(reason)
+    var web_scene: WebWorkerScene? = nil
+    if scene_is_web(kind):
+        match web_worker_scene(kind):
+            case Ok(value): web_scene = Some(value)
+            case Err(reason): return blocked("web-admission:" + reason)
+    val draw = match web_scene:
+        case Some(value): value.admitted.gpu_draw_ir
+        case nil:
+            match scene_draw_ir(kind):
+                case Ok(value): value
+                case Err(reason): return blocked(reason)
+    if not env_set("SIMPLE_VULKAN_PROVIDER_PATH", provider_path) or
+        not env_set("SIMPLE_VULKAN_PROVIDER_SHA256", provider_sha):
+        return blocked("provider-environment-unavailable")
+    # Case 31 text has no physical gate yet (same fail-closed block as the
+    # engine2d worker above).
+    if kind == SCENE_CORPUS_CASE31:
+        return blocked("corpus-case31-physical-text-gate-absent")
+    val info = gpu_provider_info(GPU_PROVIDER_BACKEND_VULKAN)
+    if not info.loaded or info.provider_path != provider_path or
+        info.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY:
+        return blocked("authenticated-skia-provider-unavailable")
+    val rendered = if kind == SCENE_CORPUS_CASE02:
+        upstream_skia_ganesh_vulkan_render_affine_v3_candidate(draw, 0, 1)
+    else:
+        upstream_skia_ganesh_vulkan_render(draw, 0, 1)
+    val frame = match rendered:
+        case Ok(value): value
+        case Err(reason): return blocked("skia-render:" + reason)
+    val artifact_result = if kind == SCENE_CLIP:
+        upstream_skia_controlled_clip_artifact(frame, scene)
+    elif scene_is_gui(kind):
+        upstream_skia_gui_button_artifact(frame, scene, scene_gui_pressed(kind))
+    elif kind == SCENE_CORPUS_CASE01:
+        match web_scene:
+            case Some(value): upstream_skia_corpus_case01_artifact(
+                frame, scene, value.admitted)
+            case nil: Err("corpus-case01-layout-admission-absent")
+    elif kind == SCENE_CORPUS_CASE06:
+        match web_scene:
+            case Some(value): upstream_skia_corpus_case06_artifact(
+                frame, scene, value.admitted)
+            case nil: Err("corpus-case06-layout-admission-absent")
+    elif kind == SCENE_CORPUS_CASE02:
+        match web_scene:
+            case Some(value): upstream_skia_corpus_case02_artifact(
+                frame, scene, value.admitted)
+            case nil: Err("corpus-case02-layout-admission-absent")
+    elif scene_is_web(kind):
+        match web_scene:
+            case Some(value): upstream_skia_web_opaque_box_artifact(
+                frame, scene, value.admitted)
+            case nil: Err("web-layout-admission-absent")
+    else:
+        upstream_skia_controlled_rectangle_artifact(frame, scene)
+    val artifact = match artifact_result:
+        case Ok(value): value
+        case Err(reason): return blocked("skia-owner:" + reason)
+    match save_candidate(artifact, output_dir, executable_sha,
+        provider_sha, nonce, skia_build.revision,
+        skia_build.receipt_sha256, skia_build.deps_sha256,
+        skia_build.archive_sha256, kind, web_scene):
+        case Ok(path):
+            print "status=candidate backend=upstream-skia-ganesh-vulkan receipt={path}"
+            0
+        case Err(reason): failed(reason)
+
+fn run_fresh_workers(executable: text, provider_path: text,
+    output_dir: text, kind: i64, announce_pass: bool) -> i64:
+    if host_os() != "linux":
+        return blocked("physical-linux-required")
+    if not safe_output_dir(output_dir) or
+        not executable.starts_with("/") or
+        not provider_path.starts_with("/") or
+        not path_components_no_symlink(output_dir) or
+        not path_components_no_symlink(executable) or
+        not path_components_no_symlink(provider_path):
+        return blocked("explicit-absolute-inputs-and-confined-output-required")
+    if not file_is_regular_no_follow(executable) or
+        not file_is_regular_no_follow(provider_path):
+        return blocked("executable-or-provider-missing-or-symlink")
+    val executable_sha = file_hash_sha256(executable)
+    val provider_sha = file_hash_sha256(provider_path)
+    if not lowercase_hex(executable_sha, 64) or
+        not lowercase_hex(provider_sha, 64):
+        return blocked("executable-or-provider-hash-unavailable")
+    if file_hash_sha256("/proc/self/exe") != executable_sha:
+        return blocked("run-executable-must-be-current-native-binary")
+    val skia_build = match provider_build_revision(provider_path, provider_sha, kind):
+        case Err(reason): return blocked(reason)
+        case Ok(value): value
+    match prepared_scene(kind):
+        case Err(reason): return blocked(reason)
+        case Ok(_): ()
+    if scene_is_web(kind):
+        match web_worker_scene(kind):
+            case Err(reason): return blocked("web-admission:" + reason)
+            case Ok(_): ()
+    if file_exists(output_dir) or not mkdir_p(output_dir):
+        return blocked("fresh-output-directory-required")
+    val nonce = sha256_text("{time_now_unix_micros()}:{getpid()}:{executable_sha}:{provider_sha}")
+    if not file_create_exclusive(output_dir + "/run.lock", nonce):
+        return blocked("fresh-run-lease-unavailable")
+    val prior_path = env_get("SIMPLE_VULKAN_PROVIDER_PATH") ?? ""
+    val prior_sha = env_get("SIMPLE_VULKAN_PROVIDER_SHA256") ?? ""
+    if not env_set("SIMPLE_VULKAN_PROVIDER_PATH", "") or
+        not env_set("SIMPLE_VULKAN_PROVIDER_SHA256", ""):
+        env_set("SIMPLE_VULKAN_PROVIDER_PATH", prior_path)
+        env_set("SIMPLE_VULKAN_PROVIDER_SHA256", prior_sha)
+        return blocked("provider-environment-unavailable")
+    val engine_command = if kind == SCENE_CLIP: "worker-engine2d-clip"
+        elif kind == SCENE_GUI_RESTING: "worker-engine2d-gui-resting"
+        elif kind == SCENE_GUI_PRESSED: "worker-engine2d-gui-pressed"
+        elif kind == SCENE_CORPUS_CASE01: "worker-engine2d-corpus-case01"
+        elif kind == SCENE_CORPUS_CASE06: "worker-engine2d-corpus-case06"
+        elif kind == SCENE_CORPUS_CASE02: "worker-engine2d-corpus-case02"
+        elif kind == SCENE_CORPUS_CASE31: "worker-engine2d-corpus-case31"
+        elif scene_is_web(kind): "worker-engine2d-web-box"
+        else: "worker-engine2d"
+    val skia_command = if kind == SCENE_CLIP: "worker-skia-clip"
+        elif kind == SCENE_GUI_RESTING: "worker-skia-gui-resting"
+        elif kind == SCENE_GUI_PRESSED: "worker-skia-gui-pressed"
+        elif kind == SCENE_CORPUS_CASE01: "worker-skia-corpus-case01"
+        elif kind == SCENE_CORPUS_CASE06: "worker-skia-corpus-case06"
+        elif kind == SCENE_CORPUS_CASE02: "worker-skia-corpus-case02"
+        elif kind == SCENE_CORPUS_CASE31: "worker-skia-corpus-case31"
+        elif scene_is_web(kind): "worker-skia-web-box"
+        else: "worker-skia"
+    val (engine_out, engine_err, engine_code) = process_run_bounded(executable,
+        [engine_command, output_dir, executable, nonce], 120000, 65536)
+    val engine_log_ok = file_atomic_write(output_dir + "/engine2d.log",
+        "stdout:\n" + engine_out + "\nstderr:\n" + engine_err)
+    if not env_set("SIMPLE_VULKAN_PROVIDER_PATH", provider_path) or
+        not env_set("SIMPLE_VULKAN_PROVIDER_SHA256", provider_sha):
+        env_set("SIMPLE_VULKAN_PROVIDER_PATH", prior_path)
+        env_set("SIMPLE_VULKAN_PROVIDER_SHA256", prior_sha)
+        return blocked("provider-environment-unavailable")
+    var skia_out = ""
+    var skia_err = ""
+    var skia_code: i64 = -1
+    if engine_code == 0 and engine_log_ok:
+        val result = process_run_bounded(executable,
+            [skia_command, output_dir, executable, provider_path,
+                provider_sha, nonce], 120000, 65536)
+        skia_out = result.0
+        skia_err = result.1
+        skia_code = result.2
+    val skia_log_ok = file_atomic_write(output_dir + "/skia.log",
+        "stdout:\n" + skia_out + "\nstderr:\n" + skia_err)
+    val restored_path = env_set("SIMPLE_VULKAN_PROVIDER_PATH", prior_path)
+    val restored_sha = env_set("SIMPLE_VULKAN_PROVIDER_SHA256", prior_sha)
+    if not restored_path or not restored_sha:
+        return blocked("provider-environment-restore-failed")
+    if engine_code == 1 and engine_out.contains(
+        "status=fail reason=analytic-controlled-oracle-mismatch"):
+        return failed("engine2d-controlled-oracle-pixel-mismatch")
+    if skia_code == 1 and skia_out.contains(
+        "status=fail reason=analytic-controlled-oracle-mismatch"):
+        return failed("skia-controlled-oracle-pixel-mismatch")
+    if engine_code != 0 or skia_code != 0 or
+        not engine_log_ok or not skia_log_ok:
+        return blocked("isolated-worker-failed; inspect retained logs")
+    if file_hash_sha256(executable) != executable_sha or
+        file_hash_sha256(provider_path) != provider_sha or
+        file_hash_sha256(provider_path + ".receipt.json") !=
+            skia_build.receipt_sha256:
+        return blocked("executable-or-provider-changed-during-run")
+    val verified = match verify_candidates(output_dir,
+        executable_sha, provider_sha, kind):
+        case Ok(value): value
+        case Err(reason):
+            if reason == "controlled-rectangle-pixel-mismatch" or
+                reason == "case02-oracle-mismatch":
+                return failed(reason)
+            return blocked(reason)
+    if verified.nonce != nonce:
+        return blocked("fresh-worker-nonce-mismatch")
+    val engine_pixel_sha = file_hash_sha256(
+        output_dir + "/engine2d-vulkan.rgba")
+    val skia_pixel_sha = file_hash_sha256(
+        output_dir + "/upstream-skia-ganesh-vulkan.rgba")
+    val scope = scene_scope(kind)
+    val fixture_id = scene_fixture_id(kind)
+    val fixture_sha = scene_fixture_sha(kind)
+    val pair_exact = if kind == SCENE_CORPUS_CASE02: "not-required" else: "pass"
+    val comparison_record = "schema: simple-2d-physical-comparison/v1\n" +
+        "status: candidate\nscope: {scope}\n" +
+        "fixture_sha256: {fixture_sha}\n" +
+        "reference_sha256: {scene_reference_sha(kind)}\n" +
+        "oracle_rgba_sha256: {scene_oracle_sha(kind)}\n" +
+        "run_nonce: {nonce}\n" +
+        "device_type: {verified.device_type}\n" +
+        "physical_device_uuid: {verified.device_uuid}\n" +
+        "driver_uuid: {verified.driver_uuid}\n" +
+        "pair_exact_rgba: {pair_exact}\nanalytic_oracle: pass\n" +
+        "input_state_sha256: {verified.input_state_sha256}\n" +
+        "web_source_draw_ir_sha256: {verified.web_source_draw_ir_sha256}\n" +
+        "web_gpu_draw_ir_sha256: {verified.web_gpu_draw_ir_sha256}\n" +
+        "web_source_command_indexes: {verified.web_source_command_indexes}\n" +
+        "pixel_length: {scene_pixel_length(kind)}\n" +
+        "engine2d_pixel_sha256: {engine_pixel_sha}\n" +
+        "skia_pixel_sha256: {skia_pixel_sha}\n"
+    val comparison_path = output_dir + "/comparison.sdn"
+    if not file_atomic_write(comparison_path, comparison_record):
+        return blocked("comparison-receipt-write-failed")
+    val comparison_sha = file_hash_sha256(comparison_path)
+    if not lowercase_hex(comparison_sha, 64):
+        return blocked("comparison-receipt-hash-failed")
+    val run_record = "schema: simple-2d-physical-run/v1\n" +
+        "status: pass\nscope: {scope}\n" +
+        "host_os: linux\nrun_nonce: {nonce}\n" +
+        "fixture_id: {fixture_id}\n" +
+        "fixture_sha256: {fixture_sha}\n" +
+        "reference_sha256: {scene_reference_sha(kind)}\n" +
+        "oracle_rgba_sha256: {scene_oracle_sha(kind)}\n" +
+        "input_state_sha256: {verified.input_state_sha256}\n" +
+        "web_source_draw_ir_sha256: {verified.web_source_draw_ir_sha256}\n" +
+        "web_gpu_draw_ir_sha256: {verified.web_gpu_draw_ir_sha256}\n" +
+        "web_source_command_indexes: {verified.web_source_command_indexes}\n" +
+        "executable_path: {executable}\n" +
+        "executable_sha256: {executable_sha}\n" +
+        "engine2d_provider: linked-native-runtime\n" +
+        "engine2d_provider_sha256: {executable_sha}\n" +
+        "skia_provider_path: {provider_path}\n" +
+        "skia_provider_sha256: {provider_sha}\n" +
+        "skia_provider_identity: {UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}\n" +
+        "skia_revision: {skia_build.revision}\n" +
+        "skia_build_receipt_sha256: {skia_build.receipt_sha256}\n" +
+        "skia_deps_sha256: {skia_build.deps_sha256}\n" +
+        "skia_dependency_checkouts_sha256: {skia_build.checkout_sha256}\n" +
+        "skia_archive_sha256: {skia_build.archive_sha256}\n" +
+        "skia_affine_v3_enabled: {skia_build.affine_v3_enabled}\n" +
+        "engine2d_worker_exit: {engine_code}\n" +
+        "skia_worker_exit: {skia_code}\n" +
+        "engine2d_log: {output_dir}/engine2d.log\n" +
+        "skia_log: {output_dir}/skia.log\n" +
+        "comparison_sha256: {comparison_sha}\n"
+    if not file_atomic_write(output_dir + "/run.sdn", run_record):
+        return blocked("run-receipt-write-failed")
+    if announce_pass:
+        print "status=pass scope={scope} fixture_sha256={fixture_sha} executable_sha256={executable_sha} provider_sha256={provider_sha} skia_revision={SKIA_REVISION} output={output_dir}"
+    0
+
+fn verify_imported(output_dir: text, executable_sha: text,
+    provider_sha: text, kind: i64) -> i64:
+    if not safe_output_dir(output_dir) or
+        not path_components_no_symlink(output_dir) or
+        not lowercase_hex(executable_sha, 64) or
+        not lowercase_hex(provider_sha, 64):
+        return blocked("invalid-verification-arguments")
+    match verify_candidates(output_dir, executable_sha, provider_sha, kind):
+        case Err(reason):
+            if reason == "controlled-rectangle-pixel-mismatch" or
+                reason == "case02-oracle-mismatch":
+                return failed(reason)
+            blocked(reason)
+        case Ok(candidate):
+            val scope = scene_scope(kind)
+            print "status=candidate reason=offline-artifacts-cannot-prove-fresh-execution scope={scope} run_nonce={candidate.nonce}"
+            3
+
+fn run_gui_button(executable: text, provider_path: text,
+    output_dir: text) -> i64:
+    if not safe_output_dir(output_dir) or
+        not path_components_no_symlink(output_dir) or
+        file_exists(output_dir):
+        return blocked("fresh-gui-output-directory-required")
+    val resting_dir = output_dir + "-resting"
+    val pressed_dir = output_dir + "-pressed"
+    if file_exists(resting_dir) or file_exists(pressed_dir):
+        return blocked("fresh-gui-state-directories-required")
+    val resting_code = run_fresh_workers(executable, provider_path,
+        resting_dir, SCENE_GUI_RESTING, false)
+    if resting_code != 0:
+        return resting_code
+    val pressed_code = run_fresh_workers(executable, provider_path,
+        pressed_dir, SCENE_GUI_PRESSED, false)
+    if pressed_code != 0:
+        return pressed_code
+    val executable_sha = file_hash_sha256(executable)
+    val provider_sha = file_hash_sha256(provider_path)
+    val resting = match read_candidate(resting_dir, "engine2d-vulkan",
+        executable_sha, executable_sha, SCENE_GUI_RESTING):
+        case Ok(value): value
+        case Err(reason): return blocked("gui-resting-receipt:" + reason)
+    val pressed = match read_candidate(pressed_dir, "engine2d-vulkan",
+        executable_sha, executable_sha, SCENE_GUI_PRESSED):
+        case Ok(value): value
+        case Err(reason): return blocked("gui-pressed-receipt:" + reason)
+    if resting.device_type != pressed.device_type or
+        resting.device_uuid != pressed.device_uuid or
+        resting.driver_uuid != pressed.driver_uuid or
+        resting.input_state_sha256 == pressed.input_state_sha256 or
+        resting.nonce == pressed.nonce:
+        return failed("gui-button-two-state-identity-or-output-mismatch")
+    var changed_pixel = false
+    var index = 0
+    while index < 1024:
+        if resting.pixels[index] != pressed.pixels[index]:
+            changed_pixel = true
+        index = index + 1
+    if not changed_pixel:
+        return failed("gui-button-state-output-unchanged")
+    if not mkdir_p(output_dir):
+        return blocked("gui-combined-output-unavailable")
+    val resting_run_sha = file_hash_sha256(resting_dir + "/run.sdn")
+    val pressed_run_sha = file_hash_sha256(pressed_dir + "/run.sdn")
+    if not lowercase_hex(resting_run_sha, 64) or
+        not lowercase_hex(pressed_run_sha, 64):
+        return blocked("gui-state-run-receipt-hash-unavailable")
+    val record = "schema: simple-2d-physical-gui-button/v1\n" +
+        "status: pass\nscope: gui-button-two-state\n" +
+        "host_os: linux\n" +
+        "physical_device_uuid: {resting.device_uuid}\n" +
+        "driver_uuid: {resting.driver_uuid}\n" +
+        "resting_fixture_sha256: {GUI_BUTTON_RESTING_SHA256}\n" +
+        "pressed_fixture_sha256: {GUI_BUTTON_PRESSED_SHA256}\n" +
+        "resting_input_state_sha256: {resting.input_state_sha256}\n" +
+        "pressed_input_state_sha256: {pressed.input_state_sha256}\n" +
+        "resting_run_sha256: {resting_run_sha}\n" +
+        "pressed_run_sha256: {pressed_run_sha}\n"
+    if not file_atomic_write(output_dir + "/run.sdn", record):
+        return blocked("gui-combined-receipt-write-failed")
+    print "status=pass scope=gui-button-two-state output={output_dir}"
+    0
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() == 0:
+        return blocked("usage: run|run-clip|run-web-box|run-corpus-case01|run-corpus-case06|run-corpus-case31|run-gui-button|run-gui-resting|run-gui-pressed|verify|verify-clip|verify-web-box|verify-corpus-case01|verify-corpus-case06|verify-corpus-case31|verify-gui-resting|verify-gui-pressed")
+    if args[0] == "worker-engine2d" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_RECT)
+    if args[0] == "worker-engine2d-clip" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_CLIP)
+    if args[0] == "worker-engine2d-gui-resting" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_GUI_RESTING)
+    if args[0] == "worker-engine2d-gui-pressed" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_GUI_PRESSED)
+    if args[0] == "worker-engine2d-web-box" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_WEB_BOX)
+    if args[0] == "worker-engine2d-corpus-case01" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_CORPUS_CASE01)
+    if args[0] == "worker-engine2d-corpus-case06" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_CORPUS_CASE06)
+    if args[0] == "worker-engine2d-corpus-case02" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_CORPUS_CASE02)
+    if args[0] == "worker-engine2d-corpus-case31" and args.len() == 4:
+        return worker_engine2d(args[1], args[2], args[3], SCENE_CORPUS_CASE31)
+    if args[0] == "worker-skia" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_RECT)
+    if args[0] == "worker-skia-clip" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_CLIP)
+    if args[0] == "worker-skia-gui-resting" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_GUI_RESTING)
+    if args[0] == "worker-skia-gui-pressed" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_GUI_PRESSED)
+    if args[0] == "worker-skia-web-box" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_WEB_BOX)
+    if args[0] == "worker-skia-corpus-case01" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_CORPUS_CASE01)
+    if args[0] == "worker-skia-corpus-case06" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_CORPUS_CASE06)
+    if args[0] == "worker-skia-corpus-case02" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_CORPUS_CASE02)
+    if args[0] == "worker-skia-corpus-case31" and args.len() == 6:
+        return worker_skia(args[1], args[2], args[3], args[4], args[5], SCENE_CORPUS_CASE31)
+    if args[0] == "run" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_RECT, true)
+    if args[0] == "run-clip" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_CLIP, true)
+    if args[0] == "run-web-box" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_WEB_BOX, true)
+    if args[0] == "run-corpus-case01" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_CORPUS_CASE01, true)
+    if args[0] == "run-corpus-case06" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_CORPUS_CASE06, true)
+    if args[0] == "run-corpus-case02" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_CORPUS_CASE02, true)
+    if args[0] == "run-corpus-case31" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_CORPUS_CASE31, true)
+    if args[0] == "run-gui-resting" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_GUI_RESTING, true)
+    if args[0] == "run-gui-pressed" and args.len() == 4:
+        return run_fresh_workers(args[1], args[2], args[3], SCENE_GUI_PRESSED, true)
+    if args[0] == "run-gui-button" and args.len() == 4:
+        return run_gui_button(args[1], args[2], args[3])
+    if args[0] == "verify" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_RECT)
+    if args[0] == "verify-clip" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_CLIP)
+    if args[0] == "verify-web-box" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_WEB_BOX)
+    if args[0] == "verify-corpus-case01" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_CORPUS_CASE01)
+    if args[0] == "verify-corpus-case06" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_CORPUS_CASE06)
+    if args[0] == "verify-corpus-case02" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_CORPUS_CASE02)
+    if args[0] == "verify-corpus-case31" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_CORPUS_CASE31)
+    if args[0] == "verify-gui-resting" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_GUI_RESTING)
+    if args[0] == "verify-gui-pressed" and args.len() == 4:
+        return verify_imported(args[1], args[2], args[3], SCENE_GUI_PRESSED)
+    blocked("invalid-arguments")

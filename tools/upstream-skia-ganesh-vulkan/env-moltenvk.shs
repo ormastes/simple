@@ -1,0 +1,57 @@
+#!/bin/sh
+# Source-only helper: pin the canonical Homebrew MoltenVK ICD for macOS
+# Vulkan device probes of the optional upstream Skia Ganesh provider.
+# MoltenVK is the only admissible macOS Vulkan backend; device evidence on
+# any other ICD is rejected by the live-evidence gate.
+#
+# Usage:  . "$(dirname "$0")/env-moltenvk.shs"
+# After sourcing, $VK_ICD_FILENAMES is exported for child processes.
+#
+# Digests below are bound to the stage-2 device preflight receipt
+# (build/tmp/macos_vulkan_2d_preflight_2026-09-27/preflight.env,
+# MoltenVK 1.4.1). Re-pin deliberately, never silently.
+
+if [ "${SIMPLE_SKIA_ENV_MOLTENVK_SOURCED:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+SIMPLE_SKIA_MOLTENVK_ICD_PATH=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
+SIMPLE_SKIA_MOLTENVK_ICD_SHA256=b514f51690582fb783383154b7a33c7816cc47e98ee1a1f652dccd3e996f0bf1
+SIMPLE_SKIA_MOLTENVK_LIBRARY_SHA256=e1773b594b468796c6aacde6b8ec6f414315d94885c69122b56f45f3acebff93
+
+if [ ! -f "$SIMPLE_SKIA_MOLTENVK_ICD_PATH" ]; then
+    echo "env-moltenvk: canonical ICD missing: $SIMPLE_SKIA_MOLTENVK_ICD_PATH" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+_icd_actual=$(shasum -a 256 "$SIMPLE_SKIA_MOLTENVK_ICD_PATH" | awk '{print $1}')
+if [ "$_icd_actual" != "$SIMPLE_SKIA_MOLTENVK_ICD_SHA256" ]; then
+    echo "env-moltenvk: ICD digest drift: $_icd_actual (expected $SIMPLE_SKIA_MOLTENVK_ICD_SHA256)" >&2
+    echo "env-moltenvk: re-qualify MoltenVK before updating the pin" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+_library_path=$(plutil -extract ICD.library_path raw -o - \
+    "$SIMPLE_SKIA_MOLTENVK_ICD_PATH" 2>/dev/null) || {
+    echo "env-moltenvk: cannot read ICD.library_path from $SIMPLE_SKIA_MOLTENVK_ICD_PATH" >&2
+    return 1 2>/dev/null || exit 1
+}
+case "$_library_path" in
+    /*) ;;
+    *) _library_path="$(dirname -- "$SIMPLE_SKIA_MOLTENVK_ICD_PATH")/$_library_path" ;;
+esac
+_library_actual=$(shasum -a 256 "$_library_path" | awk '{print $1}')
+if [ "$_library_actual" != "$SIMPLE_SKIA_MOLTENVK_LIBRARY_SHA256" ]; then
+    echo "env-moltenvk: library digest drift: $_library_actual (expected $SIMPLE_SKIA_MOLTENVK_LIBRARY_SHA256)" >&2
+    echo "env-moltenvk: re-qualify MoltenVK before updating the pin" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+export VK_ICD_FILENAMES="$SIMPLE_SKIA_MOLTENVK_ICD_PATH"
+unset VK_DRIVER_FILES VK_ADD_DRIVER_FILES 2>/dev/null || true
+SIMPLE_SKIA_ENV_MOLTENVK_SOURCED=1
+SIMPLE_SKIA_MOLTENVK_LIBRARY_PATH=$_library_path
+export SIMPLE_SKIA_MOLTENVK_LIBRARY_PATH
+
+echo "env-moltenvk: pinned $VK_ICD_FILENAMES (sha256 $_icd_actual)"
+echo "env-moltenvk: library $_library_path (sha256 $_library_actual)"

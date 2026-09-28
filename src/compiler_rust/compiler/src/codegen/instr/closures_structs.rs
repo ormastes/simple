@@ -286,6 +286,21 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // receiver emits a qualified `Type.index_of` which the caller's
             // `!lookup_name.contains('.')` gate excludes.
             | ("index_of", 1)
+            // Text case conversion. Same THEFT class
+            // (doc/08_tracking/bug/seed_bare_method_suffix_binds_text_lower_to_user_method_2026-09-28.md):
+            // a bare `v.lower()` on an untyped text receiver was bound by the
+            // single-candidate name-suffix scan to the only user `*.lower`
+            // linked in — `Avx512InstructionLowerer.lower(inst)`, an ARITY-1
+            // method — and aborted the macOS arm64 Stage 2 hello-world with
+            // "non-SIMD instruction reached AVX-512 instruction owner".
+            // `rt_string_to_lower` / `rt_string_to_upper` return a non-string
+            // receiver unchanged (`rt_string_len` fails closed with -1), so the
+            // route is safe on any value. Census of owned `.spl`: the only
+            // zero-arg `lower()`/`upper()` definitions are the seed std text
+            // extension itself (`lib/std/src/core/string_ops.spl`). Arity 0
+            // only, so a user `lower(x)` still resolves normally; a typed
+            // receiver arrives qualified and never takes this gate.
+            | ("lower" | "upper", 0)
     )
 }
 
@@ -1492,6 +1507,19 @@ mod tests {
             Some(TypeId::I64),
             "to_string"
         ));
+    }
+
+    /// A bare zero-arg `lower()` / `upper()` on an erased receiver is the text
+    /// builtin, never a name-suffix bind to a lone user `*.lower` method
+    /// (`Avx512InstructionLowerer.lower`, macOS arm64 Stage 2, 2026-09-28).
+    /// doc/08_tracking/bug/seed_bare_method_suffix_binds_text_lower_to_user_method_2026-09-28.md
+    #[test]
+    fn bare_text_case_methods_route_to_builtin_not_user_method() {
+        assert!(is_bare_builtin_collection_method("lower", 0));
+        assert!(is_bare_builtin_collection_method("upper", 0));
+        // A user method with the same name but a different arity still resolves.
+        assert!(!is_bare_builtin_collection_method("lower", 1));
+        assert!(!is_bare_builtin_collection_method("upper", 1));
     }
 
     /// The CROSS-MODULE resolution branch of `compile_method_call_static` must

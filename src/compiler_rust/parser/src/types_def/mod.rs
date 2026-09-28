@@ -79,6 +79,7 @@ impl<'a> Parser<'a> {
 
         // Check for empty struct (no body)
         // Empty structs are declared as just "struct Name" without a colon and body
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (fields, methods, invariant, doc_comment) = if self.check(&TokenKind::Newline) || self.is_at_end() {
             // Empty struct - no fields, methods, invariant, or doc comment
             (Vec::new(), Vec::new(), None, None)
@@ -86,6 +87,7 @@ impl<'a> Parser<'a> {
             // Parse fields, optional inline methods, optional invariant, and doc comment
             self.parse_indented_fields_and_methods()?
         };
+        self.collection_owner = previous_collection_owner;
 
         if !explicit_mixins.is_empty() {
             return Ok(Node::Class(ClassDef {
@@ -210,6 +212,7 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause()?;
 
         // Check for empty class (no body)
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
             if self.check(&TokenKind::Newline) || self.is_at_end() {
                 // Empty class - no fields, methods, invariant, etc.
@@ -217,6 +220,7 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_class_body()?
             };
+        self.collection_owner = previous_collection_owner;
 
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
@@ -357,6 +361,22 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
+        let collection_algorithm = if self.check(&TokenKind::At) {
+            let attribute = self.parse_at_as_attribute()?;
+            if attribute.name != "collection_algorithm" {
+                return Err(ParseError::contextual_error(
+                    "field attribute",
+                    "unsupported attribute before field",
+                    attribute.span,
+                ));
+            }
+            let algorithm = self.collection_algorithm_attribute(&[attribute])?;
+            self.skip_newlines();
+            algorithm
+        } else {
+            None
+        };
+        let declaration_start = self.current.span.start;
 
         let visibility = self.parse_optional_visibility()?;
 
@@ -450,7 +470,7 @@ impl<'a> Parser<'a> {
         };
 
         // Bit-width fields may not have default values (ambiguous parse, not useful)
-        let default = if bit_width.is_none() && self.check(&TokenKind::Assign) {
+        let mut default = if bit_width.is_none() && self.check(&TokenKind::Assign) {
             self.advance();
             Some(self.parse_expression()?)
         } else if bit_width.is_some() && self.check(&TokenKind::Assign) {
@@ -464,6 +484,24 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        if let Some(algorithm) = collection_algorithm {
+            let value = default.take().ok_or_else(|| {
+                ParseError::contextual_error(
+                    "collection algorithm",
+                    "@collection_algorithm requires an initialized field",
+                    start_span,
+                )
+            })?;
+            let declaration = Span::new(
+                declaration_start, self.previous.span.end,
+                start_span.line, start_span.column,
+            );
+            let site_id = self.collection_site_id(&name, declaration, true);
+            default = Some(self.collection_attributed_value(
+                value, &algorithm, &site_id, start_span, Some(&ty)
+            )?);
+        }
 
         if self.check(&TokenKind::Newline) {
             self.advance();
@@ -642,7 +680,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || self.check(&TokenKind::At)
+                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me])
@@ -846,7 +884,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || self.check(&TokenKind::At)
+                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me, TokenKind::Static])

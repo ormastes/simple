@@ -69,6 +69,7 @@ use std.platform.{host_os, host_arch}
 use std.io_runtime.{cwd}
 
 use std.io_runtime.{read_file_text}
+use app.io._CliCompile.native_collection_profile.{native_build_compile_with_collection_profile}
 extern fn rt_path_absolute(path: text) -> text
 
 fn _cli_eprint(message: text):
@@ -327,7 +328,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
                 return log_error
             i = i + 2
             continue
-        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or cli_native_build_policy_value_flag(arg):
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level" or arg == "--collection-profile" or arg == "--collection-workload" or arg == "--collection-target" or cli_native_build_policy_value_flag(arg):
             val error = cli_native_build_value_error(args, i, arg, false)
             if error != "":
                 return error
@@ -385,6 +386,15 @@ fn cli_native_build_option_error(args: [text]) -> text:
             if error != "": return error
         elif arg.starts_with("--cache-dir="):
             val error = cli_native_build_inline_value_error(arg, "--cache-dir=", "--cache-dir", false)
+            if error != "": return error
+        elif arg.starts_with("--collection-profile="):
+            val error = cli_native_build_inline_value_error(arg, "--collection-profile=", "--collection-profile", false)
+            if error != "": return error
+        elif arg.starts_with("--collection-workload="):
+            val error = cli_native_build_inline_value_error(arg, "--collection-workload=", "--collection-workload", false)
+            if error != "": return error
+        elif arg.starts_with("--collection-target="):
+            val error = cli_native_build_inline_value_error(arg, "--collection-target=", "--collection-target", false)
             if error != "": return error
         elif arg.starts_with("--target="):
             val error = cli_native_build_inline_value_error(arg, "--target=", "--target", false)
@@ -679,6 +689,9 @@ fn _cli_native_build(
             print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
             print "  --mode <name>        Build mode: dynload (default; warns until automatic aspect-pack packaging is available) or one-binary"
             print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+            print "  --collection-profile <path>  Admitted .sprof collection feedback"
+            print "  --collection-workload <name>  Matching workload label"
+            print "  --collection-target <name>    Matching target profile"
             print "  --release            Release build (standard optimization profile)"
             print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
             cli_print_shared_opt_level_help()
@@ -787,6 +800,10 @@ fn _cli_native_build(
         var native_cpu = ""
         var build_mode = "dynload"
         var cache_dir = "build/native_cache"
+        var collection_profile_path = ""
+        var collection_profile_digest = ""
+        var collection_workload = ""
+        var collection_target = ""
         var native_threads = 0
         var parse_shard: text = ""
         var hir_shard: text = ""
@@ -830,6 +847,30 @@ fn _cli_native_build(
                     source_dirs = source_dirs.push(args[j])
             elif a.starts_with("--source="):
                 source_dirs = source_dirs.push(a.substring(9))
+            elif a == "--collection-profile":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --collection-profile requires an argument")
+                    return 1
+                j = j + 1
+                collection_profile_path = args[j]
+            elif a.starts_with("--collection-profile="):
+                collection_profile_path = a.substring("--collection-profile=".len())
+            elif a == "--collection-workload":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --collection-workload requires an argument")
+                    return 1
+                j = j + 1
+                collection_workload = args[j]
+            elif a.starts_with("--collection-workload="):
+                collection_workload = a.substring("--collection-workload=".len())
+            elif a == "--collection-target":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --collection-target requires an argument")
+                    return 1
+                j = j + 1
+                collection_target = args[j]
+            elif a.starts_with("--collection-target="):
+                collection_target = a.substring("--collection-target=".len())
             elif a == "-o":
                 if j + 1 < args.len():
                     j = j + 1
@@ -1055,6 +1096,27 @@ fn _cli_native_build(
             _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
             return 1
 
+        if collection_profile_path == "":
+            if collection_workload != "" or collection_target != "":
+                _cli_eprint("Error: collection feedback requires --collection-profile, --collection-workload, and --collection-target")
+                return 1
+        else:
+            if collection_workload == "" or collection_target == "":
+                _cli_eprint("Error: collection feedback requires --collection-workload and --collection-target")
+                return 1
+            if not file_exists(collection_profile_path):
+                _cli_eprint("Error: collection profile file not found: {collection_profile_path}")
+                return 1
+            val profile_hash = file_hash_sha256(collection_profile_path)
+            if not digest_is_sha256(profile_hash):
+                _cli_eprint("Error: could not hash collection profile: {collection_profile_path}")
+                return 1
+            collection_profile_digest = profile_hash
+            # Different admitted feedback and target slices cannot reuse native
+            # objects parsed with a prior site's embedded workload constants.
+            val profile_scope = sha256_text("{profile_hash}|{collection_workload}|{collection_target}")
+            cache_dir = cache_dir + "/collection-" + profile_scope
+
         # Contained default: no explicit -o/--output means the binary goes to
         # build/native/<entry-stem>, never a bare filename in whatever
         # directory the process happened to be launched from (repo root for
@@ -1233,7 +1295,9 @@ fn _cli_native_build(
                     return 1
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = compiler_driver_run_compile(driver)
+            val driver_result = native_build_compile_with_collection_profile(
+                driver, entry_point, collection_profile_path,
+                collection_workload, collection_target, collection_profile_digest)
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result
@@ -1280,7 +1344,9 @@ fn _cli_native_build(
                     return 1
             if verbose:
                 _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
-            val driver_result = compiler_driver_run_compile(driver)
+            val driver_result = native_build_compile_with_collection_profile(
+                driver, entry_point, collection_profile_path,
+                collection_workload, collection_target, collection_profile_digest)
             if verbose:
                 _cli_eprint("[native-build] Driver finished")
             driver_result

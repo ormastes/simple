@@ -1,0 +1,57 @@
+"""
+# Mutex protecting a struct value
+
+Regression for the Rust-seed interpreter bridge dropping struct (and
+struct-carrying enum) values stored in `rt_mutex_*`: the protected value was
+marshaled through `runtime_bridge::value_to_runtime`, whose wildcard arm
+turned `Value::Object` into nil, so `mutex_lock` handed back nil and a
+`mutex_with_lock` update closure faulted while the real lock was held
+(PR #1901 hit this in the NVFS identity/lease owners).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock, mutex_lock, mutex_try_lock, mutex_unlock}
+
+struct MutexStructProbe:
+    count: i64
+    name: text
+    tag: text?
+
+fn _probe_bump(p: MutexStructProbe) -> MutexStructProbe:
+    var next = p
+    next.count = p.count + 1
+    next
+
+describe "mutex protecting a struct value":
+    it "lock returns the stored struct with its fields":
+        val m = mutex_new(MutexStructProbe(count: 7, name: "c", tag: nil))
+        val got: MutexStructProbe = mutex_lock(m)
+        expect(got.count).to_equal(7)
+        expect(got.name).to_equal("c")
+        expect(mutex_unlock(m, got)).to_equal(1)
+
+    it "unlock stores a new struct that the next lock reads back":
+        val m = mutex_new(MutexStructProbe(count: 1, name: "a", tag: "t"))
+        val first: MutexStructProbe = mutex_lock(m)
+        expect(mutex_unlock(m, MutexStructProbe(count: 2, name: "b", tag: first.tag))).to_equal(1)
+        val second: MutexStructProbe = mutex_try_lock(m)
+        expect(second.count).to_equal(2)
+        expect(second.name).to_equal("b")
+        expect(second.tag).to_equal("t")
+        expect(mutex_unlock(m, second)).to_equal(1)
+
+    it "with_lock update closure receives and stores the struct":
+        val m = mutex_new(MutexStructProbe(count: 10, name: "w", tag: nil))
+        val out = mutex_with_lock(m, \s: _probe_bump(s))
+        expect(out.count).to_equal(11)
+        val again = mutex_with_lock(m, \s: _probe_bump(s))
+        expect(again.count).to_equal(12)
+        expect(again.name).to_equal("w")
+
+    it "an Option-wrapped struct survives the lock":
+        val initial: MutexStructProbe? = Some(MutexStructProbe(count: 3, name: "o", tag: nil))
+        val m = mutex_new(initial)
+        val got: MutexStructProbe? = mutex_lock(m)
+        expect(got.?).to_equal(true)
+        expect(got.unwrap().count).to_equal(3)
+        expect(mutex_unlock(m, got)).to_equal(1)

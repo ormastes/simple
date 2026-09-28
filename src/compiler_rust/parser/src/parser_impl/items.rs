@@ -397,6 +397,16 @@ impl<'a> Parser<'a> {
             }
         }
 
+        if attributes.iter().any(|attribute| attribute.name == "collection_algorithm")
+            && !matches!(self.current.kind, TokenKind::Val | TokenKind::Var)
+        {
+            return Err(ParseError::contextual_error(
+                "collection algorithm",
+                "@collection_algorithm requires a val or var declaration",
+                self.current.span,
+            ));
+        }
+
         // Now parse the item with collected attributes
         // Could be function, struct, class, etc.
         match &self.current.kind {
@@ -592,10 +602,49 @@ impl<'a> Parser<'a> {
             TokenKind::Extern => self.parse_extern_with_attrs(attributes),
             // Handle attributes before use/export/var/val/trait/mixin/from
             // Attributes like #[cfg(...)] before non-declaration items — skip attrs and parse item
+            TokenKind::Var | TokenKind::Val => {
+                let algorithm = self.collection_algorithm_attribute(&attributes)?;
+                let mut node = self.parse_item()?;
+                if let Some(algorithm) = algorithm {
+                    let Node::Let(ref mut binding) = node else {
+                        return Err(ParseError::contextual_error(
+                            "collection algorithm",
+                            "@collection_algorithm requires a val or var declaration",
+                            self.previous.span,
+                        ));
+                    };
+                    let value = binding.value.take().ok_or_else(|| {
+                        ParseError::contextual_error(
+                            "collection algorithm",
+                            "@collection_algorithm requires an initialized container",
+                            binding.span,
+                        )
+                    })?;
+                    let declared_type = binding.ty.clone().or_else(|| match &binding.pattern {
+                        Pattern::Typed { ty, .. } => Some(ty.clone()),
+                        _ => None,
+                    });
+                    let mut pattern = &binding.pattern;
+                    while let Pattern::Typed { pattern: inner, .. } = pattern {
+                        pattern = inner;
+                    }
+                    let name = match pattern {
+                        Pattern::Identifier(name) | Pattern::MutIdentifier(name) => name,
+                        _ => return Err(ParseError::contextual_error(
+                            "collection algorithm",
+                            "@collection_algorithm requires one named container binding",
+                            binding.span,
+                        )),
+                    };
+                    let site_id = self.collection_site_id(name, binding.span, false);
+                    binding.value = Some(self.collection_attributed_value(
+                        value, &algorithm, &site_id, binding.span, declared_type.as_ref()
+                    )?);
+                }
+                Ok(node)
+            }
             TokenKind::Use
             | TokenKind::Export
-            | TokenKind::Var
-            | TokenKind::Val
             | TokenKind::Trait
             | TokenKind::From
             | TokenKind::Import => self.parse_item(),

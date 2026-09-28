@@ -2,6 +2,16 @@
 
 Status: SESSION CLOSED BY USER (2026-09-28); production qualification remains OPEN.
 
+Continuation note (2026-09-28): the user-provided full Target 5/6 goal is
+active again. A fresh isolated current-source Stage2 bootstrap failed on
+`dynlib_lifetime_owner_v1.spl` HIR state inference after three bounded
+verify/fix cycles; neither source experiment was retained. See
+`doc/08_tracking/bug/target56_stage2_dynlib_lifetime_state_inference_2026-09-28.md`.
+Stage4 and the production size/startup/performance cohorts remain unavailable.
+A bootstrap-mode 36-file mini build now reproduces the same HIR failure in
+seconds; the retained command, logs, and rejected explicit-generic experiment
+are in that blocker report.
+
 The user accepted the matched-startup C reference for the Linux 1.05x size
 limit and asked to consider this isolated effort done after a commit/performance
 review. This closes the requested session and does not convert the diagnostic
@@ -96,6 +106,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   package index. Complete the other semantic sections and
   their artifact receipts before connecting this producer to index publication;
   run its new tamper scenario on a current-source worker.
+  A versioned reverse-reference section now derives actual bytes from the
+  reached graph and is checked against the SMF directory and TLDR receipt;
+  run its canonical-order and stale-edge scenarios on that worker too.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.

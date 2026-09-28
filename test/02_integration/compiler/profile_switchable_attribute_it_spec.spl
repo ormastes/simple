@@ -1,0 +1,117 @@
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetProfile, AdaptiveTextSet}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap
+use app.optimize.sprof_collection_profile.{
+    sprof_serialize_collection_profile, sprof_load_collection_profile_text,
+    sprof_build_collection_set_index, sprof_adapt_text_set_with_prepared_profile
+}
+
+fn make_attributed_text_set() -> AdaptiveTextSet:
+    AdaptiveTextSet.new()
+
+fn make_attributed_text_map() -> AdaptiveTextMap:
+    AdaptiveTextMap.new()
+
+class AttributedHolder:
+    @collection_algorithm("ordered")
+    items: AdaptiveTextSet = AdaptiveTextSet.new()
+
+class AttributedMapHolder:
+    @collection_algorithm("ordered")
+    items: AdaptiveTextMap = AdaptiveTextMap.new()
+
+class FactoryAttributedHolder:
+    @collection_algorithm("ordered")
+    items: AdaptiveTextSet = make_attributed_text_set()
+
+describe "source collection attributes select one runtime container":
+    it "selects storage for a typed local factory result":
+        @collection_algorithm("hash")
+        var chosen: AdaptiveTextMap = make_attributed_text_map()
+        var other = make_attributed_text_map()
+        chosen.put("a", "one")
+        other.put("a", "two")
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(chosen.get("a") ?? "").to_equal("one")
+
+    it "selects storage for each typed factory field default":
+        var first = FactoryAttributedHolder()
+        var second = FactoryAttributedHolder()
+        first.items.insert("z")
+        first.items.insert("a")
+        expect(first.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(first.items.snapshot_values()).to_equal(["a", "z"])
+        expect(second.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(second.items.len()).to_equal(0)
+
+    it "selects ordered storage for one directly constructed text map":
+        @collection_algorithm("ordered")
+        var chosen = AdaptiveTextMap.new()
+        var other = AdaptiveTextMap.new()
+        chosen.put("z", "last")
+        chosen.put("a", "first")
+        other.put("z", "other")
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(chosen.keys()).to_equal(["a", "z"])
+        expect(chosen.get("a") ?? "").to_equal("first")
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "applies an ordered map field default to each new holder":
+        var holder = AttributedMapHolder()
+        var other = AttributedMapHolder()
+        holder.items.put("z", "last")
+        holder.items.put("a", "first")
+        expect(holder.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(holder.items.keys()).to_equal(["a", "z"])
+        expect(other.items.len()).to_equal(0)
+        expect(other.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "applies a field attribute to its default container":
+        var holder = AttributedHolder()
+        var other_holder = AttributedHolder()
+        holder.items.insert("z")
+        holder.items.insert("a")
+        expect(holder.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(holder.items.snapshot_values()).to_equal(["a", "z"])
+        expect(holder.items.observation().site_id).to_contain("/AttributedHolder/items#")
+        expect(other_holder.items.len()).to_equal(0)
+        expect(other_holder.items.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "keeps the attributed set ordered while another set stays linear":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        @collection_algorithm("ordered")
+        var chosen = AdaptiveTextSet.with_site_and_target(policy, "ast://attribute/chosen#stable", "x86_64-v3")
+        var other = AdaptiveTextSet.with_site_and_target(policy, "ast://attribute/other#stable", "x86_64-v3")
+        chosen.insert("z")
+        chosen.insert("a")
+        other.insert("z")
+        other.insert("a")
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(chosen.snapshot_values()).to_equal(["a", "z"])
+        expect(chosen.observation().site_id).to_equal("ast://attribute/chosen#stable")
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(other.snapshot_values()).to_equal(["a", "z"])
+
+    it "lets an explicit linear attribute override a hot workload":
+        val policy = AdaptiveSetProfile(linear_size_limit: 1, lookup_promotion_count: 1, allow_hash: true)
+        @collection_algorithm("linear")
+        var chosen = AdaptiveTextSet.with_profile(policy)
+        chosen.insert("a")
+        chosen.insert("b")
+        expect(chosen.contains("a")).to_be(true)
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(chosen.observation().site_id).to_start_with("ast://")
+
+    it "preserves a source attribute over admitted feedback from another run":
+        val prior = AdaptiveSetWorkloadProfile(site_id: "ast://attribute/forced#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        val body = sprof_serialize_collection_profile("module-hash", "lookup-workload", [], [prior])
+        val loaded = sprof_load_collection_profile_text(body, "module-hash", "lookup-workload")
+        val index = sprof_build_collection_set_index(loaded)
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        @collection_algorithm("linear")
+        var chosen = AdaptiveTextSet.with_site_and_target(policy, "ast://attribute/forced#stable", "x86_64-v3")
+        chosen = sprof_adapt_text_set_with_prepared_profile(chosen, index)
+        chosen.insert("a")
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)

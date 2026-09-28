@@ -19,7 +19,6 @@ use os.services.vfs.nvfs_mount_session_owner_v1.{
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_eprintln(s: text)
-extern fn rt_bytes_alloc(len: i64) -> [u8]
 extern fn rt_text_to_bytes(s: text) -> [u8]
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
@@ -310,8 +309,11 @@ fn nvfs_vfs_read_bytes(conn: NvfsVfsConnection, path: text) -> Result<[u8], FsEr
         _log_error("open failed for '{path}'")
         return Err(open_r.unwrap_err())
     val handle = open_r.unwrap()
-    var buf = rt_bytes_alloc(size)
-    val read_r = driver.read(handle, 0, buf)
+    # Byte-owning positioned read: the driver returns exactly the bytes read
+    # (short at EOF), so no caller buffer is index-assigned.  A runtime
+    # rt_bytes_alloc buffer cannot be index-assigned by the interpreter, and a
+    # fault inside the driver's leased operation would leak the lease.
+    val read_r = driver.pread_bytes_handle(handle, 0, size)
     driver.close(handle)
     val persist_r = _nvfs_vfs_store_driver(conn.conn_id, driver)
     if persist_r.is_err():
@@ -319,16 +321,7 @@ fn nvfs_vfs_read_bytes(conn: NvfsVfsConnection, path: text) -> Result<[u8], FsEr
     if read_r.is_err():
         _log_error("read failed for '{path}'")
         return Err(read_r.unwrap_err())
-    val n = read_r.unwrap()
-    if n == size:
-        return Ok(buf)
-    # Truncate to bytes actually read.
-    var out: [u8] = []
-    var j: i64 = 0
-    while j < n:
-        out.push(buf[j])
-        j = j + 1
-    Ok(out)
+    Ok(read_r.unwrap())
 
 fn nvfs_vfs_read_text(conn: NvfsVfsConnection, path: text) -> Result<text, FsError>:
     """Read a complete file as text through the NVFS connection."""
