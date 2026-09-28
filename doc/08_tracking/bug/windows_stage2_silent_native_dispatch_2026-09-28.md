@@ -1,6 +1,7 @@
 # Windows Stage2 positional native build exits silently after format dispatch
 
-Status: OPEN; focused forensic evidence, no bootstrap admission or release PASS.
+Status: OPEN; diagnostic fallback prepared, underlying dispatch failure unresolved.
+No bootstrap admission or release PASS.
 Date: 2026-09-28. Source revision: `a4aa33c3492ce19e3b6a56766405fa7bc3a1a41b`.
 
 ## Preserved failure
@@ -130,3 +131,29 @@ independently. PR #1991 was narrowed to receiver-copy/rendering source changes,
 regression fixtures, and the preserved forensic reports. This report still
 records the exact old-base rejected candidate; no rerun or admission is
 implied for the rebased PR head.
+
+## Minimal diagnostic patch
+
+Prepared separately on main revision
+`db1df50f402566e60f58cb036ebb23fe02361191` in
+`C:/Users/ormas/dev/win-admission-diagnostic-20260928`.
+
+The existing failed-`CompileResult` branch in `bootstrap_main.spl` now obtains
+the errors array once. If its length is zero, it prints a concrete failure
+message containing source path, backend, and output path. The existing loop
+still prints nonempty diagnostics in their original order and format, and the
+branch still returns 1. Success handling is unchanged. This is a diagnostic
+repair only; a corrupt array whose reported length is nonzero remains outside
+this guard's contract.
+
+No runtime behavior test was executed: no admitted self-hosted runtime receipt
+was available beside the inspected Windows release binary. The rejected
+candidate and Rust seed were not used as test substitutes. No source-string
+test was added as a substitute for behavioral coverage, and no fourth bootstrap
+cycle or additional hello-world replay ran.
+
+Pending behavior validation with an admitted runtime: drive this actual failure
+branch with an empty diagnostic array and verify the fallback and exit 1; drive
+it with two diagnostics and verify their exact order/text, no fallback, and
+exit 1. A normal success must remain unchanged. Until then the patch stays
+draft and makes no production-readiness claim.
