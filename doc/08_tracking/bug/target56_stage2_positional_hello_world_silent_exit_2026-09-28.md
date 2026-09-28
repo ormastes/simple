@@ -149,8 +149,12 @@ constructor. Both are under `build/mini_builds/target56_stage2_owner_probe/`.
 
 ## TODO
 
-First run the updated focused probe that calls `NvfsPosixDriver.new`, and
-require the POSIX constructor body to compile without stub fallback. Then
+The focused probe now calls `NvfsPosixDriver.new_on_owned_device` and includes
+its constructor symbol in a 49-file no-stub native build. Device creation
+returned true; close hit the old runtime capsule's named
+`rt_collection_remove` trap. See
+`target56_stage2_runtime_collection_remove_trap_2026-09-28.md`. Build a fresh
+ABI-matched runtime capsule, require the create/close probe to pass, then
 rerun the Stage2 compiler matrix against a frozen source revision and require
 all five required PASS rows before Stage3. If in-process spec execution cannot
 pass, obtain the owner's actual MC/DC-off waiver record for delegated rows;

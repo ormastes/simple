@@ -11,8 +11,14 @@ MC/DC-off waiver fields. The in-process matrix's five-second RSS observer
 budget held, but its full CLI build failed in three owner update closures and
 one POSIX constructor body. The owners now use direct typed state mutation
 under their original mutexes; a focused 48-file no-stub native build passed.
-The POSIX source fix and full compiler matrix still need verification. See
+The POSIX constructor now compiles in a focused 49-file no-stub native build,
+but its close path hits the old capsule's named `rt_collection_remove` trap.
+The runtime dispatcher and pure-Simple twin have source repairs awaiting a
+fresh capsule and behavioral proof. The full compiler matrix still needs
+verification. See
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
+The runtime trap and next proof are tracked in
+`doc/08_tracking/bug/target56_stage2_runtime_collection_remove_trap_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
