@@ -78,7 +78,7 @@ use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_ha
 use os.kernel.scheduler.scheduler.{Scheduler, scheduler_user_context_for_arch, sched_exec_arch}
 use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.types.task_types.{
-    TaskId, TaskPriority, UserLoadSegment, UserProcessImage
+    TaskId, TaskPriority, TaskState, UserLoadSegment, UserProcessImage
 }
 
 struct UserEntryValidationFixture:
@@ -133,6 +133,25 @@ fn build_spawn_fixture() -> UserEntryValidationFixture:
     )
 
 describe "x86_64 user entry validation":
+    it "quarantines a failed handoff without publishing a guest exit":
+        val fixture = build_spawn_fixture()
+        expect(fixture.pid).to_be_greater_than(0u64)
+        var owner = fixture.scheduler
+        val child = TaskId(id: fixture.pid)
+        expect(owner.quarantine_failed_user_handoff_v2(child)).to_equal(true)
+        val task = owner.get_task(child)
+        expect(task.is_some()).to_equal(true)
+        val retained = task.unwrap()
+        expect(retained.address_space).to_equal(fixture.cr3)
+        expect(retained.id.id).to_equal(fixture.pid)
+        val fenced = match retained.state:
+            case TaskState.PreparingExit: true
+            case _: false
+        expect(fenced).to_equal(true)
+        # Repeated fencing is idempotent, and a foreign task is rejected.
+        expect(owner.quarantine_failed_user_handoff_v2(child)).to_equal(true)
+        expect(owner.quarantine_failed_user_handoff_v2(TaskId(id: 0u64))).to_equal(false)
+
     # @manual scenario evidence
     it "rejects a missing user handoff task without entering ring-3":
         # @req REQ-SSPEC-OS
