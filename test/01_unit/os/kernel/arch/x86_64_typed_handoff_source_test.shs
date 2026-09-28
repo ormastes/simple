@@ -1,44 +1,74 @@
 #!/bin/sh
 set -eu
 root=$(git rev-parse --show-toplevel)
-python3 - "$root" <<'PY'
-import pathlib
-import sys
-root = pathlib.Path(sys.argv[1])
-bridge = (root / 'src/os/kernel/arch/x86_64/user_entry.spl').read_text()
-loader = (root / 'src/os/kernel/loader/x86_64_fs_exec_spawn.spl').read_text()
-lifecycle = (root / 'src/os/kernel/scheduler/_Scheduler/scheduler_lifecycle.spl').read_text()
-def check(bridge, loader, lifecycle):
-    assert 'rt_x86_exec_token_take_result_v2(validation.pid, validation.generation, validation.cr3, output as i64)' in bridge
-    assert 'rt_ptr_read_i64' not in bridge
-    assert 'rt_alloc(' not in bridge and 'rt_free(' not in bridge
-    assert 'rc == -4096' not in bridge
-    assert bridge.index('val output =') < bridge.index('if rt_x86_exec_token_install(')
-    failed_take = bridge.split('if taken != 1:', 1)[1].split('    val bits =', 1)[0]
-    assert 'rt_x86_exec_token_result_slot_release_v2(output)' in failed_take
-    assert 'rt_x86_exec_token_cancel(' in failed_take
-    assert 'return UserHandoffResultV2.Failed(' in failed_take
-    assert bridge.index('if taken != 1:') < bridge.index('rt_volatile_read_u64(output)')
-    failed_launch = loader.split('case UserHandoffResultV2.Failed(error):', 1)[1].split('    owner.exit_task_by_id', 1)[0]
-    assert 'owner.quarantine_failed_user_handoff_v2(child)' in failed_launch
-    assert 'return X86AuthenticatedRunResultV2(' in failed_launch
-    assert 'scheduler: owner' in failed_launch
-    assert 'exit_task_by_id(' not in failed_launch
-    assert 'wait_for_collect(' not in failed_launch
-    quarantine = lifecycle.split('pub me quarantine_failed_user_handoff_v2(', 1)[1].split('    me exit_task_by_id(', 1)[0]
-    assert 'task.state = TaskState.PreparingExit' in quarantine
-    assert 'self._remove_ready(id)' in quarantine
-    assert 'scheduler_execution_observe_exit' not in quarantine
-    assert 'wait_for_collect' not in quarantine
-check(bridge, loader, lifecycle)
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-typed-handoff.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+bridge="$root/src/os/kernel/arch/x86_64/user_entry.spl"
+loader="$root/src/os/kernel/loader/x86_64_fs_exec_spawn.spl"
+lifecycle="$root/src/os/kernel/scheduler/_Scheduler/scheduler_lifecycle.spl"
+
+has() { grep -qF -- "$2" "$1"; }
+lacks() { ! grep -qF -- "$2" "$1"; }
+
+# First line number containing a fixed marker, or empty when absent.
+line_of() { grep -nF -- "$2" "$1" | head -n 1 | cut -d: -f1; }
+
+before() {
+    first_line=$(line_of "$1" "$2"); second_line=$(line_of "$1" "$3")
+    [ -n "$first_line" ] && [ -n "$second_line" ] && [ "$first_line" -lt "$second_line" ]
+}
+
+# Write the lines strictly after the first line containing $2 up to (excluding)
+# the next line containing $3 into $4. Markers are fixed strings; an absent
+# start marker yields an empty region, which every containment check rejects.
+region() {
+    awk -v start="$2" -v stop="$3" '
+        on && index($0, stop) { exit }
+        on { print }
+        !on && index($0, start) { on = 1 }
+    ' "$1" > "$4"
+}
+
+check() {
+    src_bridge=$1; src_loader=$2; src_lifecycle=$3
+    has "$src_bridge" 'rt_x86_exec_token_take_result_v2(validation.pid, validation.generation, validation.cr3, output as i64)' || return 1
+    lacks "$src_bridge" 'rt_ptr_read_i64' || return 1
+    lacks "$src_bridge" 'rt_alloc(' || return 1
+    lacks "$src_bridge" 'rt_free(' || return 1
+    lacks "$src_bridge" 'rc == -4096' || return 1
+    before "$src_bridge" 'val output =' 'if rt_x86_exec_token_install(' || return 1
+    region "$src_bridge" 'if taken != 1:' '    val bits =' "$work/failed_take"
+    has "$work/failed_take" 'rt_x86_exec_token_result_slot_release_v2(output)' || return 1
+    has "$work/failed_take" 'rt_x86_exec_token_cancel(' || return 1
+    has "$work/failed_take" 'return UserHandoffResultV2.Failed(' || return 1
+    before "$src_bridge" 'if taken != 1:' 'rt_volatile_read_u64(output)' || return 1
+    region "$src_loader" 'case UserHandoffResultV2.Failed(error):' '    owner.exit_task_by_id' "$work/failed_launch"
+    has "$work/failed_launch" 'owner.quarantine_failed_user_handoff_v2(child)' || return 1
+    has "$work/failed_launch" 'return X86AuthenticatedRunResultV2(' || return 1
+    has "$work/failed_launch" 'scheduler: owner' || return 1
+    lacks "$work/failed_launch" 'exit_task_by_id(' || return 1
+    lacks "$work/failed_launch" 'wait_for_collect(' || return 1
+    region "$src_lifecycle" 'pub me quarantine_failed_user_handoff_v2(' '    me exit_task_by_id(' "$work/quarantine"
+    has "$work/quarantine" 'task.state = TaskState.PreparingExit' || return 1
+    has "$work/quarantine" 'self._remove_ready(id)' || return 1
+    lacks "$work/quarantine" 'scheduler_execution_observe_exit' || return 1
+    lacks "$work/quarantine" 'wait_for_collect' || return 1
+}
+
+if ! check "$bridge" "$loader" "$lifecycle"; then
+    echo 'FAIL typed x86 handoff source wiring' >&2
+    exit 1
+fi
+
 # Prove the source guard rejects the exact regression it is meant to detect.
-sabotaged = loader.replace('val quarantined = owner.quarantine_failed_user_handoff_v2(child)',
-                          'owner.exit_task_by_id(child, -22)\n            val quarantined = owner.quarantine_failed_user_handoff_v2(child)', 1)
-try:
-    check(bridge, sabotaged, lifecycle)
-except AssertionError:
-    pass
-else:
-    raise AssertionError('failed-handoff exit sabotage was not detected')
-print('PASS typed x86 handoff source wiring and sabotage (not Simple execution)')
-PY
+marker='val quarantined = owner.quarantine_failed_user_handoff_v2(child)'
+grep -qF -- "$marker" "$loader"
+awk -v m="$marker" '
+    !done && index($0, m) { print "            owner.exit_task_by_id(child, -22)"; done = 1 }
+    { print }
+' "$loader" > "$work/sabotaged_loader.spl"
+if check "$bridge" "$work/sabotaged_loader.spl" "$lifecycle"; then
+    echo 'FAIL failed-handoff exit sabotage was not detected' >&2
+    exit 1
+fi
+echo 'PASS typed x86 handoff source wiring and sabotage (not Simple execution)'
