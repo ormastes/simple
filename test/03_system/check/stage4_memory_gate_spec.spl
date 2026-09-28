@@ -16,9 +16,9 @@
 ## Overview
 
 Operators attach the out-of-process `memstat` sampler (src/app/memstat) to a
-running PID to record an OS-truth memory profile: /proc/<pid>/smaps_rollup
-(Rss, Pss, Pss_Anon, Private_Dirty, Swap) plus /proc/<pid>/stat fault
-counters, one CSV row per interval. `scripts/check/check-stage4-memory-gate.shs`
+running PID to record an OS-truth memory profile. Linux uses
+/proc/<pid>/smaps_rollup and stat; macOS uses one `ps` RSS query per interval
+and reports unavailable Linux-only columns as -1. `scripts/check/check-stage4-memory-gate.shs`
 wraps the same sampler around a fixed workload and gates on peak RSS. This
 spec proves the sampler contract on a short-lived target: the CSV exists,
 carries the fixed header plus at least one data row, the RSS column parses as
@@ -38,7 +38,7 @@ a positive integer, and a missing-argument invocation fails with usage help.
 """
 
 use std.spec.*
-use std.io_runtime.{file_read, file_exists, process_run, dir_create_all}
+use std.io_runtime.{file_read, file_exists, process_run, dir_create_all, host_os}
 
 val ARTIFACT_DIR = "build/test-artifacts/stage4_memory_gate"
 val CSV_PATH = "build/test-artifacts/stage4_memory_gate/memstat.csv"
@@ -109,6 +109,10 @@ describe "Stage-4 memory gate sampler":
         assert_equal(cols.len(), 8)
         val rss_kb = parse_dec(cols[1])
         expect(rss_kb).to_be_greater_than(0)
+        if host_os() == "macos":
+            step("Confirm Linux-only metrics are marked unavailable on macOS")
+            expect(cols[2]).to_equal("-1")
+            expect(cols[7]).to_equal("-1")
 
     it "rejects an invocation without arguments and prints usage help":
         # @req REQ-SSPEC-SYSTEM
