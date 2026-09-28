@@ -3396,26 +3396,20 @@ mod linker_tests {
 
     #[test]
     fn hosted_linux_cross_compilers_select_gnu_toolchains() {
-        assert_eq!(
-            hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::Linux), false),
-            Some("aarch64-linux-gnu-gcc")
-        );
-        assert_eq!(
-            hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::Linux), true),
-            Some("aarch64-linux-gnu-g++")
-        );
-        assert_eq!(
-            hosted_linux_cross_compiler(Target::new(TargetArch::Riscv64, TargetOS::Linux), false),
-            Some("riscv64-linux-gnu-gcc")
-        );
-        assert_eq!(
-            hosted_linux_cross_compiler(Target::new(TargetArch::Riscv64, TargetOS::Linux), true),
-            Some("riscv64-linux-gnu-g++")
-        );
-        assert_eq!(
-            hosted_linux_cross_compiler(Target::new(TargetArch::Arm, TargetOS::Linux), false),
-            Some("arm-linux-gnueabihf-gcc")
-        );
+        // A target equal to the host is not a cross target and must yield
+        // None (see `..._leave_host_and_freestanding_alone`); the expected
+        // GNU toolchain applies only when the test host differs.
+        let expect = |arch: TargetArch, cxx: bool, cross: &'static str| {
+            let target = Target::new(arch, TargetOS::Linux);
+            let want = if target.is_host() { None } else { Some(cross) };
+            assert_eq!(hosted_linux_cross_compiler(target, cxx), want, "{arch:?} cxx={cxx}");
+        };
+        expect(TargetArch::Aarch64, false, "aarch64-linux-gnu-gcc");
+        expect(TargetArch::Aarch64, true, "aarch64-linux-gnu-g++");
+        expect(TargetArch::Riscv64, false, "riscv64-linux-gnu-gcc");
+        expect(TargetArch::Riscv64, true, "riscv64-linux-gnu-g++");
+        expect(TargetArch::Arm, false, "arm-linux-gnueabihf-gcc");
+        expect(TargetArch::X86, false, "i686-linux-gnu-gcc");
     }
 
     #[test]

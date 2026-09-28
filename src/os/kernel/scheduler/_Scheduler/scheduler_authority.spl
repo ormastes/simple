@@ -1,0 +1,86 @@
+"""Scheduler mutations commit the authority runtime's returned task values."""
+
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler_types.{Scheduler, TaskSecurityBinding}
+use os.kernel.scheduler.authority_runtime.{
+    sched_bind_managed_child_security, sched_bind_managed_child_syscall_filter,
+    sched_bind_managed_child_resource_limits, sched_bind_managed_child_cpu_weight,
+    sched_syscall_allowed, sched_grant_root_mint_authority, sched_set_reaper_task,
+    sched_has_root_mint_authority, sched_bind_isolation_domain,
+    sched_bind_filesystem_view, sched_revoke_cspace_lineage,
+    sched_terminate_direct_child_job, sched_direct_child_count,
+    sched_resource_descendant_count, sched_resource_memory_admits
+}
+use os.kernel.scheduler._Scheduler.scheduler_priority_exec.*
+use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_exit_v1}
+
+impl Scheduler:
+    me bind_managed_child_security(id: TaskId, binding: TaskSecurityBinding) -> bool:
+        val (tasks, bound) = sched_bind_managed_child_security(self.tasks, id, binding)
+        self.tasks = tasks
+        bound
+
+    me bind_managed_child_syscall_filter(id: TaskId, allowed: [u64]) -> bool:
+        val (tasks, bound) = sched_bind_managed_child_syscall_filter(self.tasks, id, allowed)
+        self.tasks = tasks
+        bound
+
+    me bind_managed_child_resource_limits(id: TaskId, processes: u64, memory_pages: u64) -> bool:
+        val (tasks, bound) = sched_bind_managed_child_resource_limits(
+            self.tasks, id, processes, memory_pages)
+        self.tasks = tasks
+        bound
+
+    me bind_managed_child_cpu_weight(id: TaskId, weight: u64) -> bool:
+        val (tasks, bound) = sched_bind_managed_child_cpu_weight(self.tasks, id, weight)
+        self.tasks = tasks
+        bound
+
+    fn syscall_allowed(id: TaskId, syscall_number: u64) -> bool:
+        sched_syscall_allowed(self.tasks, id, syscall_number)
+
+    me grant_root_mint_authority(id: TaskId) -> bool:
+        val (tasks, granted) = sched_grant_root_mint_authority(self.tasks, id)
+        self.tasks = tasks
+        granted
+
+    me set_reaper_task(id: TaskId) -> bool:
+        val (tasks, granted) = sched_set_reaper_task(self.tasks, id)
+        self.tasks = tasks
+        granted
+
+    fn has_root_mint_authority(id: TaskId) -> bool:
+        sched_has_root_mint_authority(self.tasks, id)
+
+    me bind_isolation_domain(id: TaskId, domain_id: u64) -> bool:
+        val (tasks, bound) = sched_bind_isolation_domain(self.tasks, id, domain_id)
+        self.tasks = tasks
+        bound
+
+    me bind_filesystem_view(id: TaskId, root: text) -> bool:
+        val (tasks, bound) = sched_bind_filesystem_view(self.tasks, id, root)
+        self.tasks = tasks
+        bound
+
+    me revoke_cspace_lineage(root_token_id: u64) -> i64:
+        val (tasks, removed) = sched_revoke_cspace_lineage(self.tasks, root_token_id)
+        self.tasks = tasks
+        removed
+
+    me terminate_direct_child_job(caller: TaskId, target: TaskId, exit_code: i32) -> [TaskId]:
+        val (tasks, members) = sched_terminate_direct_child_job(self.tasks, caller, target, exit_code)
+        self.tasks = tasks
+        for member in members:
+            scheduler_execution_observe_exit_v1(member.id, exit_code)
+            self._remove_ready(member)
+            self._wake_exit_waiters(member)
+        members
+
+    fn direct_child_count(parent: TaskId) -> u64:
+        sched_direct_child_count(self.tasks, parent)
+
+    fn resource_descendant_count(parent: TaskId) -> u64:
+        sched_resource_descendant_count(self.tasks, parent)
+
+    fn resource_memory_admits(owner: TaskId, pages: u64) -> bool:
+        sched_resource_memory_admits(self.tasks, owner, pages)

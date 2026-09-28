@@ -180,12 +180,17 @@ pub(crate) fn missing_llvm_tool_error(tool: &str) -> String {
     )
 }
 
+/// File stem of a tool path, splitting on both `/` and `\\` so a Windows
+/// path is recognised on any host (`Path` only splits on the host separator).
+fn tool_file_stem(tool: &str) -> &str {
+    let base = tool.rsplit(['/', '\\']).next().unwrap_or(tool);
+    Path::new(base).file_stem().and_then(|stem| stem.to_str()).unwrap_or(base)
+}
+
 /// True when `tool` names an LLVM archiver (`llvm-ar[.exe]` / `llvm-lib[.exe]`).
 fn is_llvm_archive_tool(tool: &str) -> bool {
-    Path::new(tool)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("llvm-ar") || stem.eq_ignore_ascii_case("llvm-lib"))
+    let stem = tool_file_stem(tool);
+    stem.eq_ignore_ascii_case("llvm-ar") || stem.eq_ignore_ascii_case("llvm-lib")
 }
 
 /// Find the LLVM archive tool. `cc_detect` still probes GNU `ar` / MSVC `lib`

@@ -46,10 +46,10 @@ use os.kernel.memory.user_address_space.{
     create_user_address_space, destroy_user_address_space
 }
 use os.kernel.scheduler.scheduler_types.{
-    Scheduler, TaskControlBlock, TIME_SLICE_TICKS,
+    Scheduler, TaskControlBlock, TIME_SLICE_TICKS, default_task_security,
     SchedulerExecutableAdoptionOwnerStateV1,
     _address_space_can_map, _map_user_process_image,
-    _initial_user_task_context, scheduler_next_task_id_take
+    _initial_user_task_context, scheduler_next_task_lifecycle_identity_take_v1
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
 use os.kernel.scheduler.process_execution_observation.{
@@ -263,7 +263,16 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
 
-        val id = TaskId(id: scheduler_next_task_id_take())
+        val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+        if maybe_identity == nil:
+            destroy_user_address_space(space)
+            self._record_authenticated_executable_adoption_v1(
+                SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
+            return _scheduler_adoption_fail_and_close(
+                table, authorities, token, consumer,
+                ExecutableLoadConsumerErrorV1.ConsumerExhausted)
+        val identity = maybe_identity.unwrap()
+        val id = TaskId(id: identity.task_id)
         # The launch owner records the exact admitted command before
         # publication; terminal evidence later compares against this copy.
         val observed = if owned_launch.?:
@@ -281,10 +290,13 @@ impl Scheduler:
         val user_ctx = _initial_user_task_context(entry_point, user_sp)
         val tcb = TaskControlBlock(
             id: id, name: "authenticated-user-{id.id}",
+            lifecycle_generation: identity.lifecycle_generation,
             state: TaskState.Ready, priority: priority, is_user: true,
             entry_point: entry_point, context: user_ctx, user_context: Some(user_ctx),
             address_space: space.phys_root, kernel_stack: 0u64,
-            user_stack: stack_top, capabilities: caps, parent: Some(self.current),
+            user_stack: stack_top, capabilities: caps,
+            security: default_task_security(id),
+            parent: Some(self.current),
             schedule: default_task_schedule(priority),
             isolation: default_task_isolation(space.id),
             assigned_cpu: 0u32, exit_code: 0,
