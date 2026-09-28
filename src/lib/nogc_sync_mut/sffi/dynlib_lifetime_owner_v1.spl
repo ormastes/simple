@@ -30,19 +30,10 @@ fn _dynlib_lifetime_initial_v1() -> _DynlibLifetimeStateV1:
 
 # Exclusion gate only; the state stays Simple-side (same fix as
 # nvfs_device_identity_owner_v1): a struct protected value comes back nil
-# through the interpreter's rt_mutex value bridge, the update closure faults
-# with the real lock held, and every later owner call blocks forever.
+# through the interpreter's rt_mutex value bridge, which can fault with the
+# real lock held and block every later owner call.
 var _dynlib_lifetime_gate_v1: Mutex = mutex_new(0)
 var _dynlib_lifetime_state_v1: _DynlibLifetimeStateV1 = _dynlib_lifetime_initial_v1()
-
-fn _dynlib_lifetime_update_v1(
-    f: fn(_DynlibLifetimeStateV1) -> _DynlibLifetimeStateV1
-) -> _DynlibLifetimeStateV1:
-    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
-    val next = f(_dynlib_lifetime_state_v1)
-    _dynlib_lifetime_state_v1 = next
-    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
-    next
 
 fn _dynlib_lifetime_index_v1(state: _DynlibLifetimeStateV1, identity: u64) -> i64:
     var first = 0
@@ -58,88 +49,93 @@ fn _dynlib_lifetime_index_v1(state: _DynlibLifetimeStateV1, identity: u64) -> i6
 # Zero means no ownership was accepted. The caller must close the raw handle.
 pub(package) fn dynlib_lifetime_register_v1(handle: i64) -> u64:
     if handle <= 0: return 0u64
-    val updated = _dynlib_lifetime_update_v1(\state:
-        var next = state
-        next.result_identity = 0u64
-        if state.next_identity != 0u64 and
-           state.entries.len() < _DYNLIB_LIFETIME_CAPACITY_V1:
-            val identity = state.next_identity
-            next.next_identity = if identity == _DYNLIB_LIFETIME_MAX_ID_V1:
-                0u64
-            else:
-                identity + 1u64
-            next.entries.push(_DynlibLifetimeEntryV1(
-                identity: identity, handle: handle, active_uses: 0,
-                retiring: false))
-            next.result_identity = identity
-        next)
-    updated.result_identity
+    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
+    state.result_identity = 0u64
+    if state.next_identity != 0u64 and
+       state.entries.len() < _DYNLIB_LIFETIME_CAPACITY_V1:
+        val identity = state.next_identity
+        state.next_identity = if identity == _DYNLIB_LIFETIME_MAX_ID_V1:
+            0u64
+        else:
+            identity + 1u64
+        state.entries.push(_DynlibLifetimeEntryV1(
+            identity: identity, handle: handle, active_uses: 0,
+            retiring: false))
+        state.result_identity = identity
+    _dynlib_lifetime_state_v1 = state
+    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
+    state.result_identity
 
 # Returns the native handle only after reserving one use. Zero refuses stale
 # identities and prevents callers from resolving or invoking an unloaded map.
 pub(package) fn dynlib_lifetime_begin_v1(identity: u64) -> i64:
-    val updated = _dynlib_lifetime_update_v1(\state:
-        var next = state
-        next.result_handle = 0
-        val index = _dynlib_lifetime_index_v1(state, identity)
-        if index >= 0:
-            var entry = state.entries[index]
-            if not entry.retiring and entry.active_uses < 9223372036854775807:
-                entry.active_uses = entry.active_uses + 1
-                next.entries[index] = entry
-                next.result_handle = entry.handle
-        next)
-    updated.result_handle
+    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
+    state.result_handle = 0
+    val index = _dynlib_lifetime_index_v1(state, identity)
+    if index >= 0:
+        var entry = state.entries[index]
+        if not entry.retiring and entry.active_uses < 9223372036854775807:
+            entry.active_uses = entry.active_uses + 1
+            state.entries[index] = entry
+            state.result_handle = entry.handle
+    _dynlib_lifetime_state_v1 = state
+    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
+    state.result_handle
 
 pub(package) fn dynlib_lifetime_end_v1(identity: u64):
-    val updated = _dynlib_lifetime_update_v1(\state:
-        var next = state
-        next.result_handle = 0
-        val index = _dynlib_lifetime_index_v1(state, identity)
-        if index >= 0:
-            var entry = state.entries[index]
-            if entry.active_uses > 0:
-                entry.active_uses = entry.active_uses - 1
-                if entry.retiring and entry.active_uses == 0:
-                    next.result_handle = entry.handle
-                    next.entries.remove(index)
-                else:
-                    next.entries[index] = entry
-        next)
-    if updated.result_handle > 0:
+    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
+    state.result_handle = 0
+    val index = _dynlib_lifetime_index_v1(state, identity)
+    if index >= 0:
+        var entry = state.entries[index]
+        if entry.active_uses > 0:
+            entry.active_uses = entry.active_uses - 1
+            if entry.retiring and entry.active_uses == 0:
+                state.result_handle = entry.handle
+                state.entries.remove(index)
+            else:
+                state.entries[index] = entry
+    _dynlib_lifetime_state_v1 = state
+    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
+    if state.result_handle > 0:
         unsafe(capabilities: [ffi]):
-            spl_dlclose(updated.result_handle)
+            spl_dlclose(state.result_handle)
 
 # True only for the first live-to-retiring transition. A later close through
 # another DynLib copy cannot close the same native handle twice.
 pub(package) fn dynlib_lifetime_retire_v1(identity: u64) -> bool:
-    val updated = _dynlib_lifetime_update_v1(\state:
-        var next = state
-        next.result_handle = 0
-        next.result_accepted = false
-        val index = _dynlib_lifetime_index_v1(state, identity)
-        if index >= 0:
-            var entry = state.entries[index]
-            if not entry.retiring:
-                entry.retiring = true
-                next.result_accepted = true
-                if entry.active_uses == 0:
-                    next.result_handle = entry.handle
-                    next.entries.remove(index)
-                else:
-                    next.entries[index] = entry
-        next)
-    if updated.result_handle > 0:
+    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
+    state.result_handle = 0
+    state.result_accepted = false
+    val index = _dynlib_lifetime_index_v1(state, identity)
+    if index >= 0:
+        var entry = state.entries[index]
+        if not entry.retiring:
+            entry.retiring = true
+            state.result_accepted = true
+            if entry.active_uses == 0:
+                state.result_handle = entry.handle
+                state.entries.remove(index)
+            else:
+                state.entries[index] = entry
+    _dynlib_lifetime_state_v1 = state
+    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
+    if state.result_handle > 0:
         unsafe(capabilities: [ffi]):
-            spl_dlclose(updated.result_handle)
-    updated.result_accepted
+            spl_dlclose(state.result_handle)
+    state.result_accepted
 
 pub(package) fn dynlib_lifetime_live_v1(identity: u64) -> bool:
-    val updated = _dynlib_lifetime_update_v1(\state:
-        var next = state
-        next.result_accepted = false
-        val index = _dynlib_lifetime_index_v1(state, identity)
-        if index >= 0 and not state.entries[index].retiring:
-            next.result_accepted = true
-        next)
-    updated.result_accepted
+    val _ = mutex_lock(_dynlib_lifetime_gate_v1)
+    var state: _DynlibLifetimeStateV1 = _dynlib_lifetime_state_v1
+    state.result_accepted = false
+    val index = _dynlib_lifetime_index_v1(state, identity)
+    if index >= 0 and not state.entries[index].retiring:
+        state.result_accepted = true
+    _dynlib_lifetime_state_v1 = state
+    val _ = mutex_unlock(_dynlib_lifetime_gate_v1, 0)
+    state.result_accepted

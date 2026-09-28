@@ -1,7 +1,8 @@
 # Target 5/6 current-source Stage2 cannot infer dynlib lifetime state
 
-Status: OPEN. This blocks an admitted Stage4 compiler for the Target 5/6
-size, startup, and persistent-index qualification lanes.
+Status: DYN-LIFETIME HIR ERROR FIXED; full Stage2 native build passes, but
+admission is blocked by a separate hello-world positional smoke failure.
+Target 5/6 size, startup, and persistent-index qualification remain pending.
 
 ## Reproduction
 
@@ -66,13 +67,40 @@ An independent Windows MSVC full bootstrap at `e465b19cc00a706c487d788e1830cfa9c
 
 A one-file bootstrap-mode probe retained under `build/mini_builds/win_dynlib_probe/` reproduced the owner rejection in under a second. Truncating the probe before `dynlib_lifetime_register_v1` linked successfully; including registration reproduced `i64.entries`. Expanding its compact return, expanding the lookup's compact branches, and updating typed state directly under the mutex did not remove the rejection. All three source experiments were reverted. This narrows the first failing function but does not identify the specific field expression or establish a safe fix.
 
+## Isolated diagnosis and source repair
+
+A diagnostic seed instrumented at field access showed that
+`_dynlib_lifetime_index_v1` receives the declared
+`_DynlibLifetimeStateV1`, but the first `state.entries` in
+`dynlib_lifetime_register_v1` sees the `\state` update-closure parameter as
+`i64`. The same source also contains four more update closures. The temporary
+Rust instrumentation was reverted. The lifetime owner now updates its typed
+Simple-side state directly while holding the existing mutex in each operation;
+`dlclose` remains after unlock in the end and retire paths. This removes the
+closure inference failure without changing the admission/retirement sequence.
+
+The 36-file bootstrap-mode native repro compiled with zero failures and linked
+a 74 KB probe (`build/mini_builds/target56_dynlib_probe/direct_lock.log`). The
+current-source interpreter spec executed 14 cases: both cached-slot/aliased-
+handle and borrowed-mapping lifetime cases passed. Its final unrelated
+pre-publication refusal case failed because the fixture's
+`spl_plugin_entry_v1` symbol was unresolved, so the full spec is not green.
+The first full Stage2 rerun stopped in its RSS watchdog: process observation
+exceeded the default 1,000 ms budget, despite a 1.33 GiB observed peak below
+the unchanged 5.59 GiB cap. A second run set the watchdog's supported
+`SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000`. It compiled 595 files,
+reused 426, failed zero, and linked the 47,135 KB Stage2 binary in 377.4 s.
+The subsequent frontend admission smoke failed: the Stage2 compiler's
+positional hello-world native build exited 1 after AOP weaving with no
+diagnostic. The candidate remains at
+`build/bootstrap-target56/stage2/aarch64-unknown-linux-gnu/simple.rejected`;
+see `build/bootstrap-target56/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional`.
+No Stage2 admission, Stage4 CLI, or Target 5/6 performance proof exists.
+
 ## Next action
 
-On a fresh scoped session, use the fast bootstrap-mode reproduction to isolate
-the first rejected `entries` expression with the same seed and current source,
-preserving the phase cache. Add a focused
-regression that proves the real `Mutex` state remains
-`_DynlibLifetimeStateV1` through each lock callback, then repair the
-compiler or owner without changing close/borrow behavior. Run the existing
-cached-slot/aliased-handle scenario and resume Stage2 admission only after
-the focused case passes. Keep the three-cycle cap for that new session.
+Reproduce the rejected Stage2 binary's silent positional hello-world failure
+as a focused case, identify its first failing phase after AOP weaving, and
+repair that path. Then rerun Stage2 admission and resume Stage3/4 from admitted
+artifacts. Run the Target 5/6 size, startup, compile-time, and RSS cohorts
+before marking either target complete.
