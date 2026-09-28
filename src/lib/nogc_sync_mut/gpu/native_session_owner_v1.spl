@@ -6,7 +6,7 @@ own thread after the admitted call returns. Tickets never repeat, even when
 a native provider reuses an address for a later session.
 """
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 
 const _NATIVE_SESSION_CAPACITY_V1: i64 = 4096
 const _NATIVE_SESSION_MAX_ID_V1: u64 = 9223372036854775807u64
@@ -31,14 +31,37 @@ struct _NativeSessionStateV1:
     result_raw: i64
     result_ok: bool
 
+# The owner is a copyable slot into Simple-side state; copies of a handle
+# select the same slot. The runtime mutex is an exclusion gate only (same fix
+# as nvfs_device_identity_owner_v1): a struct protected value comes back nil
+# through the interpreter's rt_mutex value bridge, the update closure faults
+# with the real lock held, and every later owner call blocks forever.
 class NativeSessionOwnerV1:
-    gate: Mutex
+    _slot: i64
+
+var _native_session_gate_v1: Mutex = mutex_new(0)
+var _native_session_states_v1: [_NativeSessionStateV1] = []
+
+fn _native_session_update_v1(
+    owner: NativeSessionOwnerV1,
+    f: fn(_NativeSessionStateV1) -> _NativeSessionStateV1
+) -> _NativeSessionStateV1:
+    val _ = mutex_lock(_native_session_gate_v1)
+    val next = f(_native_session_states_v1[owner._slot])
+    _native_session_states_v1[owner._slot] = next
+    val _ = mutex_unlock(_native_session_gate_v1, 0)
+    next
 
 fn _native_session_owner_with_range_v1(start: u64, limit: u64) -> NativeSessionOwnerV1:
-    NativeSessionOwnerV1(gate: mutex_new(_NativeSessionStateV1(
+    val initial = _NativeSessionStateV1(
         next_ticket: start, ticket_limit: limit, entries: [], creating: false,
         close_claimed: false, result_ticket: 0u64,
-        result_raw: 0, result_ok: false)))
+        result_raw: 0, result_ok: false)
+    val _ = mutex_lock(_native_session_gate_v1)
+    val slot = _native_session_states_v1.len()
+    _native_session_states_v1.push(initial)
+    val _ = mutex_unlock(_native_session_gate_v1, 0)
+    NativeSessionOwnerV1(_slot: slot)
 
 fn native_session_owner_new_v1() -> NativeSessionOwnerV1:
     _native_session_owner_with_range_v1(1u64, _NATIVE_SESSION_MAX_ID_V1)
@@ -58,7 +81,7 @@ fn native_session_owner_new_for_library_v1(mapping_identity: u64) -> NativeSessi
 # until registration or failed-create cleanup has finished.
 @unsafe(reason: "claims exclusive creation while a native provider may enter foreign code", capabilities: [raw_ptr])
 fn native_session_owner_claim_create_v1(owner: NativeSessionOwnerV1) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = false
         if not state.creating and not state.close_claimed:
@@ -69,7 +92,7 @@ fn native_session_owner_claim_create_v1(owner: NativeSessionOwnerV1) -> bool:
 
 @unsafe(reason: "ends a native provider create only after registration or cleanup", capabilities: [raw_ptr])
 fn native_session_owner_end_create_v1(owner: NativeSessionOwnerV1) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = state.creating
         next.creating = false
@@ -80,7 +103,7 @@ fn native_session_owner_end_create_v1(owner: NativeSessionOwnerV1) -> bool:
 # close claim all refuse, including through retained copies of a handle.
 @unsafe(reason: "claims retirement of a native provider after all sessions drain", capabilities: [raw_ptr])
 fn native_session_owner_claim_close_v1(owner: NativeSessionOwnerV1) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = false
         if not state.creating and not state.close_claimed and
@@ -103,7 +126,7 @@ fn _native_session_index_v1(state: _NativeSessionStateV1, ticket: u64) -> i64:
 fn native_session_owner_register_v1(owner: NativeSessionOwnerV1, raw_session: i64) -> u64:
     if raw_session <= 0:
         return 0u64
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ticket = 0u64
         if state.next_ticket != 0u64 and not state.close_claimed and
@@ -124,7 +147,7 @@ fn native_session_owner_register_v1(owner: NativeSessionOwnerV1, raw_session: i6
 # retired or unknown. Every positive begin must have one matching end.
 @unsafe(reason: "borrows a provider-owned raw session address for one foreign call", capabilities: [raw_ptr])
 fn native_session_owner_begin_v1(owner: NativeSessionOwnerV1, ticket: u64) -> i64:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_raw = 0
         val index = _native_session_index_v1(state, ticket)
@@ -142,7 +165,7 @@ fn native_session_owner_begin_v1(owner: NativeSessionOwnerV1, ticket: u64) -> i6
 # Snapshot for status displays. A busy call remains live; Destroying and
 # retired tickets do not. Call admission still requires begin_v1.
 fn native_session_owner_is_live_v1(owner: NativeSessionOwnerV1, ticket: u64) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = false
         val index = _native_session_index_v1(state, ticket)
@@ -153,7 +176,7 @@ fn native_session_owner_is_live_v1(owner: NativeSessionOwnerV1, ticket: u64) -> 
 
 @unsafe(reason: "ends a borrow of a provider-owned raw session address", capabilities: [raw_ptr])
 fn native_session_owner_end_v1(owner: NativeSessionOwnerV1, ticket: u64) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = false
         val index = _native_session_index_v1(state, ticket)
@@ -171,7 +194,7 @@ fn native_session_owner_end_v1(owner: NativeSessionOwnerV1, ticket: u64) -> bool
 @unsafe(reason: "claims exclusive destruction of a provider-owned raw session", capabilities: [raw_ptr])
 fn native_session_owner_claim_destroy_v1(owner: NativeSessionOwnerV1,
                                          ticket: u64) -> i64:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_raw = 0
         val index = _native_session_index_v1(state, ticket)
@@ -191,7 +214,7 @@ fn native_session_owner_claim_destroy_v1(owner: NativeSessionOwnerV1,
 @unsafe(reason: "retires a provider-owned raw session only after native destruction", capabilities: [raw_ptr])
 fn native_session_owner_finish_destroy_v1(owner: NativeSessionOwnerV1,
                                           ticket: u64) -> bool:
-    val updated = mutex_with_lock(owner.gate, \state:
+    val updated = _native_session_update_v1(owner, \state:
         var next = state
         next.result_ok = false
         val index = _native_session_index_v1(state, ticket)
