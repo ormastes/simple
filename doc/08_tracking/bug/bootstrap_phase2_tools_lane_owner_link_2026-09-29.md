@@ -134,8 +134,16 @@ or Stage4. The separate native symbol-owner regression now links but fails its
 first runtime callback assertion (`supports_fn("emit-gpu")` is false). That
 failure remains open; no further naming retry is claimed here.
 
-The new Windows SDK resolver/restricted-PATH DLL execution test and actual
-strict Windows unresolved-link/no-stub test are prepared but unexecuted. The
+Windows focused validation passed at frozen source
+`c0aa95919f874ad7f2da870d325c1ede035c84d0` on 2026-09-28 UTC:
+strict unresolved-link/no-stub integration ran one test (1 passed, 0 failed,
+0 ignored), and the production SQLite SDK/adjacent-DLL test ran one test
+(1 passed, 0 failed, 0 ignored). Both Cargo exits and the supervisor exit were
+zero; source-input hashes remained unchanged. The SQLite executable ran with
+only System32 on PATH. Builds used 24 jobs and a physical copy of the prior
+Cargo cache on D:, preserving original bootstrap artifacts. Exact logs and
+terminal receipts are in
+`build/mini_builds/windows-pending-provider-tests-20260929/`. The
 hardware/TRACE32 helper changes require their own native execution evidence.
 Phase3/4 must publish authority bound to their actual producer compiler; the
 Phase2 capsule cannot authorize another producer. Full matrix, core/MCP/LSP
