@@ -317,6 +317,14 @@ Isolate the native digest mismatch before replacing the working whole-member
 copy; see
 `doc/08_tracking/bug/target6_native_stream_hash_archive_member_mismatch_2026-09-29.md`.
 
+Pinned archive file-view follow-up (2026-09-29): the POSIX descriptor reader
+now returns packed `[u8]` arrays instead of tagged `i64` slots. A copied
+runtime capsule passes the 9/9 no-stub archive spec; nine paired 8 MiB runs
+lower p95 from 0.56 to 0.41 s and peak RSS from 76,760 to 19,512 KiB
+(normalized sum 0.986). The current whole-archive digest remains in use;
+bounded streaming and full production-path qualification remain open. See
+`doc/09_report/compiler/target6_pinned_archive_packed_file_view_2026-09-29.md`.
+
 Warm route ordering follow-up (2026-09-29): the selected package links already
 built for archive admission now also order scheduled modules, removing one
 full index scan per scheduled package. The no-stub native route spec passes

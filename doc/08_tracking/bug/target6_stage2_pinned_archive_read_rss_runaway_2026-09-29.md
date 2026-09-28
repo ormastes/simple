@@ -1,9 +1,9 @@
 # Stage-2 pinned archive read RSS runaway (2026-09-29)
 
 Status: bounded byte-feed and signed-index chunk trials rejected by paired
-time/RSS measurements; the prior whole-archive digest is restored.
-Production memory/performance qualification remains open. No current-source
-Stage-4 result is claimed.
+time/RSS measurements; the prior whole-archive digest remains. Packed
+runtime byte arrays improve its Linux memory and time cost. Full production
+qualification and current-source Stage-4 remain open.
 
 While replacing the cold publisher's bounded CAS member check with
 `pinned_archive_open_verified_v1` and
@@ -193,7 +193,19 @@ still took 0.77 s and 135,580 KiB in one warm run. The signed-index and borrow
 edits were reverted. Full paired samples are in
 `doc/09_report/compiler/target6_pinned_digest_signed_index_8m_pair_2026-09-29.json`.
 
-Next, profile or instrument allocation in `Sha256StreamV1` block updates,
-especially class-field array writes and per-block state transfers, before
-another bounded-reader candidate. Any replacement must pass descriptor
-digest parity and the same paired time/RSS gate.
+The next investigation was allocation at the descriptor read boundary. Any
+replacement still must pass descriptor digest parity and the same paired
+time/RSS gate.
+
+## Follow-up: packed file-view byte arrays (2026-09-29)
+
+System-call tracing isolated the large allocation: the chunk candidate
+made 256 extra 528,384-byte anonymous mappings on an 8 MiB archive, while
+`runtime_file_view.c` built each `[u8]` result as tagged `i64` slots. The
+POSIX owner now uses the runtime's packed byte-array constructor. The C
+selfcheck and 9/9 no-stub native pinned archive scenarios pass. Nine paired
+8 MiB runs improve p95 from 0.56 to 0.41 s and peak RSS from 76,760 to
+19,512 KiB; normalized sum 0.986. See
+`doc/09_report/compiler/target6_pinned_archive_packed_file_view_2026-09-29.md`.
+The archive still uses a whole-file digest, so strict bounded-archive memory
+and full Target 6 gates are not yet proven.
