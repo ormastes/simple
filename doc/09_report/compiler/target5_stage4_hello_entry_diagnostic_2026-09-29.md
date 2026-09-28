@@ -57,3 +57,38 @@ provider contract. Diagnose the empty MIR on that authority and produce a
 working hello before comparing size, matched C, startup, and RSS. The earlier
 14,560-byte LLD hello is a separate one-module core-C diagnostic and cannot
 substitute for these gates.
+
+## Continuation: exact SQLite contract repaired
+
+The current bootstrap builder's exact Stage4 SQLite archive contract now
+includes `spl_sqlite_provider_abi_version_v1`. This is a required definition,
+not an exception to the extra-symbol check. The existing
+`test_stage4_cli_c_provider_archives_have_exact_members_and_contracts` test
+passed (1 test, 0 failures) against the current provider source. The rebuilt
+bootstrap tool SHA-256 is
+`1ad11693b36d62a5a3a482df12bafc9c0774b83ffa2e1047495f4954ba2d5189`.
+It is a bootstrap tool, not the default compiler authority.
+
+With `SIMPLE_NO_STUB_FALLBACK=1`, `SIMPLE_COMPILER_ENTRY_STAGE4=1`, the three
+current-source roots, Cranelift, and `core-c-bootstrap`, the first Stage4
+retry compiled all 866 units with zero failures and passed the SQLite contract.
+Linking then stopped because the supplied runtime directory lacked
+`deps/libsimple_runtime.a`. A second retry supplied the existing release
+staticlib (SHA-256
+`b37b597c678c81be955c0f3750539591de285bb6686368634fcd671a522b18cb`)
+through that path. It reused 864 units, compiled 2, and advanced to compiler
+backfill validation. The new blocker is exact:
+
+```text
+compiler backfill source contains runtime/provider ownership outside the manifest:
+spl_cranelift_aot_isa_feature_v2, spl_cranelift_aot_opt_level_v2,
+spl_cranelift_new_aot_module_config_v2
+```
+
+`build_compiler_backfill_archive` derives its export contract only from
+`rt_cranelift_*`, while the current compiler archive defines these three
+`spl_cranelift_*` AOT configuration functions. The next change must assign
+those symbols to the compiler backfill contract and verify its exact closure
+and provider disjointness. No Stage4 executable or hello size cohort exists
+from these retries. The session stopped after the third focused check/build
+cycle as required by the repository iteration cap.

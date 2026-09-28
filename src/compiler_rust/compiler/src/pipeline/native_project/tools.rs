@@ -1590,6 +1590,9 @@ const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
+    // The same provider source exports this version probe for the demand-load
+    // bridge; retain it in the exact static archive contract as well.
+    "spl_sqlite_provider_abi_version_v1",
     "rt_sqlite_begin",
     "rt_sqlite_bind_float",
     "rt_sqlite_bind_int",
