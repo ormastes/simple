@@ -949,6 +949,9 @@ impl<'a> MirLowerer<'a> {
                 src,
                 byte_size,
                 type_name: Some(name),
+                // Resolved later by `qualify_native_struct_layouts` once the
+                // whole-project vtable owner set is known.
+                owner_has_vtable: None,
                 deep_fields,
             });
             dest
@@ -992,12 +995,15 @@ impl<'a> MirLowerer<'a> {
             if inner.is_empty() {
                 continue;
             }
-            path.push(fname_ty);
+            path.push(fname_ty.clone());
             let nested = Self::struct_deep_fields(registry, type_value_kinds, inner, path);
             path.pop();
             out.push(crate::mir::AggregateFieldCopy {
                 word_index: i as u32,
                 byte_size: (inner.len() as u32) * 8,
+                type_name: Some(fname_ty),
+                // Resolved later by `qualify_native_struct_layouts`.
+                owner_has_vtable: None,
                 nested,
             });
         }

@@ -887,10 +887,25 @@ impl LlvmBackend {
                 dest,
                 src,
                 byte_size,
+                owner_has_vtable,
                 deep_fields,
                 ..
             } => {
-                self.compile_aggregate_copy(*dest, *src, *byte_size, deep_fields, vreg_map, builder)?;
+                // FIXED (was sj-segv-2026-08-27 TODO): `owner_has_vtable` is
+                // now resolved by `qualify_native_struct_layouts` from
+                // `type_name`, exactly like `FieldGet`/`FieldSet` already do —
+                // no separate name->vtable lookup needed in this scope. See
+                // doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+                // and doc/08_tracking/bug/windows_msvc_stage2_compilerconfig_by_value_return_corruption_2026-08-31.md
+                self.compile_aggregate_copy(
+                    *dest,
+                    *src,
+                    *byte_size,
+                    *owner_has_vtable,
+                    deep_fields,
+                    vreg_map,
+                    builder,
+                )?;
             }
             MirInst::BinOp { dest, op, left, right } => {
                 let left_val = self.get_vreg(left, vreg_map)?;
@@ -4163,5 +4178,70 @@ mod tests {
         assert!(!suffix_owner_matches("lib__common__target__PointerSize", "string"));
         assert!(!suffix_owner_matches("Vec4f", "f64"));
         assert!(suffix_owner_matches("f64", "f64"));
+    }
+    #[test]
+    fn aggregate_copy_of_vtable_bearing_struct_shifts_for_header() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        let symbol = "__vtable__Owner__for__Trait";
+
+        let mut caller = MirFunction::new(
+            "copy_owner".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 10,
+        });
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 20,
+        });
+        // Two i64 fields -> byte_size = 2 * 8 = 16, matching
+        // `copy_if_value_type`'s `(fields.len() as u32) * 8` at lowering.
+        caller.blocks[0].instructions.push(MirInst::StructInit {
+            dest: VReg(2),
+            type_id: crate::hir::TypeId::I64,
+            struct_name: Some("Owner".to_string()),
+            vtable_symbol: Some(symbol.to_string()),
+            struct_size: 16,
+            field_offsets: vec![0, 8],
+            field_types: vec![crate::hir::TypeId::I64, crate::hir::TypeId::I64],
+            field_values: vec![VReg(0), VReg(1)],
+        });
+        caller.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(3),
+            src: VReg(2),
+            byte_size: 16,
+            type_name: Some("Owner".to_string()),
+            owner_has_vtable: Some(true),
+            deep_fields: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        let mut mir = crate::mir::MirModule::new();
+        mir.name = Some("aggregate_copy_vtable".to_string());
+        mir.functions = vec![caller];
+        mir.vtable_impls.push((
+            crate::hir::TypeId::I64,
+            "Owner".to_string(),
+            symbol.to_string(),
+            vec![Some("Owner.method".to_string())],
+            true,
+        ));
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        // words = (16 + 8) / 8 = 3 -> alloc_bytes = 24. A pre-fix build
+        // (byte_size never shifted for the header) allocates only 16 here,
+        // losing the header shift entirely.
+        let alloc_line = ir
+            .lines()
+            .find(|l| l.contains("aggcopy_alloc") && l.contains("call"))
+            .unwrap_or_else(|| panic!("no aggcopy_alloc rt_alloc call in IR:\n{ir}"));
+        assert!(alloc_line.contains("i64 24"), "{alloc_line}\nfull ir:\n{ir}");
+        assert!(!alloc_line.contains("i64 16"), "{alloc_line}\nfull ir:\n{ir}");
+        backend.verify().unwrap();
     }
 }

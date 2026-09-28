@@ -16,6 +16,7 @@ use crate::module_resolver::ModuleResolver;
 use crate::monomorphize::monomorphize_module;
 
 use super::{effective_target, is_entry_file, safe_canonicalize, source_root_for_file, ModuleImports, NativeProjectBuilder};
+use super::aggregate_layout::resolve_owner_has_vtable;
 use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::{mangle_mir, qualify_enum_runtime_names};
 use super::module_global_init::inject_freestanding_module_global_init;
@@ -1786,6 +1787,27 @@ fn qualify_native_struct_layouts(
                         // collision-free.
                         *owner_has_vtable = Some(false);
                     }
+                    MirInst::AggregateCopy {
+                        type_name,
+                        owner_has_vtable,
+                        deep_fields,
+                        ..
+                    } => {
+                        *owner_has_vtable = Some(resolve_owner_has_vtable(
+                            type_name.as_deref(),
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        )?);
+                        resolve_deep_field_vtables(
+                            deep_fields,
+                            &resolve_exact_owner,
+                            ambiguous_names,
+                            all_mangled,
+                            vtable_type_owners,
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -1793,4 +1815,112 @@ fn qualify_native_struct_layouts(
     }
 
     Ok(())
+}
+
+/// Recursively resolve `owner_has_vtable` for every `AggregateFieldCopy` in
+/// a deep-copy descriptor tree, using each field's OWN `type_name` — a
+/// field's header-bearing-ness is a property of its own declared type, not
+/// of the enclosing struct.
+fn resolve_deep_field_vtables(
+    deep_fields: &mut [crate::mir::AggregateFieldCopy],
+    resolve_exact_owner: &impl Fn(&str) -> Option<(String, bool)>,
+    ambiguous_names: &std::collections::HashSet<String>,
+    all_mangled: &std::collections::HashMap<String, Vec<String>>,
+    vtable_type_owners: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    for field in deep_fields.iter_mut() {
+        field.owner_has_vtable = Some(resolve_owner_has_vtable(
+            field.type_name.as_deref(),
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        )?);
+        resolve_deep_field_vtables(
+            &mut field.nested,
+            resolve_exact_owner,
+            ambiguous_names,
+            all_mangled,
+            vtable_type_owners,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod aggregate_layout_tests {
+    use super::*;
+    use crate::mir::{AggregateFieldCopy, MirFunction, MirInst, MirModule, VReg};
+    use std::collections::{HashMap, HashSet};
+
+    fn field(name: &str, nested: Vec<AggregateFieldCopy>) -> AggregateFieldCopy {
+        AggregateFieldCopy {
+            word_index: 0,
+            byte_size: 8,
+            type_name: Some(name.to_string()),
+            owner_has_vtable: None,
+            nested,
+        }
+    }
+
+    #[test]
+    fn aggregate_layout_resolves_local_and_imported_nested_headers() {
+        let mut mir = MirModule::new();
+        mir.local_globals.extend(["Outer".to_string(), "Plain".to_string()]);
+        let mut function = MirFunction::new(
+            "copy_receiver".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        function.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(1),
+            src: VReg(0),
+            byte_size: 8,
+            type_name: Some("Outer".to_string()),
+            owner_has_vtable: None,
+            deep_fields: vec![field("Plain", vec![field("Inner", vec![])])],
+        });
+        mir.functions.push(function);
+        let imports = HashMap::from([("Inner".to_string(), "provider__Inner".to_string())]);
+        let owners = HashSet::from(["fixture__Outer".to_string(), "provider__Inner".to_string()]);
+        qualify_native_struct_layouts(
+            &mut mir,
+            "fixture",
+            &imports,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            &owners,
+            &HashMap::new(),
+        )
+        .unwrap();
+        let MirInst::AggregateCopy {
+            owner_has_vtable,
+            deep_fields,
+            ..
+        } = &mir.functions[0].blocks[0].instructions[0]
+        else {
+            panic!("expected aggregate copy")
+        };
+        assert_eq!(*owner_has_vtable, Some(true));
+        assert_eq!(deep_fields[0].owner_has_vtable, Some(false));
+        assert_eq!(deep_fields[0].nested[0].owner_has_vtable, Some(true));
+        assert_eq!(deep_fields[0].word_index, 0, "lowered field offsets stay unshifted");
+    }
+
+    #[test]
+    fn aggregate_layout_propagates_nested_ambiguity_errors() {
+        let mut fields = vec![field("Plain", vec![field("Shared", vec![])])];
+        let resolve = |name: &str| (name == "Plain").then(|| ("local__Plain".to_string(), true));
+        let ambiguous = HashSet::from(["Shared".to_string()]);
+        let candidates = HashMap::from([(
+            "Shared".to_string(),
+            vec!["a__Shared".to_string(), "b__Shared".to_string()],
+        )]);
+        let owners = HashSet::from(["a__Shared".to_string()]);
+        let error = resolve_deep_field_vtables(&mut fields, &resolve, &ambiguous, &candidates, &owners).unwrap_err();
+        assert!(error.contains("Shared"));
+        assert_eq!(fields[0].owner_has_vtable, Some(false));
+        assert_eq!(fields[0].nested[0].owner_has_vtable, None);
+    }
 }
