@@ -1199,3 +1199,40 @@ Simple execution and the compiler's two-tool terminal join remain pending.
 The fixed V4 64-word packet is unchanged. Follow
 `doc/03_plan/compiler/parser_inspection_atomic_input_owner_2026-09-27.md` for
 the native owner, Simple façade, compiler join, and negative matrix.
+
+### 2026-09-28 retained builtin target propagation (unverified runtime)
+
+The continuation above backend result envelope V2 retains plugin-only
+`BuiltinBackendTargetContextV2`: options, normalized CPU, copied requested
+features, and resolved LLVM target configuration. Driver empty CPU and `generic`
+are equivalent; a different operation CPU fails before emission. The requested
+CPU is now forwarded to LLVM instead of falling back to its default CPU preset.
+Cranelift accepts only the existing generic CPU request pending ISA negotiation.
+
+Module and AOT routes pass this context into the established producers. Common
+AOT helpers retain storage lowering, optimization, and debug policy. LLVM uses
+the retained triple for both IR header and llc arguments; bootstrap I/O must not
+drop explicit CPU/target arguments. Cranelift module and direct AOT constructors
+receive a retained triple instead of rereading the target environment.
+
+The context is internal configuration, not an opaque authority token. It has no
+mutating methods and copies the caller's feature array. It must never be used
+to mint accepted-feature receipts. Both versioned result acceptance and dynamic
+V1 remain `Unknown`; nonempty feature requests fail before builtin emission.
+See `doc/03_plan/agent_tasks/backend_target_context_v2.md` for blocked validation
+and remaining producer confirmation. No instruction or execution gate advances.
+
+Retained AOT optimization uses the admitted enum after validating the operation
+level. In particular, driver `o1` means Basic/-O1 on both module and AOT routes;
+it no longer becomes Size on the retained AOT route. There is no distinct MIR
+O1 pipeline, so Basic uses MIR NoOpt followed by llc -O1. Legacy unretained AOT
+mapping stays unchanged. Standard maps to llc -O2. Debug-info policy still
+follows the established AOT release/debug setting.
+
+This slice freezes target/CPU/features and optimization, not every codegen
+environment variable. Existing `SIMPLE_NATIVE_BUILD_NO_MANGLE`,
+`SIMPLE_BOOTSTRAP`, `SIMPLE_BOOTSTRAP_DEBUG`, and
+`SIMPLE_BOOTSTRAP_REAL_LLVM` policies remain active in the translator, as do
+existing diagnostic/tool selection policies. They confer no accepted-feature
+authority. Full immutable normalized-options evidence still requires a later
+producer result and policy identity contract.
