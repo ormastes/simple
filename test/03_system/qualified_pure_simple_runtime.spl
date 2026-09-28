@@ -19,22 +19,40 @@
 # Admission: export SIMPLE_QUALIFIED_RUNTIME=/abs/path/to/simple
 
 use std.spec.*
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run, env_get}
 
-# `rt_env_get` does not observe the caller's environment under `simple test`
-# (see test/03_system/check/simpleos_kernel_fabricated_rt_symbol_guard_spec.spl:54),
-# so the variable is resolved through a subshell instead.
-fn qualified_runtime_path() -> text:
-    val (out, _err, code) = process_run("/bin/sh", ["-c", "printf %s \"${SIMPLE_QUALIFIED_RUNTIME:-}\""])
-    if code != 0:
+# The native facade normally sees the caller's environment. Some older test
+# runners do not (see simpleos_kernel_fabricated_rt_symbol_guard_spec.spl), so
+# read through the host shell as a fallback. `set NAME` avoids expanding a
+# Windows path as shell code when it contains spaces or metacharacters.
+fn runtime_env_path(name: text) -> text:
+    if name != "SIMPLE_QUALIFIED_RUNTIME" and name != "SIMPLE_SEED_RUNTIME":
         return ""
-    out.trim()
+    val direct = env_get(name)
+    if direct != "":
+        return direct
+    var script = "printf %s \"${SIMPLE_QUALIFIED_RUNTIME:-}\""
+    if name == "SIMPLE_SEED_RUNTIME":
+        script = "printf %s \"${SIMPLE_SEED_RUNTIME:-}\""
+    val (posix_out, _posix_err, posix_code) = process_run("/bin/sh", ["-c", script])
+    if posix_code == 0 and posix_out.trim() != "":
+        return posix_out.trim()
+    val (windows_out, _windows_err, windows_code) = process_run(
+        "cmd.exe", ["/D", "/C", "set " + name])
+    if windows_code != 0:
+        return ""
+    val prefix = name + "="
+    for line in windows_out.split("\n"):
+        val entry = line.trim()
+        if entry.starts_with(prefix):
+            return entry.substring(prefix.len(), entry.len())
+    ""
+
+fn qualified_runtime_path() -> text:
+    runtime_env_path("SIMPLE_QUALIFIED_RUNTIME")
 
 fn seed_runtime_path() -> text:
-    val (out, _err, code) = process_run("/bin/sh", ["-c", "printf %s \"${SIMPLE_SEED_RUNTIME:-}\""])
-    if code != 0:
-        return ""
-    out.trim()
+    runtime_env_path("SIMPLE_SEED_RUNTIME")
 
 fn runtime_version_banner(binary: text) -> text:
     val (out, err, _code) = process_run(binary, ["--version"])
