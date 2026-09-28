@@ -444,6 +444,18 @@ impl Lowerer {
                 kind: HirExprKind::Local(idx),
                 ty,
             })
+        } else if let Some((symbol, ty)) = self.resolve_flatten_owned_global(name).and_then(|symbol| {
+            // Flattened unit, same-named module global of another module: the
+            // bare name is last-write-wins across modules, so resolve it
+            // through the owner of the function being lowered (PR #1936 is the
+            // interpreter twin). See `module_lowering/flatten_global_owner.rs`.
+            let ty = self.globals.get(&symbol).copied()?;
+            Some((symbol, ty))
+        }) {
+            Ok(HirExpr {
+                kind: HirExprKind::Global(symbol),
+                ty,
+            })
         } else if let Some((symbol, ty)) = self.resolve_flatten_owned_callable(name).and_then(|symbol| {
             // Flattened unit, cross-module same-named free function: the bare
             // name is ambiguous once flattening merges every module's
