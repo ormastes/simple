@@ -42,9 +42,11 @@ artifact's reverse digest was zero because another `match Ok(value): value`
 struct binding projected the wrong field. Explicit unwrap moved that check
 forward. A module-level SHA-256 sentinel then arrived as zero in the native
 binary; replacing it with its verified literal moved the spec forward again.
-The graph validator's optional lookup required explicit binding. The current
-native textual verdict is **2 passes, 2 failures**: the graph and negative
-input cases pass, while persisted publication and stale payload rejection do
-not. Both remaining cases lack a CAS archive generation. A raw file create
-returns success but its Simple boolean wrapper returns false; see
-`native_file_create_excl_wrapper_success_false_2026-09-29.md`.
+The graph validator's optional lookup required explicit binding. The last
+textual verdict from the pushed candidate is **2 passes, 2 failures**: the graph
+and negative input cases pass, while persisted publication and stale payload
+rejection do not. Both remaining cases lack a CAS archive generation. The
+earlier file-wrapper diagnosis was incorrect: tagged `0xb` is true. The next
+failure is archive manifest validation; see
+`native_archive_manifest_validation_2026-09-29.md`. A subsequent uncommitted
+trial links but crashes before producing a textual verdict.
