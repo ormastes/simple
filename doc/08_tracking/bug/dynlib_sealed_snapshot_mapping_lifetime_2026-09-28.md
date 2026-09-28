@@ -13,9 +13,16 @@ receives the same descriptor number, it is offered to `dlopen` under the same
 pathname. The dynamic loader may return the existing mapping by name before it
 opens the new descriptor, so a request whose sealed bytes hash as artifact B can
 receive artifact A's handle. See glibc's loaded-map name lookup in
-https://sourceware.org/pipermail/glibc-cvs/2025q1/087426.html . This is a
-source-backed failure mode; an admitted Linux runtime reproduction is still
-required.
+https://sourceware.org/pipermail/glibc-cvs/2025q1/087426.html .
+
+Measured on 2026-09-28 in Ubuntu 24.04 `linux/amd64` under Docker: two sealed
+memfds each contained a distinct shared library exporting `identity`; A returns
+111 and B returns 222. With A still loaded, closing its descriptor before
+snapshotting B reused fd 4. Calling `dlopen("/proc/self/fd/4", RTLD_NOW |
+RTLD_LOCAL)` for B returned A's handle. The observed output was
+`fd_A=4 fd_B=4 A=111 B=111 same_handle=1`. This establishes loader name
+aliasing independently of the Simple runtime. The Simple admission path still
+needs an end-to-end Linux regression fixture.
 
 `dynlib_admit_exact_v1` has a separate path-swap gap: it hashes the caller's
 pathname, calls `rt_host_dynlib_open` on that pathname, then hashes it again.

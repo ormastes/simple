@@ -198,6 +198,9 @@ use std.nogc_sync_mut.sffi.dynlib_lifetime_owner_v1.{
     dynlib_lifetime_end_v1, dynlib_lifetime_retire_v1,
     dynlib_lifetime_live_v1
 }
+use std.nogc_sync_mut.sffi.dynlib_snapshot_registry_v1.{
+    dynlib_snapshot_pin_process_v1
+}
 use std.sffi.admission.{
     SffiAdmissionTrustRootV1, SignatureVerifiedSffiAdmissionV1,
     verify_sffi_evidence_v2,
@@ -302,20 +305,20 @@ impl ExactArtifactDynLib:
         if actual_sha256 != expected_sha256:
             rt_file_close(fd_i32)
             return Err("E-SFFI-004: provider artifact SHA-256 mismatch: {path}")
+        # The descriptor pathname is the loader's mapping identity. Reserve it
+        # before dlopen and keep it until process exit: dlclose does not prove
+        # that the loader discarded the name (for example RTLD_NODELETE).
+        if not dynlib_snapshot_pin_process_v1(fd):
+            rt_file_close(fd_i32)
+            return Err("E-SFFI-019: sealed provider snapshot registry is full: {path}")
         match _sffi_dlopen_checked(descriptor_path):
             case Ok(handle):
-                if not rt_file_close(fd_i32):
-                    spl_dlclose(handle)
-                    return Err("E-SFFI-018: failed to close provider admission descriptor: {path}")
                 match _dynlib_owned(handle, path):
                     case Ok(lib):
                         Ok(ExactArtifactDynLib(
                             lib: lib, artifact_sha256: actual_sha256))
                     case Err(error): Err(error)
-            case Err(error):
-                if not rt_file_close(fd_i32):
-                    return Err("E-SFFI-018: failed to close provider admission descriptor: {path}")
-                Err(error)
+            case Err(error): Err(error)
 
 impl DynLib:
     @unsafe(reason: "loads an unverified dynamic provider", capabilities: [ffi])

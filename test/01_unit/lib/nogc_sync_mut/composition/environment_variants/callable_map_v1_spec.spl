@@ -24,7 +24,7 @@ refused with a distinct code, never mapped to a nil placeholder.
 """
 
 use std.spec.*
-use std.io_runtime.{shell, file_exists, file_delete}
+use std.io_runtime.{shell, file_exists, file_delete, platform_name}
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
     EnvironmentDigest256V1,
     ENV_PLACEMENT_STATIC_V1, ENV_PLACEMENT_NATIVE_DYNLIB_V1,
@@ -314,7 +314,68 @@ describe "Environment variant callable mapping V1":
 
 describe "Environment variant native placement parity V1":
 
+    it "keeps two live sealed artifacts with the same export distinct":
+        if platform_name() != "linux":
+            expect(refusal_code(ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+                                FIXTURE_SYMBOL, "", "", abi_identity(),
+                                PROVIDER_GENERATION, FIXTURE_ARITY)
+                  ).to_equal(VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1)
+            return
+        val tag = pid_tag()
+        val first_source = "/tmp/egl_pkg2_snapshot_a_{tag}.c"
+        val second_source = "/tmp/egl_pkg2_snapshot_b_{tag}.c"
+        val first_path = "/tmp/libegl_pkg2_snapshot_a_{tag}.so"
+        val second_path = "/tmp/libegl_pkg2_snapshot_b_{tag}.so"
+        val compiler = shell("command -v cc 2>/dev/null || command -v clang 2>/dev/null").stdout.trim()
+        if compiler == "":
+            fail("native lane unavailable: no cc/clang on this host")
+        else:
+            file_delete(first_source)
+            file_delete(second_source)
+            file_delete(first_path)
+            file_delete(second_path)
+            shell("printf '%s' 'long long egl_pkg2_mix2(long long a,long long b){return a*31+b;}' > '{first_source}'")
+            shell("printf '%s' 'long long egl_pkg2_mix2(long long a,long long b){return a*31+b+1000;}' > '{second_source}'")
+            expect(shell("'{compiler}' -shared -fPIC -O1 '{first_source}' -o '{first_path}' 2>&1").exit_code).to_equal(0)
+            expect(shell("'{compiler}' -shared -fPIC -O1 '{second_source}' -o '{second_path}' 2>&1").exit_code).to_equal(0)
+            val first_digest = dynlib_artifact_digest_hex_v1(first_path)
+            val second_digest = dynlib_artifact_digest_hex_v1(second_path)
+            expect(first_digest.len()).to_equal(64)
+            expect(second_digest.len()).to_equal(64)
+            expect(first_digest != second_digest).to_equal(true)
+            val first = match variant_callable_map_v1(
+                    request(ENV_PLACEMENT_NATIVE_DYNLIB_V1, FIXTURE_SYMBOL,
+                            first_path, first_digest, abi_identity(),
+                            PROVIDER_GENERATION, FIXTURE_ARITY), static_table()):
+                case Ok(value): value
+                case Err(refusal):
+                    fail("first sealed artifact refused: {refusal.reason}")
+                    return
+            val second = match variant_callable_map_v1(
+                    request(ENV_PLACEMENT_NATIVE_DYNLIB_V1, FIXTURE_SYMBOL,
+                            second_path, second_digest, abi_identity(),
+                            PROVIDER_GENERATION, FIXTURE_ARITY), static_table()):
+                case Ok(value): value
+                case Err(refusal):
+                    fail("second sealed artifact refused: {refusal.reason}")
+                    return
+            expect(invoke(first, [7, 5])).to_equal(222)
+            expect(invoke(second, [7, 5])).to_equal(1222)
+            expect(variant_callable_release_v1(first)).to_equal(true)
+            expect(invoke(second, [7, 5])).to_equal(1222)
+            expect(variant_callable_release_v1(second)).to_equal(true)
+            file_delete(first_source)
+            file_delete(second_source)
+            file_delete(first_path)
+            file_delete(second_path)
+
     it "executes a native dynlib callable and agrees with the static twin":
+        if platform_name() != "linux":
+            expect(refusal_code(ENV_PLACEMENT_NATIVE_DYNLIB_V1,
+                                FIXTURE_SYMBOL, "", "", abi_identity(),
+                                PROVIDER_GENERATION, FIXTURE_ARITY)
+                  ).to_equal(VARIANT_CALLABLE_PLACEMENT_UNAVAILABLE_V1)
+            return
         val tag = pid_tag()
         val csrc = "/tmp/egl_pkg2_fixture_{tag}.c"
         val so = "/tmp/libegl_pkg2_fixture_{tag}.so"
