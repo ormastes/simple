@@ -82,6 +82,18 @@ eagerly loaded and remains a prerequisite probe, not a first-demand provider
 or a release-small pass. See
 `doc/09_report/compiler/target5_sqlite_shared_provider_probe_2026-09-28.md`.
 
+Linux first-demand SQLite facet (2026-09-28, isolated proof): a native spec
+binary now links `runtime_sqlite_demand.o` and has no SQLite `DT_NEEDED` entry.
+The bridge loads a sealed, SHA-256-checked provider on first call and checks
+ABI v1 plus all 27 symbols. The UI access-store scenario passed 2/2 examples;
+missing, wrong-digest, wrong-ABI, and missing-symbol rejections passed; four
+native pthread callers passed concurrent first use. The SQLite wrapper also
+rejects tagged nil (`3`) as an invalid handle. The demand spec executable is
+131,816 bytes and its O2 provider is 21,864 bytes. These isolated results do
+not establish the 15 KiB hello gate, a matched startup/RSS improvement, a
+production install manifest, or the full CLI feature closure. See
+`doc/09_report/compiler/target5_sqlite_demand_provider_probe_2026-09-28.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

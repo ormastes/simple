@@ -2,7 +2,7 @@
 # SFFI pattern for embedded database operations
 # Dependencies: rusqlite (Rust crate with bundled SQLite)
 
-use std.nogc_sync_mut.io.sffi_common.{is_valid_handle, is_invalid_handle, is_empty_string}
+use std.nogc_sync_mut.io.sffi_common.{is_empty_string}
 
 # ============================================================================
 # Tier 1: Extern Function Declarations (Raw SFFI)
@@ -110,6 +110,14 @@ enum SqliteType:
     Blob
     Null
 
+# Native SQLite returns tagged nil (3) for a failed pointer result. General
+# positive-handle checks accept 3, so this boundary must reject it explicitly.
+fn sqlite_handle_valid(handle: i64) -> bool:
+    handle > 0 and handle != 3
+
+fn sqlite_handle_invalid(handle: i64) -> bool:
+    not sqlite_handle_valid(handle)
+
 # --- Connection Management ---
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
@@ -128,7 +136,7 @@ fn sqlite_open(path: text) -> SqliteConnection:
             sqlite_close(db)
     """
     val handle = rt_sqlite_open(path)
-    SqliteConnection(handle: handle, path: path, is_valid: is_valid_handle(handle))
+    SqliteConnection(handle: handle, path: path, is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_open_memory() -> SqliteConnection:
@@ -141,7 +149,7 @@ fn sqlite_open_memory() -> SqliteConnection:
         # Fast temporary database
     """
     val handle = rt_sqlite_open_memory()
-    SqliteConnection(handle: handle, path: ":memory:", is_valid: is_valid_handle(handle))
+    SqliteConnection(handle: handle, path: ":memory:", is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_close(conn: SqliteConnection) -> bool:
@@ -149,7 +157,7 @@ fn sqlite_close(conn: SqliteConnection) -> bool:
 
     Returns: true on success
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_close(conn.handle)
@@ -172,7 +180,7 @@ fn sqlite_execute(conn: SqliteConnection, sql: text) -> bool:
         sqlite_execute(db, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
         sqlite_execute(db, "INSERT INTO users (name) VALUES ('Alice')")
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_execute(conn.handle, sql)
@@ -195,7 +203,7 @@ fn sqlite_execute_batch(conn: SqliteConnection, sql: text) -> bool:
             CREATE TABLE posts (id INTEGER PRIMARY KEY, user_id INTEGER);
         \"\"\")
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_execute_batch(conn.handle, sql)
@@ -219,11 +227,11 @@ fn sqlite_query_all(conn: SqliteConnection, sql: text) -> [SqliteRow]:
         for row in rows:
             print row.values[0]
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return []
 
     val stmt_handle = rt_sqlite_query(conn.handle, sql)
-    if is_invalid_handle(stmt_handle):
+    if sqlite_handle_invalid(stmt_handle):
         return []
 
     var rows = []
@@ -304,11 +312,11 @@ fn sqlite_prepare(conn: SqliteConnection, sql: text) -> SqliteStatement:
             sqlite_bind_text(stmt, 1, "Alice")
             sqlite_bind_int(stmt, 2, 30)
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return SqliteStatement(handle: 0, sql: sql, is_valid: false)
 
     val handle = rt_sqlite_prepare(conn.handle, sql)
-    SqliteStatement(handle: handle, sql: sql, is_valid: is_valid_handle(handle))
+    SqliteStatement(handle: handle, sql: sql, is_valid: sqlite_handle_valid(handle))
 
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_bind_text(stmt: SqliteStatement, idx: i64, value: text) -> bool:
@@ -321,7 +329,7 @@ fn sqlite_bind_text(stmt: SqliteStatement, idx: i64, value: text) -> bool:
 
     Returns: true on success
     """
-    if is_invalid_handle(stmt.handle):
+    if sqlite_handle_invalid(stmt.handle):
         return false
 
     val result = rt_sqlite_bind_text(stmt.handle, idx, value)
@@ -330,7 +338,7 @@ fn sqlite_bind_text(stmt: SqliteStatement, idx: i64, value: text) -> bool:
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_bind_int(stmt: SqliteStatement, idx: i64, value: i64) -> bool:
     """Bind integer value to prepared statement"""
-    if is_invalid_handle(stmt.handle):
+    if sqlite_handle_invalid(stmt.handle):
         return false
 
     val result = rt_sqlite_bind_int(stmt.handle, idx, value)
@@ -339,7 +347,7 @@ fn sqlite_bind_int(stmt: SqliteStatement, idx: i64, value: i64) -> bool:
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_bind_float(stmt: SqliteStatement, idx: i64, value: f64) -> bool:
     """Bind float value to prepared statement"""
-    if is_invalid_handle(stmt.handle):
+    if sqlite_handle_invalid(stmt.handle):
         return false
 
     val result = rt_sqlite_bind_float(stmt.handle, idx, value)
@@ -348,7 +356,7 @@ fn sqlite_bind_float(stmt: SqliteStatement, idx: i64, value: f64) -> bool:
 @unsafe(reason: "legacy SQLite wrapper exposes unverified raw handles and ambiguous sentinel/error results", capabilities: [ffi])
 fn sqlite_bind_null(stmt: SqliteStatement, idx: i64) -> bool:
     """Bind NULL value to prepared statement"""
-    if is_invalid_handle(stmt.handle):
+    if sqlite_handle_invalid(stmt.handle):
         return false
 
     val result = rt_sqlite_bind_null(stmt.handle, idx)
@@ -360,7 +368,7 @@ fn sqlite_reset(stmt: SqliteStatement) -> bool:
 
     Returns: true on success
     """
-    if is_invalid_handle(stmt.handle):
+    if sqlite_handle_invalid(stmt.handle):
         return false
 
     val result = rt_sqlite_reset(stmt.handle)
@@ -387,7 +395,7 @@ fn sqlite_begin(conn: SqliteConnection) -> bool:
             sqlite_execute(db, "INSERT INTO posts ...")
             sqlite_commit(db)
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_begin(conn.handle)
@@ -399,7 +407,7 @@ fn sqlite_commit(conn: SqliteConnection) -> bool:
 
     Returns: true on success
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_commit(conn.handle)
@@ -411,7 +419,7 @@ fn sqlite_rollback(conn: SqliteConnection) -> bool:
 
     Returns: true on success
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return false
 
     val result = rt_sqlite_rollback(conn.handle)
@@ -429,7 +437,7 @@ fn sqlite_last_insert_rowid(conn: SqliteConnection) -> i64:
         sqlite_execute(db, "INSERT INTO users (name) VALUES ('Alice')")
         user_id = sqlite_last_insert_rowid(db)
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return 0
 
     rt_sqlite_last_insert_rowid(conn.handle)
@@ -444,7 +452,7 @@ fn sqlite_changes(conn: SqliteConnection) -> i64:
         sqlite_execute(db, "UPDATE users SET active = 1")
         updated_count = sqlite_changes(db)
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return 0
 
     rt_sqlite_changes(conn.handle)
@@ -455,7 +463,7 @@ fn sqlite_error_message(conn: SqliteConnection) -> text:
 
     Returns: Error message, or empty string if no error
     """
-    if is_invalid_handle(conn.handle):
+    if sqlite_handle_invalid(conn.handle):
         return "Invalid connection"
 
     rt_sqlite_error_message(conn.handle)

@@ -95,7 +95,7 @@ static atomic_flag simple_gpu_provider_lock = ATOMIC_FLAG_INIT;
 #if defined(__linux__)
 /* dlopen may retain NODELETE/external references after a successful close.
  * Never reuse an authenticated /proc/self/fd pathname in this process. */
-static uint64_t simple_gpu_snapshot_fd_floor_v1 = 1024;
+static uint64_t simple_dynload_snapshot_fd_floor_v1 = 1024;
 #endif
 
 static void simple_gpu_lock(void) {
@@ -106,6 +106,26 @@ static void simple_gpu_lock(void) {
 static void simple_gpu_unlock(void) {
     atomic_flag_clear_explicit(&simple_gpu_provider_lock, memory_order_release);
 }
+
+#if defined(__linux__)
+/* dlopen caches loaded objects by pathname even after a caller closes its
+ * snapshot fd. Share one monotonically increasing fd namespace across GPU,
+ * generic SFFI, and SQLite snapshots so a reused /proc/self/fd path cannot
+ * admit an older mapped object under a newer digest. */
+static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
+    int unique_snapshot = -1;
+    simple_gpu_lock();
+    if (simple_dynload_snapshot_fd_floor_v1 <= INT_MAX) {
+        unique_snapshot = fcntl(snapshot, F_DUPFD_CLOEXEC,
+            (int)simple_dynload_snapshot_fd_floor_v1);
+        if (unique_snapshot >= 0)
+            simple_dynload_snapshot_fd_floor_v1 = (uint64_t)unique_snapshot + 1;
+    }
+    simple_gpu_unlock();
+    close(snapshot);
+    return unique_snapshot;
+}
+#endif
 
 /* Forward declaration: the definition is Windows-only and lives near the
  * bottom of this file, but simple_gpu_open() below calls it. Without this
@@ -243,7 +263,7 @@ static int simple_gpu_digest_matches_expected(
 
 #if defined(__linux__)
 static int simple_gpu_snapshot_linux_v1(const char *path) {
-    int source, snapshot, unique_snapshot = -1;
+    int source, snapshot;
     struct stat source_stat;
     uint8_t buffer[65536];
     uint64_t total = 0;
@@ -282,16 +302,7 @@ static int simple_gpu_snapshot_linux_v1(const char *path) {
                 F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
         close(snapshot); return -1;
     }
-    simple_gpu_lock();
-    if (simple_gpu_snapshot_fd_floor_v1 <= INT_MAX) {
-        unique_snapshot = fcntl(snapshot, F_DUPFD_CLOEXEC,
-            (int)simple_gpu_snapshot_fd_floor_v1);
-        if (unique_snapshot >= 0)
-            simple_gpu_snapshot_fd_floor_v1 = (uint64_t)unique_snapshot + 1;
-    }
-    simple_gpu_unlock();
-    close(snapshot);
-    return unique_snapshot;
+    return simple_dynload_unique_snapshot_linux_v1(snapshot);
 }
 #endif
 
@@ -1960,7 +1971,7 @@ int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
         close(snapshot);
         return -1;
     }
-    return (int64_t)snapshot;
+    return (int64_t)simple_dynload_unique_snapshot_linux_v1(snapshot);
 #else
     (void)path_value;
     return -1;

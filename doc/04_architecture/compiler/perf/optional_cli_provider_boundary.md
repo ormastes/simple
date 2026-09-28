@@ -58,6 +58,24 @@ artifact without changing command semantics.
 
 ## Implementation sequence
 
+The Linux SQLite in-process facet now has a first-use bridge in
+`src/runtime/runtime_sqlite_demand.c`. An isolated native binary links that
+small object rather than the SQLite shared library. First use snapshots the
+configured regular provider file into a sealed memfd, checks the configured
+SHA-256 against the snapshot, loads that same snapshot, checks ABI v1 and all
+27 entry points, and supplies the Simple string callbacks through an explicit
+host table. The provider remains mapped while any SQLite handle may exist.
+The shared snapshot-fd allocator prevents `/proc/self/fd` pathname reuse
+across GPU, generic SFFI, and SQLite admissions. Concurrent callers wait for
+one admission verdict. Missing, corrupt, incompatible, or incomplete
+providers fail closed; the SQLite wrapper rejects native tagged nil (`3`) as
+an invalid pointer handle.
+
+This facet is available through an explicit object link and provider path/
+digest environment pair. It is not yet the CLI default, an installed atomic
+provider manifest, or a cross-platform solution. The full CLI still lacks
+`RuntimeFeatureClosureV1` and the Office/GPU command cutover.
+
 1. Extract the software browser/Office paint path from the all-backend
    `engine2d.engine` import closure without changing its pixel result. Keep
    GPU backends behind versioned first-use facets. The Office product build
