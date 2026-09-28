@@ -2,7 +2,7 @@
 
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
-    PACKAGE_MODULE_INDEX_SCHEMA_V2,
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3,
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
     package_module_index_read_current_v1,
     package_module_index_find_v1,
@@ -84,17 +84,21 @@ fn package_index_route_closure_v1(
 fn package_index_route_ordered_modules_v1(
     entries: [PackageModuleIndexEntryV1],
     selected_modules: [text], selected_members: Dict<text, bool>,
-    schedule: [text]
+    schedule: [text], package_heads: Dict<text, i64>, package_next: [i64]
 ) -> [text]:
     var ordered: [text] = []
     var added: Dict<text, bool> = {}
     for package_identity in schedule:
-        for entry in entries:
-            if entry.package_identity == package_identity and
-                    selected_members.has(entry.module_identity) and
-                    not added.has(entry.module_identity):
-                ordered = ordered.push(entry.module_identity)
-                added[entry.module_identity] = true
+        # The route has already linked selected entries by package. Reuse
+        # those links instead of scanning every entry for each scheduled SCC.
+        var entry_index = package_heads[package_identity] ?? -1
+        while entry_index >= 0:
+            val module_identity = entries[entry_index].module_identity
+            if selected_members.has(module_identity) and
+                    not added.has(module_identity):
+                ordered = ordered.push(module_identity)
+                added[module_identity] = true
+            entry_index = package_next[entry_index]
     # The invalidation schedule contains only dirty packages. Archive-backed
     # modules in the selected closure must still be admitted and routed.
     for module_identity in selected_modules:
@@ -125,9 +129,14 @@ fn package_index_route_current_v1(
     if not admitted.valid or admitted.generation == nil:
         return PackageIndexRouteV1(false, "index-{admitted.reason}", [], [], [], [])
     val generation = admitted.generation!
-    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 or
+    if (generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2 and
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V3) or
             generation.variant_digest != expected_variant_digest:
         return PackageIndexRouteV1(false, "index-variant-mismatch", [], [], [], [])
+    if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V3 and
+            (entry_path == "" or
+                entry_path != generation.scope_entry_source_identity):
+        return PackageIndexRouteV1(false, "index-scope-mismatch", [], [], [], [])
     if generation.entries.len() == 0:
         return PackageIndexRouteV1(false, "index-graph-empty", [], [], [], [])
     if generation.producer_digest != expected_producer:
@@ -196,7 +205,8 @@ fn package_index_route_current_v1(
                 false, "invalidation-package-sources-missing", [], [], [], [])
 
     val ordered_modules = package_index_route_ordered_modules_v1(
-        generation.entries, selected_modules, selected_members, schedule)
+        generation.entries, selected_modules, selected_members, schedule,
+        package_heads, package_next)
     val authority = PackageArchiveAuthorityV1(
         generation.producer_digest, generation.root_generation,
         expected_variant_digest, generation.scv_revision_id,

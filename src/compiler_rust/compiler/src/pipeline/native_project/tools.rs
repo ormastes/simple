@@ -3788,6 +3788,7 @@ fn is_known_system_name(name: &str) -> bool {
             // only in is_macos_system_symbol, so on a Linux host they were
             // weak-stub candidates (test_cxx_abi_symbols_are_not_stub_candidates).
             | "clock_getres"
+            | "flock"
             | "recvmsg"
             | "sendfile"
             | "sigaltstack"

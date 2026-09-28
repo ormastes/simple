@@ -128,6 +128,37 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Reject persisted archives that pass hashes/manifest checks but cannot
+  populate warm symbol/action owners. Cold publication now shares the warm
+  payload parser and leaves `CURRENT` unchanged on malformed content. Focused
+  no-stub Stage-2 native evidence: 7/7; see
+  `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
+- [ ] Fix or rule out the Stage-2 pinned archive reader RSS runaway before
+  using it as a cold publication memory optimization; see
+  `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
+  The synchronous file-view path now avoids a text-valued async roundtrip and
+  the pinned digest checks use hex text. A bounded 542-byte pinned archive
+  integration now passes 8 native scenarios, but the cold publisher trial
+  raised RSS and its apparent p95 gain was not consistent across 30 pairs.
+  The publisher change was reverted. Larger matched time/RSS and Stage-4
+  qualification remain open; see
+  `doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.
+
+- [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
+  eviction in the cold driver. Phase-1 digest and byte-length owners also work
+  for nonstreaming low-memory compilation, where source text is gone before
+  HIR completes. See
+  `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
+- [ ] Attach real archive outputs to retained receipts and publish the V3
+  scoped graph from the production driver; then prove current-source warm/cold
+  time and RSS against the independent gates.
+
+- [x] Define a serialized entry-scoped graph when entry-closure compilation
+  lowers fewer sources than the full frozen inventory. V3 binds the full
+  inventory digest and exact entry, rejects missing/redundant graph nodes,
+  verifies reached archives before publication, and refuses mismatched warm
+  requests. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
 - [x] Prevent a stale binding-only index publication from replacing a graph
   generation after a concurrent writer wins. The pointer CAS has focused
   native and SPipe evidence in

@@ -565,11 +565,18 @@ fn compiler_inventory_untracked_deletions_v1(
             removed.push(path)
     if removed.len() == 0:
         return Some([])
-    # A former untracked file may have been staged. Distinguish that case
-    # from deletion/ignore changes before emitting a delete event.
+    # A former untracked file may have been staged. Ask Git about only the
+    # changed names: listing every cached src/test path builds a full tracked
+    # map for a one-file transition. Literal pathspecs keep names containing
+    # Git glob characters exact.
+    var removed_names: Dict<text, bool> = {}
+    var pathspecs: [text] = []
+    for path in removed:
+        removed_names[path] = true
+        pathspecs.push(":(literal){path}")
     val listed = compiler_inventory_git_lines_v1(
         root, ["-c", "core.quotePath=false", "ls-files", "--cached", "--"] +
-            source_roots)
+            pathspecs)
     if listed == nil:
         return nil
     var tracked: Dict<text, bool> = {}
@@ -577,6 +584,8 @@ fn compiler_inventory_untracked_deletions_v1(
         if path == "":
             continue
         if path.starts_with("\"") or path.contains("\r"):
+            return nil
+        if not removed_names.has(path):
             return nil
         tracked[path] = true
     var deletions: [CompileSourceEventV1] = []
