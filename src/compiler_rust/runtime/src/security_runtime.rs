@@ -83,6 +83,7 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
     match name {
         "rt_file_read_text"
         | "rt_file_read_regular_no_follow_bounded"
+        | "rt_file_read_regular_no_follow_bounded_bytes"
         | "rt_file_read_text_rv"
         | "rt_file_canonicalize"
         | "rt_file_exists"
