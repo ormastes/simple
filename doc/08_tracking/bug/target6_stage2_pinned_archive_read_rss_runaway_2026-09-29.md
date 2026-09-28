@@ -79,8 +79,22 @@ by a missing byte count. The native stream implementation or its call boundary
 needs a known-vector, multi-block parity test; the existing partition test
 only pins the empty digest and compares partitions against each other.
 
-Next: test incremental SHA-256 against external known digests at block
-boundaries and over several chunks in the no-stub native binary; correct that
-path, then rerun pinned archive admission with descriptor bytes. Only after
-that passes, compare paired time and peak RSS on a realistically large CAS
-archive against the existing path and apply the normalized time/RSS gate.
+## Follow-up: native stream parity and conversion diagnosis (2026-09-29)
+
+The no-stub native unit spec now pins external SHA-256 digests for repeated
+3-, 64-, 65-, 129-, and 542-byte messages and a mixed 542-byte message.
+The stream passes all vectors, including a split 129-byte message: four
+examples, zero failures, 3,612 KiB peak RSS. The prior suspicion of a general
+stream compression defect is not supported by these tests.
+
+The persisted archive scenario now uses `text_to_utf8_bytes` on `cas_get`
+content, then checks both one-shot and streamed hashes against the admitted
+digest. All eight no-stub native integration examples pass (0.14 s,
+8,120 KiB peak RSS). This identifies the earlier `.bytes()` diagnostic as an
+invalid way to establish the archive's UTF-8 byte identity; its repeated
+calls also yielded different one-shot and streamed digests in that probe.
+The production descriptor reader still needs its own bounded-chunk retest:
+the passing text conversion does not prove its transport returns the same
+bytes or that large archives meet the time/RSS gate. Next, isolate the
+descriptor read's byte parity, then compare paired time and peak RSS on a
+realistically large CAS archive against the existing path.
