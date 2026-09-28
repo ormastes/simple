@@ -1,0 +1,63 @@
+use std.scv.compile_source_inventory.{
+    CompileSourceEventV1, compile_source_inventory_git_event_v1,
+    compile_source_inventory_apply_event_v1,
+    compile_source_inventory_apply_git_events_v1,
+    compile_source_inventory_encode_v1,
+    compile_source_inventory_read_current_v1
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+fn main() -> i64:
+    val root = "build/mini_builds/scv_warm_batch_native_probe-{rt_getpid()}"
+    val cache_root = root + "/build/scv"
+    dir_remove(root, true)
+    val a = compile_source_inventory_git_event_v1(
+        "create", "src/a.spl", "export fn a(): 1\n")
+    val b = compile_source_inventory_git_event_v1(
+        "create", "src/b.spl", "export fn b(): 1\n")
+    val seeded = compile_source_inventory_apply_git_events_v1(cache_root, [a, b])
+    if not seeded.valid or seeded.inventory == nil:
+        print "seed failed: {seeded.reason}"
+        return 1
+    val events: [CompileSourceEventV1] = [
+        a,
+        compile_source_inventory_git_event_v1(
+            "modify", "src/a.spl", "export fn a(): 2\n"),
+        compile_source_inventory_git_event_v1("delete", "src/b.spl", ""),
+        compile_source_inventory_git_event_v1(
+            "create", "src/c.spl", "export fn c(): 1\n"),
+        compile_source_inventory_git_event_v1("delete", "src/c.spl", ""),
+        compile_source_inventory_git_event_v1(
+            "create", "src/c.spl", "export fn c(): 2\n"),
+        compile_source_inventory_git_event_v1("delete", "src/missing.spl", "")
+    ]
+    var serial = seeded.inventory!
+    for event in events:
+        val changed = compile_source_inventory_apply_event_v1(serial, event)
+        if not changed.valid or changed.inventory == nil:
+            print "serial reducer failed: {changed.reason}"
+            return 2
+        serial = changed.inventory!
+    val batched = compile_source_inventory_apply_git_events_v1(cache_root, events)
+    if not batched.valid or batched.inventory == nil or
+            compile_source_inventory_encode_v1(batched.inventory!) !=
+                compile_source_inventory_encode_v1(serial):
+        print "warm batch differs from serial reducer: {batched.reason}"
+        return 3
+    val invalid = compile_source_inventory_apply_git_events_v1(cache_root, [
+        compile_source_inventory_git_event_v1(
+            "create", "src/d.spl", "export fn d(): 1\n"),
+        compile_source_inventory_git_event_v1(
+            "invalid", "src/e.spl", "export fn e(): 1\n")])
+    if invalid.valid or invalid.reason != "event-operation-invalid":
+        print "invalid batch was admitted"
+        return 4
+    val current = compile_source_inventory_read_current_v1(cache_root)
+    if not current.valid or current.digest != batched.digest:
+        print "invalid batch changed the published pointer"
+        return 5
+    dir_remove(root, true)
+    print "PASS scv_warm_batch_native_probe"
+    0

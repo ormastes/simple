@@ -9,6 +9,7 @@ use std.common.crypto.sha256.{sha256_text}
 # Byte-wise order: native text relational operators compare tagged addresses.
 use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
 use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -22,6 +23,7 @@ extern fn rt_file_size(path: text) -> i64
 extern fn rt_dir_create_all(path: text) -> bool
 
 val PACKAGE_MODULE_INDEX_SCHEMA_V1: i64 = 1
+val PACKAGE_MODULE_INDEX_SCHEMA_V2: i64 = 2
 val PACKAGE_MODULE_INDEX_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
 
 struct PackageModuleIndexEntryV1:
@@ -49,6 +51,9 @@ struct PackageModuleIndexGenerationV1:
     scv_tree_id: text
     inventory_digest: text
     entries: [PackageModuleIndexEntryV1]
+    # V2 graph generations bind the compiler configuration variant. V1
+    # snapshot-only bindings remain readable during migration.
+    variant_digest: text = ""
 
 struct PackageModuleIndexReadV1:
     valid: bool
@@ -319,14 +324,23 @@ fn package_module_index_entry_action_digest_v1(
         entry.scc_identity,
         imports
     ]
-    var encoded = ""
+    var encoded = if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V2:
+        package_module_index_frame_v1(generation.variant_digest)
+    else:
+        ""
     for part in parts:
         encoded = encoded + package_module_index_frame_v1(part)
     sha256_text(encoded)
 
 fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) -> text:
-    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V1:
+    if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V1 and
+            generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2:
         return "unsupported-schema"
+    if generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V1:
+        if generation.variant_digest != "":
+            return "legacy-variant-unexpected"
+    elif not package_module_index_digest_valid_v1(generation.variant_digest):
+        return "variant-digest-invalid"
     if not package_module_index_digest_valid_v1(generation.producer_digest):
         return "producer-digest-invalid"
     if not package_module_index_text_valid_v1(generation.root_generation):
@@ -364,17 +378,20 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
 fn package_module_index_encode_v1(generation: PackageModuleIndexGenerationV1) -> text:
     if package_module_index_validate_v1(generation) != "ok":
         return ""
+    val v2 = generation.schema_version == PACKAGE_MODULE_INDEX_SCHEMA_V2
     var lines: [text] = [
-        "simple-package-module-index-v1",
-        "schema=1",
+        if v2: "simple-package-module-index-v2" else: "simple-package-module-index-v1",
+        if v2: "schema=2" else: "schema=1",
         "producer={generation.producer_digest}",
         "root={generation.root_generation}",
         "scv-revision={generation.scv_revision_id}",
         "scv-commit={generation.scv_commit_id}",
         "scv-tree={generation.scv_tree_id}",
-        "inventory={generation.inventory_digest}",
-        "count={generation.entries.len()}"
+        "inventory={generation.inventory_digest}"
     ]
+    if v2:
+        lines.push("variant={generation.variant_digest}")
+    lines.push("count={generation.entries.len()}")
     for entry in generation.entries:
         val encoded = package_module_index_entry_encode_v1(entry)
         if encoded == "":
@@ -384,9 +401,12 @@ fn package_module_index_encode_v1(generation: PackageModuleIndexGenerationV1) ->
 
 fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     val lines = content.split("\n")
-    if lines.len() < 9 or lines[0] != "simple-package-module-index-v1":
+    if lines.len() < 9 or (lines[0] != "simple-package-module-index-v1" and
+            lines[0] != "simple-package-module-index-v2"):
         return PackageModuleIndexReadV1(false, "corrupt-header", "", nil)
-    if lines[1] != "schema=1":
+    val v2 = lines[0] == "simple-package-module-index-v2"
+    if (v2 and lines[1] != "schema=2") or
+            (not v2 and lines[1] != "schema=1"):
         return PackageModuleIndexReadV1(false, "unsupported-schema", "", nil)
     if not lines[2].starts_with("producer=") or not lines[3].starts_with("root="):
         return PackageModuleIndexReadV1(false, "corrupt-generation", "", nil)
@@ -401,13 +421,18 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     val scv_commit = lines[5].substring(11, lines[5].len())
     val scv_tree = lines[6].substring(9, lines[6].len())
     val inventory = lines[7].substring(10, lines[7].len())
-    if not lines[8].starts_with("count="):
+    if v2 and (lines.len() < 10 or not lines[8].starts_with("variant=")):
+        return PackageModuleIndexReadV1(false, "corrupt-generation", "", nil)
+    val variant_digest = if v2: lines[8].substring(8, lines[8].len()) else: ""
+    val count_row = if v2: 9 else: 8
+    val entry_row = count_row + 1
+    if not lines[count_row].starts_with("count="):
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
-    val count = lines[8].substring(6, lines[8].len()).to_i64() ?? -1
-    if count < 0 or lines.len() != count + 9:
+    val count = lines[count_row].substring(6, lines[count_row].len()).to_i64() ?? -1
+    if count < 0 or lines.len() != count + entry_row:
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
     var entries: [PackageModuleIndexEntryV1] = []
-    var index = 9
+    var index = entry_row
     while index < lines.len():
         val entry = package_module_index_entry_decode_v1(lines[index])
         if entry == nil:
@@ -415,14 +440,15 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
         entries = entries.push(entry!)
         index = index + 1
     val generation = PackageModuleIndexGenerationV1(
-        schema_version: 1,
+        schema_version: if v2: 2 else: 1,
         producer_digest: producer,
         root_generation: root,
         scv_revision_id: scv_revision,
         scv_commit_id: scv_commit,
         scv_tree_id: scv_tree,
         inventory_digest: inventory,
-        entries: entries
+        entries: entries,
+        variant_digest: variant_digest
     )
     val validation = package_module_index_validate_v1(generation)
     if validation != "ok":
@@ -438,16 +464,19 @@ fn package_module_index_digest_v1(generation: PackageModuleIndexGenerationV1) ->
 fn package_module_index_storage_dir_v1(cache_root: text) -> text:
     cache_root + "/package-module-index-v1"
 
-fn package_module_index_publish_v1(
-    cache_root: text, generation: PackageModuleIndexGenerationV1
+fn _package_module_index_publish_locked_v1(
+    dir: text, content: text, digest: text,
+    compare_current: bool, expected_current_digest: text
 ) -> bool:
-    val content = package_module_index_encode_v1(generation)
-    val digest = package_module_index_digest_v1(generation)
-    if content == "" or digest == "":
-        return false
-    val dir = package_module_index_storage_dir_v1(cache_root)
-    if not rt_dir_create_all(dir):
-        return false
+    val pointer = "{dir}/CURRENT"
+    if compare_current:
+        val current = package_module_index_read_file_v1(pointer, 64)
+        if current == nil:
+            # Missing is different from an unreadable or malformed pointer.
+            if expected_current_digest != "" or rt_file_exists(pointer):
+                return false
+        elif current! != expected_current_digest:
+            return false
     val immutable_path = "{dir}/{digest}.index"
     if rt_file_exists(immutable_path):
         val existing = package_module_index_read_file_v1(
@@ -460,7 +489,6 @@ fn package_module_index_publish_v1(
                 immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
             if raced_text != content:
                 return false
-    val pointer = "{dir}/CURRENT"
     val pointer_tmp = "{pointer}.tmp.{digest}"
     if not file_create_excl(pointer_tmp, digest):
         val staged = package_module_index_read_file_v1(pointer_tmp, 64) ?? ""
@@ -471,6 +499,44 @@ fn package_module_index_publish_v1(
         val published = package_module_index_read_file_v1(pointer, 64) ?? ""
         return published == digest
     true
+
+fn _package_module_index_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    compare_current: bool, expected_current_digest: text
+) -> bool:
+    if compare_current and expected_current_digest != "" and
+            not package_module_index_digest_valid_v1(expected_current_digest):
+        return false
+    val content = package_module_index_encode_v1(generation)
+    val digest = package_module_index_digest_v1(generation)
+    if content == "" or digest == "":
+        return false
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    if not rt_dir_create_all(dir):
+        return false
+    # The graph writer and binding-only fallback share this lock. Compare and
+    # replace the pointer while holding it, so a late fallback cannot erase a
+    # graph published after its earlier read.
+    val lock = file_lock("{dir}/CURRENT.lock", 30)
+    if lock < 0:
+        return false
+    val published = _package_module_index_publish_locked_v1(
+        dir, content, digest, compare_current, expected_current_digest)
+    if not file_unlock(lock):
+        return false
+    published
+
+fn package_module_index_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1
+) -> bool:
+    _package_module_index_publish_v1(cache_root, generation, false, "")
+
+fn package_module_index_publish_if_current_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    expected_current_digest: text
+) -> bool:
+    _package_module_index_publish_v1(
+        cache_root, generation, true, expected_current_digest)
 
 fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
     val dir = package_module_index_storage_dir_v1(cache_root)
@@ -642,6 +708,7 @@ fn package_module_index_invalidate_changes_v1(
     PackageModuleInvalidationV1(true, "ok", dirty, packages, schedule.2)
 
 export PACKAGE_MODULE_INDEX_SCHEMA_V1
+export PACKAGE_MODULE_INDEX_SCHEMA_V2
 export PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1
 export PackageTldrHeaderV1, PersistentSmfPackageIndexV1
 export PackageModuleIndexReadV1, PackageModuleInvalidationV1
@@ -650,7 +717,8 @@ export package_module_index_entry_encode_v1, package_module_index_entry_decode_v
 export package_module_index_validate_v1, package_module_index_encode_v1
 export package_module_index_decode_v1, package_module_index_digest_v1
 export package_module_index_entry_action_digest_v1
-export package_module_index_publish_v1, package_module_index_read_current_v1
+export package_module_index_publish_v1, package_module_index_publish_if_current_v1
+export package_module_index_read_current_v1
 export package_module_index_gc_v1
 export package_module_index_find_v1, package_module_index_invalidate_v1
 export package_module_index_invalidate_changes_v1

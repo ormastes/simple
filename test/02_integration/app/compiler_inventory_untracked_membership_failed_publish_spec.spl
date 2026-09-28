@@ -1,0 +1,73 @@
+# @req REQ-COMPILE-INVENTORY-ATOMIC-MEMBERSHIP
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{
+    dir_create_all, file_write, file_delete, file_exists, process_run
+}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_read_pointer_content_v1,
+    compile_source_inventory_read_current_v1
+}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+fn membership_digest_from_pointer(pointer: text) -> text:
+    val marker = "untracked_membership_digest="
+    val start = pointer.index_of(marker)
+    if start < 0:
+        return ""
+    pointer.substring(start + marker.len())
+
+describe "compiler inventory failed membership publication":
+    it "removes only a newly written record when event application rejects":
+        step("Admit a cold inventory with one untracked source")
+        val root = "build/test-artifacts/scv-membership-failed-{rt_getpid()}"
+        val cache = root + "/build/scv"
+        val records = cache + "/compile-events/untracked/"
+        dir_remove(root, true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(file_write(root + "/src/tracked.spl", "export fn tracked(): 1\n")).to_equal(true)
+        val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+        expect(init_code).to_equal(0)
+        val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/tracked.spl"])
+        expect(add_code).to_equal(0)
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+        expect(commit_code).to_equal(0)
+        expect(file_write(root + "/src/a.spl", "export fn a(): 2\n")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], true).valid).to_equal(true)
+        val admitted_pointer = compile_source_inventory_read_pointer_content_v1(cache) ?? ""
+        val admitted_digest = membership_digest_from_pointer(admitted_pointer)
+        expect(admitted_digest.len()).to_equal(64)
+        expect(file_exists(records + admitted_digest + ".paths")).to_equal(true)
+
+        step("Reject a validly framed but invalid filesystem event after a new path appears")
+        expect(file_write(root + "/src/b.spl", "export fn b(): 3\n")).to_equal(true)
+        expect(dir_create_all(root + "/.scv/journal")).to_equal(true)
+        val journal = root + "/.scv/journal/events.log"
+        expect(file_write(journal,
+            "op=one kind=fsevent refs=kind=overflow,path=src/b.spl,related=%empty sha=a utc=1\n"
+        )).to_equal(true)
+        val candidate_digest = sha256_text(
+            "simple-compile-untracked-membership-v1\ncount=2\nsrc/a.spl\nsrc/b.spl")
+        expect(candidate_digest == admitted_digest).to_equal(false)
+        val rejected = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("observed-event-apply:")
+        expect(compile_source_inventory_read_pointer_content_v1(cache) ?? "").to_equal(admitted_pointer)
+        expect(file_exists(records + admitted_digest + ".paths")).to_equal(true)
+        expect(file_exists(records + candidate_digest + ".paths")).to_equal(false)
+
+        step("Retry after removing the invalid journal without losing either source")
+        expect(file_delete(journal)).to_equal(true)
+        val accepted = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(accepted.valid).to_equal(true)
+        val current = compile_source_inventory_read_current_v1(cache)
+        expect(current.valid).to_equal(true)
+        expect(current.inventory!.entries.len()).to_equal(3)
+        expect(file_exists(records + candidate_digest + ".paths")).to_equal(true)
+        expect(file_exists(records + admitted_digest + ".paths")).to_equal(false)
+        dir_remove(root, true)

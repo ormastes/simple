@@ -5,7 +5,8 @@ use app.io.env_ops.{env_get, env_set}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
     PACKAGE_MODULE_INDEX_SCHEMA_V1, PackageModuleIndexGenerationV1, PackageModuleIndexReadV1,
-    package_module_index_publish_v1, package_module_index_read_current_v1}
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
@@ -95,10 +96,16 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
         # every platform. Publish the snapshot-binding generation here:
         # content-addressed and idempotent (same snapshot -> same digest),
         # and fail closed if it cannot be published or read back.
-        if not package_module_index_publish_v1(machine_cache_root(),
-                compiler_entrypoint_binding_generation_v1(snapshot)):
-            return compiler_entrypoint_invalid_v1("package-index:publish-failed")
+        val expected_index_digest = if index.valid: index.digest else: ""
+        val published = package_module_index_publish_if_current_v1(
+            machine_cache_root(),
+            compiler_entrypoint_binding_generation_v1(snapshot),
+            expected_index_digest)
         index = package_module_index_read_current_v1(machine_cache_root())
+        if not published and not compiler_entrypoint_index_binds_snapshot_v1(
+                index, snapshot):
+            return compiler_entrypoint_invalid_v1(
+                "package-index:publish-conflict-or-failed")
     if not index.valid or index.generation == nil:
         return compiler_entrypoint_invalid_v1("package-index:" + index.reason)
     val generation = index.generation!

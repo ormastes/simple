@@ -99,6 +99,46 @@ describe "event-maintained compile source inventory":
     it "replaces the complete inventory on an explicit cold rebuild":
         val cache_root = "build/test-artifacts/scv-cold-rebuild-{rt_getpid()}/build/scv"
         dir_remove(cache_root, true)
+
+    it "matches serial semantics for a warm event batch and rejects it atomically":
+        val cache_root = "build/test-artifacts/scv-warm-batch-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val a = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val b = compile_source_inventory_git_event_v1(
+            "create", "src/b.spl", "export fn b(): 1")
+        val seeded = compile_source_inventory_apply_git_events_v1(cache_root, [a, b])
+        expect(seeded.valid).to_equal(true)
+        val events = [
+            a,
+            compile_source_inventory_git_event_v1(
+                "modify", "src/a.spl", "export fn a(): 2"),
+            compile_source_inventory_git_event_v1("delete", "src/b.spl", ""),
+            compile_source_inventory_git_event_v1(
+                "create", "src/c.spl", "export fn c(): 1"),
+            compile_source_inventory_git_event_v1("delete", "src/c.spl", ""),
+            compile_source_inventory_git_event_v1(
+                "create", "src/c.spl", "export fn c(): 2"),
+            compile_source_inventory_git_event_v1("delete", "src/missing.spl", "")]
+        var serial = seeded.inventory!
+        for event in events:
+            val changed = compile_source_inventory_apply_event_v1(serial, event)
+            expect(changed.valid).to_equal(true)
+            serial = changed.inventory!
+        val batched = compile_source_inventory_apply_git_events_v1(cache_root, events)
+        expect(batched.valid).to_equal(true)
+        expect(compile_source_inventory_encode_v1(batched.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(serial))
+        val rejected = compile_source_inventory_apply_git_events_v1(cache_root, [
+            compile_source_inventory_git_event_v1(
+                "create", "src/d.spl", "export fn d(): 1"),
+            compile_source_inventory_git_event_v1(
+                "invalid", "src/e.spl", "export fn e(): 1")])
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("event-operation-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).digest).to_equal(
+            batched.digest)
+        dir_remove(cache_root, true)
         val first = compile_source_inventory_git_event_v1(
             "create", "src/a.spl", "export fn a(): 1")
         val disappeared = compile_source_inventory_git_event_v1(
@@ -169,6 +209,19 @@ describe "event-maintained compile source inventory":
         expect(pointer).to_contain("untracked_test_digest={test_digest}")
         expect(pointer.len() < 768).to_equal(true)
         expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(true)
+        val membership_digest = inventory_digest("bounded-path-record")
+        val (v3_digest, v3_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, empty_inventory(),
+            "0123456789abcdef0123456789abcdef01234567", 0,
+            inventory_digest(""), sha256_text(pointer),
+            src_digest, test_digest, membership_digest)
+        expect(v3_reason).to_equal("ok")
+        expect(v3_digest).to_equal(digest)
+        val v3_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(v3_pointer).to_contain("simple-compile-event-cursor-v3")
+        expect(v3_pointer).to_contain(
+            "untracked_membership_digest={membership_digest}")
+        expect(v3_pointer.len() < 768).to_equal(true)
         dir_remove(cache_root, true)
 
     it "applies Git and filesystem events without source discovery":
