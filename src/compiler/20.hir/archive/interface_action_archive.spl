@@ -7,6 +7,7 @@ use compiler.driver.cache.pinned_archive_capability.{
 }
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 
 val INTERFACE_ACTION_ARCHIVE_SCHEMA_V1: text =
     "simple-interface-action-archive-v1"
@@ -206,8 +207,12 @@ fn interface_action_archive_decode_v1(
     if manifest_result.is_err() or interface_result.is_err() or
             action_result.is_err():
         return Err(InterfaceActionArchiveErrorV1.invalid_capability)
-    val manifest_result_v1 = interface_action_archive_manifest_decode_v1(
+    val manifest_text = validated_utf8_bytes_to_text_linear(
         manifest_result.unwrap())
+    if manifest_text.is_err():
+        return Err(InterfaceActionArchiveErrorV1.unsupported_schema)
+    val manifest_result_v1 = interface_action_archive_manifest_decode_v1(
+        manifest_text.unwrap())
     if manifest_result_v1.is_err():
         return Err(manifest_result_v1.unwrap_err())
     val manifest = manifest_result_v1.unwrap()
@@ -220,8 +225,16 @@ fn interface_action_archive_decode_v1(
         return Err(InterfaceActionArchiveErrorV1.incompatible_variant)
     if manifest.dependencies != receipt.dependency_interface_digests:
         return Err(InterfaceActionArchiveErrorV1.dependency_digest_mismatch)
-    val interface_content = interface_result.unwrap()
-    val action_content = action_result.unwrap()
+    val interface_text = validated_utf8_bytes_to_text_linear(
+        interface_result.unwrap())
+    if interface_text.is_err():
+        return Err(InterfaceActionArchiveErrorV1.malformed_interface)
+    val action_text = validated_utf8_bytes_to_text_linear(
+        action_result.unwrap())
+    if action_text.is_err():
+        return Err(InterfaceActionArchiveErrorV1.malformed_action)
+    val interface_content = interface_text.unwrap()
+    val action_content = action_text.unwrap()
     if sha256_text(interface_content) != manifest.interface_digest:
         return Err(InterfaceActionArchiveErrorV1.malformed_interface)
     if sha256_text(action_content) != manifest.action_digest:
@@ -363,6 +376,7 @@ export CompileArchiveActionV1, InterfaceActionArchiveV1
 export InstalledInterfaceActionV1, SemanticContext, CompileActionRegistry
 export RouteArchiveInstallTransactionV1
 export RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1
+export InterfaceActionManifestV1, interface_action_archive_manifest_decode_v1
 export interface_action_archive_decode_v1, interface_action_archive_install_v1
 export route_archive_install_begin_v1, route_archive_install_stage_v1
 export route_archive_install_commit_v1, route_archive_install_rollback_v1
