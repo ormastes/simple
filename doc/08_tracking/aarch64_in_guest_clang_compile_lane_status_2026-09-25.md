@@ -2350,3 +2350,23 @@ R7a through completion; the serial watcher reports WITNESS_STL_OK / errors.
   (grep; zero `error:` expected). Whoever grades it: also grep
   'rung=R7a-cc1-stl-compile rc=0', 'rung=R7b-lld-stl-link rc=0',
   'rung=R7c-run-witness-stl rc=0'.
+
+## Landing procedure (recorded so any agent can repeat it)
+
+The lane landed via PR from a rebased copy, never from the dirty main worktree. Fetch both refs, then create a disposable worktree at origin/main and rebase the lane onto it — the only file both sides ever touched, `examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`, has resolved as a clean textual union both times (main's `close(33)` network-fd case plus this lane's VFAT LFN directory scan; verify with `grep -c 'case 33'` and `grep -c '_simpleos_lfn_pos'` and zero conflict markers), so no manual resolution has been needed. Push with `--force-with-lease` immediately after a fresh fetch (one rebase retry if the remote moved), open the PR with `gh pr create --base main`, wait for the required checks (Code Idiom & Structural Ratchet Gates) to go green, then land with `gh pr merge <pr> --merge` (repo convention is merge commits; auto-merge is disabled on this repo). Exact commands:
+
+```sh
+git fetch origin main codex/spipe-local-knowledge-setup
+git worktree add --detach /tmp/land-main origin/main
+cd /tmp/land-main
+git checkout -b land/codex-spipe-local-knowledge-setup origin/codex/spipe-local-knowledge-setup
+git rebase origin/main   # verify union in baremetal_stubs.c afterwards
+git fetch origin codex/spipe-local-knowledge-setup
+git push --force-with-lease origin land/codex-spipe-local-knowledge-setup:codex/spipe-local-knowledge-setup
+gh pr create --base main --head codex/spipe-local-knowledge-setup --title "..." --body "..."
+gh pr checks 1883 --watch   # until the ratchet gate passes
+gh pr merge 1883 --merge
+git worktree remove --force /tmp/land-main
+```
+
+Note: the gate's kernel native-build line cannot be verified locally while main's pre-existing `task.security` / `TaskSecurity` breakage (missing from `TaskControlBlock` since e274cd33719) is unfixed; that is a main-side repair, not part of this lane. CI is the authoritative gate.
