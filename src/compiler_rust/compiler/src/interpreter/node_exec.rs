@@ -1401,13 +1401,28 @@ pub(crate) fn exec_assignment(
             // through.
             let case1_unique = match env.get(container_name) {
                 Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
-                Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 _ => false,
             };
             if !is_module_global && case1_unique {
                 if let Some(slot) = env.get_mut(container_name) {
                     match slot {
+                        Value::ByteArray(arc) => {
+                            if let Some(bytes) = Arc::get_mut(arc) {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    while bytes.len() < idx {
+                                        bytes.push(0);
+                                    }
+                                    bytes.push(byte);
+                                }
+                                return Ok(Control::Next);
+                            }
+                        }
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
@@ -1418,19 +1433,6 @@ pub(crate) fn exec_assignment(
                                         arr.push(Value::Nil);
                                     }
                                     arr.push(value);
-                                }
-                                return Ok(Control::Next);
-                            }
-                        }
-                        Value::ByteArray(arc) => {
-                            if let Some(bytes) = Arc::get_mut(arc) {
-                                let idx = index_val.as_int()? as usize;
-                                let byte = value.as_int()? as u8;
-                                if idx < bytes.len() {
-                                    bytes[idx] = byte;
-                                } else {
-                                    bytes.resize(idx, 0);
-                                    bytes.push(byte);
                                 }
                                 return Ok(Control::Next);
                             }
@@ -1468,10 +1470,9 @@ pub(crate) fn exec_assignment(
                         }
                         Value::Array(arc)
                     }
-                    // A local buffer from a runtime allocator (`rt_byte_array_new_len`,
-                    // `rt_bytes_alloc`) is a `Value::ByteArray`; the field paths below
-                    // already accept it, the plain-local path did not
-                    // (`loader/stack_builder.spl` `bytes[cursor] = ...`). Frozen stays rejected.
+                    // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
+                    // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`
+                    // must work like the field paths below. Frozen stays rejected.
                     Value::ByteArray(mut arc) => {
                         let idx = index_val.as_int()? as usize;
                         let byte = value.as_int()? as u8;
@@ -1479,7 +1480,9 @@ pub(crate) fn exec_assignment(
                         if idx < bytes.len() {
                             bytes[idx] = byte;
                         } else {
-                            bytes.resize(idx, 0);
+                            while bytes.len() < idx {
+                                bytes.push(0);
+                            }
                             bytes.push(byte);
                         }
                         Value::ByteArray(arc)

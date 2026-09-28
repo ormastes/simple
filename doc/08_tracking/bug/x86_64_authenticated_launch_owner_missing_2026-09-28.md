@@ -98,11 +98,12 @@ the line before `extern fn`). Only `rt_array_data_ptr_text` and
 a hosted interpreter entry.
 
 - Now backed in the seed interpreter (`interpreter_extern/arm_loader.rs`, a
-  byte-for-byte port of the bare-metal C, including OOB -> 0 and the
-  `e_machine == 183` ELF64 header check): `rt_arm_array_{len_u32,
-  get_byte_u32, clone_bytes, slice_bytes}`, `rt_arm_elf64_{entry,
-  pt_load_count, pt_load_offset, pt_load_vaddr, pt_load_filesz,
-  pt_load_memsz, pt_load_flags, pt_load_align}`, `rt_arm_smf_elf_stub_size`.
+  byte-for-byte port of the bare-metal C, including the `e_machine == 183`
+  ELF64 header check): `rt_arm_array_{clone_bytes, slice_bytes}`,
+  `rt_arm_elf64_{entry, pt_load_count, pt_load_offset, pt_load_vaddr,
+  pt_load_filesz, pt_load_memsz, pt_load_flags, pt_load_align}`, and
+  `rt_arm_smf_elf_stub_size`. `rt_arm_array_{len_u32, get_byte_u32}` landed
+  concurrently on main (`976bdd1bcef`, `sffi_array.rs`).
 - Not backed, on purpose (hardware-only: cache maintenance, EL0 copy/handoff,
   payload regions, SVC, RNDR): `rt_arm64_dcache_{clean,invalidate}_range`,
   `rt_arm64_user_copy{in,out}`, `rt_arm64_record_user_handoff`,
@@ -120,8 +121,8 @@ Restoring the example exposed three more defects, all fixed:
    the interpreter. Fixed in `interpreter/expr/ops.rs`.
 2. Index assignment to a *local* `Value::ByteArray` (`rt_byte_array_new_len`)
    failed with `cannot index assign value of type array`. The field paths
-   already handled it. Fixed in `interpreter/node_exec.rs`, in both the
-   in-place path and the copy-on-write path.
+   already handled it. `origin/main` fixed this at the same time
+   (`4f186300a05`), so this change takes that fix and adds nothing here.
 3. The spec fixture had `p_offset 0x80` with `p_vaddr 0x400000` and
    `p_align 0x1000`, which the loader's alignment check rightly rejects. The
    fixture now uses vaddr/entry `0x400080`.

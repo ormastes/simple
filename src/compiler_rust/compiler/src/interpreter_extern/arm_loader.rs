@@ -11,6 +11,8 @@
 //!
 //! Hardware-only arm64 externs (dcache maintenance, EL0 user copy/handoff,
 //! payload regions, SVC, RNDR) are deliberately not backed here.
+//!
+//! `rt_arm_array_len_u32` / `rt_arm_array_get_byte_u32` live in `sffi_array.rs`.
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
@@ -99,17 +101,6 @@ fn byte_result(source: &Value, bytes: Vec<u8>) -> Value {
         Value::ByteArray(_) | Value::FrozenByteArray(_) => Value::byte_array(bytes),
         _ => Value::array(bytes.into_iter().map(|b| Value::Int(i64::from(b))).collect()),
     }
-}
-
-pub fn rt_arm_array_len_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr = arg(args, 0, "rt_arm_array_len_u32", 1)?;
-    Ok(uint(ByteView::of(arr).len()))
-}
-
-pub fn rt_arm_array_get_byte_u32_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let arr = arg(args, 0, "rt_arm_array_get_byte_u32", 2)?;
-    let idx = int_arg(args, 1, "rt_arm_array_get_byte_u32", 2)?;
-    Ok(uint(ByteView::of(arr).at(idx)))
 }
 
 pub fn rt_arm_array_clone_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -288,10 +279,31 @@ mod tests {
             Value::byte_array(vec![7, 0, 255]),
             Value::array(vec![Value::Int(7), Value::Int(0), Value::Int(255)]),
         ] {
-            assert_eq!(call(rt_arm_array_len_u32_fn, &[arr.clone()]), 3);
-            assert_eq!(call(rt_arm_array_get_byte_u32_fn, &[arr.clone(), Value::Int(2)]), 255);
-            assert_eq!(call(rt_arm_array_get_byte_u32_fn, &[arr.clone(), Value::Int(3)]), 0);
-            assert_eq!(call(rt_arm_array_get_byte_u32_fn, &[arr.clone(), Value::Int(-1)]), 0);
+            assert_eq!(
+                call(super::super::sffi_array::rt_arm_array_len_u32_fn, &[arr.clone()]),
+                3
+            );
+            assert_eq!(
+                call(
+                    super::super::sffi_array::rt_arm_array_get_byte_u32_fn,
+                    &[arr.clone(), Value::Int(2)]
+                ),
+                255
+            );
+            assert_eq!(
+                call(
+                    super::super::sffi_array::rt_arm_array_get_byte_u32_fn,
+                    &[arr.clone(), Value::Int(3)]
+                ),
+                0
+            );
+            assert_eq!(
+                call(
+                    super::super::sffi_array::rt_arm_array_get_byte_u32_fn,
+                    &[arr.clone(), Value::Int(-1)]
+                ),
+                0
+            );
         }
     }
 

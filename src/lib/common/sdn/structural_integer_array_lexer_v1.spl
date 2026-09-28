@@ -1,0 +1,71 @@
+"""Exact byte-span adapter over the existing SDN lexer, for an ASCII subset.
+
+The SDN lexer exposes kind/text but no source offsets. Restricting this adapter
+to ASCII makes its substring indices and source byte positions agree. Recover
+each span at the current cursor after spaces/tabs only; never search ahead.
+Newline, comments, strings, nested collections, and noninteger words are outside
+this candidate's single-line integer-array scope. The legacy lexer is unchanged.
+"""
+use std.common.sdn.lexer.{tokenize, TokenKind}
+use std.common.structural.parse.parse_types.{ParseTokenArena, PARSE_SCHEMA_ID}
+use std.common.structural.parse.program_v1.{ParseProgramLimitsV1, parse_program_limits_valid_v1}
+
+pub val SDN_INTEGER_TOKEN_V1: u16 = 1u16
+pub val SDN_OPEN_TOKEN_V1: u16 = 2u16
+pub val SDN_CLOSE_TOKEN_V1: u16 = 3u16
+pub val SDN_COMMA_TOKEN_V1: u16 = 4u16
+
+fn _integer_spelling_v1(bytes: [u8]) -> bool:
+    if bytes.len() == 0: return false
+    var i = 0
+    if bytes[0] == 45u8: i = 1
+    if i == bytes.len(): return false
+    while i < bytes.len():
+        if bytes[i] < 48u8 or bytes[i] > 57u8: return false
+        i = i + 1
+    true
+
+pub fn sdn_integer_array_lex_v1(source: text, limits: ParseProgramLimitsV1) -> Result<ParseTokenArena, text>:
+    if not parse_program_limits_valid_v1(limits): return Err("invalid_limits")
+    val bytes = source.bytes()
+    if bytes.len() > limits.max_source_bytes: return Err("source_capacity")
+    for byte in bytes:
+        if byte >= 128u8: return Err("unsupported_non_ascii")
+    # Existing production lexer output, never synthetic test tokens. Its
+    # temporary token allocation is bounded by source size, not max_tokens.
+    val lexed = tokenize(source)
+    var kinds: [u16] = []
+    var starts: [u32] = []
+    var counts: [u32] = []
+    var cursor = 0
+    for token in lexed:
+        while cursor < bytes.len() and (bytes[cursor] == 32u8 or bytes[cursor] == 9u8):
+            cursor = cursor + 1
+        val spelling = token.text.bytes()
+        if spelling.len() == 0 or spelling.len() > bytes.len() - cursor:
+            return Err("lexer_source_mismatch")
+        var i = 0
+        while i < spelling.len():
+            if spelling[i] != bytes[cursor + i]: return Err("lexer_source_mismatch")
+            i = i + 1
+        val kind = match token.kind:
+            case TokenKind.Word:
+                if not _integer_spelling_v1(spelling): return Err("unsupported_integer_spelling")
+                SDN_INTEGER_TOKEN_V1
+            case TokenKind.LBracket: SDN_OPEN_TOKEN_V1
+            case TokenKind.RBracket: SDN_CLOSE_TOKEN_V1
+            case TokenKind.Comma: SDN_COMMA_TOKEN_V1
+            case TokenKind.Newline: return Err("unsupported_multiline")
+            case _: return Err("unsupported_token")
+        if kinds.len() >= limits.max_tokens: return Err("token_capacity")
+        kinds.push(kind)
+        starts.push(cursor as u32)
+        counts.push(spelling.len() as u32)
+        cursor = cursor + spelling.len()
+    while cursor < bytes.len() and (bytes[cursor] == 32u8 or bytes[cursor] == 9u8):
+        cursor = cursor + 1
+    if cursor != bytes.len(): return Err("lexer_source_underfill")
+    Ok(ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts))
+
+export SDN_INTEGER_TOKEN_V1, SDN_OPEN_TOKEN_V1, SDN_CLOSE_TOKEN_V1, SDN_COMMA_TOKEN_V1
+export sdn_integer_array_lex_v1

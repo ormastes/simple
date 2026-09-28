@@ -811,11 +811,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn);
+    insert_simple!("rt_arm_array_len_u32", sffi_array::rt_arm_array_len_u32_fn);
+    insert_simple!("rt_arm_array_get_byte_u32", sffi_array::rt_arm_array_get_byte_u32_fn);
     insert_simple!("rt_bytes_u8_set", sffi_array::rt_bytes_u8_set_fn);
     // @cfg(arm64) loader byte helpers: the interpreter selects @cfg by host arch,
     // so an aarch64 host reaches these from os/kernel/loader. See arm_loader.rs.
-    insert_simple!("rt_arm_array_len_u32", arm_loader::rt_arm_array_len_u32_fn);
-    insert_simple!("rt_arm_array_get_byte_u32", arm_loader::rt_arm_array_get_byte_u32_fn);
     insert_simple!("rt_arm_array_clone_bytes", arm_loader::rt_arm_array_clone_bytes_fn);
     insert_simple!("rt_arm_array_slice_bytes", arm_loader::rt_arm_array_slice_bytes_fn);
     insert_simple!("rt_arm_elf64_pt_load_count", arm_loader::rt_arm_elf64_pt_load_count_fn);

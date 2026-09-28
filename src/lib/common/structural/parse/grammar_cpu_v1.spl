@@ -4,8 +4,8 @@ Input is an already-tokenized source blob. MatchByte matches exactly one byte;
 keyword/lexical modes remain the dialect adapter's responsibility. All effects
 are private until root acceptance at token EOF. Resource errors are fatal,
 never an ordered-choice mismatch. Step fuel counts grammar AND action dispatch
-and is not part of any checkpoint. Snapshot memory is bounded by the selected
-choice depth and per-state capacities, not claimed to be constant-space.
+and is not part of any checkpoint. Choice copies bounded call frames and marks
+semantic arenas; overwrite journals are bounded by action fuel.
 """
 use std.common.structural.parse.program_v1.*
 use std.common.structural.parse.program_output_v1.*
@@ -76,13 +76,15 @@ pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob
             if choices.len() >= limits.max_choices:
                 return parse_program_execution_failed_v1("choice_capacity", steps)
             choices.push(parse_checkpoint_v1(a, rule, cursor, calls, state))
+            state.journal_active = true
             pc = pc + 3
         elif op == PG_COMMIT_V1:
             if choices.len() == 0: return parse_program_execution_failed_v1("choice_underflow", steps)
             val checkpoint = choices[choices.len() - 1]
             if checkpoint.rule != rule or checkpoint.calls.len() != calls.len():
                 return parse_program_execution_failed_v1("foreign_choice_commit", steps)
-            choices = parse_choices_prefix_v1(choices, choices.len() - 1)
+            choices.pop()
+            if choices.len() == 0: parse_semantic_clear_journal_v1(state)
             pc = a
         elif op == PG_CALL_V1:
             if calls.len() >= limits.max_calls:
@@ -95,7 +97,7 @@ pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob
                 val frame = calls[calls.len() - 1]
                 if choices.len() != frame.choice_depth:
                     return parse_program_execution_failed_v1("unclosed_choice", steps)
-                calls = parse_calls_prefix_v1(calls, calls.len() - 1)
+                calls.pop()
                 rule = frame.rule
                 pc = frame.return_pc
             else:
@@ -118,13 +120,13 @@ pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob
         if mismatch:
             if choices.len() == 0: return parse_program_execution_failed_v1("no_match", steps)
             val checkpoint = choices[choices.len() - 1]
-            choices = parse_choices_prefix_v1(choices, choices.len() - 1)
+            choices.pop()
             pc = checkpoint.resume_pc
             rule = checkpoint.rule
             cursor = checkpoint.cursor
-            # The checkpoint is popped; transfer its private state, do not clone it.
             calls = checkpoint.calls
-            state = checkpoint.semantic
+            parse_semantic_rollback_v1(state, checkpoint)
+            if choices.len() == 0: parse_semantic_clear_journal_v1(state)
     parse_program_execution_failed_v1("unreachable_executor_end", steps)
 
 export parse_grammar_execute_v1
