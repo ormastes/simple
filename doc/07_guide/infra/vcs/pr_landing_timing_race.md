@@ -79,17 +79,13 @@ checks green is often shorter than the time it takes to earn them.
 ## What does not get you out of it
 
 - **Auto-merge is disabled repo-wide.** You cannot queue the merge and walk away.
-- **`--admin` does not bypass a *ruleset*.** Branch-protection admin override and
-  ruleset enforcement are different systems. `gh pr merge <n> --merge --admin`
-  against a ruleset-protected `main` returns, measured 2026-09-06:
-
-  ```
-  Required status check "SPipe Self Review Admission" is expected.
-  ```
-
-  That is also why the emergency procedure in `.claude/skills/spipe.md` adds a
-  `bypass_actors` entry to the ruleset *before* `--admin`: the flag alone does
-  nothing here. That procedure is user-authorized only.
+- **`--admin` alone does not bypass a *ruleset*** — only a listed bypass actor
+  does (measured 2026-09-06 with `bypass_actors: []`: `Required status check
+  "SPipe Self Review Admission" is expected.`). **Since 2026-09-28 the owner is
+  listed with `bypass_mode: pull_request`**, so `gh pr merge <n> --admin --merge`
+  now lands a reviewed PR and skips this whole loop; direct push stays rejected.
+  Recipe and rules: `.claude/rules/vcs.md` § "Force-landing a PR". The loop below
+  remains the non-admin path.
 
 ## The loop that works
 
@@ -124,7 +120,7 @@ the dispatch, because the update-branch push resets the admission.
 
 ## PR-path CI is required checks only (2026-09-27)
 
-The main ruleset has no bypass actors, so the two required contexts must report
+Outside the owner's admin PR merge, the two required contexts must report
 fast. They used to wait hours behind ~300 queued runs because every PR push
 fanned out to ~35 heavy workflows. Now:
 

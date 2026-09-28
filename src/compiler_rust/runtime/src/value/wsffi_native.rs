@@ -351,6 +351,20 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     try_call_i64_value(fptr, args_rv, nargs).unwrap_or(0)
 }
 
+/// Exact mixed ABI for a resolved `i32(i64, u32, u32, f64)` entry.
+/// The final integer is an f64 bit pattern, so the Simple extern stays all-i64.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i32_i64_u32_u32_f64_bits(
+    fptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3_bits: i64,
+) -> i64 {
+    if fptr == 0 || arg1 <= 0 || arg2 <= 0 || arg1 > u32::MAX as i64 || arg2 > u32::MAX as i64 {
+        return -1;
+    }
+    type Target = unsafe extern "C" fn(i64, u32, u32, f64) -> i32;
+    let target: Target = unsafe { std::mem::transmute(fptr as usize) };
+    unsafe { target(arg0, arg1 as u32, arg2 as u32, f64::from_bits(arg3_bits as u64)) as i64 }
+}
+
 /// Allocation-free typed C-boolean call with no arguments.
 #[no_mangle]
 pub extern "C" fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64 {

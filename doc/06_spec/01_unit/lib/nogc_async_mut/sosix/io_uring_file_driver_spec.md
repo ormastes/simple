@@ -21,6 +21,11 @@ execution is required; a portable fallback does not satisfy these scenarios.
    different file generation and a different buffer generation. Both must
    return `-22` without creating the host file; a forged buffer reference must
    expose no registered bytes.
+6. **Destination buffer offset.** Read two positioned bytes into a registered
+   buffer at offset three and preserve its prefix and suffix. Reject an offset
+   beyond the buffer with `-22`, zero transfer, and unchanged bytes. Reject
+   unsigned file offsets, buffer offsets, and lengths outside the signed host I/O range before
+   submitting native operations; the file and buffer remain unchanged.
 
-The fifth scenario is a new provider-boundary regression check. The source is
+The fifth and sixth scenarios are provider-boundary regression checks. The source is
 the authority for exact assertions until the executable manual is regenerated.

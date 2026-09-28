@@ -29,7 +29,7 @@ specs drive with a scripted device runs against the filesystem of this host.
 # providers both remain open; portable fallback evidence does not close either.
 use std.common.contracts.sosix.operation_v1.{SosixOperationId}
 use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
-use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT}
+use std.common.contracts.sosix.file_operation_v1.{SOSIX_FS_READ_AT, SosixFileOperation}
 use std.common.contracts.sosix.wait_v1.{SOSIX_NATIVE_WAIT_SIGNALED}
 use std.nogc_async_mut.io.{file_read_text_at, file_write_text_at}
 use std.nogc_async_mut.sosix.fs.{SosixHostedFs, SosixFsTaken}
@@ -46,6 +46,10 @@ use std.nogc_async_mut.io.native_driver.{
 # These reference drivers only append table entries, so generation 1 is the
 # only generation they issue. A different generation must never address a slot.
 pub val SOSIX_FILE_DRIVER_STATUS_IO: i32 = -5
+
+fn _host_file_request_fits_i64(request: SosixFileOperation) -> bool:
+    val max_i64 = 0x7fffffffffffffffu64
+    request.file_offset <= max_i64 and request.buffer_offset <= max_i64 and request.length <= max_i64
 
 class SosixHostedFileDriver:
     paths: [text]
@@ -83,6 +87,8 @@ class SosixHostedFileDriver:
         val buffer_slot = request.buffer.slot.to_i64()
         if path == "" or request.buffer.generation != 1u32 or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
             return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
+        if not _host_file_request_fits_i64(request):
+            return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
         if request.api_id == SOSIX_FS_READ_AT:
             val current = self.buffers[buffer_slot]
             val start = request.buffer_offset.to_i64()
@@ -90,8 +96,11 @@ class SosixHostedFileDriver:
                 return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
             match file_read_text_at(path, request.file_offset.to_i64(), request.length.to_i64()):
                 case Ok(bytes):
-                    val stop = start + bytes.len()
-                    val suffix = if stop < current.len(): current[stop:current.len()] else: ""
+                    val remaining = current.len() - start
+                    val suffix = if bytes.len() < remaining:
+                        current[start + bytes.len():current.len()]
+                    else:
+                        ""
                     self.buffers[buffer_slot] = current[0:start] + bytes + suffix
                     fs.complete_taken(taken, 0, bytes.len().to_u64())
                 case Err(_):
@@ -99,11 +108,15 @@ class SosixHostedFileDriver:
         else:
             # `fs._submit` admits only READ_AT and WRITE_AT, so this is the write leg.
             val start = request.buffer_offset.to_i64()
-            val stop = start + request.length.to_i64()
             val data = self.buffers[buffer_slot]
             if start > data.len():
                 return fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
-            val window = if stop > data.len(): data[start:data.len()] else: data[start:stop]
+            val available = data.len() - start
+            val stop = if request.length > available.to_u64():
+                data.len()
+            else:
+                start + request.length.to_i64()
+            val window = data[start:stop]
             val written = file_write_text_at(path, request.file_offset.to_i64(), window)
             if written < 0:
                 fs.complete_taken(taken, SOSIX_FILE_DRIVER_STATUS_IO, 0u64)
@@ -179,6 +192,8 @@ class SosixLinuxUringFileDriver:
         val buffer_slot = request.buffer.slot.to_i64()
         if path == "" or request.buffer.generation != 1u32 or buffer_slot <= 0 or buffer_slot >= self.buffers.len():
             return fs.complete_taken(taken, -22, 0u64)
+        if not _host_file_request_fits_i64(request):
+            return fs.complete_taken(taken, -22, 0u64)
 
         # Open and close are submitted native operations too; the positioned
         # read/write is the operation whose result is published to SOSIX.
@@ -192,20 +207,34 @@ class SosixLinuxUringFileDriver:
         var status: i64 = 0
         var transferred: u64 = 0u64
         if request.api_id == SOSIX_FS_READ_AT:
-            val read_op = native_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
-            status = self._wait_result(read_op)
-            if status >= 0:
-                val bytes = native_driver_poll_data(self.handle)
-                self.buffers[buffer_slot] = bytes
-                transferred = status.to_u64()
+            val start = request.buffer_offset.to_i64()
+            val current = self.buffers[buffer_slot]
+            if start < 0 or start > current.len():
+                status = -22
+            else:
+                val read_op = native_driver_submit_read(self.handle, fd, request.length.to_i64(), request.file_offset.to_i64())
+                status = self._wait_result(read_op)
+                if status >= 0:
+                    val bytes = native_driver_poll_data(self.handle)
+                    val remaining = current.len() - start
+                    val suffix = if bytes.len() < remaining:
+                        current[start + bytes.len():current.len()]
+                    else:
+                        ""
+                    self.buffers[buffer_slot] = current[0:start] + bytes + suffix
+                    transferred = status.to_u64()
         else:
             val start = request.buffer_offset.to_i64()
-            val stop = start + request.length.to_i64()
             val data = self.buffers[buffer_slot]
             if start < 0 or start > data.len():
                 status = -22
             else:
-                val window = if stop > data.len(): data[start:data.len()] else: data[start:stop]
+                val available = data.len() - start
+                val stop = if request.length > available.to_u64():
+                    data.len()
+                else:
+                    start + request.length.to_i64()
+                val window = data[start:stop]
                 val write_op = native_driver_submit_write(self.handle, fd, window, request.file_offset.to_i64())
                 status = self._wait_result(write_op)
                 if status >= 0: transferred = status.to_u64()

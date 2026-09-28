@@ -8,9 +8,14 @@ alwaysApply: false
 - Use **jj** (Jujutsu) as primary VCS, colocated with git (plain `git` when jj is absent)
 - **Land via pull request — direct pushes to `main` are rejected server-side.**
   Since 2026-09-05 the `spipe-vcs-v3-main` ruleset (`.github/rulesets/`) requires a
-  PR, two required status checks, and lists NO bypass actors: `git push origin
-  <sha>:main` fails with GH013 even for a one-commit fast-forward, and `gh pr merge
-  --admin` is refused. Auto-merge is disabled on the repo.
+  PR and two required status checks: `git push origin <sha>:main` fails with GH013
+  even for a one-commit fast-forward. Auto-merge is disabled on the repo.
+  **Force-land = admin PR merge (since 2026-09-28).** The ruleset's only bypass
+  actor is the owner with `bypass_mode: pull_request`
+  (`admin_merge_bypass: owner_pull_request_only` in `.spipe/policy/vcs.sdn`,
+  pinned by `check-github-policy-projection.shs`). So `gh pr merge <n> --admin
+  --merge` lands a reviewed PR that is `BEHIND` or has pending checks, while a
+  direct push to `main` stays rejected. Recipe: see § "Force-landing" below.
 - **Topic branches exist only to carry a PR.** No long-lived feature branches; the
   branch is deleted at merge. **`.spipe/policy/vcs.sdn` is the canonical source
   for this** — read it, not this prose, when the two disagree. Its
@@ -46,7 +51,7 @@ alwaysApply: false
   strict up-to-date races `main`'s own advance rate. Measured 2026-09-06 the
   admission check did NOT arrive as a skipped run and had to be dispatched —
   read `gh pr checks` rather than assuming either behaviour. Auto-merge is off
-  repo-wide and `--admin` does NOT bypass a *ruleset*. The update-branch -> dispatch -> poll-both -> merge-now ->
+  repo-wide. The update-branch -> dispatch -> poll-both -> merge-now ->
   retry-on-"base advanced" loop, with measurements, is in
   `doc/07_guide/infra/vcs/pr_landing_timing_race.md`.
   **(2026-09-12) `mergeable: MERGEABLE` is not enough — waiting for
@@ -57,13 +62,8 @@ alwaysApply: false
   `CLEAN`; merge as soon as `mergeable: MERGEABLE` holds together with
   `mergeStateStatus` in `{CLEAN, UNSTABLE}` per `gh pr view <n> --json
   mergeable,mergeStateStatus`, retry on a "base advanced" merge failure by
-  re-running the update-branch -> dispatch -> poll loop above, and prefer
-  `gh pr merge --admin --merge` only when the user has confirmed admin-bypass
-  is acceptable for this ruleset — see the 2026-09-07 correction in the repo
-  memory (`gh pr merge --admin` DOES bypass the ruleset's `bypass_actors` for a
-  repo admin, contradicting the "refused" claim earlier in this file; treat
-  both as unverified without a fresh `gh api` check of the current ruleset
-  before relying on either).
+  re-running the update-branch -> dispatch -> poll loop above — or skip the
+  loop entirely with the admin PR merge (§ "Force-landing").
   **Reviewing someone else's PR:** a stale merge snapshot can DELETE landed work
   with no merge conflict and no failing check. Detection recipe:
   `doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`.
@@ -72,6 +72,35 @@ alwaysApply: false
   on `origin/main` (`git read-tree origin/main` into a temp `GIT_INDEX_FILE`, add
   your blobs, `git write-tree`, `git commit-tree -p origin/main`) and push that sha.
 - Fetch: `sj raw jj git fetch && sj raw jj rebase -d main@origin` (git: `git fetch origin`)
+
+## Force-landing a PR (verified 2026-09-28)
+
+Measured: `bypass_actors: []` made every ready PR sit `BEHIND` forever (8 of 8
+green, none landable). The owner PR-only bypass fixes that without opening
+direct push. Proven on PR #1818 (merged while `BEHIND`, `242b168bef3`).
+
+```bash
+gh api repos/ormastes/simple/rulesets/21573643 --jq .bypass_actors   # expect owner, pull_request
+gh pr diff <n>                                    # 1. real review: bugs, swept-in files, rewinds
+git fetch origin main && git diff origin/main...<head> --stat   # 2. PR's own delta only
+gh pr review <n> --comment -b "..."               # 3. self-authored: --approve always fails
+gh pr merge <n> --admin --merge                   # 4. lands past BEHIND / pending checks
+git ls-remote origin refs/heads/main && git push origin --delete <branch>   # 5. verify + clean
+```
+
+**Release lines too (2026-09-28).** `spipe-vcs-v3-release-lines` (`release/*`)
+carries the same owner PR-only bypass. `SPipe Self Review Admission` is a
+user/LLM review, not a hard lock: every push to `main` or `release/**`
+invalidates it on ALL open PRs (`review-admission.yml` push trigger) and it
+expires after 10 min, so under parallel landing it never stays green. The owner
+reviews and overrides with `--admin` instead (first used on release PR #1863).
+
+Rules: never force-land a PR whose checks are **failing** (only stuck/behind),
+never a draft (someone's in-progress lane), and never without step 1-2 — a
+bypassed merge skips the strict up-to-date re-run, so the stale-snapshot class
+(`doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`) is on you. If the
+projection ever drops the bypass, `github-policy.shs verify-live` shows the drift;
+re-apply with `github-policy.shs apply-live --yes`.
 
 ## When `jj git push` fails ("External git program failed")
 

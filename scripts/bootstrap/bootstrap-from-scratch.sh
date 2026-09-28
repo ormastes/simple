@@ -2741,6 +2741,9 @@ run_rust_authority_env() {
   if [ "${AR+x}" = x ]; then set -- "AR=$AR" "$@"; fi
   if [ "${LD+x}" = x ]; then set -- "LD=$LD" "$@"; fi
   if [ "${LLVM_CONFIG+x}" = x ]; then set -- "LLVM_CONFIG=$LLVM_CONFIG" "$@"; fi
+  if [ "${os}" != macos ] && [ "${RUSTFLAGS+x}" = x ]; then
+    set -- "RUSTFLAGS=$RUSTFLAGS" "$@"
+  fi
   if [ "${os}" = macos ]; then
     bootstrap_stage3_rust_macos_helper_validate \
       "${rust_toolchain_authority}" "${rust_authority_dylib}" || return 1

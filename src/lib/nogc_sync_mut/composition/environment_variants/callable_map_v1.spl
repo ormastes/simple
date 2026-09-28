@@ -52,6 +52,7 @@ use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{
 use std.nogc_sync_mut.composition.environment_variants.native_callable_owner_v1.{
     native_callable_owner_register_v1,
     native_callable_owner_invoke_v1,
+    native_callable_owner_invoke_batch_into_v1,
     native_callable_owner_retire_v1
 }
 use std.common.string_core.{text_to_bytes}
@@ -79,6 +80,7 @@ pub const VARIANT_CALLABLE_NOT_CALLABLE_V1: i32 = 10
 # constructors have already run — an operator needs to tell those apart.
 pub const VARIANT_CALLABLE_ARTIFACT_SWAPPED_DURING_LOAD_V1: i32 = 11
 pub const VARIANT_CALLABLE_OWNER_UNAVAILABLE_V1: i32 = 12
+pub const VARIANT_CALLABLE_OUTPUT_CAPACITY_V1: i32 = 13
 
 # The mapped operation family: `i64(i64...)` over this arity range, uniformly
 # across placements. The upper bound is the widest shape the design asks an
@@ -345,6 +347,57 @@ pub fn variant_callable_invoke_v1(
         placement: callable.placement,
         operation_id: callable.operation_id,
         reason: "callable holds no resolvable entry for placement {callable.placement}"))
+
+# Validate the complete batch before its first side effect. Caller-owned input
+# rows and output storage keep lifecycle admission and output allocation out of
+# the per-element native dispatch path.
+pub fn variant_callable_invoke_batch_into_v1(
+    callable: VariantCallableV1, args: [[i64]], mut outputs: [i64]
+) -> Result<i64, VariantCallableRefusalV1>:
+    if outputs.len() < args.len():
+        return Err(VariantCallableRefusalV1(
+            code: VARIANT_CALLABLE_OUTPUT_CAPACITY_V1,
+            placement: callable.placement,
+            operation_id: callable.operation_id,
+            reason: "output capacity {outputs.len()} is smaller than batch size {args.len()}"))
+    var index = 0
+    while index < args.len():
+        if args[index].len() != callable.arity:
+            return Err(VariantCallableRefusalV1(
+                code: VARIANT_CALLABLE_ARITY_UNSUPPORTED_V1,
+                placement: callable.placement,
+                operation_id: callable.operation_id,
+                reason: "batch row {index} has {args[index].len()} arguments for arity {callable.arity}"))
+        index = index + 1
+    if callable.placement == ENV_PLACEMENT_STATIC_V1:
+        match callable.static_op:
+            case Some(op):
+                index = 0
+                while index < args.len():
+                    outputs[index] = op(args[index])
+                    index = index + 1
+                return Ok(index)
+            case nil:
+                return Err(VariantCallableRefusalV1(
+                    code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+                    placement: callable.placement,
+                    operation_id: callable.operation_id,
+                    reason: "static callable carries no operation"))
+    if callable.placement == ENV_PLACEMENT_NATIVE_DYNLIB_V1:
+        match native_callable_owner_invoke_batch_into_v1(
+                callable.native_owner_identity, args, outputs):
+            case Ok(count): return Ok(count)
+            case Err(_):
+                return Err(VariantCallableRefusalV1(
+                    code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+                    placement: callable.placement,
+                    operation_id: callable.operation_id,
+                    reason: "native callable mapping is retired or unavailable"))
+    Err(VariantCallableRefusalV1(
+        code: VARIANT_CALLABLE_NOT_CALLABLE_V1,
+        placement: callable.placement,
+        operation_id: callable.operation_id,
+        reason: "callable mapping is retired or unavailable"))
 
 # Records mapping and callability as the two distinct receipt states REQ-007
 # asks for, from one observed callable, identically for every placement.
