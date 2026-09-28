@@ -98,3 +98,27 @@ the passing text conversion does not prove its transport returns the same
 bytes or that large archives meet the time/RSS gate. Next, isolate the
 descriptor read's byte parity, then compare paired time and peak RSS on a
 realistically large CAS archive against the existing path.
+
+## Follow-up: descriptor bytes match; stream still differs (2026-09-29)
+
+A second bounded-digest trial read 64 KiB chunks through the pinned descriptor
+and fed them to `sha256_stream_v1_update`. Its no-stub native integration run
+still failed only the 542-byte pinned archive scenario (8 examples, 1 failure,
+0.13 s, 8,472 KiB peak RSS). A diagnostic in the same descriptor-read call
+showed `sha256_u8_hex` on the returned 542-byte chunk equalled the admitted
+CAS digest `f0dbda59…fcc8ca`, while the stream over that chunk returned
+`67173922…39522e` with `total_bytes=542`. The descriptor transport therefore
+returned hash-correct bytes in this fixture.
+
+Copying the descriptor chunk into a newly allocated `[u8]` before streaming
+did not fix admission (8 examples, 1 failure, 0.13 s, 8,120 KiB peak RSS).
+The copy remained bounded at one 64 KiB chunk. Both experimental variants
+and the diagnostic print were reverted, leaving the passing whole-archive
+digest in production.
+
+The next discriminating test should pin the *exact 542 archive bytes* as a
+known vector in the no-stub SHA stream spec, compare one-shot and streamed
+digests on the same retained array, and inspect the first differing block or
+call boundary. Repeated-byte and synthetic mixed-byte vectors pass, but they
+do not cover this archive content. After a correct bounded digest passes
+admission, test an archive larger than one chunk and measure paired time/RSS.
