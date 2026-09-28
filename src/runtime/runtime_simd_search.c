@@ -7,6 +7,12 @@
  * Build: cc -c -fPIC -O2 -std=gnu11 -I. runtime_simd_search.c
  */
 
+/* glibc declares memmem only with GNU extensions enabled. Feature-test
+ * macros must precede every system header, including the dispatch header. */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#  define _GNU_SOURCE 1
+#endif
+
 #include "runtime_simd_dispatch.h"
 
 #if SIMD_HAS_X86
