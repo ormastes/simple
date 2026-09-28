@@ -122,6 +122,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 - [ ] Fix or rule out the Stage-2 pinned archive reader RSS runaway before
   using it as a cold publication memory optimization; see
   `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
+  The synchronous file-view path now avoids a text-valued async roundtrip and
+  the pinned digest checks use hex text. A bounded direct native read passes;
+  archive integration and paired time/RSS proof remain open.
 
 - [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
   eviction in the cold driver. Phase-1 digest and byte-length owners also work
