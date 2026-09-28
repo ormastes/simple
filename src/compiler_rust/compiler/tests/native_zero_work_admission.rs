@@ -123,8 +123,14 @@ fn native_zero_work_admission_precedes_every_compiler_phase() {
     let final_output_export = native_build.find(
         "env_set(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\", output)")
         .expect("canonical final-output transport");
+    // Since dd8d8412998 native-build reaches the driver through the
+    // collection-profile wrapper, which itself calls compiler_driver_run_compile.
     let driver_start = native_build[final_output_export..].find(
-        "compiler_driver_run_compile(driver)").expect("driver invocation");
+        "native_build_compile_with_collection_profile(").expect("driver invocation");
+    let collection_profile = fs::read_to_string(repository.join(
+        "src/app/io/_CliCompile/native_collection_profile.spl")).expect("read collection-profile wrapper");
+    assert!(collection_profile.contains("compiler_driver_run_compile(driver)"),
+        "collection-profile wrapper must still run the compiler driver");
     let final_output_restore = native_build[final_output_export..].find(
         "env_set(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\", old_native_noop_final_output)")
         .expect("final-output restoration");

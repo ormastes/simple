@@ -288,6 +288,13 @@ pub(super) fn eval_literal_expr(
                     ctx,
                 ));
             }
+            // strict-mem (plan M5 §2): an initializer-less `let` marks its name
+            // uninit (node_exec.rs); trap the read before the lookup cascade
+            // can shadow-miss into an unrelated enclosing/global binding.
+            // Off-path cost: one bool load.
+            if crate::value::strict_mem_enabled() && env.is_uninit(name) {
+                return Err(CompileError::semantic(format!("strict-mem: read of uninitialized {name}")));
+            }
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {

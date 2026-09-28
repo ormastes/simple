@@ -421,7 +421,7 @@ fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
     assert!(
         declaration_ast.items.iter().any(|item| matches!(item,
             simple_parser::ast::Node::Function(function)
-                if function.name == "_sffi_env_get_i64" && !function.body.statements.is_empty()
+                if function.name == "_env_get_i64" && !function.body.statements.is_empty()
         )),
         "the source declaration owner must retain its private helper spelling"
     );
@@ -442,7 +442,7 @@ fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
         flattened_mir
             .functions
             .iter()
-            .any(|function| { function.name == "_sffi_env_get_i64" && !function.blocks.is_empty() }),
+            .any(|function| { function.name == "_env_get_i64" && !function.blocks.is_empty() }),
         "flattened JIT MIR must retain the private helper body under its exact spelling"
     );
     let flattened_caller = flattened_mir
@@ -456,7 +456,7 @@ fn flattened_decl_env_helper_keeps_a_matching_mir_definition_and_call_target() {
             .iter()
             .flat_map(|block| &block.instructions)
             .any(|instruction| {
-                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_sffi_env_get_i64")
+                matches!(instruction, MirInst::Call { target, .. } if target.name() == "_env_get_i64")
             }),
         "flattened caller must target the retained helper by its exact MIR definition name"
     );
@@ -2488,9 +2488,11 @@ fn test_bootstrap_entry_closure_avoids_driver_package_hub() {
     assert!(!files
         .iter()
         .any(|path| path.starts_with(repo_root.join("src/app/leak_finder"))));
-    assert!(!files
+    let rust_std_mirror: Vec<_> = files
         .iter()
-        .any(|path| path.starts_with(repo_root.join("src/compiler_rust/lib/std/src"))));
+        .filter(|path| path.starts_with(repo_root.join("src/compiler_rust/lib/std/src")))
+        .collect();
+    assert!(rust_std_mirror.is_empty(), "bootstrap closure reached the seed std mirror: {rust_std_mirror:?}");
 }
 
 #[test]
@@ -3905,7 +3907,9 @@ int main(void) {
 }
 "#,
         &[&capsule],
-        &["-lm", "-lpthread", "-ldl"],
+        // Stage4 executables link -no-pie (linker.rs stage4 link flags); the
+        // capsule is a non-PIC `-r` closure, so the probe must match.
+        &["-no-pie", "-lm", "-lpthread", "-ldl"],
         &[],
     );
 }
@@ -4502,7 +4506,7 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_struct_receiver_guard_native_contract() {
-    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

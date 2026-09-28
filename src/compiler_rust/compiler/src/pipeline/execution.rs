@@ -1225,8 +1225,11 @@ mod tests {
     #[test]
     fn single_file_runtime_bundle_keeps_native_all_for_cross_targets() {
         let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Any non-host Linux arch is a cross target; aarch64 is the host here
+        // on an aarch64 machine, so pick another arch there.
+        let cross_arch = if Target::host().arch == TargetArch::Aarch64 { TargetArch::Riscv64 } else { TargetArch::Aarch64 };
         let options = NativeBinaryOptions::new()
-            .target(Target::new(TargetArch::Aarch64, TargetOS::Linux))
+            .target(Target::new(cross_arch, TargetOS::Linux))
             .shared(false)
             .library("simple_native_all");
         let filtered = filter_single_file_runtime_bundle(Some(std::path::Path::new("/tmp/demo.spl")), options);

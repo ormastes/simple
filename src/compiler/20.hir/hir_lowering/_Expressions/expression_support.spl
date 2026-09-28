@@ -16,6 +16,7 @@ use std.string_core.{char_code}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_enum_discriminant(value: Any) -> i64
+@unsafe(reason: "raw retained-dictionary handle probe; the handle and key representation must match the active runtime", capabilities: [ffi])
 extern fn rt_dict_contains(dict: i64, key: Any) -> bool
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
@@ -61,7 +62,16 @@ fn is_interp_builtin_fn(name: text) -> bool:
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set" or name == "int" or
      name == "float" or name == "bool" or name == "panic" or
-     name == "str" or name == "text")
+     name == "str" or name == "text" or
+     # Drifted out of sync with lookup_builtin_tag: `assert cond, msg`
+     # desugars to `__assert(...)` in parser_stmts.spl, and every module
+     # containing an `assert` statement died here with
+     # "unresolved name: __assert" even though interpreter_calls.spl
+     # dispatches the tag. The three probe/stat builtins below had drifted
+     # the same way. Kept in sync by
+     # scripts/check/check-interp-builtin-list-sync.shs.
+     name == "__assert" or name == "file_is_regular_no_follow" or
+     name == "rt_file_exists_probe_begin" or name == "rt_file_exists_probe_end")
 
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
     """`i32(x)`-style primitive casts: a fixed-width numeric type name used
@@ -197,10 +207,11 @@ impl HirLowering:
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
         val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
         if base_symbol.is_valid():
-            if rt_dict_contains(self.local_tuple_types, base_symbol.id):
-                val element_types = self.local_tuple_types[base_symbol.id]
-                if index >= 0 and index < element_types.len():
-                    return element_types[index]
+            unsafe(capabilities: [ffi]):
+                if rt_dict_contains(self.local_tuple_types, base_symbol.id):
+                    val element_types = self.local_tuple_types[base_symbol.id]
+                    if index >= 0 and index < element_types.len():
+                        return element_types[index]
         nil
 
     me field_type_for_owner(owner_symbol_id: SymbolId, field_name: text) -> HirType?:
@@ -210,17 +221,25 @@ impl HirLowering:
             case _: found
 
     me field_type_for_owner_raw(raw_owner_symbol_id: i64, field_name: text) -> HirType:
-        if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
-            if val owner_module = owner_symbol.defining_module:
-                val canonical_name = owner_module + "." + owner_symbol.name
-                if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
-                    val canonical_fields = self.struct_field_types_by_name[canonical_name]
-                    if rt_dict_contains(canonical_fields, field_name):
-                        return canonical_fields[field_name]
-            if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
-                val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
-                if rt_dict_contains(owner_fields, field_name):
-                    return owner_fields[field_name]
+        unsafe(capabilities: [ffi]):
+            if val owner_symbol = self.symbols.get_symbol_raw(raw_owner_symbol_id):
+                if val owner_module = owner_symbol.defining_module:
+                    # Interpolation, NOT a 3-operand `text` `+` chain: that form is
+                    # a known silent-operand-drop landmine on the staged native /
+                    # freestanding path (memory recipe #8 -- `a+":"+b+"\n"` came
+                    # back length 1). The canonical composite key is load-bearing:
+                    # when it comes out wrong, every field of the composite is
+                    # denied at once with `field `X` is not visible from this
+                    # module`.
+                    val canonical_name = owner_module + "." + owner_symbol.name
+                    if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                        val canonical_fields = self.struct_field_types_by_name[canonical_name]
+                        if rt_dict_contains(canonical_fields, field_name):
+                            return canonical_fields[field_name]
+                if rt_dict_contains(self.struct_field_types_by_name, owner_symbol.name):
+                    val owner_fields = self.struct_field_types_by_name[owner_symbol.name]
+                    if rt_dict_contains(owner_fields, field_name):
+                        return owner_fields[field_name]
         _hir_missing_field_type()
 
     me field_type_for_base(base_symbol: SymbolId, field_name: text) -> HirType?:
@@ -230,12 +249,13 @@ impl HirLowering:
             case _: found
 
     me field_type_for_base_raw(raw_base_symbol_id: i64, field_name: text) -> HirType:
-        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-            val struct_name = self.local_struct_types[raw_base_symbol_id]
-            if rt_dict_contains(self.struct_field_types_by_name, struct_name):
-                val struct_fields = self.struct_field_types_by_name[struct_name]
-                if rt_dict_contains(struct_fields, field_name):
-                    return struct_fields[field_name]
+        unsafe(capabilities: [ffi]):
+            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+                val struct_name = self.local_struct_types[raw_base_symbol_id]
+                if rt_dict_contains(self.struct_field_types_by_name, struct_name):
+                    val struct_fields = self.struct_field_types_by_name[struct_name]
+                    if rt_dict_contains(struct_fields, field_name):
+                        return struct_fields[field_name]
 
         val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
         if raw_owner_symbol_id >= 0:
@@ -257,11 +277,12 @@ impl HirLowering:
         name before treating that name as a function-typed FIELD, so a
         same-named method always wins (see the P2 field-call precedence fix's
         call site in expression_core.spl)."""
-        if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
-            val struct_name = self.local_struct_types[raw_base_symbol_id]
-            val struct_symbol = self.symbols.lookup_or_invalid(struct_name)
-            if struct_symbol.is_valid():
-                return struct_symbol.id
+        unsafe(capabilities: [ffi]):
+            if rt_dict_contains(self.local_struct_types, raw_base_symbol_id):
+                val struct_name = self.local_struct_types[raw_base_symbol_id]
+                val struct_symbol = self.symbols.lookup_or_invalid(struct_name)
+                if struct_symbol.is_valid():
+                    return struct_symbol.id
 
         val raw_owner_symbol_id = self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)
         if raw_owner_symbol_id >= 0:
