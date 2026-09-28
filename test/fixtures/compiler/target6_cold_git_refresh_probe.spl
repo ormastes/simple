@@ -1,0 +1,68 @@
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.io.mod.{dir_create, dir_remove, file_delete, file_write, process_run_bounded}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+
+extern fn rt_getpid() -> i64
+
+fn git_ok(root: text, args: [text]) -> bool:
+    val (_out, _err, status) = process_run_bounded(
+        "git", ["-C", root] + args, 10000, 1024 * 1024)
+    status == 0
+
+fn main() -> i64:
+    val root = "build/mini_builds/target56_cold_git_refresh_probe/fixture-{rt_getpid()}"
+    val cache_root = root + "/build/scv"
+    if not dir_create(root + "/src", true) or
+            not file_write(root + "/src/a.spl", "export fn a(): 1\n") or
+            not git_ok(root, ["init", "-q"]) or
+            not git_ok(root, ["add", "src/a.spl"]) or
+            not git_ok(root, ["-c", "user.name=probe", "-c",
+                "user.email=probe@example.invalid", "commit", "-qm", "seed"]):
+        print "fixture setup failed"
+        return 6
+    val cold = compiler_inventory_refresh_v1(root, cache_root, ["src", "test"], true)
+    if not cold.valid:
+        print "cold refresh failed: {cold.reason}"
+        return 1
+    val admitted = compile_source_inventory_read_current_v1(cache_root)
+    if not admitted.valid or admitted.inventory == nil:
+        print "cold inventory failed: {admitted.reason}"
+        return 2
+    if admitted.inventory!.entries.len() != 1 or
+            admitted.inventory!.entries[0].source_identity != "src/a.spl":
+        print "cold inventory has unexpected entries"
+        return 3
+    val warm = compiler_inventory_refresh_v1(root, cache_root, ["src", "test"], false)
+    if not warm.valid:
+        print "warm refresh failed: {warm.reason}"
+        return 4
+    if warm.inventory_digest != cold.inventory_digest:
+        print "warm refresh changed an unchanged inventory"
+        return 5
+    if not file_write(root + "/src/a.spl", "export fn a(): 2\n"):
+        return 7
+    val edited = compiler_inventory_refresh_v1(root, cache_root, ["src", "test"], false)
+    if not edited.valid or edited.inventory_digest == warm.inventory_digest:
+        print "warm edit failed: {edited.reason}"
+        return 8
+    val updated = compile_source_inventory_read_current_v1(cache_root)
+    if not updated.valid or updated.inventory == nil or
+            updated.inventory!.entries.len() != 1 or
+            updated.inventory!.entries[0].content_digest ==
+                admitted.inventory!.entries[0].content_digest:
+        print "warm edit did not update the source digest"
+        return 9
+    if not file_delete(root + "/src/a.spl"):
+        return 10
+    val deleted = compiler_inventory_refresh_v1(root, cache_root, ["src", "test"], false)
+    if not deleted.valid:
+        print "warm delete failed: {deleted.reason}"
+        return 11
+    val after_delete = compile_source_inventory_read_current_v1(cache_root)
+    if not after_delete.valid or after_delete.inventory == nil or
+            after_delete.inventory!.entries.len() != 0:
+        print "warm delete retained the source"
+        return 12
+    dir_remove(root, true)
+    print "PASS target6_cold_git_refresh_probe"
+    0

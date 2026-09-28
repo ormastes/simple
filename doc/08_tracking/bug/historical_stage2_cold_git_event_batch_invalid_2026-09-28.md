@@ -1,7 +1,9 @@
 # Historical Stage2 cold Git-event batch fails admission
 
-**Status:** open diagnostic; source defect versus historical Stage2 codegen is
-unresolved. This is distinct from the fixed non-source-path filter in
+**Status:** narrowed diagnostic. A newer admitted Stage2 compiler passes a
+self-contained current-source cold/warm/edit/delete bridge probe; the earlier
+binary/fixture failure remains unexplained and broader batches are unqualified.
+This is distinct from the fixed non-source-path filter in
 `release_scv_cold_init_event_invalid_non_source_paths_2026-09-16.md`.
 
 ## Reproduction
@@ -66,6 +68,15 @@ all temporary production-source edits were reverted after the third failure.
 
 The changed failure locations show that historical Stage2 aggregate/Option
 handling affects this path, but they do not prove that the source bridge is
-correct or identify the one faulty transfer. A valid current-source worker
-must inspect the batch before publication and run the end-to-end cold/warm
-fixture. Do not land the aggregate-shape workarounds based on this diagnostic.
+correct or identify the one faulty transfer. Do not land the aggregate-shape
+workarounds based on this diagnostic.
+
+## Newer native bridge result
+
+`test/fixtures/compiler/target6_cold_git_refresh_probe.spl` builds with the
+newer admitted Stage2 binary and passes cold, unchanged warm, tracked edit,
+and tracked delete refreshes in a self-created one-file Git repository. The
+bridge calls the observed-event reducer with every cursor argument explicit.
+See `doc/09_report/compiler/target6_cold_git_refresh_native_probe_2026-09-28.md`
+for hashes and logs. The old failure is not reproduced by this focused probe;
+larger batch inspection and full Target 6 qualification remain open.

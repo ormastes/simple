@@ -66,9 +66,13 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
   30-sample development (100-sample release) startup/RSS cohort. The C-authored
   6,504/6,368-byte pair remains diagnostic only.
-- [ ] Run the Target 6 cold/warm Git-event fixture with explicit cursor
-  arguments on the current-source worker. Inspect the batch before publication;
-  do not repeat the three failed historical Stage2 aggregate workarounds.
+- [x] Run a focused Target 6 cold/warm/edit/delete Git-event native fixture
+  with explicit cursor arguments through the production bridge. The newer
+  Stage2 binary passes; see
+  `doc/09_report/compiler/target6_cold_git_refresh_native_probe_2026-09-28.md`.
+- [ ] Inspect a larger Git event batch before publication and run the
+  production fixture on an admitted current-source Stage4 worker; do not
+  repeat the three failed historical Stage2 aggregate workarounds.
   Finish the typed TLDR/SMF producer and graph publication, replace the
   binding-only index, then run the SPipe and native cold/warm/edit/SCC/variant
   time/RSS cohorts with the normalized-sum rule.
