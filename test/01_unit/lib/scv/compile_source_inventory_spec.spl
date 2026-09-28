@@ -99,6 +99,46 @@ describe "event-maintained compile source inventory":
     it "replaces the complete inventory on an explicit cold rebuild":
         val cache_root = "build/test-artifacts/scv-cold-rebuild-{rt_getpid()}/build/scv"
         dir_remove(cache_root, true)
+
+    it "matches serial semantics for a warm event batch and rejects it atomically":
+        val cache_root = "build/test-artifacts/scv-warm-batch-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val a = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val b = compile_source_inventory_git_event_v1(
+            "create", "src/b.spl", "export fn b(): 1")
+        val seeded = compile_source_inventory_apply_git_events_v1(cache_root, [a, b])
+        expect(seeded.valid).to_equal(true)
+        val events = [
+            a,
+            compile_source_inventory_git_event_v1(
+                "modify", "src/a.spl", "export fn a(): 2"),
+            compile_source_inventory_git_event_v1("delete", "src/b.spl", ""),
+            compile_source_inventory_git_event_v1(
+                "create", "src/c.spl", "export fn c(): 1"),
+            compile_source_inventory_git_event_v1("delete", "src/c.spl", ""),
+            compile_source_inventory_git_event_v1(
+                "create", "src/c.spl", "export fn c(): 2"),
+            compile_source_inventory_git_event_v1("delete", "src/missing.spl", "")]
+        var serial = seeded.inventory!
+        for event in events:
+            val changed = compile_source_inventory_apply_event_v1(serial, event)
+            expect(changed.valid).to_equal(true)
+            serial = changed.inventory!
+        val batched = compile_source_inventory_apply_git_events_v1(cache_root, events)
+        expect(batched.valid).to_equal(true)
+        expect(compile_source_inventory_encode_v1(batched.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(serial))
+        val rejected = compile_source_inventory_apply_git_events_v1(cache_root, [
+            compile_source_inventory_git_event_v1(
+                "create", "src/d.spl", "export fn d(): 1"),
+            compile_source_inventory_git_event_v1(
+                "invalid", "src/e.spl", "export fn e(): 1")])
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("event-operation-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).digest).to_equal(
+            batched.digest)
+        dir_remove(cache_root, true)
         val first = compile_source_inventory_git_event_v1(
             "create", "src/a.spl", "export fn a(): 1")
         val disappeared = compile_source_inventory_git_event_v1(

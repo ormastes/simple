@@ -114,6 +114,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Apply warm multi-event inventory batches without one full-inventory
+  rebuild per event. A 30-sample no-stub native fixture improves both p95
+  time and peak RSS; serial-equivalence and atomic-rejection probes pass.
+  See `doc/09_report/compiler/target6_warm_inventory_batch_2026-09-28.md`.
 - Build a real cold TLDR/SMF producer from frozen SCV inventory and typed HIR.
   A pure graph assembler and inventory-bound index builder now live in
   `src/compiler/80.driver/cache/cold_hir_package_drafts_v1.spl` and
