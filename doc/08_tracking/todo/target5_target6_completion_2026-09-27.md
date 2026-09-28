@@ -2,6 +2,13 @@
 
 Status: SESSION CLOSED BY USER (2026-09-28); production qualification remains OPEN.
 
+Continuation note (2026-09-28): the user-provided full Target 5/6 goal is
+active again. A fresh isolated current-source Stage2 bootstrap failed on
+`dynlib_lifetime_owner_v1.spl` HIR state inference after three bounded
+verify/fix cycles; neither source experiment was retained. See
+`doc/08_tracking/bug/target56_stage2_dynlib_lifetime_state_inference_2026-09-28.md`.
+Stage4 and the production size/startup/performance cohorts remain unavailable.
+
 The user accepted the matched-startup C reference for the Linux 1.05x size
 limit and asked to consider this isolated effort done after a commit/performance
 review. This closes the requested session and does not convert the diagnostic
