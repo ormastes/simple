@@ -31,7 +31,8 @@ fn compile_source_inventory_apply_and_publish_v1(
     expected_pointer_digest: text = "",
     cold_rebuild: bool = false,
     untracked_src_digest: text = "",
-    untracked_test_digest: text = ""
+    untracked_test_digest: text = "",
+    untracked_membership_digest: text = ""
 ) -> CompileSourceInventoryReadV1:
     val current = compile_source_inventory_read_current_v1(cache_root)
     var inventory = if current.valid:
@@ -74,7 +75,8 @@ fn compile_source_inventory_apply_and_publish_v1(
     val (digest, publish_reason) = compile_source_inventory_publish_reasoned_v1(
         cache_root, inventory, cursor_head, cursor_rows,
         cursor_filesystem_digest, expected_pointer_digest,
-        untracked_src_digest, untracked_test_digest)
+        untracked_src_digest, untracked_test_digest,
+        untracked_membership_digest)
     if digest == "":
         return CompileSourceInventoryReadV1(
             false, "inventory-publication-failed:" + publish_reason, "", nil)
@@ -175,7 +177,8 @@ fn compile_source_inventory_apply_observed_events_v1(
     expected_pointer_digest: text = "",
     cold_rebuild: bool = false,
     untracked_src_digest: text = "",
-    untracked_test_digest: text = ""
+    untracked_test_digest: text = "",
+    untracked_membership_digest: text = ""
 ) -> CompileSourceInventoryReadV1:
     # Translation can fail on overflow or an unreadable source. Complete it
     # before one immutable inventory publication so a rejected journal cannot
@@ -191,7 +194,8 @@ fn compile_source_inventory_apply_observed_events_v1(
                 cache_root, events, cursor_head, cursor_rows,
                 cursor_filesystem_digest, expected_pointer_digest,
                 cold_rebuild, untracked_src_digest,
-                untracked_test_digest)
+                untracked_test_digest,
+                untracked_membership_digest)
 
 # Cold replay retains one slot per distinct identity rather than constructing
 # successively larger inventories for every event. Reuse the one-event authority
@@ -373,7 +377,8 @@ fn compile_source_inventory_publish_reasoned_v1(
     cursor_filesystem_digest: text = "",
     expected_pointer_digest: text = "",
     untracked_src_digest: text = "",
-    untracked_test_digest: text = ""
+    untracked_test_digest: text = "",
+    untracked_membership_digest: text = ""
 ) -> (text, text):
     """Publish an inventory, answering `(digest, reason)`.
 
@@ -394,7 +399,8 @@ fn compile_source_inventory_publish_reasoned_v1(
     # from that cursor is then safe because inventory events are idempotent.
     var pointer_content = digest
     if cursor_head == "" and (untracked_src_digest != "" or
-            untracked_test_digest != ""):
+            untracked_test_digest != "" or
+            untracked_membership_digest != ""):
         return ("", "publish-untracked-cursor-invalid")
     if cursor_head != "":
         if (not (cursor_head.len() == 40 or cursor_head.len() == 64) or
@@ -409,7 +415,13 @@ fn compile_source_inventory_publish_reasoned_v1(
         if scoped and (not compile_source_inventory_digest_valid_v1(untracked_src_digest) or
                 not compile_source_inventory_digest_valid_v1(untracked_test_digest)):
             return ("", "publish-untracked-cursor-invalid")
-        val cursor_version = if scoped:
+        if untracked_membership_digest != "" and
+                (not scoped or not compile_source_inventory_digest_valid_v1(
+                    untracked_membership_digest)):
+            return ("", "publish-untracked-membership-invalid")
+        val cursor_version = if untracked_membership_digest != "":
+            "simple-compile-event-cursor-v3"
+        elif scoped:
             "simple-compile-event-cursor-v2"
         else:
             "simple-compile-event-cursor-v1"
@@ -425,6 +437,9 @@ fn compile_source_inventory_publish_reasoned_v1(
         if scoped:
             cursor_rows_text = cursor_rows_text.push("untracked_src_digest={untracked_src_digest}")
             cursor_rows_text = cursor_rows_text.push("untracked_test_digest={untracked_test_digest}")
+        if untracked_membership_digest != "":
+            cursor_rows_text = cursor_rows_text.push(
+                "untracked_membership_digest={untracked_membership_digest}")
         pointer_content = cursor_rows_text.join("\n")
     val root = compile_source_inventory_storage_v1(cache_root)
     if not rt_dir_create_all("{root}/generations"):
