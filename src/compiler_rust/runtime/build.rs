@@ -37,6 +37,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture_impl.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
@@ -290,6 +292,8 @@ fn compile_c_runtime_sources() {
         "runtime_file_view.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // Shared capture state uses this runtime owner's text and builder ABI.
+        "runtime_collection_capture.c",
         "runtime_simd_dispatch.c",
         // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
         // lane R2): both families were entirely absent from this list, so the
@@ -409,6 +413,7 @@ fn compile_c_runtime_sources() {
     }
 
     let mut build = cc::Build::new();
+    build.define("SIMPLE_RUNTIME_RUST_COLLECTION_CAPTURE_PROVIDER", None);
     build.opt_level(2).warnings(false).cargo_metadata(false);
     if linux_uring {
         build.include(runtime_c_dir.join("platform"));
@@ -625,6 +630,9 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        // The narrow provider includes these definitions; export scanning does
+        // not preprocess includes, so name its shared implementation directly.
+        "runtime_collection_capture_impl.h",
         "runtime_simd_dispatch.c",
         "hosted_win32.c",
     ];
