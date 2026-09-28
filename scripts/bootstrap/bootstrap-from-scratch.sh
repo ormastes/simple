@@ -39,8 +39,8 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
     esac
   done
   if [ "${bootstrap_strategy_bypass}" -eq 0 ] &&
-     [ -x "${bootstrap_strategy_entry}/bootstrap-strategy.sh" ]; then
-    exec "${bootstrap_strategy_entry}/bootstrap-strategy.sh" \
+     [ -x "${bootstrap_strategy_entry}/bootstrap-strategy.shs" ]; then
+    exec "${bootstrap_strategy_entry}/bootstrap-strategy.shs" \
       --strategy="${bootstrap_strategy_arg}" \
       --output="${bootstrap_strategy_output}" -- "$@"
   fi

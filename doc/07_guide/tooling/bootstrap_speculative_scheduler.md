@@ -1,6 +1,6 @@
 # Bootstrap Speculative Scheduler
 
-`scripts/bootstrap/bootstrap-strategy.sh` is the compatibility supervisor above
+`scripts/bootstrap/bootstrap-strategy.shs` is the compatibility supervisor above
 the existing `bootstrap-from-scratch.sh` trust engine. The engine still owns all
 compiler production, smoke admission, provenance, Stage 3 verification, Stage 4
 admission, deployment, and rollback evidence. The supervisor does not mint a
@@ -124,7 +124,7 @@ or exclusive deployment.
 ```sh
 sh test/01_unit/scripts/bootstrap_scheduler_contract_test.shs
 sh test/01_unit/scripts/bootstrap_strategy_fallback_contract_test.shs
-sh -n scripts/bootstrap/bootstrap-strategy.sh \
+sh -n scripts/bootstrap/bootstrap-strategy.shs \
   scripts/bootstrap/bootstrap-qualify-stage2.shs \
   scripts/bootstrap/bootstrap-scheduler-contract.shs
 ```

@@ -129,7 +129,7 @@ work and is not done here.
 `check-mcp-native-smoke.shs`, `check-freebsd-bootstrap-qemu.shs`.
 
 Coordinated `normal`/`full` runs additionally enter
-`bootstrap-strategy.sh`, which invokes the Stage-2 hello-world native-build
+`bootstrap-strategy.shs`, which invokes the Stage-2 hello-world native-build
 qualification after smoke admission and before lineage/Stage-4 publication.
 See `bootstrap_speculative_scheduler.md`; the scheduler contract test is a
 fixture-based run gate, not a static-presence claim.
