@@ -21,7 +21,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     linear_entries: [OrderedMapEntry<K, V>]
     hash_entries: Map<K, V>
     ordered_entries: OrderedMap<K, V>
-    fallback_order_keys: [K]
+    fallback_order_entries: [OrderedMapEntry<K, V>]
     site_id: text
     target_profile_id: text
     size: i64
@@ -52,7 +52,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             attribute: AdaptiveSetAttribute.Auto,
             algorithm: AdaptiveSetAlgorithm.Linear,
             linear_entries: [], hash_entries: Map.with_capacity(1),
-            ordered_entries: OrderedMap.new(), fallback_order_keys: [],
+            ordered_entries: OrderedMap.new(), fallback_order_entries: [],
             site_id: site_id, target_profile_id: target_profile_id,
             size: 0, observed_peak_size: 0, observed_lookups: 0,
             observed_hits: 0, observed_misses: 0, lookups_since_switch: 0,
@@ -203,12 +203,12 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     fn snapshot_keys_unmeasured() -> [K]:
         if self.algorithm == AdaptiveSetAlgorithm.Ordered:
             return self.ordered_entries.keys()
-        if self.fallback_order_keys.len() > 0:
-            if self.fallback_order_keys.len() != self.size:
+        if self.fallback_order_entries.len() > 0:
+            if self.fallback_order_entries.len() != self.size:
                 panic("adaptive map fallback iteration order is inconsistent")
             var keys: [K] = []
-            for key in self.fallback_order_keys:
-                keys.push(key)
+            for entry in self.fallback_order_entries:
+                keys.push(entry.key)
             return keys
         val entries = self.storage_entries()
         for entry in entries:
@@ -235,19 +235,19 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         """Key-ordered when supported; stable prior order plus insertions otherwise."""
         if self.site_id != "":
             collection_capture_note_materialization(self.site_id, self.target_profile_id)
+        self.snapshot_entries_unmeasured()
+
+    fn snapshot_entries_unmeasured() -> [OrderedMapEntry<K, V>]:
         if self.algorithm == AdaptiveSetAlgorithm.Ordered:
             return self.ordered_entries.entries()
-        val entries = self.storage_entries()
-        if self.fallback_order_keys.len() > 0:
-            var ordered_fallback: [OrderedMapEntry<K, V>] = []
-            for key in self.fallback_order_keys:
-                for entry in entries:
-                    if entry.key == key:
-                        ordered_fallback.push(entry)
-                        break
-            if ordered_fallback.len() != self.size:
+        if self.fallback_order_entries.len() > 0:
+            if self.fallback_order_entries.len() != self.size:
                 panic("adaptive map fallback iteration order is inconsistent")
+            var ordered_fallback: [OrderedMapEntry<K, V>] = []
+            for entry in self.fallback_order_entries:
+                ordered_fallback.push(entry)
             return ordered_fallback
+        val entries = self.storage_entries()
         for entry in entries:
             if not ordered_key_native_usable(entry.key):
                 return entries
@@ -344,10 +344,10 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         """Return true for a new key and false for replacement."""
         self.guard_ordered_key(key)
         val key_has_native_order = ordered_key_native_usable(key)
-        if self.fallback_order_keys.len() == 0 and not key_has_native_order:
+        if self.fallback_order_entries.len() == 0 and not key_has_native_order:
             # Preserve the pre-existing keys in their previously exposed order
             # before the first unorderable key joins the map.
-            self.fallback_order_keys = self.snapshot_keys_unmeasured()
+            self.fallback_order_entries = self.snapshot_entries_unmeasured()
         var inserted = false
         match self.algorithm:
             case AdaptiveSetAlgorithm.Linear:
@@ -371,19 +371,19 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                 var ordered = self.ordered_entries
                 inserted = ordered.put(key, value)
                 self.ordered_entries = ordered
-        if not inserted and self.fallback_order_keys.len() > 0:
-            var order = self.fallback_order_keys
+        if not inserted and self.fallback_order_entries.len() > 0:
+            var order = self.fallback_order_entries
             var refreshed = false
             var replaced_unsupported_key = false
             for i in 0..order.len():
-                if order[i] == key:
-                    replaced_unsupported_key = not ordered_key_native_usable(order[i])
-                    order[i] = key
+                if order[i].key == key:
+                    replaced_unsupported_key = not ordered_key_native_usable(order[i].key)
+                    order[i] = OrderedMapEntry(key: key, value: value)
                     refreshed = true
                     break
             if not refreshed:
                 panic("adaptive map fallback iteration order is inconsistent")
-            self.fallback_order_keys = order
+            self.fallback_order_entries = order
             if replaced_unsupported_key and key_has_native_order:
                 var unsupported_remains = false
                 for entry in self.storage_entries():
@@ -391,10 +391,10 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                         unsupported_remains = true
                         break
                 if not unsupported_remains:
-                    self.fallback_order_keys = []
+                    self.fallback_order_entries = []
         if inserted:
-            if self.fallback_order_keys.len() > 0 or not key_has_native_order:
-                self.fallback_order_keys.push(key)
+            if self.fallback_order_entries.len() > 0 or not key_has_native_order:
+                self.fallback_order_entries.push(OrderedMapEntry(key: key, value: value))
             self.size = self.size + 1
             if self.size > self.observed_peak_size:
                 self.observed_peak_size = self.size
@@ -409,10 +409,10 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
             return nil
         val previous = self.storage_get(key)
         var removed_unsupported_key = false
-        if self.fallback_order_keys.len() > 0:
-            for current in self.fallback_order_keys:
-                if current == key:
-                    removed_unsupported_key = not ordered_key_native_usable(current)
+        if self.fallback_order_entries.len() > 0:
+            for current in self.fallback_order_entries:
+                if current.key == key:
+                    removed_unsupported_key = not ordered_key_native_usable(current.key)
                     break
         elif self.ordered_key_rejected:
             for entry in self.storage_entries():
@@ -441,14 +441,14 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
                 if not ordered_key_native_usable(entry.key):
                     unsupported_remains = true
                     break
-        if self.fallback_order_keys.len() > 0:
-            var retained_order: [K] = []
-            for current in self.fallback_order_keys:
-                if current != key:
+        if self.fallback_order_entries.len() > 0:
+            var retained_order: [OrderedMapEntry<K, V>] = []
+            for current in self.fallback_order_entries:
+                if current.key != key:
                     retained_order.push(current)
-            self.fallback_order_keys = retained_order
+            self.fallback_order_entries = retained_order
             if removed_unsupported_key and not unsupported_remains:
-                self.fallback_order_keys = []
+                self.fallback_order_entries = []
         if self.ordered_key_rejected and removed_unsupported_key:
             # The unsupported key that blocked ordered storage may have been
             # the last one. Scan only after such a removal, not on every hot
@@ -468,7 +468,7 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         self.linear_entries = []
         self.hash_entries = Map.with_capacity(1)
         self.ordered_entries = OrderedMap.new()
-        self.fallback_order_keys = []
+        self.fallback_order_entries = []
         self.size = 0
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
