@@ -28,9 +28,13 @@ fn step_freebsd_bootstrap_preflight(extra_env: text) -> (text, text, i64):
         "fixture='/tmp/freebsd bootstrap qemu preflight spec'; " +
         "/bin/rm -rf \"$fixture\"; /bin/mkdir -p \"$fixture/bin\"; " +
         "trap '/bin/rm -rf \"$fixture\"' EXIT; " +
-        "for tool in qemu-system-x86_64 qemu-img ssh base64 tr timeout genisoimage; do " +
+        "for tool in qemu-img ssh base64 tr timeout genisoimage; do " +
         "  /bin/ln -s /bin/false \"$fixture/bin/$tool\"; " +
         "done; " +
+        "/bin/printf '%s\\n' '#!/bin/sh' 'if [ \"${QEMU_FAKE_DISABLE_TCG:-0}\" = 1 ]; then exit 1; fi' 'echo tcg' > \"$fixture/bin/qemu-system-x86_64\"; " +
+        "/bin/chmod 755 \"$fixture/bin/qemu-system-x86_64\"; " +
+        "/bin/printf '%s\\n' '#!/bin/sh' 'echo aarch64' > \"$fixture/bin/uname\"; " +
+        "/bin/chmod 755 \"$fixture/bin/uname\"; " +
         "/bin/printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$fixture/bin/rsync\"; " +
         "/bin/chmod 755 \"$fixture/bin/rsync\"; " +
         "/bin/printf '%s\\n' 'base image fixture' > \"$fixture/base.qcow2\"; " +
@@ -80,6 +84,13 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
         expect(stdout.contains("Smoke test PASSED")).to_equal(false)
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "rejects an ARM host when x86 QEMU lacks TCG":
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "QEMU_FAKE_DISABLE_TCG=1")
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("architecture")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "refuses a present image without a trusted media digest":
         val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(

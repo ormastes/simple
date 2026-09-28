@@ -283,7 +283,7 @@ pub extern "C" fn spl_dlsym_process_checked(name_rv: RuntimeValue, out_symbol: *
     {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
         let process = unsafe { GetModuleHandleW(std::ptr::null()) };
-        if process == 0 {
+        if process.is_null() {
             return 3;
         }
         let result = unsafe { GetProcAddress(process, buf.as_ptr()) };

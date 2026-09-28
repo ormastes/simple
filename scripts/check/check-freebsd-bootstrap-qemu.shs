@@ -172,7 +172,15 @@ preflight_timeout() {
 
 preflight_architecture() {
     host_arch="$(uname -m 2>/dev/null || true)"
-    [ "$host_arch" = "x86_64" ] || [ "$host_arch" = "amd64" ]
+    case "$host_arch" in
+        x86_64|amd64) return 0 ;;
+        aarch64|arm64)
+            # An x86_64 guest can run on ARM only through QEMU's TCG backend.
+            qemu-system-x86_64 -accel help 2>/dev/null |
+                grep -Eq '^[[:space:]]*tcg([[:space:]]|$)'
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 preflight_qemu_system() { command -v qemu-system-x86_64 >/dev/null 2>&1; }
@@ -208,12 +216,16 @@ preflight_private_key() {
     [ -r "$SSH_PRIVATE_KEY" ]
 }
 preflight_workspace() {
-    workspace_parent="${VM_DIR%/*}"
-    [ "$workspace_parent" = "$VM_DIR" ] && workspace_parent="."
     if [ -d "$VM_DIR" ]; then
         [ -w "$VM_DIR" ]
     else
-        [ -d "$workspace_parent" ] && [ -w "$workspace_parent" ]
+        workspace_parent="$VM_DIR"
+        while [ ! -d "$workspace_parent" ]; do
+            next_parent="${workspace_parent%/*}"
+            [ "$next_parent" = "$workspace_parent" ] && next_parent="."
+            workspace_parent="$next_parent"
+        done
+        [ -w "$workspace_parent" ]
     fi
 }
 
@@ -544,7 +556,10 @@ pass "Overlay created (30G): $OVERLAY_IMAGE"
 # Detect KVM
 ACCEL="tcg"
 CPU_MODEL="qemu64"
-if [ -w /dev/kvm ] 2>/dev/null; then
+HOST_ARCH="$(uname -m 2>/dev/null || true)"
+if { [ "$HOST_ARCH" = "x86_64" ] || [ "$HOST_ARCH" = "amd64" ]; } &&
+    [ -w /dev/kvm ] 2>/dev/null &&
+    qemu-system-x86_64 -accel help 2>/dev/null | grep -Eq '^[[:space:]]*kvm([[:space:]]|$)'; then
     ACCEL="kvm"
     CPU_MODEL="host"
 fi
@@ -746,7 +761,12 @@ else
         --exclude='*.qcow2' \
         --exclude='/src/compiler_rust/target/' \
         --exclude='/src/compiler_rust/target_*/' \
-        --exclude='/tools/' \
+        --include='/tools/' \
+        --include='/tools/counterpart/' \
+        --include='/tools/counterpart/sdk/' \
+        --include='/tools/counterpart/sdk/c/' \
+        --include='/tools/counterpart/sdk/c/simple_counterpart_abi.h' \
+        --exclude='/tools/**' \
         --exclude='/bin/' \
         --exclude='**/target/debug/' \
         --exclude='**/target/release/' \

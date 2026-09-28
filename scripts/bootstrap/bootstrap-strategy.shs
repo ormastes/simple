@@ -19,7 +19,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 
 usage() {
     cat <<'EOF'
-usage: bootstrap-strategy.sh --strategy=adhoc|normal|full --output=DIR -- ENGINE_ARGS...
+usage: bootstrap-strategy.shs --strategy=adhoc|normal|full --output=DIR -- ENGINE_ARGS...
 
 The arguments after -- are the original bootstrap-from-scratch.sh arguments.
 adhoc delegates unchanged. normal/full create a generation lease and run the
@@ -167,10 +167,17 @@ if [ -z "$memory_total" ] && [ -r /proc/meminfo ]; then
 fi
 case "$memory_total" in ''|*[!0-9]*|0) memory_total=2048 ;; esac
 qualification_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB:-2048}
+# `ulimit -v` limits address reservations, not resident memory. Mold reserves
+# more than 16 GiB of virtual space while linking even a tiny Stage-2 probe;
+# keep that limit separate from the 2 GiB physical scheduler reservation.
+qualification_virtual_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_VIRTUAL_MEMORY_MIB:-24576}
 memory_safety=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_SAFETY_MIB:-1024}
 critical_memory=${SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB:-}
 case "$qualification_memory:$memory_safety" in
     *[!0-9:]*|0:*|*:0) echo 'bootstrap-scheduler-error: invalid memory reservation' >&2; exit 2 ;;
+esac
+case "$qualification_virtual_memory" in
+    ''|*[!0-9]*|0) echo 'bootstrap-scheduler-error: invalid qualification virtual memory limit' >&2; exit 2 ;;
 esac
 if [ -z "$critical_memory" ]; then
     critical_memory=$((memory_total - qualification_memory - memory_safety))
@@ -207,6 +214,7 @@ runtime_graph_tmp="$generation_dir/graph.env.tmp.$$"
     echo memory_safety_mib="$memory_safety"
     echo memory_compiler_reservation_mib="$critical_memory"
     echo memory_qualification_mib="$qualification_memory"
+    echo memory_qualification_virtual_limit_mib="$qualification_virtual_memory"
     echo deploy_token=exclusive
     echo quarantine_root="$output"
 } >"$runtime_graph_tmp"
@@ -291,7 +299,7 @@ engine_pid=$!
 run_qualifier() {
     (
         if [ "$memory_enforcement" = ulimit-v ]; then
-            ulimit -v $((qualification_memory * 1024)) || exit 70
+            ulimit -v $((qualification_virtual_memory * 1024)) || exit 70
         fi
         SIMPLE_BOOTSTRAP_QUALIFICATION_CPU_SLOTS="$qualification_cpu" \
             /bin/sh "$qualifier" "$output" "$generation_dir" "$lease" \
