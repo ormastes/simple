@@ -83,3 +83,15 @@ ASLR disabled. Driver boundaries now import the concrete `CompileOptions`
 declaration, and both bootstrap call sites annotate their options receivers.
 These additions still require native admission; the imported-method memory
 growth remains a separate unresolved observation.
+
+The next Stage 2 candidate failed the positional native hello-world smoke
+with a null signature in `MirBody.from_function`. LLDB stopped before SSA
+preparation and showed an already-empty function (zero name/signature/symbol,
+only blocks populated). The storage projection pass iterated aggregate keys,
+copied each `SymbolId`, and performed a dictionary lookup with the copy;
+native disassembly confirms the fresh key allocation before `rt_index_get`.
+The pass now traverses typed function values and retains each function's own
+symbol, avoiding that native aggregate-key lookup. The existing preservation
+regression now checks function name, signature parameter count, and locals.
+General native aggregate-key value semantics remain a compiler/runtime bug.
+This repair needs a fresh admission run; no failed candidate is deployable.
