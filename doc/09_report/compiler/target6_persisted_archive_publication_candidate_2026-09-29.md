@@ -1,6 +1,6 @@
 # Target 6 persisted archive publication candidate
 
-Status: candidate; native execution and compiler-driver call remain open.
+Status: focused native publication PASS; compiler-driver call remains open.
 
 `cold_hir_package_publication_v1.spl` builds the compact V2 graph, admits one
 persisted CAS archive per package, compares the actual interface/action member
@@ -29,10 +29,23 @@ Three bounded native build/fix attempts exposed the staged runtime closure:
    converter and hashes its text bytes; it has not been rebuilt after that
    change because the session reached its three-attempt cap.
 
-Next run: compile and execute the four-example native spec once, repair any
-remaining concrete failure within the next session's cap, then wire compact
-typed-HIR and compiled-output receipts from the driver to this publisher.
-Only after that can warm/cold native time and RSS cohorts qualify Target 6.
+At that point, the next planned run was the four-example native spec. The
+focused PASS below resolves that check; compact typed-HIR and compiled-output
+receipts still need production driver wiring before warm/cold native time and
+RSS cohorts can qualify Target 6.
+
+## Focused Stage2 native publication PASS
+
+After repairing optional receipt decoding and reading member bytes directly
+from the admitted archive text, the no-stub Stage2 build of
+`test/02_integration/compiler/cache/cold_hir_compact_output_index_spec.spl`
+reported 4 examples and 0 failures. The persisted archive was decoded before
+the V2 index pointer moved, and a mismatched interface digest left `CURRENT`
+absent. The build compiled 3 changed units and reused 320 in 6.83 seconds
+at 446,600 KiB peak RSS; the single spec run took 0.05 seconds at 5,536 KiB
+max RSS. This is focused correctness evidence, not a paired performance
+cohort or production driver cutover. The native `text.bytes()` bug remains
+tracked separately.
 
 ## Native execution follow-up
 

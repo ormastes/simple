@@ -113,3 +113,22 @@ bytes. The earlier three-byte copy passed. This rules out simply changing
 the copy method as a qualified publication fix; the byte source and
 conversion boundary need byte-by-byte diagnosis. The production code was
 left unchanged after the failed trial.
+
+## Cold publication PASS after byte-source repair
+
+A byte-by-byte native probe found that the concatenated archive text matched
+the source member through its first range, but `archive_content.bytes()` first
+disagreed with `archive_content.byte_at()` at byte 10. The copied array and
+decoded text preserved that wrong array byte. Direct `byte_at()` reads into a
+preallocated member buffer produced the expected hashes for both 92-byte and
+88-byte fixture members.
+
+The cold publisher now uses the text's O(1) byte length and reads each
+validated member range with `byte_at()`; it no longer allocates a full archive
+byte array. The original no-stub Stage2 native spec then reported **4 examples,
+0 failures**, including successful persisted-archive publication and rejection
+of a mismatched payload before moving `CURRENT`. The changed build compiled
+3 units and reused 320 in 6.83 seconds at 446,600 KiB peak build RSS; the
+single spec run took 0.05 seconds at 5,536 KiB max runtime RSS. These are not
+paired performance cohorts. The underlying native `text.bytes()` defect
+remains open and Target 6 driver cutover is still incomplete.

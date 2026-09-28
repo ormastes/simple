@@ -1,7 +1,7 @@
-# Native byte-to-text path loses or corrupts payload
+# Native text.bytes() corrupts concatenated archive payload
 
-Status: open runtime/compiler bug; blocks cold package archive member
-validation in the Target 6 native publication spec.
+Status: open runtime/compiler bug. The cold archive publisher now reads
+validated byte ranges through `text.byte_at()`; its focused native spec passes.
 
 An isolated two-unit no-stub native probe, built by the immutable Stage2
 pure-Simple compiler capsule, evaluated `"abcDEF".bytes().slice(0, 3)`.
@@ -42,3 +42,15 @@ conversion first changes the data. The next probe must compare source text
 bytes to the concatenated archive bytes before conversion, then compare
 the copied array bytes and decoded text byte by byte. Both copy methods fail
 for the actual member lengths, so neither is a qualified workaround.
+
+## First corrupt operation and product bypass
+
+A byte-by-byte native probe compared the 92-byte source action text, the
+concatenated archive text, `archive.bytes()`, an assigned copy, and the
+decoded text. Source and archive `byte_at()` values matched; the first
+archive `bytes()` mismatch was at index 10. The assigned copy matched the
+array, and the decoded text matched the copy. Direct `archive.byte_at()`
+copies passed the action and interface SHA-256 checks. The product cold
+publisher now uses `byte_at()` plus a bounded member buffer, and the original
+four-example native publication spec passes 4/4. This bypass qualifies only
+that publisher; the shared `text.bytes()` behavior remains a runtime defect.
