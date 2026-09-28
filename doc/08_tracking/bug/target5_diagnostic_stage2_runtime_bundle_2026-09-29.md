@@ -59,3 +59,12 @@ this newer source tree. It timed out after 220 seconds without producing a
 compiler. A focused Cargo unit test for the adapter is currently blocked at
 dependency resolution: the locked `inkwell 0.9.0` lacks the requested
 `llvm23-1-force-static` feature. Do not treat this as a test PASS.
+
+A static owner comparison against that September 27 bootstrap directory finds
+107 of the 122 previously reported undefined names in its shared runtime or
+compiler backfill archive. Fifteen have no definition in either: ten
+`rt_net_*` names, `rt_tcp_connect`, `rt_execute_native`, and three
+`spl_cranelift_*_v2` names. `rt_execute_native` exists in `native_all`, which
+the Stage4 core lane must not absorb. The prior 122-name scan is object-wide;
+strict section-GC linking must determine which of these fifteen are live.
+This static comparison does not claim a successful link.
