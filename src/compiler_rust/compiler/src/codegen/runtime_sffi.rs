@@ -2337,6 +2337,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Dynamic Loading (WFFI)
     // =========================================================================
+    // Pure-Simple collection helpers implemented by the C SFFI runtime.
+    RuntimeFuncSpec::new("spl_ordered_key_cmp", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_begin", &[I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_note_size", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_note_lookup", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_note_materialization", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_note_hash_probe", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_finish", &[], &[I64]),
+    RuntimeFuncSpec::new("spl_collection_capture_abort", &[], &[I64]),
     RuntimeFuncSpec::new("spl_dlopen", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_backend_plugin_run_v1", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlopen_checked", &[I64, I64], &[I64]),

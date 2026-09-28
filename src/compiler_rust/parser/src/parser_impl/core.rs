@@ -2,7 +2,7 @@
 //!
 //! This module contains the Parser struct, constructor methods, and main parse entry point.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -51,6 +51,10 @@ pub struct Parser<'a> {
     pub(crate) current: Token,
     pub(crate) previous: Token,
     pub(crate) source: &'a str,
+    /// Source identity and lexical owner used by collection profile sites.
+    pub(crate) collection_module_path: String,
+    pub(crate) collection_owner: String,
+    pub(crate) collection_site_ordinals: HashMap<String, usize>,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
@@ -121,6 +125,9 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source,
+            collection_module_path: String::new(),
+            collection_owner: String::new(),
+            collection_site_ordinals: HashMap::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -166,6 +173,25 @@ impl<'a> Parser<'a> {
         parser
     }
 
+    /// Attach the same path passed to the source parser before parsing begins.
+    pub fn with_collection_module_path(mut self, path: &str) -> Self {
+        let source_path = std::path::Path::new(path);
+        let project_root = if source_path.is_absolute() {
+            // current_dir preserves the ordinary Windows path prefix used by
+            // source discovery; canonicalize(".") may produce a \\?\ prefix,
+            // making strip_prefix fail for the same physical source path.
+            std::env::current_dir().ok()
+        } else {
+            None
+        };
+        let relative = project_root
+            .as_ref()
+            .and_then(|root| source_path.strip_prefix(root).ok())
+            .unwrap_or(source_path);
+        self.collection_module_path = relative.to_string_lossy().replace('\\', "/");
+        self
+    }
+
     /// Create a parser for parsing inline expressions (e.g., f-string interpolations).
     /// Unlike `new()`, this parser does NOT treat leading whitespace as indentation,
     /// which allows expressions like ` x + y ` to parse correctly.
@@ -179,6 +205,9 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source,
+            collection_module_path: String::new(),
+            collection_owner: String::new(),
+            collection_site_ordinals: HashMap::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,

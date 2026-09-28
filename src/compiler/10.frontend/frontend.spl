@@ -12,6 +12,7 @@ use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_po
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_key}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_note_hit, frontend_parse_cache_note_miss}
+use compiler.frontend.core.collection_feedback.{parser_collection_feedback_active}
 use compiler.frontend.desugar.desugar_async.{desugar_module}
 use compiler.common.diagnostics.span.{Span}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -106,7 +107,14 @@ fn frontend_extract_domain_blocks(source: text) -> ([DomainBlock], text):
 # foreign scope, a torn blob: all fall through to a real parse.
 fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scope: bool,
     advisory_cache_identity: text) -> ParserModule:
-    val source_key = if frontend_parse_cache_enabled(): frontend_parse_cache_key(file_path) else: ""
+    # A profile-enriched initializer differs from a source-only flat AST.
+    # Keep ordinary parse-cache entries untouched until profile identity is
+    # included in that cache's key.
+    val source_key = if frontend_parse_cache_enabled() and
+            not parser_collection_feedback_active():
+        frontend_parse_cache_key(file_path)
+    else:
+        ""
     val key = if source_key != "" and advisory_cache_identity != "":
         sha256_text("frontend-advisory-cache-v1|" + source_key + "|" + advisory_cache_identity)
     else:
