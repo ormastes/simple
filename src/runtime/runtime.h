@@ -737,9 +737,16 @@ int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED T
 int8_t   rt_is_none(int64_t value);
 int8_t   rt_is_some(int64_t value);
 double   rt_math_pow(double base, double exponent);
+/* Remove by raw index, returning a tagged element or NIL for invalid receiver/index.
+ * Negative indices do not count from the end. */
+int64_t  rt_array_remove(int64_t array_value, int64_t index);
+/* Erased receiver dispatcher: key/index and removed value are tagged. */
+int64_t  rt_collection_remove(int64_t receiver, int64_t key);
 int64_t  rt_dict_new(int64_t cap_hint);
 int64_t  rt_dict_get(int64_t dict, int64_t key);
 int8_t   rt_dict_set(int64_t dict, int64_t key, int64_t value);
+int8_t   rt_dict_contains(int64_t dict, int64_t key);
+int8_t   rt_dict_remove(int64_t dict, int64_t key); /* legacy boolean result */
 int64_t  rt_dict_len(int64_t dict);
 int8_t   rt_dict_insert(int64_t dict, int64_t key, int64_t value);
 int64_t  rt_dict_get_i64_raw(int64_t dict, int64_t key);
