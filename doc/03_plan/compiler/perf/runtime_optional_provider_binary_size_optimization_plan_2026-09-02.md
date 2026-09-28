@@ -94,6 +94,15 @@ not establish the 15 KiB hello gate, a matched startup/RSS improvement, a
 production install manifest, or the full CLI feature closure. See
 `doc/09_report/compiler/target5_sqlite_demand_provider_probe_2026-09-28.md`.
 
+Current Linux Stage4 follow-up (2026-09-28): the linker now offers the
+SQLite first-demand bridge as a separately scanned candidate when building
+the full CLI. A native exact-symbol contract passes 3/3 and an actual C-object
+archive/owner-selection integration spec passes 1/1. The full CLI retry did
+not reach link selection because the diagnostic pure-Simple compiler hit
+flat-AST parse errors after source closure; no full CLI size/startup/RSS or
+SQLite-link improvement is claimed. See
+`doc/09_report/compiler/target5_stage4_sqlite_demand_candidate_2026-09-28.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.
