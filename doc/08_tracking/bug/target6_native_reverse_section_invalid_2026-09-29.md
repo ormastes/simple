@@ -47,6 +47,8 @@ textual verdict from the pushed candidate is **2 passes, 2 failures**: the graph
 and negative input cases pass, while persisted publication and stale payload
 rejection do not. Both remaining cases lack a CAS archive generation. The
 earlier file-wrapper diagnosis was incorrect: tagged `0xb` is true. The next
-failure is archive manifest validation; see
-`native_archive_manifest_validation_2026-09-29.md`. A subsequent uncommitted
-trial links but crashes before producing a textual verdict.
+failure was archive manifest validation; see
+`native_archive_manifest_validation_2026-09-29.md`. The newer archive fixes
+resolved a native null mutable-reference crash and advanced CAS through
+generation-file creation and sealing. The latest textual verdict remains 2/4:
+`CURRENT` is absent, so both publication cases still fail.

@@ -70,18 +70,24 @@ fn package_archive_aggregate_entry_v1(
     val actions = cache_text_join_v1(action_digests, "|")
     if module_names == nil or metadata == nil or actions == nil:
         return nil
+    val module_name_text = module_names.unwrap()
+    val metadata_text = metadata.unwrap()
+    val action_text = actions.unwrap()
     Some(PackageModuleIndexEntryV1(
-        package_identity, module_names!, "", "",
-        sha256_text(metadata!), "", "", "", "",
-        sha256_text(actions!), "", scc_identity,
+        package_identity, module_name_text, "", "",
+        sha256_text(metadata_text), "", "", "", "",
+        sha256_text(action_text), "", scc_identity,
         dependency_modules, []))
 
 fn package_archive_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
         return false
-    for ch in value:
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
             return false
+        index = index + 1
     true
 
 fn package_archive_token_valid_v1(value: text) -> bool:
@@ -116,14 +122,16 @@ fn package_archive_manifest_v1(
             not package_archive_digest_valid_v1(interface_digest) or
             not package_archive_digest_valid_v1(action_digest)):
         return ""
-    val dependency_text = cache_text_join_v1(dependencies!, ",")
+    val dependency_list = dependencies.unwrap()
+    val dependency_text = cache_text_join_v1(dependency_list, ",")
     if dependency_text == nil:
         return ""
+    val dependency_text_value = dependency_text.unwrap()
     cache_text_join_v1([PACKAGE_ARCHIVE_MANIFEST_V1,
         "package={entry.package_identity}",
         "variant={authority.variant_digest}",
         "producer={authority.producer_digest}",
-        "dependencies={dependencies!.len()};{dependency_text!}",
+        "dependencies={dependency_list.len()};{dependency_text_value}",
         "interface={interface_digest}",
         "action={action_digest}"], "\n") ?? ""
 
@@ -268,6 +276,7 @@ fn package_archive_publish_scc_v1(
         if aggregate == nil:
             _ = cas_batch_abort_v1(transaction)
             return false
+        val aggregate_entry = aggregate.unwrap()
         val dependencies = package_archive_sorted_dependencies_v1(
             dependencies_all)
         val interface_content = cache_text_join_v1(interfaces, "\n")
@@ -275,24 +284,27 @@ fn package_archive_publish_scc_v1(
         if interface_content == nil or action_content == nil:
             _ = cas_batch_abort_v1(transaction)
             return false
-        val interface_digest = sha256_text(interface_content!)
+        val interface_text = interface_content.unwrap()
+        val action_text = action_content.unwrap()
+        val interface_digest = sha256_text(interface_text)
         val manifest = package_archive_manifest_v1(
-            aggregate!, authority, dependencies_all,
-            interface_digest, sha256_text(action_content!))
+            aggregate_entry, authority, dependencies_all,
+            interface_digest, sha256_text(action_text))
         if dependencies == nil or manifest == "":
             _ = cas_batch_abort_v1(transaction)
             return false
+        val dependency_digests = dependencies.unwrap()
         val (archive_content, receipt) = package_archive_build_receipt_v1(
-            aggregate!, authority, dependencies!, manifest,
-            interface_content!, action_content!)
+            aggregate_entry, authority, dependency_digests, manifest,
+            interface_text, action_text)
         if (cas_put(root, archive_content) != receipt.archive_digest or
                 cas_put(root, package_archive_receipt_canonical_fields_v1(receipt)) !=
                     receipt.receipt_digest):
             _ = cas_batch_abort_v1(transaction)
             return false
         if cas_batch_stage_object_v1(
-                &mut transaction, package_identity,
-                PackageActionKeyV1(aggregate!.action_digest), receipt).is_err():
+                transaction, package_identity,
+                PackageActionKeyV1(aggregate_entry.action_digest), receipt).is_err():
             _ = cas_batch_abort_v1(transaction)
             return false
     cas_batch_publish_v1(transaction).is_ok()
