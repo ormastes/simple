@@ -5,7 +5,7 @@ set -eu
 # FreeBSD, macOS, and Windows (Git Bash).
 #
 # Usage:
-#   sh scripts/setup/bootstrap-prereqs.shs [check|install] [--dry-run] [--selftest]
+#   sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23] [--dry-run] [--selftest]
 #
 # Modes:
 #   check   (default) — detect every prerequisite with its required version,
@@ -20,6 +20,8 @@ set -eu
 #           and exits 0. A failed step (e.g. sudo needs a password this
 #           script cannot supply) is reported and does not abort the rest —
 #           the final re-check honestly reports what is still missing.
+#   install-llvm23 — install and check only the LLVM 23.1 toolchain. CI jobs
+#           needing LLVM without Vulkan/RenderDoc use this focused mode.
 #   --dry-run — with `install`, print the exact plan (same "installing ..."
 #           lines) WITHOUT executing anything. Changes nothing. Exit code
 #           mirrors what `check` would report, since no state changed.
@@ -1438,6 +1440,40 @@ run_install() {
     run_check
 }
 
+run_install_llvm23_only() {
+    dry_run="$1"
+    platform="$(detect_platform)"
+    fam="$(platform_family "$platform")"
+    if [ "$fam" = "unsupported" ]; then
+        echo "ERROR — nothing was checked: platform '${platform#unsupported:}' is not supported by this installer yet"
+        return 2
+    fi
+    apply_llvm23_path "$fam"
+    detect_timeout_mode
+    missing=0
+    for tool in clang clang++ ld.lld llvm-config llvm-ar; do
+        row="$(check_one "$tool" "$fam")"
+        split_row "$row"
+        if [ "$ROW_STATUS" != "PRESENT" ]; then missing=1; fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        do_install_llvm23 "$dry_run" "$fam" || return 1
+        apply_llvm23_path "$fam"
+    fi
+    missing=0
+    for tool in clang clang++ ld.lld llvm-config llvm-ar; do
+        row="$(check_one "$tool" "$fam")"
+        printf '%s\n' "$row"
+        split_row "$row"
+        if [ "$ROW_STATUS" != "PRESENT" ]; then missing=1; fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        echo "FAIL — LLVM 23.1 prerequisite(s) remain unavailable"
+        return 1
+    fi
+    echo "PASS — LLVM 23.1 prerequisite(s) checked"
+}
+
 # ---------------------------------------------------------------------------
 # --selftest: fixtures for every platform's detection path, tool-table
 # correctness, dry-run planning, Vulkan (present/missing/no-device),
@@ -1992,11 +2028,12 @@ for arg in "$@"; do
     case "$arg" in
         check) mode="check" ;;
         install) mode="install" ;;
+        install-llvm23) mode="install-llvm23" ;;
         --dry-run) dry_run="1" ;;
         --selftest) do_selftest="1" ;;
         *)
             echo "unknown argument: $arg" >&2
-            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install] [--dry-run] [--selftest]" >&2
+            echo "usage: sh scripts/setup/bootstrap-prereqs.shs [check|install|install-llvm23] [--dry-run] [--selftest]" >&2
             exit 2
             ;;
     esac
@@ -2014,6 +2051,10 @@ case "$mode" in
         ;;
     install)
         run_install "$dry_run"
+        exit $?
+        ;;
+    install-llvm23)
+        run_install_llvm23_only "$dry_run"
         exit $?
         ;;
 esac
