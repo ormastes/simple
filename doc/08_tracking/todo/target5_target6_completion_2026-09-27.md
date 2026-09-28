@@ -15,6 +15,27 @@ from `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`,
 `doc/08_tracking/bug/target56_isolated_current_source_verification_blockers_2026-09-27.md`.
 The isolated changes are groundwork and diagnostics, not production acceptance.
 
+## Next-session TODO
+
+- [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
+  compiler and runtime in this isolated lane. Preserve the phase-bound cache,
+  record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
+  the closure stall and missing runtime symbols in the blocker report.
+- [ ] With that authority, run a current-source release-small Simple hello and
+  a paired matched-startup C hello. Check exact output, retained symbols,
+  <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
+  30-sample development (100-sample release) startup/RSS cohort. The C-authored
+  6,504/6,368-byte pair remains diagnostic only.
+- [ ] Run the Target 6 cold/warm Git-event fixture with explicit cursor
+  arguments on the current-source worker. Inspect the batch before publication;
+  do not repeat the three failed historical Stage2 aggregate workarounds.
+  Finish the typed TLDR/SMF producer and graph publication, replace the
+  binding-only index, then run the SPipe and native cold/warm/edit/SCC/variant
+  time/RSS cohorts with the normalized-sum rule.
+- [ ] Run the full Target 5 demand-load/Phase 7 matrix and Target 6 verification
+  gates. Close the technical TODO only after a `STATUS: PASS` report; the user's
+  session closeout is not a production qualification.
+
 ## Target 5 — kernel and extension demand loading
 
 - Produce an ABI-matched current-source pure-Simple Stage4 compiler and runtime
