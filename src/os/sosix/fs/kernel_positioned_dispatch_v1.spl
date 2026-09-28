@@ -20,6 +20,7 @@ use os.sosix.fs.registry_lifecycle_v1.sosix_fs_registry_owner_v1
 
 pub struct SosixFsKernelPositionedStateV1:
     installed: bool
+    retired: bool
     owner: SosixFsPositionedDispatchOwnerV1
 
 pub struct SosixFsKernelPositionedInstallResultV1:
@@ -46,7 +47,15 @@ fn _owner_ready_v1(owner: SosixFsPositionedDispatchOwnerV1) -> bool:
 pub fn sosix_fs_kernel_positioned_state_v1(
     owner: SosixFsPositionedDispatchOwnerV1
 ) -> SosixFsKernelPositionedStateV1:
-    SosixFsKernelPositionedStateV1(installed: false, owner: owner)
+    SosixFsKernelPositionedStateV1(installed: false, retired: false, owner: owner)
+
+pub fn sosix_fs_kernel_quarantine_positioned_state_v1(
+    state: SosixFsKernelPositionedStateV1
+) -> SosixFsKernelPositionedStateV1:
+    """Close dispatch while retaining the last installed generation watermark."""
+    SosixFsKernelPositionedStateV1(
+        installed: false, retired: state.installed or state.retired,
+        owner: state.owner)
 
 pub fn sosix_fs_kernel_uninstalled_positioned_state_v1() -> SosixFsKernelPositionedStateV1:
     """Boot-time state before any positioned owner has been installed."""
@@ -61,7 +70,7 @@ pub fn sosix_fs_kernel_install_positioned_owner_v1(
     if not _owner_ready_v1(owner):
         return SosixFsKernelPositionedInstallResultV1(
             accepted: false, reason: "positioned-owner-not-ready", state: state)
-    if state.installed and (
+    if (state.installed or state.retired) and (
         owner.registry_owner.service_generation <=
             state.owner.registry_owner.service_generation or
         (owner.operation_slot == state.owner.operation_slot and
@@ -71,7 +80,8 @@ pub fn sosix_fs_kernel_install_positioned_owner_v1(
             state: state)
     SosixFsKernelPositionedInstallResultV1(
         accepted: true, reason: "positioned-owner-installed",
-        state: SosixFsKernelPositionedStateV1(installed: true, owner: owner))
+        state: SosixFsKernelPositionedStateV1(
+            installed: true, retired: false, owner: owner))
 
 pub fn sosix_fs_kernel_dispatch_positioned_v1(
     state: SosixFsKernelPositionedStateV1,
@@ -102,9 +112,10 @@ pub fn sosix_fs_kernel_dispatch_positioned_v1(
         recognized: true, accepted: dispatched.accepted,
         reason: dispatched.reason, result: dispatched.result,
         state: SosixFsKernelPositionedStateV1(
-            installed: true, owner: dispatched.owner))
+            installed: true, retired: false, owner: dispatched.owner))
 
 export sosix_fs_kernel_positioned_state_v1
 export sosix_fs_kernel_uninstalled_positioned_state_v1
+export sosix_fs_kernel_quarantine_positioned_state_v1
 export sosix_fs_kernel_install_positioned_owner_v1
 export sosix_fs_kernel_dispatch_positioned_v1
