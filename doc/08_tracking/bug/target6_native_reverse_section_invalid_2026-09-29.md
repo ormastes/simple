@@ -1,7 +1,8 @@
 # Target 6 native reverse SMF section invalid in archive publication closure
 
-Status: open; blocks the persisted archive publisher's native integration
-spec and V2 graph publication qualification.
+Status: partially resolved; SMF assembly now succeeds, but the persisted
+archive publisher's native integration spec still fails at the later draft
+reverse-projection check.
 
 The earlier compact cold graph spec passed 2/2 when its entry closure had 315
 source units. Adding persisted CAS archive publication and its integration
@@ -22,8 +23,16 @@ Its process exit code was 0 despite that text verdict, so exit status alone
 must not be treated as a pass. The test-runner exit-status defect also needs
 an owner fix before native SPipe execution can be a reliable gate.
 
-Next step: inspect the reverse section's kind, digest syntax, and payload
-extent in this exact native closure, then fix the producer or native lowering
-cause. Re-run the four-example spec and require both its textual verdict and
-the publisher's positive and stale-payload assertions to pass before calling
-the publication path verified.
+On 2026-09-29, native disassembly and GDB showed the builder returned a valid
+69-byte reverse payload. The original `payload!` path passed its `Some` wrapper
+to SHA-256 and produced an invalid section extent. Explicit `if val` binding
+fixed that. The export caller then read `reverse.payload` from struct offset 8
+although GDB showed the payload at offset 0; explicit Result unwrap moved the
+spec past SMF assembly. The current textual verdict is 4 failures, first reason
+`cold-drafts-reverse-projection-mismatch:a`. The compiler layout evidence and
+remaining investigation are in
+`native_match_result_struct_field_projection_offset_2026-09-29.md`.
+
+Next step: inspect the recomputed projection and artifact digest in the draft
+check. Require all four examples, including positive publication and stale
+payload rejection, to pass before calling the publication path verified.
