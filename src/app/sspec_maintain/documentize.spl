@@ -13,6 +13,26 @@ fn _without_generated_section(content: text, start_marker: text,
     val end_offset = start + suffix + end_marker.len()
     (content[:start] + content[end_offset:]).trim() + "\n"
 
+fn _requirement_ids(source: text) -> [text]:
+    """Collect distinct REQ-style ids declared anywhere in the spec source."""
+    var ids: [text] = []
+    for line in source.split("\n"):
+        for word in line.replace(",", " ").replace("`", " ").split(" "):
+            val token = word.trim()
+            if token.starts_with("REQ-") and token.len() > 4 and not ids.contains(token):
+                ids.push(token)
+    ids
+
+fn _traceability_section(source: text) -> text:
+    """Render the requirements this spec binds; empty when it declares none."""
+    val ids = _requirement_ids(source)
+    if ids.len() == 0:
+        return ""
+    var body = "\n<!-- sspec-maintain:traceability:start -->\n## Traceability\n\nRequirements covered by the scenarios in this manual:\n\n"
+    for id in ids:
+        body = body + "- `" + id + "`\n"
+    body + "<!-- sspec-maintain:traceability:end -->\n"
+
 fn compose_sspec_documentized_manual(path: text, source: text,
         spipe_manual: text, include_scorecard: bool) -> SspecDocumentizeResult:
     """Compose observed provenance and optional scoring around SPipe output; O(bytes+findings)."""
@@ -22,9 +42,12 @@ fn compose_sspec_documentized_manual(path: text, source: text,
     base = _without_generated_section(base,
         "<!-- sspec-maintain:provenance:start -->",
         "<!-- sspec-maintain:provenance:end -->")
+    base = _without_generated_section(base,
+        "<!-- sspec-maintain:traceability:start -->",
+        "<!-- sspec-maintain:traceability:end -->")
     val source_hash = sha256_text(source)
     val provenance = "\n<!-- sspec-maintain:provenance:start -->\n## Generation history\n\n- Canonical SPipe generation for source `{source_hash}`; maintenance tool `1`, rules `ssdoc-rules/1`.\n\nSource SHA-256: `{source_hash}`.\n<!-- sspec-maintain:provenance:end -->\n"
-    val observed = base.trim() + "\n" + provenance
+    val observed = base.trim() + "\n" + _traceability_section(source) + provenance
     val report = analyze_sspec_pair_text(path, source, Some(observed))
     var content = observed
     if include_scorecard:
