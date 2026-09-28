@@ -5,6 +5,8 @@
 
 use std.editor.services.debug_session_registry.*
 
+val EDITOR_DEBUG_DAP_FRAME_BODY_MAX: i64 = 65000
+
 fn editor_debug_dap_request(seq: i64, command: text, arguments_json: text) -> text:
     var json = "{\"seq\":" + str(seq) + ",\"type\":\"request\",\"command\":\"" + _ed_json_escape(command) + "\""
     if arguments_json != "":
@@ -15,43 +17,61 @@ fn editor_debug_dap_frame_message(json: text) -> text:
     "Content-Length: " + str(json.len()) + "\r\n\r\n" + json
 
 fn editor_debug_dap_parse_frame(buf: text) -> (text, i64):
+    editor_debug_dap_parse_frame_at(buf, 0)
+
+fn editor_debug_dap_parse_frame_at(buf: text, offset: i64) -> (text, i64):
     if buf == "":
         return ("", 0)
-    val header_end = _ed_dap_find_header_end(buf)
+    val buf_len = buf.len()
+    if offset < 0 or offset >= buf_len:
+        return ("", 0)
+    val header_end = _ed_dap_find_header_end_from(buf, offset)
     if header_end < 0:
         return ("", 0)
-    val header = buf.slice(0, header_end)
     val content_start = header_end + 4
-    val content_length = _ed_dap_parse_content_length(header)
+    val content_length = _ed_dap_parse_content_length_range(buf, offset, header_end)
     if content_length <= 0:
         return ("", 0)
     val total = content_start + content_length
-    if buf.len() < total:
+    if buf_len < total:
         return ("", 0)
     (buf.slice(content_start, total), total)
 
 fn _ed_dap_find_header_end(buf: text) -> i64:
-    if buf.len() < 4:
+    _ed_dap_find_header_end_from(buf, 0)
+
+fn _ed_dap_find_header_end_from(buf: text, offset: i64) -> i64:
+    val buf_len = buf.len()
+    if buf_len < 4:
         return -1
-    var i = 0
-    while i < buf.len() - 3:
+    var i = offset
+    while i < buf_len - 3:
         if buf[i:i + 1] == "\r" and buf[i + 1:i + 1 + 1] == "\n" and buf[i + 2:i + 2 + 1] == "\r" and buf[i + 3:i + 3 + 1] == "\n":
             return i
         i = i + 1
     -1
 
 fn _ed_dap_parse_content_length(header: text) -> i64:
-    var i = 0
-    while i < header.len():
-        if header.slice(i, header.len()).starts_with("Content-Length:"):
+    val header_len = header.len()
+    _ed_dap_parse_content_length_range(header, 0, header_len)
+
+fn _ed_dap_parse_content_length_range(buf: text, start: i64, end: i64) -> i64:
+    var i = start
+    while i < end:
+        if i + 15 <= end and buf[i:i + 15] == "Content-Length:":
             var j = i + 15
-            while j < header.len() and header[j:j + 1] == " ":
+            while j < end and buf[j:j + 1] == " ":
                 j = j + 1
-            var num = ""
-            while j < header.len() and header[j:j + 1] != "\r" and header[j:j + 1] != "\n":
-                num = num + header[j:j + 1]
+            var content_length = 0
+            while j < end and buf[j:j + 1] != "\r" and buf[j:j + 1] != "\n":
+                val digit = buf[j:j + 1]
+                if not _ed_is_digit(digit):
+                    return 0
+                content_length = content_length * 10 + _ed_digit_value(digit)
+                if content_length > EDITOR_DEBUG_DAP_FRAME_BODY_MAX:
+                    return 0
                 j = j + 1
-            return num.trim().to_i64() ?? 0
+            return content_length
         i = i + 1
     0
 
@@ -378,14 +398,13 @@ fn _ed_json_value(json: text, field: text) -> text:
         return _ed_json_balanced(json, i, "[")
     if ch == "\"":
         return "\"" + _ed_json_escape(_ed_extract_string(json, i)) + "\""
-    var result = ""
+    val value_start = i
     while i < json.len():
         val c = json[i:i + 1]
         if c == "," or c == "}":
-            return result.trim()
-        result = result + c
+            return json.slice(value_start, i).trim()
         i = i + 1
-    result.trim()
+    json.slice(value_start, i).trim()
 
 fn _ed_json_array(json: text, field: text) -> [text]:
     var result: [text] = []

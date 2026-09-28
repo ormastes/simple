@@ -1,12 +1,16 @@
 # Window Protocol — WM input event and command types.
 #
-# Provides: WmInputEvent, WmCreateRequest, WmCloseRequest,
-#           WmResizeRequest, WmMoveRequest, WM_EVENT_CLOSE.
+# Provides the platform-independent WM value and wire contract shared by the
+# compositor service and user-space Window client.
 
 use std.common.window_protocol.geometry.{WindowId, Point, Size, KeyCode, Modifiers, WmEventType}
 
-val WM_EVENT_CLOSE = "wm_close"
+val WM_EVENT_CLOSE = WmEventType.Close
+val WM_EVENT_FOCUS = WmEventType.Focus
+val WM_EVENT_RESIZE = WmEventType.Resize
 val WM_INPUT_TEXT_MAX_BYTES: u32 = 4096
+val WM_CREATE_RESPONSE_WIRE_BYTES: i64 = 12
+val WM_FOCUS_EVENT_WIRE_BYTES: i64 = 9
 
 struct WmStatus:
     value: i32
@@ -14,6 +18,14 @@ struct WmStatus:
 val WM_STATUS_OK = WmStatus(value: 0)
 val WM_STATUS_ERROR = WmStatus(value: -1)
 val WM_STATUS_NO_SPACE = WmStatus(value: -2)
+
+struct WmCreateResponse:
+    status: WmStatus
+    window_id: WindowId
+
+struct WmFocusEvent:
+    window_id: WindowId
+    focused: bool
 
 class WmInputEvent:
     event_type: WmEventType
@@ -112,3 +124,91 @@ struct WmResizeRequest:
 struct WmMoveRequest:
     window_id: WindowId
     point: Point
+
+fn wm_input_event(window_id: WindowId, event_type: WmEventType, key_code: KeyCode, point: Point) -> WmInputEvent:
+    """Construct a compatibility event from one of the stable WM_EVENT tags."""
+    WmInputEvent(
+        event_type: event_type,
+        window_id: window_id,
+        point: point,
+        key_code: key_code,
+        modifiers: Modifiers.none(),
+        scroll_dx: 0.0,
+        scroll_dy: 0.0,
+        committed_text: ""
+    )
+
+fn wm_focus_event(window_id: WindowId, focused: bool) -> WmFocusEvent:
+    WmFocusEvent(window_id: window_id, focused: focused)
+
+fn _wm_wire_push_u32_le(out: [u8], value: u32) -> [u8]:
+    var bytes = out
+    bytes = bytes.push((value & 0xFFu32).to_u8())
+    bytes = bytes.push(((value >> 8) & 0xFFu32).to_u8())
+    bytes = bytes.push(((value >> 16) & 0xFFu32).to_u8())
+    bytes = bytes.push(((value >> 24) & 0xFFu32).to_u8())
+    bytes
+
+fn _wm_wire_push_u64_le(out: [u8], value: u64) -> [u8]:
+    var bytes = out
+    var shift = 0
+    while shift < 64:
+        bytes = bytes.push(((value >> shift) & 0xFFu64).to_u8())
+        shift = shift + 8
+    bytes
+
+fn _wm_wire_read_u32_le(bytes: [u8], offset: i64) -> u32:
+    bytes[offset].to_u32() |
+        (bytes[offset + 1].to_u32() << 8) |
+        (bytes[offset + 2].to_u32() << 16) |
+        (bytes[offset + 3].to_u32() << 24)
+
+fn _wm_wire_read_u64_le(bytes: [u8], offset: i64) -> u64:
+    var value = 0u64
+    var i = 0
+    while i < 8:
+        value = value | (bytes[offset + i].to_u64() << (i * 8))
+        i = i + 1
+    value
+
+fn wm_create_response_encode(response: WmCreateResponse) -> [u8]:
+    """Encode the existing 12-byte create reply without padding or allocation-sized metadata."""
+    var out: [u8] = []
+    out = _wm_wire_push_u32_le(out, response.status.value.to_u32())
+    _wm_wire_push_u64_le(out, response.window_id.value)
+
+fn wm_create_response_decode(bytes: [u8]) -> Result<WmCreateResponse, text>:
+    """Decode one exact create reply; truncated and trailing data are rejected."""
+    if bytes.len() != WM_CREATE_RESPONSE_WIRE_BYTES:
+        return Err("wm create response must be exactly 12 bytes")
+    val status_value = _wm_wire_read_u32_le(bytes, 0).to_i32()
+    var status = WM_STATUS_ERROR
+    if status_value == WM_STATUS_OK.value:
+        status = WM_STATUS_OK
+    else if status_value == WM_STATUS_NO_SPACE.value:
+        status = WM_STATUS_NO_SPACE
+    else if status_value != WM_STATUS_ERROR.value:
+        return Err("wm create response has unknown status")
+    val window_id = WindowId(value: _wm_wire_read_u64_le(bytes, 4))
+    if status.value == WM_STATUS_OK.value and window_id.value == 0u64:
+        return Err("successful wm create response has zero window id")
+    if status.value != WM_STATUS_OK.value and window_id.value != 0u64:
+        return Err("failed wm create response has nonzero window id")
+    Ok(WmCreateResponse(status: status, window_id: window_id))
+
+fn wm_focus_event_encode(event: WmFocusEvent) -> [u8]:
+    """Encode the 9-byte payload following COMP_FOCUS_CHANGED."""
+    var out: [u8] = []
+    out = _wm_wire_push_u64_le(out, event.window_id.value)
+    out.push(if event.focused: 1u8 else: 0u8)
+
+fn wm_focus_event_decode(bytes: [u8]) -> Result<WmFocusEvent, text>:
+    """Decode an exact focus payload and reject non-canonical boolean bytes."""
+    if bytes.len() != WM_FOCUS_EVENT_WIRE_BYTES:
+        return Err("wm focus event must be exactly 9 bytes")
+    if bytes[8] != 0u8 and bytes[8] != 1u8:
+        return Err("wm focus event has invalid focused byte")
+    val window_id = _wm_wire_read_u64_le(bytes, 0)
+    if window_id == 0u64:
+        return Err("wm focus event has zero window id")
+    Ok(wm_focus_event(WindowId(value: window_id), bytes[8] == 1u8))
