@@ -1,0 +1,37 @@
+#!/bin/sh
+# Caller sources Stage-3 provenance and planner admission v2 facades first.
+# Subshell isolates verifier scratch variables from the bootstrap supervisor.
+stage4_derive_planner_binding() (
+    [ "$#" -eq 5 ] || return 1
+    binding_root=$1 binding_planner=$2 binding_manifest=$3
+    binding_candidate=$4 binding_backend=$5
+    # Verifiers may print success diagnostics; stdout is the digest protocol.
+    bootstrap_stage3_verify_manifest "$binding_manifest" "$binding_manifest" \
+        "$binding_root" "$binding_candidate" "$binding_candidate" \
+        "${binding_manifest}.authority-map.env" >/dev/null || return 1
+    binding_platform=$(bootstrap_stage3_manifest_value platform "$binding_manifest") || return 1
+    # Grant private-output authority only from the verified Stage 3 location,
+    # never from a planner field or inherited allowlist. Scope it to this call.
+    binding_manifest_real=$(bootstrap_stage3_canonical_file "$binding_manifest") || return 1
+    binding_suffix="/stage3/$binding_platform/provenance.env"
+    case "$binding_manifest_real" in *"$binding_suffix") ;; *) return 1 ;; esac
+    binding_output=${binding_manifest_real%"$binding_suffix"}
+    [ -n "$binding_output" ] && [ "$binding_output" != / ] || return 1
+    binding_output_real=$(CDPATH= cd -- "$binding_output" && pwd -P) || return 1
+    [ "$binding_output_real" = "$binding_output" ] || return 1
+    SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=$binding_output
+    export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+    bootstrap_planner_v2_verify "$binding_planner" "$binding_root" >/dev/null || return 1
+    [ "$(bootstrap_planner_v2_field target "$binding_planner")" = //bootstrap:stage4 ] || return 1
+    [ -n "$binding_platform" ] &&
+        [ "$(bootstrap_planner_v2_field platform "$binding_planner")" = "$binding_platform" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value backend "$binding_manifest")" = "$binding_backend" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value mode "$binding_manifest")" = dynload ] || return 1
+    binding_planner_sha=$(bootstrap_stage3_hash_file "$binding_planner") || return 1
+    binding_candidate_sha=$(bootstrap_stage3_hash_file "$binding_candidate") || return 1
+    binding_source_sha=$(bootstrap_stage3_manifest_value source_fingerprint "$binding_manifest") || return 1
+    [ -n "$binding_source_sha" ] || return 1
+    printf '%s\n' "planner_sha256=$binding_planner_sha" \
+        "candidate_sha256=$binding_candidate_sha" \
+        "source_fingerprint=$binding_source_sha" "backend=$binding_backend" | bootstrap_stage3_hash_stdin
+)

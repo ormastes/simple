@@ -1,0 +1,77 @@
+#!/bin/sh
+# Focused binding unit test. Synthetic verifier seams below are contract-only;
+# they do not admit a compiler or establish end-to-end qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/stage4-planner-binding.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage4-binding.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+fixture_output="$scratch/private-output"
+mkdir -p "$fixture_output/stage3/fixture"
+planner="$scratch/planner" manifest="$fixture_output/stage3/fixture/provenance.env"
+candidate="$fixture_output/stage3/fixture/simple"
+printf 'target=//bootstrap:stage4\nplatform=fixture\n' >"$planner"
+printf 'platform=fixture\nbackend=llvm\nmode=dynload\nsource_fingerprint=fixture-source\n' >"$manifest"
+printf 'synthetic artifact; never executed\n' >"$candidate"
+derive() { stage4_derive_planner_binding "$root" "$planner" "$manifest" "$candidate" llvm; }
+reject() {
+    if derive >"$scratch/rejected" 2>/dev/null; then
+        echo "FAIL: accepted $1" >&2; exit 1
+    fi
+    [ ! -s "$scratch/rejected" ] || { echo "FAIL: emitted binding for $1" >&2; exit 1; }
+}
+# Real verifier must reject synthetic authorities, even with an injected digest.
+SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256=injected
+export SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256
+reject synthetic-authorities
+# Explicit dependency seams isolate binding orchestration and field sabotage.
+planner_valid=1 manifest_valid=1
+planner_output=$fixture_output
+SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=/unrelated-inherited-allowlist
+export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+bootstrap_planner_v2_verify() {
+    echo 'planner-admission-v2: verified'
+    [ "$planner_valid" = 1 ] &&
+        [ "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" = "$planner_output" ]
+}
+bootstrap_stage3_verify_manifest() {
+    echo 'bootstrap-stage3-provenance: verified'
+    echo "stage3_path=$candidate"
+    [ "$manifest_valid" = 1 ]
+}
+expected=$(printf '%s\n' \
+    "planner_sha256=$(bootstrap_stage3_hash_file "$planner")" \
+    "candidate_sha256=$(bootstrap_stage3_hash_file "$candidate")" \
+    source_fingerprint=fixture-source backend=llvm | bootstrap_stage3_hash_stdin)
+actual=$(derive)
+[ "${#actual}" -eq 64 ] || { echo 'FAIL: binding is not exactly one digest'; exit 1; }
+case "$actual" in *[!0-9a-f]*) echo 'FAIL: binding contains diagnostics or non-hex bytes'; exit 1 ;; esac
+[ "$actual" = "$expected" ] || { echo 'FAIL: canonical binding mismatch'; exit 1; }
+# An admitted private output is scoped inside the helper and never leaks.
+[ "$SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT" = /unrelated-inherited-allowlist ] || exit 1
+planner_output="$scratch/sibling-output"; reject unrelated-external-output
+planner_output=$fixture_output
+planner_valid=0; reject planner-refusal; planner_valid=1
+manifest_valid=0; reject provenance-refusal; manifest_valid=1
+cp "$planner" "$scratch/planner.original"
+cp "$manifest" "$scratch/manifest.original"
+for alteration in 's/stage4/stage3/' 's/platform=fixture/platform=other/'; do
+    sed "$alteration" "$scratch/planner.original" >"$planner"
+    reject planner-target-or-platform
+done
+cp "$scratch/planner.original" "$planner"
+for alteration in 's/backend=llvm/backend=other/' 's/mode=dynload/mode=one-binary/' '/source_fingerprint=/d'; do
+    sed "$alteration" "$scratch/manifest.original" >"$manifest"
+    reject manifest-backend-mode-or-source
+done
+cp "$scratch/manifest.original" "$manifest"
+printf 'changed bytes\n' >>"$candidate"
+[ "$(derive)" != "$actual" ] || { echo 'FAIL: candidate mutation did not change binding'; exit 1; }
+candidate_changed=$(derive)
+printf 'changed planner bytes\n' >>"$planner"
+[ "$(derive)" != "$candidate_changed" ] || { echo 'FAIL: planner mutation did not change binding'; exit 1; }
+printf 'PASS: Stage 4 verified binding contract (unit evidence only)\n'
