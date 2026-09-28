@@ -1,6 +1,7 @@
 # Pinned package archive admission and atomic SCC publication.
 
 use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
+use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
 use compiler.driver.cache.cas_batch_transaction.{
     cas_batch_abort_v1, cas_batch_begin_v1, cas_batch_current_v1,
     cas_batch_lookup_receipt_digest_v1, cas_batch_publish_v1,
@@ -64,10 +65,15 @@ fn package_archive_aggregate_entry_v1(
     metadata_digests = metadata_digests.sorted()
     action_digests = action_digests.sorted()
     dependency_modules = dependency_modules.sorted()
+    val module_names = cache_text_join_v1(module_identities, ",")
+    val metadata = cache_text_join_v1(metadata_digests, "|")
+    val actions = cache_text_join_v1(action_digests, "|")
+    if module_names == nil or metadata == nil or actions == nil:
+        return nil
     Some(PackageModuleIndexEntryV1(
-        package_identity, module_identities.join(","), "", "",
-        sha256_text(metadata_digests.join("|")), "", "", "", "",
-        sha256_text(action_digests.join("|")), "", scc_identity,
+        package_identity, module_names!, "", "",
+        sha256_text(metadata!), "", "", "", "",
+        sha256_text(actions!), "", scc_identity,
         dependency_modules, []))
 
 fn package_archive_digest_valid_v1(value: text) -> bool:
@@ -110,13 +116,16 @@ fn package_archive_manifest_v1(
             not package_archive_digest_valid_v1(interface_digest) or
             not package_archive_digest_valid_v1(action_digest)):
         return ""
-    [PACKAGE_ARCHIVE_MANIFEST_V1,
+    val dependency_text = cache_text_join_v1(dependencies!, ",")
+    if dependency_text == nil:
+        return ""
+    cache_text_join_v1([PACKAGE_ARCHIVE_MANIFEST_V1,
         "package={entry.package_identity}",
         "variant={authority.variant_digest}",
         "producer={authority.producer_digest}",
-        "dependencies={dependencies!.len()};{dependencies!.join(",")}",
+        "dependencies={dependencies!.len()};{dependency_text!}",
         "interface={interface_digest}",
-        "action={action_digest}"].join("\n")
+        "action={action_digest}"], "\n") ?? ""
 
 fn package_archive_build_receipt_v1(
     entry: PackageModuleIndexEntryV1, authority: PackageArchiveAuthorityV1,
@@ -261,18 +270,21 @@ fn package_archive_publish_scc_v1(
             return false
         val dependencies = package_archive_sorted_dependencies_v1(
             dependencies_all)
-        val interface_content = interfaces.join("\n")
-        val action_content = actions.join("\n")
-        val interface_digest = sha256_text(interface_content)
+        val interface_content = cache_text_join_v1(interfaces, "\n")
+        val action_content = cache_text_join_v1(actions, "\n")
+        if interface_content == nil or action_content == nil:
+            _ = cas_batch_abort_v1(transaction)
+            return false
+        val interface_digest = sha256_text(interface_content!)
         val manifest = package_archive_manifest_v1(
             aggregate!, authority, dependencies_all,
-            interface_digest, sha256_text(action_content))
+            interface_digest, sha256_text(action_content!))
         if dependencies == nil or manifest == "":
             _ = cas_batch_abort_v1(transaction)
             return false
         val (archive_content, receipt) = package_archive_build_receipt_v1(
             aggregate!, authority, dependencies!, manifest,
-            interface_content, action_content)
+            interface_content!, action_content!)
         if (cas_put(root, archive_content) != receipt.archive_digest or
                 cas_put(root, package_archive_receipt_canonical_fields_v1(receipt)) !=
                     receipt.receipt_digest):

@@ -1,7 +1,7 @@
 # Target 6 native CAS batch generation corruption
 
-Status: open. This blocks production publication of warm package archives and
-the persistent package/module index cutover.
+Status: candidate repair in `codex/target6-cas-publication-guard-20260928`.
+The full compiler/index cutover remains open.
 
 ## Reproduction
 
@@ -35,3 +35,23 @@ CAS batch publication.
    and nonzero dependency counts. Then resume the typed cold graph publisher
    and native time/RSS cohort. Do not treat the manifest-only pass as a warm
    route or Target 6 completion receipt.
+
+## Candidate repair evidence
+
+A one-unit no-stub Stage2 native reproducer returned zero bytes for
+`[header...].concat([]).concat([mapping]).join("\n")`; direct, pushed-array,
+string-concatenated, and interpolated equivalents returned the expected 98
+bytes. This identifies the chained array concat/join as a concrete native
+failure. The CAS writer now pushes each line and uses the runtime text builder
+through a checked helper. It reads the persisted generation before sealing or
+publishing `CURRENT` and rejects a mismatch, header/transaction mismatch, or
+missing mapping line.
+
+The first archive round-trip probe crashed in `path_join` from the manifest's
+`[text].join(",")` call. The candidate replaces ambiguous text-list joins in
+the CAS/archive path with an explicit checked text-builder helper. A 70-unit
+no-stub Stage2 native build then passed a fail-fast two-generation
+publish/load/pin probe: zero dependencies produced a 328-byte generation,
+and one dependency with an inherited mapping produced 525 bytes. Runtime was
+0.05 seconds with 2,136 KiB peak RSS under a 4 GB address-space bound.
+These focused results do not prove the full CLI or production warm route.
