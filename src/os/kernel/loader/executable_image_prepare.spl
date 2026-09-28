@@ -15,6 +15,9 @@ use std.common.contracts.execution.simpleos_executable_admission_v1.{
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.loader.elf_loader.{elf_admit_executable}
 use os.kernel.loader.process_image.{build_user_process_image}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerErrorV1, ExecutableLoadConsumerV1,
     executable_load_consumer_plan_v1,
@@ -90,12 +93,15 @@ fn _prepare_process_image_matches(
         i = i + 1
     true
 
-pub fn executable_prepare_image_v1(
+fn _executable_prepare_image_v1(
     mut table: MountTable,
     handle: ExecutableImageHandleV1,
     consumer: ExecutableLoadConsumerV1,
     entry_point: u64,
-    arch: Architecture
+    arch: Architecture,
+    image_path: text,
+    argv: [text],
+    envp: [text]
 ) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
     val planned = executable_load_consumer_plan_v1(consumer, handle, entry_point)
     if planned.failure != ExecutableLoadConsumerErrorV1.None:
@@ -108,7 +114,7 @@ pub fn executable_prepare_image_v1(
         return Err(ExecutableLoadConsumerErrorV1.DigestMismatch)
     if elf_admit_executable(bytes, arch).is_err():
         return Err(ExecutableLoadConsumerErrorV1.ElfRejected)
-    val built = build_user_process_image("authority-image", bytes, arch, [], [])
+    val built = build_user_process_image(image_path, bytes, arch, argv, envp)
     if built.is_err():
         return Err(ExecutableLoadConsumerErrorV1.ProcessImageMismatch)
     val image = built.unwrap()
@@ -141,5 +147,36 @@ pub fn executable_prepare_image_v1(
     mapping.planned_pages = planned.planned_pages + stack_pages
     Ok(ExecutablePreparedImageV1(image: image, mapping: mapping))
 
+pub fn executable_prepare_image_with_launch_v1(
+    mut table: MountTable,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    arch: Architecture,
+    launch: ExecutableLaunchArgumentsV1
+) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
+    """Build the image with the admitted argv/envp on its initial user stack."""
+    # The launch record is publicly constructible; revalidate and copy it.
+    val checked = executable_launch_arguments_v1_validate(
+        launch.path, launch.argv, launch.envp)
+    if checked.is_err():
+        return Err(ExecutableLoadConsumerErrorV1.InvalidConsumer)
+    val owned = checked.unwrap()
+    _executable_prepare_image_v1(
+        table, handle, consumer, entry_point, arch,
+        owned.path, owned.argv, owned.envp)
+
+pub fn executable_prepare_image_v1(
+    mut table: MountTable,
+    handle: ExecutableImageHandleV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    arch: Architecture
+) -> Result<ExecutablePreparedImageV1, ExecutableLoadConsumerErrorV1>:
+    """Compatibility entrypoint: historical authority-image path, no launch vectors."""
+    _executable_prepare_image_v1(
+        table, handle, consumer, entry_point, arch, "authority-image", [], [])
+
 export ExecutablePreparedImageV1
 export executable_prepare_max_source_bytes_v1, executable_prepare_image_v1
+export executable_prepare_image_with_launch_v1
