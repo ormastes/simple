@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+root=$(git rev-parse --show-toplevel)
+work=$(mktemp -d "${TMPDIR:-/tmp}/x86-token-result-v2.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+python3 - "$root" "$work" <<'PY'
+import pathlib
+import sys
+root, work = map(pathlib.Path, sys.argv[1:])
+source = (root / 'examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c').read_text()
+def section(start, end):
+    assert source.count(start) == 1, start
+    assert source.count(end) == 1, end
+    return source.split(start, 1)[1].split(end, 1)[0]
+# Compile the actual production state and transition functions. Exclude only
+# privileged CR3 reads and the unrelated freestanding runtime dependencies.
+code = '#include <stdint.h>\n'
+code += 'static int _bare_exec_mode;\nstatic int _bare_exec_halt_on_exit;\n'
+code += 'static uint64_t _x86_exec_token_task' + section(
+    'static uint64_t _x86_exec_token_task', 'static uint64_t _x86_current_cr3(void)')
+code += 'int64_t rt_x86_exec_token_install' + section(
+    'int64_t rt_x86_exec_token_install', 'static int _x86_exec_token_current_valid(void)')
+code += 'int64_t rt_x86_exec_token_cancel' + section(
+    'int64_t rt_x86_exec_token_cancel', 'extern void rt_x86_ring3_resume(int64_t rc);')
+assert source.count('_x86_exec_token_complete_result((int64_t)a0);') == 1
+code += (root / 'test/01_unit/os/kernel/arch/x86_64_exec_token_result_v2_test.c').read_text()
+(work / 'token_test.c').write_text(code)
+PY
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror "$work/token_test.c" -o "$work/token_test"
+"$work/token_test"
+echo 'PASS x86_64 native token v2 lifecycle (serialized; no ring-3 execution)'
