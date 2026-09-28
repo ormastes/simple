@@ -66,3 +66,10 @@ inspection checked all production offsets and branch/call bounds; a quoted
 alternative jump was corrected during review. This is not executable proof.
 Core/library/MCP smoke, old integer-array regression, native candidate execution,
 performance evidence and full Stage 4 admission remain unverified.
+
+## Follow-up: structured issue mapping
+
+The opt-in `sdn_inline_parse_checked_v2` API now retains lexical byte spans.
+See [structured issue mapping](sdn_inline_candidate_issue_spans_v2_20260928.md)
+for its coordinate contract, explicit unavailable grammar/projection positions,
+and still-blocked runtime evidence. The original text-error API is preserved.
