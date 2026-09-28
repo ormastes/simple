@@ -347,7 +347,7 @@ Prerequisite split:
 - 6A.1c: builtin LLVM/Cranelift producers report backend-confirmed acceptance.
 - 6A.1d: parser evidence owner consumes the live token and exact bytes.
 
-### Mainline source audit (2026-09-28)
+### Historical mainline source audit (2026-09-28)
 
 At `origin/main` commit `3e9bc64d6bf`, the Stage 6A.1 acceptance envelope is
 not present in the checked-in source.
@@ -368,7 +368,30 @@ backend-confirmed LLVM/Cranelift
 configuration, and a live-token parser evidence join. Recheck this audit after
 each merge before advancing inspection or execution claims.
 
-Implemented checkpoint: the strict loader-to-owner path and real builtin LLVM
+### Current mainline source audit (2026-09-28)
+
+At `origin/main` commit `980f32987c7`, Stage 6A.1 has moved past the
+historical audit above. The backend plugin's `session_authority_v2.spl` now
+owns session generations, compile-use tokens,
+retained module/AOT object bytes, byte digests, result tokens, and release
+ordering. The V1 backend result projection explicitly reports feature
+acceptance as `Unknown`. This is source implementation of the 6A.1a/b
+ownership boundary; executable qualification remains pending.
+
+`BuiltinBackendTargetContextV2` exists in `target_context_v2.spl` and the
+builtin adapter retains it, but feature-bearing requests still refuse before
+emission. The presence of the `AcceptedExact` enum case does not prove an
+issued backend-confirmed acceptance record. No production
+`ParserBackendTargetEvidenceOwnerV1` was found at this commit, so 6A.1c/d
+remain open. `parser_external_inspection_tool_owner_v1.spl` still returns
+`ProcessPortUnavailable` from start and `InspectionAuthorityBlocked` from
+the join. Complete inspection and callable execution remain unqualified.
+
+The draft loader, builtin LLVM, and partial ELF inspection checkpoint
+paragraphs below describe intended transitions. They do not override this
+pinned mainline audit or constitute production acceptance evidence.
+
+Draft checkpoint: the strict loader-to-owner path and real builtin LLVM
 object producer now issue V2 `Unknown` evidence with exact byte lifetime. This
 does not satisfy 6A.1c confirmation; the next gate is backend-authored LLVM
 accepted-feature output from target-machine configuration.
@@ -379,7 +402,7 @@ configuration, reject unsupported features before emission, and return the
 effective configuration alongside the exact bytes. Only then may the result
 owner convert Unknown to AcceptedExact.
 
-Implemented checkpoint: builtin LLVM now compiles through its retained exact
+Draft checkpoint: builtin LLVM compiles through its retained exact
 plugin target context and returns effective CPU/features with exact bytes. The
 session authority issues AcceptedExact only when those canonical features equal
 the request. This completes LLVM configuration acceptance, not instruction
@@ -397,7 +420,7 @@ projects Cranelift results as `Unknown`: it does not yet retain a provider-owned
 accepted-feature record with the exact object bytes. This is a 6A.1c input,
 not completion of 6A.1c or emitted/executed SIMD evidence.
 
-Implemented inspection checkpoint: a bounded strict x86-64 ELF64 ET_REL
+Draft inspection checkpoint: a bounded strict x86-64 ELF64 ET_REL
 decoder projects exact ordered `.text`/`.text.*` candidate sections with
 per-section and framed projection digests. It rejects malformed identity,
 string tables, ranges, overlaps, and resource excess. This is intentionally not

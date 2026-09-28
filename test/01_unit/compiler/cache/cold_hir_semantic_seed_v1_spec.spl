@@ -3,7 +3,8 @@ use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
-    cold_hir_semantic_seeds_v1
+    cold_hir_semantic_seeds_v1,
+    cold_hir_typed_receipt_from_admitted_entry_v1
 }
 use compiler.hir.abi_interface.{
     hir_abi_interface_digest_v1, hir_abi_interface_encoded_v1
@@ -81,6 +82,27 @@ describe "cold HIR semantic seed":
         expect(seed.source_digest).to_equal(sha256_text(content))
         expect(seed.abi_digest).to_equal(hir_abi_interface_digest_v1(module).unwrap())
         expect(seed.direct_imports).to_equal(["a.dep", "z.dep"])
+
+    it "retains canonical ABI bytes and one matching digest for cold publication":
+        val content = "fn entry() -> i64: 1\n"
+        val inventory = test_inventory(content)
+        val module = test_module("/repo/pkg/mod.spl", [])
+        val receipt = cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, "/repo", "pkg/mod.spl", content,
+            compile_source_inventory_digest_v1(inventory),
+            inventory.entries[0])
+        expect(receipt.is_ok()).to_be(true)
+        val produced = receipt.unwrap()
+        expect(produced.abi_payload).to_equal(
+            hir_abi_interface_encoded_v1(module).unwrap())
+        expect(produced.seed.abi_digest).to_equal(
+            sha256_text(produced.abi_payload))
+        expect(produced.seed.source_digest).to_equal(sha256_text(content))
+        val changed = cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, "/repo", "pkg/mod.spl", "fn entry() -> i64: 2\n",
+            compile_source_inventory_digest_v1(inventory),
+            inventory.entries[0])
+        expect(changed.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
 
     it "rejects content or HIR path outside the frozen source":
         val content = "fn entry() -> i64: 1\n"

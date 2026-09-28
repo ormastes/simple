@@ -61,6 +61,16 @@ Cache indexes point to content; they do not supply package graph facts.
 
 ## Storage layout
 
+V2 generations retain the original all-`.spl` inventory coverage contract.
+V3 generations encode `scope-entry=<relative source identity>` after the
+configuration variant. The index digest and each action digest bind this
+field. Decode validates that the root exists, every entry is reachable from
+it, and every import/reverse edge is closed. The cold builder checks source
+content against the full frozen inventory even when it receives only reached
+drafts. A warm full-build request or a different entry refuses V3 before
+archive admission and requires explicit cold initialization. V1 binding and
+V2 full-graph encoding remain canonical and readable.
+
 Each generation uses immutable content-addressed records and a single atomic
 `CURRENT` pointer. TLDR headers and SMF sections are separate objects so closure
 planning reads bounded headers while semantic consumers fetch demanded sections.
@@ -140,6 +150,20 @@ collisions. Readers never follow mutable leaf symlinks. Recovery deletes only
 unpublished staging after proving it is unpinned; it never repairs a partial
 generation in place. GC retains current, parent/recovery, and all pinned
 generations and archives.
+
+### Explicit cold rebuild transition
+
+If the current graph binds an older SCV snapshot, warm admission returns
+`package-index:stale-graph-rebuild-required`. With
+`SIMPLE_PACKAGE_INDEX_COLD_INIT=1`, admission pins the new snapshot and keeps
+the old `CURRENT` pointer unchanged. It sets an empty active-index digest,
+clears producer/root/variant compatibility markers, and sets
+`SIMPLE_PACKAGE_INDEX_REBUILD_PENDING=1`; the driver therefore takes its
+bounded cold path. Each subsequent admission clears the pending marker before
+refresh, including when that admission later fails. A successful cold compile
+still needs the typed graph publisher to validate and atomically replace the
+old pointer. The pending marker is request state, never a substitute for a
+published graph receipt.
 
 ## Reproducibility normalization
 

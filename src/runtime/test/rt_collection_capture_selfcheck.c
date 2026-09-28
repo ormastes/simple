@@ -2,10 +2,26 @@
 #include "runtime.h"
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int64_t str(const char* value) {
     return rt_string_new((const uint8_t*)value, (uint64_t)strlen(value));
+}
+
+/* Runtime texts carry an explicit length; Rust-owned texts need not have a
+ * trailing NUL. Only this test's finished output needs a C-string copy. */
+static char* finish_text(void) {
+    int64_t text = spl_collection_capture_finish();
+    int64_t len = rt_string_len(text);
+    const uint8_t* data = rt_string_data(text);
+    assert(len >= 0 && (len == 0 || data != NULL));
+    assert((uint64_t)len < SIZE_MAX);
+    char* copy = (char*)malloc((size_t)len + 1);
+    assert(copy != NULL);
+    if (len) memcpy(copy, data, (size_t)len);
+    copy[len] = '\0';
+    return copy;
 }
 
 int main(void) {
@@ -26,7 +42,7 @@ int main(void) {
     assert(spl_collection_capture_note_materialization(site, target) == 1);
     assert(spl_collection_capture_note_materialization(site, target) == 1);
     assert(spl_collection_capture_note_size(site, target, 0) == 1);
-    const char* body = rt_interp_cstr(spl_collection_capture_finish());
+    char* body = finish_text();
     assert(body && strstr(body, "site=ast://capture/selfcheck#1") != 0);
     assert(strstr(body, "size_p95=2;lookup_p95=2;hits_p95=1;misses_p95=1") != 0);
     assert(strstr(body, "metric;sample=1;site=ast://capture/selfcheck#1;target=x86_64-v3;name=collection_size;value=2") != 0);
@@ -35,19 +51,22 @@ int main(void) {
     assert(strstr(body, "metric;sample=4;site=ast://capture/selfcheck#1;target=x86_64-v3;name=materialization_count;value=2") != 0);
     assert(strstr(body, "metric;sample=5;site=ast://capture/selfcheck#1;target=x86_64-v3;name=hash_probe_count;value=4") != 0);
     assert(strstr(body, "metric;sample=6;site=ast://capture/selfcheck#1;target=x86_64-v3;name=hash_collision_count;value=1") != 0);
+    free(body);
     assert(spl_collection_capture_begin(target) == 1);
     assert(spl_collection_capture_note_hash_probe(site, target, 1, 2) == 0);
     assert(spl_collection_capture_finish() == rt_value_nil());
     assert(spl_collection_capture_begin(target) == 1);
     assert(spl_collection_capture_note_size(site, target, 1) == 1);
-    body = rt_interp_cstr(spl_collection_capture_finish());
+    body = finish_text();
     assert(body && strstr(body, "name=collection_size;value=1") != 0);
     assert(strstr(body, "name=hash_probe_count") == 0);
     assert(strstr(body, "name=hash_collision_count") == 0);
+    free(body);
     assert(spl_collection_capture_begin(target) == 1);
     assert(spl_collection_capture_abort() == 1);
     assert(spl_collection_capture_begin(target) == 1);
-    body = rt_interp_cstr(spl_collection_capture_finish());
+    body = finish_text();
     assert(body && body[0] == '\0');
+    free(body);
     return 0;
 }

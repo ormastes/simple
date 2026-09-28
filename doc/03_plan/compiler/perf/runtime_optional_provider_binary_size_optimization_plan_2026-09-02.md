@@ -46,6 +46,88 @@ the closure digest is bound into entry/link receipts. Focused static and
 mutation-red contracts pass. Executable Simple tests remain pending an admitted
 full CLI with `test` support.
 
+Current-branch correction (2026-09-28): the named
+`runtime_feature_closure.spl` and `RuntimeFeatureClosureV1` do not exist in the
+isolated Target 5/6 branch. The historical BS1 statement above is not an
+implementation receipt for this branch. The actual pure-Simple linker has
+`NativeLinkConfig.retained_symbols` and runtime-bundle selection, but no exact
+closure type/manifest with the stated admission invariants. Phase 3 remains
+open. A focused Stage2 entry-closure hello built and ran at 21,016 stripped
+bytes on Linux aarch64, with only libc in `DT_NEEDED`; it is pre-Stage4 and
+does not satisfy the release-small gate. See
+`doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`.
+The current full CLI closure now compiles all 2,488 source units after a
+typed-row HIR fix, but Stage4 `host-gpu` linking still reports 173 distinct
+undefined symbols, chiefly from optional Vulkan, Metal, SQLite, CUDA, SDL,
+and ROCm paths. This is direct evidence that those paths still reach the core
+link instead of an admitted first-demand provider. See
+`doc/09_report/compiler/target56_stage4_cli_link_boundary_2026-09-28.md`.
+The command-level dependency and first-demand provider cut is specified in
+`doc/04_architecture/compiler/perf/optional_cli_provider_boundary.md`.
+An isolated Office product analogue still fails on 106 GPU-family symbols,
+so separate executable packaging alone is not yet a demand-load pass.
+
+Focused SQLite provider probe (2026-09-28, not admitted): the existing
+`runtime_sqlite.c` links as a 21,872-byte shared library with 27 exported
+`rt_sqlite_*` symbols in the O2 build with a SONAME. A 121,392-byte no-stub native UI
+access-store spec binary links against a debug provider and passes repeated
+insert/read plus disabled-cache cleanup coverage (2 examples, 0 failures).
+`PreparedStatement.execute()`
+and `query_rows()` previously finalized cached statements before reset/reuse,
+causing a use-after-free. The UI row decoders also passed optional values
+directly into text fields; explicit unwraps after nil checks preserve the
+returned text. Uncached statements now finalize on success and binding
+failure. The spec binary names the provider in `DT_NEEDED`, so it is
+eagerly loaded and remains a prerequisite probe, not a first-demand provider
+or a release-small pass. See
+`doc/09_report/compiler/target5_sqlite_shared_provider_probe_2026-09-28.md`.
+
+Linux first-demand SQLite facet (2026-09-28, isolated proof): a native spec
+binary now links `runtime_sqlite_demand.o` and has no SQLite `DT_NEEDED` entry.
+The bridge loads a sealed, SHA-256-checked provider on first call and checks
+ABI v1 plus all 27 symbols. The UI access-store scenario passed 2/2 examples;
+missing, wrong-digest, wrong-ABI, and missing-symbol rejections passed; four
+native pthread callers passed concurrent first use. The SQLite wrapper also
+rejects tagged nil (`3`) as an invalid handle. The demand spec executable is
+131,816 bytes and its O2 provider is 21,864 bytes. These isolated results do
+not establish the 15 KiB hello gate, a matched startup/RSS improvement, a
+production install manifest, or the full CLI feature closure. See
+`doc/09_report/compiler/target5_sqlite_demand_provider_probe_2026-09-28.md`.
+
+Current Linux Stage4 follow-up (2026-09-28): the linker now offers the
+SQLite first-demand bridge as a separately scanned candidate when building
+the full CLI. A native exact-symbol contract passes 3/3 and an actual C-object
+archive/owner-selection integration spec passes 1/1. The full CLI retry did
+not reach link selection because the diagnostic pure-Simple compiler hit
+flat-AST parse errors after source closure; no full CLI size/startup/RSS or
+SQLite-link improvement is claimed. See
+`doc/09_report/compiler/target5_stage4_sqlite_demand_candidate_2026-09-28.md`.
+The final bounded native-arena retry reached the same empty declaration-tag
+parse failure at lower RSS; the targeted parser blocker is recorded in
+`doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
+
+Current-source Linux ARM64 diagnostic (2026-09-29): the pure-Simple bootstrap
+coordinator built a one-module release-small hello at 21,016 stripped bytes
+with the default linker and 14,560 bytes with explicit `SIMPLE_LINKER=lld`.
+The latter meets the 15,360-byte absolute gate directionally; 30 paired
+Simple/Python startup and RSS samples favor Simple. An admitted Stage4 receipt,
+same-current-source matched-startup C comparator, retained link map,
+provider/NoGC traces, and full CLI demand-load proof are still missing. See
+`doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
+
+Stage4 live-closure follow-up (2026-09-29): on the saved 866-object compiler
+entry, lld's partial-link projection retains `main` and reduces undefined
+`rt_*` names from BFD's 728 to 293, excluding the 12 optional network and
+native-execution references that lacked Stage4 owners. The current-source
+bootstrap tool then reached the exact Stage4 gate with lld and found no
+direct Rust-runtime roots after assigning live imports to compiler and C
+owners. An empty Rust capsule is now supported with a focused passing test;
+the final link then exposed the sole non-`rt_`/`spl_` provider-owned live
+import, `text_dot_from_char_code`. The core-C archive defines it, but the
+live-request filter omits it before capsule projection. Exact owner retention,
+the Stage4 executable, and hello runtime/cohort proof remain pending. See
+`doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

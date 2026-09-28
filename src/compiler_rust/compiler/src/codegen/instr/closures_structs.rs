@@ -616,6 +616,7 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
     src: VReg,
     byte_size: u32,
     type_name: Option<&str>,
+    owner_has_vtable: Option<bool>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) {
     let Some(&src_tagged) = ctx.vreg_values.get(&src) else {
@@ -630,7 +631,9 @@ pub(crate) fn compile_aggregate_copy<M: Module>(
         return;
     }
 
-    let tagged = emit_aggregate_block_copy(ctx, builder, src_tagged, byte_size, type_name, deep_fields);
+    let tagged = emit_aggregate_block_copy(
+        ctx, builder, src_tagged, byte_size, type_name, owner_has_vtable, deep_fields,
+    );
     ctx.vreg_values.insert(dest, tagged);
 }
 
@@ -646,6 +649,7 @@ fn emit_aggregate_block_copy<M: Module>(
     src_tagged: cranelift_codegen::ir::Value,
     byte_size: u32,
     type_name: Option<&str>,
+    owner_has_vtable: Option<bool>,
     deep_fields: &[crate::mir::AggregateFieldCopy],
 ) -> cranelift_codegen::ir::Value {
     // A struct that implements a trait carries an 8-byte vtable pointer at
@@ -658,7 +662,12 @@ fn emit_aggregate_block_copy<M: Module>(
     // that field. When the field is a class (a pointer), dereferencing it
     // SIGSEGVs; when it is a scalar the value is silently wrong.
     // See doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
-    let has_vtable = type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n));
+    // Native project lowering resolves the owning module before emission.
+    // Its qualified names need not exist in this object's local vtable map.
+    // Honor both resolved true and false; only unresolved JIT layouts may
+    // infer the header from the local map.
+    let has_vtable = owner_has_vtable
+        .unwrap_or_else(|| type_name.is_some_and(|n| ctx.vtable_data_ids.contains_key(n)));
     let byte_size = if has_vtable { byte_size + 8 } else { byte_size };
     // `word_index` indexes THIS block's layout, so it shifts by one word when
     // THIS block carries a vtable header (independent of each field's own type).
@@ -701,6 +710,7 @@ fn emit_aggregate_block_copy<M: Module>(
             word,
             field.byte_size,
             field.type_name.as_deref(),
+            field.owner_has_vtable,
             &field.nested,
         );
         // Replace only a live tagged heap handle; nil (0) and non-handle

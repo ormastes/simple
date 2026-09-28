@@ -60,6 +60,14 @@ These come from its PR body and `doc/09_report/profile_switchable_container_stat
 - **Typed-planner gap:** the CollectionPlan is not connected to HIR/MIR selection (`guard.typed_mir=unconnected`), and the CLI `--explain-collection-plan` is not wired (status report lines 13, 27, 49 and 59).
 - **Hang:** `hash_lookup_observation_spec` hit the 600 s timeout (rc 124). Find out why before it is promoted.
 
+2026-09-28 item 7 follow-up: source inspection found the hang path in a
+capacity-one `HashSet`. After one insertion every slot is occupied; a missing
+key made `contains` probe forever, and `remove` had the same unbounded loop.
+Both scans now stop after `capacity` probes, and the focused spec checks the
+missing-key lookup and removal. This is an implementation correction, not a
+PASS receipt: the spec remains tagged until it runs on an admitted,
+source-matched pure-Simple runtime on Windows and WSL.
+
 ## Tagged specs (34)
 
 When a spec starts passing, remove its tag in the same commit as the fix and delete it from this list.

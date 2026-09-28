@@ -1,0 +1,123 @@
+# @req REQ-008 REQ-009
+# Exact token spelling in the shared scalar grammar VM; no frontend admission.
+use std.spec.{describe, it, expect, fail}
+use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
+use std.common.structural.parse.parse_types.{
+    ParseTokenArena, PARSE_SCHEMA_ID, parse_source_blob_from_text
+}
+use std.common.structural.parse.program_v1.*
+use std.common.structural.parse.program_output_v1.{ParseProgramExecutionV1}
+use std.common.structural.parse.grammar_cpu_v1.{parse_grammar_execute_v2}
+
+fn _limits_v1() -> ParseProgramLimitsV1:
+    ParseProgramLimitsV1(max_program_words: 128, max_source_bytes: 64,
+        max_tokens: 8, max_nodes: 8, max_children: 8, max_diagnostics: 8,
+        max_values: 8, max_calls: 4, max_choices: 4, max_steps: 64)
+
+fn _program_v2(words: [i64], actions: [i64], action_offsets: [i64],
+    literal_offsets: [i64], literal_bytes: [u8]) -> ParseProgramV2:
+    val validated = parse_program_validate_v2(
+        GrammarProgram(contract_version: 1, entry_rules: [0],
+            production_offsets: [0, words.len()], opcodes: words),
+        ActionProgram(contract_version: 1, action_offsets: action_offsets,
+            opcodes: actions), literal_offsets, literal_bytes, _limits_v1())
+    if validated.is_err(): fail("fixture program must validate")
+    validated.unwrap()
+
+fn _run_v2(program: ParseProgramV2, source: text,
+    kinds: [u16], starts: [u32], counts: [u32]) -> ParseProgramExecutionV1:
+    parse_grammar_execute_v2(program, parse_source_blob_from_text(source),
+        ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds,
+            start: starts, count: counts), 0, _limits_v1())
+
+describe "shared grammar token spelling":
+    it "distinguishes exact words with one shared token kind":
+        val program = _program_v2([
+            PG_MATCH_TOKEN_TEXT_V2, 0, 0,
+            PG_MATCH_TOKEN_TEXT_V2, 1, 0,
+            PG_END_V1, 0, 0], [], [0], [0, 3, 5],
+            [110u8, 111u8, 116u8, 105u8, 110u8])
+        val exact = _run_v2(program, "not in", [1u16, 1u16],
+            [0u32, 4u32], [3u32, 2u32])
+        expect(exact.ok).to_equal(true)
+        expect(exact.tokens_consumed).to_equal(2)
+        val near = _run_v2(program, "not if", [1u16, 1u16],
+            [0u32, 4u32], [3u32, 2u32])
+        expect(near.ok).to_equal(false)
+        expect(near.error).to_equal("no_match")
+
+    it "compares the exact UTF-8 byte span without a substring":
+        val program = _program_v2([
+            PG_MATCH_TOKEN_TEXT_V2, 0, 0, PG_END_V1, 0, 0],
+            [], [0], [0, 2], [206u8, 187u8])
+        expect(_run_v2(program, "λ", [1u16], [0u32], [2u32]).ok).to_equal(true)
+        val near = _run_v2(program, "μ", [1u16], [0u32], [2u32])
+        expect(near.ok).to_equal(false)
+        expect(near.error).to_equal("no_match")
+
+    it "rolls back a prior action when a spelling alternative misses":
+        val program = _program_v2([
+            PG_MATCH_KIND_V1, 1, 0,
+            PG_ACTION_V1, 0, 0,
+            PG_CHOICE_V1, 18, 0,
+            PG_ACTION_V1, 1, 0,
+            PG_MATCH_TOKEN_TEXT_V2, 0, 0,
+            PG_COMMIT_V1, 21, 0,
+            PG_MATCH_TOKEN_TEXT_V2, 1, 0,
+            PG_END_V1, 0, 0],
+            [PA_CAPTURE_V1, 10, 0, PA_DIAGNOSTIC_V1, 77, 0],
+            [0, 3, 6], [0, 2, 4], [105u8, 110u8, 105u8, 102u8])
+        val result = _run_v2(program, "x if", [1u16, 1u16],
+            [0u32, 2u32], [1u32, 2u32])
+        expect(result.ok).to_equal(true)
+        expect(result.output.nodes.len()).to_equal(1)
+        expect(result.output.nodes[0].start).to_equal(0)
+        expect(result.output.diagnostics.len()).to_equal(0)
+        expect(result.tokens_consumed).to_equal(2)
+
+    it "rejects invalid literal references and offsets before execution":
+        var grammar = GrammarProgram(contract_version: 1, entry_rules: [0],
+            production_offsets: [0, 6], opcodes: [
+                PG_MATCH_TOKEN_TEXT_V2, 1, 0, PG_END_V1, 0, 0])
+        val actions = ActionProgram(contract_version: 1, action_offsets: [0], opcodes: [])
+        expect(parse_program_validate_v2(grammar, actions,
+            [0, 2], [105u8, 110u8], _limits_v1()).is_err()).to_equal(true)
+        grammar.opcodes[1] = 0
+        expect(parse_program_validate_v1(grammar, actions, _limits_v1()).is_err()).to_equal(true)
+        expect(parse_program_validate_v2(grammar, actions,
+            [0, 1, 1], [105u8], _limits_v1()).is_err()).to_equal(true)
+        val program = _program_v2([PG_MATCH_TOKEN_TEXT_V2, 0, 0,
+            PG_END_V1, 0, 0], [], [0], [0, 2], [105u8, 110u8])
+        var forged = program
+        forged.base.grammar_words[1] = 9
+        val refused = _run_v2(forged, "in", [1u16], [0u32], [2u32])
+        expect(refused.ok).to_equal(false)
+        expect(refused.error).to_equal("invalid_program")
+
+    it "bounds literal bytes and offset rows before copying":
+        val grammar = GrammarProgram(contract_version: 1, entry_rules: [0],
+            production_offsets: [0, 6], opcodes: [
+                PG_MATCH_TOKEN_TEXT_V2, 0, 0, PG_END_V1, 0, 0])
+        val actions = ActionProgram(contract_version: 1, action_offsets: [0], opcodes: [])
+        var large_bytes: [u8] = []
+        var i = 0
+        while i < 65:
+            large_bytes.push(97u8)
+            i = i + 1
+        expect(parse_program_validate_v2(grammar, actions,
+            [0, 65], large_bytes, _limits_v1()).is_err()).to_equal(true)
+        var small_limits = _limits_v1()
+        small_limits.max_program_words = 9
+        expect(parse_program_validate_v2(grammar, actions,
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            [97u8, 97u8, 97u8, 97u8, 97u8, 97u8, 97u8, 97u8, 97u8],
+            small_limits).is_err()).to_equal(true)
+
+    it "owns a copy of the caller's literal table":
+        var offsets: [i64] = [0, 2]
+        var bytes: [u8] = [105u8, 110u8]
+        val program = _program_v2([PG_MATCH_TOKEN_TEXT_V2, 0, 0,
+            PG_END_V1, 0, 0], [], [0], offsets, bytes)
+        offsets[1] = 1
+        bytes[0] = 120u8
+        expect(_run_v2(program, "in", [1u16], [0u32], [2u32]).ok).to_equal(true)

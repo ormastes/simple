@@ -1,0 +1,96 @@
+"""REQ-017/018 rejection policy tests, not live guest execution evidence."""
+use std.spec.*
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use os.kernel.scheduler.process_execution_observation.{SchedulerExecutionEvidenceV1}
+use os.kernel.loader.simple_guest_version_owner_v1.{simple_guest_version_observation_valid_v1}
+
+fn target() -> ManifestTarget:
+    ManifestTarget(os: "simpleos", arch: "aarch64", abi: "simpleos")
+
+fn digest() -> text:
+    "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0"
+
+fn observation() -> SchedulerExecutionEvidenceV1:
+    SchedulerExecutionEvidenceV1(
+        child_id: 2u64, generation: 1u64, parent_id: 1u64,
+        image_hash: digest(), mount_id: 1u64, filesystem_name: "nvfs",
+        canonical_source_path: "/sys/apps/simple_compiler.smf",
+        target_os: "simpleos", target_arch: "aarch64", target_abi: "simpleos",
+        mount_generation: 1u64, file_generation: 1u64,
+        command_observed: true, executable_path: "/sys/apps/simple_compiler.smf",
+        argv: ["--version"], argv_file_bindings: [], exit_code: 0,
+        stdout_bytes: [115u8, 105u8, 109u8, 112u8, 108u8, 101u8, 10u8],
+        stderr_bytes: [], stdout_truncated: false, stderr_truncated: false)
+
+fn accepted(value: SchedulerExecutionEvidenceV1) -> bool:
+    simple_guest_version_observation_valid_v1(value, 1u64, digest(), target())
+
+describe "Guest version observation rejection policy":
+    it "accepts the policy fixture without issuing a receipt":
+        expect(accepted(observation())).to_equal(true)
+
+    it "rejects missing command observation and foreign parent":
+        var missing = observation()
+        missing.command_observed = false
+        expect(accepted(missing)).to_equal(false)
+        var foreign = observation()
+        foreign.parent_id = 3u64
+        expect(accepted(foreign)).to_equal(false)
+
+    it "rejects stale generation and absent filesystem identity":
+        var stale = observation()
+        stale.generation = 0u64
+        expect(accepted(stale)).to_equal(false)
+        var unbound = observation()
+        unbound.mount_generation = 0u64
+        expect(accepted(unbound)).to_equal(false)
+
+    it "rejects another image, canonical path, and target":
+        var image = observation()
+        image.image_hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        expect(accepted(image)).to_equal(false)
+        var path = observation()
+        path.canonical_source_path = "/sys/apps/simple_loader.smf"
+        expect(accepted(path)).to_equal(false)
+        var host = observation()
+        host.target_os = "linux"
+        expect(accepted(host)).to_equal(false)
+
+    it "rejects empty argv, extra arguments, and a different command":
+        var empty = observation()
+        empty.argv = []
+        expect(accepted(empty)).to_equal(false)
+        var extra = observation()
+        extra.argv = ["--version", "file.spl"]
+        expect(accepted(extra)).to_equal(false)
+        var different = observation()
+        different.argv = ["--help"]
+        expect(accepted(different)).to_equal(false)
+
+    it "rejects failed execution and absent output":
+        var failed = observation()
+        failed.exit_code = 1
+        expect(accepted(failed)).to_equal(false)
+        var empty = observation()
+        empty.stdout_bytes = []
+        expect(accepted(empty)).to_equal(false)
+
+    it "rejects truncation on either output stream":
+        var out = observation()
+        out.stdout_truncated = true
+        expect(accepted(out)).to_equal(false)
+        var err = observation()
+        err.stderr_truncated = true
+        expect(accepted(err)).to_equal(false)
+
+    it "accepts the output bound and rejects one byte beyond on either stream":
+        var bounded = observation()
+        bounded.stdout_bytes = []
+        for i in 0..4096:
+            bounded.stdout_bytes.push(115u8)
+        expect(accepted(bounded)).to_equal(true)
+        bounded.stdout_bytes.push(115u8)
+        expect(accepted(bounded)).to_equal(false)
+        var err = observation()
+        err.stderr_bytes = bounded.stdout_bytes
+        expect(accepted(err)).to_equal(false)

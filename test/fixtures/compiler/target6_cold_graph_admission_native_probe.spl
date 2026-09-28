@@ -1,0 +1,111 @@
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.mod.{file_read}
+use app.compiler_entrypoint.admission.{
+    compiler_entrypoint_admit_v1, compiler_entrypoint_frozen_env_path_v1}
+use compiler.driver.cache.cache_root.{machine_cache_root}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn seed_graph() -> i64:
+    val admission = compiler_entrypoint_admit_v1(["src"])
+    if not admission.valid or admission.index_digest == "":
+        print "seed admission failed: {admission.reason}"
+        return 1
+    val old = package_module_index_read_current_v1(machine_cache_root())
+    val root = path_absolute(".").replace("\\", "/")
+    val inventory = compile_source_inventory_read_current_v1(root + "/build/scv")
+    if not old.valid or not inventory.valid or inventory.inventory == nil or
+            inventory.inventory!.entries.len() != 1:
+        print "seed inventory or binding unavailable"
+        return 2
+    val source = inventory.inventory!.entries[0]
+    if source.source_identity != "src/a.spl":
+        print "seed source identity mismatch"
+        return 3
+    val digest = sha256_text("typed-graph-fixture")
+    var entry = PackageModuleIndexEntryV1(
+        package_identity: "package-a", module_identity: "a",
+        source_identity: source.source_identity,
+        source_digest: source.content_digest,
+        smf_metadata_digest: digest, export_digest: digest,
+        abi_digest: digest, initializer_digest: digest,
+        provider_digest: digest, action_digest: digest,
+        manifest_digest: digest, scc_identity: "scc-a",
+        direct_imports: [], reverse_dependents: [])
+    var graph = PackageModuleIndexGenerationV1(
+        schema_version: 2, producer_digest: digest,
+        root_generation: "root-a", scv_revision_id: admission.revision_id,
+        scv_commit_id: env_get("SIMPLE_SCV_COMMIT_ID") ?? "",
+        scv_tree_id: env_get("SIMPLE_SCV_TREE_ID") ?? "",
+        inventory_digest: env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "",
+        entries: [entry], variant_digest: digest)
+    entry.action_digest = package_module_index_entry_action_digest_v1(
+        graph, entry)
+    graph.entries[0] = entry
+    if not package_module_index_publish_if_current_v1(
+            machine_cache_root(), graph, old.digest):
+        print "seed graph publication failed"
+        return 4
+    print "PASS seed-graph"
+    0
+
+fn stale_graph() -> i64:
+    val old = package_module_index_read_current_v1(machine_cache_root())
+    if not old.valid or old.generation == nil or
+            old.generation!.entries.len() != 1:
+        return 5
+    val admission = compiler_entrypoint_admit_v1(["src"])
+    if admission.valid or
+            admission.reason != "package-index:stale-graph-rebuild-required":
+        print "warm stale graph was not refused: {admission.reason}"
+        return 6
+    if package_module_index_read_current_v1(machine_cache_root()).digest !=
+            old.digest:
+        return 7
+    print "PASS stale-graph-refused"
+    0
+
+fn cold_graph() -> i64:
+    val old = package_module_index_read_current_v1(machine_cache_root())
+    if not old.valid or old.generation == nil or
+            old.generation!.entries.len() != 1:
+        return 8
+    val admission = compiler_entrypoint_admit_v1(["src"])
+    if not admission.valid or admission.reason != "cold-rebuild-pending" or
+            admission.index_digest != "" or
+            (env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? "") != "1" or
+            (env_get("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "":
+        print "cold pending admission failed: {admission.reason}"
+        return 9
+    if package_module_index_read_current_v1(machine_cache_root()).digest !=
+            old.digest:
+        return 10
+    val frozen = compiler_entrypoint_frozen_env_path_v1("src/a.spl")
+    if frozen == "" or not file_read(frozen).contains("return 2"):
+        print "cold frozen source unavailable"
+        return 11
+    if not env_set("SIMPLE_PACKAGE_INDEX_COLD_INIT", "0"):
+        return 12
+    val refused = compiler_entrypoint_admit_v1(["src"])
+    if refused.valid or
+            refused.reason != "package-index:stale-graph-rebuild-required" or
+            (env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? "") != "0" or
+            compiler_entrypoint_frozen_env_path_v1("src/a.spl") != "":
+        print "failed warm retry inherited cold rebuild authority"
+        return 13
+    print "PASS cold-rebuild-preserves-graph"
+    0
+
+fn main() -> i64:
+    val step = env_get("TARGET6_GRAPH_ADMISSION_STEP") ?? ""
+    if step == "seed": return seed_graph()
+    if step == "stale": return stale_graph()
+    if step == "cold": return cold_graph()
+    print "unknown probe step"
+    12

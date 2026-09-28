@@ -1,0 +1,56 @@
+# @req REQ-COMPILE-INVENTORY-RENAME-REPLAY
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{
+    dir_create_all, file_write, file_rename, process_run
+}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+
+extern fn rt_getpid() -> i64
+
+describe "compiler inventory watcher and Git rename replay":
+    it "admits one untracked rename observed by both sources":
+        val root = "build/test-artifacts/scv-rename-replay-{rt_getpid()}"
+        val cache = root + "/build/scv"
+        dir_remove(root, true)
+        expect(dir_create_all(root + "/src")).to_equal(true)
+        expect(file_write(root + "/src/tracked.spl", "export fn tracked(): 1\n")).to_equal(true)
+        val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+        expect(init_code).to_equal(0)
+        val (_, _, add_code) = process_run("git", ["-C", root, "add", "src/tracked.spl"])
+        expect(add_code).to_equal(0)
+        val (_, _, commit_code) = process_run("git", ["-C", root,
+            "-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "seed"])
+        expect(commit_code).to_equal(0)
+        expect(file_write(root + "/src/a.spl", "export fn a(): 2\n")).to_equal(true)
+        expect(compiler_inventory_refresh_v1(root, cache, ["src"], true).valid).to_equal(true)
+
+        step("Rename the source and append the same move to the watcher journal")
+        expect(file_rename(root + "/src/a.spl", root + "/src/b.spl")).to_equal(true)
+        expect(dir_create_all(root + "/.scv/journal")).to_equal(true)
+        val journal = root + "/.scv/journal/events.log"
+        val unpaired = "op=one kind=fsevent refs=kind=renamed,path={root}/src/b.spl,related=%empty sha=a utc=1\n"
+        expect(file_write(journal, unpaired)).to_equal(true)
+        val rejected = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_contain("inventory-event-rename-unpaired")
+        val retained = compile_source_inventory_read_current_v1(cache)
+        expect(retained.valid).to_equal(true)
+        if retained.valid:
+            expect(retained.inventory!.entries.len()).to_equal(2)
+            expect(retained.inventory!.entries[0].source_identity).to_equal("src/a.spl")
+
+        step("Repair the journal and admit the move once")
+        val event = "op=one kind=fsevent refs=kind=renamed,path={root}/src/b.spl,related={root}/src/a.spl sha=a utc=1\n"
+        expect(file_write(journal, event)).to_equal(true)
+        val refresh = compiler_inventory_refresh_v1(root, cache, ["src"], false)
+        expect(refresh.valid).to_equal(true)
+        val current = compile_source_inventory_read_current_v1(cache)
+        expect(current.valid).to_equal(true)
+        if current.valid:
+            expect(current.inventory!.entries.len()).to_equal(2)
+            expect(current.inventory!.entries[0].source_identity).to_equal("src/b.spl")
+            expect(current.inventory!.entries[1].source_identity).to_equal("src/tracked.spl")
+        dir_remove(root, true)

@@ -8,6 +8,11 @@ pub const PROCESS_INSPECTION_V1_VERSION: i64 = 1
 pub const PROCESS_INSPECTION_V1_WORDS: i64 = 75
 pub const PROCESS_INSPECTION_V1_MAX_INPUT_BYTES: i64 = 16777216
 
+use std.common.process.observation_v4.{
+    POV4_VALID_TREE_CONTROL, ProcessObservationDescendantPolicyV4,
+    ProcessObservationPacketV4
+}
+
 pub struct ProcessInspectionInputReceiptV1:
     request_id_high: i64
     request_id_low: i64
@@ -67,7 +72,27 @@ pub fn process_inspection_input_complete_v1(
         receipt.stdin_closed and receipt.terminal and receipt.reaped and
         receipt.runtime_error == 0 and receipt.input_digest == expected_digest
 
+# A terminal leader and closed streams are insufficient for a request that
+# promised descendant retirement. The native packet remains the authority for
+# these facts; this predicate only enforces the policy retained by its lease.
+pub fn process_inspection_retirement_complete_v1(
+    policy: ProcessObservationDescendantPolicyV4,
+    packet: ProcessObservationPacketV4
+) -> bool:
+    if packet.process_started_ns < 0 or not packet.leader_reaped or
+            packet.leader_waited_ns < packet.process_started_ns:
+        return false
+    match policy:
+        case ProcessObservationDescendantPolicyV4.LeaderOnly: true
+        case ProcessObservationDescendantPolicyV4.ProcessGroup:
+            packet.tree_control_available and
+                (packet.validity_bits & POV4_VALID_TREE_CONTROL) != 0 and
+                packet.tree_empty and packet.tree_empty_ns >= packet.process_started_ns
+        case ProcessObservationDescendantPolicyV4.Cgroup: false
+        case ProcessObservationDescendantPolicyV4.Unknown: false
+
 export PROCESS_INSPECTION_V1_VERSION, PROCESS_INSPECTION_V1_WORDS
 export PROCESS_INSPECTION_V1_MAX_INPUT_BYTES
 export ProcessInspectionInputReceiptV1, decode_process_inspection_input_v1
 export process_inspection_input_complete_v1
+export process_inspection_retirement_complete_v1

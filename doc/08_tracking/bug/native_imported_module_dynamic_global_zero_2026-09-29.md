@@ -1,0 +1,5 @@
+# Native imported dynamic module value is zero before use
+
+The Target 6 compact output index native spec passed SMF and reverse projection checks, then failed `index-builder-manifest-digest-invalid:a`. GDB at `package_module_index_build_from_inventory_v1` showed `PackageModuleIndexDraftV1.manifest_digest` was zero. Its fixture supplied the exported `PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1`, declared in `package_module_index_builder.spl` as a module-level `val` initialized by `sha256_text("simple/package-module-index/no-manifest/v1")`. The native binary's storage for that symbol was zero.
+
+The sentinel has been replaced with the verified SHA-256 literal `b55b29a8e3d8eaf496f7f82a4a86c8371eca12f08edc91d7f5c4fea7a8e88563`, so imported consumers receive a stable value without dynamic module initialization. The native compiler still needs a minimal regression for imported module-level values initialized by calls, followed by a fix to initialization ordering or constant evaluation. This workaround should be removed only after that regression passes.

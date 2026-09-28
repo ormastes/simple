@@ -5,10 +5,13 @@ use app.io.env_ops.{env_get, env_set}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
     PACKAGE_MODULE_INDEX_SCHEMA_V1, PackageModuleIndexGenerationV1, PackageModuleIndexReadV1,
-    package_module_index_publish_v1, package_module_index_read_current_v1}
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.index_compatibility.{
+    compiler_entrypoint_publish_index_compatibility_v1}
 
 struct CompilerEntrypointAdmissionV1:
     valid: bool
@@ -23,10 +26,8 @@ fn compiler_entrypoint_invalid_v1(reason: text) -> CompilerEntrypointAdmissionV1
     CompilerEntrypointAdmissionV1(false, reason, "", "", "", "", -1)
 
 # Binding-only generation: it records exactly which SCV snapshot the index
-# belongs to and carries no module entries. Admission consumes only this
-# binding; the warm per-module route (package_index_route.spl) stays on its
-# cold path until a real module-graph producer exists, because it is gated on
-# producer/root/variant markers nothing sets.
+# belongs to and carries no module entries. It also clears warm compatibility
+# markers while an explicit cold graph rebuild is pending.
 fn compiler_entrypoint_binding_generation_v1(
     snapshot: ScvCompileSnapshotV1
 ) -> PackageModuleIndexGenerationV1:
@@ -51,7 +52,29 @@ fn compiler_entrypoint_index_binds_snapshot_v1(
         generation.scv_tree_id == snapshot.tree_id and
         generation.inventory_digest == snapshot.inventory_digest
 
+# A stale graph is immutable evidence from the prior snapshot. An explicit
+# cold rebuild may compile against the new snapshot without moving CURRENT;
+# only a complete graph publisher may replace that pointer afterward.
+fn compiler_entrypoint_index_transition_v1(
+    index: PackageModuleIndexReadV1,
+    snapshot: ScvCompileSnapshotV1,
+    explicit_cold_rebuild: bool
+) -> text:
+    if compiler_entrypoint_index_binds_snapshot_v1(index, snapshot):
+        return "bound"
+    if index.valid and index.generation != nil:
+        if index.generation!.entries.len() > 0:
+            if explicit_cold_rebuild:
+                return "cold-rebuild-pending"
+            return "stale-graph-rebuild-required"
+    "publish-binding"
+
 fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmissionV1:
+    # A failed later admission must not inherit a prior request's permission
+    # to resolve frozen paths without a matching published graph.
+    if not env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING", "0"):
+        return compiler_entrypoint_invalid_v1(
+            "package-index-rebuild-env-clear-failed")
     var root = path_absolute(".").replace("\\", "/")
     # Windows returns the verbatim `\\?\C:\...` form for an existing path;
     # `git -C` rejects it ("cannot change to '\?\C:\...'") and every refresh
@@ -80,29 +103,35 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
     if not snapshot.valid:
         return compiler_entrypoint_invalid_v1(snapshot.reason)
     var index = package_module_index_read_current_v1(machine_cache_root())
-    if not compiler_entrypoint_index_binds_snapshot_v1(index, snapshot):
-        # A complete graph is the dependency authority. The binding-only
-        # bootstrap fallback must never replace it after an SCV edit; that
-        # would erase exact edges and make the next request look cold again.
-        if index.valid:
-            if index.generation != nil:
-                if index.generation!.entries.len() > 0:
-                    return compiler_entrypoint_invalid_v1(
-                        "package-index:stale-graph-rebuild-required")
+    val transition = compiler_entrypoint_index_transition_v1(
+        index, snapshot,
+        (env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1")
+    if transition == "stale-graph-rebuild-required":
+        return compiler_entrypoint_invalid_v1(
+            "package-index:stale-graph-rebuild-required")
+    val cold_rebuild_pending = transition == "cold-rebuild-pending"
+    if transition == "publish-binding":
         # Nothing else in the tree produces this index (no caller of
         # package_module_index_publish_v1 since it was introduced), so every
         # fresh HOME failed package-index:missing-or-invalid-generation on
         # every platform. Publish the snapshot-binding generation here:
         # content-addressed and idempotent (same snapshot -> same digest),
         # and fail closed if it cannot be published or read back.
-        if not package_module_index_publish_v1(machine_cache_root(),
-                compiler_entrypoint_binding_generation_v1(snapshot)):
-            return compiler_entrypoint_invalid_v1("package-index:publish-failed")
+        val expected_index_digest = if index.valid: index.digest else: ""
+        val published = package_module_index_publish_if_current_v1(
+            machine_cache_root(),
+            compiler_entrypoint_binding_generation_v1(snapshot),
+            expected_index_digest)
         index = package_module_index_read_current_v1(machine_cache_root())
+        if not published and not compiler_entrypoint_index_binds_snapshot_v1(
+                index, snapshot):
+            return compiler_entrypoint_invalid_v1(
+                "package-index:publish-conflict-or-failed")
     if not index.valid or index.generation == nil:
         return compiler_entrypoint_invalid_v1("package-index:" + index.reason)
     val generation = index.generation!
-    if (generation.scv_revision_id != snapshot.revision_id or
+    if not cold_rebuild_pending and
+            (generation.scv_revision_id != snapshot.revision_id or
             generation.scv_commit_id != snapshot.commit_id or
             generation.scv_tree_id != snapshot.tree_id or
             generation.inventory_digest != snapshot.inventory_digest):
@@ -119,11 +148,24 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
         return compiler_entrypoint_invalid_v1("snapshot-inventory-env-publish-failed")
     if not env_set("SIMPLE_SCV_INVENTORY_GENERATION", str(refresh.inventory_generation)):
         return compiler_entrypoint_invalid_v1("snapshot-generation-env-publish-failed")
-    if not env_set("SIMPLE_PACKAGE_INDEX_DIGEST", index.digest):
+    val active_index_digest = if cold_rebuild_pending: "" else: index.digest
+    if not env_set("SIMPLE_PACKAGE_INDEX_DIGEST", active_index_digest):
         return compiler_entrypoint_invalid_v1("package-index-env-publish-failed")
+    val compatibility_generation = if cold_rebuild_pending:
+        compiler_entrypoint_binding_generation_v1(snapshot)
+    else:
+        generation
+    if not compiler_entrypoint_publish_index_compatibility_v1(
+            compatibility_generation):
+        return compiler_entrypoint_invalid_v1(
+            "package-index-compatibility-env-publish-failed")
+    if not env_set("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING",
+            if cold_rebuild_pending: "1" else: "0"):
+        return compiler_entrypoint_invalid_v1("package-index-rebuild-env-publish-failed")
     CompilerEntrypointAdmissionV1(
-        true, "ok", root, snapshot.snapshot_root, snapshot.revision_id,
-        index.digest, refresh.inventory_generation)
+        true, if cold_rebuild_pending: "cold-rebuild-pending" else: "ok",
+        root, snapshot.snapshot_root, snapshot.revision_id,
+        active_index_digest, refresh.inventory_generation)
 
 fn compiler_entrypoint_frozen_path_v1(
     admission: CompilerEntrypointAdmissionV1, path: text
@@ -142,7 +184,10 @@ fn compiler_entrypoint_frozen_env_path_v1(path: text) -> text:
     val snapshot_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
     val revision_id = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
     val index_digest = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
-    if root == "" or snapshot_root == "" or revision_id == "" or index_digest == "":
+    val rebuild_pending =
+        (env_get("SIMPLE_PACKAGE_INDEX_REBUILD_PENDING") ?? "") == "1"
+    if root == "" or snapshot_root == "" or revision_id == "" or
+            (index_digest == "" and not rebuild_pending):
         return ""
     val absolute = path_absolute(path).replace("\\", "/")
     if absolute == snapshot_root or absolute.starts_with(snapshot_root + "/"):
@@ -153,3 +198,4 @@ fn compiler_entrypoint_frozen_env_path_v1(path: text) -> text:
 export CompilerEntrypointAdmissionV1
 export compiler_entrypoint_admit_v1, compiler_entrypoint_frozen_path_v1
 export compiler_entrypoint_frozen_env_path_v1
+export compiler_entrypoint_index_transition_v1

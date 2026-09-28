@@ -1,5 +1,8 @@
 use std.spec.*
-use app.compiler_entrypoint.inventory_events.{compiler_inventory_parse_name_status_v1}
+use app.compiler_entrypoint.inventory_events.{
+    compiler_inventory_parse_name_status_v1,
+    compiler_inventory_parse_porcelain_v1
+}
 
 describe "compiler inventory Git name-status admission":
     it "rejects malformed and unknown rows before cursor publication":
@@ -24,4 +27,25 @@ describe "compiler inventory Git name-status admission":
                 expect(events.len()).to_equal(1)
                 expect(events[0].source_identity).to_equal("src/a.spl")
                 expect(events[0].operation).to_equal("delete")
+            case _: expect(false).to_equal(true)
+
+describe "compiler inventory Git porcelain admission":
+    it "rejects malformed, unknown, and quoted rows":
+        expect(compiler_inventory_parse_porcelain_v1(
+            ".", "M src/a.spl", [], ["src"]) == nil).to_equal(true)
+        expect(compiler_inventory_parse_porcelain_v1(
+            ".", "Z  src/a.spl", [], ["src"]) == nil).to_equal(true)
+        expect(compiler_inventory_parse_porcelain_v1(
+            ".", "?? \"src/a\\n.spl\"", [], ["src"]) == nil).to_equal(true)
+        expect(compiler_inventory_parse_porcelain_v1(
+            ".", "?? src/a.spl\ninvalid", [], ["src"]) == nil).to_equal(true)
+
+    it "keeps a tracked deletion event":
+        val parsed = compiler_inventory_parse_porcelain_v1(
+            ".", " D src/a.spl", [], ["src"])
+        match parsed:
+            case Some(batch):
+                expect(batch.events.len()).to_equal(1)
+                expect(batch.events[0].source_identity).to_equal("src/a.spl")
+                expect(batch.events[0].operation).to_equal("delete")
             case _: expect(false).to_equal(true)

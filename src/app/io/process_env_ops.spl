@@ -7,23 +7,25 @@
 # Requests that cannot be delivered faithfully are refused before any child is
 # created; no variable is ever silently dropped.
 use std.nogc_async_mut.io.process_ops.{process_spawn_async, process_is_running}
-use std.io_runtime.{env_get_opt}
+use std.io_runtime.{platform_name}
 
 val PROCESS_SPAWN_ENV_UNSUPPORTED: i64 = -95
 val PROCESS_SPAWN_ENV_INVALID: i64 = -22
 val PROCESS_SPAWN_ENV_LAUNCHER: text = "/usr/bin/env"
 
-fn _process_env_host_is_windows() -> bool:
-    val os_env = env_get_opt("OS")
-    if os_env == nil:
-        return false
-    os_env.lower().contains("windows")
+fn _process_env_host_uses_unix_route() -> bool:
+    # OS is caller-mutable and can be absent under a stripped bootstrap env.
+    # The runtime platform name is compiled in, so an environment override
+    # cannot select the Unix launcher on Windows.
+    val host = platform_name()
+    host == "linux" or host == "macos" or host == "freebsd" or
+        host == "illumos" or host == "solaris" or host == "unix"
 
 fn process_spawn_async_env(cmd: text, args: [text], env: {text: text}) -> i64:
     if cmd == "": return -1
     if env.len() == 0:
         return process_spawn_async(cmd, args)
-    if _process_env_host_is_windows():
+    if not _process_env_host_uses_unix_route():
         return PROCESS_SPAWN_ENV_UNSUPPORTED
     # `env` would parse a utility name containing '=' as another assignment.
     if cmd.contains("="):

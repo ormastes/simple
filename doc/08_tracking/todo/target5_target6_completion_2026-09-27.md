@@ -2,6 +2,10 @@
 
 Status: ACTIVE; production qualification remains OPEN.
 
+PR #1932 merged the focused Stage2 bootstrap/runtime repairs into `main` at
+`0dbb2c1691a442829737507dc8d1d2a970bbf7bf`. The continuing Target 5/6
+lane is `codex/target56-next`; the merged PR did not complete either target.
+
 Continuation note (2026-09-28): the isolated current-source Stage2 candidate
 now passes its full native build and positional hello-world frontend smoke
 after repairing dynlib lifetime state inference, backend diagnostics, exact
@@ -28,10 +32,15 @@ smoke, and runtime capability proof. The rebase retained main's independent
 Simple-side descriptor-list fix in that owner. A focused no-stub native build
 of the rebased source compiled 37 files with zero failures; its probe exited
 zero with missing-library refusal. The in-process Stage2 compiler-test
-matrix failed at its full CLI link after 1,828 seconds: the `host-gpu` core
-runtime does not supply optional GPU/SQLite/SDL/Metal and other reached
-symbols. The later test rows were blocked. See
+matrix failed at its full CLI link after 1,828 seconds with unresolved
+GPU/SQLite/SDL/Metal and other reached symbols. A focused same-bundle linker
+trace proves the host-gpu path selects a generated core-C archive and hosted
+rlib, omitting the frozen native-all archive. That core-C archive defines none
+of the 178 missing names; native-all defines 117 but is not a complete or
+appropriate optional-provider fix. The later test rows were blocked. See
 `doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
+Detailed attribution is in
+`doc/09_report/compiler/target56_stage2_link_argv_attribution_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
@@ -40,7 +49,7 @@ diagnostic probes into a Stage4, SPipe, native performance, or release PASS.
 The remaining technical items below remain active; see
 `doc/09_report/compiler/target56_user_closeout_2026-09-28.md`.
 
-Owner lane: `codex/target56-completion` (draft PR #1932). This TODO carries the unfinished work
+Owner lane: `codex/target56-next` (PR #1932 merged). This TODO carries the unfinished work
 from `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`,
 `doc/09_report/compiler/target6_cold_hir_batch_2026-09-27.md`, and
 `doc/08_tracking/bug/target56_isolated_current_source_verification_blockers_2026-09-27.md`.
@@ -48,18 +57,36 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Next-session TODO
 
+- [x] Link a current-source pure-Simple Stage4 diagnostic compiler through the
+  dynamic runtime lane, run a hello `--check` smoke, and retain a paired static
+  diagnostic size/startup/RSS comparison. The 30-pair Linux ARM64 result is in
+  `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+- [x] Measure a current-source core-C hello with explicit Linux LLD and a
+  diagnostic 30-pair Python startup/RSS cohort. Its 14,560-byte stripped ELF
+  clears the absolute size cap; matched C and admission gates remain open.
+  See `doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
-  the closure stall and missing runtime symbols in the blocker report.
+  the closure stall and missing runtime symbols in the blocker report. The
+  latest standalone-entry attempt passes SQLite ABI, Cranelift backfill, and
+  core-C stub disjointness, but twelve reached native-execution/network
+  symbols lack an admitted archive owner. K1 composition binding remains
+  unqualified, and the hosted static diagnostic reaches an empty-MIR AOT
+  failure. See
+  `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
 - [ ] With that authority, run a current-source release-small Simple hello and
   a paired matched-startup C hello. Check exact output, retained symbols,
   <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
   30-sample development (100-sample release) startup/RSS cohort. The C-authored
   6,504/6,368-byte pair remains diagnostic only.
-- [ ] Run the Target 6 cold/warm Git-event fixture with explicit cursor
-  arguments on the current-source worker. Inspect the batch before publication;
-  do not repeat the three failed historical Stage2 aggregate workarounds.
+- [x] Run a focused Target 6 cold/warm/edit/delete Git-event native fixture
+  with explicit cursor arguments through the production bridge. The newer
+  Stage2 binary passes; see
+  `doc/09_report/compiler/target6_cold_git_refresh_native_probe_2026-09-28.md`.
+- [ ] Inspect a larger Git event batch before publication and run the
+  production fixture on an admitted current-source Stage4 worker; do not
+  repeat the three failed historical Stage2 aggregate workarounds.
   Finish the typed TLDR/SMF producer and graph publication, replace the
   binding-only index, then run the SPipe and native cold/warm/edit/SCC/variant
   time/RSS cohorts with the normalized-sum rule.
@@ -101,6 +128,45 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Reject persisted archives that pass hashes/manifest checks but cannot
+  populate warm symbol/action owners. Cold publication now shares the warm
+  payload parser and leaves `CURRENT` unchanged on malformed content. Focused
+  no-stub Stage-2 native evidence: 7/7; see
+  `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
+- [ ] Fix or rule out the Stage-2 pinned archive reader RSS runaway before
+  using it as a cold publication memory optimization; see
+  `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
+  The synchronous file-view path now avoids a text-valued async roundtrip and
+  the pinned digest checks use hex text. A bounded 542-byte pinned archive
+  integration now passes 8 native scenarios, but the cold publisher trial
+  raised RSS and its apparent p95 gain was not consistent across 30 pairs.
+  The publisher change was reverted. Larger matched time/RSS and Stage-4
+  qualification remain open; see
+  `doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.
+
+- [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
+  eviction in the cold driver. Phase-1 digest and byte-length owners also work
+  for nonstreaming low-memory compilation, where source text is gone before
+  HIR completes. See
+  `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
+- [ ] Attach real archive outputs to retained receipts and publish the V3
+  scoped graph from the production driver; then prove current-source warm/cold
+  time and RSS against the independent gates.
+
+- [x] Define a serialized entry-scoped graph when entry-closure compilation
+  lowers fewer sources than the full frozen inventory. V3 binds the full
+  inventory digest and exact entry, rejects missing/redundant graph nodes,
+  verifies reached archives before publication, and refuses mismatched warm
+  requests. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
+- [x] Prevent a stale binding-only index publication from replacing a graph
+  generation after a concurrent writer wins. The pointer CAS has focused
+  native and SPipe evidence in
+  `doc/09_report/compiler/target6_package_index_binding_cas_2026-09-28.md`.
+- [x] Apply warm multi-event inventory batches without one full-inventory
+  rebuild per event. A 30-sample no-stub native fixture improves both p95
+  time and peak RSS; serial-equivalence and atomic-rejection probes pass.
+  See `doc/09_report/compiler/target6_warm_inventory_batch_2026-09-28.md`.
 - Build a real cold TLDR/SMF producer from frozen SCV inventory and typed HIR.
   A pure graph assembler and inventory-bound index builder now live in
   `src/compiler/80.driver/cache/cold_hir_package_drafts_v1.spl` and

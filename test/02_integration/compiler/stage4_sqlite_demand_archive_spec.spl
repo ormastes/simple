@@ -1,0 +1,48 @@
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io_runtime.{process_run, file_delete, dir_remove_all}
+use std.io_runtime.{getpid}
+use compiler.backend.backend.llvm_native_link_stage4_archives.{
+    llvm_stage4_build_sqlite_demand_archive
+}
+use compiler.backend.backend.llvm_native_link_stage4_projection.{
+    llvm_stage4_candidate_archive_inventory
+}
+use compiler.backend.backend.stage4_symbol_closure.{
+    stage4_validate_sqlite_demand_symbol_contract,
+    stage4_resolve_requested_archive_owners
+}
+
+describe "Stage4 selects the compiled Linux SQLite bridge":
+    it "archives only the checked first-demand runtime owner":
+        match secure_temp_dir("/tmp", "stage4-sqlite-archive-"):
+            case Err(reason): fail("temporary object directory unavailable: {reason}")
+            case Ok(root):
+                val object_path = root + "/runtime_sqlite_demand.o"
+                val (_, compile_err, compile_code) = process_run("cc", [
+                    "-c", "-O2", "-fPIC", "-ffunction-sections",
+                    "-fdata-sections", "-std=gnu11", "-I", "src/runtime",
+                    "src/runtime/runtime_sqlite_demand.c", "-o", object_path])
+                expect(compile_code).to_equal(0)
+                if compile_code == 0:
+                    match llvm_stage4_build_sqlite_demand_archive(
+                            [object_path], "linux", getpid()):
+                        case Err(reason): fail("SQLite bridge archive rejected: {reason} {compile_err}")
+                        case Ok(archive_path):
+                            val scanned = llvm_stage4_candidate_archive_inventory(
+                                ["runtime_sqlite_demand"], [archive_path])
+                            match scanned:
+                                case Err(reason): fail("SQLite bridge inventory failed: {reason}")
+                                case Ok(outputs):
+                                    expect(outputs.len()).to_equal(1)
+                                    expect(stage4_validate_sqlite_demand_symbol_contract(
+                                        outputs[0], "elf").is_ok()).to_equal(true)
+                                    match stage4_resolve_requested_archive_owners(
+                                            ["rt_sqlite_open"],
+                                            ["runtime_sqlite_demand"], outputs, false):
+                                        case Err(reason): fail("SQLite bridge owner not selected: {reason}")
+                                        case Ok(selection):
+                                            expect(selection.0).to_equal([0])
+                                            expect(selection.1.len()).to_equal(1)
+                            expect(file_delete(archive_path)).to_equal(true)
+                expect(dir_remove_all(root)).to_equal(true)

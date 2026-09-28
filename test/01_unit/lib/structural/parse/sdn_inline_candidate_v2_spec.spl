@@ -1,0 +1,76 @@
+# @req REQ-008 REQ-009
+# Opt-in candidate evidence, explicitly not full SDN admission.
+use std.spec.{describe, it, expect, fail}
+use std.common.sdn.parser.{parse as legacy_parse}
+use std.common.sdn.value.{SdnValue}
+use std.sdn.inline_candidate.{sdn_inline_parse_candidate_v2, ParseProgramLimitsV1}
+
+fn inline_limits_v2() -> ParseProgramLimitsV1:
+    ParseProgramLimitsV1(max_program_words: 512, max_source_bytes: 4096,
+        max_tokens: 512, max_nodes: 1024, max_children: 1024,
+        max_diagnostics: 8, max_values: 8, max_calls: 64,
+        max_choices: 64, max_steps: 20000)
+
+fn check_inline_parity_v2(source: text):
+    val legacy = legacy_parse(source)
+    val candidate = sdn_inline_parse_candidate_v2(source, inline_limits_v2())
+    if legacy.is_err(): fail("legacy fixture rejected")
+    if candidate.is_err(): fail("candidate fixture rejected: " + candidate.unwrap_err())
+    val accepted = candidate.unwrap()
+    expect(accepted.value).to_equal(legacy.unwrap())
+    expect(accepted.syntax.roots.len()).to_equal(1)
+    expect(accepted.grammar_steps).to_be_greater_than(0)
+
+describe "SDN explicit shared VM inline candidate":
+    it "matches scalar variants including exact literal boundaries":
+        for source in ["null", "true", "false", "trueish", "nullify", "FALSE", "0", "-17", "001", "-0", "word", "1.5", "-.5", "5."]:
+            check_inline_parity_v2(source)
+
+    it "matches nested mixed arrays and dictionaries":
+        check_inline_parity_v2("[null,true,false,one,[-7,[],[1.5]]]")
+        check_inline_parity_v2("{}")
+        check_inline_parity_v2("{a: 1, b: [true, {inner: false}], empty: {}, last: null}")
+        check_inline_parity_v2("{a: 1, a: 2}")
+
+    it "matches quoted values with punctuation whitespace and escapes":
+        check_inline_parity_v2("\"hello, [world]: {}\"")
+        check_inline_parity_v2("[\"two words\",\"a\\nline\",\"a\\\"quote\",\"unknown\\q\"]")
+        check_inline_parity_v2("{\"quoted key\": \"value\"}")
+
+    it "projects checked signed boundaries and rejects overflow":
+        val minimum = sdn_inline_parse_candidate_v2("-9223372036854775808", inline_limits_v2()).unwrap()
+        expect(minimum.value).to_equal(SdnValue.Int(-9223372036854775808))
+        val maximum = sdn_inline_parse_candidate_v2("9223372036854775807", inline_limits_v2()).unwrap()
+        expect(maximum.value).to_equal(SdnValue.Int(9223372036854775807))
+        expect(sdn_inline_parse_candidate_v2("9223372036854775808", inline_limits_v2()).unwrap_err()).to_equal("integer_overflow")
+
+    it "records permissive legacy malformed acceptance as divergence":
+        for source in ["[12", "[1,]", "[1,,2]", "{a: 1,}", "{a}", "[true false]"]:
+            expect(legacy_parse(source).is_ok()).to_equal(true)
+            expect(sdn_inline_parse_candidate_v2(source, inline_limits_v2()).is_err()).to_equal(true)
+
+    it "rejects unsupported documents distinctly without fallback":
+        expect(sdn_inline_parse_candidate_v2("[é]", inline_limits_v2()).unwrap_err()).to_equal("unsupported_non_ascii")
+        expect(sdn_inline_parse_candidate_v2("[1\n2]", inline_limits_v2()).unwrap_err()).to_equal("unsupported_multiline")
+        expect(sdn_inline_parse_candidate_v2("\"unclosed", inline_limits_v2()).unwrap_err()).to_equal("unterminated_quoted_string")
+        expect(sdn_inline_parse_candidate_v2("\"a\\\nline\"", inline_limits_v2()).unwrap_err()).to_equal("unsupported_multiline")
+        expect(sdn_inline_parse_candidate_v2("", inline_limits_v2()).is_err()).to_equal(true)
+        expect(sdn_inline_parse_candidate_v2("key: 1", inline_limits_v2()).is_err()).to_equal(true)
+        expect(sdn_inline_parse_candidate_v2("|a,b|", inline_limits_v2()).is_err()).to_equal(true)
+
+    it "enforces source tokens calls choices and fuel limits":
+        var limits = inline_limits_v2()
+        limits.max_source_bytes = 2
+        expect(sdn_inline_parse_candidate_v2("true", limits).unwrap_err()).to_equal("source_capacity")
+        limits = inline_limits_v2()
+        limits.max_tokens = 2
+        expect(sdn_inline_parse_candidate_v2("[1]", limits).unwrap_err()).to_equal("token_capacity")
+        limits = inline_limits_v2()
+        limits.max_calls = 2
+        expect(sdn_inline_parse_candidate_v2("[[1]]", limits).unwrap_err()).to_equal("call_capacity")
+        limits = inline_limits_v2()
+        limits.max_choices = 1
+        expect(sdn_inline_parse_candidate_v2("[1]", limits).unwrap_err()).to_equal("choice_capacity")
+        limits = inline_limits_v2()
+        limits.max_steps = 1
+        expect(sdn_inline_parse_candidate_v2("true", limits).unwrap_err()).to_equal("fuel_exhausted")

@@ -32,6 +32,13 @@ The driver owns `PersistentSmfPackageIndexV1`, canonical package/module lookup,
 generation pinning, and explicit bounded rebuild. CLI, bootstrap, MCP, LSP, and
 daemon paths call this owner and may not maintain alternate closure walkers.
 
+The catalog distinguishes a complete-inventory V2 graph from an entry-scoped
+V3 graph. V3 binds the entry source identity and the digest of the full frozen
+SCV inventory. Every stored module must be reachable from that entry and all
+its direct imports must be stored. Warm routing refuses a V3 graph for a
+different entry or a full-build request. The inventory digest alone never
+implies that an entry-scoped graph covers every source in that inventory.
+
 ### Metadata owner
 
 `PackageTldrHeaderV1` contains the package/module identity, variant identity,
@@ -115,6 +122,14 @@ and atomic pointer replacement. Readers retain generation pins. Garbage
 collection skips pinned generations. Concurrent writers, interrupted writes,
 pointer truncation, orphan staging, and daemon death recover to exactly one
 complete prior or new generation; mixed state is never readable.
+
+When SCV advances beyond the current complete graph, ordinary warm admission
+refuses that graph. `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` admits an explicit cold
+compile against the new frozen snapshot while retaining the prior `CURRENT`
+graph. It publishes an empty active-index digest, clears warm compatibility
+markers, and marks the request as rebuild-pending. A later failed admission
+clears that pending marker. Only a complete typed graph publication may move
+`CURRENT`; a binding-only snapshot must not replace the old graph.
 
 ## Reproducibility
 

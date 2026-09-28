@@ -1,0 +1,33 @@
+# Native inspection V1 required; unsupported runtimes must FAIL, never skip.
+# /usr/bin/false is deliberately not an admitted tool. This tests the isolated
+# execution stage and failure cleanup, not tool admission or LLVM decoding.
+use std.spec.*
+use std.time.sleep_ms
+use std.io.process_inspection_v1.{OwnedExecutablePin, OwnedCwdPinV4}
+use compiler.driver.parser_external_inspection_process_v1.*
+use compiler.driver.parser_external_inspection_tool_owner_v1.ParserExternalInspectionToolKindV1
+
+describe "inspection process real facade failure cleanup":
+    it "retains a failed process until acknowledgement and rejects its capture":
+        var executable = OwnedExecutablePin.pin("/usr/bin/false").unwrap()
+        var cwd = OwnedCwdPinV4.pin("/tmp").unwrap()
+        var stage = ParserExternalInspectionProcessV1.create()
+        stage.start(executable, cwd, ParserExternalInspectionToolKindV1.Objdump,
+            [127u8, 69u8, 76u8, 70u8]).unwrap()
+        # Bounded progression; exhaustion is an explicit failure.
+        var attempts = 0
+        while stage.state() == ParserInspectionProcessStateV1.Running and attempts < 5000:
+            val collected = stage.collect()
+            sleep_ms(1)
+            attempts = attempts + 1
+        attempts = 0
+        while stage.state() == ParserInspectionProcessStateV1.CleanupRequired and attempts < 5000:
+            val cleaned = stage.cleanup()
+            sleep_ms(1)
+            attempts = attempts + 1
+        expect(stage.state()).to_equal(ParserInspectionProcessStateV1.Failed)
+        expect(stage.acknowledge().is_err()).to_equal(true)
+        expect(stage.collect().is_err()).to_equal(true)
+        expect(stage.cleanup().is_err()).to_equal(true)
+        expect(executable.close().unwrap()).to_equal(true)
+        expect(cwd.close().unwrap()).to_equal(true)
