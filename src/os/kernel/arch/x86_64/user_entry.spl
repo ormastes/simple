@@ -6,32 +6,65 @@
 use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_scalars}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
+use os.kernel.arch.user_handoff_result_v2.{
+    UserHandoffResultV2, UserHandoffErrorV2, user_handoff_legacy_status_v2
+}
 
 extern fn rt_x86_exec_token_install(task_id: u64, generation: u64, expected_cr3: u64) -> i64
 extern fn rt_x86_exec_token_cancel(task_id: u64, generation: u64, expected_cr3: u64) -> i64
-extern fn rt_x86_exec_token_take_result(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+@unsafe(reason: "writes exactly eight bytes to the acquired native kernel slot", capabilities: [ffi, raw_ptr])
+extern fn rt_x86_exec_token_take_result_v2(task_id: u64, generation: u64, expected_cr3: u64, out_rc: i64) -> i64
+@unsafe(reason: "acquire the bounded serialized boot-owner output slot", capabilities: [ffi, raw_ptr])
+extern fn rt_x86_exec_token_result_slot_acquire_v2() -> u64
+@unsafe(reason: "release only the exact acquired native output slot", capabilities: [ffi, raw_ptr])
+extern fn rt_x86_exec_token_result_slot_release_v2(slot: u64) -> i64
+@unsafe(reason: "read the initialized eight-byte kernel result slot without tagged integer conversion", capabilities: [ffi, raw_ptr])
+extern fn rt_volatile_read_u64(addr: u64) -> u64
 extern fn serial_println(msg: text)
 
 fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
-    """Syscall 14: EnterUserBlocking — look up a user TCB and jump to ring-3."""
+    """Scalar syscall compatibility; execution owners must use the typed route."""
+    user_handoff_legacy_status_v2(dispatch_enter_user_blocking_v2(pid_hint, scheduler))
+
+pub fn dispatch_enter_user_blocking_v2(pid_hint: u64, scheduler: Scheduler) -> UserHandoffResultV2:
+    """Serialized boot handoff; only a consumed native result yields Exited."""
     val validation = validate_enter_user_blocking_handoff(pid_hint, scheduler)
     if not validation.ok:
         serial_println("[x86_64-user] handoff rejected")
-        return -22
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.ValidationRejected)
+
+    if validation.entry == 0u64 or validation.initial_rsp == 0u64:
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.ValidationRejected)
+    val output = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_x86_exec_token_result_slot_acquire_v2()
+    if output == 0:
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.OutputSlotBusy)
 
     if rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3) != 1:
         serial_println("[x86_64-user] token install rejected")
-        return -16
+        val released = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_x86_exec_token_result_slot_release_v2(output)
+        if released != 1:
+            return UserHandoffResultV2.Failed(UserHandoffErrorV2.OutputSlotReleaseFailed)
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.TokenRejected)
 
     serial_println("[x86_64-user] handoff enter pid={validation.pid} generation={validation.generation} cr3={validation.cr3}")
-    if validation.entry == 0u64 or validation.initial_rsp == 0u64:
-        serial_println("[x86_64-user] scalar handoff rejected")
-        val _cancelled = rt_x86_exec_token_cancel(validation.pid, validation.generation, validation.cr3)
-        return -22
     arch_x86_64_enter_user_scalars(validation.entry, validation.initial_rsp, validation.cr3)
-    val rc = rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)
-    serial_println("[x86_64-user] handoff returned rc={rc}")
-    if rc == -4096:
+    val taken = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_x86_exec_token_take_result_v2(validation.pid, validation.generation, validation.cr3, output as i64)
+    if taken != 1:
         val _cancelled = rt_x86_exec_token_cancel(validation.pid, validation.generation, validation.cr3)
-        return -22
-    rc
+        val released = unsafe(capabilities: [ffi, raw_ptr]):
+            rt_x86_exec_token_result_slot_release_v2(output)
+        if released != 1:
+            return UserHandoffResultV2.Failed(UserHandoffErrorV2.OutputSlotReleaseFailed)
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.CompletionMissing)
+    val bits = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_volatile_read_u64(output)
+    val released = unsafe(capabilities: [ffi, raw_ptr]):
+        rt_x86_exec_token_result_slot_release_v2(output)
+    if released != 1:
+        return UserHandoffResultV2.Failed(UserHandoffErrorV2.OutputSlotReleaseFailed)
+    UserHandoffResultV2.Exited(bits as i64)
+
+export dispatch_enter_user_blocking_v2

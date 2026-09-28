@@ -15296,6 +15296,11 @@ static int64_t _x86_exec_result_rc = 0;
 static uint64_t _x86_exec_result_task = 0;
 static uint64_t _x86_exec_result_generation = 0;
 static uint64_t _x86_exec_result_cr3 = 0;
+/* One bounded output slot for the serialized boot Simple bridge. A lease
+ * spans install/entry/take/read/release; an interrupted owner leaves it busy
+ * and subsequent admission fails closed rather than reusing its storage. */
+static int64_t _x86_exec_output_slot = 0;
+static int _x86_exec_output_slot_busy = 0;
 
 static uint64_t _x86_current_cr3(void) {
     uint64_t value;
@@ -15306,7 +15311,8 @@ static uint64_t _x86_current_cr3(void) {
 int64_t rt_x86_exec_token_install(uint64_t task, uint64_t generation,
                                   uint64_t expected_cr3) {
     expected_cr3 &= ~0xfffULL;
-    if (_x86_exec_token_active || task == 0 || generation == 0 || expected_cr3 == 0)
+    if (_x86_exec_token_active || _x86_exec_result_valid ||
+        task == 0 || generation == 0 || expected_cr3 == 0)
         return 0;
     _x86_exec_token_task = task;
     _x86_exec_token_generation = generation;
@@ -15333,6 +15339,22 @@ int64_t rt_x86_exec_token_cancel(uint64_t task, uint64_t generation,
     return 1;
 }
 
+uint64_t rt_x86_exec_token_result_slot_acquire_v2(void) {
+    if (_x86_exec_output_slot_busy) return 0;
+    _x86_exec_output_slot_busy = 1;
+    _x86_exec_output_slot = 0;
+    return (uint64_t)(uintptr_t)&_x86_exec_output_slot;
+}
+
+int64_t rt_x86_exec_token_result_slot_release_v2(uint64_t slot) {
+    if (!_x86_exec_output_slot_busy ||
+        slot != (uint64_t)(uintptr_t)&_x86_exec_output_slot)
+        return 0;
+    _x86_exec_output_slot = 0;
+    _x86_exec_output_slot_busy = 0;
+    return 1;
+}
+
 int64_t rt_x86_exec_token_take_result(uint64_t task, uint64_t generation,
                                       uint64_t expected_cr3) {
     if (!_x86_exec_result_valid || task != _x86_exec_result_task ||
@@ -15341,6 +15363,32 @@ int64_t rt_x86_exec_token_take_result(uint64_t task, uint64_t generation,
         return -4096;
     _x86_exec_result_valid = 0;
     return _x86_exec_result_rc;
+}
+
+/* Serialized boot execution only, like the v1 token API. This separates
+ * availability from all 64 bits of guest status; -4096 is a valid status.
+ * The output is a trusted kernel pointer, never a user-supplied address.
+ * A failed lookup must neither write the output nor consume another result. */
+int64_t rt_x86_exec_token_take_result_v2(uint64_t task, uint64_t generation,
+                                        uint64_t expected_cr3, int64_t *out_rc) {
+    if (!out_rc || !_x86_exec_result_valid || task != _x86_exec_result_task ||
+        generation != _x86_exec_result_generation ||
+        (expected_cr3 & ~0xfffULL) != _x86_exec_result_cr3)
+        return 0;
+    *out_rc = _x86_exec_result_rc;
+    _x86_exec_result_valid = 0;
+    return 1;
+}
+
+/* Caller has authenticated the active token against the live CR3. Keep this
+ * transition shared by the real exit producer and native lifecycle tests. */
+static void _x86_exec_token_complete_result(int64_t rc) {
+    _x86_exec_result_task = _x86_exec_token_task;
+    _x86_exec_result_generation = _x86_exec_token_generation;
+    _x86_exec_result_cr3 = _x86_exec_token_cr3;
+    _x86_exec_result_rc = rc;
+    _x86_exec_result_valid = 1;
+    _x86_exec_token_active = 0;
 }
 
 extern void rt_x86_ring3_resume(int64_t rc);
@@ -15590,12 +15638,7 @@ static int _bare_exec_handle(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2
             serial_puts("[syscall] exit status=");
             serial_put_dec((int64_t)a0);
             serial_puts("\r\n");
-            _x86_exec_result_task = _x86_exec_token_task;
-            _x86_exec_result_generation = _x86_exec_token_generation;
-            _x86_exec_result_cr3 = _x86_exec_token_cr3;
-            _x86_exec_result_rc = (int64_t)a0;
-            _x86_exec_result_valid = 1;
-            _x86_exec_token_active = 0;
+            _x86_exec_token_complete_result((int64_t)a0);
             if (!_bare_exec_halt_on_exit && rt_x86_ring3_resume_valid())
                 rt_x86_ring3_resume((int64_t)a0);
             outb(0xF4, (uint8_t)((a0 << 1) | 1));
