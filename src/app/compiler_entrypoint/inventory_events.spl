@@ -42,6 +42,10 @@ struct CompilerInventoryUntrackedDigestsV1:
     test_digest: text
     paths: [text]
 
+struct CompilerInventoryMembershipPublicationV1:
+    digest: text
+    newly_written: bool
+
 fn compiler_inventory_invalid_v1(reason: text) -> CompilerInventoryRefreshV1:
     CompilerInventoryRefreshV1(false, reason, "", -1)
 
@@ -510,21 +514,24 @@ fn compiler_inventory_membership_read_v1(
 
 fn compiler_inventory_membership_publish_v1(
     cache_root: text, paths: [text]
-) -> text:
+) -> CompilerInventoryMembershipPublicationV1:
     val content = compiler_inventory_membership_encode_v1(paths)
     if content == "" or content.len() > 16 * 1024 * 1024:
-        return ""
+        return CompilerInventoryMembershipPublicationV1("", false)
     val digest = sha256_text(content)
     val directory = compiler_inventory_event_root_v1(cache_root) + "/untracked"
     if not dir_create(directory, true):
-        return ""
+        return CompilerInventoryMembershipPublicationV1("", false)
     val path = compiler_inventory_membership_path_v1(cache_root, digest)
-    if not file_exists(path) and not file_atomic_write(path, content):
-        return ""
+    val already_exists = file_exists(path)
+    if not already_exists and not file_atomic_write(path, content):
+        return CompilerInventoryMembershipPublicationV1("", false)
     val admitted = compiler_inventory_membership_read_v1(cache_root, digest)
     if admitted == nil or admitted!.len() != paths.len():
-        return ""
-    digest
+        if not already_exists:
+            val _discard = file_delete(path)
+        return CompilerInventoryMembershipPublicationV1("", false)
+    CompilerInventoryMembershipPublicationV1(digest, not already_exists)
 
 fn compiler_inventory_membership_merge_v1(
     previous: [text], current: [text], source_roots: [text]
@@ -647,10 +654,8 @@ fn _compiler_inventory_refresh_locked_v1(
         cursor.untracked_membership_digest
     else:
         ""
-    if cold_init:
-        membership_digest = compiler_inventory_membership_publish_v1(
-            cache_root, observed.untracked_paths)
-    elif membership_changed:
+    var next_membership_paths = observed.untracked_paths
+    if membership_changed:
         val previous = compiler_inventory_membership_read_v1(
             cache_root, cursor.untracked_membership_digest)
         if previous == nil:
@@ -662,11 +667,8 @@ fn _compiler_inventory_refresh_locked_v1(
             return compiler_inventory_invalid_v1("untracked-membership-reconcile-failed")
         for event in deleted!:
             git_events.push(event)
-        membership_digest = compiler_inventory_membership_publish_v1(
-            cache_root, compiler_inventory_membership_merge_v1(
-                previous!, observed.untracked_paths, source_roots))
-    if membership_digest == "":
-        return compiler_inventory_invalid_v1("untracked-membership-publish-failed")
+        next_membership_paths = compiler_inventory_membership_merge_v1(
+            previous!, observed.untracked_paths, source_roots)
     val untracked_src_digest = if observed.untracked_src_digest != "":
         observed.untracked_src_digest
     elif cursor.valid and cursor.untracked_src_digest != "":
@@ -714,11 +716,35 @@ fn _compiler_inventory_refresh_locked_v1(
         root, journal, consumed_rows)
     if filesystem_events == nil:
         return compiler_inventory_invalid_v1("filesystem-event-journal-truncated")
+    # Publish only after all journal checks pass. The immutable blob must
+    # exist before inventory CURRENT may name it, but a failed apply must not
+    # leave this refresh's newly created blob behind.
+    var membership_newly_written = false
+    if cold_init or membership_changed:
+        val published = compiler_inventory_membership_publish_v1(
+            cache_root, next_membership_paths)
+        membership_digest = published.digest
+        membership_newly_written = published.newly_written
+    if membership_digest == "":
+        return compiler_inventory_invalid_v1("untracked-membership-publish-failed")
     val inventory = compile_source_inventory_apply_observed_events_v1(
         root, cache_root, git_events, filesystem_events!, head, rows,
         filesystem_digest, sha256_text(pointer_content), cold_init,
         untracked_src_digest, untracked_test_digest, membership_digest)
     if not inventory.valid:
+        if membership_newly_written and
+                (compile_source_inventory_read_pointer_content_v1(cache_root) ?? "") ==
+                    pointer_content:
+            # The refresh lock excludes other production publishers. Recheck
+            # the immutable content and pointer before deleting; uncertain
+            # ownership retains the record rather than deleting live state.
+            val still_ours = compiler_inventory_membership_read_v1(
+                cache_root, membership_digest)
+            if still_ours == nil or not file_delete(
+                    compiler_inventory_membership_path_v1(cache_root,
+                        membership_digest)):
+                return compiler_inventory_invalid_v1(
+                    "untracked-membership-cleanup-failed:" + inventory.reason)
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
     # This refresh lock covers every production membership-record reader.
