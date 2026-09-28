@@ -1,0 +1,43 @@
+# Assemble the real typed-HIR ABI and reached-graph reverse projection into
+# one canonical export SMF. Archive/action receipts remain separate owners.
+
+use compiler.hir.hir_types.{HirModule}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
+use compiler.driver.cache.cold_hir_abi_smf_section_v1.{cold_hir_abi_smf_section_v1}
+use compiler.driver.cache.cold_hir_reverse_projection_v1.{cold_hir_reverse_projection_v1}
+use compiler.driver.cache.package_tldr_metadata.{PackageExportSmfBytesV1, PackageSmfPayloadSectionV1, package_export_smf_build_v1}
+
+struct ColdHirExportSmfV1:
+    smf: PackageExportSmfBytesV1
+    abi_digest: text
+    reverse_projection_digest: text
+
+fn cold_hir_export_smf_v1(
+    module: HirModule, seed: ColdHirSemanticSeedV1,
+    package_identity: text, variant_digest: text,
+    reverse_dependents: [text]
+) -> Result<ColdHirExportSmfV1, text>:
+    if module.name != seed.module_identity or package_identity == "":
+        return Err("cold-export-smf-module-or-package-mismatch")
+    val abi = match cold_hir_abi_smf_section_v1(module):
+        case Err(reason): return Err(reason)
+        case Ok(section): section
+    if abi.abi_digest != seed.abi_digest:
+        return Err("cold-export-smf-typed-abi-mismatch")
+    val reverse = match cold_hir_reverse_projection_v1(
+            seed.module_identity, seed.direct_imports, reverse_dependents):
+        case Err(reason): return Err(reason)
+        case Ok(projection): projection
+    val smf = match package_export_smf_build_v1(
+            package_identity, seed.module_identity, variant_digest, [
+                PackageSmfPayloadSectionV1("abi_interface", abi.payload),
+                PackageSmfPayloadSectionV1("reverse_projection", reverse.payload)]):
+        case Err(reason): return Err("cold-export-smf-{reason}")
+        case Ok(bytes): bytes
+    if (smf.record.sections.len() != 2 or
+            smf.record.sections[0].digest != abi.abi_digest or
+            smf.record.sections[1].digest != reverse.digest):
+        return Err("cold-export-smf-section-digest-mismatch")
+    Ok(ColdHirExportSmfV1(smf, abi.abi_digest, reverse.digest))
+
+export ColdHirExportSmfV1, cold_hir_export_smf_v1
