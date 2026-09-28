@@ -996,7 +996,48 @@ run_conflict_tree_union() {
         case "$_push_remote" in ''|*[!A-Za-z0-9._/-]*) die "new ref requires the actual push remote name" ;; esac
         set -- "$@" "--remotes=$_push_remote"
     fi
+    # Merging main into a stale PR branch fast-forwards the branch, so
+    # old..new carries every main commit the merge brought in and trips the
+    # 64-commit bound. Those commits are already published on main and were
+    # gated when they landed; exclude them (2026-09-28).
+    _main_ref=$(published_main_ref) && set -- "$@" "$_main_ref"
     run_push_gate push-conflict-tree true "$ROOT/scripts/check/check-no-conflict-tree-push.shs" "$@"
+}
+
+# Prints refs/remotes/<push remote>/main when it resolves to a commit, so the
+# caller can exclude already-published main history from the outgoing range.
+# Fail-closed: without the ref (or a push remote name) nothing is excluded, the
+# pre-2026-09-28 range stands, and a NOTE says so on stderr.
+published_main_ref() {
+    _pm_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_pm_remote" in
+        ''|*[!A-Za-z0-9._/-]*)
+            echo "push-must-check: NOTE — no push remote name; main history is not excluded from the outgoing range" >&2
+            return 1 ;;
+    esac
+    _pm_ref=refs/remotes/$_pm_remote/main
+    git -C "$ROOT" rev-parse --verify --quiet "$_pm_ref^{commit}" >/dev/null || {
+        echo "push-must-check: NOTE — cannot verify $_pm_ref; fetch it to exclude already-published main commits from the outgoing range" >&2
+        return 1
+    }
+    printf '%s\n' "$_pm_ref"
+}
+
+# Fast-forward counterpart for the per-ref range: when the tip merged published
+# main, use the unique merge-base of tip and main as the predecessor if it
+# descends from the old ref. Every commit this drops from old..tip is reachable
+# from published main; the branch's own commits all stay in range.
+main_merged_predecessor() {
+    _mm_tip=$1
+    _mm_old=$2
+    _mm_ref=$(published_main_ref) || return 1
+    _mm_base=$(git -C "$ROOT" merge-base --all "$_mm_ref" "$_mm_tip") || return 1
+    [ -n "$_mm_base" ] || return 1
+    [ "$(printf '%s\n' "$_mm_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    [ "$_mm_base" != "$_mm_tip" ] || return 1
+    # Only replace old when it is strictly narrower.
+    [ "$(git -C "$ROOT" rev-list --count "$_mm_base..$_mm_tip")" -lt "$(git -C "$ROOT" rev-list --count "$_mm_old..$_mm_tip")" ] || return 1
+    printf '%s\n' "$_mm_base"
 }
 
 # A non-fast-forward PR update replaces a branch built on an old main with a
@@ -1236,6 +1277,45 @@ SLOW_GIT
         _slow_elapsed=$(( $(date +%s) - _slow_start ))
         [ "$_slow_elapsed" -lt 5 ] || exit 1
     ) || die "slow remote was accepted or not bounded"
+
+    # Stale-branch merge fixture (2026-09-28): a PR branch >64 commits behind
+    # main merges main and fast-forwards. old..new carries all of main's
+    # merged-in commits; only the merge commit is new and must be counted.
+    git -C "$ROOT" switch -q -c stale "$(git -C "$ROOT" rev-list --max-parents=0 main)"
+    git -C "$ROOT" commit -q --allow-empty -m stale-own || die "stale fixture commit failed"
+    git -C "$ROOT" push -q origin stale || die "stale fixture push failed"
+    _stale_old=$(git -C "$ROOT" rev-parse HEAD)
+    git -C "$ROOT" merge -q --no-ff -m merge-main main || die "stale fixture merge failed"
+    _stale_tip=$(git -C "$ROOT" rev-parse HEAD)
+    [ "$(git -C "$ROOT" rev-list --count "$_stale_old..$_stale_tip")" -gt 64 ] || die "stale fixture did not exceed the 64-commit bound"
+    [ "$(git -C "$ROOT" rev-list --count "$_stale_tip" --not "$_stale_old" refs/remotes/origin/main)" -eq 1 ] || die "stale fixture: own range is not just the merge commit"
+    [ "$(main_merged_predecessor "$_stale_tip" "$_stale_old")" = "$(git -C "$ROOT" rev-parse main)" ] || die "stale fixture: per-ref base is not published main"
+    printf 'refs/heads/stale %s refs/heads/stale %s\n' "$_stale_tip" "$_stale_old" > "$_tmp/rebased/stale-refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/stale-refs"
+    ) >/dev/null 2>&1 || die "stale branch merging main was rejected by the commit bound"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_PUSH_REMOTE=missing-remote
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/stale-refs"
+    ) >/dev/null 2>&1 && die "stale merge admitted without a verifiable remote main"
+    git -C "$ROOT" switch -q -c big main
+    _big_old=$(git -C "$ROOT" rev-parse HEAD)
+    _big_i=0
+    while [ "$_big_i" -lt 65 ]; do
+        git -C "$ROOT" commit -q --allow-empty -m "big-$_big_i" || die "big fixture commit failed"
+        _big_i=$((_big_i + 1))
+    done
+    _big_tip=$(git -C "$ROOT" rev-parse HEAD)
+    printf 'refs/heads/big %s refs/heads/big %s\n' "$_big_tip" "$_big_old" > "$_tmp/rebased/big-refs"
+    (
+        cd "$ROOT" || exit 1
+        MUST_CHECK_BUDGET_MS=10000; MUST_CHECK_BUDGET_SPENT_MS=0; MUST_CHECK_BUDGET_OVERRUN=""
+        run_conflict_tree_union "$_tmp/rebased/big-refs"
+    ) >/dev/null 2>&1 && die "65 genuinely new commits passed the 64-commit bound"
     ROOT=$_saved_root
     MUST_CHECK_PUSH_REMOTE=$_saved_remote
 
@@ -1296,7 +1376,7 @@ SLOW_GIT
         die "committed-dispatcher-newer-than-running-script: the committed run_three_push_gates_parallel never ran (marker missing or wrong)"
     rm -rf "$_ncd_tmp"
 
-    echo "push-must-check: PASS — 29 ledger/budget/dispatcher/rebase fixtures checked"
+    echo "push-must-check: PASS — 32 ledger/budget/dispatcher/rebase/stale-merge fixtures checked"
     exit 0
 fi
 
@@ -1398,6 +1478,9 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
         _predecessor=$(rebased_push_published_base "$_local_sha") ||
             die "cannot verify published main as the base of rebased ref $_local_ref"
+    elif _mm_pred=$(main_merged_predecessor "$_local_sha" "$_predecessor"); then
+        echo "push-must-check: $_local_ref merged published main; range base $_predecessor -> $_mm_pred (already-published main commits excluded)"
+        _predecessor=$_mm_pred
     fi
     ALLOW_UNPROMOTED_LEDGER=0
     if ledger_is_unpromoted_at_rev "$_predecessor"; then
