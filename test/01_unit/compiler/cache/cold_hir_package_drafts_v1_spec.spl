@@ -5,6 +5,9 @@ use std.scv.compile_source_inventory_core.{
     compile_source_inventory_digest_v1
 }
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
+use compiler.driver.cache.cold_hir_reverse_projection_v1.{
+    cold_hir_reverse_projection_v1
+}
 use compiler.driver.cache.cold_hir_package_drafts_v1.{
     ColdHirPackageArtifactV1, cold_hir_package_index_v1,
     cold_hir_package_drafts_v1
@@ -34,22 +37,34 @@ fn cold_draft_authority(inventory_digest: text) -> PackageModuleIndexBuildAuthor
         ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "cranelift",
             [], "debug", "abi-v1", [], []))
 
-fn cold_draft_artifact(
+fn cold_draft_artifact_with_reverse(
     module_identity: text, package_identity: text,
-    imports: [text], inventory_digest: text
+    imports: [text], reverse_dependents: [text], inventory_digest: text
 ) -> ColdHirPackageArtifactV1:
     val digest = sha256_text("artifact:{module_identity}")
     val abi_payload = "abi:{module_identity}"
+    val projection = cold_hir_reverse_projection_v1(
+        module_identity, imports, reverse_dependents).unwrap()
+    val smf_payload = abi_payload + projection.payload
     val seed = ColdHirSemanticSeedV1(
         module_identity, "src/{module_identity}.spl",
         sha256_text(module_identity), inventory_digest,
         sha256_text(abi_payload), imports)
     ColdHirPackageArtifactV1(
-        seed, package_identity, digest, sha256_text(abi_payload), abi_payload,
+        seed, package_identity, digest, sha256_text(smf_payload), smf_payload,
         [PackageSmfSectionV1("abi_interface", 0, abi_payload.len(),
-            seed.abi_digest)],
-        digest, digest, digest, digest, digest, digest, digest,
+            seed.abi_digest),
+         PackageSmfSectionV1("reverse_projection", abi_payload.len(),
+            projection.payload.len(), projection.digest)],
+        digest, digest, digest, digest, projection.digest, digest, digest,
         "", PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+
+fn cold_draft_artifact(
+    module_identity: text, package_identity: text,
+    imports: [text], inventory_digest: text
+) -> ColdHirPackageArtifactV1:
+    cold_draft_artifact_with_reverse(
+        module_identity, package_identity, imports, [], inventory_digest)
 
 describe "cold HIR package draft assembly":
     it "derives reverse edges and package SCCs before building an index":
@@ -57,8 +72,8 @@ describe "cold HIR package draft assembly":
         val digest = compile_source_inventory_digest_v1(inventory)
         val authority = cold_draft_authority(digest)
         val artifacts = [
-            cold_draft_artifact("a", "p", ["b"], digest),
-            cold_draft_artifact("b", "q", ["a"], digest),
+            cold_draft_artifact_with_reverse("a", "p", ["b"], ["b", "c"], digest),
+            cold_draft_artifact_with_reverse("b", "q", ["a"], ["a"], digest),
             cold_draft_artifact("c", "r", ["a"], digest)]
         val drafts = cold_hir_package_drafts_v1(authority, artifacts)
         match drafts:
@@ -104,6 +119,30 @@ describe "cold HIR package draft assembly":
         val wrong_abi = cold_hir_package_drafts_v1(authority, [abi_changed])
         expect(wrong_abi.unwrap_err()).to_equal(
             "cold-drafts-abi-section-mismatch:a")
+
+    it "binds reverse-reference bytes to the reached graph":
+        val inventory = cold_draft_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val authority = cold_draft_authority(digest)
+        val first = cold_hir_reverse_projection_v1("a", ["c", "b"], ["d"])
+        val reordered = cold_hir_reverse_projection_v1("a", ["b", "c"], ["d"])
+        expect(first.unwrap().digest).to_equal(reordered.unwrap().digest)
+
+        var artifact = cold_draft_artifact("a", "p", [], digest)
+        artifact.reverse_projection_digest = sha256_text("invented")
+        val forged = cold_hir_package_drafts_v1(authority, [artifact])
+        expect(forged.unwrap_err()).to_equal(
+            "cold-drafts-reverse-projection-mismatch:a")
+
+        var changed = cold_draft_artifact("a", "p", [], digest)
+        var seed = changed.seed
+        seed.direct_imports = ["b"]
+        changed.seed = seed
+        val stale = cold_hir_package_drafts_v1(authority, [
+            changed,
+            cold_draft_artifact_with_reverse("b", "q", [], ["a"], digest)])
+        expect(stale.unwrap_err()).to_equal(
+            "cold-drafts-reverse-projection-mismatch:a")
 
     it "requires every frozen source and a frozen manifest witness":
         val inventory = cold_draft_inventory()
