@@ -103,6 +103,9 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   package index. Complete the other semantic sections and
   their artifact receipts before connecting this producer to index publication;
   run its new tamper scenario on a current-source worker.
+  A versioned reverse-reference section now derives actual bytes from the
+  reached graph and is checked against the SMF directory and TLDR receipt;
+  run its canonical-order and stale-edge scenarios on that worker too.
 - TLDR digest admission and SMF section order now compare bytes rather than
   native text handles. The shared canonical identity comparator also reads
   bytes in place instead of allocating two byte arrays per comparison.
