@@ -990,6 +990,8 @@ exact-head review, the owner override lands it: `gh pr review <n> --comment`,
 `main` and `release/*`; see `.claude/rules/vcs.md` § "Force-landing a PR").
 Stop short of merging only for a genuinely failing check or an unmet evidence
 precondition, and then name it in the PR body.
+Read `gh pr view <n> --comments` first: an unanswered review finding that the
+change breaks callers or regresses a spec is a blocker, not noise.
 `--no-verify` skips local Git hooks only and never bypasses repository
 protection or required checks. See `doc/07_guide/app/devhub.md`,
 `doc/07_guide/infra/self_review_policy_db.md`, and
