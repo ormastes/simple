@@ -1,14 +1,17 @@
 # Hosted process spawn with explicit environment has no matching runtime ABI
 
-**Status:** Open — source route mismatch; runtime reproduction and repair pending.
+**Status:** Source-level fail-closed mitigation in progress; full hosted launch
+contract and runtime qualification remain open.
 **Affected route:** `app.io.process_spawn_async_env` and any hosted SOSIX
 `ProcessLaunchSpecV1` provider that would rely on it.
 
 ## Source evidence
 
-- `src/app/io/process_env_ops.spl` declares
-  `rt_process_spawn_async(cmd: text, args: [text], env: {text: text})` and passes
-  an environment map as its third source argument.
+- The original `src/app/io/process_env_ops.spl` declared
+  `rt_process_spawn_async(cmd: text, args: [text], env: {text: text})` and passed
+  an environment map as its third source argument. The staged mitigation
+  removes that declaration, returns `-95` for nonempty maps before spawning,
+  and delegates empty maps to the existing two-argument facade.
 - `src/compiler_rust/compiler/src/interpreter_extern/system.rs` implements
   `rt_process_spawn_async` through `process_spawn(args, false)`. That function
   requires at least two arguments, reads `args[0]` and `args[1]`, and never
@@ -25,9 +28,11 @@
   while the C `fork`/`execvp` path inherits all three descriptors. The shared
   launch contract cannot safely infer one stdio policy from this symbol.
 
-The interpreter's environment loss follows directly from its dispatch code.
-The native behavior needs a compiled ABI test; do not infer that the map is
-applied, or claim a specific native failure mode, from the declarations alone.
+The interpreter's original environment loss follows directly from its
+dispatch code. The native behavior needs a compiled ABI test; do not infer that
+the map was applied, or claim a specific native failure mode, from the old
+declarations alone. Source-level refusal does not prove the hosted process
+service or environment-aware launch contract.
 
 ## Required correction
 
