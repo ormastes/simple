@@ -102,6 +102,9 @@ not reach link selection because the diagnostic pure-Simple compiler hit
 flat-AST parse errors after source closure; no full CLI size/startup/RSS or
 SQLite-link improvement is claimed. See
 `doc/09_report/compiler/target5_stage4_sqlite_demand_candidate_2026-09-28.md`.
+The final bounded native-arena retry reached the same empty declaration-tag
+parse failure at lower RSS; the targeted parser blocker is recorded in
+`doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
 
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 

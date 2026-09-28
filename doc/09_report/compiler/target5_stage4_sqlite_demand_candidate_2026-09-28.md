@@ -41,6 +41,16 @@ module 1,077/2,446. The run exited after about 78 seconds with peak RSS
 receipt. The parse failure is a separate bootstrap/compiler limitation; no
 claim is made that the full CLI currently links.
 
+A final bounded retry set `SIMPLE_NATIVE_ARENA_DECLS=1` with a 12 GB
+address-space cap and a 120-second timeout. It failed at the same flat AST
+bridge error after 34.69 seconds, peaking at 5,580,064 KiB RSS. The first
+reported source was `src/app/cli/_CliMain/args_and_os_commands.spl` at its
+EOF (line 452, parser context kind 190), with an empty declaration tag;
+many later files showed the same pattern. Native arena mode reduced memory
+pressure but did not repair the declaration lookup. No further full CLI
+retry was run after the session's three-attempt verification cap. See
+`doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
+
 ## Remaining gates
 
 Run the full CLI through an admitted compiler that parses its current source
