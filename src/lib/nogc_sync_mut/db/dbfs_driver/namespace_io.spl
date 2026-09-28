@@ -403,6 +403,20 @@ impl DbFsDriver:
             return Err(committed.unwrap_err())
         Ok(())
 
+    fn _existing_content_bytes_locked(old: DbFsInode) -> Result<[u8], FsError>:
+        """Current bytes of `old` for a copy-on-write rebuild.
+
+        On a device-backed driver the arena blob is the owner of file bytes:
+        after a remount the namespace replay leaves `content_bytes` empty, so
+        rebuilding from the in-memory mirror would commit an image that drops
+        everything outside the patch.  Read the existing `old.size` bytes from
+        the device instead, exactly as reads do.  Hosted drivers own their
+        bytes in memory.
+        """
+        if self.arena_base < 0 or old.size <= 0:
+            return Ok(old.content_bytes)
+        self._pread_inode_bytes_from_device_locked(old.id, 0, old.size)
+
     # --- pwrite ---
 
     fn _pwrite_handle_locked(handle: FileHandle, patch: text, offset: i64) -> Result<(), FsError>:
@@ -417,7 +431,10 @@ impl DbFsDriver:
         val old = _dbfs_inodes[inode_idx]
         if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
             return Err(FsError.TooLarge)
-        val old_content = old.content
+        val existing = match self._existing_content_bytes_locked(old):
+            Ok(bytes): bytes
+            Err(error): return Err(error)
+        val old_content = if self.arena_base < 0: old.content else: dbfs_bytes_to_text(existing, existing.len() as i64)
         var new_content: text = ""
         var i: i64 = 0
         while i < offset:
@@ -500,7 +517,9 @@ impl DbFsDriver:
             dbfs_device_append_room_locked(self.inst_id, self.arena_block_count)
         if image_cap >= 0 and image_size > image_cap:
             return Err(FsError.TooLarge)
-        val old_bytes = old.content_bytes
+        val old_bytes = match self._existing_content_bytes_locked(old):
+            Ok(bytes): bytes
+            Err(error): return Err(error)
         val old_len = old_bytes.len() as i64
         var new_bytes: [u8] = []
         var i: i64 = 0
@@ -656,7 +675,10 @@ impl DbFsDriver:
         val old = _dbfs_inodes[inode_idx]
         if old.content_generation == 0x7FFFFFFFFFFFFFFFu64:
             return Err(FsError.TooLarge)
-        val old_content = old.content
+        val existing = match self._existing_content_bytes_locked(old):
+            Ok(bytes): bytes
+            Err(error): return Err(error)
+        val old_content = if self.arena_base < 0: old.content else: dbfs_bytes_to_text(existing, existing.len() as i64)
         var new_content: text = ""
         var i: i64 = 0
         while i < new_size:
