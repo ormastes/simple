@@ -124,13 +124,35 @@ upstream rows blocked; this is measurement failure, not a compiler verdict.
 Logs are under `build/bootstrap-target56/stage2-compiler-tests/` and
 `build/mini_builds/target56_dynlib_probe/stage2_matrix_inprocess.log`.
 
+## In-process compiler matrix and owner-source repair
+
+The in-process Stage2 matrix reran with the supported 5,000 ms observation
+budget and the same RSS cap. The observer held; `compiler_cli_build` ran
+1,157 seconds with max RSS 3,416,676 KiB, below the 5,859,375 KiB cap. The
+current-source full CLI build compiled 2,451 files and failed four:
+`nvfs_device_identity_owner_v1.spl` and
+`nvfs_operation_lease_owner_v1.spl` lost the type of their update-closure
+`state.last_error`; `native_session_owner_v1.spl` lost `state.entries`; and
+`nvfs_posix_driver.spl` compiled an inline conditional `val` as an unresolved
+identifier. The summary is
+`build/bootstrap-target56/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification_inprocess_budget5/summary.env`.
+
+The three owners now mutate their explicitly typed Simple-side state while
+holding their original mutex, matching the repaired dynlib lifetime owner.
+The POSIX constructor's inline conditional was expanded into a block. A
+focused no-stub native build against the admitted Stage2 binary compiled 48
+files, failed zero, and linked a 65 KB probe. Its retained symbols include
+the identity, operation, and GPU owner entrypoints, but no POSIX driver
+constructor; that fourth source repair remains unverified. A second focused
+build reused 47 files and compiled one, but still retained no POSIX driver
+constructor. Both are under `build/mini_builds/target56_stage2_owner_probe/`.
+
 ## TODO
 
-Run the already published Stage2 candidate's in-process phase-verification
-matrix with `BOOTSTRAP_STAGE2_TEST_DELEGATE=0` and the watchdog's supported
-`SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000`, keeping the same RSS cap.
-Require the full matrix summary and all five required PASS rows before Stage3.
-If in-process execution cannot pass, obtain the owner's actual MC/DC-off
-waiver record for delegated rows rather than fabricating review metadata.
-Keep the three-cycle verify/fix cap for the next scoped session; do not cite
-the candidate as a completed Stage2 verification yet.
+First run the updated focused probe that calls `NvfsPosixDriver.new`, and
+require the POSIX constructor body to compile without stub fallback. Then
+rerun the Stage2 compiler matrix against a frozen source revision and require
+all five required PASS rows before Stage3. If in-process spec execution cannot
+pass, obtain the owner's actual MC/DC-off waiver record for delegated rows;
+do not fabricate review metadata. Stage2 and Target 5/6 qualification remain
+open.
