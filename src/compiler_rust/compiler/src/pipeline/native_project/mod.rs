@@ -8,6 +8,7 @@
 //! Supports incremental compilation via content-hash keyed .o cache,
 //! and auto-detected linker selection via `LinkerBuilder`.
 
+mod aggregate_layout;
 mod config;
 mod compiler;
 mod discovery;

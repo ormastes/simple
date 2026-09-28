@@ -364,9 +364,24 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::AggregateCopy {
-            dest, src, byte_size, deep_fields, ..
+            dest,
+            src,
+            byte_size,
+            type_name,
+            owner_has_vtable,
+            deep_fields,
+            ..
         } => {
-            closures_structs::compile_aggregate_copy(ctx, builder, *dest, *src, *byte_size, deep_fields);
+            closures_structs::compile_aggregate_copy(
+                ctx,
+                builder,
+                *dest,
+                *src,
+                *byte_size,
+                type_name.as_deref(),
+                *owner_has_vtable,
+                deep_fields,
+            );
         }
 
         MirInst::BinOp { dest, op, left, right } => {

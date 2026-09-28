@@ -14,6 +14,20 @@
 pub struct AggregateFieldCopy {
     pub word_index: u32,
     pub byte_size: u32,
+    /// Name of this field's declared struct type, when resolvable. Codegen
+    /// needs it to apply the same +8 vtable-header shift that `StructInit`
+    /// and `effective_field_offset` apply for trait-implementing structs:
+    /// without it a nested vtable-carrying struct is copied 8 bytes short and
+    /// its LAST field slot falls outside the copy. See
+    /// doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+    pub type_name: Option<String>,
+    /// Whether THIS field's own struct type carries an 8-byte vtable header,
+    /// resolved post-lowering by `qualify_native_struct_layouts` from
+    /// `type_name` (mirrors `MirInst::FieldGet`/`FieldSet::owner_has_vtable`).
+    /// `None` until that pass runs (e.g. single-file/non-native-project
+    /// compiles). Cranelift may infer unresolved layouts from its local
+    /// vtable map; an explicit true or false decision is authoritative.
+    pub owner_has_vtable: Option<bool>,
     pub nested: Vec<AggregateFieldCopy>,
 }
 
@@ -61,9 +75,19 @@ pub enum MirInst {
         /// Total byte size of the aggregate's own storage, as computed for
         /// `StructInit::struct_size` at the declaration site.
         byte_size: u32,
-        /// Declared type name the kind decision was made on. Diagnostic only —
-        /// the decision is already taken by the time this exists.
+        /// Declared type name used to resolve the copied object's header
+        /// layout after lowering (the value-kind decision is already made).
         type_name: Option<String>,
+        /// Whether the copied type itself carries an 8-byte vtable header.
+        /// `None` at lowering time (the whole-project vtable owner set isn't
+        /// known yet); resolved by `qualify_native_struct_layouts` from
+        /// `type_name`, exactly like `FieldGet`/`FieldSet::owner_has_vtable`.
+        /// Without it, a vtable-bearing aggregate is copied starting at the
+        /// header word instead of the header-shifted field block: every
+        /// field shifts by one slot and the last field falls outside the
+        /// copy. See
+        /// doc/08_tracking/bug/sj_segv_struct_param_field_extract_2026-08-27.md
+        owner_has_vtable: Option<bool>,
         /// Statically-resolved nested struct-valued field slots that must be
         /// deep-copied. Built at lowering (where the type registry lives);
         /// codegen follows this tree blindly. Empty = plain shallow copy.
