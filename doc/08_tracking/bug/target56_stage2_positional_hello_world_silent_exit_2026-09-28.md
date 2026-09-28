@@ -1,7 +1,8 @@
 # Stage2 positional hello-world native build reaches AOT with an empty diagnostic
 
 Status: OPEN. The session-token rejection is fixed in the focused native
-candidate, but AOT still returns status 1 without a readable backend reason.
+candidate, but Cranelift V2 module construction still returns zero and AOT
+cannot publish a readable backend reason.
 Stage2 admission and Target 5/6 native size, startup, compile-time, and RSS
 qualification remain blocked. This is separate from the fixed
 `dynlib_lifetime_owner_v1.spl` HIR type error.
@@ -78,10 +79,34 @@ nil string can satisfy that comparison while `len()` is negative. This is a
 plausible cause, not yet proven. The temporary probe was removed from the
 authority owner before commit.
 
+## Cranelift constructor boundary
+
+Changing those diagnostic guards to `len() > 0` did not change the native
+failure, so that experiment was reverted. The smoke prints
+`[cranelift-direct] start` and `target`, but never `module`: the
+`cranelift_new_aot_for_request_v2()` call returns zero. Source inspection
+found a definite bootstrap request mismatch: `bootstrap_main.spl` set
+`options.opt_level = 3` for Cranelift, while the V2 Rust constructor accepts
+only exact optimization modes 0, 1, and 2. The bootstrap CLI now explicitly
+selects Cranelift's highest admitted mode, 2, leaving other backends at 3.
+That policy correction compiled 2 files and reused 1,019, but admission still
+failed before module creation.
+
+A debugger breakpoint on `spl_cranelift_new_aot_module_config_v2` in the
+rejected candidate confirmed the actual Rust ABI argument `opt=2`.
+The first debugger attempt did not decode the target, CPU, or feature text
+because GDB does not support `*` width in its `printf` command. Thus the
+remaining constructor rejection may be a malformed text argument, a
+noncanonical target triple, unsupported ISA, or another V2 check; the current
+evidence does not distinguish them.
+
 ## TODO
 
-Check the adapter and target-context diagnostic guards with native evidence.
-Make an empty or nil diagnostic nonfatal and preserve a real rejection
-message if one exists. Re-run the positional fixture, then full Stage2
+Read the V2 constructor's name, target, CPU, and feature byte ranges at the
+retained breakpoint using each explicit length (for example GDB Python
+`inferior.read_memory`). Determine which of `strict_abi_text`, canonical
+triple parsing, ISA lookup, feature admission, or `builder.finish` returns
+zero, then repair that input or provider path without substituting the
+requested optimization mode. Re-run the positional fixture and full Stage2
 admission. Keep the three-cycle verify/fix cap for the next scoped session;
 do not cite the linked candidate as admitted.
