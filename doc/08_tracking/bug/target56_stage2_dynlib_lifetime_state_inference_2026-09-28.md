@@ -121,7 +121,14 @@ also passed a protected struct through an update closure. It now keeps an
 explicitly typed Simple-side registry under a mutex used only as an exclusion
 gate, matching the repaired dynlib lifetime owner. A focused bootstrap-mode
 no-stub native build compiled 37 reached files, failed zero, and linked a
-75 KB probe; that probe's missing-library refusal printed `true`. Full Stage2
-admission remains pending a rerun on the fixed revision. Retained logs are
+75 KB probe; that probe's missing-library refusal printed `true`. The next
+full Stage2 rerun compiled the current source, passed positional hello-world
+and struct/runtime capability admission, and published an immutable runtime
+capsule with SHA-256
+`d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`.
+Its in-process compiler matrix failed at the full CLI link after 1,828 seconds;
+the test rows could not run. Stage2 as a whole is not yet a PASS. See
+`doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
+Retained logs are
 `build/mini_builds/target56_stage2_owner_probe/full_bootstrap_current.log`
 and `build/mini_builds/target56_dynlib_probe/current_snapshot_build.log`.
