@@ -9,6 +9,8 @@
 use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_string}
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs}
 use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.function_registry.{sheet_function_registry_has, sheet_function_registry_evaluate}
+use std.editor.extensions.host.{extension_host_ensure_command_activated}
 use common.office.number.{office_parse_unsigned_decimal_f64}
 use std.sffi.math.{random_randint}
 use common.string_core.{char_from_code, str_repeat}
@@ -258,7 +260,8 @@ fn tokenize_formula(expr: text) -> [text]:
                 if _is_alpha(ch) or _is_digit(ch):
                     word = "{word}{ch}"
                     i = i + 1
-                elif ch == "." and i + 1 < len and _is_alpha(expr.char_at(i + 1)):
+                elif ch == "." and i + 1 < len and (_is_alpha(expr.char_at(i + 1)) or _is_digit(expr.char_at(i + 1))):
+                    # Digit-tailed dotted names (T.DIST.2T / T.INV.2T) stay one token too.
                     word = "{word}."
                     i = i + 1
                 else:
@@ -457,7 +460,7 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
         val upper_token = token.upper()
         # Check if this is a function call: NAME(
         if pos + 1 < tokens.len() and tokens.get(pos + 1) == "(":
-            return _eval_function_call(upper_token, tokens, pos + 2, sheet, depth)
+            return _eval_function_call(_canonical_name(upper_token), tokens, pos + 2, sheet, depth)
         # Boolean literals
         if upper_token == "TRUE":
             return EvalResult(value: CellValue.BoolVal(value: true), next_pos: pos + 1)
@@ -480,6 +483,17 @@ fn _eval_primary(tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResu
             val v = _resolve_cell_value(upper_token, sheet, depth + 1)
             return EvalResult(
                 value: CellValue.NumberVal(value: v),
+                next_pos: pos + 1
+            )
+        # LET/LAMBDA-bound name? Checked after the cell-ref and (above)
+        # function-call checks, so A1-style refs and NAME( calls always take
+        # precedence — LET/LAMBDA names can't collide with either anyway
+        # since binding rejects both at bind time (see _is_cell_ref_token and
+        # _is_reserved_function_name in _eval_let / _eval_lambda_invoked).
+        val bound_idx = _let_find(upper_token)
+        if bound_idx >= 0:
+            return EvalResult(
+                value: _let_value_from_display(_let_values[bound_idx]),
                 next_pos: pos + 1
             )
         # Unknown identifier — treat as error
@@ -3250,8 +3264,57 @@ fn _eval_test_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return EvalResult(value: CellValue.NumberVal(value: area / 2.0), next_pos: cur_pos)
     EvalResult(value: CellValue.NumberVal(value: area), next_pos: cur_pos)
 
+fn _eval_registry_function(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
+    """Collect arguments the same way the generic numeric dispatch below does
+    (numbers as [n], ranges flattened to their cell values), then hand off
+    to function_registry.spl instead of the inline big-table dispatch."""
+    var args: [[f64]] = []
+    var cur_pos = pos
+
+    while cur_pos < tokens.len() and tokens.get(cur_pos) != ")":
+        if (cur_pos + 2 < tokens.len() and
+            tokens.get(cur_pos + 1) == ":" and
+            _is_cell_ref_token(tokens.get(cur_pos)) and
+            _is_cell_ref_token(tokens.get(cur_pos + 2))):
+            val range_str = "{tokens.get(cur_pos)}:{tokens.get(cur_pos + 2)}"
+            val values = _resolve_cell_range(range_str, sheet, depth)
+            args.push(values)
+            cur_pos = cur_pos + 3
+        else:
+            val result = _eval_comparison(tokens, cur_pos, sheet, depth)
+            val num_val = _to_number(result.value)
+            args.push([num_val])
+            cur_pos = result.next_pos
+
+        if cur_pos < tokens.len() and tokens.get(cur_pos) == ",":
+            cur_pos = cur_pos + 1
+
+    if cur_pos < tokens.len() and tokens.get(cur_pos) == ")":
+        cur_pos = cur_pos + 1
+
+    val outcome = sheet_function_registry_evaluate(name, args, sheet)
+    val result_val = match outcome:
+        Ok(v): v
+        Err(msg): CellValue.ErrorVal(message: msg)
+    EvalResult(value: result_val, next_pos: cur_pos)
+
 fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth: i32) -> EvalResult:
     """Evaluate a function call. pos points to first token after '('."""
+    # Extension hook (function_registry.spl): a registered name always wins
+    # over the inline dispatch below, so a builtin extension (e.g. the
+    # DOUBLE fixture in builtin/sheets_ext.spl) can add functions without
+    # touching this file further. Unregistered names fall through to the
+    # existing behavior unchanged.
+    #
+    # Activate-before-read seam (doc/08_tracking/bug/
+    # builtin_extensions_activate_eagerly_2026-07-30.md fix direction #1,
+    # minimum alternative): the sheets builtin extension is not active until
+    # something fires its declared "onCommand:sheets.function.double" event.
+    # This is that firing point -- idempotent after the first formula
+    # evaluation in the process.
+    extension_host_ensure_command_activated("sheets.function.double")
+    if sheet_function_registry_has(name):
+        return _eval_registry_function(name, tokens, pos, sheet, depth)
     # SUBTOTAL/AGGREGATE take a function NUMBER plus ranges whose values
     # depend on row visibility (101-111 skip hidden rows), so they must see
     # the raw tokens rather than eagerly-flattened f64 args.
@@ -3273,10 +3336,26 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
         return _eval_db_function(name, tokens, pos, sheet, depth)
     if _is_info_function(name):
         return _eval_info_function(name, tokens, pos, sheet, depth)
-    if _is_lookup_function(name) or _is_x_lookup_function(name):
+    if _is_lookup_function(name):
         return _eval_lookup_function(name, tokens, pos, sheet, depth)
+    if _is_x_lookup_function(name):
+        return _eval_x_lookup(name, tokens, pos, sheet, depth)
+    if name == "MDETERM":
+        return _eval_mdeterm(tokens, pos, sheet)
     if _is_ref_function(name):
         return _eval_ref_function(name, tokens, pos, sheet, depth)
+    if name == "OFFSET":
+        return _eval_offset(tokens, pos, sheet, depth)
+    if name == "INDIRECT":
+        return _eval_indirect(tokens, pos, sheet, depth)
+    if name == "ISOMITTED":
+        return _eval_isomitted(tokens, pos, sheet)
+    if name == "LET":
+        return _eval_let(tokens, pos, sheet, depth)
+    if name == "LAMBDA":
+        return _eval_lambda_invoked(tokens, pos, sheet, depth)
+    if name == "REDUCE":
+        return _eval_reduce(tokens, pos, sheet, depth)
     if name == "CHISQ.TEST" or name == "T.TEST" or name == "F.TEST":
         return _eval_test_function(name, tokens, pos, sheet, depth)
     if name == "PERCENTILE.EXC" or name == "QUARTILE.EXC":
@@ -4277,6 +4356,20 @@ fn _dispatch_function(name: text, args: [[f64]], sheet: Sheet) -> CellValue:
 
 fn _dispatch_function_0(name: text, args: [[f64]], flat: [f64], sheet: Sheet) -> CellValue:
     match name:
+        "CEILING.MATH":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "CEILING.MATH requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            val mode = if args.len() >= 3: _first_val(args[2]) else: 0.0
+            # Default: round toward +inf. Negative number with nonzero mode: away from zero.
+            if num < 0.0 and mode != 0.0:
+                return CellValue.NumberVal(value: _floor_f64(num / s) * s)
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
         "COMBIN":
             if args.len() >= 2:
                 val n = _first_val(args[0]).to_i64()
@@ -4538,6 +4631,17 @@ fn _dispatch_function_0(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
 
 fn _dispatch_function_1(name: text, args: [[f64]], flat: [f64], sheet: Sheet) -> CellValue:
     match name:
+        "FLOOR.PRECISE":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "FLOOR.PRECISE requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            # Always round toward -inf regardless of sign.
+            return CellValue.NumberVal(value: _floor_f64(num / s) * s)
         "AVERAGE":
             return CellValue.NumberVal(value: eval_average(flat))
         "PRODUCT":
@@ -5293,6 +5397,17 @@ fn _dispatch_function_2(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
 
 fn _dispatch_function_3(name: text, args: [[f64]], flat: [f64], sheet: Sheet) -> CellValue:
     match name:
+        "CEILING.PRECISE":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "CEILING.PRECISE requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            # Always round toward +inf regardless of sign.
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
         "SUM":
             return CellValue.NumberVal(value: eval_sum(flat))
         "MIN":
@@ -5859,6 +5974,20 @@ fn _dispatch_function_3(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
 
 fn _dispatch_function_4(name: text, args: [[f64]], flat: [f64], sheet: Sheet) -> CellValue:
     match name:
+        "FLOOR.MATH":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "FLOOR.MATH requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            val mode = if args.len() >= 3: _first_val(args[2]) else: 0.0
+            # Default: round toward -inf. Negative number with nonzero mode: toward zero.
+            if num < 0.0 and mode != 0.0:
+                return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
+            return CellValue.NumberVal(value: _floor_f64(num / s) * s)
         "ATAN":
             if flat.len() > 0:
                 return CellValue.NumberVal(value: excel_atan(flat[0]))
@@ -6349,6 +6478,16 @@ fn _dispatch_function_4(name: text, args: [[f64]], flat: [f64], sheet: Sheet) ->
 
 fn _dispatch_function_5(name: text, args: [[f64]], flat: [f64], sheet: Sheet) -> CellValue:
     match name:
+        "ISO.CEILING":
+            if flat.len() == 0:
+                return CellValue.ErrorVal(message: "ISO.CEILING requires a number")
+            val num = flat[0]
+            var s = if args.len() >= 2: _first_val(args[1]) else: 1.0
+            if s < 0.0:
+                s = 0.0 - s
+            if s == 0.0:
+                return CellValue.NumberVal(value: 0.0)
+            return CellValue.NumberVal(value: _ceil_f64(num / s) * s)
         "COUNT":
             return CellValue.NumberVal(value: eval_count(flat))
         "LOG10":
@@ -8497,6 +8636,18 @@ fn _resolve_cell_value(ref_str: text, sheet: Sheet, depth: i32) -> f64:
                 return 1.0
             return 0.0
         CellValue.FormulaVal(expr, cached_display):
+            # Array-registered functions (SEQUENCE/MMULT/TEXTSPLIT/...) have
+            # no scalar handler, so scalar re-evaluation of a spill-origin
+            # cell would yield 0. Reuse evaluate_formula_array's own
+            # recognition — a non-empty grid means the head function is in
+            # the array registry — and prefer the numeric parse of the
+            # cached spill display written by the two-phase recalc. For
+            # OFFSET/INDIRECT (on both paths) the cached origin display
+            # equals the scalar top-left value, so this stays consistent.
+            if cached_display != "":
+                val agrid = evaluate_formula_array(expr, sheet)
+                if agrid.len() > 0:
+                    return cached_display.to_f64()
             # Recursively evaluate the formula, carrying depth so a circular
             # reference is caught instead of overflowing the stack.
             val result = _evaluate_formula(expr, sheet, depth + 1)

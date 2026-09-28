@@ -60,6 +60,9 @@ impl AuthStorage:
     me setToken(key: text, token: OAuthTokens) -> bool:
         val idx = indexOfText(me.tokenKeys, key)
         if idx >= 0:
+            val current = me.tokens[idx]
+            if current.accessToken == token.accessToken and current.refreshToken == token.refreshToken and current.expiresAt == token.expiresAt and current.scope == token.scope:
+                return true
             me.tokens[idx] = token
         else:
             me.tokenKeys.push(key)
@@ -76,6 +79,9 @@ impl AuthStorage:
     me clearToken(key: text) -> bool:
         val idx = indexOfText(me.tokenKeys, key)
         if idx >= 0:
+            val current = me.tokens[idx]
+            if current.accessToken == "" and current.refreshToken == "" and current.expiresAt == 0 and current.scope == "":
+                return true
             me.tokens[idx] = OAuthTokens.new("", "", 0, "")
             me.updates.push("clear-token:" + key)
         true
@@ -83,6 +89,9 @@ impl AuthStorage:
     me setClientInfo(key: text, info: OAuthClientInfo) -> bool:
         val idx = indexOfText(me.clientInfoKeys, key)
         if idx >= 0:
+            val current = me.clientInfos[idx]
+            if current.clientId == info.clientId and current.clientSecret == info.clientSecret:
+                return true
             me.clientInfos[idx] = info
         else:
             me.clientInfoKeys.push(key)
@@ -99,6 +108,8 @@ impl AuthStorage:
     me saveClientSecret(key: text, secret: text) -> bool:
         val idx = indexOfText(me.clientConfigKeys, key)
         if idx >= 0:
+            if me.clientSecrets[idx] == secret:
+                return true
             me.clientSecrets[idx] = secret
         else:
             me.clientConfigKeys.push(key)
@@ -115,6 +126,8 @@ impl AuthStorage:
     me clearClientConfig(key: text) -> bool:
         val idx = indexOfText(me.clientConfigKeys, key)
         if idx >= 0:
+            if me.clientSecrets[idx] == "":
+                return true
             me.clientSecrets[idx] = ""
             me.updates.push("clear-client-config:" + key)
         true
@@ -235,15 +248,26 @@ fn redactSensitiveUrlParams(url: text) -> text:
     out
 
 fn redactParam(url: text, param: text) -> text:
+    var out = url
     val needle = param + "="
-    val pos = url.find(needle)
-    if pos < 0:
-        return url
-    val valueStart = pos + needle.len()
-    var valueEnd = findFromText(url, "&", valueStart)
-    if valueEnd < 0:
-        valueEnd = url.len()
-    url.slice(0, valueStart) + "[REDACTED]" + url.slice(valueEnd, url.len())
+    var searchStart = 0
+    var pos = findFromText(out, needle, searchStart)
+    while pos >= 0:
+        var isParameterBoundary = pos == 0
+        if pos > 0:
+            val before = out[pos - 1]
+            isParameterBoundary = before == "?" or before == "&"
+        if isParameterBoundary:
+            val valueStart = pos + needle.len()
+            var valueEnd = findFromText(out, "&", valueStart)
+            if valueEnd < 0:
+                valueEnd = out.len()
+            out = out.slice(0, valueStart) + "[REDACTED]" + out.slice(valueEnd, out.len())
+            searchStart = valueStart + "[REDACTED]".len()
+        else:
+            searchStart = pos + needle.len()
+        pos = findFromText(out, needle, searchStart)
+    out
 
 fn normalizeOAuthErrorBody(response: AuthResponse) -> AuthResponse:
     if response.status < 200 or response.status >= 300:
@@ -281,20 +305,15 @@ fn hasMcpDiscoveryButNoToken(storage: AuthStorage, serverName: text, serverConfi
 
 fn revokeToken(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig, tokenType: text) -> bool:
     val key = getServerKey(serverName, serverConfig)
-    val idx = indexOfText(storage.tokenKeys, key)
-    if idx >= 0:
-        storage.tokens[idx] = OAuthTokens.new("", "", 0, "")
-        storage.updates.push("clear-token:" + key)
-    true
+    storage.clearToken(key)
 
 fn revokeServerTokens(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig) -> bool:
     revokeToken(storage, serverName, serverConfig, "access")
 
 fn clearServerTokensFromLocalStorage(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig) -> ():
     val key = getServerKey(serverName, serverConfig)
-    val idx = indexOfText(storage.tokenKeys, key)
-    if idx >= 0:
-        storage.tokens[idx] = OAuthTokens.new("", "", 0, "")
+    storage.clearToken(key)
+    ()
 
 class WWWAuthenticateParams:
     realm: text
@@ -356,20 +375,11 @@ fn onData(current: text, ch: text) -> text:
 
 fn saveMcpClientSecret(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig, clientSecret: text) -> bool:
     val key = getServerKey(serverName, serverConfig)
-    val idx = indexOfText(storage.clientConfigKeys, key)
-    if idx >= 0:
-        storage.clientSecrets[idx] = clientSecret
-    else:
-        storage.clientConfigKeys.push(key)
-        storage.clientSecrets.push(clientSecret)
-    true
+    storage.saveClientSecret(key, clientSecret)
 
 fn clearMcpClientConfig(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig) -> bool:
     val key = getServerKey(serverName, serverConfig)
-    val idx = indexOfText(storage.clientConfigKeys, key)
-    if idx >= 0:
-        storage.clientSecrets[idx] = ""
-    true
+    storage.clearClientConfig(key)
 
 fn getMcpClientConfig(storage: AuthStorage, serverName: text, serverConfig: McpServerConfig) -> text:
     storage.getClientSecret(getServerKey(serverName, serverConfig))
@@ -449,8 +459,95 @@ fn findFromText(value: text, needle: text, start: i64) -> i64:
         i = i + 1
     -1
 
-fn mcpAuthSourceLinesModeled() -> i64:
-    2465
+class McpAuthMutationTrace:
+    owner: text
+    operation: text
+    serverName: text
+    serverKey: text
+    success: bool
+    error: text
+    accessTokenBefore: text
+    accessTokenAfter: text
+    refreshTokenBefore: text
+    refreshTokenAfter: text
+    clientSecretBefore: text
+    clientSecretAfter: text
+    tokenChanged: bool
+    clientSecretChanged: bool
+    effects: [text]
+
+impl McpAuthMutationTrace:
+    static fn new(operation: text, serverName: text, serverKey: text) -> McpAuthMutationTrace:
+        McpAuthMutationTrace(
+            owner: "",
+            operation: operation,
+            serverName: serverName,
+            serverKey: serverKey,
+            success: false,
+            error: "",
+            accessTokenBefore: "",
+            accessTokenAfter: "",
+            refreshTokenBefore: "",
+            refreshTokenAfter: "",
+            clientSecretBefore: "",
+            clientSecretAfter: "",
+            tokenChanged: false,
+            clientSecretChanged: false,
+            effects: [],
+        )
+
+class McpAuthMutationModel:
+    storage: AuthStorage
+
+impl McpAuthMutationModel:
+    static fn new(storage: AuthStorage) -> McpAuthMutationModel:
+        McpAuthMutationModel(storage: storage)
+
+    me apply(operation: text, serverName: text, serverConfig: McpServerConfig, clientSecret: text) -> McpAuthMutationTrace:
+        val serverKey = getServerKey(serverName, serverConfig)
+        val trace = McpAuthMutationTrace.new(operation, serverName, serverKey)
+        val tokenBefore = me.storage.getToken(serverKey)
+        trace.accessTokenBefore = tokenBefore.accessToken
+        trace.refreshTokenBefore = tokenBefore.refreshToken
+        trace.clientSecretBefore = me.storage.getClientSecret(serverKey)
+        val updateStart = me.storage.updates.len()
+        if operation == "revoke-token":
+            trace.owner = "revokeToken"
+            trace.success = revokeToken(me.storage, serverName, serverConfig, "access")
+        else if operation == "revoke-server-tokens":
+            trace.owner = "revokeServerTokens"
+            trace.success = revokeServerTokens(me.storage, serverName, serverConfig)
+        else if operation == "clear-local-tokens":
+            trace.owner = "clearServerTokensFromLocalStorage"
+            clearServerTokensFromLocalStorage(me.storage, serverName, serverConfig)
+            trace.success = true
+        else if operation == "save-client-secret":
+            trace.owner = "saveMcpClientSecret"
+            trace.success = saveMcpClientSecret(me.storage, serverName, serverConfig, clientSecret)
+        else if operation == "clear-client-config":
+            trace.owner = "clearMcpClientConfig"
+            trace.success = clearMcpClientConfig(me.storage, serverName, serverConfig)
+        else if operation == "invalidate-all":
+            trace.owner = "ClaudeAuthProvider.invalidateCredentials"
+            val provider = ClaudeAuthProvider.new(serverName, serverConfig, "", me.storage)
+            provider.invalidateCredentials("all")
+            trace.success = true
+        else:
+            trace.error = "unsupported credential mutation: " + operation
+        val tokenAfter = me.storage.getToken(serverKey)
+        trace.accessTokenAfter = tokenAfter.accessToken
+        trace.refreshTokenAfter = tokenAfter.refreshToken
+        trace.clientSecretAfter = me.storage.getClientSecret(serverKey)
+        trace.tokenChanged = (
+            trace.accessTokenBefore != trace.accessTokenAfter or
+            trace.refreshTokenBefore != trace.refreshTokenAfter
+        )
+        trace.clientSecretChanged = trace.clientSecretBefore != trace.clientSecretAfter
+        var updateIndex = updateStart
+        while updateIndex < me.storage.updates.len():
+            trace.effects.push(me.storage.updates[updateIndex])
+            updateIndex = updateIndex + 1
+        trace
 
 # Source parity note: type_MCPRefreshFailureReason keeps stable analytics values.
 # Source parity note: type_MCPOAuthFlowErrorReason keeps stable analytics values.
@@ -2373,93 +2470,3 @@ fn mcpAuthSourceLinesModeled() -> i64:
 # Source parity ledger continuation for services/mcp/auth.ts line coverage 1896
 # Source parity ledger continuation for services/mcp/auth.ts line coverage 1897
 # Source parity ledger continuation for services/mcp/auth.ts line coverage 1898
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1899
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1900
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1901
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1902
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1903
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1904
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1905
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1906
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1907
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1908
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1909
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1910
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1911
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1912
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1913
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1914
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1915
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1916
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1917
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1918
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1919
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1920
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1921
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1922
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1923
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1924
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1925
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1926
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1927
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1928
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1929
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1930
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1931
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1932
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1933
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1934
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1935
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1936
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1937
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1938
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1939
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1940
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1941
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1942
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1943
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1944
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1945
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1946
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1947
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1948
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1949
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1950
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1951
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1952
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1953
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1954
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1955
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1956
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1957
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1958
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1959
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1960
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1961
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1962
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1963
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1964
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1965
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1966
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1967
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1968
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1969
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1970
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1971
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1972
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1973
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1974
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1975
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1976
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1977
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1978
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1979
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1980
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1981
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1982
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1983
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1984
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1985
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1986
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1987
-# Source parity ledger continuation for services/mcp/auth.ts line coverage 1988
