@@ -1,0 +1,174 @@
+# Cold V2 graph publication after the compiled package archives are persisted.
+# Keep only compact HIR receipts and scalar graph entries across this boundary;
+# pin and decode one archive at a time before moving the index pointer.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
+use compiler.driver.cache.cas_store.{cas_get}
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_current_v1}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{
+    ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1
+}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1, package_module_index_digest_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, package_archive_aggregate_entry_v1,
+    package_archive_load_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
+
+val COLD_HIR_ARCHIVE_MAX_BYTES_V1: u64 = 1073741824
+
+# CAS readback verifies the whole archive digest. Check exact member layout,
+# payload hashes, and the manifest binding before graph publication. The warm
+# route later reopens the archive with its pinned no-follow capability.
+fn cold_hir_archive_payloads_v1(
+    archive_content: text, receipt: PackageArchiveReceiptV1
+) -> Result<(text, text), text>:
+    val bytes = archive_content.bytes()
+    val size = bytes.len().to_u64()
+    if size == 0 or size > COLD_HIR_ARCHIVE_MAX_BYTES_V1 or
+            receipt.members.len() != 3:
+        return Err("cold-publish-archive-layout-invalid")
+    val expected_names = ["actions.smf", "interface.smf", "manifest.sdn"]
+    var previous_end: u64 = 0
+    var member_digests: [text] = []
+    var manifest_content = ""
+    var index = 0
+    while index < 3:
+        val member = receipt.members[index]
+        if member.name != expected_names[index] or
+                member.offset != previous_end or member.extent == 0 or
+                member.offset > size or member.extent > size - member.offset:
+            return Err("cold-publish-archive-layout-invalid")
+        val end = member.offset + member.extent
+        val payload = bytes.slice(member.offset.to_i64(), end.to_i64())
+        val decoded = validated_utf8_bytes_to_text_linear(payload)
+        if decoded.is_err():
+            return Err("cold-publish-archive-member-utf8-invalid")
+        val payload_text = decoded.unwrap()
+        if sha256_text(payload_text) != member.payload_digest:
+            return Err("cold-publish-archive-member-digest-mismatch")
+        if index == 2:
+            manifest_content = payload_text
+        member_digests.push(member.payload_digest)
+        previous_end = end
+        index = index + 1
+    if previous_end != size:
+        return Err("cold-publish-archive-layout-invalid")
+    val dependency_text = cache_text_join_v1(
+        receipt.dependency_interface_digests, ",")
+    if dependency_text == nil:
+        return Err("cold-publish-archive-manifest-invalid")
+    val manifest_lines = manifest_content.split("\n")
+    if manifest_lines.len() != 7 or
+            manifest_lines[0] != "simple-interface-action-archive-v1" or
+            manifest_lines[1] != "package={receipt.package_key}" or
+            manifest_lines[2] != "variant={receipt.variant_digest}" or
+            manifest_lines[3] != "producer={receipt.producer_digest}" or
+            manifest_lines[4] != "dependencies={receipt.dependency_interface_digests.len()};{dependency_text!}" or
+            manifest_lines[5] != "interface={member_digests[1]}" or
+            manifest_lines[6] != "action={member_digests[0]}":
+        return Err("cold-publish-archive-manifest-invalid")
+    Ok((member_digests[1], member_digests[0]))
+
+fn cold_hir_package_publish_verified_v1(
+    cache_root: text,
+    authority: PackageModuleIndexBuildAuthorityV1,
+    inventory: CompileSourceInventoryV1,
+    outputs: [ColdHirPackageOutputV1],
+    expected_index_digest: text
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    val built = cold_hir_package_index_from_outputs_v1(
+        authority, inventory, outputs)
+    if built.is_err():
+        return Err(built.unwrap_err())
+    val generation = built.unwrap()
+    val archive_generation = cas_batch_current_v1(cache_root)
+    if archive_generation == "":
+        return Err("cold-publish-archive-generation-missing")
+
+    var entry_by_module: Dict<text, i64> = {}
+    var output_by_module: Dict<text, i64> = {}
+    var indices_by_package: Dict<text, [i64]> = {}
+    var packages: [text] = []
+    var index = 0
+    while index < generation.entries.len():
+        val entry = generation.entries[index]
+        entry_by_module[entry.module_identity] = index
+        val prior = if indices_by_package.has(entry.package_identity):
+            indices_by_package[entry.package_identity]
+        else:
+            packages.push(entry.package_identity)
+            []
+        indices_by_package[entry.package_identity] = prior.push(index)
+        index = index + 1
+    index = 0
+    while index < outputs.len():
+        output_by_module[outputs[index].seed.module_identity] = index
+        index = index + 1
+
+    val archive_authority = PackageArchiveAuthorityV1(
+        generation.producer_digest, generation.root_generation,
+        generation.variant_digest, generation.scv_revision_id,
+        generation.scv_tree_id, generation.inventory_digest)
+    for package_identity in packages:
+        var entries: [PackageModuleIndexEntryV1] = []
+        var dependencies: [text] = []
+        var dependency_seen: Dict<text, bool> = {}
+        for entry_index in indices_by_package[package_identity]:
+            val entry = generation.entries[entry_index]
+            entries.push(entry)
+            for imported in entry.direct_imports:
+                if not entry_by_module.has(imported):
+                    return Err("cold-publish-import-missing:{imported}")
+                val digest = generation.entries[
+                    entry_by_module[imported]].smf_metadata_digest
+                if not dependency_seen.has(digest):
+                    dependencies.push(digest)
+                    dependency_seen[digest] = true
+        val aggregate = package_archive_aggregate_entry_v1(entries)
+        if aggregate == nil:
+            return Err("cold-publish-package-aggregate-invalid:{package_identity}")
+        val loaded = package_archive_load_v1(
+            cache_root, aggregate!, archive_authority,
+            canonical_identity_sort_texts(dependencies))
+        if not loaded.valid or loaded.receipt == nil:
+            return Err("cold-publish-archive-{loaded.reason}:{package_identity}")
+        val archive_content = cas_get(
+            cache_root, loaded.receipt!.archive_digest)
+        if archive_content == nil:
+            return Err("cold-publish-archive-blob-invalid:{package_identity}")
+        val payloads = cold_hir_archive_payloads_v1(
+            archive_content!, loaded.receipt!)
+        if payloads.is_err():
+            return Err("{payloads.unwrap_err()}:{package_identity}")
+        val (interface_digest, action_digest) = payloads.unwrap()
+        for entry in entries:
+            if not output_by_module.has(entry.module_identity):
+                return Err("cold-publish-output-missing:{entry.module_identity}")
+            val output = outputs[output_by_module[entry.module_identity]]
+            if output.interface_archive_digest != interface_digest or
+                    output.action_archive_digest != action_digest:
+                return Err("cold-publish-archive-payload-mismatch:{entry.module_identity}")
+    if cas_batch_current_v1(cache_root) != archive_generation:
+        return Err("cold-publish-archive-generation-changed")
+    if not package_module_index_publish_if_current_v1(
+            cache_root, generation, expected_index_digest):
+        return Err("cold-publish-index-conflict-or-failed")
+    val current = package_module_index_read_current_v1(cache_root)
+    if not current.valid or current.digest !=
+            package_module_index_digest_v1(generation):
+        return Err("cold-publish-index-readback-invalid")
+    Ok(generation)
+
+export cold_hir_package_publish_verified_v1
