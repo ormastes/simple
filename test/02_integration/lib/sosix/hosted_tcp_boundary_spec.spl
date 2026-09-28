@@ -1,0 +1,82 @@
+# @manual: primary
+"""Hosted synchronous TCP route acceptance.
+
+Run on a host with the TCP runtime provider. The loopback exchange crosses the
+public TcpStream API and the SOSIX compatibility boundary in both directions.
+No SimpleOS, async completion, or native alias qualification is implied.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io.tcp.{TcpStream, tcp_fd_close, tcp_fd_write_text}
+use std.nogc_sync_mut.sosix.network.{
+    sosix_tcp_bind, sosix_tcp_listen, sosix_tcp_local_addr, sosix_tcp_accept_timeout,
+    sosix_tcp_set_read_timeout, sosix_tcp_read_line, sosix_tcp_read,
+    sosix_tcp_peer_addr, sosix_tcp_shutdown, sosix_tcp_close, sosix_tcp_write_text
+}
+
+describe "hosted SOSIX TCP compatibility boundary":
+    it "exchanges loopback text through both production surfaces":
+        step("Bind an ephemeral loopback listener and discover its address")
+        val listener = sosix_tcp_bind("127.0.0.1:0")
+        expect(listener).to_be_greater_than(-1)
+        val listening = sosix_tcp_listen(listener, 8)
+        if not listening:
+            sosix_tcp_close(listener)
+        expect(listening).to_equal(true)
+        val address = sosix_tcp_local_addr(listener)
+        if address == nil:
+            sosix_tcp_close(listener)
+        expect(address != nil).to_equal(true)
+        step("Connect through TcpStream and accept through the SOSIX boundary")
+        val client = TcpStream.connect_fd_timeout(address!, 1000)
+        if client < 0:
+            sosix_tcp_close(listener)
+        expect(client).to_be_greater_than(-1)
+        val server = sosix_tcp_accept_timeout(listener, 1000)
+        if server < 0:
+            tcp_fd_close(client)
+            sosix_tcp_close(listener)
+        expect(server).to_be_greater_than(-1)
+        val client_timeout = sosix_tcp_set_read_timeout(client, 1000)
+        val server_timeout = sosix_tcp_set_read_timeout(server, 1000)
+        if not client_timeout or not server_timeout:
+            tcp_fd_close(client)
+            sosix_tcp_close(server)
+            sosix_tcp_close(listener)
+        expect(client_timeout).to_equal(true)
+        expect(server_timeout).to_equal(true)
+        step("Exchange newline-terminated messages with bounded reads")
+        val request_sent = tcp_fd_write_text(client, "request\n")
+        val request_head = sosix_tcp_read(server, 1)
+        val request_tail = sosix_tcp_read_line(server)
+        val peer = sosix_tcp_peer_addr(server)
+        val reply_count = sosix_tcp_write_text(server, "reply\n")
+        val reply = sosix_tcp_read_line(client)
+        val write_shutdown = sosix_tcp_shutdown(server, 1)
+        val eof = sosix_tcp_read(client, 1)
+        step("Close each owned descriptor before checking the exchange")
+        val client_closed = tcp_fd_close(client)
+        val server_closed = sosix_tcp_close(server)
+        val listener_closed = sosix_tcp_close(listener)
+        expect(request_sent).to_equal(true)
+        expect(request_head != nil).to_equal(true)
+        expect(request_head!.len()).to_equal(1)
+        expect(request_head![0]).to_equal(114u8)
+        expect(request_tail).to_equal("equest\n")
+        expect(peer != nil).to_equal(true)
+        expect(reply_count).to_equal(6)
+        expect(reply).to_equal("reply\n")
+        expect(write_shutdown).to_equal(true)
+        expect(eof != nil).to_equal(true)
+        expect(eof!.len()).to_equal(0)
+        expect(client_closed).to_equal(true)
+        expect(server_closed).to_equal(true)
+        expect(listener_closed).to_equal(true)
+
+    it "preserves the public invalid-descriptor guards":
+        step("A negative descriptor follows the existing close and write guards")
+        expect(tcp_fd_close(-1)).to_equal(true)
+        expect(tcp_fd_write_text(-1, "unwritten")).to_equal(false)
+        expect(sosix_tcp_read(-1, 1) == nil).to_equal(true)
+        expect(sosix_tcp_peer_addr(-1) == nil).to_equal(true)
+        expect(sosix_tcp_shutdown(-1, 1)).to_equal(false)
