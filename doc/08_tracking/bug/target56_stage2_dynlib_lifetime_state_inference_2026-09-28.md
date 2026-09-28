@@ -109,3 +109,19 @@ RSS cohorts before marking either target complete.
 
 The follow-up diagnosis and TODO are in
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
+
+## Current-source snapshot registry recurrence
+
+A fresh `--full-bootstrap --stop-after-stage2` on the rebased Target 5/6
+branch rebuilt its Rust seed and runtime authority, then compiled 1,061
+Stage2 source files and failed only
+`src/lib/nogc_sync_mut/sffi/dynlib_snapshot_registry_v1.spl`:
+`hir: Cannot infer field type: struct 'i64' field 'accepted'`. This owner
+also passed a protected struct through an update closure. It now keeps an
+explicitly typed Simple-side registry under a mutex used only as an exclusion
+gate, matching the repaired dynlib lifetime owner. A focused bootstrap-mode
+no-stub native build compiled 37 reached files, failed zero, and linked a
+75 KB probe; that probe's missing-library refusal printed `true`. Full Stage2
+admission remains pending a rerun on the fixed revision. Retained logs are
+`build/mini_builds/target56_stage2_owner_probe/full_bootstrap_current.log`
+and `build/mini_builds/target56_dynlib_probe/current_snapshot_build.log`.

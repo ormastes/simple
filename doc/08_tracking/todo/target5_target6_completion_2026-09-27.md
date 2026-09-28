@@ -19,6 +19,11 @@ verification. See
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
 The runtime trap and next proof are tracked in
 `doc/08_tracking/bug/target56_stage2_runtime_collection_remove_trap_2026-09-28.md`.
+The fresh runtime authority was built, but Stage2 source compilation stopped
+on another erased update-closure state in
+`sffi/dynlib_snapshot_registry_v1.spl`. Its typed Simple-side state repair
+passes a focused 37-file no-stub bootstrap build; full Stage2 admission and
+the owned-device runtime probe are still open.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
