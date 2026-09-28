@@ -950,7 +950,11 @@ pub(super) fn eval_op_expr(
                                 .with_note("check that the divisor is not zero before division");
                             Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
                         } else {
-                            Ok(Value::Int(left_val.as_int()? / r))
+                            // Unsigned operands divide as u64: `u64::MAX / 2` must not be `-1 / 2 == 0`.
+                            Ok(match uint_wrap_width(&left_val, &right_val) {
+                                Some(width) => wrap_uint((left_val.as_int()? as u64) / (r as u64), width),
+                                None => Value::Int(left_val.as_int()? / r),
+                            })
                         }
                     }
                 }
@@ -999,7 +1003,10 @@ pub(super) fn eval_op_expr(
                                 .with_note("check that the divisor is not zero before modulo operation");
                             Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
                         } else {
-                            Ok(Value::Int(left_val.as_int()? % r))
+                            Ok(match uint_wrap_width(&left_val, &right_val) {
+                                Some(width) => wrap_uint((left_val.as_int()? as u64) % (r as u64), width),
+                                None => Value::Int(left_val.as_int()? % r),
+                            })
                         }
                     }
                 }
