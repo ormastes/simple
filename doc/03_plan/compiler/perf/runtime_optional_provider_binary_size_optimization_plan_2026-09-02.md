@@ -46,6 +46,17 @@ the closure digest is bound into entry/link receipts. Focused static and
 mutation-red contracts pass. Executable Simple tests remain pending an admitted
 full CLI with `test` support.
 
+Current-branch correction (2026-09-28): the named
+`runtime_feature_closure.spl` and `RuntimeFeatureClosureV1` do not exist in the
+isolated Target 5/6 branch. The historical BS1 statement above is not an
+implementation receipt for this branch. The actual pure-Simple linker has
+`NativeLinkConfig.retained_symbols` and runtime-bundle selection, but no exact
+closure type/manifest with the stated admission invariants. Phase 3 remains
+open. A focused Stage2 entry-closure hello built and ran at 21,016 stripped
+bytes on Linux aarch64, with only libc in `DT_NEEDED`; it is pre-Stage4 and
+does not satisfy the release-small gate. See
+`doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

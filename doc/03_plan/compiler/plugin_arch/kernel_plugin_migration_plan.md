@@ -51,9 +51,11 @@ The 2026-09-28 facade-owner cleanup switched twenty-five compiler imports
 from `app.io` compatibility shims to their existing `std.nogc_sync_mut.io`
 owners. On the isolated Target 5/6 worktree, the widened closure check moved
 from 35 to 23 and then 10 kernel-to-app/OS edges; it still fails with
-3 K0-to-P, 14 K1-to-P, and 2 unresolved edges. See
+3 K0-to-P and 14 K1-to-P edges. The 2026-09-28 SHB import fix and removal of
+an unreferenced, non-compiling test source reduced unresolved compiler imports
+from 2 to 0; the closure audit still fails with 10 kernel-to-app/OS edges. See
 `doc/09_report/compiler/target5_sysinfo_file_facade_closure_2026-09-28.md`
-and `doc/09_report/compiler/target5_direct_io_owner_closure_2026-09-28.md`.
+and `doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
