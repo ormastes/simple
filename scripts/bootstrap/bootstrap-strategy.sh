@@ -18,6 +18,8 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/stage4-planner-binding.shs"
 
 usage() {
     cat <<'EOF'
@@ -742,6 +744,13 @@ verify_continuation_evidence() {
         [ "$(bootstrap_scheduler_hash_file "$continuation_path")" = \
             "$continuation_hash" ] || return 1
     done
+    continuation_binding_after=$(stage4_derive_planner_binding "$root" \
+        "$stage4_receipt" "$stage3_manifest" "$stage3_candidate" "$backend") || return 1
+    [ "$continuation_binding_after" = "$continuation_binding" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value planner_stage4_binding_sha256 \
+        "$continuation_receipt")" = "$continuation_binding" ] || return 1
+    [ "$(bootstrap_scheduler_manifest_value planner_receipt_path \
+        "$continuation_receipt")" = "$stage4_receipt" ] || return 1
     publication_status=$(bootstrap_scheduler_manifest_value publication_status \
         "$continuation_receipt") || return 1
     case "$publication_status" in
@@ -799,7 +808,10 @@ if [ "$wants_full_cli" -eq 1 ]; then
         echo 'bootstrap-scheduler-error: Stage-4 continuation requires --stage4-bootstrap-receipt or --bootstrap-receipt' >&2
         exit 64
     }
+    # Derive from freshly verified authorities; inherited environment is never
+    # an authority for this continuation. Failure follows normal invalidation.
     continuation_status=failed
+    continuation_binding=
     continuation_started=$(date +%s)
     # The engine permits only --jobs=1 for a Stage 4 resume.
     set -- --strategy="$strategy" --output="$output_arg" \
@@ -812,13 +824,22 @@ if [ "$wants_full_cli" -eq 1 ]; then
     # the lease and every bound input after the child exits.
     continuation_quarantine=1
     set +e
+    if stage4_receipt=$(bootstrap_stage3_canonical_file "$stage4_receipt") &&
+       continuation_binding=$(stage4_derive_planner_binding "$root" \
+        "$stage4_receipt" "$stage3_manifest" "$stage3_candidate" "$backend"); then
     env SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED=1 \
+        SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256="$continuation_binding" \
         SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE="$continuation_quarantine" \
         SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION="$lineage" \
         SIMPLE_BOOTSTRAP_LINEAGE_ADMISSION_SHA256="$lineage_sha" \
         /bin/sh "$engine" "$@" \
         >"$generation_dir/stage4-continuation.log" 2>&1
     continuation_rc=$?
+    else
+        continuation_rc=1
+        echo 'bootstrap-scheduler-error: Stage-4 planner binding did not verify' \
+            >"$generation_dir/stage4-continuation.log"
+    fi
     set -e
     continuation_finished=$(date +%s)
     if [ "$continuation_rc" -eq 0 ] && verify_continuation_evidence; then

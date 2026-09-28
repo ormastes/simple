@@ -215,3 +215,26 @@ uses adversarial receipts for path escape, hash drift, tainted lineage, mutated
 Stage-4 output, recursive invalidation, and verifies that production engine or
 qualifier override variables are inert. No test-only bypass exists in the
 shipped supervisor.
+
+### Stage 4 scheduler binding
+
+The supervisor derives `SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256` through
+`scripts/check/lib/stage4-planner-binding.shs` only after verifying the selected
+planner admission and Stage 3 provenance. The planner must target
+`//bootstrap:stage4` on the admitted Stage 3 platform; backend and dynload mode
+must match. The digest binds planner bytes, candidate bytes, source fingerprint,
+and backend. An inherited digest cannot supply this authority. Private-output
+planner verification receives an allowlist scoped to the canonical output root
+derived from verified Stage 3 provenance; an inherited allowlist or planner field
+cannot widen it. The scoped value does not escape the derivation call.
+
+The existing-Stage-3 deployment guard and continuation preparation use the same
+verified derivation. After the child exits, the supervisor derives again and
+checks both the digest and exact planner path against completion. A refusal
+before launch enters the ordinary Stage 4 failure/invalidation path.
+
+`sh scripts/check/check-stage4-planner-binding.shs` checks real rejection of
+synthetic authorities, then uses explicit verifier seams to test derivation and
+negative contract cases. This is unit evidence only. Source-matched Stage 2/3
+admission, an actual Stage 4 build and completion receipt, core runtime checks,
+and MCP native/runtime smoke remain required for runtime qualification.
