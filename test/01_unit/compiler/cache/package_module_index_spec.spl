@@ -37,14 +37,15 @@ fn package_index_generation(
     entries: [PackageModuleIndexEntryV1]
 ) -> PackageModuleIndexGenerationV1:
     PackageModuleIndexGenerationV1(
-        schema_version: 1,
+        schema_version: 2,
         producer_digest: sha256_text("compiler-producer"),
         root_generation: "root-generation-v1",
         scv_revision_id: "scv-revision-v1-test",
         scv_commit_id: "scv-commit-v1-test",
         scv_tree_id: "scv-tree-v1-test",
         inventory_digest: sha256_text("frozen-inventory"),
-        entries: entries)
+        entries: entries,
+        variant_digest: sha256_text("variant"))
 
 fn admitted_package_index() -> PersistentSmfPackageIndexV1:
     val zero = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -67,7 +68,9 @@ describe "persistent package/module index":
     it "does not let a stale snapshot binding replace a graph":
         val cache_root = "build/test-artifacts/package-index-cas-{rt_getpid()}"
         dir_remove(cache_root, true)
-        val binding = package_index_generation([])
+        var binding = package_index_generation([])
+        binding.schema_version = 1
+        binding.variant_digest = ""
         expect(package_module_index_publish_if_current_v1(
             cache_root, binding, "")).to_equal(true)
         val bound = package_module_index_read_current_v1(cache_root)
@@ -94,6 +97,13 @@ describe "persistent package/module index":
             generation.scv_revision_id)
         expect(decoded.generation!.inventory_digest).to_equal(
             generation.inventory_digest)
+        expect(decoded.generation!.variant_digest).to_equal(
+            generation.variant_digest)
+        var other_variant = generation
+        other_variant.variant_digest = sha256_text("other-variant")
+        expect(package_module_index_entry_action_digest_v1(
+            other_variant, generation.entries[0]) ==
+            generation.entries[0].action_digest).to_equal(false)
 
     it "does not propagate an unrelated content-only root":
         val result = package_module_index_invalidate_changes_v1(
