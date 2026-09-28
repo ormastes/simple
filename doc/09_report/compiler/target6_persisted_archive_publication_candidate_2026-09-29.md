@@ -33,3 +33,15 @@ Next run: compile and execute the four-example native spec once, repair any
 remaining concrete failure within the next session's cap, then wire compact
 typed-HIR and compiled-output receipts from the driver to this publisher.
 Only after that can warm/cold native time and RSS cohorts qualify Target 6.
+
+## Native execution follow-up
+
+The text-hash change alone still linked with an unresolved internal
+`char_from_code` reference. The reference came from the interpreter's
+`n.chr()` lowering; routing that call through the existing pure-Simple
+Unicode converter produced a native executable. Execution exposed a separate
+failure in the larger closure: reverse SMF section admission returns
+`cold-reverse-section-invalid:smf-section-invalid` before any archive check.
+The four-example spec reports 4 failures but exits 0. No publication PASS is
+claimed. See
+`doc/08_tracking/bug/target6_native_reverse_section_invalid_2026-09-29.md`.
