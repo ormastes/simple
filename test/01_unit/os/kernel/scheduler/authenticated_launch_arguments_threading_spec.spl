@@ -1,11 +1,35 @@
-use std.spec.{describe, it, expect}
-use std.fs_driver.mount_table.{MountTable}
+use std.spec.{describe, it, expect, fail}
+use std.fs_driver.mount_table.{MountTable, ExecuteOpenBinding}
+use std.fs_driver.mount_table_support.{PositionedDriverKind}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{
+    ExecutableAdmissionDecisionV1, ExecutableAdmissionV1
+}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.scheduler.scheduler_executable_adoption_state.{
     SchedulerExecutableAdoptionOwnerStateV1
 }
 use os.kernel.loader.executable_authority_registry.{
     ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_admission_pipeline.{
+    ExecutableLoaderVerificationInputsV1, ExecutableLoaderCryptographicProofV1,
+    ExecutableLoaderAdmissionErrorV1,
+    executable_loader_admit_authenticated_open_binding_v1,
+    executable_loader_authority_owner_initialize
+}
+use os.kernel.loader.executable_crypto_authority.{
+    ExecutableTrustedSignerV1, executable_loader_trust_roots_boot_initialize_v1,
+    executable_manifest_hash_v1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_for_kind, manifest_kind_elf, manifest_with_entrypoint,
+    manifest_with_target, manifest_with_signature
 }
 use os.kernel.loader.executable_load_consumer.{
     ExecutableLoadConsumerErrorV1, executable_load_consumer_new_v1
@@ -14,11 +38,82 @@ use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1
 use os.kernel.types.task_types.{TaskPriority}
 use os.kernel.types.capability_types.{CapabilitySet}
 
-# The admitted-image half of this spec (argv/envp observed on the prepared
-# image after a real signed admission) is not included: on origin/main the
-# admission reread goes through text pread (executable_admission_pipeline
-# _loader_read_binding_exact) and trips on NUL bytes, and with byte-exact
-# reads patched in, pure-Ed25519 admission exceeds the 900 s test budget.
+# The prepared-image argv/envp example (a fully admitted image carried through
+# executable_prepare_image_with_launch_v1) is still not included: after
+# signature verification the admission parses the ELF layout, and on an
+# aarch64 host the interpreter selects @cfg(arm64) by host arch
+# (TargetArch::host()), activating freestanding externs such as
+# rt_arm_array_get_byte_u32 / rt_arm_elf64_* that the hosted interpreter does
+# not register. See the bug record.
+
+fn _push_u16(buf: [u8], value: i64) -> [u8]:
+    var out = buf
+    out.push((value & 0xFF).to_u8())
+    out.push(((value >> 8) & 0xFF).to_u8())
+    out
+
+fn _push_u32(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u16(buf, value & 0xFFFF)
+    _push_u16(out, (value >> 16) & 0xFFFF)
+
+fn _push_u64(buf: [u8], value: i64) -> [u8]:
+    var out = _push_u32(buf, value & 0xFFFFFFFF)
+    _push_u32(out, (value >> 32) & 0xFFFFFFFF)
+
+fn _x86_64_elf() -> [u8]:
+    var b: [u8] = [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0]
+    while b.len() < 16: b.push(0.to_u8())
+    b = _push_u16(b, 2)
+    b = _push_u16(b, 62)
+    b = _push_u32(b, 1)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 64)
+    b = _push_u64(b, 0)
+    b = _push_u32(b, 0)
+    b = _push_u16(b, 64)
+    b = _push_u16(b, 56)
+    b = _push_u16(b, 1)
+    b = _push_u16(b, 0)
+    b = _push_u16(b, 0)
+    b = _push_u16(b, 0)
+    b = _push_u32(b, 1)
+    b = _push_u32(b, 5)
+    b = _push_u64(b, 0x80)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 0x400000)
+    b = _push_u64(b, 4)
+    b = _push_u64(b, 4)
+    b = _push_u64(b, 0x1000)
+    while b.len() < 0x80: b.push(0.to_u8())
+    b.push(0xC3.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b.push(0x90.to_u8())
+    b
+
+fn _signing_seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn _table_with_elf() -> MountTable:
+    # NVFS: binary positioned writes survive in the mount (RamFS through the
+    # MountTable has no text-write arm and loses its fd table).
+    var table = MountTable.new()
+    if table.mount("/", DriverInstance.Nvfs(NvfsDriver.new("launch-args")),
+                   MountOptions.default()).is_err():
+        fail("fixture mount failed")
+    val opened = table.open("/simplebox", OpenFlags.create_write())
+    if opened.is_err(): fail("fixture open failed")
+    val handle = opened.unwrap()
+    if table.positioned_write_bytes(
+        handle.id, PositionedDriverKind.Auto, 0u64, _x86_64_elf()).is_err():
+        fail("fixture write failed")
+    if table.close(handle).is_err(): fail("fixture close failed")
+    table
 
 describe "authenticated executable launch argument boundary":
     it "rejects forged invalid launch data before touching authority state":
@@ -50,3 +145,51 @@ describe "authenticated executable launch argument boundary":
         expect(snapshot.token_slot).to_equal(-1)
         expect(snapshot.token_generation).to_equal(0u64)
         expect(snapshot.token_nonce).to_equal(0u64)
+
+    it "rereads the admitted image byte-exactly before signature verification":
+        var table = _table_with_elf()
+        val binding_result = table.open_for_execute("/simplebox", ExecuteTrust.Trusted)
+        expect(binding_result.is_ok()).to_be_true()
+        val binding: ExecuteOpenBinding = binding_result.unwrap()
+        # 132 bytes with embedded NULs: a text reread cannot carry this image.
+        expect(binding.size).to_equal(132)
+        val image_hash = sha256_u8_hex(_x86_64_elf())
+        val target = ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+        var manifest = manifest_with_target(manifest_for_kind(manifest_kind_elf()), target)
+        manifest = manifest_with_entrypoint(manifest, "main")
+        manifest = manifest_with_signature(manifest, "ed25519:release-root", [image_hash])
+        val pair = pure_ed25519_keypair_from_seed(_signing_seed())
+        expect(executable_loader_trust_roots_boot_initialize_v1([
+            ExecutableTrustedSignerV1(key_id: "release-root", public_key: pair.1)])).to_be_true()
+        var admission = ExecutableAdmissionV1(
+            schema_version: 1, admission_id: "launch-args-test-1",
+            decision: ExecutableAdmissionDecisionV1.Admitted, rejection_reason: "",
+            image_hash: image_hash,
+            manifest_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            kernel_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            trust_root_hash: sha256_u8_hex(pair.1), trust_epoch: 1u64,
+            target: target, firmware_profile: "test", compiler_identity: "test",
+            source_identity: "test", config_identity: "test",
+            mount_id: binding.mount_id.id.to_u64(), mount_generation: binding.mount_generation,
+            file_id: binding.file_handle.id, file_generation: binding.content_generation,
+            effective_capabilities: manifest.required_capabilities)
+        admission.manifest_hash = executable_manifest_hash_v1(manifest, admission, image_hash)
+        val owner_result = executable_loader_authority_owner_initialize(2, 0x4C41554E43484152u64)
+        expect(owner_result.is_ok()).to_be_true()
+        val inputs = ExecutableLoaderVerificationInputsV1(
+            manifest: manifest, manifest_hash: admission.manifest_hash,
+            image_hash: image_hash, trust_root_hash: admission.trust_root_hash,
+            target: target, format: "elf", role: "main-image", verified_load_ranges: [],
+            manifest_verified: true, signature_verified: true, trust_root_verified: true,
+            target_verified: true, format_verified: true, ranges_verified: true,
+            image_digest_verified: true)
+        # A wrong signature: reaching SignatureInvalid (not HandleInvalid or
+        # DigestInvalid) proves the reread bytes hashed to the admitted digest.
+        var forged_signature: [u8] = []
+        while forged_signature.len() < 64: forged_signature.push(0x01.to_u8())
+        val result = executable_loader_admit_authenticated_open_binding_v1(
+            table, owner_result.unwrap(), binding, inputs, admission,
+            ExecutableLoaderCryptographicProofV1(
+                signer_key_id: "release-root", signature: forged_signature))
+        expect(result.is_err()).to_be_true()
+        expect(result.unwrap_err()).to_equal(ExecutableLoaderAdmissionErrorV1.SignatureInvalid)
