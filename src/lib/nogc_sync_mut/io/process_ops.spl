@@ -20,13 +20,15 @@ use std.common.process.observation_v4.{
     ProcessObservationCleanupFrozenReceiptV4, ProcessObservationPacketV4,
     ProcessObservationPacketKindV4, ProcessObservationStatusV4,
     ProcessObservationFailurePhaseV4, ProcessObservationStreamStateV4,
+    ProcessObservationDescendantPolicyV4,
     canonical_encode_process_observation_request_v4,
     decode_process_observation_v4, freeze_process_observation_receipt_v4,
     freeze_process_observation_cleanup_receipt_v4
 }
 use std.common.process.inspection_v1.{
     ProcessInspectionInputReceiptV1, PROCESS_INSPECTION_V1_MAX_INPUT_BYTES,
-    decode_process_inspection_input_v1, process_inspection_input_complete_v1
+    decode_process_inspection_input_v1, process_inspection_input_complete_v1,
+    process_inspection_retirement_complete_v1
 }
 
 # Extern fn declarations (runtime resolves at file level)
@@ -1221,6 +1223,7 @@ pub fn process_observation_owner_start_pinned_v4(
 # ticket. Only methods on this retained lease may certify a terminal capture.
 pub class ProcessInspectionLeaseV1:
     observation: ProcessObservationLeaseV4
+    expected_descendant_policy: ProcessObservationDescendantPolicyV4
     expected_input_len: i64
     expected_input_digest: [u8]
     expected_request_digest: [u8]
@@ -1253,6 +1256,9 @@ pub class ProcessInspectionLeaseV1:
             return Err("process inspection V1 has only cleanup authority")
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen:
             return Ok(nil)
+        if not process_inspection_retirement_complete_v1(
+                self.expected_descendant_policy, receipt.packet):
+            return Err("process inspection V1 has no requested descendant retirement proof")
         val input = self.input_receipt()?
         if not process_inspection_input_complete_v1(input,
                 self.expected_input_len, self.expected_input_digest):
@@ -1298,6 +1304,7 @@ pub fn process_inspection_owner_start_pinned_v1(
             expected_input_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
         return Err("process inspection V1 input size or digest is invalid")
     val bound = _process_observation_bound_request_v4(executable, cwd, request)?
+    val expected_descendant_policy = bound.descendant_policy
     val encoded = canonical_encode_process_observation_request_v4(bound)?
     val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
         rt_process_inspection_v1_start_pinned_value(
@@ -1335,6 +1342,7 @@ pub fn process_inspection_owner_start_pinned_v1(
             observation: ProcessObservationLeaseV4(ticket: ticket, active: active,
                 frozen_kind: ProcessObservationPacketKindV4.Unknown,
                 acknowledged: false),
+            expected_descendant_policy: expected_descendant_policy,
             expected_input_len: input_length,
             expected_input_digest: copied_digest,
             expected_request_digest: initial_request_digest)))
