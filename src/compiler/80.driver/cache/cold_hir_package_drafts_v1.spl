@@ -7,6 +7,9 @@ use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
 use compiler.driver.cache.cold_hir_reverse_projection_v1.{
     cold_hir_reverse_projection_v1
 }
+use compiler.driver.cache.cold_hir_export_smf_v1.{
+    cold_hir_export_smf_from_seed_bytes_v1
+}
 use compiler.driver.cache.package_tldr_metadata.{
     PackageSmfSectionV1, PackageExportSmfV1, PackageTldrHeaderV1,
     config_variant_digest_v1, package_export_smf_payload_validate_v1,
@@ -34,6 +37,23 @@ struct ColdHirPackageArtifactV1:
     provider_digest: text
     generated_source_digest: text
     reverse_projection_digest: text
+    interface_archive_digest: text
+    action_archive_digest: text
+    manifest_source_identity: text
+    manifest_digest: text
+
+# Compact post-HIR receipt. The compiler must obtain the digest fields from
+# real frozen source and compiled archive outputs before calling this owner.
+# No full HIR module or source body is retained for graph publication.
+struct ColdHirPackageOutputV1:
+    seed: ColdHirSemanticSeedV1
+    abi_payload: text
+    package_identity: text
+    source_witness_digest: text
+    export_digest: text
+    initializer_digest: text
+    provider_digest: text
+    generated_source_digest: text
     interface_archive_digest: text
     action_archive_digest: text
     manifest_source_identity: text
@@ -177,5 +197,59 @@ fn cold_hir_package_index_v1(
             package_module_index_build_from_inventory_v1(
                 authority, inventory, drafts)
 
-export ColdHirPackageArtifactV1
+fn cold_hir_package_index_from_outputs_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    inventory: CompileSourceInventoryV1,
+    outputs: [ColdHirPackageOutputV1]
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    if outputs.len() == 0:
+        return Err("cold-output-empty")
+    var by_module: Dict<text, i64> = {}
+    var reverse: Dict<text, [text]> = {}
+    var index = 0
+    while index < outputs.len():
+        val seed = outputs[index].seed
+        if seed.module_identity == "" or by_module.has(seed.module_identity):
+            return Err("cold-output-module-duplicate-or-empty")
+        if seed.inventory_digest != authority.inventory_digest:
+            return Err("cold-output-inventory-mismatch:{seed.module_identity}")
+        by_module[seed.module_identity] = index
+        reverse[seed.module_identity] = []
+        index = index + 1
+    for output in outputs:
+        for imported in output.seed.direct_imports:
+            if not by_module.has(imported):
+                return Err("cold-output-import-missing:{output.seed.module_identity}:{imported}")
+            reverse[imported] = reverse[imported].push(
+                output.seed.module_identity)
+    val variant_digest = config_variant_digest_v1(authority.variant)
+    if variant_digest == "":
+        return Err("cold-output-variant-invalid")
+    var artifacts: [ColdHirPackageArtifactV1] = []
+    for output in outputs:
+        val smf = match cold_hir_export_smf_from_seed_bytes_v1(
+                output.seed, output.abi_payload, output.package_identity,
+                variant_digest, reverse[output.seed.module_identity]):
+            case Err(reason): return Err(reason)
+            case Ok(value): value
+        artifacts.push(ColdHirPackageArtifactV1(
+            seed: output.seed,
+            package_identity: output.package_identity,
+            source_witness_digest: output.source_witness_digest,
+            smf_digest: smf.smf.record.payload_digest,
+            smf_payload: smf.smf.payload,
+            smf_sections: smf.smf.record.sections,
+            export_digest: output.export_digest,
+            initializer_digest: output.initializer_digest,
+            provider_digest: output.provider_digest,
+            generated_source_digest: output.generated_source_digest,
+            reverse_projection_digest: smf.reverse_projection_digest,
+            interface_archive_digest: output.interface_archive_digest,
+            action_archive_digest: output.action_archive_digest,
+            manifest_source_identity: output.manifest_source_identity,
+            manifest_digest: output.manifest_digest))
+    cold_hir_package_index_v1(authority, inventory, artifacts)
+
+export ColdHirPackageArtifactV1, ColdHirPackageOutputV1
 export cold_hir_package_drafts_v1, cold_hir_package_index_v1
+export cold_hir_package_index_from_outputs_v1

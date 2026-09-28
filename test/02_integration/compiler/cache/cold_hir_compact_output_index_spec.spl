@@ -1,0 +1,84 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1, cold_hir_semantic_seed_v1}
+use compiler.driver.cache.cold_hir_package_drafts_v1.{ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1}
+use compiler.driver.cache.package_module_index_builder.{PackageModuleIndexBuildAuthorityV1, PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn compact_module(name: text, imports: [HirImport]) -> HirModule:
+    HirModule(name: name, path: "/frozen/{name}.spl", imports: imports,
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn compact_inventory() -> CompileSourceInventoryV1:
+    val empty = sha256_text("")
+    CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1("a.spl", sha256_text("source-a"),
+            empty, empty, empty, empty, 8),
+        CompileSourceInventoryEntryV1("b.spl", sha256_text("source-b"),
+            empty, empty, empty, empty, 8)])
+
+fn compact_authority(digest: text) -> PackageModuleIndexBuildAuthorityV1:
+    PackageModuleIndexBuildAuthorityV1(
+        sha256_text("producer"), "root", "revision", "commit", "tree",
+        digest, ConfigVariantKeyV1("aarch64-unknown-linux-gnu", "llvm-lib",
+            [], "debug", "abi-v1", [], []))
+
+fn compact_output(module: HirModule, inventory: CompileSourceInventoryV1,
+    digest: text) -> ColdHirPackageOutputV1:
+    val source = "source-{module.name}"
+    val seed: ColdHirSemanticSeedV1 = cold_hir_semantic_seed_v1(
+        module, "/frozen", "{module.name}.spl", source,
+        inventory, digest).unwrap()
+    ColdHirPackageOutputV1(seed, hir_abi_interface_encoded_v1(module).unwrap(),
+        "package-{module.name}", sha256_text(source),
+        sha256_text("export-{module.name}"),
+        sha256_text("initializer-{module.name}"),
+        sha256_text("provider-{module.name}"), sha256_text(""),
+        sha256_text("interface-archive-{module.name}"),
+        sha256_text("action-archive-{module.name}"), "",
+        PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
+
+describe "compact typed-HIR outputs to complete V2 index":
+    it "derives reverse edges and builds a complete graph without HIR bodies":
+        val inventory = compact_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val a = compact_module("a", [HirImport("b", [], false, Span.empty())])
+        val b = compact_module("b", [])
+        val built = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [compact_output(a, inventory, digest),
+             compact_output(b, inventory, digest)])
+        expect(built.is_ok()).to_be(true)
+        val generation = built.unwrap()
+        expect(generation.schema_version).to_equal(2)
+        expect(generation.entries.len()).to_equal(2)
+        expect(generation.entries[0].direct_imports).to_equal(["b"])
+        expect(generation.entries[1].reverse_dependents).to_equal(["a"])
+
+    it "rejects stale ABI bytes and incomplete source coverage":
+        val inventory = compact_inventory()
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val a = compact_module("a", [])
+        val b = compact_module("b", [])
+        var bad = compact_output(a, inventory, digest)
+        bad.abi_payload = "stale"
+        val stale = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [bad, compact_output(b, inventory, digest)])
+        expect(stale.is_err()).to_be(true)
+        expect(stale.unwrap_err()).to_equal("cold-export-smf-typed-abi-mismatch")
+        val incomplete = cold_hir_package_index_from_outputs_v1(
+            compact_authority(digest), inventory,
+            [compact_output(b, inventory, digest)])
+        expect(incomplete.is_err()).to_be(true)
+        expect(incomplete.unwrap_err()).to_equal(
+            "index-builder-source-coverage-incomplete")
