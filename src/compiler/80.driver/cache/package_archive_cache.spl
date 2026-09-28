@@ -108,6 +108,27 @@ fn package_archive_field_v1(line: text, prefix: text) -> text?:
         return nil
     Some(line.substring(prefix.len()))
 
+struct PackageArchiveDecimalU64V1:
+    valid: bool
+    value: u64
+
+fn package_archive_decimal_u64_v1(value: text) -> PackageArchiveDecimalU64V1:
+    if value == "" or (value.len() > 1 and value.starts_with("0")):
+        return PackageArchiveDecimalU64V1(false, 0u64)
+    var number = 0u64
+    var index = 0
+    while index < value.len():
+        val code = value.byte_at(index) as i64
+        if code < 48 or code > 57:
+            return PackageArchiveDecimalU64V1(false, 0u64)
+        val digit = (code - 48).to_u64()
+        if number > 1844674407370955161u64 or
+                (number == 1844674407370955161u64 and digit > 5u64):
+            return PackageArchiveDecimalU64V1(false, 0u64)
+        number = number * 10u64 + digit
+        index = index + 1
+    PackageArchiveDecimalU64V1(true, number)
+
 fn package_archive_manifest_v1(
     entry: PackageModuleIndexEntryV1, authority: PackageArchiveAuthorityV1,
     dependency_interface_digests: [text], interface_digest: text,
@@ -193,12 +214,12 @@ fn package_archive_receipt_decode_v1(content: text) -> PackageArchiveReceiptV1?:
         if parts.len() != 5:
             return nil
         val name_length = parts[0].to_i64() ?? -1
-        val offset_parsed = parts[2].to_u64()
-        val extent_parsed = parts[3].to_u64()
-        if offset_parsed == nil or extent_parsed == nil:
+        val offset_parsed = package_archive_decimal_u64_v1(parts[2])
+        val extent_parsed = package_archive_decimal_u64_v1(parts[3])
+        if not offset_parsed.valid or not extent_parsed.valid:
             return nil
-        val offset = offset_parsed.unwrap()
-        val extent = extent_parsed.unwrap()
+        val offset = offset_parsed.value
+        val extent = extent_parsed.value
         if name_length != parts[1].len() or extent == 0:
             return nil
         members = members.push(PackageArchiveMemberReceiptV1(

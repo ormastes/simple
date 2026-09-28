@@ -68,3 +68,20 @@ should isolate conversion and `Some(u64)`/unwrap in a tiny native executable,
 then make malformed, overflow, and valid offsets pass before rerunning the
 four-example archive publication spec. The latter still has only its earlier
 2/4 failure verdict; no Target 6 completion or performance claim follows.
+
+## Checked native decimal repair
+
+A one-unit no-stub native probe confirmed that `text.to_u64()` and
+`Some(u64).unwrap()` do not carry the numeric value correctly on this Stage2
+binary; a plain `{valid: bool, value: u64}` struct and `(bool, u64)` tuple
+both carried `92` correctly. The separate runtime defect is tracked in
+`doc/08_tracking/bug/native_optional_u64_unwrap_2026-09-29.md`.
+
+The archive decoder now parses canonical decimal bytes with an explicit
+overflow guard and returns a plain checked struct, avoiding optional `u64`
+transport. The 43-unit no-stub Stage2 build took 2.18 seconds at 226,860 KiB
+peak build RSS. Its native receipt probe exited 0 with
+`receipt-native-roundtrip-pass` at 3,376 KiB max runtime RSS, covering valid
+offsets/extents, digest roundtrip, malformed offset/extent, overflow, and
+noncanonical leading zero. This is a focused decoder PASS. The cold HIR
+four-example publication spec and realistic time/RSS cohort remain pending.
