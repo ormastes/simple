@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "$root/src/compiler_rust/.glibc-link-smoke.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+mkdir -p "$tmp/src"
+cat > "$tmp/Cargo.toml" <<'EOF'
+[package]
+name = "glibc_link_smoke"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+EOF
+cat > "$tmp/src/main.rs" <<'EOF'
+fn main() { println!("glibc link smoke"); }
+EOF
+
+(
+  cd "$root/src/compiler_rust"
+  unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS \
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS
+  cargo build --offline --quiet --manifest-path "$tmp/Cargo.toml" \
+    --target x86_64-unknown-linux-gnu --target-dir "$tmp/target"
+)
+binary="$tmp/target/x86_64-unknown-linux-gnu/debug/glibc_link_smoke"
+"$binary" > "$tmp/stdout.txt"
+grep -Fxq 'glibc link smoke' "$tmp/stdout.txt"
+readelf --version-info "$binary" > "$tmp/readelf-versions.txt"
+if grep -Fq GLIBC_ABI_DT_RELR "$tmp/readelf-versions.txt"; then
+  echo 'FAIL: Cargo-linked Linux binary requires GLIBC_ABI_DT_RELR' >&2
+  exit 1
+fi
+echo 'bootstrap_linux_glibc_link_compat_test: PASS'
