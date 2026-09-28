@@ -34,6 +34,7 @@
 # guessing is exactly how a stale-parser hit becomes a wrong module.
 
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.cache_dir_evict.{cache_dir_evict_due, cache_dir_evict_to_cap, cache_dir_max_bytes}
 use std.io_runtime.{
     env_get_opt, file_exists, file_read_result, file_write_exact,
     file_hash_sha256_or_empty, dir_create_all, getpid,
@@ -64,7 +65,12 @@ pub fn frontend_parse_cache_scope() -> text:
         _fe_cache_scope_memo = ""
         return ""
     val published = env_get_opt("SIMPLE_FRONTEND_CACHE_SCOPE") ?? ""
-    _fe_cache_scope_memo = published
+    # Only a NON-EMPTY scope is memoized. Memoizing "" latched the cache off
+    # for the whole process on any path that parsed before the driver
+    # published the scope (phase-1 bootstrap-defaults builds), which is
+    # doc/08_tracking/bug/frontend_parse_cache_scope_memo_latches_off_2026-08-23.md.
+    if published != "":
+        _fe_cache_scope_memo = published
     published
 
 pub fn frontend_parse_cache_enabled() -> bool:
@@ -133,6 +139,8 @@ pub fn frontend_parse_cache_store(key: text, blob: text) -> bool:
         return false
     if file_move_cross_device(tmp, final_path):
         _fe_cache_stores = _fe_cache_stores + 1
+        if cache_dir_evict_due(_fe_cache_stores):
+            val _evicted = cache_dir_evict_to_cap(dir, ".fpc", cache_dir_max_bytes())
         return true
     val _cleaned = file_delete(tmp)
     false
