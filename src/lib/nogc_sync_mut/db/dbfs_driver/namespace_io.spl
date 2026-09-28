@@ -15,7 +15,7 @@ use nogc_sync_mut.db.dbfs_driver.dbfs_driver.{
 use nogc_sync_mut.db.dbfs_driver.device_commit_owner.{
     dbfs_text_to_bytes, dbfs_bytes_to_text, dbfs_slice_bytes,
     dbfs_owner_transaction_begin, dbfs_owner_transaction_end,
-    dbfs_device_data_capacity_locked
+    dbfs_device_append_room_locked
 }
 use std.fs_driver.error.{FsError}
 use std.fs_driver.types.{
@@ -255,18 +255,19 @@ impl DbFsDriver:
         Positioned reads follow ordinary EOF semantics: an offset at or beyond
         EOF returns an empty buffer, and a range crossing EOF returns only the
         available suffix.  Validate the addition before asking a device-backed
-        owner for its prefix so an overflowing request cannot wrap.
+        owner for its prefix so an overflowing request cannot wrap.  A closed
+        or never-allocated descriptor is StaleHandle, a directory InvalidArg.
         """
         if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
             return Err(FsError.InvalidArg)
         val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
-        if fd_idx < 0:
-            return Err(FsError.NotFound)
-        if _dbfs_fds[fd_idx].closed:
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
             return Err(FsError.InvalidArg)
         val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
         if inode_idx < 0:
-            return Err(FsError.NotFound)
+            return Err(FsError.StaleHandle)
         if length == 0:
             return Ok([])
 
@@ -470,13 +471,13 @@ impl DbFsDriver:
         if offset < 0 or length < 0 or offset > 0x7FFFFFFFFFFFFFFF - length:
             return Err(FsError.InvalidArg)
         val fd_idx = _find_fd_idx_locked(self.inst_id, handle.id as u64)
-        if fd_idx < 0:
-            return Err(FsError.NotFound)
-        if _dbfs_fds[fd_idx].closed:
+        if fd_idx < 0 or _dbfs_fds[fd_idx].closed:
+            return Err(FsError.StaleHandle)
+        if _dbfs_fds[fd_idx].is_dir:
             return Err(FsError.InvalidArg)
         val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id as u64)
         if inode_idx < 0:
-            return Err(FsError.NotFound)
+            return Err(FsError.StaleHandle)
         if length == 0:
             return Ok(0)
         val old = _dbfs_inodes[inode_idx]
@@ -485,18 +486,19 @@ impl DbFsDriver:
         # Reject an image the owner can never hold BEFORE materializing it: the
         # copy-on-write loop below pushes one byte per offset, so an offset of
         # 1 TiB would otherwise spin effectively forever.  Device-backed files
-        # are bounded by the arena's total data capacity (anything larger is
-        # already rejected as TooLarge by the device append); hosted files by
-        # DBFS_HOSTED_POSITIONED_MAX_BYTES.  A zero device capacity means the
-        # owner is unregistered or the arena is malformed; leave that to the
-        # device append so its Unsupported/Corrupt verdict is unchanged.
+        # are bounded by the room REMAINING after the arena's sector-aligned
+        # append end (anything larger is rejected as TooLarge by the device
+        # append anyway); hosted files by DBFS_HOSTED_POSITIONED_MAX_BYTES.  A
+        # negative room means the owner is unregistered or the arena is
+        # malformed; leave that to the device append so its
+        # Unsupported/Corrupt verdict is unchanged.
         val patch_end = offset + length
         val image_size: i64 = if patch_end > old.size: patch_end else: old.size
         val image_cap: i64 = if self.arena_base < 0:
             DBFS_HOSTED_POSITIONED_MAX_BYTES
         else:
-            dbfs_device_data_capacity_locked(self.inst_id, self.arena_block_count)
-        if image_cap > 0 and image_size > image_cap:
+            dbfs_device_append_room_locked(self.inst_id, self.arena_block_count)
+        if image_cap >= 0 and image_size > image_cap:
             return Err(FsError.TooLarge)
         val old_bytes = old.content_bytes
         val old_len = old_bytes.len() as i64
