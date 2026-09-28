@@ -5,7 +5,7 @@ Retirement revokes new uses under the same lock that admits invocations. An
 already admitted invocation closes the mapping when its last use finishes.
 """
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 use std.nogc_sync_mut.sffi.dynlib_exact_admission_v1.{dynlib_admitted_close_v1}
 use std.nogc_sync_mut.sffi.dynamic.{spl_wffi_call_i64}
 
@@ -32,7 +32,21 @@ fn _native_callable_initial_state_v1() -> _NativeCallableStateV1:
         last_identity: 0u64, last_fptr: 0, last_close_handle: 0,
         last_accepted: false)
 
-var _native_callable_owner_v1: Mutex = mutex_new(_native_callable_initial_state_v1())
+# Exclusion gate only; the state stays Simple-side (same fix as
+# nvfs_device_identity_owner_v1): a struct protected value comes back nil
+# through the interpreter's rt_mutex value bridge, the update closure faults
+# with the real lock held, and every later owner call blocks forever.
+var _native_callable_gate_v1: Mutex = mutex_new(0)
+var _native_callable_state_v1: _NativeCallableStateV1 = _native_callable_initial_state_v1()
+
+fn _native_callable_update_v1(
+    f: fn(_NativeCallableStateV1) -> _NativeCallableStateV1
+) -> _NativeCallableStateV1:
+    val _ = mutex_lock(_native_callable_gate_v1)
+    val next = f(_native_callable_state_v1)
+    _native_callable_state_v1 = next
+    val _ = mutex_unlock(_native_callable_gate_v1, 0)
+    next
 
 fn _native_callable_index_v1(state: _NativeCallableStateV1, identity: u64) -> i64:
     # Registration appends strictly increasing identities and remove shifts
@@ -56,7 +70,7 @@ fn _native_callable_index_v1(state: _NativeCallableStateV1, identity: u64) -> i6
 pub(package) fn native_callable_owner_register_v1(handle: i64, fptr: i64) -> u64:
     if handle <= 0 or fptr <= 0:
         return 0u64
-    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+    val updated = _native_callable_update_v1(\state:
         var next = state
         next.last_identity = 0u64
         if state.next_identity != 0u64 and
@@ -75,7 +89,7 @@ pub(package) fn native_callable_owner_register_v1(handle: i64, fptr: i64) -> u64
 
 # The admission and retirement decisions are serialized by the same owner.
 fn _native_callable_acquire_v1(identity: u64) -> i64:
-    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+    val updated = _native_callable_update_v1(\state:
         var next = state
         next.last_fptr = 0
         val index = _native_callable_index_v1(state, identity)
@@ -89,7 +103,7 @@ fn _native_callable_acquire_v1(identity: u64) -> i64:
     updated.last_fptr
 
 fn _native_callable_end_v1(identity: u64):
-    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+    val updated = _native_callable_update_v1(\state:
         var next = state
         next.last_close_handle = 0
         val index = _native_callable_index_v1(state, identity)
@@ -141,7 +155,7 @@ pub(package) fn native_callable_owner_invoke_batch_into_v1(
 # True means this call made the one live-to-retiring transition. If invocations
 # remain, the last one closes the mapping; no later invocation can start.
 pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:
-    val updated = mutex_with_lock(_native_callable_owner_v1, \state:
+    val updated = _native_callable_update_v1(\state:
         var next = state
         next.last_accepted = false
         next.last_close_handle = 0
