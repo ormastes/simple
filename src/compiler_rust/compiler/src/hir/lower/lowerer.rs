@@ -152,6 +152,13 @@ pub struct Lowerer {
     pub(super) flatten_owner_import_bindings: HashMap<String, HashMap<String, (String, String)>>,
     /// Flatten owner of the function whose body is being lowered.
     pub(super) current_function_owner: Option<String>,
+    /// Flattened unit only: module-global name declared by two or more
+    /// distinct owners -> owner of each declaration in item order. Those
+    /// declarations are lowered under `flattened_global_symbol` (see
+    /// `module_lowering/flatten_global_owner.rs`).
+    pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
+    /// Owner-exact symbol of each colliding flattened global -> its owner.
+    pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -260,6 +267,8 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -321,6 +330,8 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -405,6 +416,8 @@ impl Lowerer {
             flatten_fn_owners: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
             current_function_owner: None,
+            flatten_global_owners: HashMap::new(),
+            flatten_global_symbol_owners: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -962,6 +975,48 @@ impl Lowerer {
             None
         };
         resolved.filter(|symbol| symbol != name)
+    }
+
+    /// Owner-exact symbol for a bare module-global `name` referenced from the
+    /// function being lowered, or `None` to keep the bare-name lookup.
+    ///
+    /// Mirrors `resolve_flatten_owned_callable` for globals (PR #1936 is the
+    /// interpreter twin): the current module's own colliding declaration wins,
+    /// else the declaration in the module a selective import of `name` names.
+    /// Untagged (entry-module) functions import under the `<entry>` key.
+    pub(super) fn resolve_flatten_owned_global(&self, name: &str) -> Option<String> {
+        use super::module_lowering::flattened_global_symbol;
+        if self.flatten_global_owners.is_empty() {
+            return None;
+        }
+        let current = self.current_function_owner.as_deref();
+        let resolved = if let Some(owners) = self
+            .flatten_global_owners
+            .get(name)
+            .filter(|owners| owners.iter().any(|owner| owner.as_deref() == current))
+        {
+            flattened_global_symbol(owners, current, name)
+        } else {
+            let (source_owner, source_name) = self
+                .flatten_owner_import_bindings
+                .get(current.unwrap_or("<entry>"))?
+                .get(name)?;
+            let owners = self.flatten_global_owners.get(source_name).filter(|owners| {
+                owners
+                    .iter()
+                    .any(|owner| owner.as_deref() == Some(source_owner.as_str()))
+            })?;
+            flattened_global_symbol(owners, Some(source_owner), source_name)
+        };
+        (resolved != name).then_some(resolved)
+    }
+
+    /// Type of module-global `name` as seen from the function being lowered:
+    /// its owner-exact symbol's type when it is a colliding flattened global.
+    pub(super) fn flatten_aware_global_type(&self, name: &str) -> Option<TypeId> {
+        self.resolve_flatten_owned_global(name)
+            .and_then(|symbol| self.globals.get(&symbol).copied())
+            .or_else(|| self.globals.get(name).copied())
     }
 
     /// Resolve a function alias to its original function name

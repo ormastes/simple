@@ -143,12 +143,26 @@ struct DbFsDriver:
 
 # --- Module-level store helpers ---
 
+fn _dbfs_canonical_path(path: text) -> text:
+    """Absolute form of an inode path.
+
+    VFS dispatch hands a root-mounted driver mount-relative paths
+    (`sbin/init`), while the device namespace checkpoint only admits absolute
+    entry paths (`_valid_entry_shape`). Both spellings name the same inode.
+    """
+    if path.starts_with("/"): path else: "/" + path
+
 fn _find_inode_idx_locked(inst_id: i64, path: text) -> i32:
-    """Return index in _dbfs_inodes for (inst_id, path), or -1."""
+    """Return index in _dbfs_inodes for (inst_id, path), or -1.
+
+    `path` and `/path` name the same inode (see `_dbfs_canonical_path`).
+    """
+    val canonical = _dbfs_canonical_path(path)
     var i: i32 = 0
     while i < _dbfs_inodes.len() as i32:
         val n = _dbfs_inodes[i]
-        if n.inst_id == inst_id and n.name == path and not n.unlinked:
+        if n.inst_id == inst_id and not n.unlinked and
+                (n.name == path or n.name == canonical or _dbfs_canonical_path(n.name) == canonical):
             return i
         i = i + 1
     -1
@@ -223,7 +237,7 @@ fn _dbfs_namespace_entries_locked(inst_id: i64) -> Result<[DbfsNamespaceEntry], 
                 blob_offset: blob_offset,
                 blob_length: blob_length,
                 blob_checksum: blob_checksum,
-                path: inode.name
+                path: _dbfs_canonical_path(inode.name)
             ))
     Ok(entries)
 
