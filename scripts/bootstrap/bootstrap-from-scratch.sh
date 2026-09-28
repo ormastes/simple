@@ -2368,7 +2368,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: admitted LLVM 23.1.1 (native FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
+    echo "error: admitted LLVM 23.1.1 (native Linux/FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi

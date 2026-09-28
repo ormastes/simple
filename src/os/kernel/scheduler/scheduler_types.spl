@@ -35,6 +35,13 @@ use os.kernel.scheduler.scheduler_capability_snapshot_lease_v1.{
     SchedulerCurrentExecutionSnapshotV1,
     scheduler_capability_snapshot_issue_v1
 }
+use os.kernel.types.arm32_mapping_handle_v1.{SchedulerArm32MappingHandleV1}
+use os.kernel.types.riscv32_mapping_handle_v1.{SchedulerRiscv32MappingHandleV1}
+use os.kernel.types.x86_32_mapping_handle_v1.{SchedulerX8632MappingHandleV1}
+export use os.kernel.scheduler.scheduler_security_types.{
+    TaskSecurity, TaskSecurityBinding, default_task_security,
+    task_security_fork, task_security_binding_managed_child
+}
 export use os.kernel.scheduler.scheduler_executable_adoption_state.{
     SchedulerExecutableAdoptionOwnerStateV1
 }
@@ -61,6 +68,9 @@ pub val TASK_CONTROL_BLOCK_ABI_REVISION_V1: u32 = 5u32
 
 # Stable external state codes. PreparingExit is appended rather than inserted
 # into the legacy 0..3 range consumed by ps/top and syscall TaskInfoBuf.
+pub val TASK_STATE_CODE_PREPARING_EXIT_V1: u8 = 4u8
+
+# The existing Ready/Running/Blocked/Zombie process ABI retains codes 0..3.
 pub val TASK_STATE_CODE_PREPARING_EXIT_V1: u8 = 4u8
 
 # Module-level task-id counter shared across all task-creation paths.
@@ -199,6 +209,10 @@ pub struct TaskControlBlock:
     # Exact image lifetime within this TCB lifetime. Starts at one and rotates
     # only when the scheduler atomically publishes a successful in-place exec.
     exec_generation: u64
+    # Flat root lifetime identity; preserved from creation through reaping.
+    x86_root_generation: u64
+    # Append owned policy/identity state without changing prior field offsets.
+    security: TaskSecurity
 
 pub struct WaitCollectResult:
     """Result of collecting child exit state for waitpid-compatible syscalls."""
@@ -263,6 +277,7 @@ pub fn task_control_state_code(task: TaskControlBlock) -> u8:
         case TaskState.Blocked(reason): 2u8
         case TaskState.PreparingExit: TASK_STATE_CODE_PREPARING_EXIT_V1
         case TaskState.Zombie: 3u8
+        case TaskState.PreparingExit: TASK_STATE_CODE_PREPARING_EXIT_V1
 
 pub fn task_control_priority_code(task: TaskControlBlock) -> u8:
     match task.priority:
