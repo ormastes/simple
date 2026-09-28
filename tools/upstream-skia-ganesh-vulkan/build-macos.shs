@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+# Deliberately outside every default embedded/native build entrypoint.
+# macOS (Darwin) twin of build-linux.shs: builds the opt-in upstream Skia
+# Ganesh Vulkan provider against the pinned Skia checkout and links it against
+# the Homebrew Vulkan loader. Device selection at runtime is the canonical
+# MoltenVK ICD; the provider never links MoltenVK directly.
+if [ "$(uname -s)" != Darwin ]; then
+    echo "upstream Skia Ganesh Vulkan provider: macOS build required" >&2
+    exit 2
+fi
+if [ -z "${SKIA_ROOT:-}" ]; then
+    echo "set SKIA_ROOT to the pinned Skia checkout" >&2
+    exit 2
+fi
+affine_v3=${SIMPLE_UPSTREAM_SKIA_ENABLE_AFFINE_V3:-0}
+case "$affine_v3" in
+    0|1) ;;
+    *)
+        echo "SIMPLE_UPSTREAM_SKIA_ENABLE_AFFINE_V3 must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+expected=35d5edfa0d50984c22ff94f5438c31e0db12c6f8
+actual=$(git -C "$SKIA_ROOT" rev-parse HEAD)
+if [ "$actual" != "$expected" ]; then
+    echo "Skia checkout revision differs from skia-pin.json" >&2
+    exit 2
+fi
+if [ -n "$(git -C "$SKIA_ROOT" status --porcelain --untracked-files=all)" ]; then
+    echo "Skia checkout has local modifications" >&2
+    exit 2
+fi
+if [ ! -f "$SKIA_ROOT/DEPS" ] ||
+   [ ! -f "$SKIA_ROOT/tools/git-sync-deps" ]; then
+    echo "pinned Skia DEPS or dependency synchronizer missing" >&2
+    exit 2
+fi
+# The Vulkan loader is the only Vulkan library linked. Its absence is a hard
+# build error; MoltenVK is a runtime ICD and is recorded, not linked.
+vulkan_loader="${SIMPLE_UPSTREAM_SKIA_VULKAN_LOADER:-/opt/homebrew/lib/libvulkan.dylib}"
+[ -f "$vulkan_loader" ] || {
+    echo "Vulkan loader not found: $vulkan_loader" >&2
+    exit 2
+}
+moltenvk_icd=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json
+sha256_file() {
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+provider_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$provider_dir/../.." && pwd)
+deps_manifest=$(mktemp)
+trap 'rm -f "$deps_manifest"' EXIT HUP INT TERM
+# Sync only when the checkout is not already attested: a fresh sync runs the
+# pinned DEPS hooks (e.g. Emscripten activation), which are irrelevant to the
+# native Vulkan provider and can abort an otherwise-complete checkout.
+if ! deps_checkout_digest=$(python3 "$provider_dir/verify-skia-deps.py" "$SKIA_ROOT" "$deps_manifest" 2>/dev/null); then
+    # Force the pinned checkout's DEPS even if the caller has an override set.
+    GIT_SYNC_DEPS_PATH="$SKIA_ROOT/DEPS" python3 "$SKIA_ROOT/tools/git-sync-deps"
+    deps_checkout_digest=$(python3 "$provider_dir/verify-skia-deps.py" "$SKIA_ROOT" "$deps_manifest")
+fi
+skia_out="$SKIA_ROOT/out/simple-upstream-ganesh-vulkan"
+(
+    cd "$SKIA_ROOT"
+    bin/gn gen out/simple-upstream-ganesh-vulkan --args='is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false'
+    ninja -C out/simple-upstream-ganesh-vulkan skia
+)
+if [ ! -f "$skia_out/libskia.a" ]; then
+    echo "pinned Skia build produced no libskia.a" >&2
+    exit 2
+fi
+deps_checkout_digest_after=$(python3 "$provider_dir/verify-skia-deps.py" "$SKIA_ROOT" "$deps_manifest")
+if [ "$deps_checkout_digest_after" != "$deps_checkout_digest" ]; then
+    echo "Skia dependencies changed during build" >&2
+    exit 2
+fi
+output="${1:-$repo_dir/build/optional/libsimple_upstream_skia_ganesh_vulkan.dylib}"
+mkdir -p "$(dirname -- "$output")"
+# Frameworks are the macOS base Skia link closure (no GL/Metal/Dawn backends).
+${CXX:-clang++} -std=c++17 -O2 -fPIC -dynamiclib \
+    -Wl,-undefined,error \
+    -Wl,-install_name,@rpath/$(basename -- "$output") \
+    "-DSIMPLE_UPSTREAM_SKIA_ENABLE_AFFINE_V3=$affine_v3" \
+    -DSK_USE_INTERNAL_VULKAN_HEADERS \
+    -I"$SKIA_ROOT" -I"$SKIA_ROOT/include/third_party/vulkan" \
+    -I"$repo_dir/src/runtime" \
+    "$provider_dir/provider.cpp" "$skia_out/libskia.a" \
+    "$vulkan_loader" \
+    -framework CoreFoundation -framework CoreGraphics \
+    -framework CoreText -framework CoreServices -framework Accelerate \
+    -lz -o "$output"
+deps_digest=$(sha256_file "$SKIA_ROOT/DEPS")
+skia_digest=$(sha256_file "$skia_out/libskia.a")
+provider_digest=$(sha256_file "$output")
+loader_digest=$(sha256_file "$vulkan_loader")
+if [ -f "$moltenvk_icd" ]; then
+    moltenvk_library=$(plutil -extract ICD.library_path raw -o - "$moltenvk_icd" 2>/dev/null || true)
+    case "$moltenvk_library" in
+        /*) ;;
+        *) moltenvk_library="$(dirname -- "$moltenvk_icd")/$moltenvk_library" ;;
+    esac
+    moltenvk_digest="unavailable"
+    moltenvk_path=""
+    if [ -f "$moltenvk_library" ]; then
+        moltenvk_digest=$(sha256_file "$moltenvk_library")
+        moltenvk_path=$moltenvk_library
+    fi
+else
+    moltenvk_digest="unavailable"
+    moltenvk_path=""
+fi
+cat > "$output.receipt.json" <<EOF
+{
+  "provider": "upstream-skia-ganesh-vulkan",
+  "platform": "darwin-arm64",
+  "skia_revision": "$actual",
+  "skia_deps_sha256": "$deps_digest",
+  "skia_dependency_checkouts_sha256": "$deps_checkout_digest_after",
+  "skia_dependency_checkouts": $(cat "$deps_manifest"),
+  "skia_archive_sha256": "$skia_digest",
+  "provider_sha256": "$provider_digest",
+  "affine_v3_enabled": $affine_v3,
+  "gn_args": "is_debug=false skia_use_vulkan=true skia_use_gl=false skia_use_metal=false skia_use_dawn=false",
+  "vulkan_loader_path": "$vulkan_loader",
+  "vulkan_loader_sha256": "$loader_digest",
+  "moltenvk_icd_path": "$moltenvk_icd",
+  "moltenvk_library_path": "$moltenvk_path",
+  "moltenvk_library_sha256": "$moltenvk_digest",
+  "qualification": "build-only; MoltenVK device render/readback is Mac backend evidence, not Linux N2 qualification"
+}
+EOF
+echo "$provider_digest  $output"

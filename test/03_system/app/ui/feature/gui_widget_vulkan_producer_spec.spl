@@ -1,0 +1,299 @@
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, gui, input, draw_ir
+"""GUI event and visible-command evidence before Vulkan qualification.
+
+The widget owner routes a real pointer hit and mutates pressed state. The
+shared DrawIR producer must reflect that change. Device pixels remain blocked
+until completed captures from the two Vulkan backends are admitted.
+"""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.io_runtime.{mkdir_p, write_file}
+use common.ui.builder.{button}
+use common.ui.widget.{WidgetNode}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir, widget_tree_to_draw_ir_cpu}
+use common.ui.widget_hit.{widget_set_pressed, widget_dispatch_click, widget_clear_pressed}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.common.crypto.sha256.{sha256_text}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.common.encoding.font_registry.{
+    simpleos_default_font_asset_candidate}
+use std.nogc_sync_mut.ffi.io.{file_write_bytes}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    upstream_skia_ganesh_vulkan_preflight}
+use common.renderdoc.gui_input_scene.{
+    GUI_INPUT_SCENE_ID, GUI_INPUT_WIDGET_ID, GUI_INPUT_EXPECTED_VALUE,
+    GUI_INPUT_FONT_SHA256}
+use common.renderdoc.gui_input_qualification.{
+    GUI_INPUT_PINNED_SOURCE_SHA256, gui_input_qualified_states}
+use common.renderdoc.native_glyph_contract.{
+    native_glyph_contract_resolve, native_glyph_contract_preflight}
+use common.renderdoc.gui_input_pixel_oracle.{
+    GUI_INPUT_PIXEL_FIXTURE_ID, GUI_INPUT_PIXEL_CARET_X,
+    GUI_INPUT_PIXEL_TEXT_SIZE_PX, GUI_INPUT_PIXEL_STATE_INPUT_SHA256,
+    gui_input_pixel_before_oracle, gui_input_pixel_after_oracle}
+
+fn button_fill_for_backend(root: WidgetNode, backend: text) -> u32:
+    val composition = widget_tree_to_draw_ir(root, 120, 40, backend)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == "req-2d-006-button" and command.kind == "rect":
+                return command.color
+    0u32
+
+fn button_fill(root: WidgetNode) -> u32:
+    button_fill_for_backend(root, "cpu")
+
+fn cpu_pixels(root: WidgetNode) -> [u32]:
+    var engine = Engine2D.create_with_backend(120, 40, "cpu")
+    engine.clear(0xFFFFFFFFu32)
+    val draw = widget_tree_to_draw_ir_cpu(root, 120, 40)
+    val result = engine2d_draw_ir_adv_composition(engine, draw, false)
+    val pixels = result.pixels
+    engine.shutdown()
+    pixels
+
+fn write_ppm(pixels: [u32], path: text) -> bool:
+    val header = "P6\n120 40\n255\n"
+    val hlen = header.len()
+    var data: [u8] = [0u8; hlen + pixels.len() * 3]
+    var header_index = 0
+    for ch in header:
+        data[header_index] = ch as u8
+        header_index = header_index + 1
+    var pixel_index = 0
+    while pixel_index < pixels.len():
+        val color = pixels[pixel_index]
+        val base = hlen + pixel_index * 3
+        data[base] = ((color >> 16) & 0xFF) as u8
+        data[base + 1] = ((color >> 8) & 0xFF) as u8
+        data[base + 2] = (color & 0xFF) as u8
+        pixel_index = pixel_index + 1
+    file_write_bytes(path, data)
+
+describe "GUI widget producer and input evidence":
+    it "routes focus, typing, and caret into visible GUI input DrawIR":
+        step("Focus the pinned text input through a real widget click")
+        match gui_input_qualified_states():
+            case Err(reason):
+                fail_test("GUI input producer qualification blocked: {reason}")
+            case Ok(states):
+                expect(states.source_input_sha256).to_equal(
+                    GUI_INPUT_PINNED_SOURCE_SHA256)
+                expect(states.focused_target).to_equal(GUI_INPUT_WIDGET_ID)
+                expect(states.visible_text).to_equal(GUI_INPUT_EXPECTED_VALUE)
+                expect(states.caret).to_equal(2)
+                expect(states.font_identity == "").to_equal(false)
+                expect(states.font_family == "").to_equal(false)
+                expect(states.font_sha256).to_equal(GUI_INPUT_FONT_SHA256)
+                expect(states.caret_width).to_equal(2)
+                expect(states.caret_height).to_equal(
+                    states.after.batches[0].commands[0].height - 6)
+                expect(states.before.batches[0].source.source_id).to_equal(
+                    GUI_INPUT_WIDGET_ID)
+                expect(states.after.batches[0].source.source_id).to_equal(
+                    GUI_INPUT_WIDGET_ID)
+                expect(states.before.batches[0].commands[2].component_id).to_equal(
+                    "{GUI_INPUT_WIDGET_ID}-placeholder")
+                expect(states.after.batches[0].commands[2].component_id).to_equal(
+                    "{GUI_INPUT_WIDGET_ID}-value")
+                expect(states.after.batches[0].commands[2].text_value).to_equal(
+                    GUI_INPUT_EXPECTED_VALUE)
+                expect(states.after.batches[0].commands[3].component_id).to_equal(
+                    "{GUI_INPUT_WIDGET_ID}-caret")
+                expect(states.before_sha256 == states.after_sha256).to_equal(false)
+                step("Record both widget-produced DrawIR states with physical capture blocked")
+                expect(mkdir_p("build/test-artifacts/simple_2d")).to_equal(true)
+                expect(write_file(
+                    "build/test-artifacts/simple_2d/gui_text_input_before_gpu_draw_ir.sdn",
+                    draw_ir_to_sdn(states.before))).to_equal(true)
+                expect(write_file(
+                    "build/test-artifacts/simple_2d/gui_text_input_after_gpu_draw_ir.sdn",
+                    draw_ir_to_sdn(states.after))).to_equal(true)
+                val receipt = "schema: simple-2d-gui-visible-input/v1\n" +
+                    "requirement: REQ-2D-006\n" +
+                    "nonfunctional_requirement: NFR-2D-002\n" +
+                    "scene_id: {GUI_INPUT_SCENE_ID}\n" +
+                    "widget_id: {GUI_INPUT_WIDGET_ID}\n" +
+                    "source_input_sha256: {states.source_input_sha256}\n" +
+                    "focused_target: {states.focused_target}\n" +
+                    "visible_text: {states.visible_text}\n" +
+                    "caret_character_index: {states.caret}\n" +
+                    "font_identity: {states.font_identity}\n" +
+                    "font_family: {states.font_family}\n" +
+                    "font_sha256: {states.font_sha256}\n" +
+                    "caret_rect: {states.caret_x},{states.caret_y}," +
+                    "{states.caret_width},{states.caret_height}\n" +
+                    "before_gpu_draw_ir_sha256: {states.before_sha256}\n" +
+                    "after_gpu_draw_ir_sha256: {states.after_sha256}\n" +
+                    "before_gpu_draw_ir: gui_text_input_before_gpu_draw_ir.sdn\n" +
+                    "after_gpu_draw_ir: gui_text_input_after_gpu_draw_ir.sdn\n" +
+                    "widget_event_status: focus-key-caret-delivered\n" +
+                    "engine2d_vulkan_status: blocked-no-final-pixels\n" +
+                    "upstream_skia_ganesh_vulkan_status: blocked-no-final-pixels\n" +
+                    "device_status: blocked-physical-linux-capture-absent\n"
+                expect(write_file(
+                    "build/test-artifacts/simple_2d/gui_text_input.sdn",
+                    receipt)).to_equal(true)
+
+    it "checks the independent caret pixel oracle and native glyph preflight":
+        # @req REQ-2D-006
+        # @req NFR-2D-003
+        # Source-stage companion of the physical text gate: resolves the
+        # pinned "ACB" value through the native glyph contract, runs the
+        # whole-composition preflight, and self-checks both literal-rectangle
+        # oracle images. No device pixels are claimed here; physical capture
+        # rows stay blocked for the later gate.
+        step("Resolve the pinned value text through the native glyph contract")
+        val candidate = simpleos_default_font_asset_candidate()
+        match native_glyph_contract_resolve(GUI_INPUT_EXPECTED_VALUE,
+                candidate, GUI_INPUT_PIXEL_TEXT_SIZE_PX, 0):
+            case Err(reason):
+                fail_test("native glyph contract blocked: {reason}")
+            case Ok(subset):
+                expect(subset.glyphs.len()).to_equal(3)
+                step("Run the whole-composition preflight before device work")
+                match native_glyph_contract_preflight(subset):
+                    case Err(reason):
+                        fail_test(
+                            "native glyph contract preflight blocked: {reason}")
+                    case Ok(checked):
+                        expect(checked.glyphs[2].pen_milli_px).to_equal(
+                            14400i64)
+        step("Self-check the before-state placeholder oracle image")
+        match gui_input_pixel_before_oracle():
+            case Err(reason):
+                fail_test("gui input pixel before-oracle blocked: {reason}")
+            case Ok(before_image):
+                expect(before_image.rgba.len()).to_equal(160 * 40 * 4)
+        step("Self-check the after-state ACB+caret oracle image")
+        match gui_input_pixel_after_oracle():
+            case Err(reason):
+                fail_test("gui input pixel after-oracle blocked: {reason}")
+            case Ok(after_image):
+                expect(after_image.rgba.len()).to_equal(160 * 40 * 4)
+                expect(after_image.caret_x).to_equal(GUI_INPUT_PIXEL_CARET_X)
+                expect(after_image.caret_x).to_equal(19i64)
+        step("Record the source-stage receipt with physical capture blocked")
+        expect(mkdir_p("build/test-artifacts/simple_2d")).to_equal(true)
+        val oracle_receipt = "schema: simple-2d-gui-pixel-oracle/v1\n" +
+            "requirement: REQ-2D-006\n" +
+            "nonfunctional_requirement: NFR-2D-003\n" +
+            "scene_id: {GUI_INPUT_PIXEL_FIXTURE_ID}\n" +
+            "state_input_sha256: {GUI_INPUT_PIXEL_STATE_INPUT_SHA256}\n" +
+            "source_input_sha256: {GUI_INPUT_PINNED_SOURCE_SHA256}\n" +
+            "text: {GUI_INPUT_EXPECTED_VALUE}\n" +
+            "caret_character_index: 2\n" +
+            "caret_x: {GUI_INPUT_PIXEL_CARET_X}\n" +
+            "native_glyph_contract_preflight: pass\n" +
+            "oracle_self_check: pass\n" +
+            "engine2d_vulkan_status: blocked-no-final-pixels\n" +
+            "upstream_skia_ganesh_vulkan_status: blocked-no-final-pixels\n" +
+            "device_status: blocked-physical-linux-capture-absent\n"
+        expect(write_file(
+            "build/test-artifacts/simple_2d/gui_text_input_pixel_oracle.sdn",
+            oracle_receipt)).to_equal(true)
+
+    it "preflights an unlabeled stateful button as a strict Vulkan rectangle scene":
+        # @req REQ-2D-006
+        # This is a GUI source-path slice for the rectangle-only provider.
+        # It does not admit the labeled button or claim a physical capture.
+        step("Build the resting GUI rectangle from the widget owner")
+        val root = button("req-2d-006-rect-button", "", "launch")
+        val resting = widget_tree_to_draw_ir(root, 120, 40, "gpu")
+        val resting_admission = upstream_skia_ganesh_vulkan_preflight(resting)
+        expect(resting_admission.accepted).to_equal(true)
+        expect(resting_admission.rect_count).to_equal(1)
+        val resting_color = resting.batches[0].commands[0].color
+        step("Press the button and preflight its changed GPU DrawIR")
+        expect(widget_set_pressed(root, 120, 40, 10, 10)).to_equal(
+            "req-2d-006-rect-button")
+        val pressed = widget_tree_to_draw_ir(root, 120, 40, "gpu")
+        val pressed_admission = upstream_skia_ganesh_vulkan_preflight(pressed)
+        expect(pressed_admission.accepted).to_equal(true)
+        expect(pressed_admission.rect_count).to_equal(1)
+        expect(pressed.batches[0].commands[0].color == resting_color).to_equal(false)
+        step("Release and restore the original GUI rectangle")
+        widget_clear_pressed(root)
+        val released = widget_tree_to_draw_ir(root, 120, 40, "gpu")
+        expect(released.batches[0].commands[0].color).to_equal(resting_color)
+
+    it "routes a pointer click and changes the visible button command":
+        step("Build a button and record its resting DrawIR fill")
+        val root = button("req-2d-006-button", "Launch", "launch")
+        val resting = button_fill(root)
+        val resting_pixels = cpu_pixels(root)
+        val resting_ir = draw_ir_to_ui_ir(widget_tree_to_draw_ir_cpu(root, 120, 40))
+        val resting_gpu_sdn = draw_ir_to_sdn(widget_tree_to_draw_ir(root, 120, 40, "gpu"))
+        val resting_gpu_sha256 = sha256_text(resting_gpu_sdn)
+        val resting_gpu_fill = button_fill_for_backend(root, "gpu")
+        expect(resting).to_be_greater_than(0u32)
+        expect(resting_gpu_fill).to_equal(resting)
+        expect(resting_pixels.len()).to_equal(4800)
+        expect(resting_ir.accepted).to_equal(true)
+        expect(resting_ir.commands.len()).to_be_greater_than(0)
+
+        step("Deliver pointer press and click to the widget owner")
+        val pressed_id = widget_set_pressed(root, 120, 40, 10, 10)
+        val pressed = button_fill(root)
+        val pressed_pixels = cpu_pixels(root)
+        val pressed_ir = draw_ir_to_ui_ir(widget_tree_to_draw_ir_cpu(root, 120, 40))
+        val pressed_gpu_sdn = draw_ir_to_sdn(widget_tree_to_draw_ir(root, 120, 40, "gpu"))
+        val pressed_gpu_sha256 = sha256_text(pressed_gpu_sdn)
+        val pressed_gpu_fill = button_fill_for_backend(root, "gpu")
+        val clicked_id = widget_dispatch_click(root, 120, 40, 10, 10)
+        expect(pressed_id).to_equal("req-2d-006-button")
+        expect(clicked_id).to_equal("req-2d-006-button")
+        expect(WidgetNode(id: clicked_id).get_prop("ui_action_pending")).to_equal("true")
+        expect(pressed).to_be_greater_than(0u32)
+        expect(pressed == resting).to_equal(false)
+        expect(pressed_gpu_fill).to_equal(pressed)
+        expect(pressed_gpu_fill == resting_gpu_fill).to_equal(false)
+        expect(pressed_ir.accepted).to_equal(true)
+        expect(pressed_ir.commands.len()).to_equal(resting_ir.commands.len())
+        expect(pressed_gpu_sha256 == resting_gpu_sha256).to_equal(false)
+        var changed_pixels = 0
+        var pixel_index = 0
+        while pixel_index < resting_pixels.len():
+            if resting_pixels[pixel_index] != pressed_pixels[pixel_index]:
+                changed_pixels = changed_pixels + 1
+            pixel_index = pixel_index + 1
+        expect(changed_pixels).to_be_greater_than(0)
+
+        step("Release and record source input plus explicit device blockage")
+        expect(mkdir_p("build/test-artifacts/simple_2d")).to_equal(true)
+        expect(write_ppm(resting_pixels,
+            "build/test-artifacts/simple_2d/gui_button_resting.ppm")).to_equal(true)
+        expect(write_ppm(pressed_pixels,
+            "build/test-artifacts/simple_2d/gui_button_pressed.ppm")).to_equal(true)
+        expect(write_file("build/test-artifacts/simple_2d/gui_button_resting_gpu_draw_ir.sdn",
+            resting_gpu_sdn)).to_equal(true)
+        expect(write_file("build/test-artifacts/simple_2d/gui_button_pressed_gpu_draw_ir.sdn",
+            pressed_gpu_sdn)).to_equal(true)
+        widget_clear_pressed(root)
+        expect(button_fill(root)).to_equal(resting)
+        expect(button_fill_for_backend(root, "gpu")).to_equal(resting_gpu_fill)
+        val receipt = "schema: simple-2d-gui-input/v1\n" +
+            "requirement: REQ-2D-006\nnonfunctional_requirement: NFR-2D-002\n" +
+            "widget_id: req-2d-006-button\npointer: [10, 10]\n" +
+            "pressed_target: {pressed_id}\nclicked_target: {clicked_id}\n" +
+            "resting_argb: {resting}\npressed_argb: {pressed}\n" +
+            "resting_gpu_argb: {resting_gpu_fill}\n" +
+            "pressed_gpu_argb: {pressed_gpu_fill}\n" +
+            "cpu_changed_pixels: {changed_pixels}\n" +
+            "resting_gpu_draw_ir_sha256: {resting_gpu_sha256}\n" +
+            "pressed_gpu_draw_ir_sha256: {pressed_gpu_sha256}\n" +
+            "resting_gpu_draw_ir: gui_button_resting_gpu_draw_ir.sdn\n" +
+            "pressed_gpu_draw_ir: gui_button_pressed_gpu_draw_ir.sdn\n" +
+            "cpu_resting_frame: gui_button_resting.ppm\n" +
+            "cpu_pressed_frame: gui_button_pressed.ppm\n" +
+            "widget_state: action-pending\nvisible_command_status: changed\n" +
+            "cpu_visible_pixel_status: changed\n" +
+            "engine2d_vulkan_status: blocked-no-final-pixels\n" +
+            "upstream_skia_ganesh_vulkan_status: blocked-no-final-pixels\n" +
+            "device_status: blocked-physical-linux-capture-absent\n"
+        expect(write_file("build/test-artifacts/simple_2d/gui_widget_input.sdn", receipt)).to_equal(true)

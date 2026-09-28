@@ -1,0 +1,149 @@
+# Pinned two-state GUI button source, input identity, and independent pixels.
+# This is a 16x16 opaque widget slice, not general GUI conformance.
+
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow,
+    file_hash_sha256}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use common.renderdoc.gui_button_scene.{GUI_BUTTON_WIDGET_ID,
+    GUI_BUTTON_SURFACE_ARGB, GUI_BUTTON_RESTING_ARGB,
+    GUI_BUTTON_PRESSED_ARGB, gui_button_fixture_scene,
+    gui_button_qualification_theme,
+    gui_button_scene_input_sha256}
+use common.ui.draw_ir.{DrawIrComposition, DRAW_IR_BACKEND_GPU,
+    DRAW_IR_COMMAND_RECT, DRAW_IR_SOURCE_GUI_AST}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture,
+    final_output_canonical_rgba}
+use common.renderdoc.physical_vulkan_2d_qualification.{PreparedRenderScene}
+
+pub val GUI_BUTTON_RESTING_PATH: text =
+    "test/fixtures/simple_2d_skia/gui_button_resting_v1.sdn"
+pub val GUI_BUTTON_RESTING_SHA256: text =
+    "657c37c4cafc5586893530f0caac873d9033807cf07bb9c068ab9b707c78e712"
+pub val GUI_BUTTON_PRESSED_PATH: text =
+    "test/fixtures/simple_2d_skia/gui_button_pressed_v1.sdn"
+pub val GUI_BUTTON_PRESSED_SHA256: text =
+    "7c8f313fe1492c510bb3bd8c26339233fe470a5332db2c956692be1eae01f22e"
+pub val GUI_BUTTON_THEME_MATERIAL_SHA256: text =
+    "90c57c76726d35cac51408b06da3f0e29e8b882c8201ef1215ed0f063b57dea2"
+pub val GUI_BUTTON_THEME_SOURCE_SHA256: text =
+    "3a3b7f6fbaf20439ff1b698baac35535d46ff7ed7843e30245b18d78bbca8e55"
+pub val GUI_BUTTON_RESTING_INPUT_SHA256: text =
+    "b4f94e3e2767358391781e8c4d50ed72e6739c2c6a3258b65c20e602d24e8d6a"
+pub val GUI_BUTTON_PRESSED_INPUT_SHA256: text =
+    "72423fb208efb0e68581a4741d5759401bfa0358a470385c570fdc015026c8ea"
+
+fn gui_button_qualification_input_sha256(pressed: bool) -> text:
+    if pressed: GUI_BUTTON_PRESSED_INPUT_SHA256 else:
+        GUI_BUTTON_RESTING_INPUT_SHA256
+
+fn gui_button_qualification_id(pressed: bool) -> text:
+    if pressed: "gui-button-16x16-v1-pressed" else:
+        "gui-button-16x16-v1-resting"
+
+fn gui_button_qualification_path(pressed: bool) -> text:
+    if pressed: GUI_BUTTON_PRESSED_PATH else: GUI_BUTTON_RESTING_PATH
+
+fn gui_button_qualification_sha256(pressed: bool) -> text:
+    if pressed: GUI_BUTTON_PRESSED_SHA256 else: GUI_BUTTON_RESTING_SHA256
+
+fn gui_button_qualification_scope(pressed: bool) -> text:
+    if pressed: "gui-button-pressed" else: "gui-button-resting"
+
+fn gui_button_prepared_scene(pressed: bool) -> Result<PreparedRenderScene, text>:
+    """Pin the widget state source independently of backend execution."""
+    val path = gui_button_qualification_path(pressed)
+    val expected = gui_button_qualification_sha256(pressed)
+    if not file_is_regular_no_follow(path) or
+        file_hash_sha256(path) != expected:
+        return Err("gui-button-fixture-digest-mismatch")
+    val theme = gui_button_qualification_theme()
+    if theme.material_sha256 != GUI_BUTTON_THEME_MATERIAL_SHA256 or
+        theme.source_manifest_sha256 != GUI_BUTTON_THEME_SOURCE_SHA256 or
+        gui_button_scene_input_sha256(pressed) !=
+            gui_button_qualification_input_sha256(pressed):
+        return Err("gui-button-pinned-input-state-mismatch")
+    Ok(PreparedRenderScene(fixture_id: gui_button_qualification_id(pressed),
+        source_path: path, source_sha256: expected,
+        scene_scope: gui_button_qualification_scope(pressed),
+        render_degraded: false, degrade_reason: ""))
+
+fn gui_button_checked_draw_ir(pressed: bool) -> Result<DrawIrComposition, text>:
+    """Require the actual themed widget producer and both full-target boxes."""
+    val composition = gui_button_fixture_scene(pressed)
+    if composition.backend_target != DRAW_IR_BACKEND_GPU or
+        composition.batches.len() != 1:
+        return Err("gui-button-gpu-widget-composition-required")
+    val batch = composition.batches[0]
+    if batch.source.source_kind != DRAW_IR_SOURCE_GUI_AST or
+        batch.embedding.width != 16 or batch.embedding.height != 16 or
+        batch.commands.len() != 2:
+        return Err("gui-button-widget-producer-shape-invalid")
+    val background = batch.commands[0]
+    val button = batch.commands[1]
+    if background.kind != DRAW_IR_COMMAND_RECT or
+        button.kind != DRAW_IR_COMMAND_RECT or
+        button.component_id != GUI_BUTTON_WIDGET_ID or
+        background.x != 0 or background.y != 0 or
+        background.width != 16 or background.height != 16 or
+        button.x != 0 or button.y != 0 or
+        button.width != 16 or button.height != 16 or
+        background.color != GUI_BUTTON_SURFACE_ARGB or
+        button.color != (if pressed: GUI_BUTTON_PRESSED_ARGB else:
+            GUI_BUTTON_RESTING_ARGB):
+        return Err("gui-button-widget-state-or-coverage-invalid")
+    Ok(composition)
+
+fn gui_button_expected_rgba(pressed: bool) -> Result<[i64], text>:
+    """Build uniform pixels from independent pinned color and image digests."""
+    val scene = gui_button_prepared_scene(pressed)?
+    if scene.fixture_id != gui_button_qualification_id(pressed):
+        return Err("gui-button-oracle-source-mismatch")
+    val red = if pressed: 45 else: 39
+    val green = if pressed: 90 else: 113
+    val blue = if pressed: 136 else: 199
+    val expected_sha = if pressed:
+        "e9ade1cbdaa5efeb6df9e143718f58bebc1bb3f67f443cc8aa1f6d71288e3efe"
+    else:
+        "c37303d90d03ebf14ed68c320ad4f766bf573e72862f984b3d50223f73354716"
+    var rgba: [i64] = []
+    var pixel = 0
+    while pixel < 256:
+        rgba.push(red)
+        rgba.push(green)
+        rgba.push(blue)
+        rgba.push(255)
+        pixel = pixel + 1
+    if bytes_to_hex(sha256_bytes(rgba)) != expected_sha:
+        return Err("gui-button-oracle-image-digest-mismatch")
+    Ok(rgba)
+
+fn gui_button_capture_matches_oracle(capture: FinalOutputCapture,
+    pressed: bool) -> Result<bool, text>:
+    if capture.metadata.fixture_id != gui_button_qualification_id(pressed) or
+        capture.metadata.fixture_digest != gui_button_qualification_sha256(pressed) or
+        capture.metadata.width != 16 or capture.metadata.height != 16 or
+        capture.metadata.crop_x != 0 or capture.metadata.crop_y != 0 or
+        capture.metadata.crop_width != 16 or
+        capture.metadata.crop_height != 16:
+        return Err("gui-button-final-capture-domain-mismatch")
+    val expected = gui_button_expected_rgba(pressed)?
+    val actual = match final_output_canonical_rgba(capture):
+        case Ok(value): value
+        case Err(err): return Err("gui-button-final-capture-" + err.code)
+    if actual.len() != 1024:
+        return Err("gui-button-final-capture-length-mismatch")
+    var index = 0
+    while index < 1024:
+        if actual[index] != expected[index]:
+            return Ok(false)
+        index = index + 1
+    Ok(true)
+
+export gui_button_qualification_id, gui_button_qualification_path,
+    gui_button_qualification_sha256, gui_button_qualification_scope,
+    gui_button_qualification_input_sha256,
+    gui_button_prepared_scene, gui_button_checked_draw_ir,
+    gui_button_expected_rgba, gui_button_capture_matches_oracle,
+    GUI_BUTTON_THEME_MATERIAL_SHA256, GUI_BUTTON_THEME_SOURCE_SHA256,
+    GUI_BUTTON_RESTING_INPUT_SHA256, GUI_BUTTON_PRESSED_INPUT_SHA256

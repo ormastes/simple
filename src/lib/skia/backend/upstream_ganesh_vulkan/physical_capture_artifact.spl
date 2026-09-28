@@ -1,0 +1,107 @@
+# Private controlled-rectangle capture adapter. Its output is a candidate:
+# a caller can construct a frame, so independent Linux capture provenance is
+# still required before physical Vulkan acceptance.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    CONTROLLED_RECT_FIXTURE_PATH, CONTROLLED_RECT_FIXTURE_SHA256,
+    CONTROLLED_CLIP_FIXTURE_PATH, CONTROLLED_CLIP_FIXTURE_SHA256,
+    PreparedRenderScene, VulkanBackendCaptureArtifact}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UpstreamSkiaGaneshFrame, upstream_skia_ganesh_vulkan_final_capture,
+    UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}
+
+fn _native_uuid_valid(value: text) -> bool:
+    if value.len() != 32 or value == "00000000000000000000000000000000":
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _native_device_type(value: i64) -> text:
+    # VkPhysicalDeviceType: OTHER=0, INTEGRATED_GPU=1, DISCRETE_GPU=2,
+    # VIRTUAL_GPU=3, CPU=4. The controlled physical lane admits 1 and 2.
+    if value == 1: "integrated"
+    elif value == 2: "discrete"
+    else: ""
+
+fn _upstream_skia_controlled_artifact(
+    frame: UpstreamSkiaGaneshFrame,
+    scene: PreparedRenderScene,
+    fixture_id: text, scene_scope: text,
+    fixture_path: text, fixture_sha256: text
+) -> Result<VulkanBackendCaptureArtifact, text>:
+    """Build a candidate from one completed native Skia rectangle frame."""
+    if scene.fixture_id != fixture_id or
+        scene.scene_scope != scene_scope or
+        scene.source_path != fixture_path or
+        scene.source_sha256 != fixture_sha256:
+        return Err("controlled rectangle fixture identity mismatch")
+    if not file_exists(scene.source_path) or
+        sha256_text(read_file(scene.source_path)) != scene.source_sha256:
+        return Err("controlled rectangle source digest mismatch")
+    if scene.render_degraded or scene.degrade_reason != "":
+        return Err("controlled rectangle producer degraded")
+    if frame.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        frame.backend_handle <= 0 or frame.device_identity < 0 or
+        frame.device_submit_count != 1 or frame.device_wait_count != 1 or
+        frame.device_readback_count != 1 or
+        frame.resource_id <= 0 or frame.submission_token <= 0 or
+        frame.completion_token != frame.submission_token:
+        return Err("upstream Skia completed device receipt missing")
+    if frame.width != 16 or frame.height != 16:
+        return Err("controlled rectangle extent mismatch")
+    val device_type = _native_device_type(frame.device_type)
+    if device_type == "":
+        return Err("upstream Skia physical Vulkan device required")
+    if not _native_uuid_valid(frame.physical_device_uuid) or
+        not _native_uuid_valid(frame.driver_uuid) or
+        frame.vendor_id < 0 or frame.device_id < 0 or
+        frame.api_version <= 0 or frame.driver_version < 0:
+        return Err("upstream Skia native device provenance missing")
+    val frame_id = "{scene.fixture_id}-{frame.submission_token}"
+    match upstream_skia_ganesh_vulkan_final_capture(
+        frame, scene.fixture_id, scene.source_sha256, frame_id):
+        case Err(reason): Err(reason)
+        case Ok(capture):
+            Ok(VulkanBackendCaptureArtifact(
+                backend_id: "upstream-skia-ganesh-vulkan",
+                fixture_id: scene.fixture_id,
+                fixture_sha256: scene.source_sha256,
+                producer_authenticated: true,
+                provider_identity: frame.provider_identity,
+                device_name: "vulkan-vendor-{frame.vendor_id}-device-{frame.device_id}",
+                device_type: device_type,
+                driver_identity: "vulkan-api-{frame.api_version}-driver-{frame.driver_version}",
+                physical_device_uuid: frame.physical_device_uuid,
+                driver_uuid: frame.driver_uuid,
+                device_identity: frame.device_identity,
+                backend_handle: frame.backend_handle,
+                submit_count: frame.device_submit_count,
+                fence_count: frame.device_wait_count,
+                readback_source: "device_readback",
+                fallback_required: false,
+                capture: Some(capture)))
+
+pub fn upstream_skia_controlled_rectangle_artifact(
+    frame: UpstreamSkiaGaneshFrame,
+    scene: PreparedRenderScene) -> Result<VulkanBackendCaptureArtifact, text>:
+    """Build a candidate for the v1 opaque rectangle fixture."""
+    _upstream_skia_controlled_artifact(frame, scene,
+        "controlled-opaque-rect-v1", "controlled-rectangle-only",
+        CONTROLLED_RECT_FIXTURE_PATH, CONTROLLED_RECT_FIXTURE_SHA256)
+
+pub fn upstream_skia_controlled_clip_artifact(
+    frame: UpstreamSkiaGaneshFrame,
+    scene: PreparedRenderScene) -> Result<VulkanBackendCaptureArtifact, text>:
+    """Build a candidate for the v2 clipped rectangle fixture."""
+    _upstream_skia_controlled_artifact(frame, scene,
+        "controlled-clipped-rect-v2", "controlled-clipped-rectangle-only",
+        CONTROLLED_CLIP_FIXTURE_PATH, CONTROLLED_CLIP_FIXTURE_SHA256)

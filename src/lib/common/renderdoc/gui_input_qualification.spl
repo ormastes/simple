@@ -1,0 +1,166 @@
+# Visible GUI focus, typing, and caret qualification at the widget producer.
+# This admits source DrawIR only; physical Vulkan pixels need separate capture.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.font_registry.{
+    simpleos_default_font_asset_candidate, selected_font_asset_identity}
+use common.renderdoc.gui_input_scene.{
+    GUI_INPUT_WIDGET_ID, GUI_INPUT_PLACEHOLDER,
+    GUI_INPUT_EXPECTED_VALUE, GUI_INPUT_FONT_FAMILY,
+    GUI_INPUT_FONT_SHA256, GUI_INPUT_WIDTH, GUI_INPUT_HEIGHT,
+    GUI_INPUT_POINTER_X, GUI_INPUT_POINTER_Y,
+    gui_input_scene_widget, gui_input_scene_draw_ir,
+    gui_input_scene_input_sha256}
+use common.ui.widget.{WidgetNode}
+use common.ui.widget_hit.{widget_dispatch_click, widget_dispatch_key}
+use common.ui.draw_ir.{
+    DrawIrCommand, DrawIrComposition, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT,
+    DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_GUI_AST}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+
+pub val GUI_INPUT_PINNED_SOURCE_SHA256: text =
+    "859cce2899d97ff1dbb5a6b19d7e2de45ea7e87f644ca6874472e6db364a0453"
+
+pub struct GuiInputQualifiedStates:
+    before: DrawIrComposition
+    after: DrawIrComposition
+    before_sha256: text
+    after_sha256: text
+    source_input_sha256: text
+    focused_target: text
+    visible_text: text
+    caret: i32
+    font_identity: text
+    font_family: text
+    font_sha256: text
+    caret_x: i32
+    caret_y: i32
+    caret_width: i32
+    caret_height: i32
+
+fn _gui_input_style(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _gui_input_receipt_token_valid(value: text) -> bool:
+    value != "" and not value.contains("\n") and
+        not value.contains("\r")
+
+fn _gui_input_resolved_text_valid(command: DrawIrCommand) -> bool:
+    if command.kind != DRAW_IR_COMMAND_TEXT or command.text_value == "" or
+        command.width <= 0 or command.height <= 0 or
+        not _gui_input_receipt_token_valid(
+            _gui_input_style(command, "font-identity")) or
+        not _gui_input_receipt_token_valid(
+            _gui_input_style(command, "font-family")) or
+        _gui_input_style(command, "font-size") != "12" or
+        not command.glyph_run.valid or
+        command.advance_widths.len() != command.text_value.len() or
+        command.glyph_run.glyph_ids.len() != command.text_value.len() or
+        command.glyph_run.xs.len() != command.text_value.len() or
+        command.glyph_run.ys.len() != command.text_value.len() or
+        command.glyph_run.clusters.len() != command.text_value.len():
+        return false
+    for advance in command.advance_widths:
+        if advance <= 0:
+            return false
+    true
+
+fn _gui_input_source_valid(
+    composition: DrawIrComposition, command_count: i64
+) -> bool:
+    if composition.backend_target != DRAW_IR_BACKEND_GPU or
+        composition.batches.len() != 1:
+        return false
+    val batch = composition.batches[0]
+    batch.backend_target == DRAW_IR_BACKEND_GPU and
+    batch.source.source_kind == DRAW_IR_SOURCE_GUI_AST and
+    batch.source.source_id == GUI_INPUT_WIDGET_ID and
+    batch.embedding.component_id == GUI_INPUT_WIDGET_ID and
+    batch.embedding.width == GUI_INPUT_WIDTH and
+    batch.embedding.height == GUI_INPUT_HEIGHT and
+    batch.commands.len() == command_count
+
+fn gui_input_qualified_states() -> Result<GuiInputQualifiedStates, text>:
+    """Route a real pointer click and key sequence, then inspect widget DrawIR."""
+    val source_sha = gui_input_scene_input_sha256()
+    if source_sha != GUI_INPUT_PINNED_SOURCE_SHA256:
+        return Err("gui-input-pinned-scene-changed")
+    val font = simpleos_default_font_asset_candidate()
+    if font.family != GUI_INPUT_FONT_FAMILY or
+        font.sha256 != GUI_INPUT_FONT_SHA256:
+        return Err("gui-input-pinned-font-changed")
+    val expected_font_identity = selected_font_asset_identity(font)
+    val input = gui_input_scene_widget()
+    val before = gui_input_scene_draw_ir(input)
+    if not _gui_input_source_valid(before, 3):
+        return Err("gui-input-before-source-invalid")
+    val before_commands = before.batches[0].commands
+    if before_commands[0].component_id != GUI_INPUT_WIDGET_ID or
+        before_commands[0].kind != DRAW_IR_COMMAND_RECT or
+        before_commands[1].component_id != "{GUI_INPUT_WIDGET_ID}-field" or
+        before_commands[1].kind != DRAW_IR_COMMAND_RECT or
+        before_commands[2].component_id != "{GUI_INPUT_WIDGET_ID}-placeholder" or
+        before_commands[2].text_value != GUI_INPUT_PLACEHOLDER or
+        not _gui_input_resolved_text_valid(before_commands[2]):
+        return Err("gui-input-before-visible-placeholder-invalid")
+    val focused = widget_dispatch_click(
+        input, GUI_INPUT_WIDTH, GUI_INPUT_HEIGHT,
+        GUI_INPUT_POINTER_X, GUI_INPUT_POINTER_Y
+    )
+    if focused != GUI_INPUT_WIDGET_ID or
+        WidgetNode(id: GUI_INPUT_WIDGET_ID).get_prop("ui_focus") != "true":
+        return Err("gui-input-pointer-focus-not-delivered")
+    widget_dispatch_key(focused, "A")
+    widget_dispatch_key(focused, "B")
+    widget_dispatch_key(focused, "left")
+    widget_dispatch_key(focused, "C")
+    val visible_text = WidgetNode(id: GUI_INPUT_WIDGET_ID).get_prop("value")
+    val caret_text = WidgetNode(id: GUI_INPUT_WIDGET_ID).get_prop("caret")
+    if visible_text != GUI_INPUT_EXPECTED_VALUE or caret_text != "2":
+        return Err("gui-input-key-or-caret-state-invalid")
+    val after = gui_input_scene_draw_ir(input)
+    if not _gui_input_source_valid(after, 4):
+        return Err("gui-input-after-source-invalid")
+    val after_commands = after.batches[0].commands
+    val value = after_commands[2]
+    val caret = after_commands[3]
+    if after_commands[0].component_id != GUI_INPUT_WIDGET_ID or
+        after_commands[1].component_id != "{GUI_INPUT_WIDGET_ID}-field" or
+        value.component_id != "{GUI_INPUT_WIDGET_ID}-value" or
+        value.text_value != GUI_INPUT_EXPECTED_VALUE or
+        not _gui_input_resolved_text_valid(value) or
+        _gui_input_style(value, "font-identity") !=
+            _gui_input_style(before_commands[2], "font-identity") or
+        _gui_input_style(value, "font-family") !=
+            _gui_input_style(before_commands[2], "font-family") or
+        _gui_input_style(value, "font-family") != GUI_INPUT_FONT_FAMILY or
+        _gui_input_style(value, "font-identity") !=
+            expected_font_identity or
+        caret.component_id != "{GUI_INPUT_WIDGET_ID}-caret" or
+        caret.kind != DRAW_IR_COMMAND_RECT or
+        value.x != after_commands[0].x + 5 or
+        caret.x <= value.x or caret.x > value.x + value.width or
+        caret.y != after_commands[0].y + 3 or
+        caret.width != 2 or
+        caret.height != after_commands[0].height - 6:
+        return Err("gui-input-visible-value-or-caret-invalid")
+    val before_sha = sha256_text(draw_ir_to_sdn(before))
+    val after_sha = sha256_text(draw_ir_to_sdn(after))
+    if before_sha == after_sha:
+        return Err("gui-input-before-after-draw-ir-identical")
+    Ok(GuiInputQualifiedStates(
+        before: before, after: after,
+        before_sha256: before_sha, after_sha256: after_sha,
+        source_input_sha256: source_sha, focused_target: focused,
+        visible_text: visible_text, caret: 2,
+        font_identity: _gui_input_style(value, "font-identity"),
+        font_family: _gui_input_style(value, "font-family"),
+        font_sha256: GUI_INPUT_FONT_SHA256,
+        caret_x: caret.x, caret_y: caret.y,
+        caret_width: caret.width, caret_height: caret.height
+    ))
+
+export gui_input_qualified_states
