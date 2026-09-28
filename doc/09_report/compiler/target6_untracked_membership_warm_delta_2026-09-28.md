@@ -30,9 +30,14 @@ Focused bootstrap-interpreter SPipe evidence on this worktree:
 - `compiler_inventory_untracked_membership_corrupt_spec.spl`: 1/1 passed.
   Corrupting the content-addressed path record and then changing membership
   was rejected without replacing the atomic CURRENT pointer.
+- `compiler_inventory_untracked_membership_gc_spec.spl`: 1/1 passed.
+  Successful warm create/delete transitions retire the prior path record
+  after the new pointer is admitted under the refresh lock.
 
 This does not meet the full Target 6 gate. The path list and Git untracked
 enumeration still run on every warm request; the rare membership-change path
 adds one cached-path enumeration. No current-source native binary, 30-sample
 time/RSS comparison, concurrent-writer fault matrix, or complete graph-index
 entrypoint cutover has passed. The old Stage2/full-CLI limitation remains.
+An interrupted or rejected publication can still leave an unreferenced
+content-addressed path record; recovery/GC for those orphans remains open.

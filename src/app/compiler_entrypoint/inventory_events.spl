@@ -7,7 +7,7 @@ use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inven
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io.file_ops.{
-    file_atomic_write, file_is_regular_no_follow, file_size,
+    file_atomic_write, file_delete, file_is_regular_no_follow, file_size,
     file_read_regular_no_follow_bounded
 }
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
@@ -672,6 +672,14 @@ fn _compiler_inventory_refresh_locked_v1(
     if not inventory.valid:
         return compiler_inventory_invalid_v1(
             "observed-event-apply:" + inventory.reason)
+    # This refresh lock covers every production membership-record reader.
+    # Retire the previous immutable blob only after CURRENT admits the new
+    # digest; a failed publication must leave the old cursor usable.
+    if cursor.valid and cursor.untracked_membership_digest != "" and
+            cursor.untracked_membership_digest != membership_digest:
+        val obsolete = compiler_inventory_membership_path_v1(
+            cache_root, cursor.untracked_membership_digest)
+        val _retired = file_delete(obsolete)
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
 
