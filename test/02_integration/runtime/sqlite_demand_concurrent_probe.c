@@ -5,7 +5,7 @@
 
 extern int64_t rt_sqlite_open_memory(void);
 extern int64_t rt_sqlite_close(int64_t);
-extern int64_t rt_sqlite_demand_state(void);
+extern int64_t spl_sqlite_demand_state(void);
 
 static atomic_int sqlite_probe_start = ATOMIC_VAR_INIT(0);
 
@@ -19,11 +19,11 @@ static void *sqlite_probe_worker(void *unused) {
     return (void *)1;
 }
 
-int64_t rt_sqlite_demand_concurrent_probe(void) {
+int64_t spl_sqlite_demand_concurrent_probe(void) {
     pthread_t threads[4];
     int started = 0;
     int success = 1;
-    if (rt_sqlite_demand_state() != 0) return 0;
+    if (spl_sqlite_demand_state() != 0) return 0;
     for (; started < 4; started++) {
         if (pthread_create(&threads[started], NULL,
                 sqlite_probe_worker, NULL) != 0) break;
@@ -34,5 +34,5 @@ int64_t rt_sqlite_demand_concurrent_probe(void) {
         if (pthread_join(threads[i], &result) != 0 || result != (void *)1)
             success = 0;
     }
-    return started == 4 && success && rt_sqlite_demand_state() == 2;
+    return started == 4 && success && spl_sqlite_demand_state() == 2;
 }

@@ -91,11 +91,11 @@ static int sqlite_load(void) {
     handle = dlopen(snapshot_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) goto reject;
     int64_t (*abi)(void) = NULL;
-    void *symbol = dlsym(handle, "rt_simple_sqlite_provider_abi_version");
+    void *symbol = dlsym(handle, "spl_sqlite_provider_abi_version_v1");
     memcpy(&abi, &symbol, sizeof(abi));
     if (!abi || abi() != SIMPLE_SQLITE_PROVIDER_ABI_V1) goto reject;
     int64_t (*init)(const SimpleSqliteRuntimeApiV1 *) = NULL;
-    symbol = dlsym(handle, "rt_simple_sqlite_provider_init_v1");
+    symbol = dlsym(handle, "spl_sqlite_provider_init_v1");
     memcpy(&init, &symbol, sizeof(init));
     SimpleSqliteRuntimeApiV1 host_api = {
         .struct_size = sizeof(host_api),
@@ -141,7 +141,7 @@ static int sqlite_ensure(void) {
     return state == 2;
 }
 
-int64_t rt_sqlite_demand_state(void) {
+int64_t spl_sqlite_demand_state(void) {
     return atomic_load_explicit(&sqlite_state, memory_order_acquire);
 }
 

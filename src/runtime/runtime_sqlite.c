@@ -28,13 +28,13 @@
 typedef int64_t RtValue;
 
 /* The demand bridge admits only this exact native SFFI surface. */
-int64_t rt_simple_sqlite_provider_abi_version(void) {
+int64_t spl_sqlite_provider_abi_version_v1(void) {
     return SIMPLE_SQLITE_PROVIDER_ABI_V1;
 }
 
 #if defined(SIMPLE_SQLITE_DEMAND_PROVIDER)
 static SimpleSqliteRuntimeApiV1 sqlite_runtime_api;
-int64_t rt_simple_sqlite_provider_init_v1(const SimpleSqliteRuntimeApiV1 *api) {
+int64_t spl_sqlite_provider_init_v1(const SimpleSqliteRuntimeApiV1 *api) {
     if (!api || api->struct_size != sizeof(*api) ||
             api->abi_version != SIMPLE_SQLITE_PROVIDER_ABI_V1 ||
             !api->string_new || !api->string_data || !api->string_len) return 0;
