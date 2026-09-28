@@ -27,6 +27,9 @@ Focused bootstrap-interpreter SPipe evidence on this worktree:
   UTF-8 path identities. Its old V1 cursor expectation and integer cleanup
   assertion were updated to the current API; two earlier diagnostic runs
   failed on those stale assertions, then the corrected run passed.
+- `compiler_inventory_untracked_membership_corrupt_spec.spl`: 1/1 passed.
+  Corrupting the content-addressed path record and then changing membership
+  was rejected without replacing the atomic CURRENT pointer.
 
 This does not meet the full Target 6 gate. The path list and Git untracked
 enumeration still run on every warm request; the rare membership-change path

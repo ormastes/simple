@@ -28,6 +28,9 @@ these attempts. These were timeouts, not assertion failures. The required
 full CLI, SPipe, startup, and performance gates remain open. Do not use this
 partial evidence as a Target 6 completion claim.
 
+The bounded native-build memory issue is tracked in
+`doc/08_tracking/bug/target6_focused_stage2_native_build_memory_2026-09-28.md`.
+
 Next, diagnose the large native compile from the retained command/logs with
 an isolated source closure, then qualify V2 action digest, round-trip, warm
 route, and concurrent graph publication. Production still needs typed
