@@ -96,3 +96,29 @@ address the Stage4 parse throughput or use an admitted current pure-Simple
 producer before an end-to-end link/size/startup claim can be made. A stale
 Stage2 binary cannot test the dynamic lane. No size or startup result is
 implied by this retry.
+
+## Current-source provider and lane dispatch (2026-09-29)
+
+The same worktree's Rust bootstrap build produced a current-source shared
+runtime (`libsimple_runtime.so`, 10,072,672 bytes) and compiler backfill
+archive (`libsimple_compiler_backfill.a`, 41,370,356 bytes). Both Cargo builds
+passed. The backfill archive defines the three previously absent
+`spl_cranelift_*_v2` names. This is provider availability evidence, not a
+Stage4 link or runtime size result. The object-wide missing-symbol list still
+includes `rt_net_*`, `rt_tcp_connect`, and `rt_execute_native`; section-GC
+linking must determine whether any are live.
+
+The Stage4 compiler entry additionally requires
+`SIMPLE_COMPILER_ENTRY_STAGE4=1` and an explicit runtime path containing
+`libsimple_compiler_backfill.a`. The previous long parse attempt omitted that
+authorization variable, so even completion of parsing would not have proved
+the intended lane. The next compiler attempt must include it.
+
+The lane dispatch guard now accepts `SIMPLE_LANE_CHECK_BACKEND=cranelift` for
+diagnosis while retaining `llvm-lib` as its default. With the current Rust
+bootstrap driver, the Cranelift check passed all three assertions: bundle
+name accepted, non-Stage4 use rejected, and the core-C control fixture built.
+The default LLVM check remains unqualified on this host: `llvm-config-23`
+reports 23.1.0, while `aya-llvm-sys` admits 23.1.1 or native Linux/FreeBSD
+23.1.2. The LLVM-enabled seed build stopped at that pinned-version check.
+This does not qualify a Stage4 compiler binary, startup, or size gate.
