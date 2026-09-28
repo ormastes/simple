@@ -84,7 +84,10 @@ fn nil_optional_aggregate_stays_nil_and_live_aggregate_is_copied() {
 
 #[test]
 fn untyped_hir_expression_constructors_do_not_invent_type_metadata() {
-    let source = std::fs::read_to_string("src/compiler/20.hir/hir_lowering/_Expressions/expression_core.spl")
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../compiler/20.hir/hir_lowering/_Expressions/expression_core.spl"),
+    )
         .expect("HIR expression lowering source must exist");
 
     for (variant, constructor) in [

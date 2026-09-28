@@ -1062,6 +1062,36 @@ fn codegen_inline_spl_f64_to_bits_does_not_emit_runtime_symbol() {
 }
 
 #[test]
+fn codegen_inline_spl_bits_to_f64_does_not_emit_runtime_symbol() {
+    // The pure-Simple core archive links no C runtime, so this inverse must be
+    // lowered inline like `spl_f64_to_bits`; round-trip through both.
+    let object = aot_object("inline_spl_bits_to_f64", |f| {
+        let bits = f.new_vreg();
+        let float = f.new_vreg();
+        let dest = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::ConstInt {
+            dest: bits,
+            value: 0x400C_0000_0000_0000,
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(float),
+            target: crate::mir::CallTarget::from_name("spl_bits_to_f64"),
+            args: vec![bits],
+        });
+        block.instructions.push(MirInst::Call {
+            dest: Some(dest),
+            target: crate::mir::CallTarget::from_name("spl_f64_to_bits"),
+            args: vec![float],
+        });
+        dest
+    });
+
+    assert!(!object_relocates_to_symbol(&object, "spl_bits_to_f64"));
+    assert!(!object_relocates_to_symbol(&object, "spl_f64_to_bits"));
+}
+
+#[test]
 fn codegen_inline_rt_len_does_not_emit_runtime_symbol() {
     let object = aot_object("inline_rt_len", |f| {
         let array = f.new_vreg();

@@ -264,8 +264,28 @@ fn compile_simple_runtime_memory_intrinsic<M: Module>(
     if !matches!(
         intrinsic,
         "spl_load_i64" | "spl_store_i64" | "spl_load_u8" | "spl_store_u8" | "spl_f64_to_bits"
+            | "spl_bits_to_f64"
     ) {
         return Ok(false);
+    }
+
+    // Bit-preserving inverse of `spl_f64_to_bits`. Lowered inline so the
+    // pure-Simple core archive needs no C provider for it.
+    if intrinsic == "spl_bits_to_f64" {
+        if args.len() != 1 {
+            return Err(format!("{intrinsic} expects 1 args, got {}", args.len()));
+        }
+        let Some(d) = dest else {
+            return Ok(true);
+        };
+        let value = get_vreg_or_default(ctx, builder, &args[0]);
+        let float = if builder.func.dfg.value_type(value) == types::I64 {
+            builder.ins().bitcast(types::F64, MemFlags::new(), value)
+        } else {
+            value
+        };
+        ctx.vreg_values.insert(*d, float);
+        return Ok(true);
     }
 
     if intrinsic == "spl_f64_to_bits" {
