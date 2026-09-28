@@ -34,4 +34,12 @@ bootstrap must run the spec and the full macOS Phase 2/3 evidence gate.
 On 2026-09-28 the local APFS data volume had 7.4 GiB free; the repository's
 bootstrap preflight requires 20 GiB. No full local bootstrap was started with
 insufficient space. The `main` macOS CI run `36369147089` was pending with no
-job assigned when checked.
+job assigned when first checked, then was cancelled by a newer push. Run
+`36370136718` was pending with no job assigned when checked afterward; no
+successful full macOS Phase 2/3 evidence was available.
+
+The same day's [RC1 candidate a006](https://github.com/ormastes/simple/actions/runs/36370043783)
+failed earlier on Linux while building the Rust seed (`rust-seed-build` exit
+101), before Stage 2 or any macOS linker check. The job only named its private
+`rust-seed-build.log`; it uploaded no artifact containing that log. This is an
+independent release gate and cannot be counted as evidence for this linker fix.
