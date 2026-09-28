@@ -141,6 +141,20 @@ unpublished staging after proving it is unpinned; it never repairs a partial
 generation in place. GC retains current, parent/recovery, and all pinned
 generations and archives.
 
+### Explicit cold rebuild transition
+
+If the current graph binds an older SCV snapshot, warm admission returns
+`package-index:stale-graph-rebuild-required`. With
+`SIMPLE_PACKAGE_INDEX_COLD_INIT=1`, admission pins the new snapshot and keeps
+the old `CURRENT` pointer unchanged. It sets an empty active-index digest,
+clears producer/root/variant compatibility markers, and sets
+`SIMPLE_PACKAGE_INDEX_REBUILD_PENDING=1`; the driver therefore takes its
+bounded cold path. Each subsequent admission clears the pending marker before
+refresh, including when that admission later fails. A successful cold compile
+still needs the typed graph publisher to validate and atomically replace the
+old pointer. The pending marker is request state, never a substitute for a
+published graph receipt.
+
 ## Reproducibility normalization
 
 - canonical relative package/module identities;

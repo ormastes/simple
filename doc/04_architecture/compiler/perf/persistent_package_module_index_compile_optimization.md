@@ -116,6 +116,14 @@ collection skips pinned generations. Concurrent writers, interrupted writes,
 pointer truncation, orphan staging, and daemon death recover to exactly one
 complete prior or new generation; mixed state is never readable.
 
+When SCV advances beyond the current complete graph, ordinary warm admission
+refuses that graph. `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` admits an explicit cold
+compile against the new frozen snapshot while retaining the prior `CURRENT`
+graph. It publishes an empty active-index digest, clears warm compatibility
+markers, and marks the request as rebuild-pending. A later failed admission
+clears that pending marker. Only a complete typed graph publication may move
+`CURRENT`; a binding-only snapshot must not replace the old graph.
+
 ## Reproducibility
 
 Semantic identity excludes absolute checkout paths, cwd, cache location, remote
