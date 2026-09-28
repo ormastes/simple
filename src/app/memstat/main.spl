@@ -2,14 +2,15 @@
 #
 # Usage: simple run src/app/memstat/main.spl <pid> <out_csv> [interval_ms]
 #
-# Samples /proc/<pid>/smaps_rollup (Rss, Pss, Pss_Anon, Private_Dirty, Swap)
-# plus /proc/<pid>/stat minflt/majflt at a fixed interval (default 1000 ms) and
-# appends CSV rows to <out_csv>. Exits cleanly when the target PID disappears.
+# On Linux, samples /proc/<pid>/smaps_rollup (Rss, Pss, Pss_Anon,
+# Private_Dirty, Swap) plus /proc/<pid>/stat minflt/majflt. On macOS, samples
+# RSS through ps and marks Linux-only fields unavailable. Appends CSV rows at
+# a fixed interval (default 1000 ms) until the target PID disappears.
 #
 # Dependency-light by design: only std.io_runtime facades, no app.io coupling,
 # so the same module runs under interpreter and native engines.
 
-use std.io_runtime.{get_args, file_read, file_exists, file_write, file_append_text, thread_sleep, time_now_unix_micros}
+use std.io_runtime.{get_args, file_read, file_exists, file_write, file_append_text, thread_sleep, time_now_unix_micros, host_os, process_run}
 
 extern fn rt_mem_attr_report(n: i64) -> text
 
@@ -79,6 +80,19 @@ fn sample_row(rollup_path: text, stat_path: text) -> text:
     val ts = time_now_unix_micros()
     "{ts},{rss},{pss},{pss_anon},{private_dirty},{swap},{minflt},{majflt}"
 
+# macOS has no /proc. One direct ps invocation obtains target RSS per
+# interval; unavailable Linux-only columns stay -1 rather than fake zeroes.
+# A vanished process returns an empty row, ending the sampling loop.
+fn sample_row_macos(pid: i64) -> text:
+    val (out, _err, code) = process_run("ps", ["-p", "{pid}", "-o", "rss="])
+    if code != 0:
+        return ""
+    val rss = parse_dec(out)
+    if rss <= 0:
+        return ""
+    val ts = time_now_unix_micros()
+    "{ts},{rss},-1,-1,-1,-1,-1,-1"
+
 # Positional args after the interpreter/script prelude. get_args() yields
 # [program, ..., script.spl, user args...]; take everything after the first
 # argument ending in ".spl", falling back to argv[1:] for compiled binaries.
@@ -128,7 +142,7 @@ fn main() -> i64:
     val args = cli_positional_args()
     if args.len() < 2:
         print "usage: memstat <pid> <out_csv> [interval_ms]"
-        print "  samples /proc/<pid>/smaps_rollup + stat faults to CSV until <pid> exits"
+        print "  samples Linux /proc or macOS ps RSS to CSV until <pid> exits"
         return 2
     val pid = parse_dec(args[0])
     if pid <= 0:
@@ -143,8 +157,12 @@ fn main() -> i64:
 
     val stat_path = "/proc/{pid}/stat"
     val rollup_path = "/proc/{pid}/smaps_rollup"
+    val os = host_os()
+    if os != "linux" and os != "macos":
+        print "memstat: unsupported host OS '{os}'"
+        return 2
 
-    if not file_exists(stat_path):
+    if os == "linux" and not file_exists(stat_path):
         print "memstat: pid {pid} not found (no {stat_path})"
         return 1
 
@@ -153,8 +171,12 @@ fn main() -> i64:
         return 1
 
     var rows = 0
-    while file_exists(stat_path):
-        val row = sample_row(rollup_path, stat_path)
+    while true:
+        if os == "linux" and not file_exists(stat_path):
+            break
+        val row = if os == "macos": sample_row_macos(pid) else: sample_row(rollup_path, stat_path)
+        if row.len() == 0 and os == "macos":
+            break
         if row.len() > 0:
             file_append_text(out_path, row + "\n")
             rows = rows + 1
