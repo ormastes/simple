@@ -2423,6 +2423,12 @@ fn project_stage4_archive_closure(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // A relocatable closure made by GNU ld can carry misaligned AArch64
+        // LDST relocations into an lld final link. Use the selected linker
+        // for both steps so the capsule has the same relocation semantics.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
@@ -2782,6 +2788,12 @@ pub(crate) fn build_compiler_backfill_archive(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // Match the final linker's relocation handling. GNU ld's partial
+        // AArch64 closure can leave misaligned LDST128 relocations that lld
+        // rejects when the localized backfill reaches the final link.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");

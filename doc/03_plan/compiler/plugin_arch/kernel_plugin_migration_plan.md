@@ -87,6 +87,13 @@ hosted-archive comparator. This is useful size/startup evidence, but its
 comparator is not an admitted production baseline and does not close the
 full-CLI, optional-provider, matched-hello, or Phase 7 gates. See
 `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+An exact `core-c-bootstrap` Stage4 ARM64 compiler now links after the live
+character-helper and partial-linker fixes (866 compiled units, zero failures,
+23,596,040-byte unstripped executable). Its `--version` smoke passes, but
+hello AOT reaches `PLUG-E-NOTFOUND: backend=llvm`. The K1 composition binding,
+working hello, matched size/startup/RSS cohort, and optional-provider gates
+remain open. See
+`doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline

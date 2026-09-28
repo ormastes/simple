@@ -1,6 +1,6 @@
 # Target 5 Stage4 legacy character helper omitted from exact C capsule
 
-- **Status:** Open
+- **Status:** Fixed in source; Stage4 link proved on 2026-09-29
 - **Found:** 2026-09-29, Linux aarch64 Stage4 + lld compiler entry
 - **Impact:** blocks the admitted Stage4 compiler and hello size/startup/RSS cohort
 
@@ -18,10 +18,12 @@ with the selected core-C and compiler backfill archive definitions finds
 exactly one provider-owned name outside `rt_*`/`spl_*`:
 `text_dot_from_char_code`.
 
-**TODO:** classify this known helper as an exact live runtime request, retain
-its single core-C owner in the capsule, and rerun the Stage4 final link plus
-compiler/hello smoke. Keep the no-stub owner gate. This AOT capsule omission
-is distinct from the older seed JIT symbol-table issue in
+The exact live runtime request set now includes this helper. The current-source
+Stage4 + lld build compiled 866 units with zero failures and linked an
+executable with the no-stub owner gate. Its `--version` smoke passed. Hello AOT
+still fails at `PLUG-E-NOTFOUND: backend=llvm`, tracked separately in the K1
+composition-shadowing bug; no hello executable or size qualification is claimed.
+This AOT capsule omission is distinct from the older seed JIT symbol-table issue in
 `seed_jit_cannot_resolve_text_dot_from_char_code_2026-09-04.md`.
 
 Evidence: `doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.

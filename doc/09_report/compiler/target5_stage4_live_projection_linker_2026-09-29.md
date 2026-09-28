@@ -1,7 +1,7 @@
 # Target 5 Stage4 live projection linker diagnosis (2026-09-29)
 
-Status: diagnostic evidence only. No admitted Stage4 compiler or hello-size
-result is claimed.
+Status: exact Stage4 compiler link and `--version` pass; hello AOT and
+size/startup/RSS qualification remain blocked.
 
 The previous Stage4 `core-c-bootstrap` build compiled 866 source units with
 zero source failures, then reported 12 `rt_*` requests without an admitted
@@ -90,3 +90,24 @@ known legacy runtime helper in the exact live request set and prove the
 capsule keeps exactly that owner. No further build was run after this third
 focused Stage4 verify/fix cycle. There is still no admitted Stage4 executable
 or hello size/startup/RSS cohort.
+
+## Current-source Stage4 link result
+
+The exact live request set now includes `text_dot_from_char_code`. A rebuilt
+pure-Simple bootstrap tool passed `--version`. Its first Stage4 + lld retry
+compiled 866 units without source failure and got past the missing helper, but
+the final link rejected misaligned AArch64 LDST128 relocations in the compiler
+backfill's GNU ld partial-link closure. The backfill closure now honors the
+selected `SIMPLE_LINKER=lld`. The next retry passed that archive and exposed
+the same GNU ld/lld relocation mismatch in the Rust runtime capsule, which
+now honors the selected linker too.
+
+The third bounded retry compiled 866 units, zero failures, and linked the
+Stage4 compiler in 61.1 seconds. The executable is 23,596,040 bytes before
+stripping, SHA-256
+`0e00c57984d277d0f34f1ee8a25d9290a4e30254a7099a9f72ac08342b05c8e2`.
+Its `--version` smoke passed. The hello AOT smoke reached
+`PLUG-E-NOTFOUND: backend=llvm` after MIR/AOP processing. That matches the
+open K1 composition binding issue, so no current-source hello executable,
+matched C size, startup, or RSS cohort is admitted. The 23.6 MB compiler
+measurement is diagnostic and must not be compared with the 15 KiB hello gate.

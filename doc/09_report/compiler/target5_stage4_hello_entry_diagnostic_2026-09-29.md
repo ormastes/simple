@@ -1,5 +1,11 @@
 # Target 5 Stage4 hello entry diagnostic (Linux ARM64)
 
+Update (2026-09-29): A current-source exact Stage4 + lld compiler now links
+and passes `--version` after the live character-helper and partial-linker
+fixes. Its one hello AOT smoke still fails with
+`PLUG-E-NOTFOUND: backend=llvm` after MIR/AOP processing. The K1 composition
+binding remains the next blocker; no hello size/startup/RSS cohort exists.
+
 Status: BLOCKED for production qualification. This is an investigation of the
 standalone compiler entry, not an admitted Stage4 build or a size result.
 
