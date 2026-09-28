@@ -45,7 +45,12 @@ should_pin_msvc_linker() {
 # /mnt/data is NVMe scratch on Linux, but resolves inside the Git installation
 # on Git Bash. Keep the Windows default on the workspace's persistent volume.
 select_cargo_target_dir() {
-  if [ -n "$1" ]; then
+  # The bootstrap's centralized storage sets CARGO_TARGET_DIR to the shared
+  # user cache. Allow this preflight alone to use an isolated Cargo target
+  # when that cache contains artifacts from another Rust toolchain.
+  if [ -n "${SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR:-}" ]; then
+    printf '%s\n' "$SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR"
+  elif [ -n "$1" ]; then
     printf '%s\n' "$1"
   elif is_windows_host "$2"; then
     if command -v cygpath >/dev/null 2>&1; then
@@ -340,6 +345,10 @@ selftest() {
   [ "$(select_cargo_target_dir "$TMP/explicit" MINGW64_NT "$TMP" "$TMP" "$TMP/mnt_data")" = "$TMP/explicit" ] || {
     echo "selftest FAIL: explicit Cargo target overridden"; st_fail=1;
   }
+  [ "$(SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR="$TMP/isolated" \
+    select_cargo_target_dir "$TMP/shared" Linux "$TMP" "$TMP" "$TMP/mnt_data")" = "$TMP/isolated" ] || {
+    echo "selftest FAIL: isolated preflight Cargo target not selected"; st_fail=1;
+  }
   [ "$(select_cargo_target_dir '' Linux "$TMP" "$TMP" "$TMP/mnt_data")" = "$TMP/mnt_data/tmp/cargo-seed-rebuild" ] || {
     echo "selftest FAIL: Linux NVMe target changed"; st_fail=1;
   }
@@ -435,7 +444,9 @@ selftest() {
   return $st_fail
 }
 
-if ! selftest; then
+# Test the default routes in a subshell even when this run uses the opt-in
+# isolated target; the selected CARGO_TARGET_DIR above remains unchanged.
+if ! (unset SIMPLE_BOOTSTRAP_PREFLIGHT_CARGO_TARGET_DIR; selftest); then
   echo "ERROR — nothing was checked (selftest failed)"
   exit 2
 fi
