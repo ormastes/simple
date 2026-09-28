@@ -1,0 +1,250 @@
+# @req REQ-008 REQ-009
+# Requirements: doc/02_requirements/feature/environment_optimized_dynamic_libraries.md
+# Opt-in scalar VM only. No frontend admission, complete dialect, or SIMD parity claim.
+use std.spec.{describe, it, expect, fail, step}
+use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
+use std.common.structural.parse.parse_types.{ParseTokenArena, PARSE_SCHEMA_ID, parse_source_blob_from_text}
+use std.common.structural.parse.program_v1.*
+use std.common.structural.parse.program_output_v1.*
+use std.common.structural.parse.grammar_cpu_v1.{parse_grammar_execute_v1}
+
+fn setup_limits_v1() -> ParseProgramLimitsV1:
+    ParseProgramLimitsV1(max_program_words: 512, max_source_bytes: 128,
+        max_tokens: 32, max_nodes: 32, max_children: 32, max_diagnostics: 16,
+        max_values: 32, max_calls: 8, max_choices: 8, max_steps: 128)
+
+fn setup_program_v1(words: [i64], rules: [i64], actions: [i64], offsets: [i64]) -> ParseProgramV1:
+    val validated = parse_program_validate_v1(
+        GrammarProgram(contract_version: 1, entry_rules: [0], production_offsets: rules, opcodes: words),
+        ActionProgram(contract_version: 1, action_offsets: offsets, opcodes: actions), setup_limits_v1())
+    if validated.is_err(): fail("fixture program must validate")
+    validated.unwrap()
+
+fn step_parse_program_v1(program: ParseProgramV1, source: text, kinds: [u16],
+    limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
+    step("execute the independent scalar VM over explicit one-byte fixture tokens")
+    var starts: [u32] = []
+    var counts: [u32] = []
+    var i = 0
+    while i < kinds.len():
+        starts.push(i as u32)
+        counts.push(1u32)
+        i = i + 1
+    parse_grammar_execute_v1(program, parse_source_blob_from_text(source),
+        ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts),
+        0, limits)
+
+fn check_exact_output_v1(actual: ParseProgramExecutionV1, expected: ParseProgramOutputV1):
+    step("compare every node field, child, root, and ordered diagnostic")
+    expect(actual.ok).to_equal(true)
+    expect(actual.error).to_equal("")
+    expect(actual.output.nodes.len()).to_equal(expected.nodes.len())
+    expect(actual.output.children).to_equal(expected.children)
+    expect(actual.output.roots).to_equal(expected.roots)
+    expect(actual.output.diagnostics.len()).to_equal(expected.diagnostics.len())
+    var i = 0
+    while i < expected.nodes.len():
+        val a = actual.output.nodes[i]
+        val b = expected.nodes[i]
+        expect(a.kind).to_equal(b.kind)
+        expect(a.start).to_equal(b.start)
+        expect(a.count).to_equal(b.count)
+        expect(a.value).to_equal(b.value)
+        expect(a.child_start).to_equal(b.child_start)
+        expect(a.child_count).to_equal(b.child_count)
+        i = i + 1
+    i = 0
+    while i < expected.diagnostics.len():
+        val a = actual.output.diagnostics[i]
+        val b = expected.diagnostics[i]
+        expect(a.code).to_equal(b.code)
+        expect(a.start).to_equal(b.start)
+        expect(a.count).to_equal(b.count)
+        i = i + 1
+
+fn _leaf_v1(kind: i64, start: i64, value: i64) -> ParseProgramNodeV1:
+    ParseProgramNodeV1(kind: kind, start: start, count: 1, value: value, child_start: 0, child_count: 0)
+
+fn _check_rejected_v1(result: ParseProgramExecutionV1, reason: text):
+    expect(result.ok).to_equal(false)
+    expect(result.error).to_equal(reason)
+    expect(result.output.nodes.len()).to_equal(0)
+    expect(result.output.children.len()).to_equal(0)
+    expect(result.output.diagnostics.len()).to_equal(0)
+    expect(result.output.roots.len()).to_equal(0)
+    expect(result.tokens_consumed).to_equal(0)
+
+describe "transactional scalar grammar programs":
+    it "restores nested overwrites, child allocations, values, and diagnostics":
+        val program = setup_program_v1([
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0,
+            PG_CHOICE_V1, 39, 0, PG_ACTION_V1, 1, 0,
+            PG_CHOICE_V1, 27, 0, PG_ACTION_V1, 2, 0,
+            PG_MATCH_BYTE_V1, 98, 0, PG_COMMIT_V1, 30, 0,
+            PG_FAIL_V1, 0, 0, PG_ACTION_V1, 3, 0,
+            PG_COMMIT_V1, 36, 0, PG_FAIL_V1, 0, 0,
+            PG_END_V1, 0, 0, PG_FAIL_V1, 0, 0], [0, 42], [
+            PA_CAPTURE_V1, 10, 0,
+            PA_SET_VALUE_V1, 0, 7, PA_DIAGNOSTIC_V1, 77, 0,
+            PA_SET_VALUE_V1, 0, 99, PA_DIAGNOSTIC_V1, 66, 0,
+            PA_CAPTURE_V1, 20, 0, PA_NODE_V1, 30, 1,
+            PA_DIAGNOSTIC_V1, 88, 0], [0, 3, 9, 21, 24])
+        val result = step_parse_program_v1(program, "a", [1u16], setup_limits_v1())
+        check_exact_output_v1(result, ParseProgramOutputV1(
+            nodes: [_leaf_v1(10, 0, 7)], children: [], roots: [0], diagnostics: [
+                ParseProgramDiagnosticV1(code: 77, start: 0, count: 1),
+                ParseProgramDiagnosticV1(code: 88, start: 0, count: 1)]))
+
+    it "rolls back an inner commit when its enclosing choice later fails":
+        val program = setup_program_v1([
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0,
+            PG_CHOICE_V1, 30, 0, PG_CHOICE_V1, 21, 0,
+            PG_ACTION_V1, 1, 0, PG_COMMIT_V1, 24, 0,
+            PG_FAIL_V1, 0, 0, PG_FAIL_V1, 0, 0,
+            PG_FAIL_V1, 0, 0, PG_END_V1, 0, 0, PG_END_V1, 0, 0], [0, 33], [
+            PA_CAPTURE_V1, 10, 0, PA_SET_VALUE_V1, 0, 42,
+            PA_DIAGNOSTIC_V1, 77, 0], [0, 3, 9])
+        check_exact_output_v1(step_parse_program_v1(program, "a", [1u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, 0)], children: [], roots: [0], diagnostics: []))
+
+    it "restores caller state when a nested production fails":
+        val program = setup_program_v1([
+            PG_CHOICE_V1, 12, 0, PG_CALL_V1, 1, 0,
+            PG_COMMIT_V1, 15, 0, PG_FAIL_V1, 0, 0,
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0,
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 1, 0,
+            PG_MATCH_KIND_V1, 2, 0, PG_RETURN_V1, 0, 0], [0, 21, 33], [
+            PA_CAPTURE_V1, 10, 0, PA_CAPTURE_V1, 20, 0, PA_DIAGNOSTIC_V1, 77, 0], [0, 3, 9])
+        check_exact_output_v1(step_parse_program_v1(program, "a", [1u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, 0)], children: [], roots: [0], diagnostics: []))
+
+    it "restores the last matched source span along with the cursor":
+        val program = setup_program_v1([
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_CHOICE_V1, 18, 0,
+            PG_MATCH_KIND_V1, 2, 0, PG_ACTION_V1, 0, 0, PG_FAIL_V1, 0, 0,
+            PG_ACTION_V1, 0, 0, PG_MATCH_KIND_V1, 2, 0, PG_END_V1, 0, 0], [0, 27],
+            [PA_CAPTURE_V1, 10, 0], [0, 3])
+        check_exact_output_v1(step_parse_program_v1(program, "ab", [1u16, 2u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, 0), _leaf_v1(10, 0, 0)],
+                children: [], roots: [0, 1], diagnostics: []))
+
+    it "does not refund fuel when a choice retries without consuming tokens":
+        val program = setup_program_v1([PG_CHOICE_V1, 0, 0, PG_FAIL_V1, 0, 0], [0, 6], [], [0])
+        var limits = setup_limits_v1()
+        limits.max_steps = 7
+        val result = step_parse_program_v1(program, "", [], limits)
+        _check_rejected_v1(result, "fuel_exhausted")
+        expect(result.steps_used).to_equal(7)
+
+    it "charges action steps and discards a partially executed action on exhaustion":
+        val program = setup_program_v1([PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0],
+            [0, 9], [PA_CAPTURE_V1, 10, 0, PA_SET_VALUE_V1, 0, 9], [0, 6])
+        var limits = setup_limits_v1()
+        limits.max_steps = 3
+        val result = step_parse_program_v1(program, "a", [1u16], limits)
+        _check_rejected_v1(result, "fuel_exhausted")
+        expect(result.steps_used).to_equal(3)
+
+    it "treats output exhaustion as fatal instead of taking a successful alternative":
+        val program = setup_program_v1([PG_MATCH_KIND_V1, 1, 0, PG_CHOICE_V1, 12, 0,
+            PG_ACTION_V1, 0, 0, PG_COMMIT_V1, 12, 0, PG_END_V1, 0, 0], [0, 15],
+            [PA_CAPTURE_V1, 10, 0, PA_CAPTURE_V1, 20, 0], [0, 6])
+        var limits = setup_limits_v1()
+        limits.max_nodes = 1
+        _check_rejected_v1(step_parse_program_v1(program, "a", [1u16], limits), "output_capacity")
+
+    it "bounds recursive calls and rejects unmatched input":
+        val recursive = setup_program_v1([PG_CALL_V1, 0, 0, PG_RETURN_V1, 0, 0], [0, 6], [], [0])
+        var limits = setup_limits_v1()
+        limits.max_calls = 2
+        _check_rejected_v1(step_parse_program_v1(recursive, "", [], limits), "call_capacity")
+        val mismatch = setup_program_v1([PG_MATCH_KIND_V1, 2, 0, PG_END_V1, 0, 0], [0, 6], [], [0])
+        _check_rejected_v1(step_parse_program_v1(mismatch, "a", [1u16], limits), "no_match")
+
+    it "returns from a successful rule and applies duplicate/drop to local node references":
+        val program = setup_program_v1([PG_CALL_V1, 1, 0, PG_END_V1, 0, 0,
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_RETURN_V1, 0, 0], [0, 6, 15],
+            [PA_CAPTURE_V1, 10, 0, PA_DUP_V1, 0, 0, PA_SET_VALUE_V1, 0, -5, PA_DROP_V1, 1, 0], [0, 12])
+        check_exact_output_v1(step_parse_program_v1(program, "a", [1u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, -5)], children: [], roots: [0], diagnostics: []))
+
+    it "rejects diagnostic and choice exhaustion without publishing partial state":
+        val diagnostics = setup_program_v1([PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0],
+            [0, 9], [PA_CAPTURE_V1, 10, 0, PA_DIAGNOSTIC_V1, 1, 0, PA_DIAGNOSTIC_V1, 2, 0], [0, 9])
+        var limits = setup_limits_v1()
+        limits.max_diagnostics = 1
+        _check_rejected_v1(step_parse_program_v1(diagnostics, "a", [1u16], limits), "output_capacity")
+        val choices = setup_program_v1([PG_CHOICE_V1, 0, 0, PG_CHOICE_V1, 0, 0, PG_END_V1, 0, 0], [0, 9], [], [0])
+        limits.max_choices = 1
+        _check_rejected_v1(step_parse_program_v1(choices, "", [], limits), "choice_capacity")
+
+    it "rejects action stack underflow and malformed transaction structure":
+        val action = setup_program_v1([PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0],
+            [0, 6], [PA_SET_VALUE_V1, 0, 7], [0, 3])
+        _check_rejected_v1(step_parse_program_v1(action, "", [], setup_limits_v1()), "value_underflow")
+        val choice = setup_program_v1([PG_CHOICE_V1, 3, 0, PG_END_V1, 0, 0], [0, 6], [], [0])
+        _check_rejected_v1(step_parse_program_v1(choice, "", [], setup_limits_v1()), "unbalanced_end")
+
+    it "owns copies of the mutable grammar and action descriptors":
+        var grammar = GrammarProgram(contract_version: 1, entry_rules: [0], production_offsets: [0, 9],
+            opcodes: [PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0])
+        var actions = ActionProgram(contract_version: 1, action_offsets: [0, 3], opcodes: [PA_CAPTURE_V1, 10, 0])
+        val program = parse_program_validate_v1(grammar, actions, setup_limits_v1()).unwrap()
+        grammar.opcodes[1] = 2
+        grammar.entry_rules[0] = 7
+        actions.opcodes[1] = 99
+        check_exact_output_v1(step_parse_program_v1(program, "a", [1u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, 0)], children: [], roots: [0], diagnostics: []))
+
+    it "requires a real source anchor for a zero-arity node":
+        val unanchored = setup_program_v1([PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0],
+            [0, 6], [PA_NODE_V1, 50, 0], [0, 3])
+        _check_rejected_v1(step_parse_program_v1(unanchored, "", [], setup_limits_v1()), "node_without_anchor")
+        val anchored = setup_program_v1([PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_END_V1, 0, 0],
+            [0, 9], [PA_NODE_V1, 50, 0], [0, 3])
+        check_exact_output_v1(step_parse_program_v1(anchored, "a", [1u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [ParseProgramNodeV1(kind: 50, start: 1, count: 0,
+                value: 0, child_start: 0, child_count: 0)], children: [], roots: [0], diagnostics: []))
+
+    it "rejects malformed instructions, offsets, and unknown actions before execution":
+        val no_actions = ActionProgram(contract_version: 1, action_offsets: [0], opcodes: [])
+        val bad_target = GrammarProgram(contract_version: 1, entry_rules: [0], production_offsets: [0, 6],
+            opcodes: [PG_CHOICE_V1, 1, 0, PG_END_V1, 0, 0])
+        expect(parse_program_validate_v1(bad_target, no_actions, setup_limits_v1()).is_err()).to_equal(true)
+        val end = GrammarProgram(contract_version: 1, entry_rules: [0], production_offsets: [0, 3],
+            opcodes: [PG_END_V1, 0, 0])
+        val unsupported = ActionProgram(contract_version: 1, action_offsets: [0, 3], opcodes: [99, 0, 0])
+        expect(parse_program_validate_v1(end, unsupported, setup_limits_v1()).is_err()).to_equal(true)
+        var forged = setup_program_v1([PG_END_V1, 0, 0], [0, 3], [], [0])
+        forged.grammar_words = [99, 0, 0]
+        _check_rejected_v1(step_parse_program_v1(forged, "", [], setup_limits_v1()), "invalid_program")
+
+    it "rejects invalid token spans and unconsumed tokens without output":
+        val program = setup_program_v1([PG_END_V1, 0, 0], [0, 3], [], [0])
+        val malformed = ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: [1u16], start: [2u32], count: [1u32])
+        _check_rejected_v1(parse_grammar_execute_v1(program, parse_source_blob_from_text("a"),
+            malformed, 0, setup_limits_v1()), "invalid_input")
+        _check_rejected_v1(step_parse_program_v1(program, "a", [1u16], setup_limits_v1()), "trailing_tokens")
+
+    it "uses the same VM for miniature Simple expression, SDN list, and shell pipeline tables":
+        # Explicit token fixtures demonstrate program reuse, not complete dialect lexing/parity.
+        val binary_actions = [PA_CAPTURE_V1, 10, 0, PA_NODE_V1, 30, 2]
+        val expression = setup_program_v1([
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_MATCH_BYTE_V1, 43, 0,
+            PG_MATCH_KIND_V1, 1, 0, PG_ACTION_V1, 0, 0, PG_ACTION_V1, 1, 0, PG_END_V1, 0, 0],
+            [0, 21], binary_actions, [0, 3, 6])
+        var pipeline = expression
+        pipeline.grammar_words = parse_program_words_copy_v1(expression.grammar_words)
+        pipeline.grammar_words[7] = 124
+        val expected = ParseProgramOutputV1(nodes: [_leaf_v1(10, 0, 0), _leaf_v1(10, 2, 0),
+            ParseProgramNodeV1(kind: 30, start: 0, count: 3, value: 0, child_start: 0, child_count: 2)],
+            children: [0, 1], roots: [2], diagnostics: [])
+        check_exact_output_v1(step_parse_program_v1(expression, "a+b", [1u16, 2u16, 1u16], setup_limits_v1()), expected)
+        check_exact_output_v1(step_parse_program_v1(pipeline, "a|b", [1u16, 2u16, 1u16], setup_limits_v1()), expected)
+        val list = setup_program_v1([PG_MATCH_BYTE_V1, 91, 0, PG_MATCH_KIND_V1, 1, 0,
+            PG_ACTION_V1, 0, 0, PG_MATCH_BYTE_V1, 93, 0, PG_ACTION_V1, 1, 0, PG_END_V1, 0, 0],
+            [0, 18], [PA_CAPTURE_V1, 10, 0, PA_NODE_V1, 40, 1], [0, 3, 6])
+        check_exact_output_v1(step_parse_program_v1(list, "[1]", [2u16, 1u16, 2u16], setup_limits_v1()),
+            ParseProgramOutputV1(nodes: [_leaf_v1(10, 1, 0),
+                ParseProgramNodeV1(kind: 40, start: 1, count: 1, value: 0, child_start: 0, child_count: 1)],
+                children: [0], roots: [1], diagnostics: []))
