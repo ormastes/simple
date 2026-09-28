@@ -286,6 +286,10 @@ git push origin --delete work/<topic>
 - `SPipe Self Review Admission` is a user/LLM review, not a lock: any push to
   `main`/`release/**` invalidates it on every open PR and it expires in 10
   minutes. Do not wait for it to stay green — review, then `--admin` merge.
+- Before `--admin`, read the PR's review comments
+  (`gh pr view <n> --comments`). A finding that your change breaks callers or
+  regresses a spec blocks the merge until you fix it or reply with evidence it
+  is wrong; "someone else reviewed it" is not a reason to merge over it.
 - Never `--admin` over a genuinely FAILING check caused by your change, and
   never merge another session's active draft. Recipe and rules:
   `.claude/rules/vcs.md` § "Force-landing a PR".
