@@ -2,6 +2,10 @@
 
 Status: ACTIVE; production qualification remains OPEN.
 
+PR #1932 merged the focused Stage2 bootstrap/runtime repairs into `main` at
+`0dbb2c1691a442829737507dc8d1d2a970bbf7bf`. The continuing Target 5/6
+lane is `codex/target56-next`; the merged PR did not complete either target.
+
 Continuation note (2026-09-28): the isolated current-source Stage2 candidate
 now passes its full native build and positional hello-world frontend smoke
 after repairing dynlib lifetime state inference, backend diagnostics, exact
@@ -28,9 +32,10 @@ smoke, and runtime capability proof. The rebase retained main's independent
 Simple-side descriptor-list fix in that owner. A focused no-stub native build
 of the rebased source compiled 37 files with zero failures; its probe exited
 zero with missing-library refusal. The in-process Stage2 compiler-test
-matrix failed at its full CLI link after 1,828 seconds: the `host-gpu` core
-runtime does not supply optional GPU/SQLite/SDL/Metal and other reached
-symbols. The later test rows were blocked. See
+matrix failed at its full CLI link after 1,828 seconds with unresolved
+GPU/SQLite/SDL/Metal and other reached symbols. Several GPU symbols are
+actually defined in the frozen native-all archive, so archive selection and
+link order remain under investigation. The later test rows were blocked. See
 `doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
@@ -40,7 +45,7 @@ diagnostic probes into a Stage4, SPipe, native performance, or release PASS.
 The remaining technical items below remain active; see
 `doc/09_report/compiler/target56_user_closeout_2026-09-28.md`.
 
-Owner lane: `codex/target56-completion` (draft PR #1932). This TODO carries the unfinished work
+Owner lane: `codex/target56-next` (PR #1932 merged). This TODO carries the unfinished work
 from `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`,
 `doc/09_report/compiler/target6_cold_hir_batch_2026-09-27.md`, and
 `doc/08_tracking/bug/target56_isolated_current_source_verification_blockers_2026-09-27.md`.
