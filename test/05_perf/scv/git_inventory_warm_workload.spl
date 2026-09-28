@@ -1,0 +1,61 @@
+# Native paired workload for the production Git/SCV inventory bridge.
+# `prepare` creates one fixed fixture; `warm` samples one unchanged refresh.
+
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.io.mod.{dir_create, dir_remove, file_write, process_run_bounded}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure}
+use std.scv.compile_source_inventory.{compile_source_inventory_read_current_v1}
+
+fn git_ok(root: text, args: [text]) -> bool:
+    val (_out, _err, status) = process_run_bounded(
+        "git", ["-C", root] + args, 300000, 1024 * 1024)
+    status == 0
+
+fn main() -> i64:
+    val root = "build/mini_builds/target56_git_perf_fixture"
+    val cache_root = root + "/build/scv"
+    val mode = env_get("TARGET56_GIT_PERF_MODE") ?? ""
+    if mode == "prepare":
+        dir_remove(root, true)
+        if not dir_create(root + "/src", true):
+            return 1
+        var index = 0
+        while index < 1200:
+            if not file_write(root + "/src/module_{index}.spl",
+                    "export fn value(): {index}\n"):
+                return 2
+            index = index + 1
+        if not git_ok(root, ["init", "-q"]) or
+                not git_ok(root, ["add", "src"]) or
+                not git_ok(root, ["-c", "user.name=perf", "-c",
+                    "user.email=perf@example.invalid", "commit", "-qm", "seed"]):
+            return 3
+        val cold = compiler_inventory_refresh_v1(
+            root, cache_root, ["src", "test"], true)
+        if not cold.valid:
+            print "cold-error={cold.reason}"
+            return 4
+        val admitted = compile_source_inventory_read_current_v1(cache_root)
+        if not admitted.valid or admitted.inventory == nil or
+                admitted.inventory!.entries.len() != 1200:
+            return 5
+        print "prepared=1200"
+        return 0
+    if mode != "warm":
+        return 6
+    val start = time_sample_monotonic_nanos_or_failure()
+    if start <= 0:
+        return 7
+    val refreshed = compiler_inventory_refresh_v1(
+        root, cache_root, ["src", "test"], false)
+    val elapsed = time_sample_monotonic_nanos_or_failure() - start
+    if not refreshed.valid or elapsed <= 0:
+        print "warm-error={refreshed.reason}"
+        return 8
+    val current = compile_source_inventory_read_current_v1(cache_root)
+    if not current.valid or current.inventory == nil or
+            current.inventory!.entries.len() != 1200:
+        return 9
+    print "warm_ns={elapsed}"
+    0
