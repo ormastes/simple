@@ -5,7 +5,8 @@ use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
 use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES, mount_handle_encode,
     mount_handle_slot, mount_handle_generation, mount_path_canonical, text_has_mount_prefix,
-    driver_positioned_read_bytes, driver_positioned_write_bytes}
+    driver_positioned_read_bytes, driver_positioned_write_bytes,
+    driver_positioned_kind}
 use std.fs_driver.mount_driver_dispatch.{_driver_name, _driver_capabilities, _driver_stat_path,
     _driver_fstat, _driver_open_path, _driver_opendir_path, _driver_readdir_handle,
     _driver_read_handle, _driver_mkdir_path, _driver_write_text_handle,
@@ -331,9 +332,22 @@ impl MountTable:
                 var i: i32 = 0
                 while i < self.mounts.len() as i32:
                     if self.mounts[i].id.id == binding.mount_id.id:
-                        val written = driver_positioned_write_bytes(
-                            self.mounts[i].driver, kind, binding.inner_handle,
-                            offset as i64, data)?
+                        val actual_kind = driver_positioned_kind(self.mounts[i].driver)?
+                        if kind != PositionedDriverKind.Auto and kind != actual_kind:
+                            return Err(FsError.Unsupported)
+                        # Some backends extend the file to offset even for an
+                        # empty patch. An empty write must never reach them.
+                        if length == 0u64:
+                            return Ok(0u64)
+                        self._generation_available(binding.mount_id, false)?
+                        val write_result = driver_positioned_write_bytes(
+                            self.mounts[i].driver, actual_kind, binding.inner_handle,
+                            offset as i64, data)
+                        # Drivers can write bytes and then fail while restoring a
+                        # cursor or mirroring storage. Once dispatched, even an
+                        # error must invalidate retained content identities.
+                        self._advance_generation(binding.mount_id, false)?
+                        val written = write_result?
                         if written < 0 or written > data.len() as i64:
                             return Err(FsError.IoError(code: 0u32))
                         return Ok(written as u64)
