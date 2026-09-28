@@ -53,12 +53,14 @@ main = main()
 }
 
 #[test]
-fn nested_find_alias_does_not_consume_index_of_start_argument() {
+fn nested_find_alias_honours_start_argument_like_index_of() {
+    // Since c9777df0519 (#65) `find`/`find_str` take the same optional byte
+    // offset as `index_of`; the nested temporary-text path must agree.
     let code = r#"
 fn main() -> i64:
     val find_alias: i64 = "ababa".substring(0).find_str("ba", 3)
     val indexed: i64 = "ababa".substring(0).index_of("ba", 3)
-    if find_alias == 1 and indexed == 3:
+    if find_alias == 3 and indexed == 3:
         return 0
     1
 
@@ -68,6 +70,6 @@ main = main()
     assert_eq!(
         run(code),
         0,
-        "find aliases stay one-argument while index_of honors its start offset",
+        "find aliases honour the start offset exactly like index_of",
     );
 }

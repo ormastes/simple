@@ -37,6 +37,24 @@ fn relocation_count(bytes: &[u8], name: &str) -> usize {
                         _ => panic!("unexpected call relocation for {name}: {relocation:?}"),
                     };
                 }
+                // ELF AArch64 likewise addresses an external callee through a
+                // GOT page + low-12 load pair; count the page half once.
+                if file.architecture() == object::Architecture::Aarch64
+                    && file.format() == object::BinaryFormat::Elf
+                {
+                    let object::RelocationFlags::Elf { r_type } = relocation.flags() else {
+                        panic!("unexpected ARM64 ELF relocation: {relocation:?}");
+                    };
+                    return match r_type {
+                        object::elf::R_AARCH64_CALL26
+                        | object::elf::R_AARCH64_JUMP26
+                        | object::elf::R_AARCH64_ADR_PREL_PG_HI21
+                        | object::elf::R_AARCH64_ADR_GOT_PAGE => true,
+                        object::elf::R_AARCH64_ADD_ABS_LO12_NC
+                        | object::elf::R_AARCH64_LD64_GOT_LO12_NC => false,
+                        _ => panic!("unexpected call relocation for {name}: {relocation:?}"),
+                    };
+                }
                 true
             }).count()
         })
