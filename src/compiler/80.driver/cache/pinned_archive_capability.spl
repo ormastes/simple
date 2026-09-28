@@ -1,4 +1,7 @@
-use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+use std.common.crypto.sha256.{
+    sha256_u8_hex, sha256_text, sha256_stream_v1_new,
+    sha256_stream_v1_update_byte, sha256_stream_v1_finish_hex
+}
 use std.async.cancellation.{token_new}
 use std.common.io.file_read_policy.{FileReadPolicyV1}
 use std.common.io.read_only_file_view.{
@@ -11,6 +14,7 @@ use compiler.driver.cache.package_archive_types.{
 }
 
 val PINNED_ARCHIVE_MAX_BYTES_V1: i64 = 1073741824
+val PINNED_ARCHIVE_DIGEST_CHUNK_BYTES_V1: u64 = 65536
 
 enum PinnedArchiveErrorV1:
     path_outside_cas
@@ -189,15 +193,34 @@ fn pinned_archive_identity_v1(descriptor: i64) -> ArchiveFileIdentityV1?:
 
 fn pinned_archive_digest_descriptor_v1(descriptor: i64, size: u64) -> text?:
     val view = read_only_file_view_adopt_descriptor_v1(
-        descriptor, "archive-open", FileReadPolicyV1.auto_map, size)
+        descriptor, "archive-open", FileReadPolicyV1.buffered,
+        PINNED_ARCHIVE_DIGEST_CHUNK_BYTES_V1)
     if view.is_err():
         return nil
     var adopted_view = view.unwrap()
-    val read = read_only_file_view_read_v1(
-        &adopted_view, 0, size, token_new())
-    if read.is_err() or read.unwrap().bytes.len().to_u64() != size:
-        return nil
-    Some(sha256_u8_hex(read.unwrap().bytes))
+    val stream = sha256_stream_v1_new()
+    val cancellation = token_new()
+    var offset: u64 = 0u64
+    while offset < size:
+        val remaining = size - offset
+        val length = if remaining < PINNED_ARCHIVE_DIGEST_CHUNK_BYTES_V1:
+            remaining
+        else:
+            PINNED_ARCHIVE_DIGEST_CHUNK_BYTES_V1
+        val read = read_only_file_view_read_v1(
+            &adopted_view, offset, length, cancellation)
+        if read.is_err():
+            return nil
+        val bytes = read.unwrap().bytes
+        if bytes.len().to_u64() != length:
+            return nil
+        var j: i64 = 0
+        while j < length as i64:
+            if not sha256_stream_v1_update_byte(stream, bytes[j]):
+                return nil
+            j = j + 1
+        offset = offset + length
+    sha256_stream_v1_finish_hex(stream)
 
 fn pinned_archive_close_descriptor_v1(descriptor: i64):
     unsafe(capabilities: [ffi]):

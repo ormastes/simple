@@ -1,7 +1,8 @@
 # Stage-2 pinned archive read RSS runaway (2026-09-29)
 
-Status: focused Stage-2 native repro now passes; production memory/performance
-qualification remains open. No current-source Stage-4 result is claimed.
+Status: focused Stage-2 native bounded reader now passes on small and
+three-chunk archives; production memory/performance qualification remains
+open. No current-source Stage-4 result is claimed.
 
 While replacing the cold publisher's bounded CAS member check with
 `pinned_archive_open_verified_v1` and
@@ -122,3 +123,28 @@ digests on the same retained array, and inspect the first differing block or
 call boundary. Repeated-byte and synthetic mixed-byte vectors pass, but they
 do not cover this archive content. After a correct bounded digest passes
 admission, test an archive larger than one chunk and measure paired time/RSS.
+
+## Follow-up: bounded byte feed passes three chunks (2026-09-29)
+
+The descriptor array and an owned copy both had the correct one-shot archive
+digest, yet `sha256_stream_v1_update` on the owned array returned the wrong
+digest. Feeding scalar bytes through `sha256_stream_v1_update_byte` produced
+the admitted digest. This isolates the failure to the native array-update
+call path in this context; the root cause remains unproven.
+
+The pinned descriptor digest now reads buffered windows of at most 65,536
+bytes and feeds each byte to the bounded SHA state. A no-stub native spec
+admits the original 542-byte archive and a 131 KiB archive that spans three
+digest reads, verifies a member, and closes the capability: 9 examples,
+0 failures, 0.18 s, 13,244 KiB peak RSS under a 2 GiB virtual-memory limit.
+This is correctness and bounded-read evidence, not a paired performance
+qualification. The per-byte call cost must be measured on realistic archive
+sizes against the prior whole-archive path; if it fails the normalized
+time/RSS rule or hard limits, replace it with a correct block update before
+the change is promoted.
+
+The isolated worktree does not contain `bin/simple` or native MCP/LSP server
+wrappers. The available Stage-2 capsule supports `native-build` but rejects
+the `-c` and `check` commands used by the core smoke and source-check scripts;
+the MCP native smoke stops at its missing server binary. These broader gates
+remain unverified pending a current-source self-hosted runtime and wrappers.

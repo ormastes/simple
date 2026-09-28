@@ -67,7 +67,8 @@ fn compact_output(module: HirModule, inventory: CompileSourceInventoryV1,
         PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
 
 fn compact_persisted_archive_fixture(
-    root: text, scoped: bool, corrupt_interface: bool
+    root: text, scoped: bool, corrupt_interface: bool,
+    large_archive: bool = false
 ) ->
         (PackageModuleIndexBuildAuthorityV1, CompileSourceInventoryV1,
          ColdHirPackageOutputV1, bool):
@@ -92,7 +93,11 @@ fn compact_persisted_archive_fixture(
         "not-a-symbol"
     else:
         "symbol|foo|function|i64|{symbol_digest}"
-    val action_content = "action|compile|function|foo|{compile_digest}"
+    val action_prefix = "action|compile|function|foo|{compile_digest}"
+    val action_content = if large_archive:
+        action_prefix + "x".repeat(131072)
+    else:
+        action_prefix
     output.interface_archive_digest = sha256_text(interface_content)
     output.action_archive_digest = sha256_text(action_content)
     val preview = cold_hir_package_index_from_outputs_v1(
@@ -161,6 +166,47 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
                                     expect(sha256_u8_hex(payload.unwrap())).to_equal(
                                         output.interface_archive_digest)
                                 expect(pinned_archive_close_v1(capability).is_ok()).to_be(true)
+
+    it "verifies a persisted archive across three bounded digest reads":
+        val root = "build/tmp/cold-hir-pinned-large/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false, true)
+        expect(archive_published).to_be(true)
+        val built = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, [output])
+        expect(built.is_ok()).to_be(true)
+        if built.is_ok():
+            val entry = built.unwrap().entries[0]
+            val aggregate_action_digest = sha256_text(entry.action_digest)
+            val receipt_digest = cas_batch_lookup_receipt_digest_v1(
+                root, entry.package_identity, aggregate_action_digest)
+            expect(receipt_digest != nil).to_be(true)
+            if receipt_digest != nil:
+                val encoded = cas_get(root, receipt_digest.unwrap())
+                expect(encoded != nil).to_be(true)
+                if encoded != nil:
+                    val receipt = package_archive_receipt_decode_v1(
+                        encoded.unwrap())
+                    expect(receipt != nil).to_be(true)
+                    if receipt != nil:
+                        val admitted = receipt.unwrap()
+                        val last = admitted.members[admitted.members.len() - 1]
+                        expect(last.offset + last.extent > 131072u64).to_be(true)
+                        val blob_path = cas_blob_path(root, admitted.archive_digest)
+                        val relative = blob_path.substring(
+                            root.len() + 1, blob_path.len())
+                        val opened = pinned_archive_open_verified_v1(
+                            root, relative, admitted)
+                        expect(opened.is_ok()).to_be(true)
+                        if opened.is_ok():
+                            var capability = opened.unwrap()
+                            val payload = pinned_archive_read_member_v1(
+                                &capability, "interface.smf")
+                            expect(payload.is_ok()).to_be(true)
+                            if payload.is_ok():
+                                expect(sha256_u8_hex(payload.unwrap())).to_equal(
+                                    output.interface_archive_digest)
+                            expect(pinned_archive_close_v1(capability).is_ok()).to_be(true)
 
     it "binds an entry-closure V3 graph to the full frozen inventory":
         val base = compact_inventory()
