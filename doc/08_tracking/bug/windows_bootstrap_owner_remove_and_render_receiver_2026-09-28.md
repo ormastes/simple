@@ -213,3 +213,14 @@ No full Stage2 retry or Stage3/Stage4 run was started after these findings.
 No release or production-readiness PASS is claimed. Existing native caches
 and earlier full-bootstrap evidence remain intact. Further retries stopped
 under the repository's bounded verification guard.
+
+## Mainline reconciliation after independent fixes
+
+At main `0dbb2c1691a`, commits `e7bcb37c73a` and `1d90954b0a2`
+independently fixed the lifetime owner and C collection removal boundary.
+This PR retains those mainline implementations. Its remaining source changes
+preserve aggregate-copy receiver layout in Cranelift and provide the explicit
+`MathRenderable` receiver contract; it also adds rendering and C removal
+regressions. The earlier owner/C test results above are historical evidence
+from the original isolated Windows candidate, not a new test of this rebased
+mainline tree. A focused C99 standalone build against mainline `runtime_native.c` passed the added removal selfcheck (18 checks, 0 failures) on WSL. The Windows Stage2 admission failure remains open.

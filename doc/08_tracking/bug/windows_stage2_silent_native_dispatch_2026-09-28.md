@@ -122,3 +122,11 @@ gate. That integration did not rerun full bootstrap.
 This report supplies no admission-based reason to promote or land the PR.
 Its collection-removal and receiver changes must be judged on their independent
 focused coverage; they do not resolve the failure documented here.
+
+## Mainline reconciliation
+
+At main `0dbb2c1691a`, owner and C collection removal fixes landed
+independently. PR #1991 was narrowed to receiver-copy/rendering source changes,
+regression fixtures, and the preserved forensic reports. This report still
+records the exact old-base rejected candidate; no rerun or admission is
+implied for the rebased PR head.
