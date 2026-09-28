@@ -28,3 +28,21 @@ executable existed. The final decoder fix therefore still lacks native PASS
 evidence. Use a longer bounded build or a smaller isolated decoder closure
 next; then rerun the original publication spec before claiming the cold HIR
 path works.
+
+## Compiler-path check after the bounded build
+
+The staged pure-Simple compiler at
+`build/bootstrap-target56/stage4-sqlite-compiler/simple` (SHA-256
+`f94f9f98dba65abb79491a84a30cc09aea86f4e1dc1c9bcb4ab35072fec19a3f`)
+reached the 42-file receipt probe quickly but reported the existing flat-AST
+empty-declaration-tag failure in several imported modules. An eight-file
+decoder-only closure was tried by temporarily moving the decoder next to its
+encoder; the installed `bin/release` compiler (SHA-256
+`44a07ae51c5dd308553cb06203e3e92d0a468b68ffaa28773af0fde0c7ac2c2d`)
+parsed and surfaced all eight files, then stopped in HIR with
+`semantic: array index out of bounds: index is 3 but length is 3` after
+reporting unresolved transitive `Option`/primitive type imports. That
+unqualified refactor was reverted. Neither attempt produced a probe binary or
+changed the 2/4 native publication verdict. The next diagnostic should
+address compiler qualification or reduce the probe without moving production
+code merely to shorten its closure.
