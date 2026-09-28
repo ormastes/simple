@@ -14,6 +14,28 @@ use compiler.backend.backend.backend_helpers.{backend_helper_aot_opt_level}
 use compiler.backend.backend.llvm_backend_tools.{llvm_llc_opt_flag}
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.driver.driver_backend_plugin_selection.{driver_aot_backend_plugin_request_v1}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1, static_backend_entry_v1
+}
+use compiler.backend.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.backend.static_backend_llvm_port.{llvm_backend_port_v1}
+
+# `simple test` runs under the interpreter, where the K1 composition root is
+# not shadowed in; install the same "llvm-cranelift" table the CLI installs.
+fn install_context_k1_table_v2() -> bool:
+    install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift,
+            BackendLinkClass.KernelLinked, cranelift_backend_port_v1(),
+            CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter,
+            BackendLinkClass.KernelLinked, interpreter_backend_port_v1(),
+            CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm,
+            BackendLinkClass.KernelLinked, llvm_backend_port_v1(),
+            CodegenOutputKind.ObjectCode)
+    ])
 
 fn context_probe_options_v2() -> BackendCompileOptions:
     val defaults = compileoptions_default_options()
@@ -69,6 +91,7 @@ describe "retained builtin target context V2":
         expect(ir).to_contain("target triple = \"x86_64-unknown-linux-gnu\"")
 
     it "preserves admitted O1 through AOT preparation and rejects changed optimization":
+        expect(install_context_k1_table_v2()).to_equal(true)
         val request = driver_aot_backend_plugin_request_v1("llvm", "x86_64", "", 1)
         val adapter = create_builtin_backend_compile_adapter(request).ok().unwrap()
         val options = adapter.target_context.options
