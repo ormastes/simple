@@ -317,6 +317,15 @@ Isolate the native digest mismatch before replacing the working whole-member
 copy; see
 `doc/08_tracking/bug/target6_native_stream_hash_archive_member_mismatch_2026-09-29.md`.
 
+Warm route ordering follow-up (2026-09-29): the selected package links already
+built for archive admission now also order scheduled modules, removing one
+full index scan per scheduled package. The no-stub native route spec passes
+6/6. A 30-pair, 2,488-module native microbenchmark reduced p95 from
+1,957.45 ms to 36.52 ms with peak RSS 8,792 to 8,952 KiB; normalized
+time-plus-memory score 1.037. This is a route-step result, not a full compile
+cohort. See
+`doc/09_report/compiler/target6_package_route_order_perf_2026-09-29.md`.
+
 Cold typed-HIR handoff follow-up (2026-09-28): a per-entry seed API now
 checks frozen paths and source bytes against one already-admitted inventory
 entry. The existing batch producer uses it after one digest and scalar index
