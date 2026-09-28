@@ -1,0 +1,194 @@
+# codex-impl: bounded, deterministic SimpleOS server-data media identity codec.
+#
+# This module does not create, publish, attach, or admit a host image. It is the
+# shared byte contract consumed by the future provisioner and transport probe.
+
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+
+pub val SERVER_DATA_ROLE_V1: text = "simpleos-server-data-v1"
+pub val SERVER_DATA_SERIAL_V1: text = "simpleos-server-data-v1"
+pub val SERVER_DATA_SECTOR_SIZE_V1: u32 = 512u32
+pub val SERVER_DATA_DEFAULT_BLOCKS_V1: u64 = 524288u64 # 256 MiB
+pub val SERVER_DATA_MIN_BLOCKS_V1: u64 = 65536u64     # 32 MiB
+pub val SERVER_DATA_MAX_BLOCKS_V1: u64 = 524288u64
+
+val _IDENTITY_MAGIC: u32 = 0x31444953u32 # "SID1"
+val _IDENTITY_VERSION: u32 = 1u32
+val _IDENTITY_BYTES: i64 = 512
+
+pub struct ServerDataImageIdentityV1:
+    role: text
+    serial: text
+    uuid_hi: u64
+    uuid_lo: u64
+    sector_size: u32
+    block_count: u64
+    empty_root_generation: u64
+
+pub struct ServerDataImageValidationV1:
+    accepted: bool
+    reason: text
+    identity: ServerDataImageIdentityV1
+
+fn _zero_identity() -> ServerDataImageIdentityV1:
+    ServerDataImageIdentityV1(
+        role: "", serial: "", uuid_hi: 0u64, uuid_lo: 0u64,
+        sector_size: 0u32, block_count: 0u64, empty_root_generation: 0u64)
+
+fn _zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < count:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _put_u32(buf: [u8], offset: i64, value: u32) -> [u8]:
+    var out = buf
+    val n = value as u64
+    out[offset] = (n % 256u64) as u8
+    out[offset + 1] = ((n / 256u64) % 256u64) as u8
+    out[offset + 2] = ((n / 65536u64) % 256u64) as u8
+    out[offset + 3] = ((n / 16777216u64) % 256u64) as u8
+    out
+
+fn _put_u64(buf: [u8], offset: i64, value: u64) -> [u8]:
+    var out = buf
+    var n = value
+    var i = 0
+    while i < 8:
+        out[offset + i] = (n % 256u64) as u8
+        n = n / 256u64
+        i = i + 1
+    out
+
+fn _get_u32(buf: [u8], offset: i64) -> u32:
+    var n: u64 = 0u64
+    var scale: u64 = 1u64
+    var i = 0
+    while i < 4:
+        n = n + (buf[offset + i] as u64) * scale
+        scale = scale * 256u64
+        i = i + 1
+    n as u32
+
+fn _get_u64(buf: [u8], offset: i64) -> u64:
+    var n: u64 = 0u64
+    var scale: u64 = 1u64
+    var i = 0
+    while i < 8:
+        n = n + (buf[offset + i] as u64) * scale
+        scale = scale * 256u64
+        i = i + 1
+    n
+
+fn _checksum(bytes: [u8], end: i64) -> u32:
+    # Adler-32 is used only as the corruption checksum for this fixed metadata
+    # record. The u64 intermediates avoid target-dependent overflow behavior;
+    # DBFS retains its own superblock checksum.
+    var a: u64 = 1u64
+    var b: u64 = 0u64
+    var i = 0
+    while i < end:
+        a = (a + (bytes[i] as u64)) % 65521u64
+        b = (b + a) % 65521u64
+        i = i + 1
+    (b * 65536u64 + a) as u32
+
+fn _put_ascii(buf: [u8], offset: i64, width: i64, value: text) -> [u8]:
+    var out = buf
+    val source = text_to_bytes(value)
+    var i = 0
+    while i < source.len() and i < width:
+        out[offset + i] = source[i]
+        i = i + 1
+    out
+
+fn _read_ascii(buf: [u8], offset: i64, width: i64) -> text:
+    var out: [u8] = []
+    var i = 0
+    while i < width and buf[offset + i] != 0u8:
+        out.push(buf[offset + i])
+        i = i + 1
+    bytes_to_text(out)
+
+fn _bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+pub fn server_data_identity_sector_v1(identity: ServerDataImageIdentityV1) -> Result<[u8], text>:
+    if identity.role != SERVER_DATA_ROLE_V1:
+        return Err("server-data image role mismatch")
+    if identity.serial != SERVER_DATA_SERIAL_V1:
+        return Err("server-data image serial mismatch")
+    if identity.uuid_hi == 0u64 and identity.uuid_lo == 0u64:
+        return Err("server-data image UUID must be nonzero")
+    if identity.sector_size != SERVER_DATA_SECTOR_SIZE_V1:
+        return Err("server-data image sector size must be 512")
+    if identity.block_count < SERVER_DATA_MIN_BLOCKS_V1 or identity.block_count > SERVER_DATA_MAX_BLOCKS_V1:
+        return Err("server-data image size must be between 32 MiB and 256 MiB")
+    if identity.empty_root_generation != 1u64:
+        return Err("server-data empty-root generation must be one")
+    var bytes = _zero_bytes(_IDENTITY_BYTES)
+    bytes = _put_u32(bytes, 0, _IDENTITY_MAGIC)
+    bytes = _put_u32(bytes, 4, _IDENTITY_VERSION)
+    bytes = _put_u64(bytes, 8, identity.uuid_hi)
+    bytes = _put_u64(bytes, 16, identity.uuid_lo)
+    bytes = _put_u32(bytes, 24, identity.sector_size)
+    bytes = _put_u64(bytes, 28, identity.block_count)
+    bytes = _put_u64(bytes, 36, identity.empty_root_generation)
+    bytes = _put_ascii(bytes, 44, 32, identity.role)
+    bytes = _put_ascii(bytes, 76, 32, identity.serial)
+    bytes = _put_u32(bytes, 108, _checksum(bytes, 108))
+    Ok(bytes)
+
+pub fn validate_server_data_identity_sector_v1(bytes: [u8]) -> ServerDataImageValidationV1:
+    if bytes.len() != _IDENTITY_BYTES:
+        return ServerDataImageValidationV1(accepted: false, reason: "identity sector length mismatch", identity: _zero_identity())
+    if _get_u32(bytes, 0) != _IDENTITY_MAGIC or _get_u32(bytes, 4) != _IDENTITY_VERSION:
+        return ServerDataImageValidationV1(accepted: false, reason: "identity magic/version mismatch", identity: _zero_identity())
+    if _get_u32(bytes, 108) != _checksum(bytes, 108):
+        return ServerDataImageValidationV1(accepted: false, reason: "identity checksum mismatch", identity: _zero_identity())
+    val identity = ServerDataImageIdentityV1(
+        role: _read_ascii(bytes, 44, 32), serial: _read_ascii(bytes, 76, 32),
+        uuid_hi: _get_u64(bytes, 8), uuid_lo: _get_u64(bytes, 16),
+        sector_size: _get_u32(bytes, 24), block_count: _get_u64(bytes, 28),
+        empty_root_generation: _get_u64(bytes, 36))
+    val encoded = server_data_identity_sector_v1(identity)
+    if encoded.is_err():
+        return ServerDataImageValidationV1(accepted: false, reason: encoded.unwrap_err(), identity: identity)
+    if not _bytes_equal(encoded.unwrap(), bytes):
+        return ServerDataImageValidationV1(accepted: false, reason: "identity sector is not canonical", identity: identity)
+    ServerDataImageValidationV1(accepted: true, reason: "", identity: identity)
+
+pub fn server_data_identity_set_accepts_v1(
+    candidates: [ServerDataImageIdentityV1], root_uuid_hi: u64, root_uuid_lo: u64
+) -> Result<ServerDataImageIdentityV1, text>:
+    var match_count = 0
+    var selected = _zero_identity()
+    var invalid_match = false
+    var root_alias = false
+    for candidate in candidates:
+        if candidate.role == SERVER_DATA_ROLE_V1 and candidate.serial == SERVER_DATA_SERIAL_V1:
+            if candidate.uuid_hi == root_uuid_hi and candidate.uuid_lo == root_uuid_lo:
+                root_alias = true
+            val valid = server_data_identity_sector_v1(candidate)
+            if valid.is_err():
+                invalid_match = true
+            selected = candidate
+            match_count = match_count + 1
+    if match_count == 0:
+        return Err("server-data image identity missing")
+    if match_count != 1:
+        return Err("duplicate server-data image identities")
+    if invalid_match:
+        return Err("server-data image identity is invalid")
+    if root_alias:
+        return Err("server-data UUID duplicates root volume")
+    Ok(selected)
