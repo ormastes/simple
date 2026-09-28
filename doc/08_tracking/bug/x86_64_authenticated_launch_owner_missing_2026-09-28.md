@@ -55,3 +55,36 @@ blocked because `executable_admission_pipeline._loader_read_binding_exact`
 still rereads through text `pread` (NUL bytes overrun `text_to_bytes_pure`),
 and with a byte-exact reread patched in, pure-Ed25519 admission exceeded the
 900 s test budget; (3) the arm64 owner still adopts path-only.
+
+## 2026-09-28 update — admission reread fixed; ">900 s" not reproduced
+
+Profiled with the smallest input (the 132-byte fixture ELF) under
+`bin/simple test`, binary `bin/release/aarch64-unknown-linux-gnu/simple`
+(51838272 bytes, 2026-09-26 16:44, sha256 `44a07ae51c5dd308...`, Rust seed).
+Per-phase wall times: keypair 0.35-1.0 s, sign 0.7-2.1 s, direct verify
+~1.5-1.9 s, admission reread 1 ms, sha 10 ms. Neither the reread nor
+pure-Ed25519 costs hundreds of seconds; the >900 s figure was on an unlanded
+local patch and is not reproduced on main.
+
+The real defect was correctness: `_loader_read_binding_exact` reread the image
+through text `pread` + `text_to_bytes_pure` (per-char copy), which crashes on
+the NUL-bearing ELF (`string index out of bounds: index is 132 but length is
+132`). It now makes one bulk binary read through
+`MountTable.read_execute_binding_exact_v1` (retained binding, revalidated).
+The spec fixture also moved to NVFS + `positioned_write_bytes` (RamFS via the
+MountTable has no text-write arm and drops its fd table) and to
+`executable_loader_trust_roots_boot_initialize_v1` (the public initializer is
+inspect-only).
+
+Evidence: `authenticated_launch_arguments_threading_spec.spl` example
+"rereads the admitted image byte-exactly before signature verification":
+red on main (the crash above, 1/2, 19 s) -> green 2/2 in 30 s.
+
+Item (2) above is now narrowed: the full argv/envp prepared-image proof is
+blocked on an aarch64 host because the interpreter picks `@cfg` by
+`TargetArch::host()` (`interpreter_eval.rs:523/721`,
+`interpreter_module/module_loader.rs:1000`), so ELF layout after signature
+verification reaches freestanding `@cfg(arm64)` externs
+(`byte_utils.byte_at` -> `rt_arm_array_get_byte_u32`, `elf_loader.spl`
+`rt_arm_elf64_*`) that the hosted interpreter does not register
+(`unknown extern function: rt_arm_array_get_byte_u32`).
