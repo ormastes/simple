@@ -211,6 +211,45 @@ describe "the SDN dialect through the seam":
                 case Err(e):
                     assert_true(false)
 
+    it "keeps duplicate-key diagnostics separate from last-wins nodes":
+        # @req REQ-009
+        val clean = parse_dialect_normalize_sdn_v1(
+            "metadata:\n    ns: ci\n    name: two\n", "config.sdn")
+        val duplicate_source = "metadata:\n    name: one\n    ns: ci\n    name: two\n"
+        val duplicate = parse_dialect_normalize_sdn_v1(
+            duplicate_source, "config.sdn")
+        assert_true(clean.node_digest.w0 == duplicate.node_digest.w0 and
+            clean.node_digest.w1 == duplicate.node_digest.w1 and
+            clean.node_digest.w2 == duplicate.node_digest.w2 and
+            clean.node_digest.w3 == duplicate.node_digest.w3)
+        assert_false(clean.diagnostic_digest.w0 == duplicate.diagnostic_digest.w0 and
+            clean.diagnostic_digest.w1 == duplicate.diagnostic_digest.w1 and
+            clean.diagnostic_digest.w2 == duplicate.diagnostic_digest.w2 and
+            clean.diagnostic_digest.w3 == duplicate.diagnostic_digest.w3)
+        match parse_result_seam_request_v1(parse_result_provider_sdn_v1(),
+            request_for(duplicate_source, "config.sdn", PARSE_DIALECT_SDN_V1)):
+            case Ok(result):
+                assert_true(result.diagnostic_count == 1u64)
+                assert_true(parse_result_normalized_output_same_v1(
+                    result.output, duplicate))
+            case Err(e):
+                assert_true(false)
+
+    it "reports one fatal diagnostic from a malformed SDN collection":
+        # @req REQ-009
+        val malformed_source = "items: [one"
+        val direct = parse_dialect_normalize_sdn_v1(
+            malformed_source, "bad.sdn")
+        match parse_result_seam_request_v1(parse_result_provider_sdn_v1(),
+            request_for(malformed_source, "bad.sdn", PARSE_DIALECT_SDN_V1)):
+            case Ok(result):
+                assert_true(result.declaration_count == 0u64)
+                assert_true(result.diagnostic_count == 1u64)
+                assert_true(parse_result_normalized_output_same_v1(
+                    result.output, direct))
+            case Err(e):
+                assert_true(false)
+
     it "refuses a Simple-dialect request to the SDN provider":
         # @req REQ-009
         val simple_src = simple_source("f01_functions.spl")
