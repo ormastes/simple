@@ -1,6 +1,6 @@
 # Seed binds untyped bare `x.lower()` to the only user `*.lower` method (2026-09-28)
 
-**Status:** open (seed). Symptom worked around in `.spl` by PR `work/fix-aarch64-simd-avx512-owner`.
+**Status:** fixed in seed source (PR `work/seed-bare-text-lower-builtin`); effective only after a seed redeploy. Symptom was worked around in `.spl` by PR #1894.
 
 ## Symptom
 macOS arm64 Stage 2 sanity (run 36345547574, sha 3caa0bb071f) aborted on the
@@ -40,3 +40,15 @@ prints `MARKER` twice and `0`, where it should print `MARKER` once and `hello`.
 Resolve bare text-builtin method names (`lower`, `upper`, `trim`, ...) builtin
 first, or exclude them from the single-candidate name-suffix bind, as was done
 for `has`/`len`. Until then, no user method may be named after a text builtin.
+
+## Fix (2026-09-28)
+`is_bare_builtin_collection_method` (closures_structs.rs) now includes
+`("lower" | "upper", 0)`. A bare zero-arg `lower()`/`upper()` on an erased
+receiver takes the tag-safe builtin route (`rt_string_to_lower` /
+`rt_string_to_upper`, which return a non-string unchanged) before the
+in-module suffix scan, and the cross-module `no_rebind` gate refuses the same
+rebind. Arity 0 only, so a user `lower(x)` still binds; typed receivers
+arrive qualified and are unaffected. The LLVM/native_project path
+(`mangle.rs` string-builtin guard) already listed `lower`/`upper`.
+Unit test: `bare_text_case_methods_route_to_builtin_not_user_method`.
+Takes effect only once the seed is rebuilt and redeployed.
