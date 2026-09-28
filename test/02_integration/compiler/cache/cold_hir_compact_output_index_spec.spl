@@ -56,7 +56,9 @@ fn compact_output(module: HirModule, inventory: CompileSourceInventoryV1,
         sha256_text("action-archive-{module.name}"), "",
         PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1)
 
-fn compact_persisted_archive_fixture(root: text, scoped: bool) ->
+fn compact_persisted_archive_fixture(
+    root: text, scoped: bool, corrupt_interface: bool
+) ->
         (PackageModuleIndexBuildAuthorityV1, CompileSourceInventoryV1,
          ColdHirPackageOutputV1, bool):
     val empty = sha256_text("")
@@ -76,7 +78,10 @@ fn compact_persisted_archive_fixture(root: text, scoped: bool) ->
         module, inventory, authority.inventory_digest)
     val symbol_digest = sha256_text("foo")
     val compile_digest = sha256_text("compile")
-    val interface_content = "symbol|foo|function|i64|{symbol_digest}"
+    val interface_content = if corrupt_interface:
+        "not-a-symbol"
+    else:
+        "symbol|foo|function|i64|{symbol_digest}"
     val action_content = "action|compile|function|foo|{compile_digest}"
     output.interface_archive_digest = sha256_text(interface_content)
     output.action_archive_digest = sha256_text(action_content)
@@ -180,7 +185,7 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
     it "publishes only after decoding a persisted package archive":
         val root = "build/tmp/cold-hir-publish/{rt_getpid()}-{rt_time_now_unix_micros()}"
         val (authority, inventory, output, archive_published) =
-            compact_persisted_archive_fixture(root, false)
+            compact_persisted_archive_fixture(root, false, false)
         expect(archive_published).to_be(true)
         val published = cold_hir_package_publish_verified_v1(
             root, authority, inventory, [output], "")
@@ -195,7 +200,7 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
     it "rejects mismatched archive payload before moving CURRENT":
         val root = "build/tmp/cold-hir-reject/{rt_getpid()}-{rt_time_now_unix_micros()}"
         val (authority, inventory, output, archive_published) =
-            compact_persisted_archive_fixture(root, false)
+            compact_persisted_archive_fixture(root, false, false)
         expect(archive_published).to_be(true)
         var stale = output
         stale.interface_archive_digest = sha256_text("stale-interface")
@@ -210,7 +215,7 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
     it "publishes a scoped V3 graph after verifying its reached archive":
         val root = "build/tmp/cold-hir-scope/{rt_getpid()}-{rt_time_now_unix_micros()}"
         val (authority, inventory, output, archive_published) =
-            compact_persisted_archive_fixture(root, true)
+            compact_persisted_archive_fixture(root, true, false)
         expect(archive_published).to_be(true)
         val published = cold_hir_package_publish_verified_v1(
             root, authority, inventory, [output], "")
@@ -221,3 +226,16 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
             expect(current.generation!.schema_version).to_equal(3)
             expect(current.generation!.entries.len()).to_equal(1)
             expect(current.generation!.scope_entry_source_identity).to_equal("a.spl")
+
+    it "refuses a digest-valid archive whose interface cannot be installed":
+        val root = "build/tmp/cold-hir-invalid-interface/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, true)
+        expect(archive_published).to_be(true)
+        val rejected = cold_hir_package_publish_verified_v1(
+            root, authority, inventory, [output], "")
+        expect(rejected.is_err()).to_be(true)
+        if rejected.is_err():
+            expect(rejected.unwrap_err()).to_equal(
+                "cold-publish-archive-decode-invalid:package-a")
+        expect(package_module_index_read_current_v1(root).valid).to_be(false)

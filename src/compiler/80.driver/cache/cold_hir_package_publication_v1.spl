@@ -22,6 +22,9 @@ use compiler.driver.cache.package_archive_cache.{
     package_archive_load_v1
 }
 use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.hir.archive.interface_action_archive.{
+    interface_action_archive_payloads_decode_v1
+}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
@@ -33,7 +36,7 @@ val COLD_HIR_ARCHIVE_MAX_BYTES_V1: u64 = 1073741824
 # route later reopens the archive with its pinned no-follow capability.
 fn cold_hir_archive_payloads_v1(
     archive_content: text, receipt: PackageArchiveReceiptV1
-) -> Result<(text, text), text>:
+) -> Result<(text, text, text, text), text>:
     val size = archive_content.len().to_u64()
     if size == 0 or size > COLD_HIR_ARCHIVE_MAX_BYTES_V1 or
             receipt.members.len() != 3:
@@ -42,6 +45,8 @@ fn cold_hir_archive_payloads_v1(
     var previous_end: u64 = 0
     var member_digests: [text] = []
     var manifest_content = ""
+    var interface_content = ""
+    var action_content = ""
     var index = 0
     while index < 3:
         val member = receipt.members[index]
@@ -64,7 +69,11 @@ fn cold_hir_archive_payloads_v1(
         val payload_text = decoded.unwrap()
         if sha256_text(payload_text) != member.payload_digest:
             return Err("cold-publish-archive-member-digest-mismatch")
-        if index == 2:
+        if index == 0:
+            action_content = payload_text
+        elif index == 1:
+            interface_content = payload_text
+        else:
             manifest_content = payload_text
         member_digests.push(member.payload_digest)
         previous_end = end
@@ -86,7 +95,8 @@ fn cold_hir_archive_payloads_v1(
             manifest_lines[5] != "interface={member_digests[1]}" or
             manifest_lines[6] != "action={member_digests[0]}":
         return Err("cold-publish-archive-manifest-invalid")
-    Ok((member_digests[1], member_digests[0]))
+    Ok((member_digests[1], member_digests[0],
+        interface_content, action_content))
 
 fn cold_hir_package_publish_verified_v1(
     cache_root: text,
@@ -162,7 +172,11 @@ fn cold_hir_package_publish_verified_v1(
             archive_bytes, loaded_receipt)
         if payloads.is_err():
             return Err("{payloads.unwrap_err()}:{package_identity}")
-        val (interface_digest, action_digest) = payloads.unwrap()
+        val (interface_digest, action_digest,
+            interface_content, action_content) = payloads.unwrap()
+        if interface_action_archive_payloads_decode_v1(
+                interface_content, action_content).is_err():
+            return Err("cold-publish-archive-decode-invalid:{package_identity}")
         for entry in entries:
             if not output_by_module.has(entry.module_identity):
                 return Err("cold-publish-output-missing:{entry.module_identity}")

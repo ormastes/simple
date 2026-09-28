@@ -114,6 +114,15 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Reject persisted archives that pass hashes/manifest checks but cannot
+  populate warm symbol/action owners. Cold publication now shares the warm
+  payload parser and leaves `CURRENT` unchanged on malformed content. Focused
+  no-stub Stage-2 native evidence: 7/7; see
+  `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
+- [ ] Fix or rule out the Stage-2 pinned archive reader RSS runaway before
+  using it as a cold publication memory optimization; see
+  `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
+
 - [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
   eviction in the cold driver. Phase-1 digest and byte-length owners also work
   for nonstreaming low-memory compilation, where source text is gone before

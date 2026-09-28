@@ -361,6 +361,14 @@ no-stub native test passes; real archive output attachment, production V3
 publication, full CLI execution, and paired time/RSS proof remain open. See
 `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
 
+Archive semantic follow-up (2026-09-29): before publishing `CURRENT`, the
+cold publisher now checks the exact symbol/action payload grammar used by the
+warm decoder, including action target-symbol resolution. A hash-valid but
+malformed interface archive is rejected by the 7/7 no-stub native fixture.
+An attempted pinned-reader memory improvement caused a Stage-2 RSS runaway
+on a 542-byte archive and was reverted; no memory/performance improvement is
+claimed. See `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
+
 The 2026-09-28 full CLI retry compiled its 2,488-unit source closure after
 the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173
 distinct symbols. This still blocks full-CLI Target 6 qualification; the
