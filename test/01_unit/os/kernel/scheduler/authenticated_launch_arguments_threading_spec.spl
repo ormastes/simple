@@ -1,0 +1,52 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_executable_adoption_state.{
+    SchedulerExecutableAdoptionOwnerStateV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_load_consumer.{
+    ExecutableLoadConsumerErrorV1, executable_load_consumer_new_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{ExecutableLaunchArgumentsV1}
+use os.kernel.types.task_types.{TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+# The admitted-image half of this spec (argv/envp observed on the prepared
+# image after a real signed admission) is not included: on origin/main the
+# admission reread goes through text pread (executable_admission_pipeline
+# _loader_read_binding_exact) and trips on NUL bytes, and with byte-exact
+# reads patched in, pure-Ed25519 admission exceeds the 900 s test budget.
+
+describe "authenticated executable launch argument boundary":
+    it "rejects forged invalid launch data before touching authority state":
+        var scheduler = Scheduler.new_bootstrap()
+        var table = MountTable.new()
+        # These coordinates are deliberately unusable. The launch preflight
+        # must reject first and leave the scheduler authority transaction idle.
+        val registry = ExecutableAuthorityRegistryV1(owner_epoch: 1u64)
+        val token = ExecutableAuthorityTokenV1(
+            slot_index: 7, generation: 9u64, nonce: 11u64)
+        val forged = ExecutableLaunchArgumentsV1(
+            path: "/bin/tool",
+            argv: ["tool\0hidden"],
+            envp: [],
+            argv_bytes: 1,
+            envp_bytes: 0,
+            combined_bytes: 1)
+        val adopted = scheduler.adopt_authenticated_executable_pid_with_launch_v1(
+            table, registry, token,
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            forged, 0x400000u64, TaskPriority.Normal, CapabilitySet.empty())
+        expect(adopted.pid).to_equal(0u64)
+        expect(adopted.receipt.error).to_equal(
+            ExecutableLoadConsumerErrorV1.InvalidConsumer)
+        val snapshot = scheduler.authenticated_executable_adoption_snapshot_v1()
+        expect(snapshot.state).to_equal(
+            SchedulerExecutableAdoptionOwnerStateV1.Idle)
+        expect(snapshot.pid).to_equal(0u64)
+        expect(snapshot.token_slot).to_equal(-1)
+        expect(snapshot.token_generation).to_equal(0u64)
+        expect(snapshot.token_nonce).to_equal(0u64)

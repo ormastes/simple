@@ -31,7 +31,12 @@ use os.kernel.loader.executable_admission_pipeline.{
     executable_loader_commit, executable_loader_retrieve_once,
     executable_loader_release_retrieved, executable_loader_revoke
 }
-use os.kernel.loader.executable_image_prepare.{executable_prepare_image_v1}
+use os.kernel.loader.executable_image_prepare.{
+    executable_prepare_image_v1, executable_prepare_image_with_launch_v1
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    ExecutableLaunchArgumentsV1, executable_launch_arguments_v1_validate
+}
 use os.kernel.loader.executable_load_plan_v1.{
     ExecutableLoadConsumerStateV1, ExecutableLoadConsumerErrorV1,
     ExecutableLoadConsumerV1, ExecutableLoadReceiptV1,
@@ -47,7 +52,10 @@ use os.kernel.scheduler.scheduler_types.{
     _initial_user_task_context, scheduler_next_task_id_take
 }
 use os.kernel.scheduler.scheduler_task_mgmt.{_find_empty_slot_in}
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_adoption_v1}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_observe_adoption_v1,
+    scheduler_execution_observe_adoption_with_launch_v1
+}
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
 use os.kernel.ipc.capability.{register_task_vmspace}
 export use os.kernel.scheduler.scheduler_executable_adoption_transition.{
@@ -143,15 +151,29 @@ impl Scheduler:
         self.executable_adoption_token_generation = token.generation
         self.executable_adoption_token_nonce = token.nonce
 
-    pub me adopt_authenticated_executable_pid_v1(
+    me _adopt_authenticated_executable_pid_launch_v1(
         mut table: MountTable,
         authorities: ExecutableAuthorityRegistryV1,
         token: ExecutableAuthorityTokenV1,
         consumer: ExecutableLoadConsumerV1,
         entry_point: u64,
         priority: TaskPriority,
-        caps: CapabilitySet
+        caps: CapabilitySet,
+        launch: ExecutableLaunchArgumentsV1?
     ) -> SchedulerExecutableAdoptionResultV1:
+        # ExecutableLaunchArgumentsV1 is a public transport record and can be
+        # constructed directly. Revalidate and copy it at the scheduler
+        # boundary before touching the one-shot authority token, so malformed
+        # launch data can never burn a valid token or quarantine the owner.
+        var owned_launch: ExecutableLaunchArgumentsV1? = nil
+        if launch.?:
+            val requested = launch.unwrap()
+            val checked_launch = executable_launch_arguments_v1_validate(
+                requested.path, requested.argv, requested.envp)
+            if checked_launch.is_err():
+                return _scheduler_adoption_reject(
+                    consumer, ExecutableLoadConsumerErrorV1.InvalidConsumer)
+            owned_launch = Some(checked_launch.unwrap())
         # The token/owner coordinates are the only public authority input.
         # Commit + retrieve is exactly once in the loader registry; no raw
         # AddressSpace, TCB, or process-image capability crosses this API.
@@ -189,8 +211,13 @@ impl Scheduler:
                 table, authorities, token, consumer,
                 ExecutableLoadConsumerErrorV1.RollbackUnavailable)
 
-        val prepared = executable_prepare_image_v1(
-            table, handle, consumer, entry_point, active_arch)
+        val prepared = if owned_launch.?:
+            executable_prepare_image_with_launch_v1(
+                table, handle, consumer, entry_point, active_arch,
+                owned_launch.unwrap())
+        else:
+            executable_prepare_image_v1(
+                table, handle, consumer, entry_point, active_arch)
         if prepared.is_err():
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -237,7 +264,14 @@ impl Scheduler:
                 ExecutableLoadConsumerErrorV1.ConsumerExhausted)
 
         val id = TaskId(id: scheduler_next_task_id_take())
-        if not scheduler_execution_observe_adoption_v1(id.id, self.current.id, handle):
+        # The launch owner records the exact admitted command before
+        # publication; terminal evidence later compares against this copy.
+        val observed = if owned_launch.?:
+            scheduler_execution_observe_adoption_with_launch_v1(
+                id.id, self.current.id, handle, owned_launch.unwrap())
+        else:
+            scheduler_execution_observe_adoption_v1(id.id, self.current.id, handle)
+        if not observed:
             destroy_user_address_space(space)
             self._record_authenticated_executable_adoption_v1(
                 SchedulerExecutableAdoptionOwnerStateV1.Quarantined, 0u64, token)
@@ -293,6 +327,34 @@ impl Scheduler:
         self._record_authenticated_executable_adoption_v1(
             completed_owner.state, id.id, token)
         result
+
+    pub me adopt_authenticated_executable_pid_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        """Compatibility adoption: no launch vectors, no command observation."""
+        self._adopt_authenticated_executable_pid_launch_v1(
+            table, authorities, token, consumer, entry_point, priority, caps, nil)
+
+    pub me adopt_authenticated_executable_pid_with_launch_v1(
+        mut table: MountTable,
+        authorities: ExecutableAuthorityRegistryV1,
+        token: ExecutableAuthorityTokenV1,
+        consumer: ExecutableLoadConsumerV1,
+        launch: ExecutableLaunchArgumentsV1,
+        entry_point: u64,
+        priority: TaskPriority,
+        caps: CapabilitySet
+    ) -> SchedulerExecutableAdoptionResultV1:
+        """Adopt with the admitted argv/envp mapped and the command observed."""
+        self._adopt_authenticated_executable_pid_launch_v1(
+            table, authorities, token, consumer, entry_point, priority, caps,
+            Some(launch))
 
     pub me authenticated_executable_adoption_snapshot_v1(
     ) -> SchedulerExecutableAdoptionSnapshotV1:
