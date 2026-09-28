@@ -981,6 +981,15 @@ authentication. Never have the PR author's credential call
 eligible independent provider reviewer when provider approval is required.
 After a push, base/PR edit, policy/ruleset change, or expiry, treat the old
 admission as invalid and perform a new exact-state review before redispatch.
+**A handoff state is not a finish line.** The default end state of a lane is
+`merged`. Because every push to `main`/`release/**` invalidates admission on all
+open PRs (and it expires in 10 minutes), an `awaiting-self-review-admission` or
+`merge-blocked` (BEHIND) PR will not converge on its own. After the zero-P0/P1
+exact-head review, the owner override lands it: `gh pr review <n> --comment`,
+`gh pr ready <n>`, `gh pr merge <n> --admin --merge` (owner PR-only bypass on
+`main` and `release/*`; see `.claude/rules/vcs.md` § "Force-landing a PR").
+Stop short of merging only for a genuinely failing check or an unmet evidence
+precondition, and then name it in the PR body.
 `--no-verify` skips local Git hooks only and never bypasses repository
 protection or required checks. See `doc/07_guide/app/devhub.md`,
 `doc/07_guide/infra/self_review_policy_db.md`, and
