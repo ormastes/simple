@@ -8,6 +8,9 @@ active again. A fresh isolated current-source Stage2 bootstrap failed on
 verify/fix cycles; neither source experiment was retained. See
 `doc/08_tracking/bug/target56_stage2_dynlib_lifetime_state_inference_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
+A bootstrap-mode 36-file mini build now reproduces the same HIR failure in
+seconds; the retained command, logs, and rejected explicit-generic experiment
+are in that blocker report.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
 limit and asked to consider this isolated effort done after a commit/performance
