@@ -53,6 +53,9 @@ retry was run after the session's three-attempt verification cap. See
 A 48-unit native reproducer now isolates the declaration lookup: the arena
 contains slots 7 and 11, while `module_decl_at` returns -1 for both. The
 focused probe is intentionally failing until that wrapper path is repaired.
+An owner-side checked accessor candidate removes the cross-module slot-length
+comparison, but the 48-unit native regression has not been rebuilt successfully;
+see the bug report's 2026-09-29 update. Do not count this as a Stage4 pass.
 
 ## Remaining gates
 

@@ -46,7 +46,26 @@ direct `cmp index,count; b.ge` and passes. In the native-arena branch, the
 then emits `cmp x0,#0; b.ge` before the `-1` return. If the helper returns a
 normal boolean 0 or 1, that signed `b.ge` is always taken. This is direct
 code-generation evidence for the wrapper's false rejection, although the
-precise helper ABI still needs a targeted check. The next repair should bind
-the slot length to an `i64` local and prove the resulting native branch uses
-a direct integer comparison; retain the invalid-index rejection in the
+precise helper ABI still needs a targeted check. The candidate below removes
+that cross-module comparison; retain invalid-index rejection in the native
 regression spec.
+
+## 2026-09-29 owner-side candidate
+
+The candidate moves the slot bounds check into `decl_nodes.spl`, next to the
+`module_decl_slots` array, and has `module_decl_at` call that checked accessor.
+The existing native probe now also checks the negative index. This removes
+the cross-module `index >= ast_module_decl_slots_len()` comparison identified
+above while preserving the count check and both out-of-range cases.
+
+A 3-unit native probe built with the staged pure-Simple compiler and passed
+valid and invalid indices in both arena and default environments. Its direct
+cross-module comparison also passed, so this small probe does **not** reproduce
+the full-closure miscompile and cannot qualify the candidate. The original
+48-unit native probe build using the installed Rust bootstrap seed failed in
+JIT setup on missing `rt_file_read_regular_no_follow_bounded_bytes`; it did
+not reach the probe. A staged pure-Simple compiler attempt with the broad
+`src/compiler` and `src/lib` roots was terminated after about one minute when
+its RSS reached about 40 GiB, without producing a binary. The 48-unit native
+probe and full CLI remain unverified. Narrow closure construction or a current
+bounded self-hosted compiler is needed before this bug can be closed.
