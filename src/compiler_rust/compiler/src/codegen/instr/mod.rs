@@ -386,6 +386,7 @@ pub fn compile_instruction<M: Module>(
             src,
             byte_size,
             type_name,
+            owner_has_vtable,
             deep_fields,
             ..
         } => {
@@ -396,6 +397,7 @@ pub fn compile_instruction<M: Module>(
                 *src,
                 *byte_size,
                 type_name.as_deref(),
+                *owner_has_vtable,
                 deep_fields,
             );
         }
