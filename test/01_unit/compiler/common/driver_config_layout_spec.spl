@@ -1,0 +1,33 @@
+# Exercise the real driver receiver alongside CompileOptions, whose shared
+# field names have different offsets from the smaller CompilerConfig.
+use compiler.common.driver_compile_options.{CompileOptions, driver_core_compile_options_default}
+use compiler.common.config.{compiler_mcdc_owner_bytes_from_env, compiler_mcdc_global_bytes_from_env}
+use compiler.driver.driver_types.{CompileContext}
+use std.spec.{describe, it, expect}
+
+describe "driver configuration receiver layout":
+    it "preserves environment budgets when CLI budgets are absent":
+        val options: CompileOptions = driver_core_compile_options_default()
+        val owner = compiler_mcdc_owner_bytes_from_env()
+        val global_bytes = compiler_mcdc_global_bytes_from_env(owner)
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_owner_bytes"]).to_equal(owner.to_text())
+        expect(ctx.config["mcdc_global_bytes"]).to_equal(global_bytes.to_text())
+
+    it "applies both CLI budgets without overwriting neighboring fields":
+        var options: CompileOptions = driver_core_compile_options_default()
+        options.mcdc_mode_text = "static-off"
+        options.mcdc_owner_bytes = 4096
+        options.mcdc_global_bytes = 16384
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_owner_bytes"]).to_equal("4096")
+        expect(ctx.config["mcdc_global_bytes"]).to_equal("16384")
+        expect(ctx.config["mcdc_mode"]).to_equal("off")
+        expect(ctx.config.contains_key("mcdc_config_error")).to_equal(false)
+
+    it "retains rejection of a CLI global budget below its owner":
+        var options: CompileOptions = driver_core_compile_options_default()
+        options.mcdc_owner_bytes = 16384
+        options.mcdc_global_bytes = 4096
+        val ctx = CompileContext.create(options)
+        expect(ctx.config["mcdc_config_error"]).to_contain("MC/DC global byte budget")
