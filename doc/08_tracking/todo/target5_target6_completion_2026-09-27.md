@@ -68,7 +68,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
-  the closure stall and missing runtime symbols in the blocker report.
+  the closure stall and missing runtime symbols in the blocker report. The
+  latest standalone-entry attempt is blocked by an old Stage2 builder's SQLite
+  ABI validator and nondeterministic K1 composition binding; its hosted static
+  diagnostic reaches an empty-MIR AOT failure. See
+  `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
 - [ ] With that authority, run a current-source release-small Simple hello and
   a paired matched-startup C hello. Check exact output, retained symbols,
   <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
