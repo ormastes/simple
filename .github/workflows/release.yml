@@ -1135,33 +1135,33 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    continue-on-error: true
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # bin/simple is a symlink into gitignored bin/release/<triple>/, so a fresh
-      # checkout always leaves it dangling. Before this step existed, every run of
-      # this job died in <1s with "[simpleos-bootstrap] missing executable:
-      # .../bin/simple". Build the Rust seed and point bin/simple at it.
-      - name: Setup bootstrap runtime
-        run: |
-          set -eu
-          if [ ! -x bin/simple ]; then
-            (cd src/compiler_rust && cargo build --release --bin simple)
-            mkdir -p bin
-            rm -f bin/simple
-            ln -s ../src/compiler_rust/target/release/simple bin/simple
-          fi
-          test -x bin/simple
-          ./bin/simple --version
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Rust build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            src/compiler_rust/target
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: simpleos-rust-bootstrap-${{ hashFiles('src/compiler_rust/Cargo.lock') }}
+          restore-keys: |
+            simpleos-rust-bootstrap-
 
       - name: Install QEMU + LLVM toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 llvm mtools binutils
+
+      - name: Build and deploy admitted pure-Simple host CLI
+        run: sh scripts/bootstrap/prepare-simpleos-ci-host.shs
 
       - name: Build SimpleOS kernel (--full)
         timeout-minutes: 50
@@ -1172,13 +1172,13 @@ jobs:
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
           PKG="simpleos-${VERSION}-x86_64"
+          test -s build/os/simpleos_x86_64.elf
+          shopt -s nullglob
+          images=(build/os/*.img.zst)
+          test "${#images[@]}" -gt 0
           mkdir -p "${PKG}"
-          if [ -f build/os/simpleos_x86_64.elf ]; then
-            cp build/os/simpleos_x86_64.elf "${PKG}/"
-          fi
-          if compgen -G "build/os/*.img.zst" > /dev/null; then
-            cp build/os/*.img.zst "${PKG}/"
-          fi
+          cp build/os/simpleos_x86_64.elf "${PKG}/"
+          cp "${images[@]}" "${PKG}/"
           tar -czf "${PKG}.tar.gz" "${PKG}"
           sha256sum "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
           ls -lh "${PKG}.tar.gz" "${PKG}.tar.gz.sha256"
