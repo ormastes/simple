@@ -293,14 +293,97 @@ export/ABI/initializer/provider metadata stops reverse propagation.
 |---|---|---|
 | Immutable SCV snapshot core | Groundwork | `src/lib/scv/compile_snapshot.spl`; add event-maintained inventory and full entrypoint routing. |
 | Native entry closure freeze | Partial | `src/app/io/_CliCompile/native_build_closure.spl`; frozen reads enforced, but replace the closure scan with admitted index lookup. |
-| Persistent index generation | Pure cold builder, V2 variant binding, and pointer CAS added; graph publication cutover open | `src/compiler/80.driver/cache/package_module_index.spl` and `package_module_index_builder.spl`; the builder validates frozen source coverage, variant root identity, graph edges, and action digests. V2 graph generations carry a configuration-variant digest, and the warm route rejects V1 binding records, cross-variant graphs, and empty graphs. The V1 snapshot-only binding remains readable. `package_module_index_publish_if_current_v1` prevents a late binding-only fallback from replacing a newer graph (see `doc/09_report/compiler/target6_package_index_binding_cas_2026-09-28.md` and `doc/09_report/compiler/target6_package_index_variant_binding_2026-09-28.md`). Wire the builder to typed compiler output and publish its generation instead of the binding-only index. |
-| Canonical TLDR/SMF schema | Partial | `cold_hir_package_drafts_v1.spl` assembles typed-HIR seeds and caller-supplied artifact facts into graph drafts. `cold_hir_reverse_projection_v1.spl` now produces canonical reached-graph reverse-reference bytes, and draft admission binds their digest to the SMF directory and TLDR receipt. Add the remaining semantic SMF/archive producers and metadata publication wiring; current-source execution is still unqualified. |
+| Persistent index generation | Pure cold builder, V2 variant binding, and pointer CAS added; graph publication cutover open | `src/compiler/80.driver/cache/package_module_index.spl` and `package_module_index_builder.spl`; the builder validates frozen source coverage, variant root identity, graph edges, and action digests. V2 graph generations carry a configuration-variant digest, and the warm route rejects V1 binding records, cross-variant graphs, and empty graphs. The V1 snapshot-only binding remains readable. `package_module_index_publish_if_current_v1` prevents a late binding-only fallback from replacing a newer graph (see `doc/09_report/compiler/target6_package_index_binding_cas_2026-09-28.md` and `doc/09_report/compiler/target6_package_index_variant_binding_2026-09-28.md`). The compact output builder constructs a V2 generation from typed ABI receipts and frozen inventory without retaining full HIR/source bodies; its native 2/2 integration spec passes (see `doc/09_report/compiler/target6_compact_cold_graph_builder_2026-09-28.md`). A persisted-archive verification and pointer-CAS publisher passes its focused 4/4 no-stub Stage2 native spec; production driver wiring remains open (see `doc/09_report/compiler/target6_persisted_archive_publication_candidate_2026-09-29.md`). Wire real codegen archive receipts into the driver and call this publisher instead of leaving a binding-only index. |
+| Canonical TLDR/SMF schema | Partial | `cold_hir_package_drafts_v1.spl` assembles typed-HIR seeds and caller-supplied artifact facts into graph drafts. `cold_hir_reverse_projection_v1.spl` produces canonical reached-graph reverse-reference bytes, and draft admission binds their digest to the SMF directory and TLDR receipt. `cold_hir_export_smf_v1.spl` now packs real typed-HIR ABI and reverse bytes into one checked export SMF; a no-stub native 2/2 spec passes (see `doc/09_report/compiler/target6_typed_hir_export_smf_2026-09-28.md`). Add real initializer/provider/generated-source and archive receipt producers plus compiler publication wiring; current-source execution is still unqualified. |
 | Exact invalidation | Partial | Content-vs-semantic cutoff exists. The SHB extractor now reads the AST's actual public bit and resolves its visibility owner; a real parsed-public/private native spec passes (see `doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`). Add typed consumer families and SCC transactions; the package-index publisher still does not consume a complete typed graph. |
 | Deterministic scheduler | Partial | Acyclic package order exists; add reached-graph SCC condensation and parent-authoritative parallel commit. |
 | Action/archive receipts | Partial | Native warm key/receipt binds and exposes SCV identity; bind remaining action/archive and reverse-reference receipts to the package-index generation. |
 | Git/SCV events | Bridge and untracked-membership delta implemented; admission incomplete | `src/app/compiler_entrypoint/inventory_events.spl` translates read-only Git changes and SCV filesystem journal rows into `compile_source_inventory` events. The isolated 2026-09-27 change binds the cursor and inventory digest in one atomic `source-inventory/CURRENT` record, with legacy bare-digest migration. Warm refresh captures Git HEAD once and compares committed and working changes to that revision. Warm multi-event reduction indexes the admitted inventory once and preserves one-event semantics; the 30-sample focused native workload improves p95 and peak RSS (see `doc/09_report/compiler/target6_warm_inventory_batch_2026-09-28.md`). The V3 cursor binds an immutable untracked-path record, so warm refresh applies untracked create/delete and stage transitions instead of demanding cold initialization; successful pointer updates retire the previous record. Warm tracked and untracked observations now share one fail-closed Git porcelain listing; a paired 30-sample native unchanged-warm cohort improves p95 by 4.0% at unchanged peak RSS with a 1.960 normalized sum (see `doc/09_report/compiler/target56_v3_single_status_perf_2026-09-28.md`). Native unit, Unicode and space path, and focused Git probes pass, including an untracked stage transition. It still lists untracked files on each request. A failed event application now deletes only its newly written membership record while preserving the admitted pointer and record; focused no-stub native rejection/retry and successful-retirement specs pass (see `doc/09_report/compiler/target6_membership_failed_publication_2026-09-28.md`). A focused no-stub native spec checks unpaired rename rejection and repaired Git-plus-watcher rename replay (see `doc/09_report/compiler/target6_rename_journal_replay_2026-09-28.md`). Qualify broader loss/overflow, concurrent writers, replay, realistic native cohorts, and a fully event-maintained route before marking complete. |
 | Full entrypoint cutover | Partial | The full CLI calls `compiler_entrypoint_admit_v1` for compile/check/build/run/test/native-build/MCP/LSP/query. Admission fails if any pinned snapshot/index environment binding cannot be published. Its binding-only fallback compares the old pointer under a publication lock and accepts a concurrent winner only when it binds the same snapshot. An explicit `SIMPLE_PACKAGE_INDEX_COLD_INIT=1` now admits a new frozen snapshot while retaining a stale complete V2 graph at `CURRENT`; it exposes a rebuild-pending marker, clears warm graph markers, and clears that pending authority on a failed later request. A no-stub one-source Git fixture passes seed, stale warm refusal, and explicit cold admission; see `doc/09_report/compiler/target6_cold_graph_rebuild_admission_2026-09-28.md`. The published generation in `admission.spl` still has no module graph producer. Admission publishes producer/root/variant compatibility markers from an admitted V2 graph and clears stale markers for a binding-only generation. The graph route keeps archive-backed selected modules after a dirty-package schedule. Complete the typed publisher, shared pinned graph owner, and removal of remaining closure scans. |
-| SPipe/native/perf proof | Focused native probes and unit SPipe pass; qualification not run | The final V2 index, route, and builder unit files report 3/3, 5/5, and 6/6 through the bootstrap interpreter. A no-stub Stage2 native V2 CAS probe and current-source V3 Git bridge probes pass with `--entry-closure`; the latter cover cold, unchanged warm, tracked edit/delete, untracked create/delete, and staging an untracked source. See `doc/09_report/compiler/target56_entry_closure_native_followup_2026-09-28.md`. The initial 30-sample unchanged-warm V3 cohort exceeded the normalized sum at 2.032; a paired single-status optimization then improved warm p95 at unchanged peak RSS and measured 1.960, with a paired bootstrap interval below zero. See `doc/09_report/compiler/target56_v3_single_status_perf_2026-09-28.md`. The older Stage2 fixture's `observed-event-apply:event-invalid` remains unexplained, and the broad test worker still fails to link optional GPU externs. A native publish/load archive round-trip found a three-byte corrupt CAS generation despite publication success; a trial serializer reached about 34 GiB RSS and was reverted. See `doc/08_tracking/bug/target6_native_cas_batch_generation_corruption_2026-09-28.md`. No Target 6 system SPipe or passing production native performance cohort exists; do not claim completion. |
+| SPipe/native/perf proof | Focused native probes and unit SPipe pass; qualification not run | The final V2 index, route, and builder unit files report 3/3, 5/5, and 6/6 through the bootstrap interpreter. A no-stub Stage2 native V2 CAS probe and current-source V3 Git bridge probes pass with `--entry-closure`; the latter cover cold, unchanged warm, tracked edit/delete, untracked create/delete, and staging an untracked source. See `doc/09_report/compiler/target56_entry_closure_native_followup_2026-09-28.md`. The initial 30-sample unchanged-warm V3 cohort exceeded the normalized sum at 2.032; a paired single-status optimization then improved warm p95 at unchanged peak RSS and measured 1.960, with a paired bootstrap interval below zero. See `doc/09_report/compiler/target56_v3_single_status_perf_2026-09-28.md`. The older Stage2 fixture's `observed-event-apply:event-invalid` remains unexplained, and the broad test worker still fails to link optional GPU externs. The three-byte CAS generation failure is isolated to chained array concat/join in a one-unit native probe; a checked text-builder candidate passes a 70-unit native two-generation publish/load/pin scenario at 0.05 seconds and 2,136 KiB peak RSS. See `doc/08_tracking/bug/target6_native_cas_batch_generation_corruption_2026-09-28.md`. No Target 6 system SPipe or passing production native performance cohort exists; do not claim completion. |
+
+Current-source MCP/LSP native smoke (2026-09-29): both server entrypoints
+link without generated stubs. The native MCP server accepts `initialize` and
+returns a `simple_status` tool result; the native LSP server returns symbols
+when `SIMPLE_BINARY` points at the installed self-hosted runtime. This proves
+stdio dispatch and a representative request, not the current-source query
+engine or compiler index cutover. See
+`doc/09_report/compiler/target6_current_source_mcp_lsp_native_smoke_2026-09-29.md`.
+
+Archive member memory follow-up (2026-09-29): a bounded-chunk SHA-256 and
+incremental UTF-8 candidate linked without stubs but failed the two native
+archive publication examples. It was reverted under the three-cycle cap.
+The native digest mismatch is now isolated to unsigned `[u8]` indexing in
+`sha256_stream_v1_update` on runtime-built byte arrays. A signed-index fix
+and exact action-member vector pass 5/5 in a no-stub Stage-2 native spec.
+The cold publisher now uses an exact text byte slice, the existing UTF-8
+validator, and `sha256_text`, removing its second member-sized `[u8]` copy.
+The no-stub native archive spec passes 10/10, including an invalid-UTF-8
+member refusal before `CURRENT`. Thirty paired 8 MiB member runs lower p95
+from 0.22 to 0.06 seconds and peak RSS from 99,476 to 33,860 KiB (normalized
+sum 0.613). This is one publication operation, not a full compile cohort;
+driver cutover and maximum-size qualification remain open. See
+`doc/09_report/compiler/target6_bounded_archive_member_2026-09-29.md`.
+
+Pinned archive file-view follow-up (2026-09-29): the POSIX descriptor reader
+now returns packed `[u8]` arrays instead of tagged `i64` slots. A copied
+runtime capsule passes the 9/9 no-stub archive spec; nine paired 8 MiB runs
+lower p95 from 0.56 to 0.41 s and peak RSS from 76,760 to 19,512 KiB
+(normalized sum 0.986). The current whole-archive digest remains in use;
+bounded streaming and full production-path qualification remain open. See
+`doc/09_report/compiler/target6_pinned_archive_packed_file_view_2026-09-29.md`.
+
+Warm route ordering follow-up (2026-09-29): the selected package links already
+built for archive admission now also order scheduled modules, removing one
+full index scan per scheduled package. The no-stub native route spec passes
+6/6. A 30-pair, 2,488-module native microbenchmark reduced p95 from
+1,957.45 ms to 36.52 ms with peak RSS 8,792 to 8,952 KiB; normalized
+time-plus-memory score 1.037. This is a route-step result, not a full compile
+cohort. See
+`doc/09_report/compiler/target6_package_route_order_perf_2026-09-29.md`.
+
+Cold typed-HIR handoff follow-up (2026-09-28): a per-entry seed API now
+checks frozen paths and source bytes against one already-admitted inventory
+entry. The existing batch producer uses it after one digest and scalar index
+build; its focused no-stub native spec passes 2/2. This avoids designing a
+per-module full-inventory digest/search into the future driver, but the driver
+still has no complete graph publisher. See
+`doc/09_report/compiler/target6_cold_hir_indexed_seed_2026-09-28.md`.
+
+Typed ABI receipt follow-up (2026-09-29): the per-entry cold producer now
+retains canonical typed-HIR ABI bytes together with the digest and semantic
+seed, using one ABI encoding pass. Its no-stub Stage2 native probe compiled
+292 units and passed. The production driver still needs to retain these
+compact receipts before HIR/source eviction and attach real archive outputs.
+The index builder requires one draft for every `.spl` inventory entry, while
+an entry-closure compile may lower fewer modules; cold publication must
+resolve this scope mismatch without inventing missing receipts. See
+`doc/09_report/compiler/target6_typed_hir_receipt_2026-09-29.md`.
+
+Scoped graph follow-up (2026-09-29): a V3 index now binds one entry source to
+the full frozen inventory digest and admits only its complete reached graph.
+Cold publication verifies persisted archives before moving `CURRENT`; warm
+routing rejects another entry and full-build requests. Focused no-stub native
+tests pass for scoped build/publication, warm refusal, and unchanged V1/V2
+roundtrip. The driver still must attach real archive outputs and call the
+publisher; no production compile or performance gate is
+claimed. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
+Driver receipt follow-up (2026-09-29): both successful HIR phase paths now
+capture typed receipts against the frozen SCV inventory before HIR eviction.
+Phase-1 SHA-256 and byte-length owners keep the low-memory path valid after
+source text reclamation, without a second read/hash at the HIR peak. A focused
+no-stub native test passes; real archive output attachment, production V3
+publication, full CLI execution, and paired time/RSS proof remain open. See
+`doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
+
+Archive semantic follow-up (2026-09-29): before publishing `CURRENT`, the
+cold publisher now checks the exact symbol/action payload grammar used by the
+warm decoder, including action target-symbol resolution. A hash-valid but
+malformed interface archive is rejected by the 7/7 no-stub native fixture.
+An attempted pinned-reader memory improvement caused a Stage-2 RSS runaway
+on a 542-byte archive and was reverted; no memory/performance improvement is
+claimed. See `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
 
 The 2026-09-28 full CLI retry compiled its 2,488-unit source closure after
 the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173

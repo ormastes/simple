@@ -42,11 +42,29 @@ SplArray *rt_array_new(int64_t cap) {
     return a;
 }
 
+static int packed_array_creations;
+
+SplArray *rt_byte_array_new_len(uint64_t len) {
+    if (len > INT64_MAX) return NULL;
+    SplArray *array = rt_array_new((int64_t)len);
+    if (array) {
+        array->len = (int64_t)len;
+        packed_array_creations++;
+    }
+    return array;
+}
+
 void rt_array_free(SplArray *a) { if (a) { free(a->items); free(a); } }
 
 int8_t rt_array_push(SplArray *a, int64_t value) {
     if (!a || a->len >= a->cap) return 0;
     a->items[a->len++].as_int = value;
+    return 1;
+}
+
+int8_t rt_array_set(SplArray *a, int64_t idx, int64_t value) {
+    if (!a || idx < 0 || idx >= a->len) return 0;
+    a->items[idx].as_int = value;
     return 1;
 }
 
@@ -89,6 +107,7 @@ int main(void) {
     assert((bytes->items[0].as_int >> 3) == 'b');
     assert((bytes->items[1].as_int >> 3) == 'c');
     assert((bytes->items[2].as_int >> 3) == 'd');
+    assert(packed_array_creations == 1);
     rt_array_free(bytes);
     assert(rt_file_view_pread_exact_v1(handle, 5, 2) == 3);
     assert(rt_file_view_close_v1(handle));

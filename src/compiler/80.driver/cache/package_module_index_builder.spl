@@ -1,10 +1,11 @@
 # Cold package/module index builder. The caller supplies typed TLDR/SMF facts
-# from the frozen SCV snapshot; this owner validates and assembles one complete
-# graph generation without opening source roots or publishing a partial index.
+# from the frozen SCV snapshot; this owner validates a complete full-inventory
+# V2 graph or a complete reached-entry V3 graph without opening source roots.
 
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.cache.package_module_index.{
-    PACKAGE_MODULE_INDEX_SCHEMA_V2, PackageModuleIndexEntryV1,
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3,
+    PackageModuleIndexEntryV1,
     PackageModuleIndexGenerationV1, package_module_index_entry_action_digest_v1,
     package_module_index_validate_v1
 }
@@ -14,11 +15,13 @@ use compiler.driver.cache.package_tldr_metadata.{
 }
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory_core.{
-    CompileSourceInventoryV1, compile_source_inventory_digest_v1
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_path_valid_v1
 }
 
-val PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1: text = sha256_text(
-    "simple/package-module-index/no-manifest/v1")
+# Stable SHA-256 sentinel. Native module initialization does not currently
+# evaluate a function call in a module-level val before imported consumers run.
+val PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1: text = "b55b29a8e3d8eaf496f7f82a4a86c8371eca12f08edc91d7f5c4fea7a8e88563"
 
 struct PackageModuleIndexBuildAuthorityV1:
     producer_digest: text
@@ -28,6 +31,7 @@ struct PackageModuleIndexBuildAuthorityV1:
     scv_tree_id: text
     inventory_digest: text
     variant: ConfigVariantKeyV1
+    scope_entry_source_identity: text = ""
 
 struct PackageModuleIndexDraftV1:
     header: PackageTldrHeaderV1
@@ -136,7 +140,13 @@ fn package_module_index_build_from_inventory_v1(
         source_seen[header.source_identity] = true
         module_ids.push(header.module_identity)
         index = index + 1
-    if drafts.len() != source_count:
+    val scoped = authority.scope_entry_source_identity != ""
+    if scoped and (not compile_source_inventory_path_valid_v1(
+            authority.scope_entry_source_identity) or
+            not authority.scope_entry_source_identity.ends_with(".spl") or
+            not source_seen.has(authority.scope_entry_source_identity)):
+        return Err("index-builder-scope-entry-invalid")
+    if not scoped and drafts.len() != source_count:
         return Err("index-builder-source-coverage-incomplete")
 
     var entries: [PackageModuleIndexEntryV1] = []
@@ -159,7 +169,8 @@ fn package_module_index_build_from_inventory_v1(
             direct_imports: header.direct_imports,
             reverse_dependents: header.reverse_dependents))
     var generation = PackageModuleIndexGenerationV1(
-        schema_version: PACKAGE_MODULE_INDEX_SCHEMA_V2,
+        schema_version: if scoped: PACKAGE_MODULE_INDEX_SCHEMA_V3 else:
+            PACKAGE_MODULE_INDEX_SCHEMA_V2,
         producer_digest: authority.producer_digest,
         root_generation: root_generation,
         scv_revision_id: authority.scv_revision_id,
@@ -167,7 +178,8 @@ fn package_module_index_build_from_inventory_v1(
         scv_tree_id: authority.scv_tree_id,
         inventory_digest: authority.inventory_digest,
         entries: entries,
-        variant_digest: variant_digest)
+        variant_digest: variant_digest,
+        scope_entry_source_identity: authority.scope_entry_source_identity)
     index = 0
     while index < generation.entries.len():
         var entry = generation.entries[index]

@@ -226,7 +226,7 @@ fn linker_family_label(fuse_ld_name: &str) -> &'static str {
 ///   on hosts where `/usr/bin/ld` is mold meant every bootstrap link
 ///   front-loaded mold's 8 GiB virtual reservation and died under memory
 ///   contention.
-fn requested_linker_driver_name() -> Result<Option<&'static str>, String> {
+pub(crate) fn requested_linker_driver_name() -> Result<Option<&'static str>, String> {
     let raw = match std::env::var_os("SIMPLE_LINKER") {
         Some(v) => v,
         None => return Ok(None),
@@ -1004,6 +1004,9 @@ impl NativeProjectBuilder {
                         "panic"
                             | "stderr_write"
                             | "stderr_flush"
+                            // Legacy Text.from_char_code import emitted by
+                            // the native backend; core-C owns its exact ABI.
+                            | "text_dot_from_char_code"
                             | "__simple_runtime_init"
                             | "__simple_runtime_shutdown"
                             | "__simple_call_module_inits"

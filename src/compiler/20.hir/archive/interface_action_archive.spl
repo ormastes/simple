@@ -39,6 +39,10 @@ struct CompileArchiveActionV1:
     target_symbol: text
     action_digest: text
 
+struct InterfaceActionArchivePayloadsV1:
+    symbols: [InterfaceArchiveSymbolV1]
+    actions: [CompileArchiveActionV1]
+
 struct InterfaceActionArchiveV1:
     package_key: text
     variant_key: ConfigVariantKeyV1
@@ -192,6 +196,27 @@ fn interface_action_archive_actions_decode_v1(
         return Err(InterfaceActionArchiveErrorV1.malformed_action)
     Ok(actions)
 
+# Shared semantic gate for cold publication and warm pinned decoding. Hash and
+# manifest validation happen at their respective archive boundaries; this
+# verifies that the member text can actually populate the two warm owners.
+fn interface_action_archive_payloads_decode_v1(
+    interface_content: text, action_content: text
+) -> Result<InterfaceActionArchivePayloadsV1, InterfaceActionArchiveErrorV1>:
+    val symbols = interface_action_archive_symbols_decode_v1(interface_content)
+    if symbols.is_err():
+        return Err(symbols.unwrap_err())
+    val actions = interface_action_archive_actions_decode_v1(action_content)
+    if actions.is_err():
+        return Err(actions.unwrap_err())
+    var symbol_names: Dict<text, bool> = {}
+    for symbol in symbols.unwrap():
+        symbol_names[symbol.name] = true
+    for action in actions.unwrap():
+        if not symbol_names.has(action.target_symbol):
+            return Err(InterfaceActionArchiveErrorV1.install_conflict)
+    Ok(InterfaceActionArchivePayloadsV1(
+        symbols.unwrap(), actions.unwrap()))
+
 fn interface_action_archive_decode_v1(
     capability: PinnedArchiveCapability,
     receipt: PackageArchiveReceiptV1
@@ -239,18 +264,17 @@ fn interface_action_archive_decode_v1(
         return Err(InterfaceActionArchiveErrorV1.malformed_interface)
     if sha256_text(action_content) != manifest.action_digest:
         return Err(InterfaceActionArchiveErrorV1.malformed_action)
-    val symbols = interface_action_archive_symbols_decode_v1(interface_content)
-    if symbols.is_err():
-        return Err(symbols.unwrap_err())
-    val actions = interface_action_archive_actions_decode_v1(action_content)
-    if actions.is_err():
-        return Err(actions.unwrap_err())
+    val payloads = interface_action_archive_payloads_decode_v1(
+        interface_content, action_content)
+    if payloads.is_err():
+        return Err(payloads.unwrap_err())
+    val parsed = payloads.unwrap()
     Ok(InterfaceActionArchiveV1(
         manifest.package_key, ConfigVariantKeyV1(
             "archive", "archive", [], "archive", "v1", [], []),
         manifest.producer_digest,
         manifest.dependencies, manifest.interface_digest,
-        manifest.action_digest, symbols.unwrap(), actions.unwrap()))
+        manifest.action_digest, parsed.symbols, parsed.actions))
 
 fn interface_action_archive_install_v1(
     archive: InterfaceActionArchiveV1,
@@ -377,6 +401,7 @@ export InstalledInterfaceActionV1, SemanticContext, CompileActionRegistry
 export RouteArchiveInstallTransactionV1
 export RouteArchiveInstallStageTransferV1, RouteArchiveInstallCommitTransferV1
 export InterfaceActionManifestV1, interface_action_archive_manifest_decode_v1
+export InterfaceActionArchivePayloadsV1, interface_action_archive_payloads_decode_v1
 export interface_action_archive_decode_v1, interface_action_archive_install_v1
 export route_archive_install_begin_v1, route_archive_install_stage_v1
 export route_archive_install_commit_v1, route_archive_install_rollback_v1

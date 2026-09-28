@@ -57,10 +57,24 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Next-session TODO
 
+- [x] Link a current-source pure-Simple Stage4 diagnostic compiler through the
+  dynamic runtime lane, run a hello `--check` smoke, and retain a paired static
+  diagnostic size/startup/RSS comparison. The 30-pair Linux ARM64 result is in
+  `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+- [x] Measure a current-source core-C hello with explicit Linux LLD and a
+  diagnostic 30-pair Python startup/RSS cohort. Its 14,560-byte stripped ELF
+  clears the absolute size cap; matched C and admission gates remain open.
+  See `doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
-  the closure stall and missing runtime symbols in the blocker report.
+  the closure stall and missing runtime symbols in the blocker report. The
+  latest standalone-entry attempt passes SQLite ABI, Cranelift backfill, and
+  core-C stub disjointness, but twelve reached native-execution/network
+  symbols lack an admitted archive owner. K1 composition binding remains
+  unqualified, and the hosted static diagnostic reaches an empty-MIR AOT
+  failure. See
+  `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
 - [ ] With that authority, run a current-source release-small Simple hello and
   a paired matched-startup C hello. Check exact output, retained symbols,
   <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
@@ -113,6 +127,37 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   current pure-Simple core already stores argv without that allocation.
 
 ## Target 6 — persistent compile index
+
+- [x] Reject persisted archives that pass hashes/manifest checks but cannot
+  populate warm symbol/action owners. Cold publication now shares the warm
+  payload parser and leaves `CURRENT` unchanged on malformed content. Focused
+  no-stub Stage-2 native evidence: 7/7; see
+  `doc/09_report/compiler/target6_cold_archive_semantic_gate_2026-09-29.md`.
+- [ ] Fix or rule out the Stage-2 pinned archive reader RSS runaway before
+  using it as a cold publication memory optimization; see
+  `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
+  The synchronous file-view path now avoids a text-valued async roundtrip and
+  the pinned digest checks use hex text. A bounded 542-byte pinned archive
+  integration now passes 8 native scenarios, but the cold publisher trial
+  raised RSS and its apparent p95 gain was not consistent across 30 pairs.
+  The publisher change was reverted. Larger matched time/RSS and Stage-4
+  qualification remain open; see
+  `doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.
+
+- [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
+  eviction in the cold driver. Phase-1 digest and byte-length owners also work
+  for nonstreaming low-memory compilation, where source text is gone before
+  HIR completes. See
+  `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
+- [ ] Attach real archive outputs to retained receipts and publish the V3
+  scoped graph from the production driver; then prove current-source warm/cold
+  time and RSS against the independent gates.
+
+- [x] Define a serialized entry-scoped graph when entry-closure compilation
+  lowers fewer sources than the full frozen inventory. V3 binds the full
+  inventory digest and exact entry, rejects missing/redundant graph nodes,
+  verifies reached archives before publication, and refuses mismatched warm
+  requests. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
 
 - [x] Prevent a stale binding-only index publication from replacing a graph
   generation after a concurrent writer wins. The pointer CAS has focused

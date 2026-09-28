@@ -39,7 +39,7 @@ pub fn llvm_native_link_orchestrator_publish_runtime_provider_v1(
         subject: text, consumer: text, evidence: text):
     reverse_reference_owner_mark_known_v1("runtime-provider")
     reverse_reference_register_runtime_provider_v1(subject, consumer, evidence)
-use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
+use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_sqlite_demand_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
@@ -389,83 +389,53 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 contract provider failed: " + err)
+        var sqlite_demand_archive = ""
+        if hosted_os == "linux":
+            match llvm_stage4_build_sqlite_demand_archive(runtime_objects, hosted_os, pid):
+                case Ok(path): sqlite_demand_archive = path
+                case Err(err):
+                    var prior_candidates = [compiler_backfill_capsule, runtime_native_archive,
+                        contracts_provider_archive, runtime_legacy_compat_archive,
+                        process_provider_archive, dynload_provider_archive,
+                        font_provider_archive, memtrack_provider_archive,
+                        time_provider_archive]
+                    if fork_provider_archive != "":
+                        prior_candidates.push(fork_provider_archive)
+                    return llvm_stage4_profile_failure(runtime_objects, entry_obj_path,
+                        prior_candidates, compiler_backfill_stage_dir,
+                        bootstrap_support_obj, "Stage4 SQLite demand bridge failed: " + err)
         var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_contracts", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
         var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, contracts_provider_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
         if fork_provider_archive != "":
             candidate_labels = candidate_labels.push("runtime_fork")
             candidate_paths = candidate_paths.push(fork_provider_archive)
+        if sqlite_demand_archive != "":
+            candidate_labels = candidate_labels.push("runtime_sqlite_demand")
+            candidate_paths = candidate_paths.push(sqlite_demand_archive)
         val candidate_scans = match llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths):
             case Ok(scans): scans
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 combined candidate inventory failed: " + err)
         val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os):
             case Ok(format): format
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, err)
         match stage4_validate_compiler_backfill_provider_disjoint(candidate_scans[0], candidate_labels[1:], candidate_scans[1:], compiler_backfill_object_format):
             case Ok(()): ()
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, err)
         val (selected_archive_indices, owner_rows) = match stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == "macos"):
             case Ok(resolution): resolution
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 requested-owner resolution failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 requested-owner resolution failed: " + err)
         if trace:
             print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
         val source_hash_rows = match llvm_stage4_file_hash_rows(final_simple_objects):
@@ -488,21 +458,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, pid, output):
             case Ok(value): value
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 selected-archive projection failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 selected-archive projection failed: " + err)
         stage4_projection_capsule = projected_capsule
         stage4_projection_dir = projected_dir
         cleanup_runtime_objects(runtime_objects)

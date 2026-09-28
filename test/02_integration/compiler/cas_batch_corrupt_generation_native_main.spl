@@ -1,0 +1,44 @@
+# Native negative probe: malformed CURRENT generations must not serve receipts.
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_lookup_receipt_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn main() -> i64:
+    val root = "build/tmp/cas_batch_corrupt_generation/{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val directory = "{root}/batch-v1/generations"
+    if not rt_dir_create_all(directory):
+        return 1
+    val current = sha256_text("generation")
+    val transaction = sha256_text("transaction")
+    val action = sha256_text("action")
+    val receipt = sha256_text("receipt")
+    val generation_path = "{directory}/{current}.generation"
+    val current_path = "{root}/batch-v1/CURRENT"
+    val valid = "simple-cas-batch-v1\ngeneration={current}\nparent=\nscc=fixture\ntransaction={transaction}\npkg|{action}|{receipt}"
+    if not rt_file_write_text(generation_path, valid) or
+            not rt_file_write_text(current_path, current):
+        return 1
+    if cas_batch_lookup_receipt_digest_v1(root, "pkg", action) != Some(receipt):
+        print "valid-generation-rejected"
+        return 1
+    if not rt_file_write_text(generation_path, "broken\n" + valid):
+        return 1
+    if cas_batch_lookup_receipt_digest_v1(root, "pkg", action) != nil:
+        print "corrupt-header-accepted"
+        return 1
+    if not rt_file_write_text(generation_path, valid + "\nother|bad|bad"):
+        return 1
+    if cas_batch_lookup_receipt_digest_v1(root, "pkg", action) != nil:
+        print "corrupt-mapping-accepted"
+        return 1
+    if not rt_file_write_text(current_path, "../escape"):
+        return 1
+    if cas_batch_lookup_receipt_digest_v1(root, "pkg", action) != nil:
+        print "invalid-current-accepted"
+        return 1
+    print "corrupt-generation-rejected"
+    0

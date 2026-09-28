@@ -167,10 +167,12 @@ static int lookup_fd_locked(int64_t handle) {
 
 static int64_t bytes_array(const uint8_t *bytes, uint64_t length) {
     if (length > INT64_MAX) return 3;
-    SplArray *array = rt_array_new((int64_t)length);
+    /* A [u8] must use the packed array ABI. Tagged i64 slots turn each
+     * bounded read into eight times as much live storage. */
+    SplArray *array = rt_byte_array_new_len(length);
     if (!array) return 3;
     for (uint64_t i = 0; i < length; ++i) {
-        if (!rt_array_push(array, (int64_t)bytes[i] << 3)) {
+        if (!rt_array_set(array, (int64_t)i, (int64_t)bytes[i] << 3)) {
             rt_array_free(array);
             return 3;
         }
