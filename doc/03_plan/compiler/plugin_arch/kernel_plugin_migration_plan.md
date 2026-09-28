@@ -56,6 +56,11 @@ an unreferenced, non-compiling test source reduced unresolved compiler imports
 from 2 to 0; the closure audit still fails with 10 kernel-to-app/OS edges. See
 `doc/09_report/compiler/target5_sysinfo_file_facade_closure_2026-09-28.md`
 and `doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`.
+The LLVM host target probe now calls `std.io_runtime.process_run` directly,
+removing its `app.io.mod` dependency and lowering kernel-to-app/OS edges from
+10 to 9. Its focused native binary shrank by 11,536 bytes with Linux behavior
+preserved; see
+`doc/09_report/compiler/target5_llvm_host_probe_closure_2026-09-28.md`.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
