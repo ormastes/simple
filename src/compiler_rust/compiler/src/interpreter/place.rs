@@ -272,7 +272,28 @@ pub(crate) fn write_place(env: &mut Env, place: &Place, value: Value) -> bool {
 
 /// Mirror a mutated root back into MODULE_GLOBALS when it is a module-level
 /// binding, matching what the identifier and two-level paths already do.
-fn sync_module_global(env: &Env, root: &str) {
+fn sync_module_global(env: &mut Env, root: &str) {
+    // A global with owner provenance publishes to its defining owner's store,
+    // which is what reads resolve through. The flat map's entry under this
+    // bare name may be an unrelated module's, so an import never writes it.
+    if !env.is_local(root) {
+        if let Some((owner, source_name)) = env.global_binding(root) {
+            let foreign = env.scope().map_or(true, |scope| *scope.owner() != owner);
+            if let Some(value) = env.get(root).cloned() {
+                let scoped = env.scope().is_some();
+                if scoped {
+                    env.release_scope();
+                }
+                crate::interpreter::set_owned_global(&owner, &source_name, value, false);
+                if scoped {
+                    env.refresh_scope(crate::interpreter::owned_globals_snapshot());
+                }
+            }
+            if foreign {
+                return;
+            }
+        }
+    }
     MODULE_GLOBALS.with(|cell| {
         // Peek before the write borrow: borrow_mut() on this generation-tracked
         // cell invalidates every owned-env template (2026-08-21 stall record).

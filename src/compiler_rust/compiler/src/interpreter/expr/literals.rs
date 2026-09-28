@@ -311,6 +311,19 @@ pub(super) fn eval_literal_expr(
                 // MODULE_GLOBALS is authoritative for these names (a direct
                 // write in the body syncs there too), so prefer it on read.
                 if !env.is_local(name) {
+                    // A global with owner provenance resolves through its
+                    // defining module's store, never the bare-name flat map,
+                    // where a same-named global of an unrelated loaded module
+                    // may sit (PR #1905: x86_32 `g_vmm` shadowed the imported
+                    // `memory.vmm.g_vmm`).
+                    // A write by this frame (overlay entry) is published to the
+                    // owner store only when the frame returns, so it wins.
+                    if let Some(live) = env.live_owned_global(name) {
+                        if env.has_overlay_entry(name) {
+                            return Ok(Some(val.clone()));
+                        }
+                        return Ok(Some(live.unwrap_or_else(|| val.clone())));
+                    }
                     let live = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());
                     if let Some(live) = live {
                         return Ok(Some(live));

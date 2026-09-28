@@ -453,6 +453,16 @@ impl GlobalScope {
         self.bindings.as_ref()?.get(name).cloned()
     }
 
+    /// Live value of `name` read from the store of the module that defines
+    /// it. Outer `None`: `name` has no owner provenance in this scope.
+    fn live_owned(&self, name: &str) -> Option<Option<Value>> {
+        if self.owner_has(name) {
+            return Some(crate::interpreter::owned_global(&self.owner, name));
+        }
+        let (owner, source) = self.bindings.as_ref()?.get(name)?;
+        Some(crate::interpreter::owned_global(owner, source))
+    }
+
     /// Every local name through which (`owner`, `source`) is visible.
     fn aliases_of(&self, owner: &Arc<str>, source: &str, out: &mut Vec<String>) {
         if *owner == self.owner && self.owner_has(source) {
@@ -1136,6 +1146,32 @@ impl CowEnv {
             return None;
         }
         self.scope.as_ref()?.binding(local_name)
+    }
+
+    /// (defining owner, defining name) behind `local_name` when it is imported
+    /// from a module OTHER than this frame's own. Such a name must resolve
+    /// through that owner's store: the flat `MODULE_GLOBALS` map is keyed by
+    /// bare name, so a same-named global of any other loaded module shadows it
+    /// there (PR #1905: x86_32 `g_vmm` read in place of `memory.vmm.g_vmm`).
+    pub fn foreign_global_binding(&self, local_name: &str) -> Option<(Arc<str>, String)> {
+        let (owner, source) = self.global_binding(local_name)?;
+        if self.scope.as_ref().is_some_and(|scope| *scope.owner() == owner) {
+            return None;
+        }
+        Some((owner, source))
+    }
+
+    /// Live value of a non-local global that has owner provenance (defined by
+    /// this module or imported), read from its defining owner's store rather
+    /// than the bare-name flat map. Outer `None`: no provenance.
+    pub fn live_owned_global(&self, local_name: &str) -> Option<Option<Value>> {
+        if let Some((owner, source)) = self.global_bindings.get(local_name) {
+            return Some(crate::interpreter::owned_global(owner, source));
+        }
+        if self.is_local(local_name) {
+            return None;
+        }
+        self.scope.as_ref()?.live_owned(local_name)
     }
 
     /// Every (local name, (owner, source)) pair this frame treats as a global
