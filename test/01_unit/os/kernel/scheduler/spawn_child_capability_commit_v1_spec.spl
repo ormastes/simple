@@ -1,0 +1,62 @@
+"""Child capability ownership at scheduler publication."""
+# codex-system-test
+use std.spec.*
+use std.fs.{file_read}
+use os.kernel.types.capability_types.{
+    CapabilityKind, CapabilitySet, CapabilityToken, capability_set_bind_owner
+}
+
+fn _token_v1(kind: CapabilityKind, owner: u64, token_id: u64) -> CapabilityToken:
+    CapabilityToken(
+        kind: kind, generation: 7u64, owner: owner, token_id: token_id,
+        parent_token_id: 41u64, depth: 1)
+
+describe "REQ-SPAWN-CAP-001 actual child identity binding":
+    it "preserves an attenuated pouch while replacing every parent owner":
+        val parent = CapabilitySet(caps: [
+            _token_v1(CapabilityKind.ProcessSpawn, 17u64, 51u64),
+            _token_v1(CapabilityKind.FileExec(path_prefix: "/system/bin/simple"), 17u64, 52u64)
+        ], is_pledged: true)
+        val child = capability_set_bind_owner(parent, 88u64)
+        expect(child.is_pledged).to_equal(true)
+        expect(child.caps.len()).to_equal(2)
+        expect(child.caps[0].owner).to_equal(88u64)
+        expect(child.caps[1].owner).to_equal(88u64)
+        expect(child.caps[0].kind).to_equal(parent.caps[0].kind)
+        expect(child.caps[1].kind).to_equal(parent.caps[1].kind)
+        expect(child.caps[0].generation).to_equal(7u64)
+        expect(child.caps[1].depth).to_equal(1)
+        expect(child.caps[0].token_id).to_equal(51u64)
+        expect(child.caps[1].parent_token_id).to_equal(41u64)
+
+    it "binds only after scheduler reserves the actual child id":
+        val generic = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val reserve = generic.find("val user_next_id = identity.task_id")
+        val bind = generic.find("capabilities: capability_set_bind_owner(caps, user_next_id)")
+        val stage = generic.find("new_tasks[slot] = tcb")
+        expect(reserve).to_be_greater_than(-1)
+        expect(bind).to_be_greater_than(reserve)
+        expect(bind).to_be_less_than(stage)
+        expect(generic.count("capabilities: capability_set_bind_owner(caps, user_next_id)")).to_equal(2)
+
+    it "binds authenticated loader adoption before task publication":
+        val source = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        val reserve = source.find("val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
+        val assigned = source.find("val id = TaskId(id: identity.task_id)")
+        val generation = source.find("lifecycle_generation: identity.lifecycle_generation")
+        val bind = source.find("capabilities: capability_set_bind_owner(caps, id.id)")
+        val publish = source.find("self.tasks[slot] = tcb")
+        expect(reserve).to_be_greater_than(-1)
+        expect(assigned).to_be_greater_than(reserve)
+        expect(generation).to_be_greater_than(assigned)
+        expect(generation).to_be_less_than(publish)
+        expect(bind).to_be_greater_than(assigned)
+        expect(bind).to_be_less_than(publish)
+        expect(source.count("scheduler_next_task_id_take()")).to_equal(0)
+
+describe "REQ-SPAWN-CAP-002 syscall remains fail closed":
+    it "does not mistake the scalar VMM helper for complete ingress authority":
+        val source = file_read("src/os/kernel/ipc/spawn_packet_admission_v1.spl")
+        expect(source).to_contain("descriptor/stdio inheritance")
+        expect(source).to_contain("RV64 lacks an Sv39 retained-copy provider")
+        expect(source).to_contain("    -38")
