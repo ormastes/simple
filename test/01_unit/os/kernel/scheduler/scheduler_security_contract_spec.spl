@@ -1,0 +1,233 @@
+"""Scheduler security representations and owner updates; no guest handoff proof.
+
+REQ-001, REQ-002, REQ-003, REQ-006 in simple_os_enhance.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.task_types.{
+    TaskId, TaskState, TaskPriority, TaskContext, BlockReason,
+    default_task_schedule, default_task_isolation
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.arm32_mapping_handle_v1.{scheduler_arm32_mapping_handle_absent_v1}
+use os.kernel.types.riscv32_mapping_handle_v1.{scheduler_riscv32_mapping_handle_absent_v1}
+use os.kernel.types.x86_32_mapping_handle_v1.{scheduler_x86_32_mapping_handle_absent_v1}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_types.{
+    TaskControlBlock, default_task_security, task_security_fork,
+    task_security_binding_managed_child, task_control_state_code
+}
+use os.kernel.scheduler.task_pre_exit_admission_v1.{
+    scheduler_task_state_admits_syscall_v1,
+    scheduler_task_state_admits_fd_operation_v1,
+    scheduler_task_state_admits_capability_use_v1,
+    scheduler_prepare_task_exit_admission_v1
+}
+
+fn _security_task() -> TaskControlBlock:
+    val id = TaskId(id: 17u64)
+    val context = TaskContext(
+        rax: 0u64, rbx: 0u64, rcx: 0u64, rdx: 0u64,
+        rsi: 0u64, rdi: 0u64, rbp: 0u64, rsp: 0u64,
+        r8: 0u64, r9: 0u64, r10: 0u64, r11: 0u64,
+        r12: 0u64, r13: 0u64, r14: 0u64, r15: 0u64,
+        rip: 0u64, rflags: 0u64, cs: 0u64, ss: 0u64, fpu_state: 0u64)
+    TaskControlBlock(
+        id: id, name: "security-contract", state: TaskState.Ready,
+        priority: TaskPriority.Normal, is_user: true, entry_point: 0u64,
+        context: context, user_context: Some(context),
+        address_space: 0u64, kernel_stack: 0u64, user_stack: 0u64,
+        capabilities: CapabilitySet.empty(), parent: nil,
+        schedule: default_task_schedule(TaskPriority.Normal),
+        isolation: default_task_isolation(0u64), assigned_cpu: 0u32,
+        exit_code: 0, ticks_remaining: 0u64, lifecycle_generation: 41u64,
+        arm32_mapping_handle: scheduler_arm32_mapping_handle_absent_v1(),
+        riscv32_mapping_handle: scheduler_riscv32_mapping_handle_absent_v1(),
+        x86_32_mapping_handle: scheduler_x86_32_mapping_handle_absent_v1(),
+        exec_generation: 0u64, x86_root_generation: 0u64,
+        security: default_task_security(id))
+
+fn _security_scheduler(task: TaskControlBlock) -> Scheduler:
+    var scheduler = Scheduler.new_bootstrap()
+    scheduler.tasks[0] = task
+    scheduler
+
+describe "canonical scheduler security contract":
+    it "keeps legacy state codes and assigns PreparingExit code 4":
+        var task = _security_task()
+        expect(task_control_state_code(task)).to_equal(0u8)
+        task.state = TaskState.Running
+        expect(task_control_state_code(task)).to_equal(1u8)
+        task.state = TaskState.Blocked(BlockReason.Sleep(until_ns: 5u64))
+        expect(task_control_state_code(task)).to_equal(2u8)
+        task.state = TaskState.Zombie
+        expect(task_control_state_code(task)).to_equal(3u8)
+        task.state = TaskState.PreparingExit
+        expect(task_control_state_code(task)).to_equal(4u8)
+
+    it "closes syscall FD and capability admission in both exit states":
+        for state in [TaskState.Ready, TaskState.Running, TaskState.Blocked(BlockReason.Exit)]:
+            expect(scheduler_task_state_admits_syscall_v1(state)).to_be(true)
+            expect(scheduler_task_state_admits_fd_operation_v1(state)).to_be(true)
+            expect(scheduler_task_state_admits_capability_use_v1(state)).to_be(true)
+        for state in [TaskState.PreparingExit, TaskState.Zombie]:
+            expect(scheduler_task_state_admits_syscall_v1(state)).to_be(false)
+            expect(scheduler_task_state_admits_fd_operation_v1(state)).to_be(false)
+            expect(scheduler_task_state_admits_capability_use_v1(state)).to_be(false)
+
+    it "creates PID-backed identities with no policy or root authority":
+        val task = _security_task()
+        val security = task.security
+        expect(security.principal_id).to_equal(task.id.id)
+        expect(security.job_id).to_equal(task.id.id)
+        expect(security.cspace_id).to_equal(task.id.id)
+        expect(security.resource_domain_id).to_equal(task.id.id)
+        expect(security.audit_context_id).to_equal(task.id.id)
+        expect(security.parent_job_id).to_equal(0u64)
+        expect(security.parent_resource_domain_id).to_equal(0u64)
+        expect(security.policy_bound).to_be(false)
+        expect(security.resource_limits_bound).to_be(false)
+        expect(security.cpu_weight_bound).to_be(false)
+        expect(security.syscall_filter_bound).to_be(false)
+        expect(security.syscall_filter.len()).to_equal(0)
+        expect(security.root_mint_authority).to_be(false)
+        expect(security.reaper_authority).to_be(false)
+        expect(task.isolation.filesystem_root).to_equal("")
+        expect(task.isolation.filesystem_denied).to_be(true)
+        expect(task.isolation.filesystem_view_bound).to_be(false)
+        val scheduler = _security_scheduler(task)
+        expect(scheduler.syscall_allowed(task.id, 4u64)).to_be(false)
+        expect(scheduler.has_root_mint_authority(task.id)).to_be(false)
+        expect(scheduler.has_root_mint_authority(TaskId(id: 0u64))).to_be(false)
+        expect(scheduler.has_root_mint_authority(TaskId(id: 18u64))).to_be(false)
+
+    it "binds managed policy once and commits the explicit syscall filter":
+        val task = _security_task()
+        var scheduler = _security_scheduler(task)
+        val binding = task_security_binding_managed_child(0u64, 0u64, task.id)
+        expect(scheduler.bind_managed_child_security(task.id, binding)).to_be(true)
+        expect(scheduler.bind_managed_child_security(task.id, binding)).to_be(false)
+        expect(scheduler.syscall_allowed(task.id, 4u64)).to_be(false)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [])).to_be(false)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [0u64])).to_be(false)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [4u64, 4u64])).to_be(false)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [4u64, 5u64])).to_be(true)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [7u64])).to_be(false)
+        expect(scheduler.syscall_allowed(task.id, 0u64)).to_be(false)
+        expect(scheduler.syscall_allowed(task.id, 4u64)).to_be(true)
+        expect(scheduler.syscall_allowed(task.id, 7u64)).to_be(false)
+
+    it "requires a live generation and exact child for managed binding":
+        var task = _security_task()
+        var scheduler = _security_scheduler(task)
+        val binding = task_security_binding_managed_child(0u64, 0u64, task.id)
+        expect(scheduler.bind_managed_child_security(TaskId(id: 0u64), binding)).to_be(false)
+        expect(scheduler.bind_managed_child_security(TaskId(id: 18u64), binding)).to_be(false)
+        val absent_parent = task_security_binding_managed_child(19u64, 19u64, task.id)
+        expect(scheduler.bind_managed_child_security(task.id, absent_parent)).to_be(false)
+        task.lifecycle_generation = 0u64
+        scheduler = _security_scheduler(task)
+        expect(scheduler.bind_managed_child_security(task.id, binding)).to_be(false)
+        for state in [TaskState.PreparingExit, TaskState.Zombie]:
+            task = _security_task()
+            task.state = state
+            scheduler = _security_scheduler(task)
+            expect(scheduler.bind_managed_child_security(task.id, binding)).to_be(false)
+
+    it "requires separate root and reaper grants on the policy-bound user root":
+        val task = _security_task()
+        var scheduler = _security_scheduler(task)
+        expect(scheduler.grant_root_mint_authority(task.id)).to_be(false)
+        expect(scheduler.set_reaper_task(task.id)).to_be(false)
+        expect(scheduler.bind_managed_child_security(task.id,
+            task_security_binding_managed_child(0u64, 0u64, task.id))).to_be(true)
+        expect(scheduler.set_reaper_task(task.id)).to_be(true)
+        expect(scheduler.has_root_mint_authority(task.id)).to_be(false)
+        expect(scheduler.grant_root_mint_authority(task.id)).to_be(true)
+        expect(scheduler.has_root_mint_authority(task.id)).to_be(true)
+        expect(scheduler.set_reaper_task(task.id)).to_be(false)
+        expect(scheduler.grant_root_mint_authority(task.id)).to_be(false)
+
+    it "rejects root grants for kernel tasks non-root children and zero generations":
+        for invalid_case in 0..3:
+            var task = _security_task()
+            var security = task.security
+            security.policy_bound = true
+            task.security = security
+            if invalid_case == 0:
+                task.is_user = false
+            elif invalid_case == 1:
+                task.parent = Some(TaskId(id: 22u64))
+            else:
+                task.lifecycle_generation = 0u64
+            var scheduler = _security_scheduler(task)
+            expect(scheduler.set_reaper_task(task.id)).to_be(false)
+            expect(scheduler.grant_root_mint_authority(task.id)).to_be(false)
+
+    it "denies existing root authority and syscall policy after exact pre-exit admission":
+        val task = _security_task()
+        var scheduler = _security_scheduler(task)
+        expect(scheduler.bind_managed_child_security(task.id,
+            task_security_binding_managed_child(0u64, 0u64, task.id))).to_be(true)
+        expect(scheduler.bind_managed_child_syscall_filter(task.id, [4u64])).to_be(true)
+        expect(scheduler.set_reaper_task(task.id)).to_be(true)
+        expect(scheduler.grant_root_mint_authority(task.id)).to_be(true)
+        val stale = scheduler_prepare_task_exit_admission_v1(
+            scheduler.tasks, task.id.id, task.lifecycle_generation + 1u64)
+        expect(stale.transitioned).to_be(false)
+        val prepared = scheduler_prepare_task_exit_admission_v1(
+            scheduler.tasks, task.id.id, task.lifecycle_generation)
+        expect(prepared.transitioned).to_be(true)
+        scheduler.tasks = prepared.tasks
+        expect(scheduler.has_root_mint_authority(task.id)).to_be(false)
+        expect(scheduler.syscall_allowed(task.id, 4u64)).to_be(false)
+        expect(scheduler.bind_managed_child_resource_limits(task.id, 4u64, 8u64)).to_be(false)
+        expect(scheduler.bind_managed_child_cpu_weight(task.id, 100u64)).to_be(false)
+        expect(scheduler.bind_filesystem_view(task.id, "/")).to_be(false)
+        expect(scheduler.bind_isolation_domain(task.id, 77u64)).to_be(false)
+        val repeated = scheduler_prepare_task_exit_admission_v1(
+            scheduler.tasks, task.id.id, task.lifecycle_generation)
+        expect(repeated.transitioned).to_be(false)
+
+    it "preserves a bound filesystem view through resource and domain updates":
+        val task = _security_task()
+        var scheduler = _security_scheduler(task)
+        expect(scheduler.bind_managed_child_security(task.id,
+            task_security_binding_managed_child(0u64, 0u64, task.id))).to_be(true)
+        expect(scheduler.bind_filesystem_view(task.id, "/sandbox")).to_be(true)
+        expect(scheduler.bind_managed_child_resource_limits(task.id, 4u64, 8u64)).to_be(true)
+        expect(scheduler.bind_isolation_domain(task.id, 77u64)).to_be(true)
+        val bound = scheduler.tasks[0].unwrap()
+        expect(bound.isolation.filesystem_root).to_equal("/sandbox")
+        expect(bound.isolation.filesystem_denied).to_be(false)
+        expect(bound.isolation.filesystem_view_bound).to_be(true)
+        expect(bound.isolation.max_threads).to_equal(4u32)
+        expect(bound.isolation.max_memory_pages).to_equal(8u64)
+        expect(scheduler.bind_filesystem_view(task.id, "/")).to_be(false)
+
+    it "forks identities and restrictive policy without root or reaper authority":
+        var parent = default_task_security(TaskId(id: 17u64))
+        parent.policy_bound = true
+        parent.resource_limits_bound = true
+        parent.process_limit = 3u64
+        parent.memory_limit_pages = 11u64
+        parent.cpu_weight_bound = true
+        parent.syscall_filter_bound = true
+        parent.syscall_filter = [4u64, 5u64]
+        parent.root_mint_authority = true
+        parent.reaper_authority = true
+        val child = task_security_fork(parent, TaskId(id: 23u64))
+        expect(child.principal_id).to_equal(23u64)
+        expect(child.cspace_id).to_equal(23u64)
+        expect(child.audit_context_id).to_equal(23u64)
+        expect(child.job_id).to_equal(17u64)
+        expect(child.resource_domain_id).to_equal(17u64)
+        expect(child.policy_bound).to_be(true)
+        expect(child.resource_limits_bound).to_be(true)
+        expect(child.process_limit).to_equal(3u64)
+        expect(child.memory_limit_pages).to_equal(11u64)
+        expect(child.cpu_weight_bound).to_be(true)
+        expect(child.syscall_filter_bound).to_be(true)
+        expect(child.syscall_filter).to_equal([4u64, 5u64])
+        expect(child.root_mint_authority).to_be(false)
+        expect(child.reaper_authority).to_be(false)
