@@ -104,3 +104,6 @@ as a focused case, identify its first failing phase after AOP weaving, and
 repair that path. Then rerun Stage2 admission and resume Stage3/4 from admitted
 artifacts. Run the Target 5/6 size, startup, compile-time, and RSS cohorts
 before marking either target complete.
+
+The follow-up diagnosis and TODO are in
+`doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
