@@ -13,17 +13,22 @@ one POSIX constructor body. The owners now use direct typed state mutation
 under their original mutexes; a focused 48-file no-stub native build passed.
 The POSIX constructor now compiles in a focused 49-file no-stub native build,
 but its close path hits the old capsule's named `rt_collection_remove` trap.
-The runtime dispatcher and pure-Simple twin have source repairs awaiting a
-fresh capsule and behavioral proof. The full compiler matrix still needs
+The runtime dispatcher and pure-Simple twin have source repairs. A fresh
+Stage2 runtime capsule now passes verification, and its no-stub native
+owned-device create/close probe exits zero with owner counts returning to
+zero. The pure-Simple shadow gate and full compiler matrix still need
 verification. See
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
 The runtime trap and next proof are tracked in
 `doc/08_tracking/bug/target56_stage2_runtime_collection_remove_trap_2026-09-28.md`.
-The fresh runtime authority was built, but Stage2 source compilation stopped
-on another erased update-closure state in
-`sffi/dynlib_snapshot_registry_v1.spl`. Its typed Simple-side state repair
-passes a focused 37-file no-stub bootstrap build; full Stage2 admission and
-the owned-device runtime probe are still open.
+The snapshot-registry state repair in
+`sffi/dynlib_snapshot_registry_v1.spl` passed its focused 37-file no-stub
+bootstrap build and the full Stage2 native build, positional hello-world
+smoke, and runtime capability proof. The in-process Stage2 compiler-test
+matrix failed at its full CLI link after 1,828 seconds: the `host-gpu` core
+runtime does not supply optional GPU/SQLite/SDL/Metal and other reached
+symbols. The later test rows were blocked. See
+`doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
