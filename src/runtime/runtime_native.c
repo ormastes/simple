@@ -10415,7 +10415,7 @@ int64_t rt_array_remove(int64_t array_value, int64_t index) {
         int64_t removed = (int64_t)base[index];
         memmove(base + index, base + index + 1, (size_t)tail * sizeof(uint64_t));
         array->len -= 1;
-        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+        return rt_value_int(removed);
     }
     int64_t* base = (int64_t*)array->data;
     int64_t removed = base[index];
