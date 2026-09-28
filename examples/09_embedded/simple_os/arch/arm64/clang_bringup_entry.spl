@@ -13,7 +13,15 @@
 #   R6b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /WITNESS.O
 #        /LIBCXX.A /LIBC.A /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF (C++ link)
 #   R6c: /WITNESS2.ELF                  (prints WITNESS_CXX_42)
-# Final markers: CLANG_IN_GUEST_ARM64_OK (R1-R5), CLANG_IN_GUEST_ARM64_CXX_OK (R6)
+#   R7a: /CLANG.ELF -cc1 -x c++ -std=c++17 -fno-rtti -I/INCLUDE/c++/v1
+#        -I/INCLUDE -emit-obj -o /WSTL.O /WSTL.CPP
+#        (in-guest STL compile: std::string/std::vector/<algorithm>
+#         instantiated from the /INCLUDE libc++ header tree)
+#   R7b: /LLD.ELF -flavor gnu -T /SIMPLEOS.LD /CRT0.O /WSTL.O
+#        /LIBCXX.A /LIBC.A /CXXABI.A /RTBUILT.A -o /WSTL2.ELF (STL link)
+#   R7c: /WSTL2.ELF                     (prints WITNESS_STL_OK)
+# Final markers: CLANG_IN_GUEST_ARM64_OK (R1-R5), CLANG_IN_GUEST_ARM64_CXX_OK (R6),
+#   CLANG_IN_GUEST_ARM64_STL_OK (R7)
 #
 # Staged by scripts/qemu/check_simpleos_arm64_clang_compile.shs via
 # scripts/os/fsexec_mkimg_clang_arm64.spl (FAT32 root-only, 8.3 names).
@@ -154,4 +162,45 @@ fn spl_start():
         return
 
     serial_println("CLANG_IN_GUEST_ARM64_CXX_OK")
+
+    # R7a: in-guest STL compile — the REAL libc++ proof. The witness TU
+    # #includes <string>/<vector>/<algorithm> and instantiates std::sort /
+    # std::find / std::string concatenation against the /INCLUDE header tree
+    # (the sysroot C + libc++ include tree, staged host-side). -I flags are
+    # joined form (-I/path); the cc1 include lookup opens e.g.
+    # /INCLUDE/c++/v1/__algorithm/sort.h through the guest VFS subdir + LFN
+    # read path. NO exceptions flag: this fork's cc1 compiles exceptions OUT
+    # by default and REJECTS -fno-exceptions; the sysroot libc++abi.a is a
+    # no-exceptions build (no __cxa_throw/_Unwind_*), and the witness uses no
+    # throw/try/catch. -fno-rtti matches the prebuilt guest libc++ (as R6a).
+    val rc7a = _rung("R7a-cc1-stl-compile", "/CLANG.ELF",
+        ["/CLANG.ELF", "-cc1", "-triple", "aarch64-unknown-simpleos",
+         "-ffreestanding", "-O0", "-x", "c++", "-std=c++17", "-fno-rtti",
+         "-I/INCLUDE/c++/v1", "-I/INCLUDE",
+         "-emit-obj", "-o", "/WSTL.O", "/WSTL.CPP"])
+    if rc7a != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R7_COMPILE_FAIL rc={rc7a}")
+        rt_qemu_exit_success()
+        return
+
+    # R7b: in-guest lld STL link -> /WSTL2.ELF (same archive order as R6b).
+    val rc7b = _rung("R7b-lld-stl-link", "/LLD.ELF",
+        ["/LLD.ELF", "-flavor", "gnu", "-T", "/SIMPLEOS.LD",
+         "/CRT0.O", "/WSTL.O", "/LIBCXX.A", "/LIBC.A",
+         "/CXXABI.A", "/RTBUILT.A", "--no-mmap-output-file",
+         "-o", "/WSTL2.ELF"])
+    if rc7b != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R7_LINK_FAIL rc={rc7b}")
+        rt_qemu_exit_success()
+        return
+
+    # R7c: run the guest-produced STL binary (prints WITNESS_STL_OK — a
+    # computed sort/find/string result, not a literal).
+    val rc7c = _rung("R7c-run-witness-stl", "/WSTL2.ELF", ["/WSTL2.ELF"])
+    if rc7c != 0:
+        serial_println("CLANG_IN_GUEST_ARM64_R7_RUN_FAIL rc={rc7c}")
+        rt_qemu_exit_success()
+        return
+
+    serial_println("CLANG_IN_GUEST_ARM64_STL_OK")
     rt_qemu_exit_success()
