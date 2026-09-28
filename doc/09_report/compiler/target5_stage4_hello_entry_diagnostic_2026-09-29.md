@@ -92,3 +92,38 @@ those symbols to the compiler backfill contract and verify its exact closure
 and provider disjointness. No Stage4 executable or hello size cohort exists
 from these retries. The session stopped after the third focused check/build
 cycle as required by the repository iteration cap.
+
+## Continuation: backfill and core-C ownership
+
+The compiler backfill contract now retains the three versioned
+`spl_cranelift_*_v2` AOT configuration hooks as exact exports. Its six focused
+archive tests pass, including public-export, private-localization,
+provider-overlap, and extra-runtime-symbol rejection. The next Stage4 attempt
+passed that manifest but rejected overlap with the core-C archive: ordinary
+bootstrap core-C still carried `runtime_cranelift_bridge_stub.c`, duplicating
+the real `rt_cranelift_*` and versioned `spl_cranelift_*` hooks.
+
+A dedicated Stage4 compiler core-C variant now excludes that stub translation
+unit while leaving ordinary bootstrap's named-trap stubs in place. The focused
+archive test confirms that the Stage4 variant contains `rt_string_new` and no
+`rt_cranelift_*` or `spl_cranelift_*` definitions. A final full current-source
+retry compiled 866 units with zero failures and passed both the backfill
+manifest and overlap checks. It then stopped at a later exact ownership gate:
+
+```text
+Stage4 requested symbols have no archive owner:
+rt_execute_native, rt_net_accept, rt_net_bind, rt_net_close, rt_net_init,
+rt_net_recv_bytes, rt_net_rx_ready, rt_net_send_bytes, rt_net_socket,
+rt_net_stats, rt_net_tx_test, rt_tcp_connect
+```
+
+`rt_execute_native` has an implementation in the hosted Rust `native_all`
+archive, which is not an admitted Stage4 core-C provider. The network symbols
+have Simple extern declarations in `src/lib/nogc_sync_mut/sffi/net.spl` and
+bare-metal uses; the current core-C archive does not own them. The next pass
+must establish the intended hosted owner or remove these calls from the
+compiler entry closure by justified feature boundaries, then prove exact
+archive ownership. Import classification or a blanket undefined-symbol waiver
+would not supply behavior. The build produced no Stage4 executable or hello
+size/startup/RSS cohort. This is the session's third focused fix/check cycle;
+no further build retry was made.

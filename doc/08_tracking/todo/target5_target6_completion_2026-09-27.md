@@ -69,10 +69,11 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
   the closure stall and missing runtime symbols in the blocker report. The
-  latest standalone-entry attempt repaired the SQLite ABI validator, but the
-  Stage4 link is now blocked by three unowned `spl_cranelift_*` AOT exports in
-  compiler backfill. K1 composition binding remains unqualified, and the
-  hosted static diagnostic reaches an empty-MIR AOT failure. See
+  latest standalone-entry attempt passes SQLite ABI, Cranelift backfill, and
+  core-C stub disjointness, but twelve reached native-execution/network
+  symbols lack an admitted archive owner. K1 composition binding remains
+  unqualified, and the hosted static diagnostic reaches an empty-MIR AOT
+  failure. See
   `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
 - [ ] With that authority, run a current-source release-small Simple hello and
   a paired matched-startup C hello. Check exact output, retained symbols,

@@ -423,7 +423,11 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
+fn build_c_runtime_library(
+    build_dir: &Path,
+    include_stage4_hosted: bool,
+    include_cranelift_stubs: bool,
+) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let target = effective_target();
@@ -582,7 +586,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
-    } else {
+    } else if include_cranelift_stubs {
         // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
         // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
         // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
@@ -755,11 +759,17 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false)
+    build_c_runtime_library(build_dir, false, true)
+}
+
+pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    // The compiler backfill owns the real Cranelift hooks. Keep ordinary
+    // bootstrap's named-trap stubs out of this archive to prevent overlap.
+    build_c_runtime_library(build_dir, false, false)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true)
+    build_c_runtime_library(build_dir, true, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
@@ -2657,8 +2667,9 @@ fn project_stage4_archive_closure(
 
 /// Build the Stage-4 compiler hook archive without importing a second runtime.
 ///
-/// The dedicated archive's globally defined `rt_cranelift_*` symbols are the
-/// exact export contract. On GNU/Linux, a relocatable link roots those exports
+/// The dedicated archive's globally defined `rt_cranelift_*` symbols and the
+/// three versioned AOT configuration hooks form the exact export contract.
+/// On GNU/Linux, a relocatable link roots those exports
 /// and section-GCs everything outside their dependency closure. Surviving
 /// non-contract definitions are localized; the result is rejected unless its
 /// public ABI is contract-only and disjoint from every provider.
@@ -2696,7 +2707,14 @@ pub(crate) fn build_compiler_backfill_archive(
         let mut manifest_raw = BTreeSet::new();
         for (symbol, count) in &source_defined {
             let canonical = canonical_archive_symbol(symbol);
-            if canonical.starts_with("rt_cranelift_") {
+            if canonical.starts_with("rt_cranelift_")
+                || matches!(
+                    canonical,
+                    "spl_cranelift_new_aot_module_config_v2"
+                        | "spl_cranelift_aot_isa_feature_v2"
+                        | "spl_cranelift_aot_opt_level_v2"
+                )
+            {
                 *contract_counts.entry(canonical.to_string()).or_insert(0usize) += *count;
                 manifest_raw.insert(symbol.clone());
             }

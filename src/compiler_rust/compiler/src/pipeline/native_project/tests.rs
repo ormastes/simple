@@ -3239,6 +3239,9 @@ fn test_compiler_backfill_archive_keeps_exact_manifest_and_localizes_dependency_
         &[r#"
 void hidden_helper(void) {}
 void rt_cranelift_requested_hook(void) { hidden_helper(); }
+void spl_cranelift_new_aot_module_config_v2(void) { hidden_helper(); }
+void spl_cranelift_aot_isa_feature_v2(void) { hidden_helper(); }
+void spl_cranelift_aot_opt_level_v2(void) { hidden_helper(); }
 __attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); }
 "#],
     );
@@ -3249,8 +3252,11 @@ __attribute__((constructor)) static void compiler_ctor(void) { hidden_helper(); 
     assert_eq!(output, output_dir.join("libsimple_compiler_backfill.a"));
     let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
     assert_eq!(defined.get("rt_cranelift_requested_hook"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_new_aot_module_config_v2"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_aot_isa_feature_v2"), Some(&1));
+    assert_eq!(defined.get("spl_cranelift_aot_opt_level_v2"), Some(&1));
     assert!(!defined.contains_key("hidden_helper"));
-    assert_eq!(defined.len(), 1);
+    assert_eq!(defined.len(), 4);
     assert!(!undefined
         .iter()
         .any(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_")));
@@ -3350,6 +3356,19 @@ fn test_compiler_backfill_archive_rejects_provider_symbol_overlap() {
             .unwrap_err();
     assert!(error.contains(&provider.display().to_string()));
     assert!(error.contains("rt_cranelift_requested_hook"));
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
+fn test_stage4_compiler_core_c_omits_cranelift_stubs() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = super::tools::build_stage4_compiler_core_c_runtime_library(temp.path())
+        .expect("Stage4 compiler core-C archive should build");
+    let members = archive_members(&runtime).unwrap();
+    assert!(!members.iter().any(|member| member == "runtime_cranelift_bridge_stub.o"));
+    let (defined, _) = super::tools::archive_global_symbols(&runtime).unwrap();
+    assert!(defined.contains_key("rt_string_new"));
+    assert!(!defined.keys().any(|symbol| symbol.starts_with("rt_cranelift_") || symbol.starts_with("spl_cranelift_")));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
