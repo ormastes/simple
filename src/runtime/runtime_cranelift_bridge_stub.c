@@ -71,6 +71,27 @@ int64_t rt_cranelift_new_aot_module_triple(int64_t name_ptr, int64_t name_len, i
     return 0;
 }
 
+int64_t spl_cranelift_new_aot_module_config_v2(int64_t name_ptr, int64_t name_len,
+        int64_t target_ptr, int64_t target_len, int64_t cpu_ptr, int64_t cpu_len,
+        int64_t opt_level, int64_t features_ptr, int64_t features_len) {
+    (void)name_ptr; (void)name_len; (void)target_ptr; (void)target_len;
+    (void)cpu_ptr; (void)cpu_len; (void)opt_level; (void)features_ptr; (void)features_len;
+    rt_trap_unimplemented("spl_cranelift_new_aot_module_config_v2");
+    return 0;
+}
+
+int64_t spl_cranelift_aot_isa_feature_v2(int64_t module, int64_t feature_ptr, int64_t feature_len) {
+    (void)module; (void)feature_ptr; (void)feature_len;
+    rt_trap_unimplemented("spl_cranelift_aot_isa_feature_v2");
+    return -1;
+}
+
+int64_t spl_cranelift_aot_opt_level_v2(int64_t module) {
+    (void)module;
+    rt_trap_unimplemented("spl_cranelift_aot_opt_level_v2");
+    return -1;
+}
+
 int64_t rt_cranelift_finalize_module(int64_t module) {
     (void)module;
     rt_trap_unimplemented("rt_cranelift_finalize_module");

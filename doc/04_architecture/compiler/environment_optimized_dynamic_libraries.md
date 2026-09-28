@@ -594,3 +594,16 @@ An emitted artifact receipt has its own lifetime. Issuance retains the exact
 planner artifact use, and owner-derived project/live checks bind plan, variant,
 artifact intent, cache and target facts. Emission release is blocked by joins
 and releases its planner retain before record reclamation.
+
+### 2026-09-28 builtin target propagation boundary
+
+`backend_plugin.target_context_v2` retains configuration between admission and
+the builtin producer calls. Backend-owned options remain separate from V1
+request/receipt layouts. Common AOT preparation still owns storage lowering,
+optimization, and debug policy; LLVM/Cranelift producers receive an explicit
+target rather than reconstructing it at compile time. This is propagation,
+not feature acceptance authority. Session result V2 continues to project
+`Unknown`, and unsupported feature/CPU requests fail before emission.
+
+Runtime and smoke validation is blocked pending an admitted source-compatible
+self-hosted binary; see `doc/03_plan/agent_tasks/backend_target_context_v2.md`.
