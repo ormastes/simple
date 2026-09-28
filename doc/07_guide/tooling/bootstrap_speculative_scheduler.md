@@ -35,6 +35,25 @@ resumes, so the supervisor pins both continuations to one job.
 
 ## Scheduling contract
 
+Stage 4 continuation publishes two receipts. The immutable
+`stage4-continuation-admission.env` uses
+`simple-bootstrap-stage4-continuation-admission-v1` with `status=prepared`.
+The compiler provenance binds those exact admission bytes. Finalization writes
+a separate `stage4-continuation.env` using
+`simple-bootstrap-stage4-continuation-v2` with `status=pass`, binding the
+admission, compiler, and compiler provenance hashes. This dependency order
+allows completion without changing a file already pinned by provenance.
+Completion must preserve the complete admission prefix, changing only schema
+and status; duplicate keys in either receipt are rejected. This keeps copied
+lineage, planner, and Stage 3 authority bound to the original admission.
+Legacy continuation-v1 receipts cannot qualify this split contract; rebuild
+through the canonical producer. Do not repair evidence by hand-rehashing it.
+
+`sh scripts/check/check-stage4-continuation-receipts.shs` exercises the real
+finalizer and verifies inherited authority mutation, duplicate keys, incomplete status, legacy schema, and duplicate
+publication rejection. Its synthetic artifact tests receipt linkage only; it
+does not qualify a compiler or replace the complete candidate verifier.
+
 The immutable graph authority is
 `scripts/bootstrap/bootstrap-graph.sdn`. A run creates
 `OUTPUT/scheduler/bootstrap-<time>-<pid>/` containing:

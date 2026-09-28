@@ -1,0 +1,97 @@
+#!/bin/sh
+# Focused receipt graph test; synthetic bytes are never admitted as a compiler.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+. "$root/scripts/bootstrap/resume-stage4-from-admitted.sh"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage4-receipt-test.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+output_dir="$scratch/output"
+PLATFORM=receipt-fixture
+mkdir -p "$output_dir/stage2/$PLATFORM" "$output_dir/stage3/$PLATFORM" "$output_dir/full/$PLATFORM"
+printf 'immutable parent\n' >"$output_dir/stage2/$PLATFORM/parent"
+printf 'immutable producer\n' >"$output_dir/stage3/$PLATFORM/parent"
+full_bin="$output_dir/full/$PLATFORM/simple"
+printf 'synthetic artifact, never executed\n' >"$full_bin"
+resume_stage4_before="$output_dir/stage4-continuation-before.sha256"
+resume_stage4_snapshot "$resume_stage4_before" "$output_dir" "$PLATFORM"
+resume_stage4_admission="$output_dir/stage4-continuation-admission.env"
+resume_stage4_receipt="$output_dir/stage4-continuation.env"
+{
+  echo schema=simple-bootstrap-stage4-continuation-admission-v1
+  echo status=prepared
+  echo planner_stage4_binding_sha256=fixture-binding
+  echo lineage_path=/fixture/lineage
+  echo lineage_sha256=fixture-lineage-hash
+  echo planner_receipt_path=/fixture/planner
+  echo planner_receipt_sha256=fixture-planner-hash
+  echo stage3_provenance_path=/fixture/stage3
+  echo stage3_provenance_sha256=fixture-stage3-hash
+} >"$resume_stage4_admission"
+{
+  echo stage4_continuation_path="$resume_stage4_admission"
+  echo stage4_continuation_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_admission")"
+  echo planner_stage4_binding_sha256=fixture-binding
+} >"${full_bin}.provenance.env"
+cp "$resume_stage4_admission" "$scratch/admission.original"
+cp "${full_bin}.provenance.env" "$scratch/provenance.original"
+cp "$full_bin" "$scratch/artifact.original"
+SIMPLE_BOOTSTRAP_STAGE4_QUARANTINE=1
+deploy=0
+
+# Execute the production finalizer, including both immutable parent snapshots.
+resume_stage4_finalize
+cmp "$resume_stage4_admission" "$scratch/admission.original"
+cmp "${full_bin}.provenance.env" "$scratch/provenance.original"
+stage4_verify_continuation_completion "$resume_stage4_receipt"
+cp "$resume_stage4_receipt" "$scratch/completion.original"
+
+reject_completion() {
+  if stage4_verify_continuation_completion "$resume_stage4_receipt"; then
+    echo "FAIL: accepted $1" >&2
+    exit 1
+  fi
+}
+printf 'mutation=true\n' >>"$resume_stage4_admission"
+reject_completion changed-admission
+cp "$scratch/admission.original" "$resume_stage4_admission"
+printf 'mutation=true\n' >>"${full_bin}.provenance.env"
+reject_completion changed-provenance
+cp "$scratch/provenance.original" "${full_bin}.provenance.env"
+printf 'mutation\n' >>"$full_bin"
+reject_completion changed-binary
+cp "$scratch/artifact.original" "$full_bin"
+sed 's/^admission_sha256=.*/admission_sha256=wrong/' "$scratch/completion.original" >"$resume_stage4_receipt"
+reject_completion mismatched-admission-hash
+sed 's/^status=pass$/status=prepared/' "$scratch/completion.original" >"$resume_stage4_receipt"
+reject_completion unfinished-completion
+sed 's/continuation-v2/continuation-v1/' "$scratch/completion.original" >"$resume_stage4_receipt"
+reject_completion legacy-circular-receipt
+for inherited_key in lineage_path lineage_sha256 planner_receipt_path \
+    planner_receipt_sha256 stage3_provenance_path stage3_provenance_sha256; do
+  sed "s|^${inherited_key}=.*|${inherited_key}=changed|" \
+    "$scratch/completion.original" >"$resume_stage4_receipt"
+  reject_completion "changed-completion-$inherited_key"
+done
+cp "$scratch/completion.original" "$resume_stage4_receipt"
+printf 'lineage_path=/fixture/other-lineage\n' >>"$resume_stage4_receipt"
+reject_completion duplicate-inherited-key
+cp "$scratch/completion.original" "$resume_stage4_receipt"
+printf 'extra_field=first\nextra_field=second\n' >>"$resume_stage4_receipt"
+reject_completion duplicate-unconsumed-key
+sed '/^lineage_path=/d' "$scratch/completion.original" >"$resume_stage4_receipt"
+reject_completion deleted-inherited-field
+cp "$scratch/completion.original" "$resume_stage4_receipt"
+
+# Existing output must never be silently replaced on a duplicate finalization.
+if (resume_stage4_finalize); then
+  echo 'FAIL: duplicate completion overwritten' >&2
+  exit 1
+fi
+cmp "$resume_stage4_receipt" "$scratch/completion.original"
+echo 'stage4-continuation-receipt-graph: PASS (finalize + 16 rejection cases; no runtime admission)'

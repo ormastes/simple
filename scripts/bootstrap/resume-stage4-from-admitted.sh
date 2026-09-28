@@ -5,6 +5,7 @@
 resume_stage4_continuation_lock=
 resume_stage4_before=
 resume_stage4_receipt=
+resume_stage4_admission=
 resume_stage4_work=
 
 resume_stage4_release_continuation_lock() {
@@ -90,9 +91,12 @@ resume_stage4_prepare() {
   resume_stage4_snapshot "$resume_stage4_before" "$output" "$platform" || return 1
   receipt="$output/stage4-continuation.env"; resume_stage4_receipt=$receipt
   [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  admission="$output/stage4-continuation-admission.env"
+  [ ! -e "$admission" ] && [ ! -L "$admission" ] || return 1
+  resume_stage4_admission=$admission
   umask 077
   {
-    echo schema=simple-bootstrap-stage4-continuation-v1
+    echo schema=simple-bootstrap-stage4-continuation-admission-v1
     echo status=prepared
     echo planner_receipt_path="$planner_receipt"
     echo planner_receipt_sha256="$(bootstrap_stage3_hash_file "$planner_receipt")"
@@ -111,9 +115,9 @@ resume_stage4_prepare() {
     echo bootstrap_lock_owner_pid="$$"
     echo immutable_snapshot_path="$resume_stage4_before"
     echo immutable_snapshot_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_before")"
-  } >"${receipt}.tmp.$$"
-  mv "${receipt}.tmp.$$" "$receipt"
-  STAGE4_CONTINUATION_RECEIPT=$receipt
+  } >"${admission}.tmp.$$"
+  mv "${admission}.tmp.$$" "$admission"
+  STAGE4_CONTINUATION_RECEIPT=$admission
   export STAGE4_CONTINUATION_RECEIPT
 }
 
@@ -133,8 +137,16 @@ resume_stage4_finalize() {
   [ -f "$full_bin" ] && [ ! -L "$full_bin" ] &&
     [ -f "${full_bin}.provenance.env" ] && [ ! -L "${full_bin}.provenance.env" ] || return 1
   tmp="${resume_stage4_receipt}.tmp.$$"; resume_stage4_work=$tmp
-  sed 's/^status=prepared$/status=pass/' "$resume_stage4_receipt" >"$tmp" || return 1
+  # Provenance already pins the admission bytes. Never rewrite them when
+  # publishing completion: completion -> provenance -> admission is acyclic.
+  [ ! -e "$resume_stage4_receipt" ] && [ ! -L "$resume_stage4_receipt" ] || return 1
+  stage4_verify_continuation_binding "${full_bin}.provenance.env" || return 1
+  [ "$(bootstrap_stage3_manifest_value stage4_continuation_path "${full_bin}.provenance.env")" = "$resume_stage4_admission" ] || return 1
+  sed -e 's/^schema=simple-bootstrap-stage4-continuation-admission-v1$/schema=simple-bootstrap-stage4-continuation-v2/' \
+      -e 's/^status=prepared$/status=pass/' "$resume_stage4_admission" >"$tmp" || return 1
   {
+    echo admission_path="$resume_stage4_admission"
+    echo admission_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_admission")"
     echo immutable_status=pass
     echo immutable_after_path="$after"
     echo immutable_after_sha256="$(bootstrap_stage3_hash_file "$after")"
