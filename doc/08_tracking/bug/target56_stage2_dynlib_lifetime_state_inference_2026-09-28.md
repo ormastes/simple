@@ -60,6 +60,12 @@ the owner as bytecode; ordinary native build instead stops earlier at parser
 errors for this source, so neither is a substitute for the bootstrap-mode
 reproduction.
 
+## Windows current-main confirmation (2026-09-28)
+
+An independent Windows MSVC full bootstrap at `e465b19cc00a706c487d788e1830cfa9ce91c001` rebuilt the Rust authority with LLVM 23.1.1 and reached the same `hir: Cannot infer field type: struct 'i64' field 'entries'` rejection during Stage 2. It also found an independent `src/math/rendering.spl` unresolved `to_latex` call. The Stage 2 compiler test matrix did not start. The full log is `D:/dev/simple-windows-bootstrap-20260927/build/bootstrap/windows-linux-20260927/windows/logs/x86_64-pc-windows-msvc/stage2-native-build.log`.
+
+A one-file bootstrap-mode probe retained under `build/mini_builds/win_dynlib_probe/` reproduced the owner rejection in under a second. Truncating the probe before `dynlib_lifetime_register_v1` linked successfully; including registration reproduced `i64.entries`. Expanding its compact return, expanding the lookup's compact branches, and updating typed state directly under the mutex did not remove the rejection. All three source experiments were reverted. This narrows the first failing function but does not identify the specific field expression or establish a safe fix.
+
 ## Next action
 
 On a fresh scoped session, use the fast bootstrap-mode reproduction to isolate

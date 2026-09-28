@@ -19,7 +19,17 @@ Both isolated worktrees started from main `3e9bc64d6bf`. FreeBSD was deferred at
 
 The session retry cap was reached. Keep the phase caches and evidence; start any further verify/fix cycle in a fresh scoped session. The release branch has not been changed.
 
+## 2026-09-28 current-main parallel retry
+
+Both lanes used isolated checkouts at GitHub main `e465b19cc00a706c487d788e1830cfa9ce91c001`. FreeBSD remains deferred by the user. No Stage 2, Stage 3, Stage 4, essential-tool, or release PASS was produced.
+
+| Host | Result | Evidence and next action |
+| --- | --- | --- |
+| Windows MSVC | Requested 24 jobs; memory policy admitted 2 with about 6 GiB free. LLVM 23.1.1 and SDK were bound. Full Rust authority rebuilt and passed seed preflight. Stage 2 compiled 1,043 files but refused `sffi/dynlib_lifetime_owner_v1.spl` (`i64.entries` HIR inference) and `src/math/rendering.spl` (untyped receiver `to_latex`). `BOOTSTRAP_STAGE2_TEST_DELEGATE=0` was set, but the build stopped before the test matrix. Three focused owner edits failed and were reverted. | `D:/dev/simple-windows-bootstrap-20260927/build/bootstrap/windows-linux-20260927/windows/console-current.log`, `logs/x86_64-pc-windows-msvc/stage2-native-build.log`, and `build/mini_builds/win_dynlib_probe/`. Fix both source failures in a fresh scoped session, then rerun Stage 2 and its nondelegated test matrix. |
+| WSL Linux | Requested 14 jobs; memory policy admitted 9. Official LLVM 23.1.1 archive lacked a shared `libLLVM`; a narrow local patch admitted apt LLVM 23.1.2 and its focused shell test passed. With Rust nightly 1.101, Rust seed and native libraries compiled, but seed execution failed before Stage 2: `-z pack-relative-relocs` requires `GLIBC_ABI_DT_RELR`, absent from glibc 2.35. Three cycles were used. | `/home/ormastes/simple-multihost-bootstrap-main/build/bootstrap/windows-linux-20260927/linux/console-current-main.log` and `build/native_probe/preflight-cargo.ZBNiHj/cargo-check.log`. The LLVM patch remains uncommitted on isolated branch `work/linux-bootstrap-main-20260928`. Resolve the linker policy and rerun in a fresh scoped session. |
+
 ## Earlier resume commands (2026-09-27)
+
 
 All commands run from an isolated checkout of the same current `main` revision. Preserve phase-bound caches; do not use Rust seed binaries as Stage 4 evidence.
 
