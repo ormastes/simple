@@ -1,6 +1,6 @@
 # Seed binds untyped bare `x.lower()` to the only user `*.lower` method (2026-09-28)
 
-**Status:** fixed in seed source (PR `work/seed-bare-text-lower-builtin`); effective only after a seed redeploy. Symptom was worked around in `.spl` by PR #1894.
+**Status:** fixed in seed source (PR #1900); effective only after a seed redeploy. Symptom was worked around in `.spl` by PR #1894.
 
 ## Symptom
 macOS arm64 Stage 2 sanity (run 36345547574, sha 3caa0bb071f) aborted on the
