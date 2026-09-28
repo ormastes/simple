@@ -8,55 +8,69 @@ use compiler.frontend.core.collection_feedback.{
     parser_collection_feedback_clear, parser_collection_feedback_install
 }
 use app.optimize.sprof_collection_profile.{
-    sprof_source_module_identity, sprof_load_collection_profile_file,
+    sprof_source_module_identity, sprof_load_collection_profile_text,
     sprof_build_collection_set_index
 }
 use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
-use app.io.file_ops.{file_exists}
+use app.io.file_ops.{file_exists, file_read}
 use std.io_runtime.{file_hash_sha256}
+use std.common.crypto.sha256.{sha256_text}
 
-fn native_build_compile_with_collection_profile(
-    driver: CompilerDriver, entry_path: text, profile_path: text,
+fn native_collection_profile_select_from_body(
+    body: text, expected_digest: text, identity: text,
     workload: text, target: text
-) -> CompileResult:
-    parser_collection_feedback_clear()
-    if profile_path == "":
-        if workload != "" or target != "":
-            return CompileResult.CodegenError("collection feedback requires --collection-profile, --collection-workload, and --collection-target")
-        return compiler_driver_run_compile(driver)
-    if workload == "" or target == "":
-        return CompileResult.CodegenError("collection feedback requires --collection-workload and --collection-target")
-    if not file_exists(entry_path) or not file_exists(profile_path):
-        return CompileResult.CodegenError("collection entry or profile file not found")
-    val source_digest = file_hash_sha256(entry_path)
-    if source_digest == "":
-        return CompileResult.CodegenError("collection entry could not be hashed")
-    val profile_digest = file_hash_sha256(profile_path)
-    if profile_digest == "":
-        return CompileResult.CodegenError("collection profile could not be hashed")
-    val identity = sprof_source_module_identity(entry_path)
-    if file_hash_sha256(entry_path) != source_digest:
-        return CompileResult.CodegenError("collection entry changed during profile admission")
-    val loaded = sprof_load_collection_profile_file(profile_path, identity, workload)
+) -> Result<[AdaptiveSetWorkloadProfile], text>:
+    if expected_digest == "" or sha256_text(body) != expected_digest:
+        return Err("collection profile body does not match the native cache identity")
+    val loaded = sprof_load_collection_profile_text(body, identity, workload)
     if loaded.status != "loaded":
-        return CompileResult.CodegenError("collection profile was not admitted: {loaded.status}")
+        return Err("collection profile was not admitted: {loaded.status}")
     val index = sprof_build_collection_set_index(loaded)
     if not index.admitted:
-        return CompileResult.CodegenError("collection profile index was not admitted")
+        return Err("collection profile index was not admitted")
     var selected: [AdaptiveSetWorkloadProfile] = []
     for prior in index.profiles:
         if prior.target_profile_id == target:
             selected.push(prior)
     if selected.len() == 0:
-        return CompileResult.CodegenError("collection profile has no samples for target")
+        return Err("collection profile has no samples for target")
+    Ok(selected)
+
+fn native_build_compile_with_collection_profile(
+    driver: CompilerDriver, entry_path: text, profile_path: text,
+    workload: text, target: text, expected_profile_digest: text
+) -> CompileResult:
+    parser_collection_feedback_clear()
+    if profile_path == "":
+        if workload != "" or target != "" or expected_profile_digest != "":
+            return CompileResult.CodegenError("collection feedback requires --collection-profile, --collection-workload, and --collection-target")
+        return compiler_driver_run_compile(driver)
+    if workload == "" or target == "":
+        return CompileResult.CodegenError("collection feedback requires --collection-workload and --collection-target")
+    if expected_profile_digest == "":
+        return CompileResult.CodegenError("collection profile cache identity missing")
+    if not file_exists(entry_path) or not file_exists(profile_path):
+        return CompileResult.CodegenError("collection entry or profile file not found")
+    val source_digest = file_hash_sha256(entry_path)
+    if source_digest == "":
+        return CompileResult.CodegenError("collection entry could not be hashed")
+    val identity = sprof_source_module_identity(entry_path)
+    if file_hash_sha256(entry_path) != source_digest:
+        return CompileResult.CodegenError("collection entry changed during profile admission")
+    val body = file_read(profile_path)
+    val selected = match native_collection_profile_select_from_body(
+        body, expected_profile_digest, identity, workload, target):
+        case Ok(profiles): profiles
+        case Err(reason): return CompileResult.CodegenError(reason)
     if not parser_collection_feedback_install(target, selected):
         return CompileResult.CodegenError("collection profile target slice was not admitted")
     val result = compiler_driver_run_compile(driver)
     parser_collection_feedback_clear()
     if file_hash_sha256(entry_path) != source_digest:
         return CompileResult.CodegenError("collection entry changed during compilation")
-    if file_hash_sha256(profile_path) != profile_digest:
+    if file_hash_sha256(profile_path) != expected_profile_digest:
         return CompileResult.CodegenError("collection profile changed during compilation")
     result
 
 export native_build_compile_with_collection_profile
+export native_collection_profile_select_from_body
