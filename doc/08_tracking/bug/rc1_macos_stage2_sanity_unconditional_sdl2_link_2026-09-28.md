@@ -43,3 +43,23 @@ failed earlier on Linux while building the Rust seed (`rust-seed-build` exit
 101), before Stage 2 or any macOS linker check. The job only named its private
 `rust-seed-build.log`; it uploaded no artifact containing that log. This is an
 independent release gate and cannot be counted as evidence for this linker fix.
+
+On this Mac, an isolated `cargo check --release --locked --offline --bin simple`
+passed, followed by one `cargo build --release --locked --offline --bin simple`
+with `CARGO_BUILD_JOBS=2`. The build completed in 5m 47s and produced a 35 MiB
+Rust bootstrap seed with SHA-256
+`2e6639df852eeded2db03d38e4f6496e4d332c1b5b00036add678aea6ad63d20`.
+It reports `Simple Language v1.0.0-rc.1` with the explicit seed warning.
+The build used the local RC1 source at `636c057e315`; the later protected
+release tip `6f96848e395` changes only
+`.github/release-convergence-manifest.json` relative to that base. This proves
+Stage 1 can build on this macOS host, not that the Linux candidate's exit 101
+is fixed, nor that Stage 2/3 bootstrap or this linker change passes.
+
+The local repair branch was rebased onto protected `release/1.0` tip
+`7fbcd449abba86176b48c8c534713c7134b7067a` on 2026-09-28. The rebased
+diff remains limited to this note, the linker, and its focused spec. The
+earlier Rust seed build is historical evidence for the older source identity;
+it does not certify this newer tip. Main macOS Phase 2/3 run `36370942485`
+was still pending with no assigned job at this check. The same host had 6.7
+GiB free, still below the 20 GiB bootstrap preflight floor.
