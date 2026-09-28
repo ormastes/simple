@@ -16,8 +16,22 @@ stable patch ID, so it must not be claimed as an admitted exact backport under
 the current reviewed-convergence rule. Obtain a reviewed equivalence path or
 make the release-line preimage compatible before candidate admission.
 
+An earlier `main` fix, `8733526cf8f0d49562cd5e8617533c761243fcc6`,
+cherry-picks cleanly to RC1 as `27df83e1c399fbd02a625a2f3484b05ae651bd56`.
+The changed lines have the same zero-context stable patch ID
+`a6122a3e65a534d455093cd2c7e79a7ceeef402e`. The release gate uses
+standard `git show | git patch-id --stable`: source is
+`ec74df8428714a62d30c7c58879f1c1af54b87ca`, result is
+`d9ceb64fefc1fd37ee24a13c626dfaaff682fa2e`. The earlier fix also leaves
+macOS `-lc/-lpthread/-lm` on the RC1 link line. It is not a complete macOS
+bootstrap repair or an admissible exact backport.
+
 The focused spec is in
 `test/01_unit/compiler/linker/native_link_hardening_spec.spl`. The local July
 beta self-hosted binary could not run it: parsing unrelated current source
 `module_surface_types.spl` failed before test assertions. A current RC1
 bootstrap must run the spec and the full macOS Phase 2/3 evidence gate.
+On 2026-09-28 the local APFS data volume had 7.4 GiB free; the repository's
+bootstrap preflight requires 20 GiB. No full local bootstrap was started with
+insufficient space. The `main` macOS CI run `36369147089` was pending with no
+job assigned when checked.
