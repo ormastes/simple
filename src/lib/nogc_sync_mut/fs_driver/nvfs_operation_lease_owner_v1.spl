@@ -1,6 +1,6 @@
 """Bounded serialization owner for device-backed NVFS operations and close."""
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 use std.fs_driver.nvfs_device_identity_owner_v1.{
     NvfsDeviceIdentityBindingV1, NvfsDeviceRegionIdentityV1,
     nvfs_device_identity_validate_v1
@@ -84,7 +84,21 @@ fn _initial_state_v1() -> NvfsOperationOwnerStateV1:
             _slot: -1, _generation: 0u32, _close_nonce: 0u64,
             _outer_instance_id: 0))
 
-var _nvfs_operation_owner_v1: Mutex = mutex_new(_initial_state_v1())
+# Exclusion gate only; the state stays Simple-side for the same reason as
+# nvfs_device_identity_owner_v1: a struct protected value comes back nil
+# through the interpreter's rt_mutex value bridge, the closure faults with the
+# real lock held, and every later owner call blocks forever.
+var _nvfs_operation_gate_v1: Mutex = mutex_new(0)
+var _nvfs_operation_state_v1: NvfsOperationOwnerStateV1 = _initial_state_v1()
+
+fn _nvfs_operation_update_v1(
+    f: fn(NvfsOperationOwnerStateV1) -> NvfsOperationOwnerStateV1
+) -> NvfsOperationOwnerStateV1:
+    val _ = mutex_lock(_nvfs_operation_gate_v1)
+    val next = f(_nvfs_operation_state_v1)
+    _nvfs_operation_state_v1 = next
+    val _ = mutex_unlock(_nvfs_operation_gate_v1, 0)
+    next
 
 fn _binding_matches_v1(
     slot: NvfsOperationSlotV1, binding: NvfsDeviceIdentityBindingV1,
@@ -107,7 +121,7 @@ pub fn nvfs_operation_owner_register_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.InvalidBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         val owner_index = binding.owner_slot_index()
@@ -143,7 +157,7 @@ pub fn nvfs_operation_begin_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.StaleBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         next.last_lease = NvfsOperationLeaseV1.invalid_probe()
@@ -180,7 +194,7 @@ pub fn nvfs_operation_begin_v1(
 pub fn nvfs_operation_end_v1(
     lease: NvfsOperationLeaseV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         if lease._slot == -2:
@@ -214,7 +228,7 @@ pub fn nvfs_operation_end_v1(
     Ok(true)
 
 pub fn nvfs_global_operation_begin_v1() -> Result<NvfsOperationLeaseV1, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         next.last_lease = NvfsOperationLeaseV1.invalid_probe()
@@ -240,7 +254,7 @@ pub fn nvfs_operation_begin_close_v1(
     if nvfs_device_identity_validate_v1(
             binding, outer_instance_id, inner_instance_id, region).is_err():
         return Err(NvfsOperationLeaseErrorV1.StaleBinding)
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         val slot_index = binding.owner_slot_index()
@@ -280,7 +294,7 @@ pub fn nvfs_operation_begin_close_v1(
 fn _close_transition_v1(
     fence: NvfsOperationCloseFenceV1, target: NvfsOperationSlotStateV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         if fence._slot < 0 or fence._slot >= state.slots.len():
@@ -315,7 +329,7 @@ pub fn nvfs_operation_close_complete_v1(fence: NvfsOperationCloseFenceV1) -> Res
 pub fn nvfs_operation_close_quarantine_v1(fence: NvfsOperationCloseFenceV1) -> Result<bool, NvfsOperationLeaseErrorV1>:
     val transitioned = _close_transition_v1(fence, NvfsOperationSlotStateV1.Quarantined)
     if transitioned.is_err(): return transitioned
-    val _ = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val _ = _nvfs_operation_update_v1(\state:
         var next = state
         next.quarantined_count = state.quarantined_count + 1
         next)
@@ -325,7 +339,7 @@ pub fn nvfs_operation_force_quarantine_v1(
     binding: NvfsDeviceIdentityBindingV1, outer_instance_id: i64,
     inner_instance_id: i64, region: NvfsDeviceRegionIdentityV1
 ) -> Result<bool, NvfsOperationLeaseErrorV1>:
-    val updated = mutex_with_lock(_nvfs_operation_owner_v1, \state:
+    val updated = _nvfs_operation_update_v1(\state:
         var next = state
         next.last_error = nil
         val slot_index = binding.owner_slot_index()
@@ -352,7 +366,7 @@ pub fn nvfs_operation_force_quarantine_v1(
     Ok(true)
 
 pub fn nvfs_operation_quarantined_count_v1() -> i32:
-    val state = mutex_with_lock(_nvfs_operation_owner_v1, \state: state)
+    val state = _nvfs_operation_update_v1(\state: state)
     state.quarantined_count
 
 export NvfsOperationLeaseV1, NvfsOperationCloseFenceV1
