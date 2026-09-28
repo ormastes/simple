@@ -57,3 +57,30 @@ usable in this focused case. Replacing the cold publisher's whole-blob path
 did not meet the normalized time/RSS rule beyond noise, so that trial was
 reverted. See
 `doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.
+
+## Follow-up: bounded digest trial rejected (2026-09-29)
+
+A 64 KiB buffered descriptor read plus `sha256_stream_v1_update` compiled in
+the no-stub Stage-2 native capsule (2 changed units, 330 reused), but the
+guarded 542-byte archive scenario failed while the other seven scenarios
+passed. Under a 2 GiB virtual-memory limit, the diagnostic worker finished
+in 0.13 s at 8,464–8,472 KiB peak RSS. The bounded change and temporary
+diagnostic prints were reverted; the known-passing whole-archive digest path
+remains in production.
+
+The admitted archive digest was `f0dbda59…fcc8ca`, confirmed by `sha256sum`
+on the CAS file. A diagnostic `cas_get(...).bytes()` conversion produced
+542 bytes whose one-shot `sha256_u8_hex` was `c07df267…c3c5dc` instead.
+That text conversion is therefore unsuitable as a binary archive oracle.
+Independently, `sha256_stream_v1_update` over those *same converted bytes*
+produced `2fc603c0…192085`, disagreeing with the one-shot digest. The stream
+reported `total_bytes=542` and `block_len=30`, so the mismatch is not explained
+by a missing byte count. The native stream implementation or its call boundary
+needs a known-vector, multi-block parity test; the existing partition test
+only pins the empty digest and compares partitions against each other.
+
+Next: test incremental SHA-256 against external known digests at block
+boundaries and over several chunks in the no-stub native binary; correct that
+path, then rerun pinned archive admission with descriptor bytes. Only after
+that passes, compare paired time and peak RSS on a realistically large CAS
+archive against the existing path and apply the normalized time/RSS gate.
