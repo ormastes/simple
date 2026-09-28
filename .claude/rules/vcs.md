@@ -206,6 +206,8 @@ that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
 and which deletes cleanly.
 ## Pre-push guards
 
+**(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL.
+
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
 
 The installed hook is `scripts/check/pre-push-conflict-tree-guard.shs`. It runs

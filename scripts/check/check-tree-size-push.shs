@@ -482,7 +482,7 @@ evaluate_commit() {
 #   commits keep their own parents as reference. The stated number is still
 #   RECORDED in the verdict line, which is the flag's whole purpose.
 #
-# MERGES: first parent (`<rev>^1`) — the mainline the commit advances.
+# MERGES: the parent whose file count is closest (2026-09-28; was first parent).
 # ROOT COMMITS: no parent, so no relative band exists. REF_FILES is -1 and the
 #   caller SAYS SO on stderr; the absolute band, duplicate-entry check, src/
 #   entry band and load-bearing path floors all still apply unchanged.
@@ -513,6 +513,31 @@ reference_for_rev() {
         return 2
     }
     REF_SOURCE="first parent $rf_parent"
+    # Merge (2026-09-28): band against the CLOSEST parent. Merging published
+    # main into a stale PR branch has the branch as first parent, so the
+    # first-parent delta is main's already-gated growth. A tree within the band
+    # of any parent it merges is structurally consistent with that parent; the
+    # absolute band, src/ band and path floors still apply unchanged.
+    rf_parents=$(git -C "$rf_repo" rev-list --parents -n1 "$rf_rev" 2>/dev/null | cut -d" " -f2-) || rf_parents=""
+    [ "$(printf "%s\n" $rf_parents | grep -c .)" -gt 1 ] || return 0
+    rf_own=$(file_count "$rf_repo" "$rf_rev") || {
+        IC_ERR="git ls-tree failed reading merge $rf_rev"
+        return 2
+    }
+    rf_best=$(( rf_own - REF_FILES )); [ "$rf_best" -ge 0 ] || rf_best=$(( -rf_best ))
+    for rf_p in $rf_parents; do
+        [ "$rf_p" = "$rf_parent" ] && continue
+        rf_n=$(file_count "$rf_repo" "$rf_p") || {
+            IC_ERR="git ls-tree failed reading merge parent $rf_p"
+            return 2
+        }
+        rf_d=$(( rf_own - rf_n )); [ "$rf_d" -ge 0 ] || rf_d=$(( -rf_d ))
+        if [ "$rf_d" -lt "$rf_best" ]; then
+            rf_best=$rf_d
+            REF_FILES=$rf_n
+            REF_SOURCE="closest merge parent $rf_p"
+        fi
+    done
     return 0
 }
 
@@ -531,9 +556,9 @@ evaluate_rev_banded() {
 }
 
 # ===========================================================================
-# SELFTEST — runs before every scan, FATAL. 24 fixtures.
+# SELFTEST — runs before every scan, FATAL. 26 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=24
+SELFTEST_EXPECTED=26
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -863,6 +888,13 @@ selftest() {
     st_assert_banded expect-files-tip       "$st_jump"       "$st_jump" 230 0
     # ... and NOT applied to a non-tip commit, which keeps its own parent
     st_assert_banded expect-files-not-nontip "$st_jump"      "$st_c5"   230 1
+    # merges (2026-09-28): a stale branch (first parent c0, 200 files) merging
+    # main (second parent c5, 210) lands main's tree — banded against the
+    # closest parent it PASSES; a merge tree far from BOTH parents still FAILS.
+    st_merge_ok=$(st_git "$st_dir" commit-tree "$st_c5^{tree}" -p "$st_c0" -p "$st_c5" -m merge </dev/null) || return 1
+    st_merge_far=$(st_git "$st_dir" commit-tree "$st_jump^{tree}" -p "$st_c0" -p "$st_c5" -m merge </dev/null) || return 1
+    st_assert_banded merge-closest-parent   "$st_merge_ok"   ''         -1  0
+    st_assert_banded merge-far-from-parents "$st_merge_far"  ''         -1  1
 
     # --- 16 fixtures that MUST FAIL ---------------------------------------
     st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
@@ -903,7 +935,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (16 must-fail, 7 must-pass, 1 env-isolation)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 8 must-pass, 1 env-isolation)"
     return 0
 }
 
