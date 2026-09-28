@@ -4,6 +4,10 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use std.log.{error}
+use common.ui.access.{ACCESS_OUTPUT_HUMAN, ACCESS_OUTPUT_JSON, access_error_to_json}
+use app.play.wm_access_cli.{wm_access_is_command, wm_access_operation, wm_access_execute}
+use app.play.wm_daemon.{wm_daemon_dispatch}
+use app.play.wm_tray.{wm_tray_dispatch}
 
 val TOOL_NAME = "Simple Play"
 val TOOL_VERSION = "0.1.0"
@@ -11,15 +15,11 @@ val TOOL_VERSION = "0.1.0"
 fn main() -> i64:
     play_cli_main(get_cli_args())
 
-fn play_cli_main(args_in: [text]) -> i64:
+pub fn play_cli_main(raw_args: [text]) -> i64:
     """Same as `main()`'s body, but callable with an explicit args array
     instead of reading `get_cli_args()` directly -- needed so the unified
     `simple` CLI dispatcher (app/cli/_CliMain/main_and_help.spl) can invoke
-    `play` as a subcommand with its own already-sliced argv tail. That
-    dispatcher has always imported `use app.play.main.{play_cli_main}` and
-    called it, but this function was never defined here -- undefined
-    `play_cli_main` at the Stage-4 macOS final link (2026-09-07)."""
-    val raw_args = args_in
+    `play` as a subcommand with its own already-sliced argv tail."""
     val log_opts = parse_log_options(raw_args)
     if not log_opts.valid:
         error("play", log_opts.error)
@@ -56,6 +56,28 @@ fn play_cli_main(args_in: [text]) -> i64:
             error("play", message)
         return 1
 
+    if subcommand == "daemon":
+        val daemon_args = if args.len() > 1: args[1:] else: []
+        return wm_daemon_dispatch(daemon_args, log_opts.log_mode == "json")
+
+    if subcommand == "tray":
+        val tray_args = if args.len() > 1: args[1:] else: []
+        return wm_tray_dispatch(tray_args, log_opts.log_mode == "json")
+
+    if wm_access_is_command(subcommand):
+        val command_args = if args.len() > 1: args[1:] else: []
+        val output_mode = if log_opts.log_mode == "json": ACCESS_OUTPUT_JSON else: ACCESS_OUTPUT_HUMAN
+        match wm_access_execute(subcommand, command_args, output_mode):
+            Ok(output):
+                print output
+                return 0
+            Err(e):
+                if output_mode == ACCESS_OUTPUT_JSON:
+                    print access_error_to_json(wm_access_operation(subcommand), e.request_id, e)
+                else:
+                    error("play", e.message)
+                return if e.code == "invalid_argument" or e.code == "interaction_required": 2 else: 1
+
     val required = play_required_arg_count(subcommand)
     if args.len() - 1 < required:
         val message = "Subcommand {subcommand} requires {required} argument(s)"
@@ -91,15 +113,19 @@ fn print_help():
     print "  evaluate <sid> <js>             Evaluate JavaScript"
     print "  close <sid>                     Close a session"
     print "  wm-list                         List native windows"
+    print "  windows                         List native windows (shared access grammar)"
     print "  wm-click <x> <y>                Native click"
-    print "  wm-text-snapshot <source>       Plan common WM text snapshot facade"
-    print "  wm-text-find <source> <text>    Plan common WM text query facade"
-    print "  wm-text-act <target> <action>   Plan common WM text action facade"
+    print "  wm-text-snapshot <source>       Snapshot native windows"
+    print "  wm-text-find <source> <text>    Find native windows"
+    print "  wm-text-act <target> <action> --generation TOKEN  Act on an observed native window"
+    print "  wm-text-history                 Read bounded WM access history"
     print "  sdl2-connect <url>              Connect to SDL2 test API"
     print "  ui-snapshot <sid>               Read canonical UI snapshot"
     print "  ui-query <sid> [flags]          Query canonical UI nodes"
     print "  ui-ensure <sid> [flags]         Await canonical UI state"
     print "  ui-act <sid> <cid> <action>     Dispatch canonical UI action"
+    print "  daemon <sub>                    Resident WM daemon (serve/status/health/...)"
+    print "  tray <sub>                      Tray control surface (list/focus/close/quit-all/status)"
     print ""
     print "Options:"
     print "  -h, --help                      Show this help message"
@@ -116,6 +142,10 @@ fn print_help_with_progress(progress_mode: text):
     print_help()
 
 fn play_is_subcommand(name: text) -> bool:
+    if name == "daemon":
+        return true
+    if name == "tray":
+        return true
     if name == "run":
         return true
     if name == "launch":
@@ -142,6 +172,8 @@ fn play_is_subcommand(name: text) -> bool:
         return true
     if name == "wm-list":
         return true
+    if name == "windows":
+        return true
     if name == "wm-click":
         return true
     if name == "wm-type":
@@ -153,6 +185,8 @@ fn play_is_subcommand(name: text) -> bool:
     if name == "wm-text-find":
         return true
     if name == "wm-text-act":
+        return true
+    if name == "wm-text-history":
         return true
     if name == "sdl2-connect":
         return true
@@ -178,6 +212,8 @@ fn play_is_subcommand(name: text) -> bool:
 
 fn play_required_arg_count(name: text) -> i64:
     if name == "wm-list":
+        return 0
+    if name == "windows":
         return 0
     if play_has_one_required_arg(name):
         return 1

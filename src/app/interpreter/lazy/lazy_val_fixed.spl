@@ -364,35 +364,36 @@ impl Memo:
         """Get cached value or compute and cache it."""
         self.stats.total_lookups = self.stats.total_lookups + 1
 
-        val existing = self.cache.get(key)
-        match existing:
-            case Some(cached):
-                self.stats.cache_hits = self.stats.cache_hits + 1
-                var lazy_val = cached
-                lazy_val.force_unchecked()
-            case _:
-                self.stats.cache_misses = self.stats.cache_misses + 1
-                val lazy_val = Lazy__new(compute)
-                self.cache[key] = lazy_val
-                var lv = lazy_val
-                lv.force_unchecked()
+        # NOTE: Dict.get() returns a corrupt Option for class values under native
+        # codegen — see doc/07_guide/language/dict_native_pitfalls.md
+        if self.cache.contains_key(key):
+            self.stats.cache_hits = self.stats.cache_hits + 1
+            var lazy_val = self.cache[key]
+            lazy_val.force_unchecked()
+        else:
+            self.stats.cache_misses = self.stats.cache_misses + 1
+            val lazy_val = Lazy__new(compute)
+            self.cache[key] = lazy_val
+            var lv = lazy_val
+            lv.force_unchecked()
     fn get(key: K) -> V?:
         """Get cached value if present."""
-        match self.cache.get(key):
-            case Some(cached):
-                cached.get()
-            case _:
-                nil
+        if self.cache.contains_key(key):
+            val cached = self.cache[key]
+            cached.get()
+        else:
+            nil
     fn contains(key: K) -> bool:
         """Check if key is in cache."""
-        self.cache.get(key).?
+        self.cache.contains_key(key)
     me clear():
         """Clear the cache."""
         self.cache = {}
         self.stats.clears = self.stats.clears + 1
     fn size() -> i64:
         """Number of cached entries."""
-        self.cache.len()
+        # NOTE: Dict.len() always returns -1 under native codegen.
+        self.cache.keys().len()
     fn get_stats() -> MemoStats:
         """Get memoization statistics."""
         self.stats

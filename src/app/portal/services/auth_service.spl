@@ -269,6 +269,39 @@ fn verify_api_token(db: Database, raw_token: text) -> Result<ApiToken, text>:
             Err("Database error verifying token")
 
 # ============================================================================
+# Session Cookies
+#
+# Stateless, HMAC-signed session values — no server-side session store or
+# database row is needed since the signature is recomputed on every
+# request. This mirrors the API-token approach above (fixed HMAC key,
+# `hmac_sha256`) but is scoped to a single trusted username rather than a
+# database-verified identity, which is enough for the portal's minimal
+# PORTAL_AUTH admin gate (see app.portal.server).
+# ============================================================================
+
+fn sign_session_cookie(username: text, secret: text) -> text:
+    """Build a signed session-cookie value for `username`.
+
+    Format is `username|hex(hmac_sha256(secret, username))`.
+    """
+    "{username}|{hmac_sha256(secret, username)}"
+
+fn verify_session_cookie(cookie_value: text, secret: text) -> text?:
+    """Verify a signed session-cookie value, returning the username if the
+    signature matches, or nil if the cookie is missing, malformed, or has
+    been tampered with."""
+    val sep = cookie_value.index_of("|")
+    if sep <= 0:
+        return nil
+    val username = cookie_value[0:sep]
+    val given_sig = cookie_value[sep + 1:]
+    val expected_sig = hmac_sha256(secret, username)
+    if given_sig == expected_sig:
+        Some(username)
+    else:
+        nil
+
+# ============================================================================
 # Helpers
 # ============================================================================
 
