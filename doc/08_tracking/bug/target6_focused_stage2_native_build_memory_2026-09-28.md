@@ -1,7 +1,8 @@
 # Target 6 focused Stage2 native build reaches about 40 GiB RSS
 
-Status: OPEN (2026-09-28). This blocks native qualification of the V2
-package-index action digest and the wider Target 6 performance cohort.
+Status: FOCUSED PROBE MITIGATED; broad native-build memory path OPEN
+(2026-09-28). The V2 package-index action-digest probe now has native evidence;
+the wider Target 6 performance cohort remains unqualified.
 
 The admitted pure-Simple Stage2 compiler binary has SHA-256
 `d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`.
@@ -20,8 +21,16 @@ The observed high memory may come from broad source-root scanning, codegen
 specialization, or host contention. There was no compiler diagnostic or
 assertion failure before either timeout, so the cause is still unassigned.
 
-Next isolate the exact source closure and compare bounded builds with and
-without the final V2 action-digest edit using the same compiler binary and
-cache policy. Record wall time and max RSS. Fix the compiler or probe setup
-before claiming a Target 6 native PASS; do not replace it with a Rust-seed
-result or a narrow interpreter-only check.
+The original next step was to isolate the source closure and compare bounded
+builds with the same compiler binary and cache policy. That focused build
+has now passed; the broader source-root memory path still needs attribution.
+Do not replace its evidence with a Rust-seed result.
+
+Follow-up: adding `--entry-closure` to the same no-stub Stage2 V2 probe built
+two units, reused 26, linked in 1.85 seconds at 137,872 KiB peak RSS, and the
+binary passed. See
+`doc/09_report/compiler/target56_entry_closure_native_followup_2026-09-28.md`.
+The previous two commands omitted the flag, so the focused probe setup was
+the immediate blocker. The broad-source path still needs an isolated
+same-cache comparison and a memory bound; do not infer that its 40 GiB
+behavior is fixed.

@@ -31,6 +31,14 @@ partial evidence as a Target 6 completion claim.
 The bounded native-build memory issue is tracked in
 `doc/08_tracking/bug/target6_focused_stage2_native_build_memory_2026-09-28.md`.
 
+Follow-up: the same no-stub Stage2 probe passed after adding the missing
+`--entry-closure` flag. The final V2 index, route, and builder unit files
+also passed 3/3, 5/5, and 6/6 through the bootstrap interpreter. Exact binary,
+source, RSS, and timing evidence is in
+`doc/09_report/compiler/target56_entry_closure_native_followup_2026-09-28.md`.
+This qualifies the focused V2 behavior, not Target 6's production graph
+publication or performance gate.
+
 Next, diagnose the large native compile from the retained command/logs with
 an isolated source closure, then qualify V2 action digest, round-trip, warm
 route, and concurrent graph publication. Production still needs typed

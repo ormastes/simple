@@ -27,3 +27,7 @@ Git batch, qualify filesystem-journal races or untracked membership changes,
 prove the full typed index publication, or provide a Target 6 SPipe/performance
 cohort. A current-source Stage4 compiler and the production fixture remain
 required for final admission.
+
+Follow-up: the current-source V3 probe now also passes warm untracked
+create/delete under the same no-stub, entry-closure Stage2 method. See
+`doc/09_report/compiler/target56_entry_closure_native_followup_2026-09-28.md`.
