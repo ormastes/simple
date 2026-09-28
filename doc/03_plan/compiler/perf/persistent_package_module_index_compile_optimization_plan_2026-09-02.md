@@ -349,9 +349,17 @@ the full frozen inventory digest and admits only its complete reached graph.
 Cold publication verifies persisted archives before moving `CURRENT`; warm
 routing rejects another entry and full-build requests. Focused no-stub native
 tests pass for scoped build/publication, warm refusal, and unchanged V1/V2
-roundtrip. The driver still must retain typed HIR receipts, attach real archive
-outputs, and call the publisher; no production compile or performance gate is
+roundtrip. The driver still must attach real archive outputs and call the
+publisher; no production compile or performance gate is
 claimed. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
+Driver receipt follow-up (2026-09-29): both successful HIR phase paths now
+capture typed receipts against the frozen SCV inventory before HIR eviction.
+Phase-1 SHA-256 and byte-length owners keep the low-memory path valid after
+source text reclamation, without a second read/hash at the HIR peak. A focused
+no-stub native test passes; real archive output attachment, production V3
+publication, full CLI execution, and paired time/RSS proof remain open. See
+`doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
 
 The 2026-09-28 full CLI retry compiled its 2,488-unit source closure after
 the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173

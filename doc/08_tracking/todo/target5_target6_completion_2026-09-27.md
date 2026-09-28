@@ -114,6 +114,15 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
+  eviction in the cold driver. Phase-1 digest and byte-length owners also work
+  for nonstreaming low-memory compilation, where source text is gone before
+  HIR completes. See
+  `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
+- [ ] Attach real archive outputs to retained receipts and publish the V3
+  scoped graph from the production driver; then prove current-source warm/cold
+  time and RSS against the independent gates.
+
 - [x] Define a serialized entry-scoped graph when entry-closure compilation
   lowers fewer sources than the full frozen inventory. V3 binds the full
   inventory digest and exact entry, rejects missing/redundant graph nodes,
