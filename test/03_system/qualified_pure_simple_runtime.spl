@@ -19,7 +19,7 @@
 # Admission: export SIMPLE_QUALIFIED_RUNTIME=/abs/path/to/simple
 
 use std.spec.*
-use std.io_runtime.{process_run, env_get}
+use std.io_runtime.{process_run, env_get, platform_name}
 
 # The native facade normally sees the caller's environment. Some older test
 # runners do not (see simpleos_kernel_fabricated_rt_symbol_guard_spec.spl), so
@@ -31,22 +31,24 @@ fn runtime_env_path(name: text) -> text:
     val direct = env_get(name)
     if direct != "":
         return direct
+    if platform_name() == "windows":
+        val (windows_out, _windows_err, windows_code) = process_run(
+            "cmd.exe", ["/D", "/C", "set " + name])
+        if windows_code != 0:
+            return ""
+        val prefix = name + "="
+        for line in windows_out.split("\n"):
+            val entry = line.trim()
+            if entry.starts_with(prefix):
+                return entry.substring(prefix.len(), entry.len())
+        return ""
     var script = "printf %s \"${SIMPLE_QUALIFIED_RUNTIME:-}\""
     if name == "SIMPLE_SEED_RUNTIME":
         script = "printf %s \"${SIMPLE_SEED_RUNTIME:-}\""
     val (posix_out, _posix_err, posix_code) = process_run("/bin/sh", ["-c", script])
-    if posix_code == 0 and posix_out.trim() != "":
-        return posix_out.trim()
-    val (windows_out, _windows_err, windows_code) = process_run(
-        "cmd.exe", ["/D", "/C", "set " + name])
-    if windows_code != 0:
+    if posix_code != 0:
         return ""
-    val prefix = name + "="
-    for line in windows_out.split("\n"):
-        val entry = line.trim()
-        if entry.starts_with(prefix):
-            return entry.substring(prefix.len(), entry.len())
-    ""
+    posix_out.trim()
 
 fn qualified_runtime_path() -> text:
     runtime_env_path("SIMPLE_QUALIFIED_RUNTIME")
