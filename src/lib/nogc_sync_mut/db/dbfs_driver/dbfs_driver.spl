@@ -339,6 +339,21 @@ impl DbFsDriver:
     fn fstat(handle: FileHandle) -> Result<FileStat, FsError>:
         if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
         _dbfs_finish_result(self._fstat_locked(handle))
+
+    fn _file_generation_v1_locked(handle: FileHandle) -> Result<u64, FsError>:
+        val inode_idx = _fd_inode_idx_locked(self.inst_id, handle.id)
+        if inode_idx < 0:
+            return Err(FsError.StaleHandle)
+        val generation = _dbfs_inodes[inode_idx].content_generation
+        if generation == 0u64:
+            return Err(FsError.Corrupt)
+        Ok(generation)
+
+    fn file_generation_v1(handle: FileHandle) -> Result<u64, FsError>:
+        """Observe the retained inode through the canonical DBFS transaction owner."""
+        if not dbfs_owner_transaction_begin(): return Err(FsError.Unsupported)
+        _dbfs_finish_result(self._file_generation_v1_locked(handle))
+
     static fn new_hosted() -> DbFsDriver:
         """Create a new in-memory DBFS driver with a root inode."""
         # The legacy signature cannot report lock admission failure.  Return
