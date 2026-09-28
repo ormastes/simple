@@ -1,9 +1,10 @@
-# Stage2 positional hello-world native build rejects its backend session token
+# Stage2 positional hello-world native build reaches AOT with an empty diagnostic
 
-Status: OPEN. The former silent exit now emits a diagnostic, but the session
-token rejection still blocks Stage2 admission and therefore Target 5/6 native
-size, startup, compile-time, and RSS qualification. It is separate from the
-fixed `dynlib_lifetime_owner_v1.spl` HIR type error.
+Status: OPEN. The session-token rejection is fixed in the focused native
+candidate, but AOT still returns status 1 without a readable backend reason.
+Stage2 admission and Target 5/6 native size, startup, compile-time, and RSS
+qualification remain blocked. This is separate from the fixed
+`dynlib_lifetime_owner_v1.spl` HIR type error.
 
 ## Evidence
 
@@ -54,11 +55,33 @@ projection after opening. It has not yet been proven whether the owner lost
 its newly appended record, token equality fails under native codegen, or a
 different authority invariant is violated.
 
+## Fieldwise token repair and next AOT failure
+
+The next native candidate traced one authority record with owner ID 1,
+generation 1, and the same receipt hash as the returned token. Direct
+whole-struct token equality in `_backend_session_record_index_v2()` therefore
+rejected matching fields. The authority, compile-use, and result-token index
+helpers now compare their token fields explicitly. The following Stage2 build
+compiled 3 files, reused 1,018, and failed zero; its positional smoke passed
+session projection and reached Cranelift direct AOT. This proves the original
+`UnknownOrSubstituted` boundary was removed in that native fixture.
+
+The new failure is `backend object-path status 1`. The AOT diagnostic writer
+reports that its atomic write failed; the driver then cannot read the
+diagnostic file. A temporary bounded console fallback printed a blank line
+where the backend reason should have appeared, so that fallback was reverted.
+The writer/adapter path is in
+`src/compiler/70.backend/backend_plugin/builtin_adapter.spl` and
+`src/compiler/70.backend/backend_plugin/target_context_v2.spl`. Both test
+`diagnostic != ""` before rejecting; native code elsewhere documents that a
+nil string can satisfy that comparison while `len()` is negative. This is a
+plausible cause, not yet proven. The temporary probe was removed from the
+authority owner before commit.
+
 ## TODO
 
-Add a focused native probe inside the authority owner that records the new
-record count and each token field before projection, without relying on
-struct equality. Compare those values with the caller's token, then repair
-the failing invariant. Re-run the positional fixture before full Stage2
+Check the adapter and target-context diagnostic guards with native evidence.
+Make an empty or nil diagnostic nonfatal and preserve a real rejection
+message if one exists. Re-run the positional fixture, then full Stage2
 admission. Keep the three-cycle verify/fix cap for the next scoped session;
 do not cite the linked candidate as admitted.
