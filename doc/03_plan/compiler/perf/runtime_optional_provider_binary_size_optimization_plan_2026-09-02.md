@@ -106,6 +106,15 @@ The final bounded native-arena retry reached the same empty declaration-tag
 parse failure at lower RSS; the targeted parser blocker is recorded in
 `doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
 
+Current-source Linux ARM64 diagnostic (2026-09-29): the pure-Simple bootstrap
+coordinator built a one-module release-small hello at 21,016 stripped bytes
+with the default linker and 14,560 bytes with explicit `SIMPLE_LINKER=lld`.
+The latter meets the 15,360-byte absolute gate directionally; 30 paired
+Simple/Python startup and RSS samples favor Simple. An admitted Stage4 receipt,
+same-current-source matched-startup C comparator, retained link map,
+provider/NoGC traces, and full CLI demand-load proof are still missing. See
+`doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

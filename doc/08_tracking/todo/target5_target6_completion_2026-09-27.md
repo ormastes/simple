@@ -61,6 +61,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   dynamic runtime lane, run a hello `--check` smoke, and retain a paired static
   diagnostic size/startup/RSS comparison. The 30-pair Linux ARM64 result is in
   `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+- [x] Measure a current-source core-C hello with explicit Linux LLD and a
+  diagnostic 30-pair Python startup/RSS cohort. Its 14,560-byte stripped ELF
+  clears the absolute size cap; matched C and admission gates remain open.
+  See `doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
