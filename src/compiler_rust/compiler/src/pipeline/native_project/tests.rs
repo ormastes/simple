@@ -4003,6 +4003,24 @@ int main(void) {
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
+fn test_stage4_rust_runtime_projection_allows_no_live_rust_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = build_stage4_rust_runtime_projection_archive(
+        &temp.path().join("unneeded_runtime.a"),
+        &[],
+        &[],
+        &temp.path().join("projection"),
+    )
+    .unwrap();
+
+    assert!(archive_members(&output).unwrap().is_empty());
+    let (defined, undefined) = super::tools::archive_global_symbols(&output).unwrap();
+    assert!(defined.is_empty());
+    assert!(undefined.is_empty());
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[test]
 fn test_stage4_rust_runtime_projection_keeps_roots_and_allowed_runtime_externals_only() {
     let temp = tempfile::tempdir().unwrap();
     let rust_runtime = build_compiler_backfill_test_archive(

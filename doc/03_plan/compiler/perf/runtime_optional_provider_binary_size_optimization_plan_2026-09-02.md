@@ -115,6 +115,19 @@ same-current-source matched-startup C comparator, retained link map,
 provider/NoGC traces, and full CLI demand-load proof are still missing. See
 `doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
 
+Stage4 live-closure follow-up (2026-09-29): on the saved 866-object compiler
+entry, lld's partial-link projection retains `main` and reduces undefined
+`rt_*` names from BFD's 728 to 293, excluding the 12 optional network and
+native-execution references that lacked Stage4 owners. The current-source
+bootstrap tool then reached the exact Stage4 gate with lld and found no
+direct Rust-runtime roots after assigning live imports to compiler and C
+owners. An empty Rust capsule is now supported with a focused passing test;
+the final link then exposed the sole non-`rt_`/`spl_` provider-owned live
+import, `text_dot_from_char_code`. The core-C archive defines it, but the
+live-request filter omits it before capsule projection. Exact owner retention,
+the Stage4 executable, and hello runtime/cohort proof remain pending. See
+`doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

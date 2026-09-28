@@ -2274,6 +2274,32 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
     allowed_external_runtime_symbols: &[String],
     temp_dir: &Path,
 ) -> Result<PathBuf, String> {
+    // A live entry may need only the compiler backfill and core-C providers.
+    // In that case there are no Rust runtime roots to project. Keep an empty
+    // archive in the final link so any missed dependency still fails there.
+    if requested_symbols.is_empty() {
+        if let Some(symbol) = allowed_external_runtime_symbols
+            .iter()
+            .find(|symbol| !symbol.starts_with("rt_") && !symbol.starts_with("spl_"))
+        {
+            return Err(format!("Stage4 allowed external `{symbol}` is not a runtime ABI symbol"));
+        }
+        std::fs::create_dir_all(temp_dir)
+            .map_err(|err| format!("create empty Stage4 Rust runtime capsule directory: {err}"))?;
+        let output = temp_dir.join("libsimple_stage4_rust_runtime.a");
+        let _ = std::fs::remove_file(&output);
+        let ar = find_archive_tool()?;
+        let created = archive_create_command(&ar, &output, &[], false, true)
+            .output()
+            .map_err(|err| format!("execute empty Stage4 Rust runtime archive tool {ar}: {err}"))?;
+        if !created.status.success() {
+            return Err(format!(
+                "create empty Stage4 Rust runtime capsule: {}",
+                String::from_utf8_lossy(&created.stderr).trim()
+            ));
+        }
+        return Ok(output);
+    }
     project_stage4_archive_closure(
         &[rust_runtime_archive],
         requested_symbols,
