@@ -1,10 +1,9 @@
-# Stage2 positional hello-world native build reaches AOT with an empty diagnostic
+# Stage2 positional hello-world raw-string ABI and compiler-test admission
 
-Status: OPEN. The session-token rejection is fixed in the focused native
-candidate, but Cranelift V2 module construction still returns zero and AOT
-cannot publish a readable backend reason.
-Stage2 admission and Target 5/6 native size, startup, compile-time, and RSS
-qualification remain blocked. This is separate from the fixed
+Status: POSITIONAL SMOKE FIXED; Stage2 compiler-test matrix pending. The
+candidate and its runtime capsule were published, but Stage2 verification
+did not pass, so Stage3 and Target 5/6 native size, startup, compile-time,
+and RSS qualification remain blocked. This is separate from the fixed
 `dynlib_lifetime_owner_v1.spl` HIR type error.
 
 ## Evidence
@@ -100,13 +99,38 @@ remaining constructor rejection may be a malformed text argument, a
 noncanonical target triple, unsupported ISA, or another V2 check; the current
 evidence does not distinguish them.
 
+## Raw-string ABI repair and current gate
+
+A GDB Python read at the Rust V2 constructor showed name, target, and CPU
+lengths of 14, 25, and 7, but their pointers addressed Simple text object
+headers rather than UTF-8 bytes. `src/lib/nogc_sync_mut/sffi/codegen.spl`
+used `.ptr()` for those raw pointer arguments. The wrapper now uses
+`rt_string_data()` and `rt_string_len()`, like its neighboring Cranelift
+wrappers; the same correction covers the V2 feature readback and two
+global-data name wrappers. The next full Stage2 run compiled the source,
+passed the positional hello-world frontend smoke, and passed the struct
+receiver/runtime capability proof. Its candidate hash was
+`5d71c26b371b83d0041e10b815dae153a38b9f7c61aa0931f3473aaee919e2f6`.
+
+Stage2 compiler tests then stopped before a verification summary was written:
+the default delegated spec rows require four nonempty MC/DC-off waiver fields
+(`REASON`, `REVIEWER`, `REVIEW_ID`, `VERSION`) supplied by an actual owner
+approval record. No such values were invented for this run. A direct
+`BOOTSTRAP_STAGE2_TEST_DELEGATE=0` matrix attempt avoided the waiver and
+reached `compiler_cli_build`, but its RSS observer failed at the default
+1,000 ms observation budget (peak 3,041,288 KiB below the 5,859,375 KiB
+cap). The summary records `compiler_cli_build=FAIL` with status 89 and
+upstream rows blocked; this is measurement failure, not a compiler verdict.
+Logs are under `build/bootstrap-target56/stage2-compiler-tests/` and
+`build/mini_builds/target56_dynlib_probe/stage2_matrix_inprocess.log`.
+
 ## TODO
 
-Read the V2 constructor's name, target, CPU, and feature byte ranges at the
-retained breakpoint using each explicit length (for example GDB Python
-`inferior.read_memory`). Determine which of `strict_abi_text`, canonical
-triple parsing, ISA lookup, feature admission, or `builder.finish` returns
-zero, then repair that input or provider path without substituting the
-requested optimization mode. Re-run the positional fixture and full Stage2
-admission. Keep the three-cycle verify/fix cap for the next scoped session;
-do not cite the linked candidate as admitted.
+Run the already published Stage2 candidate's in-process phase-verification
+matrix with `BOOTSTRAP_STAGE2_TEST_DELEGATE=0` and the watchdog's supported
+`SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000`, keeping the same RSS cap.
+Require the full matrix summary and all five required PASS rows before Stage3.
+If in-process execution cannot pass, obtain the owner's actual MC/DC-off
+waiver record for delegated rows rather than fabricating review metadata.
+Keep the three-cycle verify/fix cap for the next scoped session; do not cite
+the candidate as a completed Stage2 verification yet.

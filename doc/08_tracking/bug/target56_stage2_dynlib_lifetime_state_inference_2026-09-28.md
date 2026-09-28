@@ -1,7 +1,7 @@
 # Target 5/6 current-source Stage2 cannot infer dynlib lifetime state
 
-Status: DYN-LIFETIME HIR ERROR FIXED; full Stage2 native build passes, but
-admission is blocked by a separate hello-world positional smoke failure.
+Status: DYN-LIFETIME HIR ERROR FIXED; full Stage2 native build and positional
+smoke pass, but the compiler-test matrix has not passed.
 Target 5/6 size, startup, and persistent-index qualification remain pending.
 
 ## Reproduction
@@ -97,13 +97,15 @@ diagnostic. The candidate remains at
 see `build/bootstrap-target56/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional`.
 No Stage2 admission, Stage4 CLI, or Target 5/6 performance proof exists.
 
-## Next action
+## Current update and next action
 
-Reproduce the rejected Stage2 binary's silent positional hello-world failure
-as a focused case, identify its first failing phase after AOP weaving, and
-repair that path. Then rerun Stage2 admission and resume Stage3/4 from admitted
-artifacts. Run the Target 5/6 size, startup, compile-time, and RSS cohorts
-before marking either target complete.
+The later raw-string ABI repair moved the Stage2 candidate through the
+positional hello-world smoke and struct/runtime proof. Its compiler-test
+matrix stopped at missing delegated MC/DC waiver fields; a direct in-process
+attempt then hit the RSS observer's 1,000 ms budget before a compiler verdict.
+Complete that matrix with a supported observation budget and require its PASS
+summary before Stage3/4. Run the Target 5/6 size, startup, compile-time, and
+RSS cohorts before marking either target complete.
 
 The follow-up diagnosis and TODO are in
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
