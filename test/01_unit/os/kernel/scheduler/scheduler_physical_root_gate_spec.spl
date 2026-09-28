@@ -1,0 +1,168 @@
+"""
+Scheduler physical-root publication source contract.
+Evidence class: source-contract. These scenarios inspect production owners;
+they do not execute a mapper, scheduler, child task, or guest.
+"""
+# codex-system-test
+use std.spec.*
+use std.fs.{file_read}
+
+fn _scheduler_source_function(source: text, name: text) -> text:
+    val sections = source.split("pub fn {name}(")
+    expect(sections.len()).to_equal(2)
+    if sections.len() != 2:
+        return ""
+    val following = sections[1].split("\npub fn ")
+    following[0]
+
+describe "REQ-SCHED-ROOT-001 production image publication [source-contract]":
+    it "should reject roots zero and one before invoking either mapping backend":
+        step("Inspect the common production mapper admission gate")
+        val source = file_read("src/os/kernel/scheduler/scheduler_types.spl")
+        val predicate = _scheduler_source_function(source, "_address_space_can_map")
+        expect(predicate).to_contain("space.phys_root != 0 and space.phys_root != 1")
+        val mapper = _scheduler_source_function(source, "_map_user_process_image")
+        val before_backend = mapper.split("    if _scheduler_uses_direct_load_arena():")
+        expect(before_backend.len()).to_equal(2)
+        expect(before_backend[0]).to_contain("if not _address_space_can_map(space):")
+        expect(before_backend[0]).to_contain("return -12")
+        expect(before_backend[0].count("return 0")).to_equal(0)
+
+    it "should require exact mapper success in every generic image creation route":
+        step("Inspect generic and slot-zero image creation, then the owned-byte delegation")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val routes = ["sched_create_user_task_pid_impl", "sched_create_bootstrap_user_task_pid_impl"]
+        for name in routes:
+            val body = _scheduler_source_function(source, name)
+            val before_context = body.split("    val user_ctx =")
+            expect(before_context.len()).to_equal(2)
+            expect(before_context[0]).to_contain("val map_result = _map_user_process_image(user_as,")
+            expect(before_context[0]).to_contain("if map_result != 0:\n        destroy_user_address_space(user_as)\n        return (0, tasks")
+            expect(body.count("val map_result = if")).to_equal(0)
+            expect(body).to_contain("state: TaskState.Blocked(BlockReason.Notification(0u64))")
+        val bytes = _scheduler_source_function(source, "sched_create_user_task_from_bytes_pid_impl")
+        expect(bytes).to_contain("val prepared = build_user_process_image(path, bytes, arch, argv, envp)")
+        expect(bytes).to_contain("case Err(_): (0, tasks, -1)")
+        expect(bytes).to_contain("case Ok(image): sched_create_user_task_pid_impl(tasks, current, image, priority, caps)")
+        expect(bytes.count("staged_")).to_equal(0)
+        expect(bytes.count("TaskControlBlock(")).to_equal(0)
+
+    it "should reject unavailable mapping before ARM bootstrap identity and queue publication":
+        step("Inspect the architecture bootstrap producer before Ready publication")
+        val source = file_read("src/os/kernel/scheduler/scheduler_arm_bootstrap.spl")
+        val body = _scheduler_source_function(source, "scheduler_create_bootstrap_user_task_pid")
+        val before_identity = body.split("    val maybe_identity =")
+        expect(before_identity.len()).to_equal(2)
+        expect(before_identity[0]).to_contain("val map_result = _map_user_process_image(user_as,")
+        expect(before_identity[0]).to_contain("if map_result != 0:\n        destroy_user_address_space(user_as)")
+        expect(before_identity[0]).to_contain("return SchedulerBootstrapUserTaskResult(scheduler: scheduler, pid: 0)")
+        expect(body.count("val map_result = if")).to_equal(0)
+        expect(body).to_contain("scheduler.ready_queues[queue_idx].enqueue(id)")
+
+    it "should quarantine authenticated adoption for every nonzero mapping status":
+        step("Inspect authenticated adoption before selecting a task slot")
+        val source = file_read("src/os/kernel/scheduler/scheduler_executable_adoption.spl")
+        val sections = source.split("    pub me adopt_authenticated_executable_pid_v1(")
+        expect(sections.len()).to_equal(2)
+        if sections.len() != 2:
+            return
+        val before_slot = sections[1].split("        var slot = _find_empty_slot_in(self.tasks)")
+        expect(before_slot.len()).to_equal(2)
+        expect(before_slot[0]).to_contain("if not _address_space_can_map(space):")
+        expect(before_slot[0]).to_contain("ExecutableLoadConsumerErrorV1.AddressSpaceUnavailable")
+        expect(before_slot[0]).to_contain("if mapped != 0:\n            destroy_user_address_space(space)")
+        expect(before_slot[0]).to_contain("SchedulerExecutableAdoptionOwnerStateV1.Quarantined")
+        expect(before_slot[0]).to_contain("ExecutableLoadConsumerErrorV1.MapFailed")
+
+    it "should preserve the old image when replacement mapping is unavailable or nonzero":
+        step("Inspect exec failure before releasing the current task address space")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_exec_image_impl")
+        val before_release = body.split("    sched_release_task_address_space(old_task)")
+        expect(before_release.len()).to_equal(2)
+        expect(before_release[0]).to_contain("val map_result = _map_user_process_image(new_as,")
+        expect(before_release[0]).to_contain("if map_result != 0:\n        destroy_user_address_space(new_as)")
+        expect(before_release[0]).to_contain("val error_code = if map_result < 0: map_result else: -12")
+        expect(before_release[0]).to_contain("return (error_code, tasks)")
+        expect(body.count("val map_result = if")).to_equal(0)
+
+describe "REQ-SPAWN-PREP-002 operation-owned child preparation [source-contract]":
+    it "should validate the stack before mapping and reserve paired identities only after mapping succeeds":
+        step("Inspect generic and bootstrap rejection before identity reservation")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        for name in ["sched_create_user_task_pid_impl", "sched_create_bootstrap_user_task_pid_impl"]:
+            val body = _scheduler_source_function(source, name)
+            val before_root = body.split("    val user_as: AddressSpace = create_user_address_space()")
+            expect(before_root.len()).to_equal(2)
+            if before_root.len() != 2: return
+            expect(before_root[0]).to_contain("if not initial_stack_binding_valid_v1(")
+            expect(before_root[0].count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(0)
+            val before_identity = body.split("    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
+            expect(before_identity.len()).to_equal(2)
+            if before_identity.len() != 2: return
+            expect(before_identity[0]).to_contain("if map_result != 0:\n        destroy_user_address_space(user_as)\n        return (0, tasks")
+            expect(before_identity[0]).to_contain("if not verify_direct_load_entry(user_as, file_bytes, entry):\n            destroy_user_address_space(user_as)\n            return (0, tasks")
+            expect(before_identity[1]).to_contain("if maybe_identity == nil:\n        destroy_user_address_space(user_as)\n        return (0, tasks")
+            expect(body).to_contain("val user_next_id = identity.task_id")
+            expect(body).to_contain("lifecycle_generation: identity.lifecycle_generation")
+            expect(body).to_contain("exec_generation: 0u64")
+            expect(body.count("register_task_vmspace(")).to_equal(0)
+            expect(body.count("cap_init_task_record(")).to_equal(0)
+            expect(body.count("exec_generation: 1u64")).to_equal(0)
+            expect(body.count("initial_sp(image) &")).to_equal(0)
+
+    it "should fail a full table even when the parent is bootstrap task zero":
+        step("Inspect task-table refusal before any identity or root allocation")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_create_user_task_pid_impl")
+        expect(body).to_contain("val slot = _find_empty_slot_in(tasks)\n    if slot < 0:\n        return (0, tasks, -1)")
+        expect(body.count("slot = 0")).to_equal(0)
+        expect(body.count("if current.id == 0")).to_equal(0)
+
+    it "should retain syscall packet refusal without granting authority from owned image data":
+        step("Inspect the independent physical packet-admission owner")
+        val source = file_read("src/os/kernel/ipc/spawn_packet_admission_v1.spl")
+        val body = _scheduler_source_function(source, "spawn_packet_physical_errno_v1")
+        expect(body).to_contain("val malformed = spawn_packet_register_errno_v1(args)")
+        expect(body).to_contain("    -38")
+        expect(body.count("sched_create_")).to_equal(0)
+
+describe "REQ-SCHED-ROOT-002 fork publication [source-contract]":
+    it "should reject an unavailable or synthetic parent before cloning":
+        step("Inspect parent and slot rejection before any identity or COW mutation")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_clone_task_impl")
+        val before_identity = body.split("    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
+        expect(before_identity.len()).to_equal(2)
+        expect(before_identity[0]).to_contain("if parent.address_space == 0 or parent.address_space == 1:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_identity[0]).to_contain("if child_slot < 0:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_identity[0].count("vmm_cow_clone_pages(")).to_equal(0)
+
+    it "should reserve identity before COW because the shallow clone has no safe rollback":
+        step("Inspect allocator refusal before the COW provider can alter parent tables")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_clone_task_impl")
+        val before_clone = body.split("    val child_as = vmm_cow_clone_pages(parent.address_space)")
+        expect(before_clone.len()).to_equal(2)
+        expect(before_clone[0]).to_contain("val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()")
+        expect(before_clone[0]).to_contain("if maybe_identity == nil:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_clone[1].count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(0)
+        val before_task = body.split("    val child = TaskControlBlock(")
+        expect(before_task.len()).to_equal(2)
+        expect(before_task[0]).to_contain("if child_as == 0 or child_as == 1:\n        return (TaskId(id: 0), tasks, -1)")
+        expect(before_task[0].count("register_task_vmspace(")).to_equal(0)
+        expect(body).to_contain("val child_id = TaskId(id: identity.task_id)")
+        expect(body).to_contain("lifecycle_generation: identity.lifecycle_generation")
+        expect(body.count("scheduler_next_task_lifecycle_identity_take_v1()")).to_equal(1)
+        expect(body.count("scheduler_next_task_id_take()")).to_equal(0)
+        expect(body.count("destroy_user_address_space(")).to_equal(0)
+
+    it "should use the accepted child root for the task and VM registry":
+        step("Inspect the accepted-root flow into both publication records")
+        val source = file_read("src/os/kernel/scheduler/scheduler_exec.spl")
+        val body = _scheduler_source_function(source, "sched_clone_task_impl")
+        expect(body).to_contain("val child_as_id = child_as")
+        expect(body).to_contain("address_space: child_as, kernel_stack:")
+        expect(body).to_contain("ProcessVmSpace(pml4: child_as, id: child_as_id,")
+        expect(body.count("val child_as = if")).to_equal(0)
+        expect(body.count("parent.isolation.address_space_id")).to_equal(0)
