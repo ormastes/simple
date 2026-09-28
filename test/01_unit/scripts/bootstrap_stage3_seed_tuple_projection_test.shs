@@ -87,6 +87,29 @@ actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
 [ "$actual_payload_bytes" -lt 10485760 ] ||
     fail "decoy bytes were copied into authority"
 
+# DrvFS without metadata exposes Cargo members as 0777, including archives.
+# Tuple roles must determine frozen modes without changing admitted bytes.
+drvfs="$test_tmp/drvfs"
+drvfs_out="$test_tmp/drvfs-out"
+make_tuple "$drvfs"
+for member in simple libsimple_native_all.a libsimple_compiler_backfill.a \
+    deps/libsimple_runtime.a; do
+    chmod 777 "$drvfs/$member"
+done
+bootstrap_stage3_copy_seed_tuple "$drvfs" "$drvfs_out" simple \
+    libsimple_native_all.a libsimple_compiler_backfill.a ||
+    fail "DrvFS source modes prevented tuple admission"
+for member in simple libsimple_native_all.a libsimple_compiler_backfill.a \
+    deps/libsimple_runtime.a; do
+    expected_mode=400
+    [ "$member" != simple ] || expected_mode=500
+    [ "$(stat -c '%a' "$drvfs_out/$member")" = "$expected_mode" ] ||
+        fail "DrvFS member $member did not freeze by artifact role"
+    [ "$(bootstrap_stage3_hash_file "$drvfs/$member")" = \
+        "$(bootstrap_stage3_hash_file "$drvfs_out/$member")" ] ||
+        fail "DrvFS member $member bytes changed during projection"
+done
+
 missing="$test_tmp/missing"
 make_tuple "$missing"
 rm "$missing/libsimple_compiler_backfill.a"
