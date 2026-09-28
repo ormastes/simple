@@ -810,6 +810,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn);
+    insert_simple!("rt_arm_array_len_u32", sffi_array::rt_arm_array_len_u32_fn);
+    insert_simple!("rt_arm_array_get_byte_u32", sffi_array::rt_arm_array_get_byte_u32_fn);
     insert_simple!("rt_bytes_u8_set", sffi_array::rt_bytes_u8_set_fn);
     insert_simple!("rt_f64_array_alloc", file_io::rt_f64_array_alloc);
     insert_simple!("rt_f32_array_alloc", file_io::rt_f32_array_alloc);
