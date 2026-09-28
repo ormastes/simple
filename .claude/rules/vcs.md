@@ -88,8 +88,17 @@ gh pr merge <n> --admin --merge                   # 4. lands past BEHIND / pendi
 git ls-remote origin refs/heads/main && git push origin --delete <branch>   # 5. verify + clean
 ```
 
+**Release lines too (2026-09-28).** `spipe-vcs-v3-release-lines` (`release/*`)
+carries the same owner PR-only bypass. `SPipe Self Review Admission` is a
+user/LLM review, not a hard lock: every push to `main` or `release/**`
+invalidates it on ALL open PRs (`review-admission.yml` push trigger) and it
+expires after 10 min, so under parallel landing it never stays green. The owner
+reviews and overrides with `--admin` instead (first used on release PR #1863).
+
 Rules: never force-land a PR whose checks are **failing** (only stuck/behind),
-never a draft (someone's in-progress lane), and never without step 1-2 — a
+never ANOTHER session's active draft (newest commit < 20 min, or its body names
+an unmet evidence precondition) — your OWN finished draft: `gh pr ready`, then
+land it; and never without step 1-2 — a
 bypassed merge skips the strict up-to-date re-run, so the stale-snapshot class
 (`doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`) is on you. If the
 projection ever drops the bypass, `github-policy.shs verify-live` shows the drift;

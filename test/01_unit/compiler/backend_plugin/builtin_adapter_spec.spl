@@ -13,6 +13,33 @@ use app.io.{shell}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1, static_backend_entry_v1
+}
+use compiler.backend.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.backend.static_backend_llvm_port.{llvm_backend_port_v1}
+
+# `simple test` runs under the interpreter, where the K1 composition root
+# (src/compositions/kernel_llvm_cranelift) is not shadowed in and
+# compiler.driver.bootstrap_k1_selected is the fail-closed stub. Install the
+# same "llvm-cranelift" table the CLI composition root installs so the
+# compile adapter's CodegenFactory can select LLVM/Cranelift; repeat calls
+# with the same policy are idempotent.
+fn install_adapter_k1_table() -> bool:
+    install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift,
+            BackendLinkClass.KernelLinked, cranelift_backend_port_v1(),
+            CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter,
+            BackendLinkClass.KernelLinked, interpreter_backend_port_v1(),
+            CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm,
+            BackendLinkClass.KernelLinked, llvm_backend_port_v1(),
+            CodegenOutputKind.ObjectCode)
+    ])
 
 fn builtin_compile_request(provider: text, target: text = "host") -> BackendPluginRequestV1:
     BackendPluginRequestV1(
@@ -65,6 +92,8 @@ fn load_error_code(result: Result<BackendSession, BackendPluginError>) -> text:
 
 describe "built-in backend compile adapter":
     it "compiles representative MIR through retained LLVM and Cranelift providers":
+        step("Install the composition-root K1 backend table so the providers exist")
+        expect(install_adapter_k1_table()).to_equal(true)
         step("Load each explicit provider through the common admission boundary")
         val module = representative_plugin_mir()
         val llvm_session = load_backend(builtin_compile_request("llvm")).ok().unwrap()
@@ -81,6 +110,8 @@ describe "built-in backend compile adapter":
         expect(cranelift_output.object_code.len()).to_be_greater_than(0)
 
     it "publishes an object through a retained Cranelift session's object-path AOT":
+        step("Install the composition-root K1 backend table so the providers exist")
+        expect(install_adapter_k1_table()).to_equal(true)
         # Regression fence for the positional native-build blocker (2026-09-06).
         #
         # `BuiltinBackendCompileAdapter.compile_aot_into_path` used to refuse

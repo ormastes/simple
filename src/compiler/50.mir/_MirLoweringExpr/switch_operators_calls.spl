@@ -1564,6 +1564,36 @@ impl MirLowering:
         nil
 
     me lower_bootstrap_print_call(args: [HirCallArg], rt_name: text) -> LocalId:
+        # A plain literal already has static UTF-8 bytes. Pass its address and
+        # length directly to the runtime writer: boxing it and then unwrapping
+        # it retains the literal intern table and generic string machinery in
+        # even a one-line program. Interpolated strings still take the normal
+        # value path below. Panic has its own ABI and stays on that path too.
+        if args.len() > 0 and (rt_name == "rt_print" or rt_name == "rt_println" or rt_name == "rt_eprintln"):
+            match args[0].value.kind:
+                case StringLit(literal, interps):
+                    var plain = true
+                    if val parts = interps:
+                        plain = parts.len() == 0
+                    # rt_print/rt_println use C strings and stop at a NUL.
+                    # Preserve that behavior for the rare embedded-NUL literal.
+                    if plain and not literal.contains("\0"):
+                        val bytes_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
+                        val writer = if rt_name == "rt_print": "rt_print_str" elif rt_name == "rt_eprintln": "rt_eprintln_str" else: "rt_println_str"
+                        val writer_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str(writer),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [bytes_type, MirType(kind: MirTypeKind.U64)], return_type: MirType.unit(), is_variadic: false)))
+                        ))
+                        var b_literal = self.builder
+                        b_literal.emit_call(writer_op, [
+                            MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(literal), bytes_type)),
+                            MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(literal.len()), MirType(kind: MirTypeKind.U64)))
+                        ], MirType.unit())
+                        val literal_result = b_literal.new_temp(MirType.unit())
+                        self.builder = b_literal
+                        return literal_result
+                case _:
+                    ()
         var arg_local = LocalId(id: 0)
         if args.len() > 0:
             arg_local = self.lower_expr(args[0].value)

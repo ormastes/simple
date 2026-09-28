@@ -1,0 +1,29 @@
+use std.scv.compile_source_inventory.{compile_source_inventory_git_event_v1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_read_current_v1}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+fn main() -> i64:
+    val cache_root = "build/mini_builds/scv_observed_events_native_probe-{rt_getpid()}/build/scv"
+    dir_remove(cache_root, true)
+    val git = compile_source_inventory_git_event_v1(
+        "create", "src/a.spl", "export fn a(): 1")
+    val rejected = compile_source_inventory_apply_observed_events_v1(
+        ".", cache_root, [git],
+        [FsWatchEvent(seq: 1, kind: "overflow", path: "", related: "")])
+    if rejected.valid or rejected.reason != "inventory-event-overflow":
+        return 1
+    if compile_source_inventory_read_current_v1(cache_root).valid:
+        return 2
+    val admitted = compile_source_inventory_apply_observed_events_v1(
+        ".", cache_root, [git], [])
+    if not admitted.valid or admitted.inventory == nil:
+        print "scv probe rejected: {admitted.reason}"
+        return 3
+    if admitted.inventory!.entries.len() != 1 or
+            admitted.inventory!.entries[0].source_identity != "src/a.spl":
+        return 4
+    dir_remove(cache_root, true)
+    print "PASS scv_observed_events_native_probe"
+    0

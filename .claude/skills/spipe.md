@@ -369,7 +369,8 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 > `admin_merge_bypass: owner_pull_request_only`). Review the PR, post a
 > `--comment` review (approve is impossible, self-authored), then
 > `gh pr merge <n> --admin --merge` lands it even when `BEHIND`. Direct push to
-> `main` stays rejected (GH013). Full recipe and rules:
+> `main` stays rejected (GH013). `release/*` has the same owner PR-only
+> bypass: self-review admission is a user/LLM review the owner may override. Full recipe and rules:
 > `.claude/rules/vcs.md` § "Force-landing a PR". The older 2026-09-07 note
 > that direct push succeeded via a `RepositoryRole` bypass is obsolete.
 

@@ -8,6 +8,7 @@
 use compiler.core.ast_expr.{asm_arm_new, ast_generation}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
 use std.string_core.{char_code}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
@@ -58,10 +59,6 @@ var stmt_if_val_marker: [bool] = []
 var stmt_count_slot: [i64] = [0]
 var stmt_mode_ready: bool = false
 var stmt_env_mirror_cached: bool = false
-
-extern fn rt_env_get(key: text) -> text
-extern fn rt_env_set(key: text, value: text) -> bool
-extern fn rt_env_remove(key: text) -> bool
 
 # High-water mark of the largest stmt index ever mirrored into the environment
 # since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
@@ -127,11 +124,11 @@ fn stmt_env_mirror_enabled() -> bool:
         return stmt_env_mirror_cached
     # Interpreter module variables may not persist between calls. Preserve its
     # compatibility mirror while compiled Stage4 uses the cached fast path.
-    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
+    (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
 
 fn stmt_mode_slots_refresh():
-    val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
-    stmt_env_mirror_cached = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
+    val native_arena = (env_get_nullable("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
+    stmt_env_mirror_cached = (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
     stmt_mode_ready = true
 
 fn stmt_count_slot_ensure():
@@ -142,7 +139,7 @@ fn stmt_count_env() -> i64:
     stmt_count_slot_ensure()
     if not stmt_env_mirror_enabled():
         return stmt_count_slot[0]
-    val env_count = stmt_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
+    val env_count = stmt_parse_i64(env_get_nullable("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
     if env_count > 0:
         return env_count
     stmt_count_slot[0]
@@ -158,7 +155,7 @@ fn stmt_count_set(value: i64):
         stmt_env_mirror_high_ensure()
         if value > stmt_env_mirror_high_slot[0]:
             stmt_env_mirror_high_slot[0] = value
-        rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
+        env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
 
 fn stmt_key(idx: i64, field: text) -> text:
     "SIMPLE_BOOTSTRAP_STMT_" + int_to_str(idx) + "_" + field
@@ -189,7 +186,7 @@ fn stmt_env_mirror_clear():
     var i: i64 = 0
     while i < upto:
         for field in fields:
-            rt_env_remove(stmt_key(i, field))
+            env_remove_process(stmt_key(i, field))
         i = i + 1
     stmt_env_mirror_high_slot[0] = 0
 
@@ -203,15 +200,15 @@ fn stmt_env_mirror_clear():
 # back to the (correct) arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
 fn stmt_i64_set(idx: i64, field: text, value: i64):
     if stmt_env_mirror_enabled():
-        rt_env_set(stmt_key(idx, field), int_to_str(value))
+        env_set(stmt_key(idx, field), int_to_str(value))
 
 fn stmt_text_set(idx: i64, field: text, value: text):
     if stmt_env_mirror_enabled():
-        rt_env_set(stmt_key(idx, field), value)
+        env_set(stmt_key(idx, field), value)
 
 fn stmt_list_set(idx: i64, field: text, values: [i64]):
     if stmt_env_mirror_enabled():
-        rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
+        env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
 fn stmt_body_store(idx: i64, values: [i64]):
     val offset = stmt_body_flat.len()
@@ -297,7 +294,7 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_i64_set(idx, "TYPE", 0)
     stmt_list_set(idx, "BODY", [])
     stmt_i64_set(idx, "IF_ELSE_SINGLE", -1)
-    val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
+    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
         (idx < 8 or tag <= 0)):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
@@ -584,7 +581,7 @@ fn stmt_get_tag(idx: i64) -> i64:
             print message
         return -1
     val fallback = stmt_tag[idx]
-    val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
+    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
         (idx < 8 or fallback <= 0)):
         print "[stmt_get_tag] idx={idx} arena={fallback}"
@@ -629,7 +626,7 @@ fn stmt_get_tag(idx: i64) -> i64:
 fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
     if frontend_trace_suppressed():
         return
-    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
+    val trace_ast_oob = env_get_nullable("SIMPLE_TRACE_AST_OOB") ?? ""
     if trace_ast_oob != "":
         print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
 

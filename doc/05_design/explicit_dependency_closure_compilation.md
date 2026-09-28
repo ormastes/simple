@@ -195,7 +195,14 @@ accepting a live workspace root after freeze.
 2. Receive editor/filesystem and Git/SCV lifecycle hints.
 3. Coalesce rename/atomic-save and bulk generations.
 4. For changed paths, stable-stat/read only when content capture is needed.
-5. Update a private next inventory generation and atomically replace its pointer.
+5. Update a private next inventory generation and atomically replace its
+   `source-inventory/CURRENT` pointer. The pointer carries the inventory digest
+   and the Git/filesystem event cursor in one record; a failed rename leaves
+   both prior values intact. Bare-digest pointers read their legacy cursor for
+   migration and become combined records on the next successful refresh.
+   Each refresh reads the pointer once, validates that pinned generation, and
+   compares the captured pointer digest under the publication lock before
+   replacing it. A stale writer rejects instead of moving the cursor backward.
 6. On overflow/cursor mismatch, mark generation `needs_reconcile`; never silently
    call the compiler collectors.
 7. Run quietly. Write one bounded refresh receipt.

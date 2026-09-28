@@ -1,0 +1,111 @@
+# Linear-time package SCC projection for one frozen cold index generation.
+# Edges are package -> imported package. No filesystem access occurs here.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ColdPackageEdgeV1:
+    source: text
+    target: text
+
+struct ColdPackageSccGroupV1:
+    identity: text
+    packages: [text]
+
+struct ColdPackageDfsFrameV1:
+    package_identity: text
+    next_edge: i64
+
+fn _cold_package_sorted_unique_v1(values: [text]) -> [text]:
+    val sorted = canonical_identity_sort_texts(values)
+    var unique: [text] = []
+    for value in sorted:
+        if unique.len() == 0 or unique[unique.len() - 1] != value:
+            unique.push(value)
+    unique
+
+fn _cold_package_scc_identity_v1(members: [text], variant_digest: text) -> text:
+    # Identical wire identity to package_scc_scheduler.package_scc_identity_v1.
+    # Keep the cold graph projection independent of the warm scheduler's
+    # package-index, archive, and reverse-reference module graph.
+    val canonical = _cold_package_sorted_unique_v1(members)
+    var encoded = "simple/package-scc/v1|{variant_digest}|{canonical.len()}"
+    for member in canonical:
+        encoded = encoded + "|{member.len()}:{member}"
+    sha256_text(encoded)
+
+fn cold_package_scc_v1(
+    package_ids: [text], edges: [ColdPackageEdgeV1], variant_digest: text
+) -> Result<[ColdPackageSccGroupV1], text>:
+    if variant_digest == "":
+        return Err("cold-scc-variant-missing")
+    val ordered = _cold_package_sorted_unique_v1(package_ids)
+    if ordered.len() == 0:
+        return Err("cold-scc-packages-empty")
+    var forward: Dict<text, [text]> = {}
+    var reverse: Dict<text, [text]> = {}
+    for package_identity in ordered:
+        if package_identity == "":
+            return Err("cold-scc-package-empty")
+        forward[package_identity] = []
+        reverse[package_identity] = []
+    for edge in edges:
+        if not forward.has(edge.source) or not forward.has(edge.target):
+            return Err("cold-scc-edge-unknown:{edge.source}:{edge.target}")
+        if edge.source != edge.target:
+            var targets = forward[edge.source]
+            targets.push(edge.target)
+            forward[edge.source] = targets
+            var sources = reverse[edge.target]
+            sources.push(edge.source)
+            reverse[edge.target] = sources
+    for package_identity in ordered:
+        forward[package_identity] = _cold_package_sorted_unique_v1(
+            forward[package_identity])
+        reverse[package_identity] = _cold_package_sorted_unique_v1(
+            reverse[package_identity])
+    var visited: Dict<text, bool> = {}
+    var finished: [text] = []
+    for root in ordered:
+        if visited.has(root):
+            continue
+        visited[root] = true
+        var stack: [ColdPackageDfsFrameV1] = [ColdPackageDfsFrameV1(root, 0)]
+        while stack.len() > 0:
+            val top = stack.len() - 1
+            var frame = stack[top]
+            val neighbors = forward[frame.package_identity]
+            if frame.next_edge < neighbors.len():
+                val target = neighbors[frame.next_edge]
+                frame.next_edge = frame.next_edge + 1
+                stack[top] = frame
+                if not visited.has(target):
+                    visited[target] = true
+                    stack.push(ColdPackageDfsFrameV1(target, 0))
+            else:
+                finished.push(frame.package_identity)
+                stack.pop()
+    var assigned: Dict<text, bool> = {}
+    var groups: [ColdPackageSccGroupV1] = []
+    while finished.len() > 0:
+        val root = finished[finished.len() - 1]
+        finished.pop()
+        if assigned.has(root):
+            continue
+        assigned[root] = true
+        var pending: [text] = [root]
+        var members: [text] = []
+        while pending.len() > 0:
+            val current = pending[pending.len() - 1]
+            pending.pop()
+            members.push(current)
+            for source in reverse[current]:
+                if not assigned.has(source):
+                    assigned[source] = true
+                    pending.push(source)
+        val canonical = _cold_package_sorted_unique_v1(members)
+        groups.push(ColdPackageSccGroupV1(
+            _cold_package_scc_identity_v1(canonical, variant_digest), canonical))
+    Ok(groups)
+
+export ColdPackageEdgeV1, ColdPackageSccGroupV1, cold_package_scc_v1
