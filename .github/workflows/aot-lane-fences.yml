@@ -86,23 +86,38 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
 
-      # The Rust backend binds LLVM 23.1 (LLVM_SYS_231_PREFIX). Unversioned
+      # The Rust backend requires exactly LLVM 23.1.1. apt.llvm.org's rolling
+      # llvm-23 packages can advance to 23.1.2 while keeping the same path;
+      # admit the reviewed upstream release bytes instead. Unversioned
       # llvm-as/opt/llc are required by
       # check-native-option-bool-llvm-verify.shs and strace by
       # check-rt-io-file-native-jit-stub.shs. Both are checked for
       # availability by the fences themselves (exit 2 if missing) -- install
       # them here so a missing tool means something broke in this workflow,
       # not that the fence is unfenced-by-design.
-      - name: Install native toolchain and probe tools
+      - name: Install pinned LLVM 23.1.1 and probe tools
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y gnupg libfreetype6-dev libunwind-dev strace
-          sh scripts/setup/bootstrap-prereqs.shs install-llvm23
-          sudo apt-get install -y libpolly-23-dev
-          test -x /usr/lib/llvm-23/bin/llvm-config
-          /usr/lib/llvm-23/bin/llvm-config --version
-          echo "/usr/lib/llvm-23/bin" >> "$GITHUB_PATH"
-          echo "LLVM_SYS_231_PREFIX=/usr/lib/llvm-23" >> "$GITHUB_ENV"
+          sudo apt-get install -y libfreetype6-dev libunwind-dev strace
+          llvm_archive="$RUNNER_TEMP/LLVM-23.1.1-Linux-X64.tar.xz"
+          llvm_prefix="$RUNNER_TEMP/llvm-23.1.1"
+          gh release download llvmorg-23.1.1 --repo llvm/llvm-project \
+            --pattern 'LLVM-23.1.1-Linux-X64.tar.xz' --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' \
+            '832aeb58d105de1cabc7b982dd2c65de0610f7377df48ae8fc2dd8e97420a15c' \
+            "$llvm_archive" | sha256sum --check
+          mkdir -p "$llvm_prefix"
+          tar -xJf "$llvm_archive" -C "$llvm_prefix" --strip-components=1
+          rm "$llvm_archive"
+          test "$("$llvm_prefix/bin/llvm-config" --version)" = '23.1.1'
+          test -x "$llvm_prefix/bin/clang"
+          test -x "$llvm_prefix/bin/llvm-as"
+          test -x "$llvm_prefix/bin/opt"
+          test -x "$llvm_prefix/bin/llc"
+          echo "$llvm_prefix/bin" >> "$GITHUB_PATH"
+          echo "LLVM_SYS_231_PREFIX=$llvm_prefix" >> "$GITHUB_ENV"
 
       - name: Cache Cargo
         uses: actions/cache@v4
