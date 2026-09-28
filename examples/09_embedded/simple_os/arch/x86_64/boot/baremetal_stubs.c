@@ -15296,6 +15296,11 @@ static int64_t _x86_exec_result_rc = 0;
 static uint64_t _x86_exec_result_task = 0;
 static uint64_t _x86_exec_result_generation = 0;
 static uint64_t _x86_exec_result_cr3 = 0;
+/* One bounded output slot for the serialized boot Simple bridge. A lease
+ * spans install/entry/take/read/release; an interrupted owner leaves it busy
+ * and subsequent admission fails closed rather than reusing its storage. */
+static int64_t _x86_exec_output_slot = 0;
+static int _x86_exec_output_slot_busy = 0;
 
 static uint64_t _x86_current_cr3(void) {
     uint64_t value;
@@ -15331,6 +15336,22 @@ int64_t rt_x86_exec_token_cancel(uint64_t task, uint64_t generation,
         (expected_cr3 & ~0xfffULL) != _x86_exec_token_cr3)
         return 0;
     _x86_exec_token_active = 0;
+    return 1;
+}
+
+uint64_t rt_x86_exec_token_result_slot_acquire_v2(void) {
+    if (_x86_exec_output_slot_busy) return 0;
+    _x86_exec_output_slot_busy = 1;
+    _x86_exec_output_slot = 0;
+    return (uint64_t)(uintptr_t)&_x86_exec_output_slot;
+}
+
+int64_t rt_x86_exec_token_result_slot_release_v2(uint64_t slot) {
+    if (!_x86_exec_output_slot_busy ||
+        slot != (uint64_t)(uintptr_t)&_x86_exec_output_slot)
+        return 0;
+    _x86_exec_output_slot = 0;
+    _x86_exec_output_slot_busy = 0;
     return 1;
 }
 
