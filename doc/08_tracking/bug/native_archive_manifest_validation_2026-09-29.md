@@ -11,3 +11,20 @@ The latest native spec reports **2 passes, 2 failures**. The graph and negative 
 After strict linking, the first archive lookup received tagged integer `0x4` instead of the package key. Explicitly unwrapping the aggregate entry before the call moved the lookup to the receipt read. GDB then showed that `receipt_digest!` passed an empty digest to `cas_get`: it tried to read `.../cas/sha256//`, a directory. The earlier quarantine contained that moved directory, not a corrupt receipt blob. Explicitly unwrapping the digest and receipt at the load boundary moved execution to receipt decoding. `cas_get` also returned bare text from a `text?` function; the decoder received tagged nil after the caller unwrapped it. It now returns `Some(content)` after digest validation.
 
 The persisted receipt had `dependencies=Option::Some()` because canonical serialization interpolated an optional value. Explicit unwrapping corrected that field. The most recent native spec still reports **2 passes, 2 failures** with `archive-receipt-invalid`. GDB reconstructed the decoded receipt and found its member offsets/extents were pointer-like numbers (`3381553`, `3923265`, etc.) rather than the file's `0`, `92`, and other byte counts. The `to_u64() ?? 0` conversions were passing optional wrappers. They now use checked explicit unwraps, but that final edit has not been rebuilt or tested because this turn reached the three-cycle limit. The runner's zero exit status does not override its textual failure verdict.
+
+## Follow-up native build boundary
+
+The next full four-example spec build stopped before source parsing because this
+worktree had no admitted SCV freeze inventory. With the tool's explicit
+`SIMPLE_SCV_FREEZE_FALLBACK=1` diagnostic setting, it parsed 216 files, but
+surface construction reached only 16/216 after about 16 minutes at roughly
+4.7 GiB worker RSS. That diagnostic run was terminated; it is not a spec
+verdict. A new direct native receipt regression probe under
+`test/02_integration/compiler/cache/package_archive_receipt_native_probe_main.spl`
+uses a 42-file closure and checks empty dependency encoding, numeric member
+offsets/extents, digest roundtrip, and rejection of a malformed offset. Its
+four-minute build bound expired at surface construction 14/42, before an
+executable existed. The final decoder fix therefore still lacks native PASS
+evidence. Use a longer bounded build or a smaller isolated decoder closure
+next; then rerun the original publication spec before claiming the cold HIR
+path works.
