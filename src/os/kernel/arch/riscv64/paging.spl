@@ -90,7 +90,7 @@ pub struct Rv64Sv39ActivationResult:
     active: bool
 
 # Global VMM instance
-var g_vmm: Rv64VirtMemManager = Rv64VirtMemManager(
+var g_rv64_vmm: Rv64VirtMemManager = Rv64VirtMemManager(
     root_ppn: 0,
     root_phys: 0
 )
@@ -239,8 +239,8 @@ fn vmm_init():
         log_raw_println("[VMM] FATAL: Could not allocate root page table")
         return
 
-    g_vmm.root_phys = root_phys
-    g_vmm.root_ppn = root_phys / PAGE_SIZE
+    g_rv64_vmm.root_phys = root_phys
+    g_rv64_vmm.root_ppn = root_phys / PAGE_SIZE
 
     log_raw_println("[VMM] Root page table at physical 0x{root_phys}")
 
@@ -258,7 +258,7 @@ fn _identity_map_1gb():
     Maps virtual 0x0..0x3FFF_FFFF to physical 0x0..0x3FFF_FFFF.
     Also maps 0x8000_0000..0xBFFF_FFFF for the RAM region.
     """
-    val root = g_vmm.root_phys
+    val root = g_rv64_vmm.root_phys
 
     # Map first 1GB (I/O space: PLIC, CLINT, UART, etc.)
     # VPN[2]=0 -> 0x00000000..0x3FFFFFFF
@@ -336,7 +336,7 @@ fn riscv64_vmm_map_page_in(root_phys: u64, virt: VirtAddr, phys: PhysAddr, flags
 fn riscv64_vmm_map_page(virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
     """Map a page in the active kernel Sv39 root."""
     _riscv64_vmm_map_page_in_checked(
-        g_vmm.root_phys, virt, phys, flags, false)
+        g_rv64_vmm.root_phys, virt, phys, flags, false)
 
 fn riscv64_vmm_unmap_page(virt: VirtAddr) -> bool:
     """Unmap a single 4KB virtual page.
@@ -345,7 +345,7 @@ fn riscv64_vmm_unmap_page(virt: VirtAddr) -> bool:
     Returns true if the page was mapped, false if not.
     """
     val vaddr = virt.addr
-    val root = g_vmm.root_phys
+    val root = g_rv64_vmm.root_phys
 
     # Walk Level 2
     val l2_entry = _read_pte(root, _vpn2(vaddr))
@@ -382,7 +382,7 @@ fn riscv64_vmm_translate(virt: VirtAddr) -> PhysAddr?:
     Returns nil if the address is not mapped.
     """
     val vaddr = virt.addr
-    val root = g_vmm.root_phys
+    val root = g_rv64_vmm.root_phys
 
     # Level 2
     val l2_entry = _read_pte(root, _vpn2(vaddr))
@@ -430,7 +430,7 @@ fn vmm_create_address_space() -> u64:
     RAM identity mapping plus the upper mappings from the kernel root.
     Returns the physical address of the new root table, or 0 on failure.
     """
-    val kernel_root = g_vmm.root_phys
+    val kernel_root = g_rv64_vmm.root_phys
     if kernel_root == 0:
         return 0
 
@@ -482,7 +482,7 @@ fn vmm_activate():
     Call this after vmm_init() and all initial mappings are established.
     """
     log_raw_println("[VMM] Activating Sv39 paging...")
-    vmm_switch_address_space(g_vmm.root_phys)
+    vmm_switch_address_space(g_rv64_vmm.root_phys)
     log_raw_println("[VMM] Sv39 paging active")
 
 pub fn rv64_sv39_activate_and_readback() -> Rv64Sv39ActivationResult:
@@ -492,9 +492,9 @@ pub fn rv64_sv39_activate_and_readback() -> Rv64Sv39ActivationResult:
     readback reports mode 8 with that exact root PPN.  Callers may advance the
     typed boot gate only from this returned fact.
     """
-    if g_vmm.root_phys == 0:
+    if g_rv64_vmm.root_phys == 0:
         vmm_init()
-    if g_vmm.root_phys == 0:
+    if g_rv64_vmm.root_phys == 0:
         return Rv64Sv39ActivationResult(
             root_phys: 0,
             satp_value: csrr_satp(),
@@ -507,11 +507,11 @@ pub fn rv64_sv39_activate_and_readback() -> Rv64Sv39ActivationResult:
     val satp_mode = satp_value >> SATP_MODE_SHIFT
     val satp_root_ppn = satp_value & 0x00000FFFFFFFFFFFu64
     Rv64Sv39ActivationResult(
-        root_phys: g_vmm.root_phys,
+        root_phys: g_rv64_vmm.root_phys,
         satp_value: satp_value,
         satp_mode: satp_mode,
         satp_root_ppn: satp_root_ppn,
-        active: satp_mode == SATP_MODE_SV39 and satp_root_ppn == g_vmm.root_ppn
+        active: satp_mode == SATP_MODE_SV39 and satp_root_ppn == g_rv64_vmm.root_ppn
     )
 
 # ============================================================================
