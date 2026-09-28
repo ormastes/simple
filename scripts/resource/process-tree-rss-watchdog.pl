@@ -567,7 +567,11 @@ sub snapshot {
     }
     local $ENV{LC_ALL} = 'C';
     # List form bypasses shell pipelines, so a failing ps cannot be hidden by awk.
-    $ps_pid = open(my $ps, '-|', 'ps', '-axo', 'pid=,ppid=,pgid=,rss=,stat=,lstart=');
+    # One -o per column: FreeBSD ps treats everything after the first '=' in a
+    # single -o argument as that column's header text, so 'pid=,ppid=,...'
+    # printed a non-empty header row and only the pid column (exit 89).
+    $ps_pid = open(my $ps, '-|', 'ps', '-ax', '-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=',
+                   '-o', 'rss=', '-o', 'stat=', '-o', 'lstart=');
     defined($ps_pid) or die "cannot start ps";
     my %all;
     local $SIG{ALRM} = sub { kill 'KILL', $ps_pid; die "ps timed out" };
