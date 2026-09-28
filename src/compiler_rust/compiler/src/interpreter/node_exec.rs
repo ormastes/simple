@@ -1291,11 +1291,27 @@ pub(crate) fn exec_assignment(
             let case1_unique = match env.get(container_name) {
                 Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 _ => false,
             };
             if case1_unique {
                 if let Some(slot) = env.get_mut(container_name) {
                     match slot {
+                        Value::ByteArray(arc) => {
+                            if let Some(bytes) = Arc::get_mut(arc) {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    while bytes.len() < idx {
+                                        bytes.push(0);
+                                    }
+                                    bytes.push(byte);
+                                }
+                                return Ok(Control::Next);
+                            }
+                        }
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
@@ -1345,6 +1361,23 @@ pub(crate) fn exec_assignment(
                             arr.push(value);
                         }
                         Value::Array(arc)
+                    }
+                    // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
+                    // `Value::ByteArray`; `var buf = rt_bytes_alloc(n); buf[i] = b`
+                    // must work like the field paths below. Frozen stays rejected.
+                    Value::ByteArray(mut arc) => {
+                        let idx = index_val.as_int()? as usize;
+                        let byte = value.as_int()? as u8;
+                        let bytes = Arc::make_mut(&mut arc);
+                        if idx < bytes.len() {
+                            bytes[idx] = byte;
+                        } else {
+                            while bytes.len() < idx {
+                                bytes.push(0);
+                            }
+                            bytes.push(byte);
+                        }
+                        Value::ByteArray(arc)
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
