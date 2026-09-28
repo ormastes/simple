@@ -19,6 +19,7 @@ use compiler.backend.backend_plugin.session_authority_v2.{
     BackendSessionResultTerminalStatusV2,
     backend_session_authority_compile_module_result_v2,
     backend_session_authority_compile_aot_result_v2,
+    backend_session_authority_compile_aot_into_path_v2,
     backend_session_authority_result_project_v2,
     backend_session_authority_result_release_v2
 }
@@ -150,6 +151,10 @@ describe "backend session generation and compile-use authority V2":
             Err(BackendSessionAuthorityErrorV2.ResultsLive))
         expect(backend_session_authority_close_v2(owner, token)).to_equal(
             Err(BackendSessionAuthorityErrorV2.UsesLive))
+        val draining = backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).ok().unwrap()
+        expect(draining.object_sha256).to_equal(projected.object_sha256)
+        expect(draining.envelope_sha256).to_equal(projected.envelope_sha256)
         expect(backend_session_authority_result_release_v2(
             owner, token, use_token, result_token)).to_equal(Ok(()))
         expect(backend_session_authority_result_project_v2(
@@ -270,6 +275,48 @@ describe "backend session generation and compile-use authority V2":
         expect(backend_session_authority_project_v2(
             owner, token).err().unwrap()).to_equal(
             BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+
+    it "refuses every compile entrypoint for an unused token after close begins":
+        # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
+        var owner = BackendSessionAuthorityV2.create()
+        val token = backend_session_authority_open_v2(
+            owner, authority_request()).ok().unwrap()
+        val use_token = backend_session_authority_use_acquire_v2(
+            owner, token).ok().unwrap()
+
+        step("Begin close with a reserved use that has not compiled")
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.UsesLive))
+        expect(backend_session_authority_project_v2(
+            owner, token).ok().unwrap().state).to_equal(
+            BackendSessionAuthorityStateV2.Closing)
+
+        step("The reserved use cannot start module or AOT provider work")
+        val module = authority_probe_module()
+        expect(backend_session_authority_compile_module_v2(
+            owner, token, use_token, module).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.NotAccepting)
+        expect(backend_session_authority_compile_module_result_v2(
+            owner, token, use_token, module).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.NotAccepting)
+        expect(backend_session_authority_compile_aot_result_v2(
+            owner, token, use_token, module, false, 0, "generic", []).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.NotAccepting)
+        expect(backend_session_authority_compile_aot_into_path_v2(
+            owner, token, use_token, module, false, 0, "generic", [],
+            "", "").err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.NotAccepting)
+
+        step("Drain the unused reservation and retry close before releasing")
+        expect(backend_session_authority_project_v2(
+            owner, token).ok().unwrap().live_uses).to_equal(1)
+        expect(backend_session_authority_release_v2(owner, token)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.NotClosed))
+        expect(backend_session_authority_use_release_v2(
+            owner, token, use_token)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, token)).to_equal(Ok(()))
 
     it "rejects foreign tokens and a revoked compile use":
         # @req REQ-010
