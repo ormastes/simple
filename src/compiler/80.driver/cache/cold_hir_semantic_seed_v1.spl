@@ -5,7 +5,7 @@
 # occurs in this owner.
 
 use compiler.hir.hir_types.{HirModule}
-use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.scv.compile_source_inventory_core.{
     CompileSourceInventoryV1, CompileSourceInventoryEntryV1,
@@ -23,6 +23,12 @@ struct ColdHirSemanticSeedV1:
     inventory_digest: text
     abi_digest: text
     direct_imports: [text]
+
+# Retain canonical typed ABI bytes with the compact graph seed while HIR is
+# live. The cold archive publisher consumes these bytes after source eviction.
+struct ColdHirTypedReceiptV1:
+    seed: ColdHirSemanticSeedV1
+    abi_payload: text
 
 struct ColdHirSemanticInputV1:
     module: HirModule
@@ -43,19 +49,19 @@ fn _cold_hir_source_path_error_v1(
         return "cold-hir-module-source-mismatch"
     ""
 
-fn _cold_hir_seed_from_entry_v1(
+fn _cold_hir_receipt_from_entry_v1(
     module: HirModule,
     source_identity: text,
     source_content: text,
     inventory_digest: text,
     source: CompileSourceInventoryEntryV1
-) -> Result<ColdHirSemanticSeedV1, text>:
+) -> Result<ColdHirTypedReceiptV1, text>:
     if source.source_identity != source_identity or
             not compile_source_inventory_entry_valid_v1(source) or
             source.content_digest != sha256_text(source_content) or
             source.byte_count != source_content.len():
         return Err("cold-hir-source-content-mismatch")
-    val abi = hir_abi_interface_digest_v1(module)
+    val abi = hir_abi_interface_encoded_v1(module)
     if abi.is_err():
         return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}")
     var imports: [text] = []
@@ -71,27 +77,37 @@ fn _cold_hir_seed_from_entry_v1(
         if unique_imports.len() == 0 or
                 unique_imports[unique_imports.len() - 1] != module_path:
             unique_imports.push(module_path)
-    Ok(ColdHirSemanticSeedV1(
+    val payload = abi.unwrap()
+    val seed = ColdHirSemanticSeedV1(
         module.name, source_identity, source.content_digest,
-        inventory_digest, abi.unwrap(), unique_imports))
+        inventory_digest, sha256_text(payload), unique_imports)
+    Ok(ColdHirTypedReceiptV1(seed, payload))
 
-fn cold_hir_semantic_seed_from_admitted_entry_v1(
+fn cold_hir_typed_receipt_from_admitted_entry_v1(
     module: HirModule, source_root: text, source_identity: text,
     source_content: text, admitted_inventory_digest: text,
     source: CompileSourceInventoryEntryV1
-) -> Result<ColdHirSemanticSeedV1, text>:
-    # The caller admits the complete inventory digest once and indexes its
-    # entries by source identity. This per-module boundary keeps the same
-    # path/content/typed-ABI checks without rescanning that inventory for
-    # every HIR module in a cold compile.
+) -> Result<ColdHirTypedReceiptV1, text>:
     val path_error = _cold_hir_source_path_error_v1(
         module, source_root, source_identity)
     if path_error != "":
         return Err(path_error)
     if admitted_inventory_digest.len() != 64:
         return Err("cold-hir-inventory-mismatch")
-    _cold_hir_seed_from_entry_v1(module, source_identity, source_content,
+    _cold_hir_receipt_from_entry_v1(module, source_identity, source_content,
         admitted_inventory_digest, source)
+
+fn cold_hir_semantic_seed_from_admitted_entry_v1(
+    module: HirModule, source_root: text, source_identity: text,
+    source_content: text, admitted_inventory_digest: text,
+    source: CompileSourceInventoryEntryV1
+) -> Result<ColdHirSemanticSeedV1, text>:
+    # Legacy seed callers project the same once-encoded typed receipt.
+    match cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, source_root, source_identity, source_content,
+            admitted_inventory_digest, source):
+        case Err(reason): Err(reason)
+        case Ok(receipt): Ok(receipt.seed)
 
 fn cold_hir_semantic_seed_v1(
     module: HirModule,
@@ -154,5 +170,6 @@ fn cold_hir_semantic_seeds_v1(
     Ok(seeds)
 
 export ColdHirSemanticSeedV1, ColdHirSemanticInputV1
+export ColdHirTypedReceiptV1, cold_hir_typed_receipt_from_admitted_entry_v1
 export cold_hir_semantic_seed_v1, cold_hir_semantic_seeds_v1
 export cold_hir_semantic_seed_from_admitted_entry_v1

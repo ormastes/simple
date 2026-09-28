@@ -334,6 +334,16 @@ per-module full-inventory digest/search into the future driver, but the driver
 still has no complete graph publisher. See
 `doc/09_report/compiler/target6_cold_hir_indexed_seed_2026-09-28.md`.
 
+Typed ABI receipt follow-up (2026-09-29): the per-entry cold producer now
+retains canonical typed-HIR ABI bytes together with the digest and semantic
+seed, using one ABI encoding pass. Its no-stub Stage2 native probe compiled
+292 units and passed. The production driver still needs to retain these
+compact receipts before HIR/source eviction and attach real archive outputs.
+The index builder requires one draft for every `.spl` inventory entry, while
+an entry-closure compile may lower fewer modules; cold publication must
+resolve this scope mismatch without inventing missing receipts. See
+`doc/09_report/compiler/target6_typed_hir_receipt_2026-09-29.md`.
+
 The 2026-09-28 full CLI retry compiled its 2,488-unit source closure after
 the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173
 distinct symbols. This still blocks full-CLI Target 6 qualification; the
