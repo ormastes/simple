@@ -10,6 +10,14 @@
 
 The focused text-set, text-map, generic map/set capture, AVL tree, parser, and `.sprof` unit specs plus `test/02_integration/compiler/profile_switchable_attribute_it_spec.spl`, `test/02_integration/compiler/profile_switchable_cli_feedback_it_spec.spl`, and `test/02_integration/app/optimize/sprof_collection_sample_limit_it_spec.spl` are preliminary evidence only. The CLI probe captures real text-set and text-map sites, measured lookups and public snapshots, appends a second run, and checks early algorithm switches when that profile is loaded. It also checks explicit attribute precedence, workload and target rejection, and rejected append preserving a corrupt prior file. These Simple tests have not run on an admitted source-matched runner. The executable SPipe system scenario and mirrored manual now include text, integer-key generic, and typed factory paths through interpreter and LLVM native builds, but remain unrun under an admitted pure-Simple compiler with no stub fallback. Additional scenarios for aggregate generic keys, typed-MIR, other backends, and NFR requirements are still required.
 
+Windows and WSL admission use the same `test/03_system/qualified_pure_simple_runtime.spl`
+helper. It reads `SIMPLE_QUALIFIED_RUNTIME` from the runtime facade first, then
+from `/bin/sh` on WSL or `cmd.exe` on Windows when an older test runner hides
+the caller environment. A missing path, unidentified binary, or Rust-seed
+banner remains a test failure. This portable lookup is test infrastructure;
+each platform still needs its own source-matched pure-Simple binary and
+interpreter/native receipts before any system scenario can be marked PASS.
+
 The two existing collection benchmark scripts measure list/set/hashset references and may select a Rust seed; they cannot serve as the item 7 performance gate. Add an adaptive-container benchmark that records linear comparisons, hash probes/collisions, ordered lookup and update comparisons, allocation/copied-byte counts, peak RSS, and warm latency for each admitted target profile. Require a qualified source-matched pure-Simple compiler and reject seed evidence.
 
 Identity gate: capture a first-run profile under `@collection_algorithm("auto")`, change only that attribute to `"ordered"`, and prove the second run admits the same module and site identities while selecting the forced ordered representation. A changed path, changed non-attribute source, workload, or target must still reject the old feedback. The source-level parser/profile cases exist but need an admitted runner; the installed Windows executables are Rust seeds and the isolated pure-Simple Stage2 test-runner link is unresolved.
