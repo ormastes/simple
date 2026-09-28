@@ -8,7 +8,7 @@ those exact retained bytes.
 
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.io_runtime.{file_read_bytes}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock, mutex_lock, mutex_unlock}
 use std.nogc_sync_mut.composition.provider_generation.{
     SIMPLE_GENERATION_OK, SIMPLE_GENERATION_NOT_ACTIVE,
     ProviderActivationCandidateV1, ProviderActivationReceiptV1,
@@ -66,8 +66,26 @@ struct _ProviderPublicationStateV1:
     last_release_status: i32
     last_lease_live: bool
 
+# The owner is a copyable slot into Simple-side state; copies select the same
+# slot. The runtime mutex is an exclusion gate only (same fix as
+# nvfs_device_identity_owner_v1): a struct protected value comes back nil
+# through the interpreter's rt_mutex value bridge, the update closure faults
+# with the real lock held, and every later owner call blocks forever.
 pub class ProviderPublicationOwnerV1:
-    _state: Mutex
+    _slot: i64
+
+var _provider_publication_gate_v1: Mutex = mutex_new(0)
+var _provider_publication_states_v1: [_ProviderPublicationStateV1] = []
+
+fn _provider_publication_update_v1(
+    owner: ProviderPublicationOwnerV1,
+    f: fn(_ProviderPublicationStateV1) -> _ProviderPublicationStateV1
+) -> _ProviderPublicationStateV1:
+    val _ = mutex_lock(_provider_publication_gate_v1)
+    val next = f(_provider_publication_states_v1[owner._slot])
+    _provider_publication_states_v1[owner._slot] = next
+    val _ = mutex_unlock(_provider_publication_gate_v1, 0)
+    next
 
 var _next_owner_identity: Mutex = mutex_new(1)
 
@@ -115,7 +133,12 @@ fn _state_new(owner_identity: i64) -> _ProviderPublicationStateV1:
 
 pub fn provider_publication_owner_new_v1() -> ProviderPublicationOwnerV1:
     val identity = _owner_identity_new()
-    ProviderPublicationOwnerV1(_state: mutex_new(_state_new(identity)))
+    val initial = _state_new(identity)
+    val _ = mutex_lock(_provider_publication_gate_v1)
+    val slot = _provider_publication_states_v1.len()
+    _provider_publication_states_v1.push(initial)
+    val _ = mutex_unlock(_provider_publication_gate_v1, 0)
+    ProviderPublicationOwnerV1(_slot: slot)
 
 fn _binding_exists(state: _ProviderPublicationStateV1,
     lease: ProviderPublicationLeaseV1) -> bool:
@@ -184,7 +207,7 @@ fn _publish_captured_locked(state: _ProviderPublicationStateV1, path: text,
 pub fn provider_publication_publish_captured_v1(owner: ProviderPublicationOwnerV1,
     path: text, before: [u8], after: [u8], candidate: ProviderActivationCandidateV1
 ) -> ProviderPublicationReceiptV1:
-    val updated = mutex_with_lock(owner._state, \state:
+    val updated = _provider_publication_update_v1(owner, \state:
         _publish_captured_locked(state, path, before, after, candidate))
     updated.last_receipt
 
@@ -222,13 +245,13 @@ fn _acquire_locked(state: _ProviderPublicationStateV1) -> _ProviderPublicationSt
 # generation, never a mixed path/digest/generation tuple.
 pub fn provider_publication_acquire_v1(owner: ProviderPublicationOwnerV1
 ) -> ProviderPublicationAcquireV1:
-    val updated = mutex_with_lock(owner._state, \state: _acquire_locked(state))
+    val updated = _provider_publication_update_v1(owner, \state: _acquire_locked(state))
     updated.last_acquire
 
 pub fn provider_publication_lease_live_v1(owner: ProviderPublicationOwnerV1,
     lease: ProviderPublicationLeaseV1
 ) -> bool:
-    val updated = mutex_with_lock(owner._state, \state:
+    val updated = _provider_publication_update_v1(owner, \state:
         var next = state
         # Both checks must occur inside the same owner turn.  Testing the
         # manager after releasing this lock would let a concurrent release
@@ -258,7 +281,7 @@ fn _release_locked(state: _ProviderPublicationStateV1,
 pub fn provider_publication_release_v1(owner: ProviderPublicationOwnerV1,
     lease: ProviderPublicationLeaseV1
 ) -> i32:
-    val updated = mutex_with_lock(owner._state, \state:
+    val updated = _provider_publication_update_v1(owner, \state:
         _release_locked(state, lease))
     updated.last_release_status
 

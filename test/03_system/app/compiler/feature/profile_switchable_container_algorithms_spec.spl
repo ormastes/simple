@@ -1,0 +1,329 @@
+# @req REQ-PSC-001 REQ-PSC-002 REQ-PSC-003 REQ-PSC-004 REQ-PSC-005 REQ-PSC-006 REQ-PSC-008
+# @cover src/app/io/_CliCompile/native_collection_profile.spl
+# @cover src/compiler/10.frontend/core/collection_feedback.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_set.spl
+# @cover src/lib/nogc_sync_mut/src/collections/adaptive_text_map.spl
+"""
+# Profile-switchable containers: captured workload reaches native storage
+
+Run these scenarios with an admitted pure-Simple runtime. They compare text and
+integer-key generic containers, replay paired collision evidence through both
+engines, capture a workload, explain its matching sites, and check native
+storage. A Rust bootstrap seed cannot satisfy the admission gate. Other key
+families and typed optimizer requirements remain open in the system test plan.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run, file_exists, file_delete, getpid, read_file_text, env_get, env_set}
+use app.optimize.sprof_collection_profile.{
+    SprofCollectionMetric, sprof_source_module_identity,
+    sprof_source_module_identity_from_text,
+    sprof_write_collection_profile_file_with_metrics
+}
+use app.optimize.collection_plan_cli.{collection_plan_source_sites}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetWorkloadProfile}
+use test.system.qualified_pure_simple_runtime.{admit_pure_simple_runtime}
+
+val COLLECTION_SYSTEM_PROBE = "test/02_integration/compiler/probe_profile_switchable_cli_feedback.spl"
+val COLLECTION_SEMANTICS_PROBE = "test/fixtures/profile_switchable/semantics_probe.spl"
+val COLLECTION_GENERIC_PROBE = "test/fixtures/profile_switchable/generic_semantics_probe.spl"
+val COLLECTION_TYPED_FACTORY_PROBE = "test/fixtures/profile_switchable/typed_factory_attribute_probe.spl"
+val COLLECTION_UNSUPPORTED_KEY_PROBE = "test/fixtures/profile_switchable/unsupported_ordered_key_probe.spl"
+val COLLECTION_EMBEDDED_MISMATCH_PROBE = "test/fixtures/profile_switchable/embedded_replay_mismatch_probe.spl"
+val COLLECTION_COLLISION_PROBE = "test/02_integration/compiler/probe_profile_switchable_collision_replay.spl"
+
+fn collection_system_field(output: text, prefix: text) -> text:
+    for line in output.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return trimmed.substring(prefix.len(), trimmed.len())
+    ""
+
+describe "profile-switchable collection system workflow":
+    it "preserves text set and map behavior across three physical algorithms":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Run the attributed semantics probe through the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run(
+            runtime, ["run", COLLECTION_SEMANTICS_PROBE])
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out + interpreted_err).to_contain("COLLECTION_SEMANTICS: PASS")
+        step("Build and run the same source through LLVM native code")
+        val binary_path = "build/collection_semantics_system_{getpid()}.exe"
+        val (build_out, build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_SEMANTICS_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        file_delete(binary_path)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_SEMANTICS: PASS")
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "preserves integer-key generic set and map behavior across three algorithms":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Run the generic semantics probe through the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run(
+            runtime, ["run", COLLECTION_GENERIC_PROBE])
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out + interpreted_err).to_contain("COLLECTION_GENERIC_SEMANTICS: PASS")
+        step("Build and run the generic source through LLVM native code")
+        val binary_path = "build/collection_generic_semantics_system_{getpid()}.exe"
+        val (build_out, build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_GENERIC_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        file_delete(binary_path)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_GENERIC_SEMANTICS: PASS")
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "applies typed factory attributes to local and field containers on both engines":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Run the typed factory probe through the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run(
+            runtime, ["run", COLLECTION_TYPED_FACTORY_PROBE])
+        expect(interpreted_code).to_equal(0)
+        expect(interpreted_out + interpreted_err).to_contain("COLLECTION_TYPED_FACTORY: PASS")
+        step("Build and run the same factory source through LLVM native code")
+        val binary_path = "build/collection_typed_factory_system_{getpid()}.exe"
+        val (_build_out, _build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_TYPED_FACTORY_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        file_delete(binary_path)
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLECTION_TYPED_FACTORY: PASS")
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "rejects an unsupported direct ordered-map query on both engines":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Run the unsupported-key probe through the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run(
+            runtime, ["run", COLLECTION_UNSUPPORTED_KEY_PROBE])
+        expect(interpreted_code != 0).to_be(true)
+        expect(interpreted_out + interpreted_err).to_contain(
+            "OrderedMap key type has no supported native order")
+        expect((interpreted_out + interpreted_err).contains(
+            "UNREACHABLE_ORDERED_KEY_QUERY")).to_be(false)
+        step("Build and run the same probe through LLVM native code")
+        val binary_path = "build/collection_unsupported_key_system_{getpid()}.exe"
+        val (build_out, build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_UNSUPPORTED_KEY_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        file_delete(binary_path)
+        expect(native_code != 0).to_be(true)
+        expect(native_out + native_err).to_contain(
+            "OrderedMap key type has no supported native order")
+        expect((native_out + native_err).contains(
+            "UNREACHABLE_ORDERED_KEY_QUERY")).to_be(false)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "rejects an embedded profile bound to another target on both engines":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Reject the mismatched embedded target in the interpreter")
+        val (interpreted_out, interpreted_err, interpreted_code) = process_run(
+            runtime, ["run", COLLECTION_EMBEDDED_MISMATCH_PROBE])
+        expect(interpreted_code != 0).to_be(true)
+        expect(interpreted_out + interpreted_err).to_contain(
+            "embedded collection workload does not match container site and target")
+        expect((interpreted_out + interpreted_err).contains(
+            "UNREACHABLE_EMBEDDED_REPLAY")).to_be(false)
+        step("Reject the same target mismatch in LLVM native execution")
+        val binary_path = "build/collection_embedded_mismatch_system_{getpid()}.exe"
+        val (_build_out, _build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_EMBEDDED_MISMATCH_PROBE,
+            "--source", "src/lib", "--output", binary_path
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        file_delete(binary_path)
+        expect(native_code != 0).to_be(true)
+        expect(native_out + native_err).to_contain(
+            "embedded collection workload does not match container site and target")
+        expect((native_out + native_err).contains(
+            "UNREACHABLE_EMBEDDED_REPLAY")).to_be(false)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "replays paired collision evidence into all auto families on both engines":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        step("Prepare a valid exact-site profile with paired hash collision samples")
+        val source = read_file_text(COLLECTION_COLLISION_PROBE)
+        val parsed = collection_plan_source_sites(source, COLLECTION_COLLISION_PROBE)
+        expect(parsed != nil).to_be(true)
+        val target = "x86_64-v3"
+        var profiles: [AdaptiveSetWorkloadProfile] = []
+        var metrics: [SprofCollectionMetric] = []
+        for site in parsed.unwrap():
+            if site.attribute == "auto":
+                profiles.push(AdaptiveSetWorkloadProfile(
+                    site_id: site.site_id, target_profile_id: target,
+                    sample_count: 1, size_p95: 20, lookup_count_p95: 100,
+                    hit_count_p95: 80, miss_count_p95: 20))
+                metrics.push(SprofCollectionMetric(
+                    site_id: site.site_id, target_profile_id: target,
+                    name: "hash_probe_count", value: 100))
+                metrics.push(SprofCollectionMetric(
+                    site_id: site.site_id, target_profile_id: target,
+                    name: "hash_collision_count", value: 40))
+        expect(profiles.len()).to_equal(4)
+        val identity = sprof_source_module_identity_from_text(COLLECTION_COLLISION_PROBE, source)
+        val profile_path = "build/collection_collision_system_{getpid()}.sprof"
+        val binary_path = "build/collection_collision_system_{getpid()}.exe"
+        expect(sprof_write_collection_profile_file_with_metrics(
+            profile_path, identity, "collision-workload", [], profiles, metrics)).to_be(true)
+
+        step("Run the profile through the interpreter and inspect storage and values")
+        val (run_out, run_err, run_code) = process_run(runtime, [
+            "run", COLLECTION_COLLISION_PROBE,
+            "--collection-profile=" + profile_path,
+            "--collection-module=" + identity,
+            "--collection-workload=collision-workload",
+            "--collection-target=" + target
+        ])
+        expect(run_code).to_equal(0)
+        expect(run_out + run_err).to_contain("COLLISION_REPLAY: PASS")
+
+        step("Native-build with the same profile and inspect the selected storage")
+        val (build_out, build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_COLLISION_PROBE,
+            "--source", "src/lib", "--output", binary_path,
+            "--collection-profile=" + profile_path,
+            "--collection-workload=collision-workload",
+            "--collection-target=" + target
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        expect(native_code).to_equal(0)
+        expect(native_out + native_err).to_contain("COLLISION_REPLAY: PASS")
+        expect(file_delete(binary_path)).to_be(true)
+        expect(file_delete(profile_path)).to_be(true)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)
+
+    it "captures exact sites and replays their load in a native build":
+        step("Admit a source-matched pure-Simple compiler")
+        val runtime = admit_pure_simple_runtime()
+        if runtime == "":
+            return
+        val previous_no_stub = env_get("SIMPLE_NO_STUB_FALLBACK") ?? ""
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", "1")).to_be(true)
+        val profile_path = "build/collection_system_{getpid()}.sprof"
+        val binary_path = "build/collection_system_{getpid()}.exe"
+        val identity = sprof_source_module_identity(COLLECTION_SYSTEM_PROBE)
+
+        step("Capture a workload from independently attributed set and map sites")
+        val (capture_out, capture_err, capture_code) = process_run(runtime, [
+            "run", COLLECTION_SYSTEM_PROBE,
+            "--collection-profile-out=" + profile_path,
+            "--collection-module=" + identity,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ])
+        val capture = capture_out + capture_err
+        val hot_site = collection_system_field(capture, "COLLECTION_HOT_SITE:")
+        val map_site = collection_system_field(capture, "COLLECTION_MAP_SITE:")
+        val profile_body = if file_exists(profile_path): read_file_text(profile_path) else: ""
+        expect(capture_code).to_equal(0)
+        expect(capture).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        expect(hot_site).to_start_with("ast://")
+        expect(map_site).to_start_with("ast://")
+        expect(profile_body).to_contain("name=hash_probe_count")
+        expect(profile_body).to_contain("name=hash_collision_count")
+
+        step("Explain the admitted exact-site plan and its evidence")
+        val (explain_out, explain_err, explain_code) = process_run(runtime, [
+            "optimize", COLLECTION_SYSTEM_PROBE, "--explain-collection-plan",
+            "--profile=" + profile_path,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3", "--site=" + hot_site
+        ])
+        expect(explain_code).to_equal(0)
+        expect(explain_out + explain_err).to_contain("profile.status=admitted-exact-site")
+        expect(explain_out + explain_err).to_contain("selected=hash")
+
+        step("Build and execute the probe with its captured profile")
+        val (build_out, build_err, build_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--mode=one-binary",
+            "--entry-closure", "--entry", COLLECTION_SYSTEM_PROBE,
+            "--source", "src/lib", "--output", binary_path,
+            "--collection-profile=" + profile_path,
+            "--collection-workload=lookup-workload",
+            "--collection-target=x86_64-v3"
+        ])
+        expect(build_code).to_equal(0)
+        expect(file_exists(binary_path)).to_be(true)
+        val (native_out, native_err, native_code) = process_run(binary_path, [])
+        val native_output = native_out + native_err
+        expect(native_code).to_equal(0)
+        expect(native_output).to_contain("COLLECTION_PROFILE_CLI: PASS")
+        expect(collection_system_field(native_output, "COLLECTION_HOT_PREINSERT_HASH:")).to_equal("true")
+        expect(collection_system_field(native_output, "COLLECTION_MAP_PREINSERT_HASH:")).to_equal("true")
+        expect(collection_system_field(native_output, "COLLECTION_COLD_PREINSERT_HASH:")).to_equal("false")
+        expect(collection_system_field(native_output, "COLLECTION_FORCED_PREINSERT_HASH:")).to_equal("false")
+
+        step("Reject a mismatched target without replacing the admitted binary")
+        val (_rejected_out, rejected_err, rejected_code) = process_run(runtime, [
+            "native-build", "--backend=llvm", "--entry-closure",
+            "--entry", COLLECTION_SYSTEM_PROBE, "--source", "src/lib",
+            "--output", binary_path,
+            "--collection-profile=" + profile_path,
+            "--collection-workload=lookup-workload",
+            "--collection-target=aarch64-neon"
+        ])
+        val binary_preserved = file_exists(binary_path)
+        file_delete(binary_path)
+        file_delete(profile_path)
+        expect(rejected_code).to_equal(1)
+        expect(rejected_err).to_contain("no samples for target")
+        expect(binary_preserved).to_be(true)
+        expect(env_set("SIMPLE_NO_STUB_FALLBACK", previous_no_stub)).to_be(true)

@@ -1,0 +1,295 @@
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile, AdaptiveSetWorkloadProfile, AdaptiveTextSet, adaptive_set_attribute_supported}
+
+describe "AdaptiveTextSet per-container algorithm selection":
+    it "moves an auto hash set to ordered after a live collision window":
+        val policy = AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 4, allow_hash: true)
+        var set = AdaptiveTextSet.with_profile(policy)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        for _ in 0..4:
+            expect(set.contains("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        # FNV-1a hashes alpha and beta to the same slot in this four-slot table.
+        for _ in 0..4:
+            expect(set.contains("beta")).to_be(false)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.contains("alpha")).to_be(true)
+        set.clear()
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var forced = AdaptiveTextSet.with_attribute(
+            policy, "", "", AdaptiveSetAttribute.Hash)
+        forced.insert("alpha")
+        for _ in 0..8:
+            forced.contains("beta")
+        expect(forced.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+
+    it "uses ordered storage for a hot no-hash profile and retains membership":
+        val policy = AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 32, allow_hash: false)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://set/no-hash#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 3, lookup_count_p95: 40,
+            hit_count_p95: 30, miss_count_p95: 10
+        )
+        var set = AdaptiveTextSet.with_site_and_target(policy, prior.site_id, prior.target_profile_id)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.apply_workload_profile(prior)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.contains("alpha")).to_be(true)
+        set.clear()
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+
+    it "uses admitted collision pressure for ordered auto storage and keeps values":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://set/collision#stable", target_profile_id: "x86_64-v3",
+            sample_count: 2, size_p95: 20, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 20,
+            hash_probe_count_p95: 100, hash_collision_count_p95: 40
+        )
+        var set = AdaptiveTextSet.with_site_and_target(policy, prior.site_id, prior.target_profile_id)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.apply_workload_profile(prior)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.contains("alpha")).to_be(true)
+        expect(set.remove("alpha")).to_be(true)
+        set.clear()
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        var forced = AdaptiveTextSet.with_attribute(
+            policy, prior.site_id, prior.target_profile_id, AdaptiveSetAttribute.Hash)
+        expect(forced.apply_workload_profile(prior)).to_be(false)
+        expect(forced.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        var malformed = prior
+        malformed.hash_collision_count_p95 = -1
+        var other = AdaptiveTextSet.with_site_and_target(policy, prior.site_id, prior.target_profile_id)
+        expect(other.apply_workload_profile(malformed)).to_be(false)
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "rejects impossible single-sample workload feedback":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        var set = AdaptiveTextSet.with_site_and_target(policy, "ast://set/invalid#stable", "x86_64-v3")
+        val invalid = AdaptiveSetWorkloadProfile(
+            site_id: "ast://set/invalid#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 64, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 10
+        )
+        expect(set.apply_workload_profile(invalid)).to_be(false)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "starts linear and promotes only the busy instance":
+        var busy = AdaptiveTextSet.with_site(AdaptiveSetProfile(linear_size_limit: 4, lookup_promotion_count: 3, allow_hash: true), "ast://example/main/lookup#stable")
+        var quiet = AdaptiveTextSet.with_profile(AdaptiveSetProfile(linear_size_limit: 4, lookup_promotion_count: 3, allow_hash: true))
+        busy.insert("alpha")
+        quiet.insert("alpha")
+        expect(busy.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(busy.contains("alpha")).to_be(true)
+        expect(busy.contains("missing")).to_be(false)
+        expect(busy.contains("alpha")).to_be(true)
+        expect(busy.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(busy.observation().lookups).to_equal(3)
+        expect(busy.observation().site_id).to_equal("ast://example/main/lookup#stable")
+        expect(busy.observation().hits).to_equal(2)
+        expect(busy.observation().misses).to_equal(1)
+        expect(quiet.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(busy.len()).to_equal(1)
+
+    it "promotes by size then demotes after removals":
+        var set = AdaptiveTextSet.with_profile(AdaptiveSetProfile(linear_size_limit: 2, lookup_promotion_count: 100, allow_hash: true))
+        expect(set.insert("a")).to_be(true)
+        expect(set.insert("b")).to_be(true)
+        expect(set.insert("c")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.insert("a")).to_be(false)
+        expect(set.remove("b")).to_be(true)
+        expect(set.remove("c")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(set.contains("a")).to_be(true)
+        expect(set.contains("b")).to_be(false)
+        expect(set.len()).to_equal(1)
+
+    it "honors a per-instance no-hash profile even under pressure":
+        var set = AdaptiveTextSet.with_profile(AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: false))
+        set.insert("a")
+        set.insert("b")
+        expect(set.contains("a")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        set.set_profile(AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: true))
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.contains("b")).to_be(true)
+        set.set_profile(AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: false))
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(set.contains("a")).to_be(true)
+        set.set_profile(AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true))
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        set.clear()
+        expect(set.len()).to_equal(0)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "does not allocate a hash table for an empty lookup workload":
+        var set = AdaptiveTextSet.with_profile(AdaptiveSetProfile(linear_size_limit: 0, lookup_promotion_count: 1, allow_hash: true))
+        expect(set.contains("absent")).to_be(false)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "normalizes invalid thresholds before selecting storage":
+        var set = AdaptiveTextSet.with_profile(AdaptiveSetProfile(linear_size_limit: -4, lookup_promotion_count: 0, allow_hash: true))
+        expect(set.profile.linear_size_limit).to_equal(0)
+        expect(set.profile.lookup_promotion_count).to_equal(1)
+        expect(set.insert("a")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+
+    it "uses a matching prior profile without inflating live observations":
+        var set = AdaptiveTextSet.with_site_and_target(AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true), "ast://module/lookup#stable", "x86_64-v3")
+        val wrong = AdaptiveSetWorkloadProfile(site_id: "ast://other/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 12, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        expect(set.apply_workload_profile(wrong)).to_be(false)
+        val wrong_target = AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "aarch64-neon", sample_count: 12, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        expect(set.apply_workload_profile(wrong_target)).to_be(false)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        val matched = AdaptiveSetWorkloadProfile(site_id: "ast://module/lookup#stable", target_profile_id: "x86_64-v3", sample_count: 12, size_p95: 100, lookup_count_p95: 500, hit_count_p95: 250, miss_count_p95: 250)
+        expect(set.apply_workload_profile(matched)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.observation().lookups).to_equal(0)
+        expect(set.observation().target_profile_id).to_equal("x86_64-v3")
+        expect(set.contains("alpha")).to_be(true)
+        expect(set.observation().hits).to_equal(1)
+
+    it "reuses a measured instance only for the same site and target":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 2, allow_hash: true)
+        var measured = AdaptiveTextSet.with_site_and_target(policy, "ast://module/contains#stable", "x86_64-v3")
+        measured.insert("alpha")
+        expect(measured.contains("alpha")).to_be(true)
+        expect(measured.contains("absent")).to_be(false)
+        val sample = measured.workload_profile_sample()
+        expect(sample.sample_count).to_equal(1)
+        expect(sample.size_p95).to_equal(1)
+        expect(sample.lookup_count_p95).to_equal(2)
+        expect(sample.hit_count_p95).to_equal(1)
+        expect(sample.miss_count_p95).to_equal(1)
+        var replay = AdaptiveTextSet.with_site_and_target(policy, "ast://module/contains#stable", "x86_64-v3")
+        expect(replay.apply_workload_profile(sample)).to_be(true)
+        expect(replay.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        replay.insert("alpha")
+        expect(replay.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(replay.observation().lookups).to_equal(0)
+        var other_target = AdaptiveTextSet.with_site_and_target(policy, "ast://module/contains#stable", "aarch64-neon")
+        expect(other_target.apply_workload_profile(sample)).to_be(false)
+        expect(other_target.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        replay.clear()
+        expect(replay.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+
+    it "changes only the attributed container's physical algorithm":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var selected = AdaptiveTextSet.with_attribute(policy, "ast://module/selected#stable", "x86_64-v3", AdaptiveSetAttribute.Linear)
+        var other = AdaptiveTextSet.with_attribute(policy, "ast://module/other#stable", "x86_64-v3", AdaptiveSetAttribute.Auto)
+        selected.insert("alpha")
+        selected.insert("beta")
+        other.insert("alpha")
+        selected.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(selected.contains("alpha")).to_be(true)
+        expect(selected.contains("beta")).to_be(true)
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        selected.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(selected.len()).to_equal(2)
+        expect(selected.contains("beta")).to_be(true)
+        selected.set_attribute(AdaptiveSetAttribute.Auto)
+        expect(selected.algorithm_attribute()).to_equal(AdaptiveSetAttribute.Auto)
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "applies a source attribute to one initialized set and preserves profile identity":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var selected = AdaptiveTextSet.attributed(AdaptiveTextSet.with_site_and_target(policy, "ast://module/chosen#stable", "x86_64-v3"), "ordered")
+        var other = AdaptiveTextSet.with_site_and_target(policy, "ast://module/other#stable", "x86_64-v3")
+        selected.insert("alpha")
+        other.insert("alpha")
+        expect(selected.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(selected.observation().site_id).to_equal("ast://module/chosen#stable")
+        expect(selected.observation().target_profile_id).to_equal("x86_64-v3")
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "uses a generated site only when the constructor left the site empty":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        val generated = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.with_profile(policy), "ordered", "ast://module/generated#stable")
+        expect(generated.observation().site_id).to_equal("ast://module/generated#stable")
+        expect(generated.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        val explicit = AdaptiveTextSet.attributed_at_site(AdaptiveTextSet.with_site_and_target(policy, "ast://module/explicit#stable", "x86_64-v3"), "linear", "ast://module/generated#stable")
+        expect(explicit.observation().site_id).to_equal("ast://module/explicit#stable")
+        expect(explicit.observation().target_profile_id).to_equal("x86_64-v3")
+
+    it "keeps explicit linear storage when a prior workload is hot":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 2, allow_hash: true)
+        var set = AdaptiveTextSet.with_attribute(policy, "ast://module/linear#stable", "x86_64-v3", AdaptiveSetAttribute.Linear)
+        set.insert("alpha")
+        val hot = AdaptiveSetWorkloadProfile(site_id: "ast://module/linear#stable", target_profile_id: "x86_64-v3", sample_count: 1, size_p95: 100, lookup_count_p95: 100, hit_count_p95: 100, miss_count_p95: 0)
+        expect(set.apply_workload_profile(hot)).to_be(false)
+        expect(set.contains("alpha")).to_be(true)
+        expect(set.contains("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "guards a forced hash attribute with the container's hash policy":
+        val no_hash = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: false)
+        expect(adaptive_set_attribute_supported(no_hash, AdaptiveSetAttribute.Hash)).to_be(false)
+        expect(adaptive_set_attribute_supported(no_hash, AdaptiveSetAttribute.Ordered)).to_be(true)
+        val hash_ready = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var set = AdaptiveTextSet.with_attribute(hash_ready, "ast://module/guarded#stable", "x86_64-v3", AdaptiveSetAttribute.Hash)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.remove("alpha")).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        set.clear()
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        set.set_attribute(AdaptiveSetAttribute.Auto)
+        set.set_profile(no_hash)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "uses hash storage from construction when its attribute forces hash":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true)
+        var set = AdaptiveTextSet.with_attribute(policy, "ast://module/forced#stable", "x86_64-v3", AdaptiveSetAttribute.Hash)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.contains("absent")).to_be(false)
+        expect(set.insert("alpha")).to_be(true)
+        expect(set.contains("alpha")).to_be(true)
+
+    it "captures peak cardinality after the set shrinks":
+        var set = AdaptiveTextSet.with_site_and_target(AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true), "ast://module/peak#stable", "x86_64-v3")
+        set.insert("alpha")
+        set.insert("beta")
+        expect(set.remove("beta")).to_be(true)
+        expect(set.len()).to_equal(1)
+        expect(set.observation().peak_size).to_equal(2)
+        expect(set.workload_profile_sample().size_p95).to_equal(2)
+
+    it "retains lifetime workload measurements after clear":
+        var set = AdaptiveTextSet.with_site_and_target(AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true), "ast://module/clear#stable", "x86_64-v3")
+        set.insert("alpha")
+        expect(set.contains("alpha")).to_be(true)
+        expect(set.contains("missing")).to_be(false)
+        set.clear()
+        expect(set.len()).to_equal(0)
+        expect(set.workload_profile_sample().size_p95).to_equal(1)
+        expect(set.workload_profile_sample().lookup_count_p95).to_equal(2)
+        expect(set.workload_profile_sample().hit_count_p95).to_equal(1)
+        expect(set.workload_profile_sample().miss_count_p95).to_equal(1)
+
+    it "keeps membership and ordered snapshots across three algorithms":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: false)
+        var set = AdaptiveTextSet.with_attribute(policy, "ast://module/ordered#stable", "x86_64-v3", AdaptiveSetAttribute.Linear)
+        set.insert("zeta")
+        set.insert("alpha")
+        set.insert("middle")
+        expect(set.snapshot_values()).to_equal(["alpha", "middle", "zeta"])
+        set.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(set.snapshot_values()).to_equal(["alpha", "middle", "zeta"])
+        expect(set.insert("middle")).to_be(false)
+        expect(set.remove("alpha")).to_be(true)
+        expect(set.contains("alpha")).to_be(false)
+        expect(set.snapshot_values()).to_equal(["middle", "zeta"])
+        set.set_profile(AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 100, allow_hash: true))
+        set.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.snapshot_values()).to_equal(["middle", "zeta"])
+        set.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(set.snapshot_values()).to_equal(["middle", "zeta"])

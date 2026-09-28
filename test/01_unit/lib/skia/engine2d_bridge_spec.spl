@@ -36,6 +36,15 @@ fn _record_two_rects(w: i32, h: i32, bg: i64, fg: i64) -> SkPicture:
     rec.record(sk_picture_op_draw_rect(fg_rect, sk_paint_fill(fg)))
     rec.finish_recording()
 
+# Same picture with hard-edged (non-anti-aliased) paints: the strict
+# skia_render_picture_on_engine2d entrypoint rejects anti-aliased ops.
+fn _record_two_hard_rects(w: i32, h: i32, bg: i64, fg: i64) -> SkPicture:
+    val full = SkRect(left: 0.0, top: 0.0, right: w.to_f64(), bottom: h.to_f64())
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    rec.record(sk_picture_op_draw_rect(full, sk_paint_fill(bg).with_anti_alias(false)))
+    rec.record(sk_picture_op_draw_rect(sk_rect_make_xywh(4.0, 3.0, 8.0, 6.0), sk_paint_fill(fg).with_anti_alias(false)))
+    rec.finish_recording()
+
 # Background fill via DrawPaint (whole-canvas) followed by a stroked rect
 # outline. Both were previously counted as skipped.
 fn _record_paint_and_stroked_rect(w: i32, h: i32, bg: i64, line: i64) -> SkPicture:
@@ -86,8 +95,10 @@ describe "SkiaEngine2DBridge":
         val h = 16
         val bg = sk_color_argb(255, 0x12, 0x34, 0x56)   # 0xFF123456
         val fg = sk_color_argb(255, 0xEF, 0x44, 0x44)   # 0xFFEF4444
-        val pic = _record_two_rects(w, h, bg, fg)
-        val pixels = skia_render_picture_on_engine2d(pic, w, h, "cpu_simd")
+        val pic = _record_two_hard_rects(w, h, bg, fg)
+        val rendered = skia_render_picture_on_engine2d(pic, w, h, "cpu_simd")
+        expect(rendered.is_ok()).to_equal(true)
+        val pixels = rendered.unwrap()
 
         # Buffer is the right size.
         expect(pixels.len()).to_equal(w * h)
@@ -107,12 +118,25 @@ describe "SkiaEngine2DBridge":
         val h = 16
         val bg = sk_color_argb(255, 0x12, 0x34, 0x56)
         val fg = sk_color_argb(255, 0xEF, 0x44, 0x44)
-        val pic = _record_two_rects(w, h, bg, fg)
-        val pixels = skia_render_picture_on_engine2d(pic, w, h, "software")
+        val pic = _record_two_hard_rects(w, h, bg, fg)
+        val rendered = skia_render_picture_on_engine2d(pic, w, h, "software")
+        expect(rendered.is_ok()).to_equal(true)
+        val pixels = rendered.unwrap()
 
         expect(pixels.len()).to_equal(w * h)
         expect(pixels[8 + 5 * w]).to_equal(0xFFEF4444u32)
         expect(pixels[20 + 14 * w]).to_equal(0xFF123456u32)
+
+    it "strict entrypoint rejects an anti-aliased picture with a typed reason":
+        # @req REQ-SSPEC-LIB
+        step("strict entrypoint rejects an anti-aliased picture with a typed reason")
+        val w = 24
+        val h = 16
+        val bg = sk_color_argb(255, 0x12, 0x34, 0x56)
+        val fg = sk_color_argb(255, 0xEF, 0x44, 0x44)
+        val rendered = skia_render_picture_on_engine2d(_record_two_rects(w, h, bg, fg), w, h, "cpu_simd")
+        expect(rendered.is_err()).to_equal(true)
+        expect(rendered.unwrap_err()).to_equal("op 0: paint-anti-alias")
 
     it "reports both fill rects as mapped with nothing skipped":
         # @req REQ-SSPEC-LIB

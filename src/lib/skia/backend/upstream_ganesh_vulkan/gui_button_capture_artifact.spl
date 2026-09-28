@@ -1,0 +1,78 @@
+# Private upstream Skia candidate adapter for the pinned GUI button states.
+
+use common.renderdoc.physical_vulkan_2d_qualification.{
+    PreparedRenderScene, VulkanBackendCaptureArtifact}
+use common.renderdoc.gui_button_qualification.{gui_button_prepared_scene}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UpstreamSkiaGaneshFrame, upstream_skia_ganesh_vulkan_final_capture,
+    UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY}
+
+fn _native_uuid_valid(value: text) -> bool:
+    if value.len() != 32 or value == "00000000000000000000000000000000":
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _physical_device_type(value: i64) -> text:
+    if value == 1: "integrated"
+    elif value == 2: "discrete"
+    else: ""
+
+pub fn upstream_skia_gui_button_artifact(
+    frame: UpstreamSkiaGaneshFrame,
+    scene: PreparedRenderScene, pressed: bool
+) -> Result<VulkanBackendCaptureArtifact, text>:
+    """Package one completed Ganesh GUI frame without physical promotion."""
+    val pinned = gui_button_prepared_scene(pressed)?
+    if scene.fixture_id != pinned.fixture_id or
+        scene.source_path != pinned.source_path or
+        scene.source_sha256 != pinned.source_sha256 or
+        scene.scene_scope != pinned.scene_scope or
+        scene.render_degraded or scene.degrade_reason != "":
+        return Err("upstream Skia GUI button state or source invalid")
+    if frame.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        frame.backend_handle <= 0 or frame.device_identity < 0 or
+        frame.device_submit_count != 1 or frame.device_wait_count != 1 or
+        frame.device_readback_count != 1 or frame.resource_id <= 0 or
+        frame.submission_token <= 0 or
+        frame.completion_token != frame.submission_token:
+        return Err("upstream Skia GUI button completion missing")
+    if frame.width != 16 or frame.height != 16:
+        return Err("upstream Skia GUI button extent invalid")
+    val device_type = _physical_device_type(frame.device_type)
+    if device_type == "":
+        return Err("upstream Skia physical Vulkan device required")
+    if not _native_uuid_valid(frame.physical_device_uuid) or
+        not _native_uuid_valid(frame.driver_uuid) or
+        frame.vendor_id < 0 or frame.device_id < 0 or
+        frame.api_version <= 0 or frame.driver_version < 0:
+        return Err("upstream Skia native device provenance missing")
+    val frame_id = "{scene.fixture_id}-{frame.submission_token}"
+    match upstream_skia_ganesh_vulkan_final_capture(
+        frame, scene.fixture_id, scene.source_sha256, frame_id):
+        case Err(reason): Err(reason)
+        case Ok(capture):
+            Ok(VulkanBackendCaptureArtifact(
+                backend_id: "upstream-skia-ganesh-vulkan",
+                fixture_id: scene.fixture_id,
+                fixture_sha256: scene.source_sha256,
+                producer_authenticated: true,
+                provider_identity: frame.provider_identity,
+                device_name: "vulkan-vendor-{frame.vendor_id}-device-{frame.device_id}",
+                device_type: device_type,
+                driver_identity: "vulkan-api-{frame.api_version}-driver-{frame.driver_version}",
+                physical_device_uuid: frame.physical_device_uuid,
+                driver_uuid: frame.driver_uuid,
+                device_identity: frame.device_identity,
+                backend_handle: frame.backend_handle,
+                submit_count: frame.device_submit_count,
+                fence_count: frame.device_wait_count,
+                readback_source: "device_readback",
+                fallback_required: false,
+                capture: Some(capture)))

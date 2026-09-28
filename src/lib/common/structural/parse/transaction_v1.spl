@@ -1,0 +1,96 @@
+"""Private speculative state. A checkpoint owns a complete semantic snapshot.
+
+The first scalar implementation favors bounded, explicit copies over an undo
+log. This restores field overwrites as well as append lengths. Fuel is owned by
+the executor and is deliberately absent here. No external callbacks run.
+
+Snapshots cost O(nodes + children + diagnostics + live values + call depth)
+per speculative choice, with retained space multiplied by live choice depth.
+Only Choice takes a snapshot; actions mutate the private reference owner and
+rollback transfers a popped snapshot. An overwrite journal plus arena length
+marks and count/scan/reserve/emit is required before production promotion.
+"""
+use std.common.structural.parse.program_output_v1.{
+    ParseProgramOutputV1, ParseProgramNodeV1, ParseProgramDiagnosticV1, parse_program_output_copy_v1
+}
+
+pub class ParseSemanticStateV1:
+    # Reference semantics are confined to one VM invocation. Never publish this
+    # owner or share it with a checkpoint; snapshots create a fresh owner.
+    nodes: [ParseProgramNodeV1]
+    children: [i64]
+    diagnostics: [ParseProgramDiagnosticV1]
+    values: [i64]
+    value_count: i64
+    last_start: i64
+    last_count: i64
+    last_valid: bool
+
+pub struct ParseCallFrameV1:
+    return_pc: i64
+    rule: i64
+    choice_depth: i64
+
+pub struct ParseCheckpointV1:
+    resume_pc: i64
+    rule: i64
+    cursor: i64
+    calls: [ParseCallFrameV1]
+    semantic: ParseSemanticStateV1
+
+pub fn parse_semantic_empty_v1() -> ParseSemanticStateV1:
+    ParseSemanticStateV1(nodes: [], children: [], diagnostics: [], values: [], value_count: 0,
+        last_start: 0, last_count: 0, last_valid: false)
+
+pub fn parse_semantic_roots_v1(state: ParseSemanticStateV1) -> [i64]:
+    var roots: [i64] = []
+    var i = 0
+    while i < state.value_count:
+        roots.push(state.values[i])
+        i = i + 1
+    roots
+
+pub fn parse_semantic_output_v1(state: ParseSemanticStateV1) -> ParseProgramOutputV1:
+    ParseProgramOutputV1(nodes: state.nodes, children: state.children,
+        diagnostics: state.diagnostics, roots: parse_semantic_roots_v1(state))
+
+pub fn parse_semantic_push_v1(mut state: ParseSemanticStateV1, value: i64):
+    # Capacity is checked by the action owner. Reuse popped stack storage.
+    if state.value_count < state.values.len():
+        state.values[state.value_count] = value
+    else:
+        state.values.push(value)
+    state.value_count = state.value_count + 1
+
+pub fn parse_semantic_copy_v1(state: ParseSemanticStateV1) -> ParseSemanticStateV1:
+    val copied = parse_program_output_copy_v1(parse_semantic_output_v1(state))
+    ParseSemanticStateV1(nodes: copied.nodes, children: copied.children,
+        diagnostics: copied.diagnostics, values: copied.roots, value_count: state.value_count,
+        last_start: state.last_start, last_count: state.last_count, last_valid: state.last_valid)
+
+pub fn parse_calls_prefix_v1(calls: [ParseCallFrameV1], count: i64) -> [ParseCallFrameV1]:
+    var out: [ParseCallFrameV1] = []
+    var i = 0
+    while i < count:
+        out.push(calls[i])
+        i = i + 1
+    out
+
+pub fn parse_choices_prefix_v1(choices: [ParseCheckpointV1], count: i64) -> [ParseCheckpointV1]:
+    var out: [ParseCheckpointV1] = []
+    var i = 0
+    while i < count:
+        out.push(choices[i])
+        i = i + 1
+    out
+
+pub fn parse_checkpoint_v1(resume_pc: i64, rule: i64, cursor: i64,
+    calls: [ParseCallFrameV1], state: ParseSemanticStateV1) -> ParseCheckpointV1:
+    ParseCheckpointV1(resume_pc: resume_pc, rule: rule, cursor: cursor,
+        calls: parse_calls_prefix_v1(calls, calls.len()), semantic: parse_semantic_copy_v1(state))
+
+export ParseSemanticStateV1, ParseCallFrameV1, ParseCheckpointV1
+export parse_semantic_empty_v1, parse_semantic_copy_v1, parse_checkpoint_v1
+export parse_calls_prefix_v1, parse_choices_prefix_v1
+
+export parse_semantic_roots_v1, parse_semantic_output_v1, parse_semantic_push_v1

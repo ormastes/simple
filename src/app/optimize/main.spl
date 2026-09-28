@@ -7,6 +7,7 @@ use app.optimize.analyze.{optimize_analyze, optimize_db_analyze, optimize_full_a
 use app.optimize.compare.{optimize_compare}
 use app.optimize.apply.{optimize_apply}
 use app.optimize.profile_layout_cli.{profile_layout_write_manifest_file, profile_layout_write_artifact_file}
+use app.optimize.collection_plan_cli.{collection_plan_explain_file}
 
 fn print_optimize_help():
     print "Usage: simple optimize <file.spl> [options]"
@@ -19,13 +20,18 @@ fn print_optimize_help():
     print "  --db-analyze          Analyze DB query patterns (linear scans, missing indexes)"
     print "  --full                Full analysis: MIR + DB + general patterns combined"
     print "  --layout-plan         Build pure-Simple profile-guided executable layout manifest"
-    print "  --profile=PATH        .sprof profile input for --layout-plan"
+    print "  --explain-collection-plan  Explain attributed containers' initial runtime storage"
+    print "  --profile=PATH        .sprof input for layout or collection explanation"
+    print "  --collection-workload=NAME  Workload label for collection profile admission"
+    print "  --collection-target=NAME    Target identity for collection profile admission"
+    print "  --site=AST_ID              Optional exact collection site filter"
     print "  --manifest=PATH       Native/settlement executable metadata input for --layout-plan"
     print "  --out=PATH            Output manifest path for --layout-plan"
     print "  --order-out=PATH      Optional native symbol order output for --layout-plan"
     print "  --c-section-map-out=PATH  Optional generated-C section map output for --layout-plan"
     print "  --passes=P1,P2,...    Comma-separated list of MIR passes to run"
     print "  --level=O0|O1|O2|O3  MIR optimization level (default: O2)"
+    print "  --verbose             List every opportunity location (default: concise per-pass counts)"
     print "  -h, --help            Show this help"
     print ""
     print "Optimization levels (MIR):"
@@ -41,6 +47,7 @@ fn print_optimize_help():
     print "  simple optimize src/app/web/server.spl --full --level=O3"
     print "  simple optimize src/app/web/server.spl --apply --level=O3"
     print "  simple optimize app.bin --layout-plan --profile=run.sprof --manifest=app.layout --out=app.opt.layout"
+    print "  simple optimize app.spl --explain-collection-plan --profile=run.sprof --collection-workload=bench --collection-target=x86_64-v3"
 
 struct OptimizeArgs:
     file_path:    text
@@ -49,13 +56,18 @@ struct OptimizeArgs:
     do_db_analyze: bool
     do_full:      bool
     do_layout_plan: bool
+    do_explain_collection_plan: bool
     profile_path:  text
+    collection_workload: text
+    collection_target: text
+    collection_site: text
     manifest_path: text
     out_path:      text
     order_out_path: text
     c_section_map_out_path: text
     passes:       [text]
     level:        text    # "O0"|"O1"|"O2"|"O3"
+    verbose:      bool    # print every opportunity location (default: concise per-pass counts)
 
 fn parse_flag_value(args: [text], prefix: text) -> text:
     var i = 0
@@ -103,13 +115,18 @@ fn parse_optimize_args(args: [text]) -> OptimizeArgs:
         do_db_analyze: has_flag(args, "--db-analyze"),
         do_full:      has_flag(args, "--full"),
         do_layout_plan: has_flag(args, "--layout-plan"),
+        do_explain_collection_plan: has_flag(args, "--explain-collection-plan"),
         profile_path:  parse_flag_value(args, "--profile="),
+        collection_workload: parse_flag_value(args, "--collection-workload="),
+        collection_target: parse_flag_value(args, "--collection-target="),
+        collection_site: parse_flag_value(args, "--site="),
         manifest_path: parse_flag_value(args, "--manifest="),
         out_path:      parse_flag_value(args, "--out="),
         order_out_path: parse_flag_value(args, "--order-out="),
         c_section_map_out_path: parse_flag_value(args, "--c-section-map-out="),
         passes:       passes,
-        level:        level
+        level:        level,
+        verbose:      has_flag(args, "--verbose")
     )
 
 fn run_profile_layout_command(opt_args: OptimizeArgs) -> i64:
@@ -181,18 +198,26 @@ fn run_optimize_command(opt_args: OptimizeArgs) -> i64:
 
     var exit_code = 0
 
-    if opt_args.do_layout_plan:
+    if opt_args.do_explain_collection_plan:
+        val explanation = collection_plan_explain_file(
+            opt_args.file_path, opt_args.profile_path,
+            opt_args.collection_workload, opt_args.collection_target,
+            opt_args.collection_site
+        )
+        print explanation
+        exit_code = if explanation.starts_with("error:"): 1 else: 0
+    elif opt_args.do_layout_plan:
         exit_code = run_profile_layout_command(opt_args)
     elif opt_args.do_compare:
         exit_code = optimize_compare(opt_args.file_path)
     elif opt_args.do_apply:
         exit_code = optimize_apply(opt_args.file_path, opt_args.passes, opt_args.level)
     elif opt_args.do_db_analyze:
-        exit_code = optimize_db_analyze(opt_args.file_path)
+        exit_code = optimize_db_analyze(opt_args.file_path, opt_args.verbose)
     elif opt_args.do_full:
-        exit_code = optimize_full_analyze(opt_args.file_path, opt_args.level)
+        exit_code = optimize_full_analyze(opt_args.file_path, opt_args.level, opt_args.verbose)
     else:
-        exit_code = optimize_analyze(opt_args.file_path, opt_args.level)
+        exit_code = optimize_analyze(opt_args.file_path, opt_args.level, opt_args.verbose)
 
     exit_code
 

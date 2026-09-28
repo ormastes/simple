@@ -2,7 +2,7 @@
 //!
 //! This module contains the Parser struct, constructor methods, and main parse entry point.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -51,6 +51,10 @@ pub struct Parser<'a> {
     pub(crate) current: Token,
     pub(crate) previous: Token,
     pub(crate) source: &'a str,
+    /// Source identity and lexical owner used by collection profile sites.
+    pub(crate) collection_module_path: String,
+    pub(crate) collection_owner: String,
+    pub(crate) collection_site_ordinals: HashMap<String, usize>,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
@@ -121,6 +125,9 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source,
+            collection_module_path: String::new(),
+            collection_owner: String::new(),
+            collection_site_ordinals: HashMap::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -166,6 +173,25 @@ impl<'a> Parser<'a> {
         parser
     }
 
+    /// Attach the same path passed to the source parser before parsing begins.
+    pub fn with_collection_module_path(mut self, path: &str) -> Self {
+        let source_path = std::path::Path::new(path);
+        let project_root = if source_path.is_absolute() {
+            // current_dir preserves the ordinary Windows path prefix used by
+            // source discovery; canonicalize(".") may produce a \\?\ prefix,
+            // making strip_prefix fail for the same physical source path.
+            std::env::current_dir().ok()
+        } else {
+            None
+        };
+        let relative = project_root
+            .as_ref()
+            .and_then(|root| source_path.strip_prefix(root).ok())
+            .unwrap_or(source_path);
+        self.collection_module_path = relative.to_string_lossy().replace('\\', "/");
+        self
+    }
+
     /// Create a parser for parsing inline expressions (e.g., f-string interpolations).
     /// Unlike `new()`, this parser does NOT treat leading whitespace as indentation,
     /// which allows expressions like ` x + y ` to parse correctly.
@@ -179,6 +205,9 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source,
+            collection_module_path: String::new(),
+            collection_owner: String::new(),
+            collection_site_ordinals: HashMap::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -1031,6 +1060,14 @@ impl<'a> Parser<'a> {
     /// here. See doc/08_tracking/bug/
     /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
     pub(crate) fn parse_condition_block(&mut self) -> Result<Block, ParseError> {
+        // Conditionals (`if`/`elif`/`else`/`while`/`for`) forbid an empty body:
+        // Simple has `pass` for a deliberate no-op, and the pure-Simple front
+        // end has always rejected a bodyless header. Match-arm bodies reach the
+        // same code through `parse_inline_or_block`, which passes `true`.
+        self.parse_condition_block_allowing_empty(false)
+    }
+
+    pub(crate) fn parse_condition_block_allowing_empty(&mut self, allow_empty_body: bool) -> Result<Block, ParseError> {
         self.expect(&TokenKind::Newline)?;
 
         // Deep shape: the compensating DEDENT(s) appear right here, before
@@ -1049,7 +1086,7 @@ impl<'a> Parser<'a> {
         let block = if equal_column {
             self.parse_block_body()?
         } else {
-            self.parse_block_after_newline()?
+            self.parse_block_after_newline_allowing_empty(allow_empty_body)?
         };
 
         // Shallow shape: the compensating DEDENT(s) don't appear until after
@@ -1064,6 +1101,19 @@ impl<'a> Parser<'a> {
     /// consumed by the caller (shared by `parse_block` and
     /// `parse_condition_block`).
     fn parse_block_after_newline(&mut self) -> Result<Block, ParseError> {
+        self.parse_block_after_newline_allowing_empty(true)
+    }
+
+    /// `allow_empty_body` gates the "empty body before Dedent/Eof" arm below.
+    /// That arm exists for `case nil:` match arms (reached via `parse_block`,
+    /// which passes `true`). It used to leak into `if`/`elif`/`else`/`while`/
+    /// `for` through `parse_condition_block`, so a BODYLESS `if cond:` whose
+    /// next line dedents was silently accepted as a no-op — while the
+    /// pure-Simple front end rejected the same source. Conditionals now pass
+    /// `false` and get a parse error; Simple has `pass` for a deliberate no-op.
+    /// See doc/08_tracking/bug/
+    /// seed_accepts_bodyless_if_native_build_rejects_2026-08-22.md
+    fn parse_block_after_newline_allowing_empty(&mut self, allow_empty_body: bool) -> Result<Block, ParseError> {
         // Simple supports "flat body" pattern where block body appears on the
         // next line at the SAME indentation level (no indent token):
         //   if cond:
@@ -1094,7 +1144,7 @@ impl<'a> Parser<'a> {
             }
 
             // Empty body: `case nil:` followed by dedent or another case
-            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+            if allow_empty_body && (self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof)) {
                 let span = self.current.span;
                 return Ok(Block {
                     span,

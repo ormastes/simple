@@ -2,6 +2,28 @@
 # and its specs. std-only on purpose: the orchestrator is a slim entry that
 # must not drag the compiler closure in.
 use std.io_runtime.{dir_list, file_read, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_append}
+
+# The file, inside the queue dir, that records every claim released because its
+# holder died. See parse_shard_release_claims below for why this exists.
+pub fn parse_shard_orphan_ledger_path(queue_dir: text) -> text:
+    "{queue_dir}/orphaned.claims"
+
+# A claim marker's content is "<shard spec>" (legacy) or "<shard spec>\n<path>"
+# (current). Ownership has ALWAYS been decided by the spec alone, so reading
+# only the first line keeps legacy markers -- and markers written by a
+# concurrently-running older shard binary -- comparing exactly as before.
+fn _claim_owner(content: text) -> text:
+    val nl = content.index_of("\n")
+    if nl < 0: content else: content.substring(0, nl)
+
+# The claimed path, or "" for a legacy marker that did not record one. The
+# marker NAME is hash+length and is deliberately not invertible, so a marker
+# without this second line cannot be attributed to a file at all.
+fn _claim_path(content: text) -> text:
+    val nl = content.index_of("\n")
+    if nl < 0: "" else: content.substring(nl + 1, content.len())
+
 # Orphan reclaim (orchestrator side). A shard that dies AFTER claiming -- the
 # kill_simple_monitor CPU guard took parse shard 6/8 of run11 at age 901s --
 # leaves its markers in the queue with no cache entry behind them, and every
@@ -10,6 +32,16 @@ use std.io_runtime.{dir_list, file_read, file_delete}
 # then the real build) re-parses the same ~48 modules. Release = delete every
 # marker whose content is one of the dead shard specs, so a retry shard can
 # claim them. Returns the number of markers released.
+#
+# RECORD BEFORE DELETING (2026-08-23). Deleting the marker is correct for
+# re-claiming but it destroys the only durable evidence that a specific file
+# was in flight when a worker died. That evidence is exactly what convergence
+# mode needs: "the worker died while holding it" is a different outcome from
+# "it failed to compile" and needs different retry behaviour -- an external
+# earlyoom SIGTERM (72 in 12h on this box, `simple` is the preferred victim) is
+# not the file's fault. So every released claim is appended to the orphan
+# ledger first. Appending is best-effort and never changes the released count:
+# reclaim must not start failing because a ledger write did.
 pub fn parse_shard_release_claims(queue_dir: text, dead_specs: [text]) -> i64:
     if queue_dir == "" or dead_specs.len() == 0:
         return 0
@@ -18,14 +50,51 @@ pub fn parse_shard_release_claims(queue_dir: text, dead_specs: [text]) -> i64:
         if not name.ends_with(".claim"):
             continue
         val marker = "{queue_dir}/{name}"
-        val owner = file_read(marker)
+        val content = file_read(marker)
+        val owner = _claim_owner(content)
         var dead = false
         for spec in dead_specs:
             if owner == spec:
                 dead = true
-        if dead and file_delete(marker):
+        if not dead:
+            continue
+        # Read the path out BEFORE the delete -- after it, the marker name is a
+        # non-invertible hash and the identity is gone for good.
+        val path = _claim_path(content)
+        if file_delete(marker):
             released = released + 1
+            val recorded = if path == "": "unknown-legacy-marker:{name}" else: path
+            val _ = file_append(
+                parse_shard_orphan_ledger_path(queue_dir),
+                "status=orphaned spec={owner} path={recorded}\n")
     released
+
+# Read back the set of paths recorded by parse_shard_release_claims. This is the
+# "worker died while holding it" half of a convergence-mode failing set; the
+# "failed to compile" half comes from the build progress events. Legacy markers
+# that recorded no path are skipped rather than reported under a fake name -- a
+# convergence loop must not be handed a path that does not exist.
+pub fn parse_shard_orphaned_paths(queue_dir: text) -> [text]:
+    var out: [text] = []
+    if queue_dir == "":
+        return out
+    val content = file_read(parse_shard_orphan_ledger_path(queue_dir))
+    if content == "":
+        return out
+    for line in content.split("\n"):
+        val at = line.index_of(" path=")
+        if at < 0:
+            continue
+        val path = line.substring(at + 6, line.len())
+        if path == "" or path.starts_with("unknown-legacy-marker:"):
+            continue
+        var seen = false
+        for existing in out:
+            if existing == path:
+                seen = true
+        if not seen:
+            out.push(path)
+    out
 
 # Classify rt_process_wait's result for the receipt: 0 = ok, >0 = exit code,
 # -1 = killed by a signal (WIFEXITED false) or wait error, -2 = wait timeout.

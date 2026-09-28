@@ -106,6 +106,15 @@ impl<'a> Parser<'a> {
             0
         };
 
+        // Set when the return type was wrapped onto continuation line(s) after a
+        // trailing `->`. In that shape the body sits at the SAME indentation as
+        // the continuation, so the lexer emits no further INDENT for it — the
+        // same situation `sig_indents > 0` already describes for the
+        // leading-arrow form. Tracked separately from `sig_indents` on purpose:
+        // that variable also drives the dedent drain at :148, and folding the
+        // two together regressed normally-indented bodies (see the comment
+        // just below).
+        let mut arrow_continuation_indents = 0usize;
         let return_type = if self.check(&TokenKind::Arrow) {
             self.advance();
             // Trailing-`->` signature continuation:
@@ -128,6 +137,7 @@ impl<'a> Parser<'a> {
             if arrow_indents > 0 {
                 self.consume_dedents_for_method_chain(arrow_indents);
             }
+            arrow_continuation_indents = arrow_indents;
             Some(ty)
         } else {
             None
@@ -160,6 +170,7 @@ impl<'a> Parser<'a> {
             false
         };
 
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (body, contract, bounds_block) = if is_abstract {
             // Abstract method has no body
             let empty_span = Span::new(start_span.start, start_span.end, start_span.line, start_span.column);
@@ -194,8 +205,11 @@ impl<'a> Parser<'a> {
                 // In that case, skip the Indent expectation.
                 if self.check(&TokenKind::Indent) {
                     self.advance();
-                } else if sig_indents == 0 {
-                    // Only require indent for normal (non-multiline-sig) functions
+                } else if sig_indents == 0 && arrow_continuation_indents == 0 {
+                    // Only require indent for normal (non-multiline-sig) functions.
+                    // `arrow_continuation_indents > 0` is the trailing-`->` twin of
+                    // `sig_indents > 0`: the body already sits at the signature
+                    // continuation's level, so no INDENT token is coming.
                     self.expect(&TokenKind::Indent)?;
                 }
                 // else: sig_indents > 0 means body at sig continuation level, no Indent expected
@@ -258,6 +272,7 @@ impl<'a> Parser<'a> {
                 (body, None, None)
             }
         };
+        self.collection_owner = previous_collection_owner;
 
         // Effect inference: if body contains suspension operators, infer async effect
         let inferred_effects = if !is_abstract && has_suspension_in_body(&body) {
@@ -325,14 +340,14 @@ impl<'a> Parser<'a> {
             decorators,
             attributes,
             doc_comment: None,
-            contract,
+            contract: contract.map(Box::new),
             is_abstract,
             is_sync: false,
             is_static: false,
             is_me_method,
             is_generator,
             bounds_block,
-            return_constraint,
+            return_constraint: return_constraint.map(Box::new),
             is_generic_template: !generic_params.is_empty(),
             specialization_of: None,
             type_bindings: HashMap::new(),

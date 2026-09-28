@@ -55,7 +55,13 @@ fn test_val_match_keyword_is_rejected_but_contextual_distinctions_remain() {
         panic!("expected val declaration, got {:?}", contextual.items[0]);
     };
     assert_eq!(stmt.pattern, Pattern::Identifier("class".to_string()));
-    assert!(parse("val case = 5").is_err(), "case remains hard-reserved");
+    // `case` became a SOFT keyword in 1fdb3ec586d (2026-08-23): it is a keyword
+    // only as a match-arm marker, so it is an ordinary binding name elsewhere.
+    // This assertion predated that change and was never updated with it.
+    assert!(
+        parse("val case = 5").is_ok(),
+        "case is a soft keyword outside match arms"
+    );
 }
 
 // Bug fix a1397571773 (parser_patterns.rs, parse_keyword_as_pattern): the

@@ -38,19 +38,34 @@ fn file_stamp_check(stamp: FileStamp) -> bool:
     """Fast path: true iff current size+mtime match the stamp. No read, no hash."""
     if not file_exists(stamp.path):
         return false
-    (file_size_signed(stamp.path) == stamp.size and
-     rt_file_stat(stamp.path) == stamp.mtime_s)
+    val size = file_size_signed(stamp.path)
+    if size != stamp.size:
+        return false
+    # rt_file_stat returns 0 on provider failure; a zero mtime must never
+    # validate a stamp (fail closed rather than trust a sentinel).
+    val mtime = rt_file_stat(stamp.path)
+    if mtime <= 0:
+        return false
+    mtime == stamp.mtime_s
 
 fn _file_stamp_measure(path: text) -> FileStamp?:
     """Option-C torn-read guard: stat before read, hash, stat after; retry
-    once when size/mtime changed mid-read; accept the retry's measurement."""
+    once when size/mtime changed mid-read; accept the retry's measurement.
+    Any failure sentinel (negative size, non-positive mtime, empty digest)
+    yields nil instead of a stamp built from sentinel values."""
     var attempt = 0
     while attempt < 2:
         val size_before = file_size_signed(path)
         val mtime_before = rt_file_stat(path)
+        if size_before < 0 or mtime_before <= 0:
+            return nil
         val sha = file_hash_sha256_or_empty(path)
+        if sha == "":
+            return nil
         val size_after = file_size_signed(path)
         val mtime_after = rt_file_stat(path)
+        if size_after < 0 or mtime_after <= 0:
+            return nil
         if (size_before == size_after and
             mtime_before == mtime_after):
             return Some(FileStamp(path: path, size: size_after,
@@ -60,8 +75,14 @@ fn _file_stamp_measure(path: text) -> FileStamp?:
     # post-hash identity — coherent-enough best effort for a file being
     # rewritten under us.
     val sha_final = file_hash_sha256_or_empty(path)
-    Some(FileStamp(path: path, size: file_size_signed(path),
-                   mtime_s: rt_file_stat(path), content_sha: sha_final))
+    if sha_final == "":
+        return nil
+    val size_final = file_size_signed(path)
+    val mtime_final = rt_file_stat(path)
+    if size_final < 0 or mtime_final <= 0:
+        return nil
+    Some(FileStamp(path: path, size: size_final,
+                   mtime_s: mtime_final, content_sha: sha_final))
 
 # ============================================================================
 # Stamp index (value type — functions return the updated index)

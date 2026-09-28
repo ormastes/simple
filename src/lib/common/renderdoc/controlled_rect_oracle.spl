@@ -1,0 +1,60 @@
+# codex-impl
+# Independent analytic CPU oracle for the pinned 16x16 opaque scene. Its
+# geometry and expected image digest are specified independently of the
+# fixture-to-DrawIR parser used by both GPU workers.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text, sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture, final_output_canonical_rgba}
+
+val _ORACLE_FIXTURE_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn"
+val _ORACLE_FIXTURE_SHA256: text =
+    "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3"
+val _ORACLE_RGBA_SHA256: text =
+    "46869ca7aac9cedb7645e157dab8ff16123b3eaa1f1da894db8fc616ff622b94"
+
+pub fn controlled_rect_expected_rgba() -> Result<[i64], text>:
+    """Build a pinned analytic RGBA8 image without decoding DrawIR."""
+    if not file_exists(_ORACLE_FIXTURE_PATH) or
+        sha256_text(read_file(_ORACLE_FIXTURE_PATH)) != _ORACLE_FIXTURE_SHA256:
+        return Err("controlled-rect-oracle-source-mismatch")
+    var rgba: [i64] = []
+    var y = 0
+    while y < 16:
+        var x = 0
+        while x < 16:
+            val foreground = x >= 4 and x < 12 and y >= 4 and y < 12
+            rgba.push(if foreground: 51 else: 16)
+            rgba.push(if foreground: 102 else: 32)
+            rgba.push(if foreground: 153 else: 48)
+            rgba.push(255)
+            x = x + 1
+        y = y + 1
+    if bytes_to_hex(sha256_bytes(rgba)) != _ORACLE_RGBA_SHA256:
+        return Err("controlled-rect-oracle-image-digest-mismatch")
+    Ok(rgba)
+
+pub fn controlled_rect_capture_matches_oracle(capture: FinalOutputCapture) -> Result<bool, text>:
+    """Compare one completed canonical capture to the independent scene oracle."""
+    if capture.metadata.fixture_id != "controlled-opaque-rect-v1" or
+        capture.metadata.fixture_digest != "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3":
+        return Err("controlled-rect-oracle-fixture-mismatch")
+    if capture.metadata.width != 16 or capture.metadata.height != 16 or
+        capture.metadata.crop_x != 0 or capture.metadata.crop_y != 0 or
+        capture.metadata.crop_width != 16 or capture.metadata.crop_height != 16:
+        return Err("controlled-rect-oracle-capture-extent")
+    val expected = controlled_rect_expected_rgba()?
+    val actual = match final_output_canonical_rgba(capture):
+        case Ok(rgba): rgba
+        case Err(err): return Err("controlled-rect-oracle-capture-" + err.code)
+    if actual.len() != 16 * 16 * 4 or expected.len() != 16 * 16 * 4:
+        return Err("controlled-rect-oracle-capture-length")
+    var index = 0
+    while index < actual.len():
+        if actual[index] != expected[index]:
+            return Ok(false)
+        index = index + 1
+    Ok(true)

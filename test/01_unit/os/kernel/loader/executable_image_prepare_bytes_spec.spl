@@ -1,0 +1,54 @@
+"""Executable preparation must reread the retained image as exact bytes."""
+
+use std.spec.{describe, it, expect, fail}
+use std.db.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.types.{MountOptions, OpenFlags}
+use std.common.contracts.execution.simpleos_executable_v1.{ManifestTarget}
+use std.common.contracts.execution.simpleos_executable_admission_v1.{ExecutableImageHandleV1}
+use os.kernel.loader.executable_image_prepare.{executable_prepare_read_exact_v1}
+
+fn _binary_image_handle_v1(open_handle_id: u64, size: u64) -> ExecutableImageHandleV1:
+    ExecutableImageHandleV1(
+        schema_version: 1, open_handle_id: open_handle_id,
+        mount_id: 1u64, filesystem_name: "dbfs",
+        canonical_source_path: "/binary-image.elf",
+        mount_generation: 1u64, file_id: 1u64, file_generation: 1u64,
+        size_bytes: size, role: "test-image",
+        target: ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos"),
+        verified_load_ranges: [], image_hash: "", admission_id: "test-image",
+        trust_epoch: 1u64, read_count: 0u64, read_bytes: 0u64,
+        consumed: false)
+
+describe "executable retained-image byte reads":
+    it "preserves NUL and non-UTF8 bytes through the exact image reread":
+        var table = MountTable.new()
+        table.mount(
+            "/", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+            MountOptions.default()).unwrap()
+        val file = table.open(
+            "/binary-image.elf", OpenFlags.create_write()).unwrap()
+        val source: [u8] = [0u8, 255u8, 128u8, 0u8, 65u8]
+        table.positioned_write_bytes(
+            file.id, PositionedDriverKind.Dbfs, 0u64, source).unwrap()
+        val read = executable_prepare_read_exact_v1(
+            table, _binary_image_handle_v1(file.id, source.len() as u64))
+        if not read.?: fail("retained binary reread failed")
+        expect(read.unwrap()).to_equal(source)
+        table.close(file).unwrap()
+
+    it "rejects a short read from the retained handle":
+        var table = MountTable.new()
+        table.mount(
+            "/", DriverInstance.DbFs(DbFsDriver.new_hosted()),
+            MountOptions.default()).unwrap()
+        val file = table.open(
+            "/binary-image.elf", OpenFlags.create_write()).unwrap()
+        table.positioned_write_bytes(
+            file.id, PositionedDriverKind.Dbfs, 0u64,
+            [0u8, 255u8, 128u8]).unwrap()
+        val read = executable_prepare_read_exact_v1(
+            table, _binary_image_handle_v1(file.id, 4u64))
+        expect(read.?).to_equal(false)
+        table.close(file).unwrap()

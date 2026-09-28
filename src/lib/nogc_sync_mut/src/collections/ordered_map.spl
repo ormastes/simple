@@ -1,0 +1,272 @@
+# Generic AVL map for keys with a total order consistent with equality.
+# The free list reuses removed nodes, so allocated slots are bounded by the
+# largest live size reached by this instance.
+
+use std.nogc_sync_mut.sffi.ordered_key_cmp.{ordered_key_native_cmp, ordered_key_native_usable}
+
+struct OrderedMapEntry<K, V>:
+    key: K
+    value: V
+
+struct OrderedMapNode<K, V>:
+    key: K
+    value: V
+    left: i64
+    right: i64
+    height: i64
+
+fn ordered_map_checked_relation(equal: bool, order: i64) -> i64:
+    # Native K words need representation-aware ordering. A typed Ord dispatch
+    # is still required before aggregate keys can be admitted to this map.
+    if (equal and order != 0) or (not equal and order == 0):
+        panic("OrderedMap key Eq and Ord disagree")
+    if equal:
+        return 0
+    if order < 0:
+        return -1
+    1
+
+struct OrderedMap<K, V> where K: Ord + Eq:
+    nodes: [OrderedMapNode<K, V>]
+    free_nodes: [i64]
+    root: i64
+    count: i64
+    last_update_comparisons: i64
+
+    static fn new() -> OrderedMap<K, V>:
+        OrderedMap(nodes: [], free_nodes: [], root: -1, count: 0,
+            last_update_comparisons: 0)
+
+    fn len() -> i64:
+        self.count
+
+    fn tree_height() -> i64:
+        self.height_at(self.root)
+
+    fn allocated_slots() -> i64:
+        self.nodes.len()
+
+    fn update_comparisons() -> i64:
+        """Eq and native-order key comparisons made by the last put/remove."""
+        self.last_update_comparisons
+
+    fn height_at(idx: i64) -> i64:
+        if idx < 0:
+            return 0
+        self.nodes[idx].height
+
+    me update_height(idx: i64):
+        var node = self.nodes[idx]
+        val left_height = self.height_at(node.left)
+        val right_height = self.height_at(node.right)
+        if left_height > right_height:
+            node.height = left_height + 1
+        else:
+            node.height = right_height + 1
+        self.nodes[idx] = node
+
+    me rotate_left(idx: i64) -> i64:
+        val pivot = self.nodes[idx].right
+        var node = self.nodes[idx]
+        var pivot_node = self.nodes[pivot]
+        node.right = pivot_node.left
+        pivot_node.left = idx
+        self.nodes[idx] = node
+        self.nodes[pivot] = pivot_node
+        self.update_height(idx)
+        self.update_height(pivot)
+        pivot
+
+    me rotate_right(idx: i64) -> i64:
+        val pivot = self.nodes[idx].left
+        var node = self.nodes[idx]
+        var pivot_node = self.nodes[pivot]
+        node.left = pivot_node.right
+        pivot_node.right = idx
+        self.nodes[idx] = node
+        self.nodes[pivot] = pivot_node
+        self.update_height(idx)
+        self.update_height(pivot)
+        pivot
+
+    me rebalance(idx: i64) -> i64:
+        self.update_height(idx)
+        val node = self.nodes[idx]
+        val balance = self.height_at(node.left) - self.height_at(node.right)
+        if balance > 1:
+            val left = self.nodes[node.left]
+            if self.height_at(left.left) < self.height_at(left.right):
+                var changed = self.nodes[idx]
+                changed.left = self.rotate_left(changed.left)
+                self.nodes[idx] = changed
+            return self.rotate_right(idx)
+        if balance < -1:
+            val right = self.nodes[node.right]
+            if self.height_at(right.right) < self.height_at(right.left):
+                var changed = self.nodes[idx]
+                changed.right = self.rotate_right(changed.right)
+                self.nodes[idx] = changed
+            return self.rotate_left(idx)
+        idx
+
+    me allocate_node(key: K, value: V) -> i64:
+        val node = OrderedMapNode(key: key, value: value, left: -1, right: -1, height: 1)
+        if self.free_nodes.len() > 0:
+            val idx = self.free_nodes[self.free_nodes.len() - 1]
+            self.free_nodes.pop()
+            self.nodes[idx] = node
+            return idx
+        val idx = self.nodes.len()
+        self.nodes.push(node)
+        idx
+
+    me insert_at(idx: i64, key: K, value: V) -> (i64, bool):
+        if idx < 0:
+            return (self.allocate_node(key, value), true)
+        var node = self.nodes[idx]
+        self.last_update_comparisons = self.last_update_comparisons + 2
+        val order = ordered_map_checked_relation(key == node.key, ordered_key_native_cmp(key, node.key))
+        if order < 0:
+            val (left, inserted) = self.insert_at(node.left, key, value)
+            node.left = left
+            self.nodes[idx] = node
+            if inserted:
+                return (self.rebalance(idx), true)
+            return (idx, false)
+        elif order > 0:
+            val (right, inserted) = self.insert_at(node.right, key, value)
+            node.right = right
+            self.nodes[idx] = node
+            if inserted:
+                return (self.rebalance(idx), true)
+            return (idx, false)
+        else:
+            # A replacement keeps the caller's equal key, like the linear
+            # and hash representations, without changing tree shape.
+            node.key = key
+            node.value = value
+            self.nodes[idx] = node
+            return (idx, false)
+
+    fn search_node(key: K) -> (i64, i64):
+        if not ordered_key_native_usable(key):
+            panic("OrderedMap key type has no supported native order")
+        var idx = self.root
+        # Native usability checks key != key and native_cmp(key, key) once.
+        var comparisons: i64 = 2
+        while idx >= 0:
+            val node = self.nodes[idx]
+            comparisons = comparisons + 2
+            val order = ordered_map_checked_relation(key == node.key, ordered_key_native_cmp(key, node.key))
+            if order == 0:
+                return (idx, comparisons)
+            idx = if order < 0: node.left else: node.right
+        (-1, comparisons)
+
+    fn lookup_comparisons(key: K) -> i64:
+        """Count Eq and native-order comparisons on the get/contains path."""
+        val search = self.search_node(key)
+        search[1]
+
+    fn contains_key(key: K) -> bool:
+        val search = self.search_node(key)
+        search[0] >= 0
+
+    me put(key: K, value: V) -> bool:
+        """Insert or replace; return true only when the key was new."""
+        if not ordered_key_native_usable(key):
+            panic("OrderedMap key type has no supported native order")
+        self.last_update_comparisons = 2
+        val (root, inserted) = self.insert_at(self.root, key, value)
+        self.root = root
+        if inserted:
+            self.count = self.count + 1
+        inserted
+
+    fn get(key: K) -> V?:
+        val search = self.search_node(key)
+        if search[0] < 0:
+            return nil
+        Some(self.nodes[search[0]].value)
+
+    fn min_node_at(idx: i64) -> OrderedMapNode<K, V>:
+        var current = idx
+        while self.nodes[current].left >= 0:
+            current = self.nodes[current].left
+        self.nodes[current]
+
+    me remove_at(idx: i64, key: K) -> i64:
+        if idx < 0:
+            panic("OrderedMap key disappeared during removal")
+        var node = self.nodes[idx]
+        self.last_update_comparisons = self.last_update_comparisons + 2
+        val order = ordered_map_checked_relation(key == node.key, ordered_key_native_cmp(key, node.key))
+        if order < 0:
+            node.left = self.remove_at(node.left, key)
+            self.nodes[idx] = node
+            return self.rebalance(idx)
+        if order > 0:
+            node.right = self.remove_at(node.right, key)
+            self.nodes[idx] = node
+            return self.rebalance(idx)
+        if node.left < 0 or node.right < 0:
+            val child = if node.left >= 0: node.left else: node.right
+            self.free_nodes.push(idx)
+            return child
+        val successor = self.min_node_at(node.right)
+        node.key = successor.key
+        node.value = successor.value
+        node.right = self.remove_at(node.right, successor.key)
+        self.nodes[idx] = node
+        self.rebalance(idx)
+
+    me remove(key: K) -> V?:
+        if not ordered_key_native_usable(key):
+            panic("OrderedMap key type has no supported native order")
+        self.last_update_comparisons = 2
+        var idx = self.root
+        while idx >= 0:
+            val node = self.nodes[idx]
+            self.last_update_comparisons = self.last_update_comparisons + 2
+            val order = ordered_map_checked_relation(key == node.key, ordered_key_native_cmp(key, node.key))
+            if order == 0:
+                # Save the value before tree mutation so a two-child removal
+                # returns the original payload rather than its successor.
+                val previous_value = node.value
+                self.root = self.remove_at(self.root, key)
+                self.count = self.count - 1
+                return Some(previous_value)
+            idx = if order < 0: node.left else: node.right
+        nil
+
+    fn keys() -> [K]:
+        var result: [K] = []
+        var stack: [i64] = []
+        var idx = self.root
+        while idx >= 0 or stack.len() > 0:
+            while idx >= 0:
+                stack.push(idx)
+                idx = self.nodes[idx].left
+            val next = stack[stack.len() - 1]
+            stack.pop()
+            result.push(self.nodes[next].key)
+            idx = self.nodes[next].right
+        result
+
+    fn entries() -> [OrderedMapEntry<K, V>]:
+        var result: [OrderedMapEntry<K, V>] = []
+        var stack: [i64] = []
+        var idx = self.root
+        while idx >= 0 or stack.len() > 0:
+            while idx >= 0:
+                stack.push(idx)
+                idx = self.nodes[idx].left
+            val next = stack[stack.len() - 1]
+            stack.pop()
+            val node = self.nodes[next]
+            result.push(OrderedMapEntry(key: node.key, value: node.value))
+            idx = node.right
+        result
+
+export OrderedMap
+export OrderedMapEntry

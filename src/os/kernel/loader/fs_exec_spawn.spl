@@ -6,7 +6,7 @@
 # optional live handoff hook.
 
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.loader.cap_exec_gate.{exec_cap_check}
+use os.kernel.loader.cap_exec_gate.{exec_cap_check, exec_cap_check_caps}
 use os.kernel.loader.byte_utils.{byte_len}
 use std.fs_driver.mount_table.{MountTable}
 use os.kernel.loader.executable_authority_registry.{
@@ -32,7 +32,11 @@ use os.kernel.loader.spawn_authority.{
     spawn_authority_spawn_caps
 }
 use os.kernel.loader.spawn_recipes.{
-    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps
+    spawn_recipe_is_migrated, spawn_recipe_seed_parent_caps,
+    spawn_recipe_launch_contract_valid
+}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno, executable_launch_arguments_v1_validate
 }
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology}
 use os.kernel.types.capability_types.{CapabilitySet}
@@ -280,6 +284,62 @@ pub fn fs_exec_adopt_authenticated_v1(
     val adopted: SchedulerExecutableAdoptionResultV1 =
         owner.adopt_authenticated_executable_pid_v1(
             table, authorities, token, consumer, entry_point,
+            TaskPriority.Normal, caps)
+    if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
+        return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
+    FsExecPrepareResult(
+        scheduler: owner, pid: adopted.pid as i64, entry: entry_point as i64)
+
+pub fn fs_exec_adopt_authenticated_with_launch_v1(
+    scheduler: Scheduler,
+    mut table: MountTable,
+    authorities: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    consumer: ExecutableLoadConsumerV1,
+    entry_point: u64,
+    caller: i64,
+    caller_caps: CapabilitySet,
+    path: text,
+    argv: [text],
+    envp: [text],
+    recipe: i64
+) -> FsExecPrepareResult:
+    """Consume one loader-issued authority and publish with its exact launch.
+
+    Unlike the compatibility seam this never recreates the parent capability
+    set or drops argv/envp: the scheduler maps them onto the initial user
+    stack and records the same owned command in its execution observation.
+    """
+    # A null entry is never a valid 64-bit filesystem launch target. Reject it
+    # before capability policy or adoption can consume the one-shot authority.
+    if entry_point == 0u64:
+        return FsExecPrepareResult(scheduler: scheduler, pid: -8, entry: 0)
+    # Validate and copy before the scheduler can consume the authority, so a
+    # malformed vector cannot burn a valid token.
+    val launch_result = executable_launch_arguments_v1_validate(path, argv, envp)
+    if launch_result.is_err():
+        return FsExecPrepareResult(
+            scheduler: scheduler,
+            pid: executable_launch_arguments_v1_errno(
+                launch_result.unwrap_err()) as i64,
+            entry: 0)
+    val launch = launch_result.unwrap()
+    # Bind privilege-bearing recipe identity to the owned launch copy before
+    # consuming the one-shot executable authority.
+    if not spawn_recipe_launch_contract_valid(
+        recipe, launch.path, launch.argv, launch.envp):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    val gate = exec_cap_check_caps(caller_caps, launch.path)
+    if gate != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: gate as i64, entry: 0)
+    val allowed = spawn_authority_check_spawn(caller, recipe)
+    if allowed != 0:
+        return FsExecPrepareResult(scheduler: scheduler, pid: allowed as i64, entry: 0)
+    val caps = spawn_authority_spawn_caps(caller, recipe, caller_caps)
+    var owner = scheduler
+    val adopted: SchedulerExecutableAdoptionResultV1 =
+        owner.adopt_authenticated_executable_pid_with_launch_v1(
+            table, authorities, token, consumer, launch, entry_point,
             TaskPriority.Normal, caps)
     if not adopted.receipt.execution_authorized or adopted.pid == 0u64:
         return FsExecPrepareResult(scheduler: owner, pid: -13, entry: 0)
