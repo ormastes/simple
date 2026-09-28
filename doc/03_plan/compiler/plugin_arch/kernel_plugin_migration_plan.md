@@ -61,6 +61,10 @@ removing its `app.io.mod` dependency and lowering kernel-to-app/OS edges from
 10 to 9. Its focused native binary shrank by 11,536 bytes with Linux behavior
 preserved; see
 `doc/09_report/compiler/target5_llvm_host_probe_closure_2026-09-28.md`.
+The unused Wasm mapper import in `backend/common/mod.spl` has also been
+removed; the widened closure audit now reports 3 K0-to-P, 13 K1-to-P, and 9
+kernel-to-app/OS edges with zero unresolved imports. The structural gate
+still fails.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
