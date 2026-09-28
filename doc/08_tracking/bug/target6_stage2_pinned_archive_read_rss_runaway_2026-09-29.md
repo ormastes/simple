@@ -1,8 +1,8 @@
 # Stage-2 pinned archive read RSS runaway (2026-09-29)
 
-Status: focused Stage-2 native bounded reader now passes on small and
-three-chunk archives; production memory/performance qualification remains
-open. No current-source Stage-4 result is claimed.
+Status: bounded byte-feed trial rejected by paired time/RSS measurements;
+the prior whole-archive digest is restored. Production memory/performance
+qualification remains open. No current-source Stage-4 result is claimed.
 
 While replacing the cold publisher's bounded CAS member check with
 `pinned_archive_open_verified_v1` and
@@ -132,7 +132,7 @@ digest. Feeding scalar bytes through `sha256_stream_v1_update_byte` produced
 the admitted digest. This isolates the failure to the native array-update
 call path in this context; the root cause remains unproven.
 
-The pinned descriptor digest now reads buffered windows of at most 65,536
+The trial pinned descriptor digest read buffered windows of at most 65,536
 bytes and feeds each byte to the bounded SHA state. A no-stub native spec
 admits the original 542-byte archive and a 131 KiB archive that spans three
 digest reads, verifies a member, and closes the capability: 9 examples,
@@ -148,3 +148,28 @@ wrappers. The available Stage-2 capsule supports `native-build` but rejects
 the `-c` and `check` commands used by the core smoke and source-check scripts;
 the MCP native smoke stops at its missing server binary. These broader gates
 remain unverified pending a current-source self-hosted runtime and wrappers.
+
+## Follow-up: paired 8 MiB performance rejection (2026-09-29)
+
+A focused no-stub native entry opened and verified the same deterministic
+8,388,608-byte CAS file using the prior reader (`9361eda0179`) and bounded
+byte-feed reader (`f41c8838915`), compiled with the same Stage-2 capsule and
+host runtime bundle. Each process ran under a 2 GiB address-space limit;
+one warm run per binary preceded nine alternating paired samples on the same
+host. Both returned `pass`. The baseline binary was 115 KB, the candidate
+130 KB.
+
+| Metric | Prior reader | Byte-feed candidate | Candidate / prior |
+| --- | ---: | ---: | ---: |
+| p95 elapsed | 0.55 s | 0.77 s | 1.40 |
+| median elapsed | 0.52 s | 0.76 s | 1.46 |
+| peak RSS | 76,760 KiB | 135,596 KiB | 1.77 |
+
+The normalized p95 time plus peak RSS ratio is **3.17**, above the `<2`
+gate, with gaps much larger than sample spread (baseline 0.51–0.55 s;
+candidate 0.75–0.77 s). Per-byte Simple calls likely allocate in this native
+path, but that mechanism is not proven. The candidate was reverted; the
+131 KiB admission test remains as a whole-archive regression. Raw samples
+are in `doc/09_report/compiler/target6_pinned_digest_8m_pair_2026-09-29.json`.
+Next, find a correct chunk update that avoids per-byte calls, then
+rerun this same paired workload before considering the bounded reader.
