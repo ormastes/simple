@@ -8,6 +8,7 @@ Malformed delimiters can differ from the permissive legacy parser; tests retain
 those divergences and this candidate remains unadmitted. Full SDN, diagnostics,
 lexer modes, and optimized arena/choice execution are not qualified by this slice.
 """
+use std.common.sdn.structural_scalar_value_v1.{sdn_integer_from_span_v1}
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.structural_integer_array_lexer_v1.{sdn_integer_array_lex_v1}
 use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
@@ -45,27 +46,6 @@ fn _integer_array_program_v1(limits: ParseProgramLimitsV1) -> Result<ParseProgra
         PA_CAPTURE_V1, 101, 0, PA_NODE_V1, 102, 2])
     parse_program_validate_v1(grammar, actions, limits)
 
-fn _integer_from_span_v1(bytes: [u8], start: i64, count: i64) -> Result<i64, text>:
-    if start < 0 or count <= 0 or start > bytes.len() or count > bytes.len() - start:
-        return Err("invalid_integer_span")
-    var cursor = start
-    val negative = bytes[cursor] == 45u8
-    if negative: cursor = cursor + 1
-    if cursor == start + count: return Err("invalid_integer_span")
-    # Accumulate negatively so INT64_MIN is representable. Guard before every
-    # multiply/subtract; conversion never relies on overflow or text.to_int.
-    var value: i64 = 0
-    while cursor < start + count:
-        val byte = bytes[cursor]
-        if byte < 48u8 or byte > 57u8: return Err("invalid_integer_span")
-        val digit = (byte - 48u8) as i64
-        val last_digit = if negative: 8 else: 7
-        if value < -922337203685477580 or
-            (value == -922337203685477580 and digit > last_digit):
-            return Err("integer_overflow")
-        value = value * 10 - digit
-        cursor = cursor + 1
-    if negative: Ok(value) else: Ok(-value)
 
 fn _array_from_output_v1(bytes: [u8], output: ParseProgramOutputV1) -> Result<SdnValue, text>:
     if output.roots.len() != 1 or output.diagnostics.len() != 0:
@@ -90,7 +70,7 @@ fn _array_from_output_v1(bytes: [u8], output: ParseProgramOutputV1) -> Result<Sd
                 return Err("invalid_semantic_output")
             val leaf = output.nodes[item]
             if leaf.kind != 101 or leaf.child_count != 0: return Err("invalid_semantic_output")
-            val value = _integer_from_span_v1(bytes, leaf.start, leaf.count)?
+            val value = sdn_integer_from_span_v1(bytes, leaf.start, leaf.count)?
             reversed.push(value)
             cursor = prior
         else:
