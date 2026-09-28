@@ -693,7 +693,7 @@ impl Lowerer {
                 let local = ctx.lookup(name).and_then(|idx| ctx.locals.get(idx));
                 let ty = match local {
                     Some(local) => local.ty,
-                    None => self.globals.get(name).copied()?,
+                    None => self.flatten_aware_global_type(name)?,
                 };
                 if let Some(struct_name) = self.try_named_struct_name_for_type(ty) {
                     return Some(struct_name);
