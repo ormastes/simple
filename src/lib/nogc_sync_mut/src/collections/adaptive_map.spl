@@ -202,10 +202,19 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
     fn snapshot_keys_unmeasured() -> [K]:
         if self.algorithm == AdaptiveSetAlgorithm.Ordered:
             return self.ordered_entries.keys()
-        # Use the same comparator as ordered storage so every physical
-        # representation exposes the same key order.
+        val entries = self.storage_entries()
+        for entry in entries:
+            if not ordered_key_native_usable(entry.key):
+                # Native order cannot compare this key. Keep iteration usable
+                # in the linear/hash fallback without invoking OrderedMap.
+                var keys: [K] = []
+                for current in entries:
+                    keys.push(current.key)
+                return keys
+        # Keys with native order retain the same sorted snapshot under every
+        # physical representation.
         var sorted: OrderedMap<K, bool> = OrderedMap.new()
-        for entry in self.storage_entries():
+        for entry in entries:
             sorted.put(entry.key, true)
         sorted.keys()
 
@@ -215,13 +224,17 @@ struct AdaptiveMap<K, V> where K: Hash + Eq + Ord:
         self.snapshot_keys_unmeasured()
 
     fn entries() -> [OrderedMapEntry<K, V>]:
-        """Stable key-ordered snapshot under every physical representation."""
+        """Key-ordered when supported; backing order for keys without native order."""
         if self.site_id != "":
             collection_capture_note_materialization(self.site_id, self.target_profile_id)
         if self.algorithm == AdaptiveSetAlgorithm.Ordered:
             return self.ordered_entries.entries()
+        val entries = self.storage_entries()
+        for entry in entries:
+            if not ordered_key_native_usable(entry.key):
+                return entries
         var sorted: OrderedMap<K, V> = OrderedMap.new()
-        for entry in self.storage_entries():
+        for entry in entries:
             sorted.put(entry.key, entry.value)
         sorted.entries()
 
