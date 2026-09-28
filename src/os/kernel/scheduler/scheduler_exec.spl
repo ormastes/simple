@@ -44,7 +44,7 @@ use os.kernel.log.klog_api.{log_raw_println}
 
 extern fn serial_println(msg: text)
 use os.kernel.scheduler.scheduler_types.{
-    TaskControlBlock,
+    TaskControlBlock, default_task_security, task_security_fork,
     MAX_TASKS, PRIORITY_LEVELS, TIME_SLICE_TICKS, SCHED_RT_BASE_PRIORITY_UNSET,
     sched_exec_arch,
     ReadyQueue, CpuRunQueue,
@@ -241,6 +241,12 @@ pub fn sched_create_user_task_pid_impl(
         if not verify_direct_load_entry(user_as, file_bytes, entry):
             destroy_user_address_space(user_as)
             return (0, tasks, -1)
+    # Mapping and entry validation do not consume a task identity on refusal.
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
+        destroy_user_address_space(user_as)
+        return (0, tasks, -1)
+    val identity = maybe_identity.unwrap()
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
     val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
     if maybe_identity == nil:
@@ -255,6 +261,7 @@ pub fn sched_create_user_task_pid_impl(
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: Some(current),
+        security: default_task_security(id),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
         assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
@@ -401,6 +408,11 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
         if not verify_direct_load_entry(user_as, file_bytes, entry):
             destroy_user_address_space(user_as)
             return (0, tasks)
+    val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
+    if maybe_identity == nil:
+        destroy_user_address_space(user_as)
+        return (0, tasks)
+    val identity = maybe_identity.unwrap()
     val user_ctx = _initial_user_task_context(mapped_entry, user_sp)
     val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
     if maybe_identity == nil:
@@ -415,6 +427,7 @@ pub fn sched_create_bootstrap_user_task_pid_impl(
         entry_point: mapped_entry, context: user_ctx, user_context: Some(user_ctx),
         address_space: user_as.phys_root, kernel_stack: 0, user_stack: stack_top,
         capabilities: caps, parent: nil,
+        security: default_task_security(id),
         schedule: default_task_schedule(priority),
         isolation: default_task_isolation(user_as.id),
         assigned_cpu: 0u32, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
@@ -449,6 +462,9 @@ pub fn sched_clone_task_impl(
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:
         return (TaskId(id: 0), tasks, -1)
+    # COW has no owned rollback for its shared parent tables. Reserve identity
+    # before invoking it so allocator refusal cannot strand a mutated clone.
+    # A later COW failure burns this pair; issued identities are never reused.
     val maybe_identity = scheduler_next_task_lifecycle_identity_take_v1()
     if maybe_identity == nil:
         return (TaskId(id: 0u64), tasks, -1)
@@ -475,6 +491,7 @@ pub fn sched_clone_task_impl(
         entry_point: parent.entry_point, context: child_ctx, user_context: child_user_ctx,
         address_space: child_as, kernel_stack: parent.kernel_stack, user_stack: parent.user_stack,
         capabilities: parent.capabilities, parent: Some(parent_id),
+        security: task_security_fork(parent.security, child_id),
         schedule: parent.schedule, isolation: default_task_isolation(child_as_id),
         assigned_cpu: parent.assigned_cpu, exit_code: 0, ticks_remaining: TIME_SLICE_TICKS,
         # Fork cannot alias either architecture owner's destruction authority.

@@ -3,7 +3,7 @@
 # Keeps the RV64 trap policy in pure Simple code so it can be unit tested
 # without depending on the architecture-specific trap vector assembly.
 
-use os.kernel.arch.arch_context.{Riscv64Context}
+use os.kernel.arch.arch_context.{ExtendedCtxRv, Riscv64Context}
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 
 val RV64_CAUSE_INTERRUPT_BIT: u64 = 1 << 63
@@ -19,6 +19,10 @@ val RV64_CAUSE_ECALL_FROM_S: u64 = 9
 
 val RV64_SSTATUS_SPIE: u64 = 1 << 5
 val RV64_SSTATUS_SPP: u64 = 1 << 8
+val RV64_SSTATUS_FS_MASK: u64 = 3 << 13
+val RV64_SSTATUS_FS_INITIAL: u64 = 1 << 13
+val RV64_CONTEXT_BYTES: u64 = 544
+val RV64_KERNEL_RETURN_COOKIE: u64 = 0x525636344B524554
 
 enum Rv64TrapKind:
     SoftwareInterrupt
@@ -31,11 +35,27 @@ enum Rv64TrapKind:
 
 fn rv64_initial_kernel_sstatus() -> u64:
     """Return sstatus for a fresh kernel task restored with sret."""
-    RV64_SSTATUS_SPP | RV64_SSTATUS_SPIE
+    RV64_SSTATUS_SPP | RV64_SSTATUS_SPIE | RV64_SSTATUS_FS_INITIAL
 
 fn rv64_initial_user_sstatus() -> u64:
     """Return sstatus for a fresh user task restored with sret."""
-    RV64_SSTATUS_SPIE
+    RV64_SSTATUS_SPIE | RV64_SSTATUS_FS_INITIAL
+
+fn rv64_prepare_kernel_exit_context(saved: Riscv64Context, exit_code: i32) -> Result<Riscv64Context, text>:
+    """Validate a saved kernel continuation and attach the user exit code."""
+    if saved.scause != RV64_KERNEL_RETURN_COOKIE:
+        return Err("invalid RV64 kernel continuation cookie")
+    if saved.sepc == 0:
+        return Err("invalid RV64 kernel continuation sepc")
+    if saved.sp == 0:
+        return Err("invalid RV64 kernel continuation sp")
+    if (saved.sstatus & RV64_SSTATUS_SPP) == 0:
+        return Err("invalid RV64 kernel continuation privilege")
+
+    var resumed = saved
+    resumed.a0 = exit_code as i64 as u64
+    resumed.scause = 0
+    Ok(resumed)
 
 fn create_rv64_kernel_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv64Context:
     """Create a kernel-mode RV64 context."""
@@ -73,7 +93,9 @@ fn create_rv64_kernel_context(entry_point: u64, stack_top: u64, arg: u64) -> Ris
         t6: 0,
         sepc: entry_point,
         sstatus: rv64_initial_kernel_sstatus(),
-        scause: 0
+        scause: 0,
+        fp_state: ExtendedCtxRv(bytes: [0; 264]),
+        fp_pad: 0
     )
 
 fn create_rv64_user_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv64Context:
@@ -118,7 +140,9 @@ fn create_rv64_user_context(entry_point: u64, stack_top: u64, arg: u64) -> Riscv
         t6: 0,
         sepc: entry_point,
         sstatus: rv64_initial_user_sstatus(),
-        scause: 0
+        scause: 0,
+        fp_state: ExtendedCtxRv(bytes: [0; 264]),
+        fp_pad: 0
     )
 
 fn rv64_is_interrupt(scause: u64) -> bool:
