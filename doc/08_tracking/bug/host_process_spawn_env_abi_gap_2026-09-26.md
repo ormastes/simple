@@ -1,7 +1,13 @@
 # Hosted process spawn with explicit environment has no matching runtime ABI
 
-**Status:** Source-level fail-closed mitigation in progress; full hosted launch
-contract and runtime qualification remain open.
+**Status:** Environment delivery restored in source (2026-09-28): nonempty maps are
+applied through `/usr/bin/env -- K=V ... cmd args` over the two-argument spawn,
+which preserves the child pid. Invalid keys (empty or containing `=`) and a
+utility name containing `=` return `-22`; Windows hosts return `-95`. Both
+refuse before any child is created. Spec:
+`test/01_unit/app/io/process_env_spawn_spec.spl` (4/4 on the interpreter).
+The versioned full-launch-contract operation below remains open.
+
 **Affected route:** `app.io.process_spawn_async_env` and any hosted SOSIX
 `ProcessLaunchSpecV1` provider that would rely on it.
 
@@ -9,7 +15,7 @@ contract and runtime qualification remain open.
 
 - The original `src/app/io/process_env_ops.spl` declared
   `rt_process_spawn_async(cmd: text, args: [text], env: {text: text})` and passed
-  an environment map as its third source argument. The staged mitigation
+  an environment map as its third source argument. PR #1938 removed
   removes that declaration, returns `-95` for nonempty maps before spawning,
   and delegates empty maps to the existing two-argument facade.
 - `src/compiler_rust/compiler/src/interpreter_extern/system.rs` implements
