@@ -59,3 +59,36 @@ fi
 cmp "$receipt" "$tmp/receipt.before"
 done
 echo 'PASS: Windows receipt publication uses direct native write/flush and no-replace cleanup'
+
+# A core.symlinks=true checkout (the windows-latest image default) carries
+# git's own native symlinks. Bare mode must accept them untouched and keep them
+# out of the undo manifest; receipt mode must fail closed.
+echo "runner core.symlinks: $(git -C "$root" config --show-origin core.symlinks || echo unset)"
+native="$tmp/native"
+git -c core.symlinks=true clone -q "$repo" "$native"
+if [ ! -L "$native/alias" ]; then
+    echo 'BLOCKED: this host cannot create native symlinks; native-symlink fixture skipped' >&2
+    exit 0
+fi
+sh "$root/scripts/setup/materialize-symlinks-windows.shs" "$native" >"$tmp/native.log" 2>&1 || {
+    cat "$tmp/native.log" >&2
+    exit 1
+}
+test -L "$native/alias"
+test -L "$native/directory-alias"
+test "$(cat "$native/alias")" = 'payload'
+test "$(cat "$native/directory-alias/nested.txt")" = 'nested payload'
+if grep -Eq 'alias' "$native/.git/simple-materializer-manifest.tsv" 2>/dev/null; then
+    echo 'native git symlink was recorded in the undo manifest' >&2
+    exit 1
+fi
+if sh "$root/scripts/setup/materialize-symlinks-windows.shs" \
+    --receipt "$tmp/out/native.env" "$native" >"$tmp/native-receipt.log" 2>&1; then
+    echo 'receipt mode unexpectedly admitted a native git symlink' >&2
+    exit 1
+fi
+grep -Fq 'native git symlink is not receiptable' "$tmp/native-receipt.log" || {
+    cat "$tmp/native-receipt.log" >&2
+    exit 1
+}
+echo 'PASS: native git symlinks from a core.symlinks=true checkout are accepted untouched'
