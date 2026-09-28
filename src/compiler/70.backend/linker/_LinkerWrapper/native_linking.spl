@@ -52,6 +52,12 @@ use compiler.backend.linker.linker_wrapper_helpers.{detect_self_contained, find_
 use compiler.backend.linker.linker_wrapper_helpers.{build_trailer, fnv1a_hash_i64}
 use compiler.backend.linker.linker_wrapper_helpers.{write_bytes_to_file, write_elf_bytes_to_file}
 
+# runtime_sdl2.c loads SDL at first use; default binaries need no SDL2 library.
+# Direct ld64 needs libSystem explicitly, while clang supplies it for cc links.
+pub fn native_macos_default_std_lib_args(mode: text) -> [text]:
+    if mode == "ld": return ["-lSystem"]
+    []
+
 # ============================================================================
 # Configuration Structs
 # ============================================================================
@@ -339,20 +345,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         args.push("-lm")
         args.push("-lSDL2")
         args.push("--no-as-needed")
-    elif os == "macos":
-        # sdl2-compat installs into the Homebrew lib dir, which is not on the
-        # default linker search path — add it before -lSDL2 resolves.
-        # /opt/homebrew/lib covers Apple Silicon brew; /usr/local/lib covers
-        # Intel brew. Both are harmless no-ops when absent.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        args.push("-lc")
-        args.push("-lpthread")
-        args.push("-lm")
-        args.push("-lSystem")
-        args.push("-lSDL2")
+    elif os == "macos" or os == "darwin":
+        for flag in native_macos_default_std_lib_args("ld"):
+            args.push(flag)
     elif os == "freebsd":
         args.push("-lc")
         args.push("-lpthread")
@@ -659,13 +654,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         for obj in cc_fallback_object_args(object_files):
             args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
-        # sdl2-compat lives in the Homebrew lib dir, which cc does not search
-        # by default — add it before -lSDL2 resolves.
-        args.push("-L")
-        args.push("/opt/homebrew/lib")
-        args.push("-L")
-        args.push("/usr/local/lib")
-        for flag in ["-lc", "-lpthread", "-lm", "-lSystem", "-lSDL2"]:
+        for flag in native_macos_default_std_lib_args("cc"):
             args.push(flag)
         for flag in native_all_gnu_support_args(object_files, os_name, brew_prefix):
             args.push(flag)
