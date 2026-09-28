@@ -21,19 +21,23 @@ absent from the capsule: `nm` finds `rt_cuda_init`,
 `rt_vulkan_fence_submission_supported`, `rt_rocm_device_count`, and
 `rt_metal_init` defined in the frozen `libsimple_native_all.a`, while this
 archive does not define `rt_sqlite_open` or `rt_sdl_create_window`. The
-linker's actual archive arguments and ordering still need attribution. The
-log says the selected core lane intentionally limits its ABI. This result
-does not undo the focused runtime probe.
+focused same-bundle link trace and retained failed-link core archive now
+attribute the selection: the host-gpu lane passes a generated core-C archive
+and the hosted runtime rlib, while the frozen native-all archive is not
+selected. The generated core-C archive defines none of the 178 unresolved
+names; native-all defines 117, and 61 need other owners or source fixes. The
+full details and limits of that evidence are in
+`doc/09_report/compiler/target56_stage2_link_argv_attribution_2026-09-28.md`.
+This result does not undo the focused runtime probe.
 
 Evidence:
 `build/bootstrap-target56/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/summary.env`
 and its `logs/compiler_cli_build.log`; the rejection is in the sibling
 `rejection.env`.
 
-Next: capture the actual linker argv, classify missing symbols against the
-selected archives, and identify why the full CLI entry closure reaches
-optional modules and lenient unresolved globals. Then make the closure exact
-and supply any genuinely required providers through an admitted runtime lane.
+Next: identify why the full CLI entry closure reaches optional modules and
+lenient unresolved globals, then make the closure exact and supply genuinely
+required providers through an admitted, receipt-bound runtime lane.
 Do not add fake symbols or silently expand the core ABI. Re-run the matrix
 only after that source/selection change; this 1,828-second failure is the
 baseline, not a passing Stage2 verification.

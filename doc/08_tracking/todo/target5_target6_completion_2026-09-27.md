@@ -33,10 +33,14 @@ Simple-side descriptor-list fix in that owner. A focused no-stub native build
 of the rebased source compiled 37 files with zero failures; its probe exited
 zero with missing-library refusal. The in-process Stage2 compiler-test
 matrix failed at its full CLI link after 1,828 seconds with unresolved
-GPU/SQLite/SDL/Metal and other reached symbols. Several GPU symbols are
-actually defined in the frozen native-all archive, so archive selection and
-link order remain under investigation. The later test rows were blocked. See
+GPU/SQLite/SDL/Metal and other reached symbols. A focused same-bundle linker
+trace proves the host-gpu path selects a generated core-C archive and hosted
+rlib, omitting the frozen native-all archive. That core-C archive defines none
+of the 178 missing names; native-all defines 117 but is not a complete or
+appropriate optional-provider fix. The later test rows were blocked. See
 `doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
+Detailed attribution is in
+`doc/09_report/compiler/target56_stage2_link_argv_attribution_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
