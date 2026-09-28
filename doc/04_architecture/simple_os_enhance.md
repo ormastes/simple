@@ -51,6 +51,17 @@ KernelCallContext → syscall → typed object-handle check → operation
 
 ## Pattern choice
 
+Scheduler contract restoration (2026-09-14): the concrete policy record is
+`TaskSecurity` in `scheduler/scheduler_security_types.spl`, stored as an
+appended `TaskControlBlock.security` field. `TaskSecurityBinding` contains only
+trusted managed-launch input. The `_Scheduler/scheduler_authority.spl` facade
+commits mutations from `authority_runtime.spl` back into the one scheduler
+task table. Constructors grant no syscall/root/reaper authority; managed
+policy and the two root objects require explicit owner operations. All
+authority use closes at `PreparingExit`, before cleanup publishes `Zombie`.
+See the dated design addendum for the restored field/ABI contract and the
+explicit missing execution evidence.
+
 The selected pattern is composition, not separate service/container/agent
 security stacks: each is a specialization of `WorkloadManifest` plus a job,
 CSpace, optional isolation domain, resource domain, identity, and lifecycle

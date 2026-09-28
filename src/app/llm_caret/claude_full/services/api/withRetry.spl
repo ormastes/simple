@@ -47,10 +47,14 @@ class RetryOptions:
     sandbox: bool
     fallbackForAllPrimaryModels: bool
     featureFastMode: bool
+    useBedrock: bool
+    awsCredentialsProviderError: bool
+    useVertex: bool
+    staleConnectionCooldownMs: i64
 
 impl RetryOptions:
     static fn new(model: text) -> RetryOptions:
-        RetryOptions(maxRetries: 10, model: model, fallbackModel: "", querySource: "", initialConsecutive529Errors: 0, persistentRetry: false, claudeAiSubscriber: false, enterpriseSubscriber: false, remote: false, antUser: false, externalUser: false, sandbox: false, fallbackForAllPrimaryModels: false, featureFastMode: false)
+        RetryOptions(maxRetries: 10, model: model, fallbackModel: "", querySource: "", initialConsecutive529Errors: 0, persistentRetry: false, claudeAiSubscriber: false, enterpriseSubscriber: false, remote: false, antUser: false, externalUser: false, sandbox: false, fallbackForAllPrimaryModels: false, featureFastMode: false, useBedrock: false, awsCredentialsProviderError: false, useVertex: false, staleConnectionCooldownMs: defaultStaleConnectionCooldownMs())
 
 class CannotRetryError:
     originalMessage: text
@@ -90,20 +94,61 @@ impl RetryOutcome:
     static fn fail(errorName: text, message: text, attempts: i64, context: RetryContext) -> RetryOutcome:
         RetryOutcome(status: "fail", attempts: attempts, delayMs: 0, yieldedHeartbeats: 0, context: context, errorName: errorName, errorMessage: message)
 
+class RetryEffectTrace:
+    sleepDelaysMs: [i64]
+    heartbeatCounts: [i64]
+    cacheClears: [text]
+    cooldownDelaysMs: [i64]
+    attemptStatuses: [text]
+
+impl RetryEffectTrace:
+    static fn new() -> RetryEffectTrace:
+        RetryEffectTrace(sleepDelaysMs: [], heartbeatCounts: [], cacheClears: [], cooldownDelaysMs: [], attemptStatuses: [])
+
+    me recordOutcome(outcome: RetryOutcome):
+        me.attemptStatuses.push(outcome.status)
+        if outcome.status == "retry":
+            me.sleepDelaysMs.push(outcome.delayMs)
+            me.heartbeatCounts.push(outcome.yieldedHeartbeats)
+
+class RetrySequenceResult:
+    outcomes: [RetryOutcome]
+    totalDelayMs: i64
+    yieldedHeartbeats: i64
+    terminalStatus: text
+    terminalError: text
+
+impl RetrySequenceResult:
+    static fn new() -> RetrySequenceResult:
+        RetrySequenceResult(outcomes: [], totalDelayMs: 0, yieldedHeartbeats: 0, terminalStatus: "ok", terminalError: "")
+
 class WithRetryModel:
     options: RetryOptions
     context: RetryContext
     consecutive529Errors: i64
     persistentAttempt: i64
     logs: [text]
-    cacheClears: [text]
-    cooldowns: [text]
+    trace: RetryEffectTrace
+    handledAttempts: [i64]
+    handledOutcomes: [RetryOutcome]
 
 impl WithRetryModel:
     static fn new(options: RetryOptions) -> WithRetryModel:
-        WithRetryModel(options: options, context: RetryContext.new(options.model), consecutive529Errors: options.initialConsecutive529Errors, persistentAttempt: 0, logs: [], cacheClears: [], cooldowns: [])
+        WithRetryModel(options: options, context: RetryContext.new(options.model), consecutive529Errors: options.initialConsecutive529Errors, persistentAttempt: 0, logs: [], trace: RetryEffectTrace.new(), handledAttempts: [], handledOutcomes: [])
 
     me handleError(error: ApiError, attempt: i64) -> RetryOutcome:
+        var i = 0
+        while i < me.handledAttempts.len():
+            if me.handledAttempts[i] == attempt:
+                return me.handledOutcomes[i]
+            i = i + 1
+        val outcome = me.decideRetry(error, attempt)
+        me.handledAttempts.push(attempt)
+        me.handledOutcomes.push(outcome)
+        me.trace.recordOutcome(outcome)
+        outcome
+
+    me decideRetry(error: ApiError, attempt: i64) -> RetryOutcome:
         if is529Error(error) and not shouldRetry529(me.options.querySource):
             me.logs.push("tengu_api_529_background_dropped")
             val cannot = CannotRetryError.new(error.message, me.context)
@@ -113,11 +158,21 @@ impl WithRetryModel:
             if me.consecutive529Errors >= max529Retries() and me.options.fallbackModel != "":
                 val fallback = FallbackTriggeredError.new(me.options.model, me.options.fallbackModel)
                 return RetryOutcome.fail(fallback.name, fallback.message, attempt, me.context)
+        var providerRecovery = false
+        if handleAwsCredentialError(error, me.options.useBedrock, me.options.awsCredentialsProviderError):
+            providerRecovery = true
+            me.trace.cacheClears.push(awsCredentialCacheIdentity())
+        if handleGcpCredentialError(error, me.options.useVertex):
+            providerRecovery = true
+            me.trace.cacheClears.push(gcpCredentialCacheIdentity())
+        if isStaleConnectionError(error):
+            providerRecovery = true
+            me.trace.cooldownDelaysMs.push(me.options.staleConnectionCooldownMs)
         val persistent = me.options.persistentRetry and isTransientCapacityError(error)
         if attempt > getMaxRetries(me.options) and not persistent:
             val cannot = CannotRetryError.new(error.message, me.context)
             return RetryOutcome.fail(cannot.name, cannot.originalMessage, attempt, me.context)
-        if not shouldRetryWithOptions(error, me.options):
+        if not providerRecovery and not shouldRetryWithOptions(error, me.options):
             val cannot = CannotRetryError.new(error.message, me.context)
             return RetryOutcome.fail(cannot.name, cannot.originalMessage, attempt, me.context)
         val overflow = parseMaxTokensContextOverflowError(error)
@@ -125,7 +180,9 @@ impl WithRetryModel:
             val available = overflow.contextLimit - overflow.inputTokens - 1000
             if available < floorOutputTokens():
                 return RetryOutcome.fail("ApiError", "availableContext below floor", attempt, me.context)
-            me.context.maxTokensOverride = maxI64(floorOutputTokens(), maxI64(available, me.context.thinkingBudgetTokens + 1))
+            if me.context.thinkingEnabled and me.context.thinkingBudgetTokens >= available:
+                return RetryOutcome.fail("ApiError", "thinking budget exceeds availableContext", attempt, me.context)
+            me.context.maxTokensOverride = available
             me.logs.push("tengu_max_tokens_context_overflow_adjustment")
             return RetryOutcome.retry(0, attempt, me.context)
         var delay = 0
@@ -136,9 +193,27 @@ impl WithRetryModel:
             delay = getRetryDelay(attempt, getRetryAfter(error), 32000, 0)
         me.logs.push("tengu_api_retry")
         val out = RetryOutcome.retry(delay, attempt, me.context)
-        if persistent and delay > heartbeatIntervalMs():
+        if persistent and delay >= heartbeatIntervalMs():
             out.yieldedHeartbeats = (delay + heartbeatIntervalMs() - 1) / heartbeatIntervalMs()
         out
+
+fn run_retry_sequence(model: WithRetryModel, errors: [ApiError]) -> RetrySequenceResult:
+    val result = RetrySequenceResult.new()
+    var i = 0
+    while i < errors.len():
+        val outcome = model.handleError(errors[i], i + 1)
+        result.outcomes.push(outcome)
+        if outcome.status == "retry":
+            result.totalDelayMs = result.totalDelayMs + outcome.delayMs
+            result.yieldedHeartbeats = result.yieldedHeartbeats + outcome.yieldedHeartbeats
+        else:
+            result.terminalStatus = outcome.status
+            result.terminalError = outcome.errorMessage
+            return result
+        i = i + 1
+    if result.outcomes.len() > 0:
+        result.terminalStatus = result.outcomes[result.outcomes.len() - 1].status
+    result
 
 fn abortError() -> text:
     "APIUserAbortError"
@@ -161,9 +236,56 @@ fn getRetryAfter(error: ApiError) -> text:
     error.retryAfter
 
 fn getRetryDelay(attempt: i64, retryAfterHeader: text, maxDelayMs: i64, jitterMs: i64) -> i64:
-    if retryAfterHeader != "":
-        return retryAfterHeader.to_i64() * 1000
-    minI64(baseDelayMs() * pow2(attempt - 1), maxDelayMs) + jitterMs
+    if maxDelayMs <= 0:
+        return 0
+    val retryAfterMs = parseRetryAfterMsCapped(retryAfterHeader, maxDelayMs)
+    if retryAfterMs >= 0:
+        return minI64(retryAfterMs, maxDelayMs)
+    clampDelayWithJitter(saturatedExponentialDelay(attempt, maxDelayMs), jitterMs, maxDelayMs)
+
+fn parseRetryAfterMsCapped(value: text, maxDelayMs: i64) -> i64:
+    if value == "":
+        return -1
+    if maxDelayMs <= 0:
+        return 0
+    var delayMs = 0
+    var i = 0
+    while i < value.len():
+        val ch = value[i]
+        if ch < "0" or ch > "9":
+            return -1
+        val digitMs = (ch.to_i64() - "0".to_i64()) * 1000
+        if digitMs > maxDelayMs:
+            return maxDelayMs
+        if delayMs > (maxDelayMs - digitMs) / 10:
+            return maxDelayMs
+        delayMs = delayMs * 10 + digitMs
+        i = i + 1
+    delayMs
+
+fn saturatedExponentialDelay(attempt: i64, maxDelayMs: i64) -> i64:
+    if maxDelayMs <= 0:
+        return 0
+    var delay = minI64(baseDelayMs(), maxDelayMs)
+    var i = 1
+    while i < attempt:
+        if delay >= maxDelayMs or delay > maxDelayMs / 2:
+            return maxDelayMs
+        delay = delay * 2
+        i = i + 1
+    delay
+
+fn clampDelayWithJitter(delayMs: i64, jitterMs: i64, maxDelayMs: i64) -> i64:
+    if maxDelayMs <= 0:
+        return 0
+    val boundedDelay = maxI64(0, minI64(delayMs, maxDelayMs))
+    if jitterMs >= 0:
+        if jitterMs >= maxDelayMs - boundedDelay:
+            return maxDelayMs
+        return boundedDelay + jitterMs
+    if jitterMs <= 0 - boundedDelay:
+        return 0
+    boundedDelay + jitterMs
 
 class OverflowData:
     inputTokens: i64
@@ -215,6 +337,15 @@ fn isVertexAuthError(error: ApiError, useVertex: bool) -> bool:
 
 fn handleGcpCredentialError(error: ApiError, useVertex: bool) -> bool:
     isVertexAuthError(error, useVertex)
+
+fn awsCredentialCacheIdentity() -> text:
+    "aws_credentials"
+
+fn gcpCredentialCacheIdentity() -> text:
+    "gcp_credentials"
+
+fn defaultStaleConnectionCooldownMs() -> i64:
+    1000
 
 fn shouldRetry(error: ApiError) -> bool:
     shouldRetryWithOptions(error, RetryOptions.new("model"))
@@ -304,9 +435,6 @@ fn maxI64(a: i64, b: i64) -> i64:
     if a > b:
         return a
     b
-
-fn withRetrySourceLinesModeled() -> i64:
-    822
 
 # Source parity note: function_abortError returns APIUserAbortError.
 # Source parity note: function_shouldRetry529 retries undefined query source.
