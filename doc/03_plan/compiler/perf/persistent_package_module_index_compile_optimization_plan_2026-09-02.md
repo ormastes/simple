@@ -313,8 +313,11 @@ engine or compiler index cutover. See
 Archive member memory follow-up (2026-09-29): a bounded-chunk SHA-256 and
 incremental UTF-8 candidate linked without stubs but failed the two native
 archive publication examples. It was reverted under the three-cycle cap.
-Isolate the native digest mismatch before replacing the working whole-member
-copy; see
+The native digest mismatch is now isolated to unsigned `[u8]` indexing in
+`sha256_stream_v1_update` on runtime-built byte arrays. A signed-index fix
+and exact action-member vector pass 5/5 in a no-stub Stage-2 native spec.
+The publisher still copies the whole member; direct range validation and a
+paired time/RSS cohort remain before replacing it. See
 `doc/08_tracking/bug/target6_native_stream_hash_archive_member_mismatch_2026-09-29.md`.
 
 Pinned archive file-view follow-up (2026-09-29): the POSIX descriptor reader

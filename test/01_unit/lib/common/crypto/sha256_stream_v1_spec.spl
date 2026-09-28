@@ -3,7 +3,7 @@
 use std.spec.*
 use std.common.crypto.sha256.{
     sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex,
-    sha256_u8_hex
+    sha256_u8_hex, sha256_text
 }
 
 fn stream_digest(parts: [[u8]]) -> text:
@@ -13,6 +13,29 @@ fn stream_digest(parts: [[u8]]) -> text:
     sha256_stream_v1_finish_hex(stream).unwrap()
 
 describe "SHA-256 stream block update contract":
+    it "hashes runtime-built archive member bytes across chunk boundaries":
+        val payload = "action|compile|function|foo|{sha256_text("compile")}"
+        val expected = "9f63f2e1edaf9e26d3742a826204a1375848dc984c759e6016fa91d6aa7bd77c"
+        var copied: [u8] = [0u8; payload.len()]
+        var stream = sha256_stream_v1_new()
+        var offset = 0
+        while offset < payload.len():
+            val remaining = payload.len() - offset
+            val chunk_len = if remaining < 7: remaining else: 7
+            var chunk: [u8] = [0u8; chunk_len]
+            var i = 0
+            while i < chunk_len:
+                val value = payload.byte_at(offset + i).to_u8()
+                copied[offset + i] = value
+                chunk[i] = value
+                i = i + 1
+            expect(sha256_stream_v1_update(stream, chunk)).to_be(true)
+            offset = offset + chunk_len
+        expect(sha256_text(payload)).to_equal(expected)
+        expect(sha256_u8_hex(copied)).to_equal(expected)
+        expect(stream_digest([copied])).to_equal(expected)
+        expect(sha256_stream_v1_finish_hex(stream).unwrap()).to_equal(expected)
+
     it "matches a mixed-byte native known vector":
         var bytes: [u8] = [0u8; 542]
         var i: u64 = 0u64

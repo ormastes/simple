@@ -28,3 +28,21 @@ session should compare the exact member bytes and a known nonempty SHA vector
 inside one focused native probe before trying this optimization again. A
 realistic paired time/RSS cohort is required before accepting any memory for
 time tradeoff. No size, memory, or performance improvement is claimed here.
+
+## Root isolated (2026-09-29 continuation)
+
+A no-stub native probe fed the exact action-member text shown above through
+three paths. `sha256_text` and `sha256_u8_hex` of the copied bytes both gave
+the receipt digest `9f63…7bd77c`. `Sha256StreamV1.update` on that runtime-built
+array gave the earlier bad `3af1…34c31d2`; direct `update_byte` calls gave
+the receipt digest. The existing native stream spec passed four literal-array
+vectors, so those vectors did not cover this runtime-built array shape.
+
+`sha256_stream_v1_update` used unsigned indices for `[u8]` reads while the
+working one-shot hasher used signed indices. Switching the stream's read loop
+to signed indices and adding the exact runtime-built archive-member vector
+made the no-stub native SHA spec pass 5/5, including both one-shot and
+seven-byte chunk streams. The cold archive publisher still uses its previous
+whole-member byte copy. Reapply bounded publication only after direct range
+UTF-8 validation and a paired native time/RSS cohort; this bug remains open
+until that production consumer is verified.
