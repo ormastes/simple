@@ -6,7 +6,8 @@ commit are exclusively owned by the shared VM; projection reads committed nodes.
 """
 use std.common.sdn.value.{SdnValue}
 use std.common.sdn.structural_scalar_value_v1.{sdn_integer_from_span_v1, sdn_unescape_scalar_v1}
-use std.common.sdn.structural_inline_lexer_v2.{sdn_inline_lex_v2}
+use std.common.sdn.structural_inline_lexer_v2.{sdn_inline_lex_checked_v2}
+use std.common.sdn.structural_inline_issue_v2.{SdnInlineIssueV2}
 use std.common.structural.parse.dialect.{GrammarProgram, ActionProgram}
 use std.common.structural.parse.parse_types.{ParseTokenArena, parse_source_blob_from_text}
 use std.common.structural.parse.program_v1.*
@@ -181,14 +182,27 @@ fn _inline_value_v2(source: text, output: ParseProgramOutputV1) -> Result<SdnVal
     if root < 0 or root != values.len() - 1: return Err("invalid_semantic_output")
     Ok(values[root])
 
-pub fn sdn_inline_parse_candidate_v2(source: text,
-    limits: ParseProgramLimitsV1) -> Result<SdnInlineCandidateV2, text>:
-    val tokens = sdn_inline_lex_v2(source, limits)?
-    val program = _inline_program_v2(limits)?
+pub fn sdn_inline_parse_checked_v2(source: text,
+    limits: ParseProgramLimitsV1) -> Result<SdnInlineCandidateV2, SdnInlineIssueV2>:
+    val tokens = sdn_inline_lex_checked_v2(source, limits)?
+    val validation = _inline_program_v2(limits)
+    if validation.is_err():
+        return Err(SdnInlineIssueV2(phase: "program", code: validation.unwrap_err(), start: -1, count: 0))
+    val program = validation.unwrap()
     val parsed = parse_grammar_execute_v2(program, parse_source_blob_from_text(source), tokens, 0, limits)
-    if not parsed.ok: return Err(parsed.error)
-    val value = _inline_value_v2(source, parsed.output)?
+    if not parsed.ok:
+        return Err(SdnInlineIssueV2(phase: "grammar", code: parsed.error, start: -1, count: 0))
+    val projected = _inline_value_v2(source, parsed.output)
+    if projected.is_err():
+        return Err(SdnInlineIssueV2(phase: "projection", code: projected.unwrap_err(), start: -1, count: 0))
+    val value = projected.unwrap()
     Ok(SdnInlineCandidateV2(value: value, tokens: tokens,
         syntax: parsed.output, grammar_steps: parsed.steps_used))
 
-export SdnInlineCandidateV2, sdn_inline_parse_candidate_v2
+pub fn sdn_inline_parse_candidate_v2(source: text,
+    limits: ParseProgramLimitsV1) -> Result<SdnInlineCandidateV2, text>:
+    val result = sdn_inline_parse_checked_v2(source, limits)
+    if result.is_err(): return Err(result.unwrap_err().code)
+    Ok(result.unwrap())
+
+export SdnInlineCandidateV2, SdnInlineIssueV2, sdn_inline_parse_candidate_v2, sdn_inline_parse_checked_v2

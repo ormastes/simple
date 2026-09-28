@@ -4,6 +4,7 @@ Offsets are recovered in order, never searched. The opt-in quote mode retains
 complete escaped string tokens. Block mappings, tables, comments, Unicode and
 multiline source remain outside this candidate.
 """
+use std.common.sdn.structural_inline_issue_v2.{SdnInlineIssueV2}
 use std.common.sdn.lexer.{tokenize, TokenKind, Token}
 use std.common.structural.parse.parse_types.{ParseTokenArena, PARSE_SCHEMA_ID}
 use std.common.structural.parse.program_v1.{ParseProgramLimitsV1, parse_program_limits_valid_v1}
@@ -41,7 +42,7 @@ fn _decimal_spelling_v2(bytes: [u8]) -> bool:
 # Candidate-local string mode. Ordinary source runs are tokenized by the
 # production SDN tokenizer. Quoted runs are single source tokens with escapes
 # retained; neither this mode nor span recovery decides collection syntax.
-fn _inline_tokens_v2(source: text) -> Result<[Token], text>:
+fn _inline_tokens_v2(source: text) -> Result<[Token], SdnInlineIssueV2>:
     var tokens: [Token] = []
     var cursor = 0
     var run_start = 0
@@ -55,7 +56,7 @@ fn _inline_tokens_v2(source: text) -> Result<[Token], text>:
         var closed = false
         while cursor < source.len():
             val ch = source.substring(cursor, cursor + 1)
-            if ch == "\n" or ch == "\r": return Err("unsupported_multiline")
+            if ch == "\n" or ch == "\r": return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_multiline", start: cursor, count: 1))
             if ch == "\\":
                 cursor = cursor + 2
             elif ch == "\"":
@@ -64,19 +65,30 @@ fn _inline_tokens_v2(source: text) -> Result<[Token], text>:
                 break
             else:
                 cursor = cursor + 1
-        if not closed: return Err("unterminated_quoted_string")
+        if not closed: return Err(SdnInlineIssueV2(phase: "lex", code: "unterminated_quoted_string", start: start, count: source.len() - start))
         tokens.push(Token.make(TokenKind.Word, source.substring(start, cursor)))
         run_start = cursor
     for token in tokenize(source.substring(run_start, cursor)): tokens.push(token)
     Ok(tokens)
 
-pub fn sdn_inline_lex_v2(source: text, limits: ParseProgramLimitsV1, allow_words: bool = true) -> Result<ParseTokenArena, text>:
-    if not parse_program_limits_valid_v1(limits): return Err("invalid_limits")
+pub fn sdn_inline_lex_checked_v2(source: text, limits: ParseProgramLimitsV1, allow_words: bool = true) -> Result<ParseTokenArena, SdnInlineIssueV2>:
+    if not parse_program_limits_valid_v1(limits): return Err(SdnInlineIssueV2(phase: "limits", code: "invalid_limits", start: -1, count: 0))
     val bytes = source.bytes()
-    if bytes.len() > limits.max_source_bytes: return Err("source_capacity")
-    for byte in bytes:
-        if byte >= 128u8: return Err("unsupported_non_ascii")
-        if allow_words and (byte == 10u8 or byte == 13u8): return Err("unsupported_multiline")
+    if bytes.len() > limits.max_source_bytes: return Err(SdnInlineIssueV2(phase: "limits", code: "source_capacity", start: -1, count: 0))
+    var offset = 0
+    while offset < bytes.len():
+        val byte = bytes[offset]
+        if byte >= 128u8:
+            # Text input is UTF-8. Include the complete first non-ASCII scalar;
+            # never report only its leading byte or a character-index offset.
+            var end = offset + 1
+            while end < bytes.len() and bytes[end] >= 128u8 and bytes[end] < 192u8:
+                end = end + 1
+            return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_non_ascii", start: offset, count: end - offset))
+        if allow_words and (byte == 10u8 or byte == 13u8):
+            val width = if byte == 13u8 and offset + 1 < bytes.len() and bytes[offset + 1] == 10u8: 2 else: 1
+            return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_multiline", start: offset, count: width))
+        offset = offset + 1
     # Existing production lexer output, never synthetic test tokens. Its
     # temporary token allocation is bounded by source size, not max_tokens.
     val lexed = if allow_words: _inline_tokens_v2(source)? else: tokenize(source)
@@ -89,10 +101,10 @@ pub fn sdn_inline_lex_v2(source: text, limits: ParseProgramLimitsV1, allow_words
             cursor = cursor + 1
         val spelling = token.text.bytes()
         if spelling.len() == 0 or spelling.len() > bytes.len() - cursor:
-            return Err("lexer_source_mismatch")
+            return Err(SdnInlineIssueV2(phase: "lex", code: "lexer_source_mismatch", start: -1, count: 0))
         var i = 0
         while i < spelling.len():
-            if spelling[i] != bytes[cursor + i]: return Err("lexer_source_mismatch")
+            if spelling[i] != bytes[cursor + i]: return Err(SdnInlineIssueV2(phase: "lex", code: "lexer_source_mismatch", start: -1, count: 0))
             i = i + 1
         val kind = match token.kind:
             case TokenKind.Word:
@@ -101,39 +113,46 @@ pub fn sdn_inline_lex_v2(source: text, limits: ParseProgramLimitsV1, allow_words
                 elif _integer_spelling_v1(spelling):
                     SDN_INTEGER_TOKEN_V1
                 elif allow_words and _decimal_spelling_v2(spelling):
-                    if spelling.len() > 128: return Err("unsupported_float_magnitude")
+                    if spelling.len() > 128: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_float_magnitude", start: cursor, count: spelling.len()))
                     6u16
                 else:
-                    if not allow_words: return Err("unsupported_integer_spelling")
+                    if not allow_words: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_integer_spelling", start: cursor, count: spelling.len()))
                     for byte in spelling:
-                        if byte == 34u8: return Err("unsupported_quoted_string")
+                        if byte == 34u8: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_quoted_string", start: cursor, count: spelling.len()))
                         if not ((byte >= 65u8 and byte <= 90u8) or
                             (byte >= 97u8 and byte <= 122u8) or
                             (byte >= 48u8 and byte <= 57u8) or byte == 95u8 or byte == 45u8):
-                            return Err("unsupported_word_spelling")
+                            return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_word_spelling", start: cursor, count: spelling.len()))
                     5u16
             case TokenKind.LBracket: SDN_OPEN_TOKEN_V1
             case TokenKind.RBracket: SDN_CLOSE_TOKEN_V1
             case TokenKind.Comma: SDN_COMMA_TOKEN_V1
             case TokenKind.LBrace:
-                if not allow_words: return Err("unsupported_token")
+                if not allow_words: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_token", start: cursor, count: spelling.len()))
                 7u16
             case TokenKind.RBrace:
-                if not allow_words: return Err("unsupported_token")
+                if not allow_words: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_token", start: cursor, count: spelling.len()))
                 8u16
             case TokenKind.Colon:
-                if not allow_words: return Err("unsupported_token")
+                if not allow_words: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_token", start: cursor, count: spelling.len()))
                 9u16
-            case TokenKind.Newline: return Err("unsupported_multiline")
-            case _: return Err("unsupported_token")
-        if kinds.len() >= limits.max_tokens: return Err("token_capacity")
+            case TokenKind.Newline: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_multiline", start: cursor, count: spelling.len()))
+            case _: return Err(SdnInlineIssueV2(phase: "lex", code: "unsupported_token", start: cursor, count: spelling.len()))
+        if kinds.len() >= limits.max_tokens: return Err(SdnInlineIssueV2(phase: "limits", code: "token_capacity", start: cursor, count: spelling.len()))
         kinds.push(kind)
         starts.push(cursor as u32)
         counts.push(spelling.len() as u32)
         cursor = cursor + spelling.len()
     while cursor < bytes.len() and (bytes[cursor] == 32u8 or bytes[cursor] == 9u8):
         cursor = cursor + 1
-    if cursor != bytes.len(): return Err("lexer_source_underfill")
+    if cursor != bytes.len(): return Err(SdnInlineIssueV2(phase: "lex", code: "lexer_source_underfill", start: cursor, count: 0))
     Ok(ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: kinds, start: starts, count: counts))
 
-export sdn_inline_lex_v2
+# Compatibility boundary: existing integer-array and inline callers retain
+# their exact error codes without running the tokenizer a second time.
+pub fn sdn_inline_lex_v2(source: text, limits: ParseProgramLimitsV1, allow_words: bool = true) -> Result<ParseTokenArena, text>:
+    val result = sdn_inline_lex_checked_v2(source, limits, allow_words)
+    if result.is_err(): return Err(result.unwrap_err().code)
+    Ok(result.unwrap())
+
+export sdn_inline_lex_v2, sdn_inline_lex_checked_v2

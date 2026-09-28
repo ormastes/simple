@@ -3,7 +3,7 @@
 use std.spec.{describe, it, expect, fail}
 use std.common.sdn.parser.{parse as legacy_parse}
 use std.common.sdn.value.{SdnValue}
-use std.sdn.inline_candidate.{sdn_inline_parse_candidate_v2, ParseProgramLimitsV1}
+use std.sdn.inline_candidate.{sdn_inline_parse_candidate_v2, sdn_inline_parse_checked_v2, ParseProgramLimitsV1}
 
 fn inline_limits_v2() -> ParseProgramLimitsV1:
     ParseProgramLimitsV1(max_program_words: 512, max_source_bytes: 4096,
@@ -74,3 +74,47 @@ describe "SDN explicit shared VM inline candidate":
         limits = inline_limits_v2()
         limits.max_steps = 1
         expect(sdn_inline_parse_candidate_v2("true", limits).unwrap_err()).to_equal("fuel_exhausted")
+
+    it "maps unsupported Unicode to complete UTF-8 scalars through the public API":
+        for scalar in ["é", "한", "😀"]:
+            val source = "[true, \"" + scalar + "\"]"
+            val issue = sdn_inline_parse_checked_v2(source, inline_limits_v2()).unwrap_err()
+            expect(issue.phase).to_equal("lex")
+            expect(issue.code).to_equal("unsupported_non_ascii")
+            expect(issue.start).to_equal(8)
+            expect(issue.count).to_equal(scalar.bytes().len())
+            expect(sdn_inline_parse_candidate_v2(source, inline_limits_v2()).unwrap_err()).to_equal(issue.code)
+
+    it "maps CRLF and unterminated strings without crossing source bounds":
+        val multiline = sdn_inline_parse_checked_v2("[1,\r\n2]", inline_limits_v2()).unwrap_err()
+        expect(multiline.start).to_equal(3)
+        expect(multiline.count).to_equal(2)
+        expect(multiline.code).to_equal("unsupported_multiline")
+        val unclosed = sdn_inline_parse_checked_v2("[1, \"tail", inline_limits_v2()).unwrap_err()
+        expect(unclosed.code).to_equal("unterminated_quoted_string")
+        expect(unclosed.start).to_equal(4)
+        expect(unclosed.count).to_equal(5)
+
+    it "does not invent locations for grammar projection or configuration errors":
+        val grammar = sdn_inline_parse_checked_v2("[1,,2]", inline_limits_v2()).unwrap_err()
+        expect(grammar.phase).to_equal("grammar")
+        expect(grammar.start).to_equal(-1)
+        expect(grammar.count).to_equal(0)
+        val overflow = sdn_inline_parse_checked_v2("[9223372036854775808]", inline_limits_v2()).unwrap_err()
+        expect(overflow.phase).to_equal("projection")
+        expect(overflow.code).to_equal("integer_overflow")
+        expect(overflow.start).to_equal(-1)
+        var limits = inline_limits_v2()
+        limits.max_source_bytes = 2
+        val capacity = sdn_inline_parse_checked_v2("true", limits).unwrap_err()
+        expect(capacity.phase).to_equal("limits")
+        expect(capacity.start).to_equal(-1)
+
+    it "preserves successful VM output through both public entrypoints":
+        val source = "{a: [true, 12], b: null}"
+        val checked = sdn_inline_parse_checked_v2(source, inline_limits_v2()).unwrap()
+        val previous = sdn_inline_parse_candidate_v2(source, inline_limits_v2()).unwrap()
+        expect(checked.value).to_equal(legacy_parse(source).unwrap())
+        expect(checked.value).to_equal(previous.value)
+        expect(checked.tokens.start).to_equal(previous.tokens.start)
+        expect(checked.grammar_steps).to_equal(previous.grammar_steps)
