@@ -236,6 +236,73 @@ fn compiler_inventory_untracked_digests_v1(
     CompilerInventoryUntrackedDigestsV1(
         true, src_digest, test_digest, src_paths + test_paths)
 
+fn compiler_inventory_porcelain_path_v1(raw: text) -> text?:
+    if raw == "" or raw.contains("\t") or raw.contains("\r"):
+        return nil
+    if not raw.starts_with("\""):
+        return Some(raw)
+    # Git porcelain quotes spaces even with core.quotePath=false. Accept only
+    # that unescaped form; paths with control/quote/backslash escapes retain
+    # the existing fail-closed behavior of the separate Git listings.
+    if raw.len() < 3 or not raw.ends_with("\""):
+        return nil
+    val unquoted = raw[1:raw.len() - 1]
+    if unquoted == "" or unquoted.contains("\\") or
+            unquoted.contains("\""):
+        return nil
+    Some(unquoted)
+
+fn compiler_inventory_parse_porcelain_v1(
+    root: text, output: text, events: [CompileSourceEventV1],
+    source_roots: [text]
+) -> CompilerInventoryGitEventsV1?:
+    # Porcelain v1 with --no-renames emits tracked changes and individual
+    # untracked files in one Git snapshot. Reject any status/path we cannot
+    # interpret before advancing the cursor.
+    var changed = events
+    var untracked_paths: [text] = []
+    for line in output.split("\n"):
+        if line == "":
+            continue
+        if line.len() <= 3 or line[2:3] != " ":
+            return nil
+        val status = line[:2]
+        val decoded = compiler_inventory_porcelain_path_v1(line[3:])
+        if decoded == nil:
+            return nil
+        val path = decoded!
+        if status == "??":
+            untracked_paths.push(path)
+            continue
+        val index_status = status[:1]
+        val tree_status = status[1:2]
+        if (index_status != " " and index_status != "A" and
+                index_status != "M" and index_status != "D" and
+                index_status != "T" and index_status != "U") or
+                (tree_status != " " and tree_status != "A" and
+                    tree_status != "M" and tree_status != "D" and
+                    tree_status != "T" and tree_status != "U"):
+            return nil
+        val operation = if status.contains("D"): "delete" else: "modify"
+        val next = compiler_inventory_event_push_v1(
+            changed, root, operation, path)
+        if next == nil:
+            return nil
+        changed = next!
+    val untracked = untracked_paths.join("\n")
+    val digests = compiler_inventory_untracked_digests_v1(
+        untracked, source_roots)
+    if not digests.valid:
+        return nil
+    for path in untracked_paths:
+        val next = compiler_inventory_event_push_v1(
+            changed, root, "create", path)
+        if next == nil:
+            return nil
+        changed = next!
+    Some(CompilerInventoryGitEventsV1(
+        changed, digests.src_digest, digests.test_digest, digests.paths))
+
 fn compiler_inventory_git_events_v1(
     root: text, previous_head: text, head: text,
     source_roots: [text], cold_init: bool
@@ -291,34 +358,16 @@ fn compiler_inventory_git_events_v1(
         if next == nil:
             return nil
         events = next!
+    # One porcelain listing replaces the separate tracked diff and untracked
+    # ls-files processes on every warm request. The captured HEAD above still
+    # binds the committed-diff range and the cursor for this refresh.
     val working = compiler_inventory_git_lines_v1(
-        root, ["-c", "core.quotePath=false", "diff", "--name-status",
-            "--no-renames", head, "--"] + source_roots)
-    val untracked = compiler_inventory_git_lines_v1(
-        # Keep literal UTF-8 identities, matching cold initialization and diff.
-        # Git's default C quoting adds a trailing quote, so the source filter
-        # otherwise silently drops non-ASCII untracked .spl/simple.sdn paths.
-        root, ["-c", "core.quotePath=false", "ls-files", "--others",
-            "--exclude-standard", "--"] + source_roots)
-    if working == nil or untracked == nil:
+        root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
+            "--untracked-files=all", "--no-renames", "--"] + source_roots)
+    if working == nil:
         return nil
-    val digests = compiler_inventory_untracked_digests_v1(
-        untracked!, source_roots)
-    if not digests.valid:
-        return nil
-    val changed = compiler_inventory_parse_name_status_v1(root, working!, events)
-    if changed == nil:
-        return nil
-    events = changed!
-    for path in untracked!.split("\n"):
-        if path != "":
-            val next = compiler_inventory_event_push_v1(events, root, "create", path)
-            if next == nil:
-                return nil
-            events = next!
-    Some(CompilerInventoryGitEventsV1(
-        events, digests.src_digest, digests.test_digest,
-        digests.paths))
+    compiler_inventory_parse_porcelain_v1(
+        root, working!, events, source_roots)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -705,6 +754,7 @@ fn compiler_inventory_refresh_v1(
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
 export compiler_inventory_parse_name_status_v1
+export compiler_inventory_parse_porcelain_v1
 export compiler_inventory_journal_rows_v1
 export compiler_inventory_journal_prefix_digest_v1
 export compiler_inventory_filesystem_events_v1
