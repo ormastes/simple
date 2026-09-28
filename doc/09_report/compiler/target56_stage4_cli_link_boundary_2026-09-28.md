@@ -32,3 +32,18 @@ The next production change must put the optional CLI/provider paths behind
 admitted first-demand loading and give Stage4 only the kernel's required
 symbols. The full CLI, MCP/LSP, matched hello size, and production compile
 time/RSS gates remain open.
+
+## Standalone Office check
+
+A no-stub Stage2 analogue of the existing standalone Office target used
+`--entry-closure --entry src/app/office/mod.spl` with `src/lib` and
+`src/app/office` source roots. It compiled **532 units, 0 failures**, then
+failed its `core-c-bootstrap` link on **106 distinct symbols**: 42 Vulkan,
+25 Metal, 16 CUDA, 15 ROCm, and eight smaller-family symbols. The local log
+is `build/mini_builds/target56_office_provider_build.log`, SHA-256
+`b604dacaabae9663230d41e0b1014ba0c13ec664def30aefb5f2ec0deadd7e93`.
+This is not a run of the Phase3-only production script, whose admitted
+compiler is unavailable in this worktree. It shows that simply moving Office
+into a separate executable still leaves the GPU provider boundary to solve.
+The concrete dependency cut is in
+`doc/04_architecture/compiler/perf/optional_cli_provider_boundary.md`.

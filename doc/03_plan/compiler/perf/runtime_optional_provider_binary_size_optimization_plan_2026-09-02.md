@@ -62,6 +62,10 @@ undefined symbols, chiefly from optional Vulkan, Metal, SQLite, CUDA, SDL,
 and ROCm paths. This is direct evidence that those paths still reach the core
 link instead of an admitted first-demand provider. See
 `doc/09_report/compiler/target56_stage4_cli_link_boundary_2026-09-28.md`.
+The command-level dependency and first-demand provider cut is specified in
+`doc/04_architecture/compiler/perf/optional_cli_provider_boundary.md`.
+An isolated Office product analogue still fails on 106 GPU-family symbols,
+so separate executable packaging alone is not yet a demand-load pass.
 
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
