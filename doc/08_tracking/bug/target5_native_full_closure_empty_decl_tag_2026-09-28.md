@@ -1,6 +1,7 @@
 # Native full-closure parse reports empty declaration tags
 
-Status: open; blocks Target 5 full CLI Stage4 link and size qualification.
+Status: focused native accessor regression passes; full CLI Stage4 link and
+size qualification remain open.
 
 The Target 5 diagnostic pure-Simple compiler compiled 959 source units, then
 attempted `src/app/cli/main.spl` with entry closure across compiler, app,
@@ -66,6 +67,12 @@ the full-closure miscompile and cannot qualify the candidate. The original
 JIT setup on missing `rt_file_read_regular_no_follow_bounded_bytes`; it did
 not reach the probe. A staged pure-Simple compiler attempt with the broad
 `src/compiler` and `src/lib` roots was terminated after about one minute when
-its RSS reached about 40 GiB, without producing a binary. The 48-unit native
-probe and full CLI remain unverified. Narrow closure construction or a current
-bounded self-hosted compiler is needed before this bug can be closed.
+its RSS reached about 40 GiB, without producing a binary. That attempt omitted
+the required `--entry-closure` flag and is not a bounded comparison.
+
+With `--entry-closure`, the staged pure-Simple compiler built the original
+48-unit regression in 5.28 seconds at 244,816 KiB peak RSS. The executable
+passed in both `SIMPLE_NATIVE_ARENA_DECLS=1` and default modes: count and
+slot length were 2, direct reads and `module_decl_at` returned 7 and 11,
+and indices -1 and 2 returned -1. This qualifies the focused accessor repair;
+the full CLI parser and Stage4 link still need their own run.

@@ -52,10 +52,21 @@ retry was run after the session's three-attempt verification cap. See
 `doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
 A 48-unit native reproducer now isolates the declaration lookup: the arena
 contains slots 7 and 11, while `module_decl_at` returns -1 for both. The
-focused probe is intentionally failing until that wrapper path is repaired.
-An owner-side checked accessor candidate removes the cross-module slot-length
-comparison, but the 48-unit native regression has not been rebuilt successfully;
-see the bug report's 2026-09-29 update. Do not count this as a Stage4 pass.
+focused probe failed before the owner-side repair. The repair removes the
+cross-module slot-length comparison. Rebuilt with `--entry-closure`, the
+48-unit native regression now passes in arena and default modes (5.28 s build,
+244,816 KiB build peak RSS). This is focused parser evidence, not a Stage4
+full CLI or size pass; see the bug report's 2026-09-29 update.
+
+## Current-source diagnostic compiler boundary
+
+A staged pure-Simple compiler reached native link for
+`src/compiler/80.driver/main.spl` with entry closure after the
+`OptimizationConfig` import was made direct. The link then rejected 122
+undefined runtime symbols (133.36 s, 3,558,148 KiB peak RSS), so no updated
+diagnostic compiler or full CLI binary exists. The concrete bundle blocker is
+tracked in
+`doc/08_tracking/bug/target5_diagnostic_stage2_runtime_bundle_2026-09-29.md`.
 
 ## Remaining gates
 
