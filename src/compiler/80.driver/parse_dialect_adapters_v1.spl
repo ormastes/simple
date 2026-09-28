@@ -38,7 +38,8 @@ use std.common.string_core.{text_to_utf8_bytes}
 use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
 
 use std.common.sdn.lexer.{tokenize}
-use std.common.sdn.parser.{parse_with_spans, parse_with_issues}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.parser.{SdnIssue, parse_with_issues, parse_with_spans_and_issues}
 use std.common.sdn.encode.{sdn_encode_canonical}
 
 use compiler.driver.parser_scalar_parity_v1.{ParserScalarNormalizedOutputV1}
@@ -129,7 +130,7 @@ fn _sdn_action_bits(index: i64) -> i64:
 
 # SDN punctuation tokens carry their character as their text, and a Word token
 # never is one, so the token-text stream is a lossless ordered token walk.
-fn _sdn_token_digest(source: text, path: text) -> EnvironmentDigest256V1:
+fn _sdn_token_projection(source: text, path: text) -> (EnvironmentDigest256V1, u64):
     var material: [i64] = []
     parse_digest_push_text_v1(material, "sdn/parse-tokens/v1")
     parse_digest_push_text_v1(material, path)
@@ -137,73 +138,92 @@ fn _sdn_token_digest(source: text, path: text) -> EnvironmentDigest256V1:
     parse_digest_push_u64_v1(material, tokens.len() as u64)
     for token in tokens:
         parse_digest_push_text_v1(material, token.text)
-    parse_digest_of_v1(material)
+    (parse_digest_of_v1(material), tokens.len() as u64)
 
-# Spans come from the parser's own dotted-path span table. Keys are sorted, so
-# the digest does not depend on hash iteration order.
-fn _sdn_span_digest(source: text, path: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
-    parse_digest_push_text_v1(material, "sdn/parse-spans/v1")
-    parse_digest_push_text_v1(material, path)
-    match parse_with_spans(source):
-        case Ok(pair):
-            val spans = pair.1
-            val keys = spans.keys().sort()
-            parse_digest_push_u64_v1(material, keys.len() as u64)
-            for key in keys:
-                val span = spans[key]
-                parse_digest_push_text_v1(material, key)
-                parse_digest_push_u64_v1(material, span.line as u64)
-                parse_digest_push_u64_v1(material, span.column as u64)
-                parse_digest_push_u64_v1(material, span.start as u64)
-                parse_digest_push_u64_v1(material, span.end as u64)
-        case Err(e):
-            parse_digest_push_text_v1(material, "unparsed")
-            parse_digest_push_text_v1(material, e)
-    parse_digest_of_v1(material)
+# Spans, nodes, and issues share one parse result. Keep the three digest
+# material streams unchanged; the canonical node encoding remains SDN-owned.
+fn _sdn_digests_ready(
+    value: SdnValue, spans: Dict<text, SdnSpan>, issues: [SdnIssue], path: text
+) -> (EnvironmentDigest256V1, EnvironmentDigest256V1, EnvironmentDigest256V1):
+    var span_material: [i64] = []
+    parse_digest_push_text_v1(span_material, "sdn/parse-spans/v1")
+    parse_digest_push_text_v1(span_material, path)
+    val keys = spans.keys().sort()
+    parse_digest_push_u64_v1(span_material, keys.len() as u64)
+    for key in keys:
+        val span = spans[key]
+        parse_digest_push_text_v1(span_material, key)
+        parse_digest_push_u64_v1(span_material, span.line as u64)
+        parse_digest_push_u64_v1(span_material, span.column as u64)
+        parse_digest_push_u64_v1(span_material, span.start as u64)
+        parse_digest_push_u64_v1(span_material, span.end as u64)
 
-# The node digest is the canonical encoding SDN already defines (bytewise-sorted
-# dict keys, inline rendering), not a second tree walk written here.
-fn _sdn_node_digest(source: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
-    parse_digest_push_text_v1(material, "sdn/parse-nodes/v1")
-    match parse_with_issues(source):
-        case Ok(parsed):
-            parse_digest_push_text_v1(material, "parsed")
-            parse_digest_push_text_v1(material, sdn_encode_canonical(parsed.0))
-        case Err(e):
-            parse_digest_push_text_v1(material, "unparsed")
-            parse_digest_push_text_v1(material, e)
-    parse_digest_of_v1(material)
+    var node_material: [i64] = []
+    parse_digest_push_text_v1(node_material, "sdn/parse-nodes/v1")
+    parse_digest_push_text_v1(node_material, "parsed")
+    parse_digest_push_text_v1(node_material, sdn_encode_canonical(value))
 
-fn _sdn_diagnostic_digest(source: text) -> EnvironmentDigest256V1:
-    var material: [i64] = []
-    parse_digest_push_text_v1(material, "sdn/parse-diagnostics/v1")
-    match parse_with_issues(source):
-        case Ok(parsed):
-            val issues = parsed.1
-            parse_digest_push_u64_v1(material, issues.len() as u64)
-            for issue in issues:
-                parse_digest_push_text_v1(material, issue.kind)
-                parse_digest_push_text_v1(material, issue.path)
-                parse_digest_push_text_v1(material, issue.message)
-                parse_digest_push_u64_v1(material, issue.line as u64)
-                parse_digest_push_u64_v1(material, issue.col as u64)
-        case Err(e):
-            # A fatal SDN parse error has no issue list; it is one diagnostic.
-            parse_digest_push_u64_v1(material, 1u64)
-            parse_digest_push_text_v1(material, "fatal")
-            parse_digest_push_text_v1(material, e)
-    parse_digest_of_v1(material)
+    var diagnostic_material: [i64] = []
+    parse_digest_push_text_v1(diagnostic_material, "sdn/parse-diagnostics/v1")
+    parse_digest_push_u64_v1(diagnostic_material, issues.len() as u64)
+    for issue in issues:
+        parse_digest_push_text_v1(diagnostic_material, issue.kind)
+        parse_digest_push_text_v1(diagnostic_material, issue.path)
+        parse_digest_push_text_v1(diagnostic_material, issue.message)
+        parse_digest_push_u64_v1(diagnostic_material, issue.line as u64)
+        parse_digest_push_u64_v1(diagnostic_material, issue.col as u64)
+    (parse_digest_of_v1(span_material), parse_digest_of_v1(node_material),
+        parse_digest_of_v1(diagnostic_material))
+
+fn _sdn_digests_failed(
+    error: text, path: text
+) -> (EnvironmentDigest256V1, EnvironmentDigest256V1, EnvironmentDigest256V1):
+    var span_material: [i64] = []
+    parse_digest_push_text_v1(span_material, "sdn/parse-spans/v1")
+    parse_digest_push_text_v1(span_material, path)
+    parse_digest_push_text_v1(span_material, "unparsed")
+    parse_digest_push_text_v1(span_material, error)
+
+    var node_material: [i64] = []
+    parse_digest_push_text_v1(node_material, "sdn/parse-nodes/v1")
+    parse_digest_push_text_v1(node_material, "unparsed")
+    parse_digest_push_text_v1(node_material, error)
+
+    var diagnostic_material: [i64] = []
+    parse_digest_push_text_v1(diagnostic_material, "sdn/parse-diagnostics/v1")
+    parse_digest_push_u64_v1(diagnostic_material, 1u64)
+    parse_digest_push_text_v1(diagnostic_material, "fatal")
+    parse_digest_push_text_v1(diagnostic_material, error)
+    (parse_digest_of_v1(span_material), parse_digest_of_v1(node_material),
+        parse_digest_of_v1(diagnostic_material))
+
+fn _sdn_normalized_ready(
+    token_digest: EnvironmentDigest256V1, value: SdnValue,
+    spans: Dict<text, SdnSpan>, issues: [SdnIssue], path: text
+) -> ParserScalarNormalizedOutputV1:
+    val digests = _sdn_digests_ready(value, spans, issues, path)
+    ParserScalarNormalizedOutputV1(
+        token_digest: token_digest, span_digest: digests.0,
+        node_digest: digests.1, diagnostic_digest: digests.2)
+
+fn _sdn_normalized_failed(
+    token_digest: EnvironmentDigest256V1, error: text, path: text
+) -> ParserScalarNormalizedOutputV1:
+    val digests = _sdn_digests_failed(error, path)
+    ParserScalarNormalizedOutputV1(
+        token_digest: token_digest, span_digest: digests.0,
+        node_digest: digests.1, diagnostic_digest: digests.2)
 
 pub fn parse_dialect_normalize_sdn_v1(
     source: text, path: text
 ) -> ParserScalarNormalizedOutputV1:
-    ParserScalarNormalizedOutputV1(
-        token_digest: _sdn_token_digest(source, path),
-        span_digest: _sdn_span_digest(source, path),
-        node_digest: _sdn_node_digest(source),
-        diagnostic_digest: _sdn_diagnostic_digest(source))
+    val tokens = _sdn_token_projection(source, path)
+    match parse_with_spans_and_issues(source):
+        case Ok(parsed):
+            _sdn_normalized_ready(
+                tokens.0, parsed.0, parsed.1, parsed.2, path)
+        case Err(error):
+            _sdn_normalized_failed(tokens.0, error, path)
 
 const _SDN_PROBE_PATH: text = "dialect-probe.sdn"
 const _SDN_PROBE_SOURCE: text = "name: probe\ncount: 2\nitems: [a, b]\nnested: {k: v}\n"
@@ -219,16 +239,10 @@ pub fn parse_dialect_tables_sdn_v1() -> DialectTablesV1:
         probe_output: parse_dialect_normalize_sdn_v1(
             _SDN_PROBE_SOURCE, _SDN_PROBE_PATH))
 
-fn _sdn_declaration_count(source: text) -> u64:
-    match parse_with_spans(source):
-        case Ok(pair): pair.1.keys().len() as u64
-        case Err(e): 0u64
-
-fn _sdn_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
-    var diagnostics = 0u64
-    match parse_with_issues(request.source_text):
-        case Ok(parsed): diagnostics = parsed.1.len() as u64
-        case Err(e): diagnostics = 1u64
+fn _sdn_result(
+    request: ParseRequestV1, token_count: u64, declaration_count: u64,
+    diagnostic_count: u64, output: ParserScalarNormalizedOutputV1
+) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
     Ok(ParseNormalizedResultV1(
         schema_version: PARSE_RESULT_PROVIDER_SEAM_SCHEMA_V1,
         provider_id: _SDN_PROVIDER_ID,
@@ -241,11 +255,23 @@ fn _sdn_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseR
         actions_digest: parse_result_unstamped_dialect_digest_v1(),
         schema_digest: parse_result_unstamped_dialect_digest_v1(),
         semantic_profile_digest: parse_result_unstamped_dialect_digest_v1(),
-        token_count: tokenize(request.source_text).len() as u64,
-        declaration_count: _sdn_declaration_count(request.source_text),
-        diagnostic_count: diagnostics,
-        output: parse_dialect_normalize_sdn_v1(
-            request.source_text, request.source_path)))
+        token_count: token_count,
+        declaration_count: declaration_count,
+        diagnostic_count: diagnostic_count,
+        output: output))
+
+fn _sdn_parse(request: ParseRequestV1) -> Result<ParseNormalizedResultV1, ParseResultRefusalV1>:
+    val tokens = _sdn_token_projection(request.source_text, request.source_path)
+    match parse_with_spans_and_issues(request.source_text):
+        case Ok(parsed):
+            val declarations = parsed.1.keys().len() as u64
+            val diagnostics = parsed.2.len() as u64
+            _sdn_result(request, tokens.1, declarations, diagnostics,
+                _sdn_normalized_ready(tokens.0, parsed.0, parsed.1,
+                    parsed.2, request.source_path))
+        case Err(error):
+            _sdn_result(request, tokens.1, 0u64, 1u64,
+                _sdn_normalized_failed(tokens.0, error, request.source_path))
 
 pub fn parse_result_provider_sdn_v1() -> ParseResultProviderV1:
     val tables = parse_dialect_tables_sdn_v1()
@@ -256,4 +282,3 @@ pub fn parse_result_provider_sdn_v1() -> ParseResultProviderV1:
         tables: tables,
         dialect_identity: parse_dialect_identity_of_v1(tables),
         parse: _sdn_parse)
-

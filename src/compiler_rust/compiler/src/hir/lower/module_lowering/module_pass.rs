@@ -1496,6 +1496,16 @@ impl Lowerer {
         }
     }
 
+    /// Rename colliding flattened globals to owner-exact symbols and record
+    /// the census the reference resolver consults; `None` = no collision.
+    fn qualify_flattened_globals(&mut self, ast_module: &Module) -> Option<Module> {
+        let (module, owners, symbol_owners) =
+            super::flatten_global_owner::module_with_owner_qualified_globals(ast_module)?;
+        self.flatten_global_owners = owners;
+        self.flatten_global_symbol_owners = symbol_owners;
+        Some(module)
+    }
+
     pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
@@ -1503,6 +1513,10 @@ impl Lowerer {
         // See `nested_def_hoist.rs` for the rules and rationale.
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        // Same-named globals of different flattened modules get owner-exact
+        // symbols before any registration (see `flatten_global_owner.rs`).
+        let qualified = self.qualify_flattened_globals(ast_module);
+        let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
         self.module.name = ast_module.name.clone();
         // Codegen-side consumer of the flattened import-binding markers, so
@@ -2063,7 +2077,13 @@ impl Lowerer {
                     continue;
                 }
                 let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
                 // Codegen decides whether a global's backing data is writable
                 // by consulting `dynamic_init_globals` (mirrors the same
                 // check for global_init_strings/arrays/functions/structs) --
@@ -2186,6 +2206,10 @@ impl Lowerer {
         // Hoist nested type definitions to module scope (see `lower_module`).
         let hoisted = super::nested_def_hoist::module_with_hoisted_defs(ast_module);
         let ast_module: &Module = hoisted.as_ref().unwrap_or(ast_module);
+        // Same-named globals of different flattened modules get owner-exact
+        // symbols before any registration (see `flatten_global_owner.rs`).
+        let qualified = self.qualify_flattened_globals(ast_module);
+        let ast_module: &Module = qualified.as_ref().unwrap_or(ast_module);
 
         // Perform all lowering passes
         self.module.name = ast_module.name.clone();
@@ -2418,7 +2442,13 @@ impl Lowerer {
                     continue;
                 }
                 let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx)?;
+                // Resolve the initializer's own references through the owner
+                // of the global it initializes (flattened same-name globals).
+                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+                let hir_val = self.lower_expr(value, &mut dyn_ctx);
+                self.current_function_owner = previous_owner;
+                let hir_val = hir_val?;
                 // Codegen decides whether a global's backing data is writable
                 // by consulting `dynamic_init_globals` (mirrors the same
                 // check for global_init_strings/arrays/functions/structs) --

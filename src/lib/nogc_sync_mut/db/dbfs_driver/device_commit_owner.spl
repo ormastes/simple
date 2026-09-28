@@ -408,7 +408,9 @@ fn _device_read_bytes_locked(inst_id: i64, base_block: i64, block_count: i64, of
             out.push(sector[pos as i32])
             pos = pos + 1
             read_count = read_count + 1
-        if pos >= sector.len() as i64 and read_count < length:
+        # A full sector ends at pos == sector_size; only a SHORT sector (the
+        # device returned fewer bytes than its sector size) is corruption.
+        if pos < sector_size and pos >= sector.len() as i64 and read_count < length:
             return Err(FsError.Corrupt)
     Ok(out)
 
@@ -758,6 +760,28 @@ fn dbfs_device_unregister_locked(inst_id: i64) -> Result<bool, FsError>:
 fn dbfs_device_data_capacity_locked(inst_id: i64, block_count: i64) -> i64:
     _device_data_capacity_locked(inst_id, block_count)
 
+fn dbfs_device_append_room_locked(inst_id: i64, block_count: i64) -> i64:
+    """Bytes the next append can still hold, or -1 when the owner is unknown.
+
+    Mirrors `_device_append_locked`: the next blob starts at the
+    sector-aligned end of the arena, so a caller can reject an image that
+    cannot fit without advancing the mutation epoch or materializing it.
+    """
+    val idx = _owner_idx(inst_id)
+    if idx < 0:
+        return -1
+    val sector_size = _device_sector_size_locked(inst_id)
+    val capacity = _device_data_capacity_locked(inst_id, block_count)
+    val prior_end = _owner_next_offsets[idx]
+    if sector_size <= 0 or capacity <= 0 or prior_end < 0 or prior_end > capacity:
+        return -1
+    val rem = prior_end % sector_size
+    if rem == 0:
+        return capacity - prior_end
+    if prior_end > capacity - (sector_size - rem):
+        return 0
+    capacity - (prior_end + sector_size - rem)
+
 fn dbfs_device_blob_binding_locked(inst_id: i64, inode_id: u64) -> DbfsBlobBinding:
     _device_blob_binding_locked(inst_id, inode_id)
 
@@ -806,6 +830,7 @@ export dbfs_owner_transaction_begin, dbfs_owner_transaction_end
 export dbfs_owner_quarantined
 export dbfs_device_register_locked, dbfs_device_unregister_locked
 export dbfs_device_data_capacity_locked, dbfs_device_blob_binding_locked
+export dbfs_device_append_room_locked
 export dbfs_device_mount_seal_epoch_locked
 export dbfs_device_restore_blob_locked, dbfs_device_commit_blob_locked
 export dbfs_device_append_unbound_locked, dbfs_device_read_bytes_locked

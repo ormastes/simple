@@ -59,8 +59,8 @@ impl Lowerer {
                     Ok(ctx.locals[idx].ty)
                 } else if let Some(ty) = self.named_callable_value_type(name) {
                     Ok(ty)
-                } else if let Some(ty) = self.globals.get(name) {
-                    Ok(*ty)
+                } else if let Some(ty) = self.flatten_aware_global_type(name) {
+                    Ok(ty)
                 } else if self.lenient_types {
                     Ok(TypeId::ANY)
                 } else {

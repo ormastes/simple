@@ -48,3 +48,38 @@ after #1882 lands:
     sed -e '9s/exit 1/: /' -e '2s/set -eu/set -u/' \
       scripts/check/check-bootstrap-portability.shs >/tmp/enum.shs
     sh /tmp/enum.shs 2>&1 | grep '^FAIL'
+
+**Note:** the enumeration must run from inside `scripts/check/` — the script
+resolves its root from `$0`, so a copy under `/tmp` checks the wrong tree.
+
+## Update 2026-09-28 — after #1882 (rebased on main with #1909/#1913)
+
+Enumeration run from `scripts/check/` in a worktree at origin/main + #1882:
+
+| workflow file substituted | failing assertions |
+|---|---|
+| origin/main | 231 |
+| #1882 | **106** |
+| pre-rewind `e274cd33719^` | 107 (106 plus the concurrency pin #1909 changed) |
+
+The #1882 failure set is **identical** to the one you get with the pre-rewind
+workflow, so `e274cd33719^:.github/workflows/rust-bootstrap-multiplatform.yml`
+has no further content these checks need. None of the 106 remaining
+assertions greps content of `rust-bootstrap-multiplatform.yml`. All of them
+need an owner decision:
+
+- `freebsd-build.yml` triggers/wiring (module-init, parse-f64, enum f64 payload
+  fixtures; full execution; QEMU KVM): 6
+- `windows-build.yml` (MinGW `CC_`/`AR_x86_64_pc_windows_gnu`, MinGW triple): 3
+- release surfaces still reference the retired LLVM cross workflow: 1
+- baremetal C sources (`examples/09_embedded/simple_os/arch/*/boot/*.c`,
+  `src/os/kernel/arch/riscv64/boot/freestanding_runtime.c`): ~44
+- hosted RV32/FreeBSD cross toolchain spec text: 15
+- pure runtime enum equality, cross-module zero-arg receiver fixture,
+  focused interpreter regressions: 11
+- bootstrap script text (backend help, macOS prerequisites, CPU/Stage 4
+  profiles, etc.): the rest
+
+Several of these files were also rewound by `e274cd33719` (`windows-build.yml`,
+`freebsd-build.yml`, `release.yml`, `bootstrap-from-scratch.sh`), but they have
+been edited heavily since, so restoring them is outside #1882.

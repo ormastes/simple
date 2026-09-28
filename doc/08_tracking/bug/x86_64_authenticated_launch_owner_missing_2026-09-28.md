@@ -88,3 +88,47 @@ verification reaches freestanding `@cfg(arm64)` externs
 (`byte_utils.byte_at` -> `rt_arm_array_get_byte_u32`, `elf_loader.spl`
 `rt_arm_elf64_*`) that the hosted interpreter does not register
 (`unknown extern function: rt_arm_array_get_byte_u32`).
+
+## 2026-09-28 update — arm64 host: interpreter backings; argv/envp example restored
+
+All 27 `@cfg(arm64)`-decorated externs in `src/` were enumerated (decorator on
+the line before `extern fn`). Only `rt_array_data_ptr_text` and
+`simpleos_syscall` had any backing outside the freestanding runtime
+(`examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`); none had
+a hosted interpreter entry.
+
+- Now backed in the seed interpreter (`interpreter_extern/arm_loader.rs`, a
+  byte-for-byte port of the bare-metal C, including the `e_machine == 183`
+  ELF64 header check): `rt_arm_array_{clone_bytes, slice_bytes}`,
+  `rt_arm_elf64_{entry, pt_load_count, pt_load_offset, pt_load_vaddr,
+  pt_load_filesz, pt_load_memsz, pt_load_flags, pt_load_align}`, and
+  `rt_arm_smf_elf_stub_size`. `rt_arm_array_{len_u32, get_byte_u32}` landed
+  concurrently on main (`976bdd1bcef`, `sffi_array.rs`).
+- Not backed, on purpose (hardware-only: cache maintenance, EL0 copy/handoff,
+  payload regions, SVC, RNDR): `rt_arm64_dcache_{clean,invalidate}_range`,
+  `rt_arm64_user_copy{in,out}`, `rt_arm64_record_user_handoff`,
+  `rt_arm64_set_exec_image`, `rt_arm_payload_{elf64_ring3_enter,
+  region_begin, region_byte_at, region_load_sectors}`,
+  `rt_arm_svc_ram_payload_resident`, `rt_rndr`, `simpleos_syscall`.
+- Runtime lanes (`src/runtime`, `src/compiler_rust/runtime`) are unchanged:
+  the hosted backing lives in the interpreter only, so the dual-lane ratchet
+  is not touched. The pure-Simple interpreter was not exercised here.
+
+Restoring the example exposed three more defects, all fixed:
+1. Seed interpreter `u64` `/` and `%` ran as signed `i64`
+   (`0xffff_ffff_ffff_ffffu64 / 2 == 0`). `stack_builder` then reported
+   `ArithmeticOverflow`. This only shows when a module falls back from JIT to
+   the interpreter. Fixed in `interpreter/expr/ops.rs`.
+2. Index assignment to a *local* `Value::ByteArray` (`rt_byte_array_new_len`)
+   failed with `cannot index assign value of type array`. The field paths
+   already handled it. `origin/main` fixed this at the same time
+   (`4f186300a05`), so this change takes that fix and adds nothing here.
+3. The spec fixture had `p_offset 0x80` with `p_vaddr 0x400000` and
+   `p_align 0x1000`, which the loader's alignment check rightly rejects. The
+   fixture now uses vaddr/entry `0x400080`.
+
+Evidence on this aarch64 host (`authenticated_launch_arguments_threading_spec`):
+deployed seed `bin/release/aarch64-unknown-linux-gnu/simple` (sha256
+`44a07ae51c5dd308...`) 2/3, `unknown extern function:
+rt_arm_array_get_byte_u32`. Locally built seed 3/3. `elf_loader_spec` also
+goes from 0/10 to 10/10. The deployed seed needs a redeploy to pick this up.

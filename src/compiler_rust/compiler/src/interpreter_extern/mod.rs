@@ -103,6 +103,7 @@ pub mod sandbox;
 pub mod mock_policy;
 pub mod sffi_value;
 pub mod sffi_array;
+pub mod arm_loader;
 pub mod sffi_db;
 pub mod sffi_dict;
 pub mod signatures;
@@ -810,7 +811,22 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn);
+    insert_simple!("rt_arm_array_len_u32", sffi_array::rt_arm_array_len_u32_fn);
+    insert_simple!("rt_arm_array_get_byte_u32", sffi_array::rt_arm_array_get_byte_u32_fn);
     insert_simple!("rt_bytes_u8_set", sffi_array::rt_bytes_u8_set_fn);
+    // @cfg(arm64) loader byte helpers: the interpreter selects @cfg by host arch,
+    // so an aarch64 host reaches these from os/kernel/loader. See arm_loader.rs.
+    insert_simple!("rt_arm_array_clone_bytes", arm_loader::rt_arm_array_clone_bytes_fn);
+    insert_simple!("rt_arm_array_slice_bytes", arm_loader::rt_arm_array_slice_bytes_fn);
+    insert_simple!("rt_arm_elf64_pt_load_count", arm_loader::rt_arm_elf64_pt_load_count_fn);
+    insert_simple!("rt_arm_elf64_entry", arm_loader::rt_arm_elf64_entry_fn);
+    insert_simple!("rt_arm_elf64_pt_load_offset", arm_loader::rt_arm_elf64_pt_load_offset_fn);
+    insert_simple!("rt_arm_elf64_pt_load_vaddr", arm_loader::rt_arm_elf64_pt_load_vaddr_fn);
+    insert_simple!("rt_arm_elf64_pt_load_filesz", arm_loader::rt_arm_elf64_pt_load_filesz_fn);
+    insert_simple!("rt_arm_elf64_pt_load_memsz", arm_loader::rt_arm_elf64_pt_load_memsz_fn);
+    insert_simple!("rt_arm_elf64_pt_load_flags", arm_loader::rt_arm_elf64_pt_load_flags_fn);
+    insert_simple!("rt_arm_elf64_pt_load_align", arm_loader::rt_arm_elf64_pt_load_align_fn);
+    insert_simple!("rt_arm_smf_elf_stub_size", arm_loader::rt_arm_smf_elf_stub_size_fn);
     insert_simple!("rt_f64_array_alloc", file_io::rt_f64_array_alloc);
     insert_simple!("rt_f32_array_alloc", file_io::rt_f32_array_alloc);
     insert_simple!("rt_i64_array_alloc", file_io::rt_i64_array_alloc);
@@ -2803,6 +2819,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
     insert_simple!("spl_dlsym_checked", wsffi::spl_dlsym_checked);
     insert_simple!("spl_dlsym_process_checked", wsffi::spl_dlsym_process_checked);
+    insert_simple!("spl_dynlib_snapshot_linux", wsffi::spl_dynlib_snapshot_linux);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
