@@ -423,7 +423,11 @@ pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     None
 }
 
-fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Option<PathBuf> {
+fn build_c_runtime_library(
+    build_dir: &Path,
+    include_stage4_hosted: bool,
+    include_cranelift_stubs: bool,
+) -> Option<PathBuf> {
     let archive = build_dir.join(host_archive_name());
     let runtime_root = find_core_c_runtime_source_root()?;
     let target = effective_target();
@@ -582,7 +586,7 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
     }
     if include_stage4_hosted {
         runtime_inputs.extend(["runtime_font.c", "runtime_sqlite.c"]);
-    } else {
+    } else if include_cranelift_stubs {
         // Cranelift JIT bridge NAMED-TRAP stubs (75 symbols) -- see
         // doc/08_tracking/bug/stage2_link_full_undefined_symbol_census_2026-09-07.md
         // "Bucket 2 deferred: cranelift JIT bridge". Only the core-C-bootstrap
@@ -755,11 +759,17 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
 }
 
 pub(crate) fn build_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, false)
+    build_c_runtime_library(build_dir, false, true)
+}
+
+pub(crate) fn build_stage4_compiler_core_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
+    // The compiler backfill owns the real Cranelift hooks. Keep ordinary
+    // bootstrap's named-trap stubs out of this archive to prevent overlap.
+    build_c_runtime_library(build_dir, false, false)
 }
 
 pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf> {
-    build_c_runtime_library(build_dir, true)
+    build_c_runtime_library(build_dir, true, false)
 }
 
 /// Compile ONLY `src/runtime/runtime_sqlite.c` into a standalone object.
@@ -1590,6 +1600,9 @@ const STAGE4_C_TIME_DEFINITIONS: &[&str] = &[
 ];
 
 const STAGE4_C_SQLITE_DEFINITIONS: &[&str] = &[
+    // The same provider source exports this version probe for the demand-load
+    // bridge; retain it in the exact static archive contract as well.
+    "spl_sqlite_provider_abi_version_v1",
     "rt_sqlite_begin",
     "rt_sqlite_bind_float",
     "rt_sqlite_bind_int",
@@ -2261,6 +2274,32 @@ pub(crate) fn build_stage4_rust_runtime_projection_archive(
     allowed_external_runtime_symbols: &[String],
     temp_dir: &Path,
 ) -> Result<PathBuf, String> {
+    // A live entry may need only the compiler backfill and core-C providers.
+    // In that case there are no Rust runtime roots to project. Keep an empty
+    // archive in the final link so any missed dependency still fails there.
+    if requested_symbols.is_empty() {
+        if let Some(symbol) = allowed_external_runtime_symbols
+            .iter()
+            .find(|symbol| !symbol.starts_with("rt_") && !symbol.starts_with("spl_"))
+        {
+            return Err(format!("Stage4 allowed external `{symbol}` is not a runtime ABI symbol"));
+        }
+        std::fs::create_dir_all(temp_dir)
+            .map_err(|err| format!("create empty Stage4 Rust runtime capsule directory: {err}"))?;
+        let output = temp_dir.join("libsimple_stage4_rust_runtime.a");
+        let _ = std::fs::remove_file(&output);
+        let ar = find_archive_tool()?;
+        let created = archive_create_command(&ar, &output, &[], false, true)
+            .output()
+            .map_err(|err| format!("execute empty Stage4 Rust runtime archive tool {ar}: {err}"))?;
+        if !created.status.success() {
+            return Err(format!(
+                "create empty Stage4 Rust runtime capsule: {}",
+                String::from_utf8_lossy(&created.stderr).trim()
+            ));
+        }
+        return Ok(output);
+    }
     project_stage4_archive_closure(
         &[rust_runtime_archive],
         requested_symbols,
@@ -2384,6 +2423,12 @@ fn project_stage4_archive_closure(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // A relocatable closure made by GNU ld can carry misaligned AArch64
+        // LDST relocations into an lld final link. Use the selected linker
+        // for both steps so the capsule has the same relocation semantics.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");
@@ -2654,8 +2699,9 @@ fn project_stage4_archive_closure(
 
 /// Build the Stage-4 compiler hook archive without importing a second runtime.
 ///
-/// The dedicated archive's globally defined `rt_cranelift_*` symbols are the
-/// exact export contract. On GNU/Linux, a relocatable link roots those exports
+/// The dedicated archive's globally defined `rt_cranelift_*` symbols and the
+/// three versioned AOT configuration hooks form the exact export contract.
+/// On GNU/Linux, a relocatable link roots those exports
 /// and section-GCs everything outside their dependency closure. Surviving
 /// non-contract definitions are localized; the result is rejected unless its
 /// public ABI is contract-only and disjoint from every provider.
@@ -2693,7 +2739,14 @@ pub(crate) fn build_compiler_backfill_archive(
         let mut manifest_raw = BTreeSet::new();
         for (symbol, count) in &source_defined {
             let canonical = canonical_archive_symbol(symbol);
-            if canonical.starts_with("rt_cranelift_") {
+            if canonical.starts_with("rt_cranelift_")
+                || matches!(
+                    canonical,
+                    "spl_cranelift_new_aot_module_config_v2"
+                        | "spl_cranelift_aot_isa_feature_v2"
+                        | "spl_cranelift_aot_opt_level_v2"
+                )
+            {
                 *contract_counts.entry(canonical.to_string()).or_insert(0usize) += *count;
                 manifest_raw.insert(symbol.clone());
             }
@@ -2735,6 +2788,12 @@ pub(crate) fn build_compiler_backfill_archive(
         })?;
         let cc = find_c_compiler();
         let mut closure_cmd = std::process::Command::new(&cc);
+        // Match the final linker's relocation handling. GNU ld's partial
+        // AArch64 closure can leave misaligned LDST128 relocations that lld
+        // rejects when the localized backfill reaches the final link.
+        if let Some(linker) = super::linker::requested_linker_driver_name()? {
+            closure_cmd.arg(format!("-fuse-ld={linker}"));
+        }
         closure_cmd.arg("-nostdlib").arg("-Wl,-r");
         #[cfg(target_os = "linux")]
         closure_cmd.arg("-no-pie").arg("-Wl,--gc-sections");

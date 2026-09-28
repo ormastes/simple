@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.backend.stage4_symbol_closure.{
+    stage4_validate_sqlite_demand_symbol_contract
+}
+
+fn sqlite_demand_nm() -> text:
+    val definitions = [
+        "rt_sqlite_begin", "rt_sqlite_bind_float", "rt_sqlite_bind_int",
+        "rt_sqlite_bind_null", "rt_sqlite_bind_text", "rt_sqlite_changes",
+        "rt_sqlite_close", "rt_sqlite_column_count", "rt_sqlite_column_float",
+        "rt_sqlite_column_int", "rt_sqlite_column_name", "rt_sqlite_column_text",
+        "rt_sqlite_column_type", "rt_sqlite_commit", "rt_sqlite_error_message",
+        "rt_sqlite_execute", "rt_sqlite_execute_batch", "rt_sqlite_finalize",
+        "rt_sqlite_last_insert_rowid", "rt_sqlite_open", "rt_sqlite_open_memory",
+        "rt_sqlite_prepare", "rt_sqlite_query", "rt_sqlite_query_done",
+        "rt_sqlite_query_next", "rt_sqlite_reset", "rt_sqlite_rollback",
+        "spl_sqlite_demand_state"
+    ]
+    var lines: [text] = []
+    for symbol in definitions:
+        lines.push("00000000 T {symbol}")
+    for dependency in [
+        "rt_sha256_file_raw_v1", "rt_string_data", "rt_string_len",
+        "rt_string_new", "spl_dynlib_snapshot_linux", "dlopen", "dlsym"
+    ]:
+        lines.push("                 U {dependency}")
+    lines.join("\n")
+
+describe "Stage4 Linux SQLite first-demand runtime owner":
+    it "admits the complete bridge without SQLite library imports":
+        expect(stage4_validate_sqlite_demand_symbol_contract(
+            sqlite_demand_nm(), "elf").is_ok()).to_equal(true)
+
+    it "rejects a missing entry point and an eager SQLite import":
+        val missing = sqlite_demand_nm().replace(
+            "00000000 T rt_sqlite_open\n", "")
+        expect(stage4_validate_sqlite_demand_symbol_contract(
+            missing, "elf").is_err()).to_equal(true)
+        val eager = sqlite_demand_nm() + "\n                 U sqlite3_open"
+        expect(stage4_validate_sqlite_demand_symbol_contract(
+            eager, "elf").is_err()).to_equal(true)
+
+    it "rejects the Linux bridge on other object formats":
+        expect(stage4_validate_sqlite_demand_symbol_contract(
+            sqlite_demand_nm(), "macho").is_err()).to_equal(true)

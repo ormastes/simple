@@ -57,10 +57,24 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Next-session TODO
 
+- [x] Link a current-source pure-Simple Stage4 diagnostic compiler through the
+  dynamic runtime lane, run a hello `--check` smoke, and retain a paired static
+  diagnostic size/startup/RSS comparison. The 30-pair Linux ARM64 result is in
+  `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
+- [x] Measure a current-source core-C hello with explicit Linux LLD and a
+  diagnostic 30-pair Python startup/RSS cohort. Its 14,560-byte stripped ELF
+  clears the absolute size cap; matched C and admission gates remain open.
+  See `doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
 - [ ] Build and admit an ABI-matched **current-source pure-Simple Stage4**
   compiler and runtime in this isolated lane. Preserve the phase-bound cache,
   record binary/source hashes, require `SIMPLE_NO_STUB_FALLBACK=1`, and resolve
-  the closure stall and missing runtime symbols in the blocker report.
+  the closure stall and missing runtime symbols in the blocker report. The
+  latest standalone-entry attempt passes SQLite ABI, Cranelift backfill, and
+  core-C stub disjointness, but twelve reached native-execution/network
+  symbols lack an admitted archive owner. K1 composition binding remains
+  unqualified, and the hosted static diagnostic reaches an empty-MIR AOT
+  failure. See
+  `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
 - [ ] With that authority, run a current-source release-small Simple hello and
   a paired matched-startup C hello. Check exact output, retained symbols,
   <=15,360 bytes, <=1.05x matched C, empty NoGC/provider traces, and the
