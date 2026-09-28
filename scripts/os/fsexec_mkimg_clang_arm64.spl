@@ -14,6 +14,20 @@
 #   payload 4 = LIBCXX.A   (libc++.a, rung R6b)
 #   payload 5 = CXXABI.A   (libc++abi.a, rung R6b)
 #   payload 6 = RTBUILT.A  (libclang_rt.builtins-aarch64.a, rung R6b)
+#   payload 7 = WSTL.CPP   (the STL C++ witness source, rung R7a — includes
+#                <string>/<vector>/<algorithm>; compiled against the /INCLUDE
+#                libc++ header tree that fsexec_include_tree_insert.py writes
+#                into the reserved TREE cluster range below)
+#
+# INCLUDE TREE (host-written by scripts/os/fsexec_include_tree_insert.py,
+# NOT shell-appended): the sysroot include tree (C headers + c++/v1) is
+# mirrored as the guest directory /INCLUDE. The guest FAT32 read path walks
+# subdirs + LFN names; the inserter is the write path. This stager only
+# RESERVES the contiguous cluster range (counted by the gate via the tool's
+# `plan` mode into include_tree_clusters.txt) so the BPB/FAT sizing and the
+# guest's free-cluster pool account for it; the inserter fills the range and
+# marks every tree cluster allocated (FAT-chained) so in-guest writes
+# (cc1 -o /HELLO.O, ...) can never land on it.
 # SMALL files (staged under build/os/elfexec_clang_arm64/stage/):
 #   CRT0.O, SIMPLEOS.LD, LIBC.A, HELLO.C
 # Free clusters past the payloads let the in-guest FAT32 write path persist
@@ -155,6 +169,10 @@ fn main() -> i64:
     val payload4: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/libcxx_size.txt") ?? [])
     val payload5: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/cxxabi_size.txt") ?? [])
     val payload6: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/rtbuilt_size.txt") ?? [])
+    val payload7: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/witness_stl_size.txt") ?? [])
+    # Reserved cluster range for the /INCLUDE tree (written host-side by
+    # fsexec_include_tree_insert.py). 0 when the gate stages no tree.
+    val tree_clusters: u64 = _parse_u64(rt_file_read_bytes("build/os/elfexec_clang_arm64/include_tree_clusters.txt") ?? [])
 
     # ---- Pass 1: which small files exist, how big, which cluster ----------
     val names: [text] = _small_names()
@@ -175,8 +193,8 @@ fn main() -> i64:
         i = i + 1
 
     # ---- BIG payloads: sequential cluster allocation, all optional but p1 --
-    val p_names: [text] = ["CLANG.ELF", "LLD.ELF", "WITNESS.CPP", "LIBCXX.A", "CXXABI.A", "RTBUILT.A"]
-    val p_sizes: [u64] = [payload1, payload2, payload3, payload4, payload5, payload6]
+    val p_names: [text] = ["CLANG.ELF", "LLD.ELF", "WITNESS.CPP", "LIBCXX.A", "CXXABI.A", "RTBUILT.A", "WSTL.CPP"]
+    val p_sizes: [u64] = [payload1, payload2, payload3, payload4, payload5, payload6, payload7]
     var p_starts: [u64] = []
     var p_clusters: [u64] = []
     var cursor: u64 = next_cluster
@@ -190,6 +208,13 @@ fn main() -> i64:
         cursor = cursor + pc
         pi = pi + 1
     val P1_START: u64 = p_starts[0]
+
+    # /INCLUDE tree reservation: contiguous range right after the payloads,
+    # before the spare pool. Content + FAT chains are written by the host
+    # inserter; this stager only accounts for the space.
+    val TREE_START: u64 = cursor
+    if tree_clusters > 0u64:
+        cursor = cursor + tree_clusters
 
     val highest_cluster: u64 = cursor - 1u64
     val fat_entries: u64 = highest_cluster + 1u64 + SPARE_CLUSTERS
@@ -386,7 +411,7 @@ fn main() -> i64:
         print "fsexec_mkimg_clang_arm64_error=write prefix failed: " + prefix_path
         return 1
 
-    var out: text = "fsexec_mkimg_clang_arm64_status=ok staged=" + staged + " root_entries=" + slot.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " payload1_start=" + P1_START.to_text() + " payload1_bytes=" + payload1.to_text() + " payload1_padded_bytes=" + payload1_padded.to_text()
+    var out: text = "fsexec_mkimg_clang_arm64_status=ok staged=" + staged + " root_entries=" + slot.to_text() + " spc=" + SPC.to_text() + " fat_sectors=" + fat_sectors.to_text() + " prefix_bytes=" + prefix_bytes_u.to_text() + " payload1_start=" + P1_START.to_text() + " payload1_bytes=" + payload1.to_text() + " payload1_padded_bytes=" + payload1_padded.to_text() + " tree_start=" + TREE_START.to_text() + " tree_clusters=" + tree_clusters.to_text()
     var opi: i64 = 0
     while opi < p_names.len():
         val pn2: i64 = opi + 1
