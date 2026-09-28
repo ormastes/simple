@@ -16,6 +16,8 @@ BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenanc
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
 
 usage() {
     cat <<'EOF'
@@ -713,7 +715,8 @@ bootstrap_scheduler_verify_lineage_admission "$lineage" "$generation" \
 verify_continuation_evidence() {
     continuation_receipt="$output/stage4-continuation.env"
     [ "$(bootstrap_scheduler_manifest_value schema "$continuation_receipt")" = \
-        simple-bootstrap-stage4-continuation-v1 ] || return 1
+        simple-bootstrap-stage4-continuation-v2 ] || return 1
+    stage4_verify_continuation_completion "$continuation_receipt" || return 1
     [ "$(bootstrap_scheduler_manifest_value status "$continuation_receipt")" = pass ] || return 1
     [ "$(bootstrap_scheduler_manifest_value lineage_path "$continuation_receipt")" = \
         "$lineage" ] || return 1

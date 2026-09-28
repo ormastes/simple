@@ -100,7 +100,7 @@ stage4_write_candidate_provenance() (
     [ -f "$bootstrap_lock" ] && [ ! -L "$bootstrap_lock" ] &&
       portable_lock_handle_is_owned "$bootstrap_lock" || exit 1
     continuation="$(bootstrap_stage3_canonical_file "$STAGE4_CONTINUATION_RECEIPT")" || exit 1
-    [ "$(bootstrap_stage3_manifest_value schema "$continuation")" = simple-bootstrap-stage4-continuation-v1 ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value schema "$continuation")" = simple-bootstrap-stage4-continuation-admission-v1 ] || exit 1
     [ "$(bootstrap_stage3_manifest_value status "$continuation")" = prepared ] || exit 1
     [ "$(bootstrap_stage3_manifest_value stage3_provenance_path "$continuation")" = "$stage3_manifest" ] || exit 1
     [ "$(bootstrap_stage3_manifest_value stage3_provenance_sha256 "$continuation")" = "$(bootstrap_stage3_hash_file "$stage3_manifest")" ] || exit 1
@@ -183,6 +183,57 @@ stage4_verify_phase7_llvm_binding() (
   kernel_phase7_verify_llvm_toolchain_receipt "$llvm_receipt"
 )
 
+stage4_verify_continuation_binding() (
+  provenance="$1"
+  continuation="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")")" || exit 1
+  [ "$(bootstrap_stage3_manifest_value schema "$continuation")" = simple-bootstrap-stage4-continuation-admission-v1 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value status "$continuation")" = prepared ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value stage4_continuation_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$continuation")" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$provenance")" = "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$continuation")" ] || exit 1
+)
+
+# Link verification supplements, and never replaces, candidate admission.
+# The completion must inherit the admission verbatim, except schema/status.
+# Validate every key, including fields not consumed by an individual verifier,
+# so duplicate or shadowed authority cannot change a downstream interpretation.
+stage4_verify_continuation_prefix() (
+  awk '
+    {
+      separator = index($0, "=")
+      key = substr($0, 1, separator - 1)
+      if (!separator || key !~ /^[a-z][a-z0-9_]*$/ || seen[FILENAME, key]++) exit 1
+    }
+    FILENAME == ARGV[1] {
+      line = $0
+      if (key == "schema") line = "schema=simple-bootstrap-stage4-continuation-v2"
+      if (key == "status") line = "status=pass"
+      inherited[++count] = line
+      next
+    }
+    {
+      completed++
+      if (completed <= count && $0 != inherited[completed]) exit 1
+    }
+    END { if (!count || completed < count) exit 1 }
+  ' "$1" "$2"
+)
+
+stage4_verify_continuation_completion() (
+  completion="$1"
+  [ "$(bootstrap_stage3_manifest_value schema "$completion")" = simple-bootstrap-stage4-continuation-v2 ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value status "$completion")" = pass ] || exit 1
+  provenance="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_provenance_path "$completion")")" || exit 1
+  stage4_verify_continuation_binding "$provenance" || exit 1
+  admission="$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")" || exit 1
+  stage4_verify_continuation_prefix "$admission" "$completion" || exit 1
+  [ "$(bootstrap_stage3_manifest_value admission_path "$completion")" = "$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value admission_sha256 "$completion")" = "$(bootstrap_stage3_manifest_value stage4_continuation_sha256 "$provenance")" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value stage4_provenance_sha256 "$completion")" = "$(bootstrap_stage3_hash_file "$provenance")" ] || exit 1
+  binary="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_output_path "$completion")")" || exit 1
+  [ "$provenance" = "${binary}.provenance.env" ] || exit 1
+  [ "$(bootstrap_stage3_manifest_value stage4_output_sha256 "$completion")" = "$(bootstrap_stage3_hash_file "$binary")" ] || exit 1
+)
+
 stage4_verify_candidate_provenance_generic() (
   provenance="$(bootstrap_stage3_canonical_file "$1")" || exit 1
   binary="$(bootstrap_stage3_canonical_file "$2")" || exit 1
@@ -225,9 +276,7 @@ stage4_verify_candidate_provenance_generic() (
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
   [ "$(bootstrap_stage3_manifest_value completed_gate "$provenance")" = stage4-essential-tools-smoke ] || exit 1
   if bootstrap_stage3_manifest_value stage4_continuation_path "$provenance" >/dev/null 2>&1; then
-    continuation="$(bootstrap_stage3_canonical_file "$(bootstrap_stage3_manifest_value stage4_continuation_path "$provenance")")" || exit 1
-    [ "$(bootstrap_stage3_manifest_value stage4_continuation_sha256 "$provenance")" = "$(bootstrap_stage3_hash_file "$continuation")" ] || exit 1
-    [ "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$provenance")" = "$(bootstrap_stage3_manifest_value planner_stage4_binding_sha256 "$continuation")" ] || exit 1
+    stage4_verify_continuation_binding "$provenance" || exit 1
   fi
 )
 
