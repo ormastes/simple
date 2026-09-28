@@ -957,7 +957,7 @@ static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
 static int rt_core_dict_has(RtCoreDict* d, int64_t key);
-static int rt_core_dict_del(RtCoreDict* d, int64_t key);
+static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
 static _Atomic size_t rt_core_heap_registry_count = 0;
 static RtCoreString* rt_core_short_string_cache[257] = {0};
@@ -8056,6 +8056,36 @@ int64_t rt_array_pop(SplArray* a) {
     return value;
 }
 
+/* Remove by raw index and return the tagged element; negative indices are invalid.
+ * Byte and packed-u64 storage require tagging the removed raw scalar. */
+int64_t rt_array_remove(int64_t array_value, int64_t index) {
+    RtCoreArray* array = rt_core_as_array(array_value);
+    if (!array) return rt_core_nil();
+    int64_t len = array->len;
+    if (!array->data || index < 0 || index >= len) return rt_core_nil();
+    int64_t tail = len - 1 - index;
+
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        uint8_t* base = (uint8_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail);
+        array->len -= 1;
+        return (int64_t)((uint64_t)removed << 3) | RT_VALUE_TAG_INT;
+    }
+    if (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) {
+        uint64_t* base = (uint64_t*)array->data;
+        int64_t removed = (int64_t)base[index];
+        memmove(base + index, base + index + 1, (size_t)tail * sizeof(uint64_t));
+        array->len -= 1;
+        return rt_value_int(removed);
+    }
+    int64_t* base = (int64_t*)array->data;
+    int64_t removed = base[index];
+    memmove(base + index, base + index + 1, (size_t)tail * sizeof(int64_t));
+    array->len -= 1;
+    return removed;
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's
@@ -8359,7 +8389,7 @@ static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
     }
 }
 
-static int rt_core_dict_del(RtCoreDict* d, int64_t key) {
+static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
     if (!d || !d->entries || d->len == 0) return 0;
     int64_t ck = rt_core_dict_canon_key(key);
     uint64_t h = rt_core_dict_hash(ck);
@@ -8369,6 +8399,7 @@ static int rt_core_dict_del(RtCoreDict* d, int64_t key) {
         RtCoreDictEntry* e = &d->entries[idx];
         if (e->occupied == 0) return 0;
         if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
+            if (removed) *removed = e->value;
             e->occupied = -1;
             d->len--;
             d->tombstones++;
@@ -8437,7 +8468,7 @@ int8_t rt_dict_contains(int64_t dict, int64_t key) {
 }
 
 int8_t rt_dict_remove(int64_t dict, int64_t key) {
-    return (int8_t)rt_core_dict_del(rt_core_as_dict(dict), key);
+    return (int8_t)rt_core_dict_del(rt_core_as_dict(dict), key, NULL);
 }
 
 int8_t rt_dict_clear(int64_t dict) {
@@ -12684,8 +12715,23 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     return ok;
 }
 
-/* collections.rs:1708 -- remove by key/index from array or dict. */
-SPL_RT_TRAP2(rt_collection_remove)
+/* Erased collection receivers use a tagged key/index, unlike the raw index
+ * accepted by rt_array_remove. Match the Rust receiver dispatcher, including
+ * NIL for invalid array indices, missing dict keys and other receivers.
+ * The dict arm returns the removed VALUE; rt_dict_remove's legacy C ABI
+ * returns a boolean, so capture the value in the same lookup/delete pass. */
+int64_t rt_collection_remove(int64_t receiver, int64_t key) {
+    if (rt_core_as_array(receiver)) {
+        int64_t index = rt_core_is_int(key) ? key >> 3 : -1;
+        return rt_array_remove(receiver, index);
+    }
+    int64_t removed = rt_core_nil();
+    if (key != rt_core_nil()) {
+        rt_core_dict_del(rt_core_as_dict(receiver), key, &removed);
+    }
+    return removed;
+}
+
 
 /* Wave17: one-owner, exact-byte artifact bundle publication.  Handles are
  * random registry tokens, never descriptors.  The Linux implementation keeps
