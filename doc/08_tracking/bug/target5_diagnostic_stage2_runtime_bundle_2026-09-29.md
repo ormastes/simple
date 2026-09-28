@@ -24,3 +24,18 @@ the listed symbols for this compiler entry, then rebuild with entry closure
 and run the full CLI parse, Stage4 symbol, size, and startup checks. Do not
 use `SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1`: that would leave NULL GOT entries and
 could crash at first use. Keep the PR draft until the end-to-end run passes.
+
+## Bundle-path check
+
+The available `libsimple_native_all.a` defines 108 of the 122 missing names,
+but passing its directory with `--runtime-bundle host-gpu --runtime-path` to
+the September 8 staged compiler still produced exactly the same 122-symbol
+link failure (17.22 seconds, 1,369,464 KiB peak RSS). The staged tool did not
+admit that archive as a provider for this entry. A newer September 27 Rust
+seed was used only for bootstrap of a current-source diagnostic compiler; it
+passed JIT setup but timed out at 240 seconds before native output, with RSS
+near 1.3 GiB. Neither run produced a diagnostic compiler or full CLI proof.
+
+The next build route needs a current, admitted pure-Simple bootstrap compiler
+and an explicitly verified runtime provider binding. Merely supplying a path
+to the old staged tool does not fix the link.
