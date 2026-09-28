@@ -1,6 +1,6 @@
 use std.spec.{describe, it, expect}
 use std.io_runtime.{env_get, env_set}
-use app.io.cli_ops.{_cli_driver_binary}
+use app.io.cli_ops.{_cli_driver_binary, _cli_frontend_delegate_binary, cli_current_exe_path}
 
 describe "CLI bootstrap delegation policy":
 
@@ -22,3 +22,55 @@ describe "CLI bootstrap delegation policy":
         expect(driver_restored).to_equal(true)
         expect(ordinary).to_equal(sentinel)
         expect(suppressed).to_equal("")
+
+    it "defaults both execution and frontend work to the current runtime":
+        val previous = env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") ?? ""
+        val previous_driver = env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
+        val previous_frontend = env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
+        val previous_loop = env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "")
+        env_set("SIMPLE_BOOTSTRAP_DRIVER", "")
+        env_set("SIMPLE_FRONTEND_DELEGATE", "")
+        env_set("SIMPLE_FRONTEND_DELEGATED", "")
+        val driver = _cli_driver_binary()
+        val frontend = _cli_frontend_delegate_binary()
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous)
+        env_set("SIMPLE_BOOTSTRAP_DRIVER", previous_driver)
+        env_set("SIMPLE_FRONTEND_DELEGATE", previous_frontend)
+        env_set("SIMPLE_FRONTEND_DELEGATED", previous_loop)
+        expect(driver).to_equal("")
+        expect(frontend).to_equal("")
+
+    it "preserves explicit frontend selection, loop guard and admission suppression":
+        val previous = env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") ?? ""
+        val previous_frontend = env_get("SIMPLE_FRONTEND_DELEGATE") ?? ""
+        val previous_loop = env_get("SIMPLE_FRONTEND_DELEGATED") ?? ""
+        # Existing file suffices for selection; this test never executes it.
+        val candidate = "test/01_unit/app/io/cli_driver_no_bootstrap_delegate_spec.spl"
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "")
+        env_set("SIMPLE_FRONTEND_DELEGATE", candidate)
+        env_set("SIMPLE_FRONTEND_DELEGATED", "")
+        val selected = _cli_frontend_delegate_binary()
+        env_set("SIMPLE_FRONTEND_DELEGATED", "1")
+        val loop_blocked = _cli_frontend_delegate_binary()
+        env_set("SIMPLE_FRONTEND_DELEGATED", "")
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1")
+        val suppressed = _cli_frontend_delegate_binary()
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous)
+        env_set("SIMPLE_FRONTEND_DELEGATE", previous_frontend)
+        env_set("SIMPLE_FRONTEND_DELEGATED", previous_loop)
+        expect(selected).to_equal(candidate)
+        expect(loop_blocked).to_equal("")
+        expect(suppressed).to_equal("")
+
+    it "rejects an explicit driver pointing to the running executable":
+        val previous = env_get("SIMPLE_NO_BOOTSTRAP_DELEGATE") ?? ""
+        val previous_driver = env_get("SIMPLE_BOOTSTRAP_DRIVER") ?? ""
+        val executable = cli_current_exe_path()
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "")
+        env_set("SIMPLE_BOOTSTRAP_DRIVER", executable)
+        val selected = _cli_driver_binary()
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous)
+        env_set("SIMPLE_BOOTSTRAP_DRIVER", previous_driver)
+        expect(executable.len() > 0).to_equal(true)
+        expect(selected).to_equal("")
