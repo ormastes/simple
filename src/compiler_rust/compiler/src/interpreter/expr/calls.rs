@@ -24,7 +24,8 @@ fn write_back_identifier_receiver(env: &mut Env, name: &str, value: Value) {
     if let Some((owner, source_name)) = owned_binding {
         set_owned_global(&owner, &source_name, value.clone(), false);
     }
-    if !env.is_local(name) && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
+    // An imported global's bare name in the flat map may belong to another module.
+    if !env.is_local(name) && env.foreign_global_binding(name).is_none() && MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) {
         MODULE_GLOBALS.with(|cell| {
             cell.borrow_mut().insert(name.to_owned(), value);
         });
