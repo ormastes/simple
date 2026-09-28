@@ -338,6 +338,23 @@ pub fn spl_dlopen_checked(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// Sealed Linux provider snapshot (interpreter twin of the C/native
+/// `spl_dynlib_snapshot_linux`). Returns a memfd descriptor, or -1.
+///
+/// Callable from Simple as: `spl_dynlib_snapshot_linux(path: text) -> i64`
+pub fn spl_dynlib_snapshot_linux(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime(
+            "spl_dynlib_snapshot_linux requires 1 argument (path)",
+        ));
+    }
+    let path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        _ => return Err(CompileError::runtime("spl_dynlib_snapshot_linux: path must be a string")),
+    };
+    Ok(Value::Int(simple_runtime::value::dynlib_snapshot_linux_path(path.as_bytes())))
+}
+
 /// Look up a symbol in a loaded library by name.
 ///
 /// Callable from Simple as: `spl_dlsym(handle: i64, name: text) -> i64`
