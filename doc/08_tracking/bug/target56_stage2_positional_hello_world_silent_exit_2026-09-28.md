@@ -1,6 +1,7 @@
-# Stage2 positional hello-world native build exits without a diagnostic
+# Stage2 positional hello-world native build rejects its backend session token
 
-Status: OPEN. This blocks Stage2 admission and therefore Target 5/6 native
+Status: OPEN. The former silent exit now emits a diagnostic, but the session
+token rejection still blocks Stage2 admission and therefore Target 5/6 native
 size, startup, compile-time, and RSS qualification. It is separate from the
 fixed `dynlib_lifetime_owner_v1.spl` HIR type error.
 
@@ -34,11 +35,30 @@ an unresolved call into it; it does not yet prove which expression fails.
 The frontend smoke only reports raw exit 1 and the compiler's
 `compile_result_errors()` loop prints no message.
 
+## Session-open diagnosis
+
+Opt-in markers added around native output dispatch show that the candidate
+passes plugin selection and request construction, then
+`BackendSessionOwnedLeaseV2.open()` returns `Err`. The previous implicit
+`error.to_text()` rendering also failed silently before the error could be
+printed. An explicit match over `BackendSessionAuthorityErrorV2` variants now
+reports `BACKEND_SESSION_AUTHORITY: unknown or substituted session` in the
+Stage2 sanity log. The last build compiled 3 files, reused 1,018, and failed
+zero before reaching the same admission refusal.
+
+`backend_session_authority_open_v2()` can return only `InvalidOwner`,
+`CapacityExceeded`, `CounterOverflow`, or `LoadRejected`. The wrapper then
+calls `backend_session_authority_project_v2()`, which can return
+`UnknownOrSubstituted`. The observed error therefore points to token
+projection after opening. It has not yet been proven whether the owner lost
+its newly appended record, token equality fails under native codegen, or a
+different authority invariant is violated.
+
 ## TODO
 
-Add temporary phase markers around the output-format dispatch,
-`compile_to_native()`, and the backend-session `open()` result. Rebuild one
-Stage2 candidate and run the focused positional fixture. Repair the first
-failing operation and ensure a real diagnostic is returned on refusal. Then
-rerun full Stage2 admission. Keep the three-cycle verify/fix cap for the next
-scoped session; do not cite the linked candidate as admitted.
+Add a focused native probe inside the authority owner that records the new
+record count and each token field before projection, without relying on
+struct equality. Compare those values with the caller's token, then repair
+the failing invariant. Re-run the positional fixture before full Stage2
+admission. Keep the three-cycle verify/fix cap for the next scoped session;
+do not cite the linked candidate as admitted.
