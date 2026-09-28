@@ -46,3 +46,25 @@ unqualified refactor was reverted. Neither attempt produced a probe binary or
 changed the 2/4 native publication verdict. The next diagnostic should
 address compiler qualification or reduce the probe without moving production
 code merely to shorten its closure.
+
+## Stage2 native probe result
+
+The immutable Stage2 pure-Simple compiler capsule
+`build/bootstrap-target56/phase2-runtime-capsules/d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c/simple`
+(SHA-256 `d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`)
+compiled the unmodified 43-unit receipt probe with `--entry-closure`,
+`--runtime-bundle host-gpu`, and no stub fallback in 2.24 seconds at
+225,388 KiB peak build RSS. The resulting executable exited 1 with
+`receipt-invalid-number-accepted`: native decoding accepted `bad` as an
+archive member offset.
+
+Two bounded repair builds used the same capsule. A digit check around
+`text.to_u64()` made the valid receipt return nil; a manual decimal parser
+then let decoding proceed but failed the combined digest/member roundtrip
+assertion. Both candidate edits were reverted because neither passed the
+probe. This points to native numeric/optional transport as a concrete next
+diagnostic, but it does not prove which operation is at fault. A next repair
+should isolate conversion and `Some(u64)`/unwrap in a tiny native executable,
+then make malformed, overflow, and valid offsets pass before rerunning the
+four-example archive publication spec. The latter still has only its earlier
+2/4 failure verdict; no Target 6 completion or performance claim follows.
