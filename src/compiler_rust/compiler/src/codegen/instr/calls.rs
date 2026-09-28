@@ -2675,6 +2675,14 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         | "rt_file_wrap_smf_dynlib"
         | "rt_file_extract_smf_dynlib"
         | "rt_file_create_excl" => Some(&[0, 1]),
+        // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
+        // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
+        // phase_ptr, phase_len, source_index, path_ptr, path_len, ...).
+        // Missing here => single-word collapse, path_len=0, open returns -1
+        // and native stage2 fails HIR with "SIMPLE_MEM_SNAPSHOT_FILE could
+        // not be established safely".
+        "rt_mem_snapshot_open" => Some(&[0]),
+        "rt_mem_snapshot_record" => Some(&[2, 3, 5]),
         "rt_file_write_bytes" => Some(&[0]),
         "rt_hosted_safe_artifact_bundle_begin_v1" => Some(&[0, 1, 2, 3, 4]),
         "rt_hosted_safe_artifact_bundle_stage_scr1_v1" => Some(&[1]),
