@@ -1,0 +1,481 @@
+# codex-impl
+# Per-instance linear, hash, and AVL-ordered text map storage.
+
+use std.nogc_sync_mut.src.collections.hashmap.HashMap
+use std.nogc_sync_mut.src.collections.ordered_text_set.{OrderedTextSet, OrderedTextEntry}
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_note_size, collection_capture_note_lookup, collection_capture_note_materialization, collection_capture_note_hash_probe}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile,
+    AdaptiveSetObservation, AdaptiveSetWorkloadProfile,
+    adaptive_set_default_profile, adaptive_set_normalize_profile,
+    adaptive_set_attribute_supported, adaptive_set_feedback_for_site,
+    adaptive_set_feedback_target, adaptive_set_live_collision_step
+}
+
+class AdaptiveTextMap:
+    """Text-keyed map with one active physical representation per instance."""
+    profile: AdaptiveSetProfile
+    attribute: AdaptiveSetAttribute
+    algorithm: AdaptiveSetAlgorithm
+    linear_entries: [OrderedTextEntry]
+    hash_entries: HashMap
+    ordered_entries: OrderedTextSet
+    site_id: text
+    target_profile_id: text
+    size: i64
+    observed_peak_size: i64
+    observed_lookups: i64
+    observed_hits: i64
+    observed_misses: i64
+    lookups_since_switch: i64
+    last_linear_lookup_comparisons: i64
+    prefer_hash_from_profile: bool
+    prefer_ordered_from_profile: bool
+    prefer_ordered_from_live: bool
+    live_hash_lookups: i64
+    live_high_collision_lookups: i64
+
+    static fn new() -> AdaptiveTextMap:
+        AdaptiveTextMap.with_profile(adaptive_set_default_profile())
+
+    static fn with_profile(profile: AdaptiveSetProfile) -> AdaptiveTextMap:
+        AdaptiveTextMap.with_site_and_target(profile, "", "")
+
+    static fn with_site(profile: AdaptiveSetProfile, site_id: text) -> AdaptiveTextMap:
+        AdaptiveTextMap.with_site_and_target(profile, site_id, "")
+
+    static fn with_site_and_target(
+        profile: AdaptiveSetProfile, site_id: text, target_profile_id: text
+    ) -> AdaptiveTextMap:
+        val map = AdaptiveTextMap(
+            profile: adaptive_set_normalize_profile(profile),
+            attribute: AdaptiveSetAttribute.Auto,
+            algorithm: AdaptiveSetAlgorithm.Linear,
+            linear_entries: [], hash_entries: HashMap.with_capacity(1),
+            ordered_entries: OrderedTextSet.new(),
+            site_id: site_id, target_profile_id: target_profile_id,
+            size: 0, observed_peak_size: 0, observed_lookups: 0,
+            observed_hits: 0, observed_misses: 0, lookups_since_switch: 0,
+            last_linear_lookup_comparisons: 0,
+            prefer_hash_from_profile: false,
+            prefer_ordered_from_profile: false,
+            prefer_ordered_from_live: false,
+            live_hash_lookups: 0, live_high_collision_lookups: 0
+        )
+        if site_id != "":
+            collection_capture_note_size(site_id, target_profile_id, 0)
+        map
+
+    static fn with_attribute(
+        profile: AdaptiveSetProfile, site_id: text, target_profile_id: text,
+        attribute: AdaptiveSetAttribute
+    ) -> AdaptiveTextMap:
+        var map = AdaptiveTextMap.with_site_and_target(profile, site_id, target_profile_id)
+        map.set_attribute(attribute)
+        map
+
+    static fn attributed(source: AdaptiveTextMap, algorithm_name: text) -> AdaptiveTextMap:
+        var map = source
+        if algorithm_name == "auto":
+            map.set_attribute(AdaptiveSetAttribute.Auto)
+        elif algorithm_name == "linear":
+            map.set_attribute(AdaptiveSetAttribute.Linear)
+        elif algorithm_name == "hash":
+            map.set_attribute(AdaptiveSetAttribute.Hash)
+        elif algorithm_name == "ordered":
+            map.set_attribute(AdaptiveSetAttribute.Ordered)
+        else:
+            panic("unknown collection algorithm: " + algorithm_name)
+        map
+
+    static fn attributed_at_site(
+        source: AdaptiveTextMap, algorithm_name: text, site_id: text
+    ) -> AdaptiveTextMap:
+        var map = source
+        if map.site_id == "":
+            map.site_id = site_id
+        if map.target_profile_id == "":
+            map.target_profile_id = adaptive_set_feedback_target()
+        map = AdaptiveTextMap.attributed(map, algorithm_name)
+        match adaptive_set_feedback_for_site(map.site_id, map.target_profile_id):
+            case Some(prior):
+                map.apply_workload_profile(prior)
+                ()
+            case None: ()
+        if map.site_id != "":
+            collection_capture_note_size(map.site_id, map.target_profile_id, map.size)
+        map
+
+    static fn attributed_with_prior_at_site(
+        source: AdaptiveTextMap, algorithm_name: text, site_id: text,
+        target_profile_id: text, sample_count: i64, size_p95: i64,
+        lookup_count_p95: i64, hit_count_p95: i64, miss_count_p95: i64,
+        hash_probe_count_p95: i64, hash_collision_count_p95: i64
+    ) -> AdaptiveTextMap:
+        var map = source
+        if map.site_id == "":
+            map.site_id = site_id
+        if map.target_profile_id == "":
+            map.target_profile_id = target_profile_id
+        map = AdaptiveTextMap.attributed(map, algorithm_name)
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: site_id, target_profile_id: target_profile_id,
+            sample_count: sample_count, size_p95: size_p95,
+            lookup_count_p95: lookup_count_p95, hit_count_p95: hit_count_p95,
+            miss_count_p95: miss_count_p95,
+            hash_probe_count_p95: hash_probe_count_p95,
+            hash_collision_count_p95: hash_collision_count_p95
+        )
+        if algorithm_name == "auto" and not map.apply_workload_profile(prior):
+            panic("embedded collection workload does not match container site and target")
+        if map.site_id != "":
+            collection_capture_note_size(map.site_id, map.target_profile_id, map.size)
+        map
+
+    fn len() -> i64:
+        self.size
+
+    fn selected_algorithm() -> AdaptiveSetAlgorithm:
+        self.algorithm
+
+    fn algorithm_attribute() -> AdaptiveSetAttribute:
+        self.attribute
+
+    fn linear_lookup_comparisons() -> i64:
+        """Equality checks in the most recent lookup when it used linear storage."""
+        self.last_linear_lookup_comparisons
+
+    fn observation() -> AdaptiveSetObservation:
+        AdaptiveSetObservation(
+            site_id: self.site_id, target_profile_id: self.target_profile_id,
+            size: self.size, peak_size: self.observed_peak_size,
+            lookups: self.observed_lookups, hits: self.observed_hits,
+            misses: self.observed_misses, algorithm: self.algorithm
+        )
+
+    fn workload_profile_sample() -> AdaptiveSetWorkloadProfile:
+        AdaptiveSetWorkloadProfile(
+            site_id: self.site_id, target_profile_id: self.target_profile_id,
+            sample_count: 1, size_p95: self.observed_peak_size,
+            lookup_count_p95: self.observed_lookups,
+            hit_count_p95: self.observed_hits,
+            miss_count_p95: self.observed_misses
+        )
+
+    fn storage_get(key: text) -> text?:
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Linear:
+                for entry in self.linear_entries:
+                    if entry.key == key:
+                        return Some(entry.value)
+            case AdaptiveSetAlgorithm.Hash:
+                return self.hash_entries.get(key)
+            case AdaptiveSetAlgorithm.Ordered:
+                return self.ordered_entries.get_value(key)
+        nil
+
+    fn storage_entries() -> [OrderedTextEntry]:
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Linear: return self.linear_entries
+            case AdaptiveSetAlgorithm.Ordered: return self.ordered_entries.entries()
+            case AdaptiveSetAlgorithm.Hash:
+                var entries: [OrderedTextEntry] = []
+                for pair in self.hash_entries.entries():
+                    entries.push(OrderedTextEntry(key: pair[0], value: pair[1]))
+                return entries
+        []
+
+    fn snapshot_keys_unmeasured() -> [text]:
+        var result: [text] = []
+        for entry in self.storage_entries():
+            result.push(entry.key)
+        result.sort()
+        result
+
+    fn keys() -> [text]:
+        if self.site_id != "":
+            collection_capture_note_materialization(self.site_id, self.target_profile_id)
+        self.snapshot_keys_unmeasured()
+
+    fn entries() -> [OrderedTextEntry]:
+        """Stable sorted key/value snapshot under all three representations."""
+        if self.site_id != "":
+            collection_capture_note_materialization(self.site_id, self.target_profile_id)
+        if self.algorithm == AdaptiveSetAlgorithm.Ordered:
+            return self.ordered_entries.entries()
+        var sorted = OrderedTextSet.new()
+        for entry in self.storage_entries():
+            sorted.put_value(entry.key, entry.value)
+        sorted.entries()
+
+    me get(key: text) -> text?:
+        self.observed_lookups = self.observed_lookups + 1
+        self.lookups_since_switch = self.lookups_since_switch + 1
+        self.promote_if_useful()
+        self.last_linear_lookup_comparisons = 0
+        var found: text? = nil
+        if self.algorithm == AdaptiveSetAlgorithm.Linear:
+            for entry in self.linear_entries:
+                self.last_linear_lookup_comparisons = self.last_linear_lookup_comparisons + 1
+                if entry.key == key:
+                    found = Some(entry.value)
+                    break
+        elif self.algorithm == AdaptiveSetAlgorithm.Hash and
+                (self.site_id != "" or self.attribute == AdaptiveSetAttribute.Auto):
+            val observed = self.hash_entries.get_observed(key)
+            found = observed.value
+            if self.site_id != "":
+                collection_capture_note_hash_probe(
+                    self.site_id, self.target_profile_id,
+                    observed.probes, observed.collisions
+                )
+            self.observe_live_hash_lookup(observed.probes, observed.collisions)
+        else:
+            found = self.storage_get(key)
+        if found == nil:
+            self.observed_misses = self.observed_misses + 1
+        else:
+            self.observed_hits = self.observed_hits + 1
+        if self.site_id != "":
+            collection_capture_note_lookup(self.site_id, self.target_profile_id, found != nil)
+        found
+
+    me contains_key(key: text) -> bool:
+        self.get(key) != nil
+
+    me observe_live_hash_lookup(probes: i64, collisions: i64):
+        if self.attribute != AdaptiveSetAttribute.Auto or
+                self.algorithm != AdaptiveSetAlgorithm.Hash:
+            return
+        val window = adaptive_set_live_collision_step(
+            self.live_hash_lookups, self.live_high_collision_lookups,
+            self.profile.lookup_promotion_count, probes, collisions
+        )
+        self.live_hash_lookups = window[0]
+        self.live_high_collision_lookups = window[1]
+        if window[2]:
+            self.prefer_ordered_from_live = true
+            self.promote_to_ordered()
+
+    me put(key: text, value: text) -> bool:
+        """Insert or replace; return true only when a new key was added."""
+        var inserted = false
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Linear:
+                var entries = self.linear_entries
+                for i in 0..entries.len():
+                    if entries[i].key == key:
+                        entries[i] = OrderedTextEntry(key: key, value: value)
+                        self.linear_entries = entries
+                        return false
+                entries.push(OrderedTextEntry(key: key, value: value))
+                self.linear_entries = entries
+                inserted = true
+            case AdaptiveSetAlgorithm.Hash:
+                var hashed = self.hash_entries
+                inserted = not hashed.contains_key(key)
+                hashed.insert(key, value)
+                self.hash_entries = hashed
+            case AdaptiveSetAlgorithm.Ordered:
+                var ordered = self.ordered_entries
+                inserted = ordered.put_value(key, value)
+                self.ordered_entries = ordered
+        if inserted:
+            self.size = self.size + 1
+            if self.size > self.observed_peak_size:
+                self.observed_peak_size = self.size
+            self.promote_if_useful()
+            if self.site_id != "":
+                collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
+        inserted
+
+    me remove(key: text) -> text?:
+        val previous = self.storage_get(key)
+        if previous == nil:
+            return nil
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Linear:
+                var retained: [OrderedTextEntry] = []
+                for entry in self.linear_entries:
+                    if entry.key != key:
+                        retained.push(entry)
+                self.linear_entries = retained
+            case AdaptiveSetAlgorithm.Hash:
+                var hashed = self.hash_entries
+                hashed.remove(key)
+                self.hash_entries = hashed
+            case AdaptiveSetAlgorithm.Ordered:
+                var ordered = self.ordered_entries
+                ordered.remove(key)
+                self.ordered_entries = ordered
+        self.size = self.size - 1
+        self.demote_if_small()
+        if self.site_id != "":
+            collection_capture_note_size(self.site_id, self.target_profile_id, self.size)
+        previous
+
+    me clear():
+        self.linear_entries = []
+        self.hash_entries = HashMap.with_capacity(1)
+        self.ordered_entries = OrderedTextSet.new()
+        self.size = 0
+        self.lookups_since_switch = 0
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+        self.algorithm = AdaptiveSetAlgorithm.Linear
+        if self.attribute == AdaptiveSetAttribute.Ordered or
+                (self.attribute == AdaptiveSetAttribute.Auto and
+                    (self.prefer_ordered_from_profile or self.prefer_ordered_from_live)):
+            self.promote_to_ordered()
+        elif self.attribute == AdaptiveSetAttribute.Hash or
+                (self.attribute == AdaptiveSetAttribute.Auto and self.prefer_hash_from_profile):
+            self.promote_if_useful()
+        if self.site_id != "":
+            collection_capture_note_size(self.site_id, self.target_profile_id, 0)
+
+    me set_profile(profile: AdaptiveSetProfile):
+        if not adaptive_set_attribute_supported(profile, self.attribute):
+            panic("hash collection algorithm is unavailable for this container")
+        self.profile = adaptive_set_normalize_profile(profile)
+        self.prefer_hash_from_profile = false
+        self.prefer_ordered_from_profile = false
+        self.prefer_ordered_from_live = false
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+        if self.attribute == AdaptiveSetAttribute.Ordered:
+            self.promote_to_ordered()
+        elif self.attribute == AdaptiveSetAttribute.Linear or not self.profile.allow_hash or
+                (self.attribute == AdaptiveSetAttribute.Auto and
+                self.size <= self.profile.linear_size_limit and
+                self.lookups_since_switch < self.profile.lookup_promotion_count):
+            self.demote_to_linear()
+        else:
+            self.promote_if_useful()
+
+    me set_attribute(attribute: AdaptiveSetAttribute):
+        if not adaptive_set_attribute_supported(self.profile, attribute):
+            panic("hash collection algorithm is unavailable for this container")
+        self.attribute = attribute
+        self.prefer_hash_from_profile = false
+        self.prefer_ordered_from_profile = false
+        self.prefer_ordered_from_live = false
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+        if attribute == AdaptiveSetAttribute.Ordered:
+            self.promote_to_ordered()
+        elif attribute == AdaptiveSetAttribute.Linear or not self.profile.allow_hash or
+                (attribute == AdaptiveSetAttribute.Auto and
+                self.size <= self.profile.linear_size_limit and
+                self.lookups_since_switch < self.profile.lookup_promotion_count):
+            self.demote_to_linear()
+        else:
+            self.promote_if_useful()
+
+    me apply_workload_profile(prior: AdaptiveSetWorkloadProfile) -> bool:
+        if self.site_id == "" or self.target_profile_id == "" or
+                prior.site_id != self.site_id or
+                prior.target_profile_id != self.target_profile_id or
+                prior.sample_count <= 0 or prior.size_p95 < 0 or
+                prior.lookup_count_p95 < 0 or prior.hit_count_p95 < 0 or
+                prior.miss_count_p95 < 0 or
+                self.attribute != AdaptiveSetAttribute.Auto:
+            return false
+        if prior.hit_count_p95 > prior.lookup_count_p95 or
+                prior.miss_count_p95 > prior.lookup_count_p95:
+            return false
+        if prior.sample_count == 1 and
+                prior.hit_count_p95 != prior.lookup_count_p95 - prior.miss_count_p95:
+            return false
+        if prior.hash_probe_count_p95 < -1 or prior.hash_collision_count_p95 < -1 or
+                (prior.hash_probe_count_p95 < 0) != (prior.hash_collision_count_p95 < 0) or
+                (prior.hash_probe_count_p95 >= 0 and
+                    prior.hash_collision_count_p95 > prior.hash_probe_count_p95):
+            return false
+        self.prefer_ordered_from_profile = (prior.hash_probe_count_p95 >= self.profile.lookup_promotion_count and
+            prior.hash_collision_count_p95 > prior.hash_probe_count_p95 / 4) or
+            (not self.profile.allow_hash and (prior.size_p95 > self.profile.linear_size_limit or
+                prior.lookup_count_p95 >= self.profile.lookup_promotion_count))
+        self.prefer_hash_from_profile = self.profile.allow_hash and
+            (prior.size_p95 > self.profile.linear_size_limit or
+                prior.lookup_count_p95 >= self.profile.lookup_promotion_count)
+        if self.prefer_ordered_from_profile or self.prefer_ordered_from_live:
+            self.promote_to_ordered()
+        elif self.prefer_hash_from_profile:
+            self.promote_if_useful()
+        elif self.size <= self.profile.linear_size_limit:
+            self.demote_to_linear()
+        true
+
+    me promote_if_useful():
+        if self.attribute == AdaptiveSetAttribute.Ordered or
+                (self.attribute == AdaptiveSetAttribute.Auto and
+                    (self.prefer_ordered_from_profile or self.prefer_ordered_from_live)):
+            self.promote_to_ordered()
+            return
+        if not self.profile.allow_hash or self.attribute == AdaptiveSetAttribute.Linear:
+            return
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Hash: return
+            case AdaptiveSetAlgorithm.Linear: ()
+            case AdaptiveSetAlgorithm.Ordered: ()
+        if self.size == 0:
+            if self.attribute == AdaptiveSetAttribute.Hash or
+                    (self.attribute == AdaptiveSetAttribute.Auto and self.prefer_hash_from_profile):
+                self.hash_entries = HashMap.with_capacity(16)
+                self.algorithm = AdaptiveSetAlgorithm.Hash
+                self.live_hash_lookups = 0
+                self.live_high_collision_lookups = 0
+            return
+        if self.attribute == AdaptiveSetAttribute.Auto and
+                self.size <= self.profile.linear_size_limit and
+                self.lookups_since_switch < self.profile.lookup_promotion_count and
+                not self.prefer_hash_from_profile:
+            return
+        var rebuilt = HashMap.with_capacity(self.size * 2 + 1)
+        for entry in self.storage_entries():
+            rebuilt.insert(entry.key, entry.value)
+        self.hash_entries = rebuilt
+        self.linear_entries = []
+        self.ordered_entries = OrderedTextSet.new()
+        self.algorithm = AdaptiveSetAlgorithm.Hash
+        self.lookups_since_switch = 0
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+
+    me promote_to_ordered():
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Ordered: return
+            case AdaptiveSetAlgorithm.Linear: ()
+            case AdaptiveSetAlgorithm.Hash: ()
+        var rebuilt = OrderedTextSet.new()
+        for entry in self.storage_entries():
+            rebuilt.put_value(entry.key, entry.value)
+        self.ordered_entries = rebuilt
+        self.linear_entries = []
+        self.hash_entries = HashMap.with_capacity(1)
+        self.algorithm = AdaptiveSetAlgorithm.Ordered
+        self.lookups_since_switch = 0
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+
+    me demote_if_small():
+        if self.attribute == AdaptiveSetAttribute.Auto and
+                not self.prefer_hash_from_profile and not self.prefer_ordered_from_profile and
+                not self.prefer_ordered_from_live and
+                self.size <= self.profile.linear_size_limit / 2:
+            self.demote_to_linear()
+
+    me demote_to_linear():
+        match self.algorithm:
+            case AdaptiveSetAlgorithm.Linear: return
+            case AdaptiveSetAlgorithm.Hash: ()
+            case AdaptiveSetAlgorithm.Ordered: ()
+        self.linear_entries = self.storage_entries()
+        self.hash_entries = HashMap.with_capacity(1)
+        self.ordered_entries = OrderedTextSet.new()
+        self.algorithm = AdaptiveSetAlgorithm.Linear
+        self.lookups_since_switch = 0
+        self.live_hash_lookups = 0
+        self.live_high_collision_lookups = 0
+
+export AdaptiveTextMap

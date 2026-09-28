@@ -1,0 +1,28 @@
+use std.spec.*
+use std.io.{file_write, file_delete, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+use app.cli.native_build_collection_profile_digest.{native_build_warm_collection_profile_digest}
+
+extern fn rt_getpid() -> i64
+
+describe "native-build warm receipt collection profile identity":
+    it "rejects a missing profile and changes identity when bytes change at one path":
+        val absent = native_build_warm_collection_profile_digest(["--entry=probe.spl"])
+        expect(absent[0]).to_be(true)
+        expect(absent[1]).to_equal("")
+        expect(native_build_warm_collection_profile_digest(["--collection-profile"])[0]).to_be(false)
+        val path = get_temp_dir() + "/simple_warm_collection_{rt_getpid()}_{time_now_unix_micros()}.sprof"
+        expect(file_write(path, "first profile bytes")).to_be(true)
+        val first = native_build_warm_collection_profile_digest([
+            "--collection-profile", path])
+        expect(first[0]).to_be(true)
+        expect(first[1].len()).to_equal(64)
+        expect(file_write(path, "different profile bytes")).to_be(true)
+        val second = native_build_warm_collection_profile_digest([
+            "--collection-profile=" + path])
+        expect(second[0]).to_be(true)
+        expect(second[1].len()).to_equal(64)
+        expect(second[1] == first[1]).to_be(false)
+        expect(file_delete(path)).to_be(true)
+        expect(native_build_warm_collection_profile_digest([
+            "--collection-profile=" + path])[0]).to_be(false)

@@ -1,0 +1,159 @@
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_begin, collection_capture_finish}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetAlgorithm, AdaptiveSetAttribute, AdaptiveSetProfile,
+    AdaptiveSetWorkloadProfile
+}
+
+fn generic_capture_metric(body: text, site: text, name: text) -> i64:
+    for line in body.split("\n"):
+        if line.contains("site=" + site + ";") and line.contains("name=" + name + ";value="):
+            val fields = line.split(";value=")
+            if fields.len() == 2:
+                return fields[1].to_i64() ?? -1
+    -1
+
+describe "generic adaptive collections":
+    it "captures hash probes for integer-key maps and delegated sets":
+        expect(collection_capture_begin("x86_64-v3")).to_be(true)
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        val map_site = "ast://generic/capture-map#stable"
+        val set_site = "ast://generic/capture-set#stable"
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(policy, map_site, "x86_64-v3")
+        map.set_attribute(AdaptiveSetAttribute.Hash)
+        val map_inserted = map.put(7, "value")
+        val map_value = map.get(7) ?? ""
+        val map_miss = map.contains_key(8)
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(policy, set_site, "x86_64-v3")
+        set.set_attribute(AdaptiveSetAttribute.Hash)
+        val set_inserted = set.insert(11)
+        val set_hit = set.contains(11)
+        val set_miss = set.contains(12)
+        val body = collection_capture_finish() ?? ""
+        expect(map_inserted).to_be(true)
+        expect(map_value).to_equal("value")
+        expect(map_miss).to_be(false)
+        expect(set_inserted).to_be(true)
+        expect(set_hit).to_be(true)
+        expect(set_miss).to_be(false)
+        expect(generic_capture_metric(body, map_site, "hash_probe_count")).to_be_greater_than(0)
+        expect(generic_capture_metric(body, set_site, "hash_probe_count")).to_be_greater_than(0)
+        expect(generic_capture_metric(body, map_site, "hash_collision_count")).to_be_greater_than(-1)
+        expect(generic_capture_metric(body, set_site, "hash_collision_count")).to_be_greater_than(-1)
+
+    it "rejects impossible single-sample workload feedback for a typed map":
+        val policy = AdaptiveSetProfile(linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true)
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_site_and_target(
+            policy, "ast://generic/invalid#stable", "x86_64-v3"
+        )
+        val invalid = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/invalid#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 64, lookup_count_p95: 100,
+            hit_count_p95: 80, miss_count_p95: 10
+        )
+        expect(map.apply_workload_profile(invalid)).to_be(false)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "applies a source attribute to one typed generic set instance":
+        @collection_algorithm("ordered")
+        var chosen: AdaptiveSet<i64> = AdaptiveSet.new()
+        var other: AdaptiveSet<i64> = AdaptiveSet.new()
+        expect(chosen.insert(4)).to_be(true)
+        expect(chosen.insert(1)).to_be(true)
+        expect(other.insert(4)).to_be(true)
+        expect(chosen.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Ordered)
+        expect(chosen.snapshot_values()).to_equal([1, 4])
+        expect(other.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+
+    it "preserves integer-key map values across linear, hash, and ordered storage":
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 2, lookup_promotion_count: 2, allow_hash: true
+        )
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.with_profile(policy)
+        expect(map.put(3, "three")).to_be(true)
+        expect(map.put(1, "one")).to_be(true)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Linear)
+        expect(map.get(3) ?? "").to_equal("three")
+        expect(map.get(1) ?? "").to_equal("one")
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(map.put(3, "updated")).to_be(false)
+        map.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(map.keys()).to_equal([1, 3])
+        expect(map.get(3) ?? "").to_equal("updated")
+        expect(map.remove(1) ?? "").to_equal("one")
+        expect(map.len()).to_equal(1)
+        map.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(map.get(3) ?? "").to_equal("updated")
+
+    it "uses one key order for every generic map representation":
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.new()
+        expect(map.put(17, "seventeen")).to_be(true)
+        expect(map.put(-5, "minus five")).to_be(true)
+        expect(map.put(3, "three")).to_be(true)
+        expect(map.put(0, "zero")).to_be(true)
+        for algorithm in [AdaptiveSetAttribute.Linear, AdaptiveSetAttribute.Hash, AdaptiveSetAttribute.Ordered]:
+            map.set_attribute(algorithm)
+            expect(map.keys()).to_equal([-5, 0, 3, 17])
+            val entries = map.entries()
+            expect(entries.len()).to_equal(4)
+            expect(entries[0].key).to_equal(-5)
+            expect(entries[1].key).to_equal(0)
+            expect(entries[2].key).to_equal(3)
+            expect(entries[3].key).to_equal(17)
+
+    it "keeps only one idle hash bucket outside hash storage":
+        var map: AdaptiveMap<i64, text> = AdaptiveMap.new()
+        expect(map.hash_entries.capacity).to_equal(1)
+        map.set_attribute(AdaptiveSetAttribute.Hash)
+        expect(map.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(map.hash_entries.capacity).to_equal(16)
+        map.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(map.hash_entries.capacity).to_equal(1)
+        map.set_attribute(AdaptiveSetAttribute.Linear)
+        expect(map.hash_entries.capacity).to_equal(1)
+
+    it "tracks a key independently of a nil optional payload":
+        var map: AdaptiveMap<i64, text?> = AdaptiveMap.new()
+        expect(map.put(7, nil)).to_be(true)
+        val hits_before = map.observation().hits
+        map.get(7)
+        expect(map.observation().hits).to_equal(hits_before + 1)
+        expect(map.linear_lookup_comparisons()).to_equal(1)
+        for algorithm in [AdaptiveSetAttribute.Linear, AdaptiveSetAttribute.Hash, AdaptiveSetAttribute.Ordered]:
+            map.set_attribute(algorithm)
+            expect(map.contains_key(7)).to_be(true)
+            expect(map.contains_key(8)).to_be(false)
+            expect(map.len()).to_equal(1)
+            val entries = map.entries()
+            expect(entries.len()).to_equal(1)
+            expect(entries[0].key).to_equal(7)
+            expect(entries[0].value == nil).to_be(true)
+        map.remove(7)
+        expect(map.contains_key(7)).to_be(false)
+        expect(map.len()).to_equal(0)
+
+    it "lets admitted per-site load choose hash for an integer-key set":
+        val policy = AdaptiveSetProfile(
+            linear_size_limit: 8, lookup_promotion_count: 32, allow_hash: true
+        )
+        var set: AdaptiveSet<i64> = AdaptiveSet.with_site_and_target(
+            policy, "ast://generic/set#stable", "x86_64-v3"
+        )
+        val prior = AdaptiveSetWorkloadProfile(
+            site_id: "ast://generic/set#stable", target_profile_id: "x86_64-v3",
+            sample_count: 1, size_p95: 64, lookup_count_p95: 100,
+            hit_count_p95: 50, miss_count_p95: 50
+        )
+        expect(set.apply_workload_profile(prior)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.insert(8)).to_be(true)
+        expect(set.insert(2)).to_be(true)
+        expect(set.selected_algorithm()).to_equal(AdaptiveSetAlgorithm.Hash)
+        expect(set.contains(8)).to_be(true)
+        expect(set.contains(9)).to_be(false)
+        set.set_attribute(AdaptiveSetAttribute.Ordered)
+        expect(set.snapshot_values()).to_equal([2, 8])
+        expect(set.remove(2)).to_be(true)
+        expect(set.snapshot_values()).to_equal([8])
