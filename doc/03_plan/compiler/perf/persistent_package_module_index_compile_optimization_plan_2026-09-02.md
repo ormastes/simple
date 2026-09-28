@@ -310,6 +310,13 @@ stdio dispatch and a representative request, not the current-source query
 engine or compiler index cutover. See
 `doc/09_report/compiler/target6_current_source_mcp_lsp_native_smoke_2026-09-29.md`.
 
+Archive member memory follow-up (2026-09-29): a bounded-chunk SHA-256 and
+incremental UTF-8 candidate linked without stubs but failed the two native
+archive publication examples. It was reverted under the three-cycle cap.
+Isolate the native digest mismatch before replacing the working whole-member
+copy; see
+`doc/08_tracking/bug/target6_native_stream_hash_archive_member_mismatch_2026-09-29.md`.
+
 Cold typed-HIR handoff follow-up (2026-09-28): a per-entry seed API now
 checks frozen paths and source bytes against one already-admitted inventory
 entry. The existing batch producer uses it after one digest and scalar index
