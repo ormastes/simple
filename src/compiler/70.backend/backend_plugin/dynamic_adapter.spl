@@ -102,9 +102,16 @@ class DynamicBackendAdapter:
         if self.closed or not self.lease.is_open():
             return Err(compileerror_backend_error(
                 BackendKind.Compiler, "dynamic backend session is closed"))
-        # Admission pins the library once; steady-state dispatch uses its handle.
+        # Retain the mapping for the entire tagged-handle transport call.
+        val provider_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            self.lease.begin_admitted_call()
+        if provider_handle <= 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend session is closed"))
         val envelope = backend_plugin_run_admitted_module_v1(
-            self.lease.admitted_handle(), self.request, module)
+            provider_handle, self.request, module)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            self.lease.end_admitted_call()
         if not envelope.valid:
             return Err(compileerror_backend_error(
                 BackendKind.Compiler,
@@ -135,11 +142,20 @@ class DynamicBackendAdapter:
                 BackendKind.Compiler, "dynamic backend session is closed"))
         if modules.len() == 0:
             return Ok([])
+        # One retained use covers batch open, every compile, finalize, and
+        # batch close. Closing the outer adapter cannot unload mid-batch.
+        val provider_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            self.lease.begin_admitted_call()
+        if provider_handle <= 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Compiler, "dynamic backend session is closed"))
         val opened = backend_plugin_open_admitted_batch_v1(
-            self.lease.admitted_handle(), self.request)
+            provider_handle, self.request)
         var batch = match opened:
             case Ok(value): value
             case Err(reason):
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    self.lease.end_admitted_call()
                 return Err(compileerror_backend_error(
                     BackendKind.Compiler, "dynamic backend batch open failed: " + reason))
         for module in modules:
@@ -150,10 +166,14 @@ class DynamicBackendAdapter:
                 else:
                     "provider status " + compiled.status.to_string()
                 batch.close()
+                unsafe(capabilities: [ffi, raw_ptr]):
+                    self.lease.end_admitted_call()
                 return Err(compileerror_backend_error(
                     BackendKind.Compiler, "dynamic backend batch compile failed: " + detail))
         val finalized = batch.finalize()
         val close_ok = batch.close()
+        unsafe(capabilities: [ffi, raw_ptr]):
+            self.lease.end_admitted_call()
         if not finalized.valid:
             return Err(compileerror_backend_error(
                 BackendKind.Compiler, "dynamic backend batch finalize rejected response: "

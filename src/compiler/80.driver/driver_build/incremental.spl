@@ -4,6 +4,7 @@
 # Tracks file fingerprints, dependency relationships, and provides
 # a build cache with integrity checking.
 
+use std.io_runtime.{env_get_nullable, file_read_nullable}
 use std.common.sdn.parser (parse)
 use std.common.sdn.value.{SdnValue}
 use compiler.driver.cache.integration.shadow_mode.{
@@ -43,7 +44,6 @@ pub fn incremental_publish_module_scc_artifact_v1(subject: text,
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_size(path: text) -> i64
-extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_hash_text(content: text) -> i64
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -52,7 +52,6 @@ extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
-extern fn rt_env_get(key: text) -> text
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -63,7 +62,7 @@ fn incremental_file_size(path: text) -> i64:
 # nil = file missing/unreadable. Callers MUST treat nil as a cache MISS — never
 # as empty content (an empty text would be hashed/parsed as real content).
 fn incremental_file_read_text(path: text) -> text?:
-    rt_file_read_text(path)
+    file_read_nullable(path)
 
 fn incremental_parse_file(path: text) -> Result<SdnValue, text>:
     if val content = incremental_file_read_text(path):
@@ -212,7 +211,7 @@ fn native_build_compiler_executable_hash() -> text:
     # The orchestrator publishes the resolved compiler in SIMPLE_BINARY before
     # spawning anything; hash THAT when present so every process of a build
     # (and every build run by the same compiler) shares one identity.
-    val simple_bin = rt_env_get("SIMPLE_BINARY") ?? ""
+    val simple_bin = env_get_nullable("SIMPLE_BINARY") ?? ""
     if simple_bin != "" and rt_file_exists(simple_bin):
         val bin_hash = rt_file_hash_sha256(simple_bin)
         if bin_hash.len() == 64:
@@ -403,11 +402,11 @@ fn native_build_compiler_identity() -> text:
     val hash = native_build_compiler_executable_hash()
     if hash != "":
         val compiler_fp = if src_fp == "": "embedded" else: src_fp
-        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
-        val runtime_bundle = rt_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+        val runtime_path = env_get_nullable("SIMPLE_RUNTIME_PATH") ?? ""
+        val runtime_bundle = env_get_nullable("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
         val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
-        val abi_policy = rt_env_get("SIMPLE_ABI_POLICY") ?? ""
-        val abi_receipt_path = rt_env_get("SIMPLE_ABI_ADMISSION_RECEIPT") ?? ""
+        val abi_policy = env_get_nullable("SIMPLE_ABI_POLICY") ?? ""
+        val abi_receipt_path = env_get_nullable("SIMPLE_ABI_ADMISSION_RECEIPT") ?? ""
         if abi_policy == "" or abi_receipt_path == "":
             return native_build_uncacheable_abi_identity("explicit-policy-or-receipt-absent")
         val abi_receipt = incremental_file_read_text(abi_receipt_path)
@@ -447,7 +446,7 @@ pub fn native_build_cache_lane() -> text:
     Unset means `default`, which reproduces the previous single-lane behaviour
     exactly. See doc/05_design/compiler/incremental_build/per_lane_private_caches.md
     """
-    val lane = rt_env_get("SIMPLE_CACHE_SCOPE") ?? ""
+    val lane = env_get_nullable("SIMPLE_CACHE_SCOPE") ?? ""
     if lane == "":
         return "default"
     lane

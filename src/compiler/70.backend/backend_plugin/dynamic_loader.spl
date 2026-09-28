@@ -97,26 +97,23 @@ impl DynamicBackendPluginLease:
         DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1
 
     fn is_open() -> bool:
-        not self.closed and self.entry_symbol_address > 0
+        not self.closed and self.entry_symbol_address > 0 and self.library.is_live()
 
-    fn admitted_handle() -> i64:
-        """Retained library handle for the transport's tagged-handle packet.
+    @unsafe(reason: "pins a tagged raw provider handle through one transport operation", capabilities: [ffi, raw_ptr])
+    fn begin_admitted_call() -> i64:
+        if not self.is_open() or not self.library.begin_raw_call():
+            return 0
+        self.library.handle
 
-        The runtime bridge casts this back to the loaded library and resolves
-        the v1 entry on it (`runtime_backend_plugin.c`), so it is the dlopen
-        handle, not the entry address. Returns 0 once the lease is closed;
-        transport rejects a non-positive handle as `missing-provider-handle`.
-        """
-        if self.is_open():
-            self.library.handle
-        else:
-            0
+    @unsafe(reason: "ends a tagged raw provider transport operation", capabilities: [ffi, raw_ptr])
+    fn end_admitted_call():
+        self.library.end_raw_call()
 
     me close() -> bool:
         """Unload once, then retry private staging cleanup until it succeeds."""
         if self.closed:
             return true
-        if self.library.handle > 0:
+        if self.library.is_live():
             var retained_library = self.library
             unsafe(capabilities: [ffi]):
                 retained_library.close()

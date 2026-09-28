@@ -364,26 +364,16 @@ sh scripts/setup/install-spipe-dev-command.shs --apply
 
 ## Landing a PR here (measured 2026-09-06 — read before you push)
 
-> **CORRECTION 2026-09-07 — read this before the paragraph below.** The claim
-> that direct push is rejected and `bypass_actors: []` is **FALSE for the repo
-> owner**. Measured repeatedly on 2026-09-07, `git push origin <sha>:refs/heads/main`
-> SUCCEEDS and the remote answers verbatim:
-> ```
-> remote: Bypassed rule violations for refs/heads/main:
-> remote: - Changes must be made through a pull request.
-> remote: - 2 of 2 required status checks are expected.
-> ```
-> The live ruleset carries `actor_type: RepositoryRole` with
-> `current_user_can_bypass: always`. ~35 PRs were landed this way in one session.
-> **The consequence is the important part: on a bypassed push the two required
-> checks NEVER RUN.** Locally-run gates are then the only verification that
-> happened. That is a reason for more rigour, not less — see "Resolving a PR
-> queue" below. The queue-cancellation advice in the next paragraphs still
-> applies whenever you DO go through a PR.
+> **Force-land (2026-09-28):** `spipe-vcs-v3-main` now carries ONE bypass
+> actor — the owner, `bypass_mode: pull_request` (canonical
+> `admin_merge_bypass: owner_pull_request_only`). Review the PR, post a
+> `--comment` review (approve is impossible, self-authored), then
+> `gh pr merge <n> --admin --merge` lands it even when `BEHIND`. Direct push to
+> `main` stays rejected (GH013). Full recipe and rules:
+> `.claude/rules/vcs.md` § "Force-landing a PR". The older 2026-09-07 note
+> that direct push succeeded via a `RepositoryRole` bypass is obsolete.
 
-
-`main` is ruleset-protected (`spipe-vcs-v3-main`, `bypass_actors: []`). Direct
-push is rejected; `gh pr merge --admin` is refused for admins too. Two required
+`main` is ruleset-protected (`spipe-vcs-v3-main`). Two required
 checks: **`Code Idiom & Structural Ratchet Gates`** and **`SPipe Self Review
 Admission`**.
 
@@ -449,21 +439,10 @@ gh workflow run review-admission.yml --repo <r> \
 config says it is **not** independent authentication. Never dispatch it without
 the user's explicit instruction, and only when the values are true.
 
-**Emergency bypass — user-authorized only, and always restored.** When a
-required check is stuck in the runner queue rather than failing:
-
-```bash
-gh api repos/<r>/rulesets/<id> > ruleset_ORIGINAL.json          # 1. save
-jq '{bypass_actors:[{actor_id:5,actor_type:"RepositoryRole",bypass_mode:"always"}]}' \
-   ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
-gh pr merge <n> --merge --admin                                  # 2. merge
-jq '{bypass_actors:[]}' ruleset_ORIGINAL.json | gh api -X PUT repos/<r>/rulesets/<id> --input -
-gh api repos/<r>/rulesets/<id> --jq '.bypass_actors|length'      # 3. MUST print 0
-```
-
-This lowers protection for the whole repo, not one PR. Keep the window to a
-single command, verify `bypass_actors=0` afterwards, and record the bypass in
-the PR/commit. Do not use it for a check that is genuinely FAILING.
+**No temporary bypass window any more.** The old "PUT an `always` bypass,
+merge, PUT `[]` back" recipe is retired: the permanent owner PR-only bypass
+replaces it, and an `always` bypass would also re-open direct push. Do not
+widen it; `check-github-policy-projection.shs` fails on any other bypass shape.
 
 **Lanes that are red for everyone — never attribute them to your change.**
 `Containerized Tests` (publishes `Unit Test Discovery (Podman)`, `Verify

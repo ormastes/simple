@@ -31,11 +31,9 @@ use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os}
 use compiler.driver.driver_log_helpers.{log_phase}
-use compiler.backend.backend_plugin.loader.{load_backend}
-use compiler.backend.backend_plugin.session.{BackendSession}
+use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2}
 use compiler.driver.driver_backend_plugin_selection.{
-    driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1,
-    driver_backend_plugin_error_text
+    driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1
 }
 use compiler.backend.linker.linker_wrapper.{
     link_to_native, link_to_shared,
@@ -1552,10 +1550,10 @@ impl CompilerDriver:
             val request = driver_aot_backend_plugin_request_v1(
                 backend_name, native_target, native_cpu, driver_opt_level,
                 ctx.options.backend_plugin_path)
-            match load_backend(request):
+            match BackendSessionOwnedLeaseV2.open(request):
                 case Err(error):
                     return CompileResult.CodegenError(
-                        driver_backend_plugin_error_text(error))
+                        "BACKEND_SESSION_AUTHORITY: {error.to_text()}")
                 case Ok(loaded_session):
                     var session = loaded_session
                     val result = self._compile_to_native_with_backend_session(
@@ -1569,7 +1567,7 @@ impl CompilerDriver:
 
     me _compile_to_native_with_backend_session(
         output: text,
-        backend_session: BackendSession?,
+        backend_session: BackendSessionOwnedLeaseV2?,
         native_target: text,
         native_cpu: text
     ) -> CompileResult:
@@ -1590,11 +1588,11 @@ impl CompilerDriver:
         if trace:
             print "[NATIVE] backend_name={backend_name}, is_release={is_release}"
         val effective_backend = if val session = backend_session:
-            session.request.backend_name
+            session.backend_name
         else:
             get_effective_backend_name(backend_name, is_release)
         val provider_receipt_hash = if val session = backend_session:
-            session.receipt.hash()
+            session.receipt_hash
         else:
             ""
         if trace:
@@ -2345,7 +2343,7 @@ fn _aot_compile_failure(name: text, detail: text) -> Result<text, text>:
 fn _compile_frozen_module_capsule(
     batch: FrozenNativeModuleCapsuleBatchV1, backend_name: text, target: text,
     is_release: bool, opt_level: i64, provider_receipt_hash: text,
-    backend_session: BackendSession?, name: text
+    backend_session: BackendSessionOwnedLeaseV2?, name: text
 ) -> Result<text, text>:
     compiler_work_codegen_schedule_v1(1)
     """Compile one parent-frozen module capsule without CompileContext/cache access."""
@@ -2433,7 +2431,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                             output_base: text, name: text, mir_module: MirModule,
                             storage_snapshot: FrozenStorageModuleSnapshotV1,
                             frozen_target_cpu: text,
-                            backend_session: BackendSession?) -> Result<text, text>:
+                            backend_session: BackendSessionOwnedLeaseV2?) -> Result<text, text>:
     if not storage_snapshot.ok or storage_snapshot.module_name != name:
         return _aot_compile_failure(name, "storage-snapshot-module-mismatch")
     if (env_get_nullable("SIMPLE_COMPILER_TRACE") ?? "") == "1":

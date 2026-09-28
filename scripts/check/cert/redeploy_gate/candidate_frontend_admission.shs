@@ -11,6 +11,7 @@ candidate_frontend_timeout_bin() {
     elif command -v gtimeout >/dev/null 2>&1; then
         command -v gtimeout
     else
+        echo 'candidate_frontend_timeout_bin: timeout or gtimeout is required on PATH' >&2
         return 1
     fi
 }
@@ -245,8 +246,15 @@ candidate_frontend_bounded_build() {
       stage2_mir_retention) bounded_leaf=$bounded_base.stage2-mir-retention ;;
       stage2_module_path_naming) bounded_leaf=$bounded_base.stage2-module-path-naming ;;
       hello_world_positional) bounded_leaf=$bounded_base.hello-world-positional ;;
+      hello_world_positional_debugger) bounded_leaf=$bounded_base.hello-world-positional.debugger.log ;;
       *) return 126 ;;
     esac
+    bounded_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
+    bounded_grace=$COMPILER_CHECK_KILL_GRACE_SECONDS
+    if [ "$bounded_probe" = hello_world_positional_debugger ]; then
+        bounded_timeout=90
+        bounded_grace=5
+    fi
     bounded_log=$bounded_parent/$bounded_leaf
     bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
     # native-build is synchronous: once its root exits, any remaining Job
@@ -261,8 +269,8 @@ candidate_frontend_bounded_build() {
         --output-parent="$bounded_output_parent" --log-leaf="$bounded_leaf" \
         --receipt-leaf="$bounded_leaf.bounded.env" \
         --max-bytes="$CANDIDATE_FRONTEND_MAX_LOG_BYTES" \
-        --timeout-seconds="${COMPILER_BUILD_TIMEOUT_SECONDS:-180}" \
-        --term-grace-seconds="$COMPILER_CHECK_KILL_GRACE_SECONDS" "$@"; then
+        --timeout-seconds="$bounded_timeout" \
+        --term-grace-seconds="$bounded_grace" "$@"; then
         bounded_rc=0
     else
         bounded_rc=$?
@@ -602,6 +610,39 @@ candidate_frontend_smoke() (
     fi
     hello_world_positional_raw_status=$positional_status
     hello_world_positional_reason=$(sed -n 's/^reason=//p' "$hello_world_positional_receipt" 2>/dev/null || echo infrastructure-failure)
+    # A native SIGSEGV here has previously left only the last flushed HIR
+    # progress marker. Replay this exact source/argv/bootstrap/backend shape
+    # under LLDB while the sanity scrub's HOME, TMPDIR, and environment are
+    # still active. The replay is diagnostic only; it cannot turn a failed
+    # admission into a pass. Keep a separate bounded log in the held output
+    # directory so the smoke's temporary cache may still be removed.
+    if [ "$positional_status" -eq 139 ] && [ "$(uname -s)" = Darwin ] &&
+       command -v lldb >/dev/null 2>&1; then
+        positional_debug_log=$hello_world_positional_log.debugger.log
+        SIMPLE_BINARY="$candidate" \
+        SIMPLE_BIN="$candidate" \
+        SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+        SIMPLE_FRONTEND_DELEGATE="$candidate" \
+        SIMPLE_FRONTEND_DELEGATED=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+        SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
+        SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+            candidate_frontend_bounded_build hello_world_positional_debugger \
+                lldb -b -o run -k 'thread backtrace all' \
+                -k 'register read' -- "$candidate" native-build \
+                --backend "$candidate_backend" \
+                --runtime-bundle core-c-bootstrap \
+                --entry-closure \
+                --cache-dir "$probe_dir/cache-hello-world-positional-debug" \
+                --mode one-binary \
+                scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+                --output "$probe_dir/hello_world_positional_debug" || :
+        if [ -f "$positional_debug_log" ] && [ ! -L "$positional_debug_log" ]; then
+            echo "candidate_frontend_smoke: SIGSEGV replay log: ${build_log_display}.hello-world-positional.debugger.log" >&2
+            tail -c 32768 "$positional_debug_log" >&2 || :
+        fi
+    fi
     [ "$positional_status" -eq 0 ] ||
         candidate_frontend_fail hello-world-positional-build "$positional_status"
     if [ "$positional_status" -eq 0 ] && [ ! -x "$positional_output" ]; then

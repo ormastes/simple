@@ -13,6 +13,7 @@ on:
       - 'src/runtime/**'
       - 'scripts/bootstrap/bootstrap-from-scratch.sh'
       - 'scripts/bootstrap/run-linux-phase2-tests.shs'
+      - 'scripts/check/lib/bootstrap-stage3/**'
       - 'scripts/resource/run_capped.shs'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
@@ -20,6 +21,7 @@ on:
       - 'scripts/check/check-linux-phase2-test-runner-contract.shs'
       - 'test/01_unit/scripts/linux_phase2_false_pass_contract_test.shs'
       - 'test/01_unit/scripts/run_capped_fail_closed_contract_test.shs'
+      - 'test/01_unit/scripts/bootstrap_seed_generation_permissions_test.shs'
       - 'scripts/check/check-freebsd-selfhost-ci.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
       - 'scripts/check/check-mcp-native-smoke.shs'
@@ -69,6 +71,7 @@ on:
       - 'src/runtime/**'
       - 'scripts/bootstrap/bootstrap-from-scratch.sh'
       - 'scripts/bootstrap/run-linux-phase2-tests.shs'
+      - 'scripts/check/lib/bootstrap-stage3/**'
       - 'scripts/resource/run_capped.shs'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/cert/redeploy_gate/fixtures/p2_add.spl'
@@ -76,6 +79,7 @@ on:
       - 'scripts/check/check-linux-phase2-test-runner-contract.shs'
       - 'test/01_unit/scripts/linux_phase2_false_pass_contract_test.shs'
       - 'test/01_unit/scripts/run_capped_fail_closed_contract_test.shs'
+      - 'test/01_unit/scripts/bootstrap_seed_generation_permissions_test.shs'
       - 'scripts/check/check-freebsd-selfhost-ci.shs'
       - 'scripts/check/check-llvm-simd-row-native-arch.shs'
       - 'scripts/check/check-mcp-native-smoke.shs'
@@ -124,6 +128,8 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ARM64 self-hosted runners also advertise ubuntu-latest. Pin hosted Linux
+  # jobs so x86_64, cross, and VM builds cannot land on those runners.
   # Native builds — compile and test on each platform
   native:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
@@ -131,7 +137,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             name: Linux x86_64
           - os: macos-latest
             name: macOS aarch64
@@ -270,7 +276,7 @@ jobs:
   # Cross-compilation builds from Linux x86_64
   cross:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -295,6 +301,13 @@ jobs:
       - name: Install cross-compilation toolchain
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.pkg }}
 
+      - name: Select Clang for Windows GNU bootstrap
+        if: matrix.target == 'x86_64-pc-windows-gnu'
+        run: |
+          sudo apt-get install -y clang
+          echo 'CC_x86_64_pc_windows_gnu=clang' >> "$GITHUB_ENV"
+          clang --version | head -1
+
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -313,7 +326,7 @@ jobs:
   # FreeBSD build (VM-based)
   freebsd:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Native — FreeBSD x86_64
     steps:
       - uses: actions/checkout@v4
@@ -357,7 +370,7 @@ jobs:
   # Stage 2 trust root and the tracked Stage 3 resume interface in the guest.
   freebsd-selfhost:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Self-host — FreeBSD Stage 3
     timeout-minutes: 180
     steps:
@@ -368,7 +381,11 @@ jobs:
         with:
           usesh: true
           prepare: |
-            pkg install -y bash coreutils curl git gmake llvm18 pkgconf libffi zstd perl5 rsync
+            mkdir -p /usr/local/etc/pkg/repos
+            sed 's|/quarterly|/latest|' /etc/pkg/FreeBSD.conf > /usr/local/etc/pkg/repos/FreeBSD.conf
+            grep -q '/latest' /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f
+            pkg install -y bash coreutils curl git gmake llvm23 pkgconf libffi zstd perl5 rsync
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
           run: |
             set -eu

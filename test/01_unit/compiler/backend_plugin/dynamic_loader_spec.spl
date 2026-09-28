@@ -151,7 +151,7 @@ describe "dynamic backend provider library lease":
         step("Verify the unsupported variant retains its diagnostic detail")
         expect(unsupported.diagnostic()).to_equal("typed descriptor ABI is unavailable")
 
-    it "loads the exact symbol and clears the admitted handle on close":
+    it "loads the exact symbol and revokes admitted calls on close":
         # @req REQ-DYNLOADER-002
         step("Compile and load a real C provider exporting the exact v1 symbol")
         val (output, error, code) = process_run(
@@ -171,13 +171,19 @@ describe "dynamic backend provider library lease":
         expect(lease.build_id).to_equal(selected_build_id)
         expect(file_hash_sha256_or_empty(lease.provider_path)).to_equal(
             lease.build_id)
-        expect(lease.admitted_handle()).to_be_greater_than(0)
+        val admitted_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(admitted_handle).to_be_greater_than(0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            lease.end_admitted_call()
         expect(dir_exists(lease.staging_dir)).to_equal(true)
 
         step("Close the admitted lease and remove its private stage")
         val staging_dir = lease.staging_dir
         expect(lease.close()).to_equal(true)
-        expect(lease.admitted_handle()).to_equal(0)
+        val stale_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(stale_handle).to_equal(0)
         expect(dir_exists(staging_dir)).to_be(false)
         expect(file_read(unload_marker)).to_equal("unloaded\n")
         expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
@@ -203,8 +209,10 @@ describe "dynamic backend provider library lease":
         expect(lease.close()).to_equal(false)
         expect(lease.closed).to_equal(false)
         expect(lease.is_open()).to_equal(false)
-        expect(lease.admitted_handle()).to_equal(0)
-        expect(lease.library.handle).to_equal(0)
+        val stale_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(stale_handle).to_equal(0)
+        expect(lease.library.is_live()).to_be(false)
         expect(lease.entry_symbol_address).to_equal(0)
         expect(dir_exists(staging_dir)).to_equal(true)
         expect(file_read(unload_marker)).to_equal("unloaded\n")

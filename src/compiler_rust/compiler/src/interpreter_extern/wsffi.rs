@@ -624,6 +624,34 @@ pub fn spl_wffi_call_i64(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(result))
 }
 
+/// Interpreter twin of the native mixed ABI transport.
+pub fn spl_wffi_call_i32_i64_u32_u32_f64_bits(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 5 {
+        return Err(CompileError::runtime(
+            "spl_wffi_call_i32_i64_u32_u32_f64_bits requires 5 arguments",
+        ));
+    }
+    let mut raw = [0i64; 5];
+    for (slot, value) in raw.iter_mut().zip(args.iter()) {
+        *slot = match value {
+            Value::Int(number) => *number,
+            _ => return Err(CompileError::runtime(
+                "spl_wffi_call_i32_i64_u32_u32_f64_bits requires integer arguments",
+            )),
+        };
+    }
+    if raw[0] == 0 || raw[2] <= 0 || raw[3] <= 0
+        || raw[2] > u32::MAX as i64 || raw[3] > u32::MAX as i64
+    {
+        return Ok(Value::Int(-1));
+    }
+    type Target = unsafe extern "C" fn(i64, u32, u32, f64) -> i32;
+    let target: Target = unsafe { std::mem::transmute(raw[0] as usize) };
+    Ok(Value::Int(unsafe {
+        target(raw[1], raw[2] as u32, raw[3] as u32, f64::from_bits(raw[4] as u64)) as i64
+    }))
+}
+
 /// Allocation-free typed C-boolean call with no arguments.
 pub fn spl_wffi_call_bool0_checked(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 2 {

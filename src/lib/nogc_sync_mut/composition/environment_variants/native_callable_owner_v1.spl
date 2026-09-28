@@ -120,6 +120,24 @@ pub(package) fn native_callable_owner_invoke_v1(
     _native_callable_end_v1(identity)
     Ok(result)
 
+# Admit one use for an entire caller-owned batch. No lifecycle lock or output
+# allocation occurs per element; retirement waits for the last batch to end.
+pub(package) fn native_callable_owner_invoke_batch_into_v1(
+    identity: u64, args: [[i64]], mut outputs: [i64]
+) -> Result<i64, text>:
+    if outputs.len() < args.len():
+        return Err("native batch output capacity is too small")
+    val fptr = _native_callable_acquire_v1(identity)
+    if fptr <= 0:
+        return Err("native mapping is retired or unavailable")
+    var index = 0
+    while index < args.len():
+        outputs[index] = unsafe(capabilities: [ffi, raw_ptr]):
+            spl_wffi_call_i64(fptr, args[index], args[index].len())
+        index = index + 1
+    _native_callable_end_v1(identity)
+    Ok(index)
+
 # True means this call made the one live-to-retiring transition. If invocations
 # remain, the last one closes the mapping; no later invocation can start.
 pub(package) fn native_callable_owner_retire_v1(identity: u64) -> bool:

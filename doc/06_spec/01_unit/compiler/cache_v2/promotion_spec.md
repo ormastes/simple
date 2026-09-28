@@ -507,6 +507,49 @@ assert_false(result.reachable)
 
 ### Stale/unauthenticated snapshot cannot authorize promotion (§15.1)
 
+#### rejects a stale local tip after fetch fails
+
+- A successful local rev-parse cannot stand in for a failed fetch.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("A successful local rev-parse cannot stand in for a failed fetch")
+assert_false(git_ancestry_fetch_accepted_v1(
+    "https://example.invalid/repo.git", "https://example.invalid/repo.git",
+    0, 1, 0, "stale-tip"))
+```
+
+</details>
+
+#### requires the expected authenticated remote and a resolved tip
+
+- A local or substituted remote cannot authorize promotion.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("A local or substituted remote cannot authorize promotion")
+assert_false(git_ancestry_fetch_accepted_v1(
+    "https://example.invalid/repo.git", "file:///tmp/repo.git",
+    0, 0, 0, "tip"))
+assert_false(git_ancestry_fetch_accepted_v1(
+    "file:///tmp/repo.git", "file:///tmp/repo.git",
+    0, 0, 0, "tip"))
+assert_false(git_ancestry_fetch_accepted_v1(
+    "https://example.invalid/repo.git", "https://example.invalid/repo.git",
+    0, 0, 0, ""))
+assert_true(git_ancestry_fetch_accepted_v1(
+    "https://example.invalid/repo.git", "https://example.invalid/repo.git",
+    0, 0, 0, "tip"))
+```
+
+</details>
+
 #### rejects even a truly-ancestor commit when the snapshot is stale
 
 - rejects even a truly-ancestor commit when the snapshot is stale

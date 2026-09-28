@@ -29,3 +29,5 @@ available, execution is `BLOCKED`; source inspection is not a substitute.
 
 The executable source contains real assertions and no `pass_todo` or
 tautological placeholder pass.
+Fixture setup and the crash helper use `file_write_exact`, so an unregistered
+`rt_file_write` extern cannot prevent these scenarios from reaching admission.
