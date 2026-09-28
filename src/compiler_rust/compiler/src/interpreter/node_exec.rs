@@ -1401,6 +1401,7 @@ pub(crate) fn exec_assignment(
             // through.
             let case1_unique = match env.get(container_name) {
                 Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                 _ => false,
             };
@@ -1417,6 +1418,19 @@ pub(crate) fn exec_assignment(
                                         arr.push(Value::Nil);
                                     }
                                     arr.push(value);
+                                }
+                                return Ok(Control::Next);
+                            }
+                        }
+                        Value::ByteArray(arc) => {
+                            if let Some(bytes) = Arc::get_mut(arc) {
+                                let idx = index_val.as_int()? as usize;
+                                let byte = value.as_int()? as u8;
+                                if idx < bytes.len() {
+                                    bytes[idx] = byte;
+                                } else {
+                                    bytes.resize(idx, 0);
+                                    bytes.push(byte);
                                 }
                                 return Ok(Control::Next);
                             }
@@ -1453,6 +1467,22 @@ pub(crate) fn exec_assignment(
                             arr.push(value);
                         }
                         Value::Array(arc)
+                    }
+                    // A local buffer from a runtime allocator (`rt_byte_array_new_len`,
+                    // `rt_bytes_alloc`) is a `Value::ByteArray`; the field paths below
+                    // already accept it, the plain-local path did not
+                    // (`loader/stack_builder.spl` `bytes[cursor] = ...`). Frozen stays rejected.
+                    Value::ByteArray(mut arc) => {
+                        let idx = index_val.as_int()? as usize;
+                        let byte = value.as_int()? as u8;
+                        let bytes = Arc::make_mut(&mut arc);
+                        if idx < bytes.len() {
+                            bytes[idx] = byte;
+                        } else {
+                            bytes.resize(idx, 0);
+                            bytes.push(byte);
+                        }
+                        Value::ByteArray(arc)
                     }
                     Value::Dict(mut dict) => {
                         let key = index_val.to_key_string();
