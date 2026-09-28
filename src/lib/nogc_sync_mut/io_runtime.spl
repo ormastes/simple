@@ -630,21 +630,11 @@ pub fn process_kill(pid: i64) -> bool:
 # ============================================================================
 
 pub fn host_os() -> text:
-    # Windows first, via environment: NT always sets OS=Windows_NT, and the
-    # uname fallback below spawns "/bin/sh", which CreateProcess cannot start
-    # from a native-Windows process — the failed spawn used to yield "" here
-    # ("Native linking is unsupported on host architecture '' for OS ''").
-    # On Linux/macOS/BSD the OS variable is unset, so this branch never fires
-    # and the uname path below is byte-identical to before for their outputs.
-    # The compiled-in platform comes first: Stage 2 sanity runs the candidate
-    # under `env -i` with an allowlist that has no OS, so the env check missed
-    # and the uname spawn failed -- host_os() answered "" and find_c_compiler
-    # took the Unix path ("No C compiler found (hosted native link ...)").
-    if platform_name() == "windows":
-        return "windows"
-    val os_env = env_get("OS")
-    if os_env.lower().contains("windows"):
-        return "windows"
+    # The runtime identifies the host independently of mutable OS/OSTYPE.
+    # BSD providers report "unix", so retain uname for their specific name.
+    val runtime_os = platform_name_raw()
+    if runtime_os == "windows" or runtime_os == "macos" or runtime_os == "linux":
+        return runtime_os
     val os = shell_output("uname -s")
     if os == "Linux":
         return "linux"
@@ -694,11 +684,8 @@ pub fn hash_text(s: text) -> i64:
         rt_hash_text(s)
 
 pub fn host_arch() -> text:
-    # Windows first, via environment, for the same reason as host_os() above:
-    # the "/bin/sh -c uname -m" fallback cannot spawn on native Windows and
-    # used to return "" here. Unset on Linux/macOS/BSD, so this is a no-op there.
-    val os_env = env_get("OS")
-    if platform_name() == "windows" or os_env.lower().contains("windows"):
+    # Select the Windows architecture path only on a runtime-confirmed host.
+    if platform_name_raw() == "windows":
         val pa = env_get("PROCESSOR_ARCHITECTURE").lower()
         if pa == "amd64" or pa == "x64":
             return "x86_64"

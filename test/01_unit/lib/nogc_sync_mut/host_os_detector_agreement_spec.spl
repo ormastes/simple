@@ -1,8 +1,36 @@
 use std.spec
-use std.io_runtime.{host_os, platform_name}
+use std.io_runtime.{host_os, host_arch, platform_name, env_get_nullable, env_set, env_remove_process}
 use std.platform.{host_os as platform_host_os}
 use std.nogc_sync_mut.env.platform.{detect_os, is_windows}
 use std.sffi.platform.{platform_name_raw}
+
+fn restore_host_detector_env(key: text, original: text?):
+    if original == nil:
+        env_remove_process(key)
+    else:
+        env_set(key, original)
+
+fn check_host_detectors_with_env(os_value: text, ostype_value: text):
+    val expected_os = detect_os()
+    val expected_arch = host_arch()
+    val saved_os = env_get_nullable("OS")
+    val saved_ostype = env_get_nullable("OSTYPE")
+    val set_os = env_set("OS", os_value)
+    val set_ostype = env_set("OSTYPE", ostype_value)
+    val observed_os = host_os()
+    val observed_platform = platform_host_os()
+    val observed_detect = detect_os()
+    val observed_arch = host_arch()
+    # Restore process state before assertions so a failing expectation cannot
+    # leak the forged environment into subsequent tests.
+    restore_host_detector_env("OS", saved_os)
+    restore_host_detector_env("OSTYPE", saved_ostype)
+    expect(set_os).to_equal(true)
+    expect(set_ostype).to_equal(true)
+    expect(observed_os).to_equal(expected_os)
+    expect(observed_platform).to_equal(expected_os)
+    expect(observed_detect).to_equal(expected_os)
+    expect(observed_arch).to_equal(expected_arch)
 
 # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md
 #
@@ -24,6 +52,15 @@ use std.sffi.platform.{platform_name_raw}
 # on Windows -- the POSIX branches were left byte-identical by the fix, so
 # this must also hold on Linux/macOS/BSD).
 describe "host OS detectors agree with each other":
+    it "ignores a forged Windows OS and Linux OSTYPE":
+        check_host_detectors_with_env("Windows_NT", "linux-gnu")
+
+    it "ignores a forged Unix OS and BSD OSTYPE":
+        check_host_detectors_with_env("Darwin", "freebsd14")
+
+    it "ignores empty OS and OSTYPE values":
+        check_host_detectors_with_env("", "")
+
     it "agrees across every public host-OS resolver":
         val a = host_os()
         val b = platform_host_os()
