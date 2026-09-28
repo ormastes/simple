@@ -1,13 +1,42 @@
-# Hosted process compatibility helpers. There is no runtime ABI that accepts
-# an environment map at this route. Refuse it before any child is created.
+# Hosted process helpers that apply an explicit environment map.
+#
+# No runtime spawn ABI accepts an environment map (every `rt_process_spawn_async`
+# backend takes only cmd + argv). The environment is therefore delivered through
+# POSIX `env`: `/usr/bin/env -- K=V ... cmd args...`. `env` execs the utility,
+# so the returned pid is the child's own pid and wait/kill/liveness stay exact.
+# Requests that cannot be delivered faithfully are refused before any child is
+# created; no variable is ever silently dropped.
 use std.nogc_async_mut.io.process_ops.{process_spawn_async, process_is_running}
+use std.io_runtime.{env_get_opt}
 
 val PROCESS_SPAWN_ENV_UNSUPPORTED: i64 = -95
+val PROCESS_SPAWN_ENV_INVALID: i64 = -22
+val PROCESS_SPAWN_ENV_LAUNCHER: text = "/usr/bin/env"
+
+fn _process_env_host_is_windows() -> bool:
+    val os_env = env_get_opt("OS")
+    if os_env == nil:
+        return false
+    os_env.lower().contains("windows")
 
 fn process_spawn_async_env(cmd: text, args: [text], env: {text: text}) -> i64:
     if cmd == "": return -1
-    if env.len() != 0: return PROCESS_SPAWN_ENV_UNSUPPORTED
-    process_spawn_async(cmd, args)
+    if env.len() == 0:
+        return process_spawn_async(cmd, args)
+    if _process_env_host_is_windows():
+        return PROCESS_SPAWN_ENV_UNSUPPORTED
+    # `env` would parse a utility name containing '=' as another assignment.
+    if cmd.contains("="):
+        return PROCESS_SPAWN_ENV_INVALID
+    var launch_args: [text] = ["--"]
+    for key in env.keys():
+        if key == "" or key.contains("="):
+            return PROCESS_SPAWN_ENV_INVALID
+        launch_args.push(key + "=" + (env[key] ?? ""))
+    launch_args.push(cmd)
+    for arg in args:
+        launch_args.push(arg)
+    process_spawn_async(PROCESS_SPAWN_ENV_LAUNCHER, launch_args)
 
 fn process_is_alive(pid: i64) -> bool:
     if pid <= 0:
