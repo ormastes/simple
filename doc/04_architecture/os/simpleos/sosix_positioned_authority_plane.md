@@ -33,7 +33,7 @@ The control operation names and numeric syscall/IPC IDs require a registry revie
 
 ## Route transaction defect to resolve with installation
 
-`boot_nvfs_root_mount_transaction_v1` installs the positioned backend route before `vfs_nvfs_root_mount_commit_v1`. If commit fails, the staged root is aborted or quarantined, but the route remains selected. The DBFS transaction and both boot fallbacks need the same audit. Route publication needs a retained transaction result that either commits with the exact root or can be quarantined on every failed commit without rewinding a generation or invalidating an unrelated newer route. A route-generation comparison alone is insufficient to prove the filesystem root is live.
+`boot_nvfs_root_mount_transaction_v1` installs the positioned backend route before `vfs_nvfs_root_mount_commit_v1`. At the design baseline, commit failure left that route selected. The stacked implementation candidate quarantines the exact selected route on failure, advances its generation, and retires prior shim registrations. The DBFS transaction and both boot fallbacks still need the same audit. A route-generation comparison alone is insufficient to prove the filesystem root is live; final publication must bind the exact committed root.
 
 ## Evidence gates
 

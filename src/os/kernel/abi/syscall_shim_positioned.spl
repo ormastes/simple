@@ -19,6 +19,7 @@ use os.sosix.fs.kernel_positioned_dispatch_v1.{
     SosixFsKernelPositionedStateV1,
     SosixFsKernelPositionedInstallResultV1,
     sosix_fs_kernel_uninstalled_positioned_state_v1,
+    sosix_fs_kernel_quarantine_positioned_state_v1,
     sosix_fs_kernel_install_positioned_owner_v1,
     sosix_fs_kernel_dispatch_positioned_v1
 }
@@ -31,7 +32,8 @@ use os.sosix.fs.positioned_backend_composition_v1.{
     SosixPositionedBackendOwnerV1,
     SosixPositionedBackendInstallResultV1,
     sosix_positioned_backend_default_v1,
-    sosix_positioned_backend_install_v1
+    sosix_positioned_backend_install_v1,
+    sosix_positioned_backend_quarantine_exact_v1
 }
 
 var g_shim_positioned_state: SosixFsKernelPositionedStateV1 =
@@ -52,7 +54,23 @@ pub fn shim_positioned_install_backend_route_v1(
         g_shim_positioned_backend, kind)
     if installed.accepted:
         g_shim_positioned_backend = installed.owner
+        # A new route must never reuse registrations from the prior backend.
+        g_shim_positioned_state = sosix_fs_kernel_quarantine_positioned_state_v1(
+            g_shim_positioned_state)
     installed
+
+pub fn shim_positioned_quarantine_backend_route_v1(
+    expected: SosixPositionedBackendOwnerV1
+) -> bool:
+    """Fail closed after an exact staged root fails to commit."""
+    val retired = sosix_positioned_backend_quarantine_exact_v1(
+        g_shim_positioned_backend, expected)
+    if not retired.accepted:
+        return false
+    g_shim_positioned_backend = retired.owner
+    g_shim_positioned_state = sosix_fs_kernel_quarantine_positioned_state_v1(
+        g_shim_positioned_state)
+    true
 
 pub fn shim_positioned_install_owner_v1(
     owner: SosixFsPositionedDispatchOwnerV1
@@ -101,4 +119,5 @@ fn spl_handle_fs_pwrite_registered_v1(
 
 export shim_positioned_reset_v1, shim_positioned_install_owner_v1
 export shim_positioned_install_backend_route_v1
+export shim_positioned_quarantine_backend_route_v1
 export shim_positioned_dispatch_v1
