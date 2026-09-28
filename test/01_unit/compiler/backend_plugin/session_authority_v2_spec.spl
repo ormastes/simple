@@ -6,12 +6,46 @@ use compiler.common.backend_plugin.model.{
     BackendRole, BackendCapability, BackendPluginRequestV1
 }
 use compiler.backend.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
-use compiler.backend.backend_plugin.session_authority_v2.*
+use compiler.backend.backend_plugin.session_authority_v2.{
+    BackendSessionAuthorityV2, BackendSessionAuthorityErrorV2,
+    BackendSessionAuthorityStateV2, BackendSessionOwnedLeaseV2,
+    backend_session_authority_open_v2, backend_session_authority_project_v2,
+    backend_session_authority_use_acquire_v2,
+    backend_session_authority_compile_module_v2,
+    backend_session_authority_use_release_v2,
+    backend_session_authority_close_v2, backend_session_authority_release_v2
+}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend.backend_types.{BackendKind}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.backend.backend.static_backend_registry.{
+    BackendLinkClass, install_k1_static_backend_table_v1, static_backend_entry_v1
+}
+use compiler.backend.backend.static_backend_cranelift_port.{cranelift_backend_port_v1}
+use compiler.backend.backend.static_backend_interpreter_port.{interpreter_backend_port_v1}
+use compiler.backend.backend.static_backend_llvm_port.{llvm_backend_port_v1}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
 use std.io_runtime.{file_exists, file_size_raw}
+
+# `simple test` runs under the interpreter, where the K1 composition root
+# (src/compositions/kernel_llvm_cranelift) is not shadowed in and
+# compiler.driver.bootstrap_k1_selected is the fail-closed stub. Install the
+# same "llvm-cranelift" table the CLI composition root installs; repeat calls
+# with the same policy are idempotent.
+fn install_authority_k1_table() -> bool:
+    install_k1_static_backend_table_v1("llvm-cranelift", [
+        static_backend_entry_v1(BackendKind.Cranelift,
+            BackendLinkClass.KernelLinked, cranelift_backend_port_v1(),
+            CodegenOutputKind.ObjectCode),
+        static_backend_entry_v1(BackendKind.Interpreter,
+            BackendLinkClass.KernelLinked, interpreter_backend_port_v1(),
+            CodegenOutputKind.InterpretedResult),
+        static_backend_entry_v1(BackendKind.Llvm,
+            BackendLinkClass.KernelLinked, llvm_backend_port_v1(),
+            CodegenOutputKind.ObjectCode)
+    ])
 
 fn authority_request(provider: text = "llvm") -> BackendPluginRequestV1:
     BackendPluginRequestV1(
@@ -61,6 +95,7 @@ fn authority_probe_module() -> MirModule:
 describe "backend session generation and compile-use authority V2":
     it "retains a compiled object until its use drains and close completes":
         # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
         var owner = BackendSessionAuthorityV2.create()
         val token = backend_session_authority_open_v2(
             owner, authority_request()).ok().unwrap()
@@ -101,6 +136,7 @@ describe "backend session generation and compile-use authority V2":
 
     it "rejects foreign tokens and a revoked compile use":
         # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
         var first = BackendSessionAuthorityV2.create()
         var second = BackendSessionAuthorityV2.create()
         val first_token = backend_session_authority_open_v2(
@@ -133,6 +169,7 @@ describe "backend session generation and compile-use authority V2":
 
     it "does not publish a generation when loader admission fails":
         # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
         var owner = BackendSessionAuthorityV2.create()
         expect(backend_session_authority_open_v2(
             owner, authority_request("missing")).is_err()).to_equal(true)
@@ -150,6 +187,7 @@ describe "backend session generation and compile-use authority V2":
 
     it "routes object-path AOT through an owned compile use":
         # @req REQ-010
+        expect(install_authority_k1_table()).to_equal(true)
         val stage_dir = "/tmp/unit_backend_session_owned_lease_v2"
         _ = shell("rm -rf '{stage_dir}' && mkdir -p '{stage_dir}'")
         val object_path = "{stage_dir}/probe.o"
