@@ -39,3 +39,23 @@ near 1.3 GiB. Neither run produced a diagnostic compiler or full CLI proof.
 The next build route needs a current, admitted pure-Simple bootstrap compiler
 and an explicitly verified runtime provider binding. Merely supplying a path
 to the old staged tool does not fix the link.
+
+## Dynamic-runtime adapter mismatch
+
+The September 8 direct pure-Simple compiler artifact rejected
+`--runtime-bundle dynamic-runtime` at argument admission, before compilation.
+Its `rt_native_build` adapter listed only `auto`, `simple-core`,
+`core-c-bootstrap`, `host-gpu`, and `runtime`. The Rust native-project CLI
+already accepts `dynamic-runtime` and restricts its use to the authorized
+Stage4 compiler entry. The source FFI adapter now accepts the same names and
+delegates entry authorization to that existing link check. This source change
+does not update the deployed September 8 binary; a new pure-Simple bootstrap
+candidate is still required before rerunning the diagnostic compiler build.
+
+A separate probe through the main checkout's `bin/release` binary is excluded
+from qualification: that binary identifies itself as a Rust bootstrap seed and
+its JIT could not resolve `rt_file_read_regular_no_follow_bounded_bytes` from
+this newer source tree. It timed out after 220 seconds without producing a
+compiler. A focused Cargo unit test for the adapter is currently blocked at
+dependency resolution: the locked `inkwell 0.9.0` lacks the requested
+`llvm23-1-force-static` feature. Do not treat this as a test PASS.
