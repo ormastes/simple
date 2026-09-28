@@ -1900,6 +1900,21 @@ impl Lowerer {
             expr_hir.ty
         };
 
+        // Coalescing a declared [T]? yields [T], not a nullable pointer to it.
+        // Keeping the wrapper here erases the element type at a following
+        // for-in: iterable inference accepts Array, but intentionally does not
+        // accept optional pointers. Narrow only arrays; existing scalar
+        // optional representation and other shared reference behavior remain
+        // unchanged in this maintenance branch.
+        let result_ty = match self.module.types.get(result_ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if matches!(self.module.types.get(*inner), Some(HirType::Array { .. })) => *inner,
+            _ => result_ty,
+        };
+
         // Unwrap the then-branch: if expr is Some(x), return x, not Some(x).
         // Use rt_unwrap_or_self which handles both enum and raw values.
         let unwrapped_expr = HirExpr {

@@ -23,6 +23,8 @@ mod tools;
 mod tests;
 #[cfg(test)]
 mod entry_closure_global_init_tests;
+#[cfg(test)]
+mod coalesce_array_tests;
 
 pub use config::*;
 pub use compiler::*;
