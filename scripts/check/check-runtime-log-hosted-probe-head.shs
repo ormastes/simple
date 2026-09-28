@@ -1,18 +1,51 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cc="${CC:-cc}"
+asan=0
+if [ "${1:-}" = --asan ]; then
+    asan=1
+    shift
+fi
+if [ "$#" -ne 0 ]; then
+    printf 'usage: bash %s [--asan]\n' "$0" >&2
+    exit 2
+fi
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-"$cc" -std=c11 -Wall -Wextra -fsanitize=address -fno-omit-frame-pointer \
+platform="$(uname -s 2>/dev/null || printf unknown)"
+case "$platform" in
+    Linux) ;;
+    *) printf 'SKIP: hosted log probe fixture requires Linux; current platform is %s\n' "$platform"; exit 0 ;;
+esac
+
+set -- -std=c11 -Wall -Wextra
+if [ "$asan" -eq 1 ]; then
+    set -- "$@" -fsanitize=address -fno-omit-frame-pointer
+fi
+
+"$cc" "$@" \
     "$repo_root/scripts/check/fixtures/runtime_log_hosted_probe_head.c" \
     -o "$tmp_dir/runtime-log-hosted-probe-head"
 
-SIMPLE_LOG_HOSTED_PROBE=1 "$tmp_dir/runtime-log-hosted-probe-head" \
-    2> "$tmp_dir/stderr"
+if [ "$asan" -eq 1 ]; then
+    if ! command -v timeout >/dev/null 2>&1; then
+        printf '%s\n' 'ERROR: --asan requires timeout to bound the sanitizer run' >&2
+        exit 2
+    fi
+    if ! (ulimit -f 128; SIMPLE_LOG_HOSTED_PROBE=1 timeout 10 \
+        "$tmp_dir/runtime-log-hosted-probe-head") 2> "$tmp_dir/stderr"; then
+        cat "$tmp_dir/stderr" >&2
+        exit 1
+    fi
+else
+    SIMPLE_LOG_HOSTED_PROBE=1 "$tmp_dir/runtime-log-hosted-probe-head" \
+        2> "$tmp_dir/stderr"
+fi
 
 expected='[HOSTED-LOG-PROBE] device_write level=-9223372036854775808 len=-9223372036854775808 payload=<UNREADABLE>'
 grep -Fqx -- "$expected" "$tmp_dir/stderr"
-printf '%s\n' 'PASS: hosted log probe header is complete and in bounds'
+printf '%s\n' 'PASS: hosted log probe emits complete maximum-length header'
