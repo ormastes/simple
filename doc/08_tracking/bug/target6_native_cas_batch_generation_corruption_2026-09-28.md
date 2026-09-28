@@ -55,3 +55,12 @@ publish/load/pin probe: zero dependencies produced a 328-byte generation,
 and one dependency with an inherited mapping produced 525 bytes. Runtime was
 0.05 seconds with 2,136 KiB peak RSS under a 4 GB address-space bound.
 These focused results do not prove the full CLI or production warm route.
+
+Follow-up native reader check: `cas_batch_lookup_receipt_digest_v1` now
+requires a digest-shaped `CURRENT`, the exact generation header and
+transaction identity, and well-formed mapping rows; inheriting a malformed
+parent generation fails publication. A separate 55-unit no-stub Stage2 native
+probe passed valid lookup and rejected a corrupt header, a corrupt unrelated
+mapping, and a traversal-shaped `CURRENT` (0.01 seconds, 1,608 KiB peak RSS).
+The new reader deliberately fails closed on older four-header-line generation
+files; production warm graph cutover is not yet admitted.

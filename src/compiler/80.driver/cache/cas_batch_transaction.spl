@@ -65,20 +65,54 @@ fn cas_batch_read_v1(path: text) -> text?:
 fn cas_batch_current_v1(store_root: text) -> text:
     cas_batch_read_v1("{cas_batch_root_v1(store_root)}/CURRENT") ?? ""
 
+fn cas_batch_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+    true
+
+fn cas_batch_generation_header_valid_v1(lines: [text], expected_generation: text) -> bool:
+    if lines.len() < 6:
+        return false
+    if (lines[0] != CAS_BATCH_SCHEMA_V1 or
+            lines[1] != "generation={expected_generation}" or
+            not lines[2].starts_with("parent=") or
+            not lines[3].starts_with("scc=") or
+            not lines[4].starts_with("transaction=") or
+            lines[3].len() <= 4 or
+            not cas_batch_digest_valid_v1(lines[4].substring(12))):
+        return false
+    val parent = lines[2].substring(7)
+    parent == "" or cas_batch_digest_valid_v1(parent)
+
+fn cas_batch_mapping_valid_v1(fields: [text]) -> bool:
+    if fields.len() != 3:
+        return false
+    fields[0] != "" and
+        cas_batch_digest_valid_v1(fields[1]) and
+        cas_batch_digest_valid_v1(fields[2])
+
 fn cas_batch_lookup_receipt_digest_v1(
     store_root: text, package_key: text, action_digest: text
 ) -> text?:
     val current = cas_batch_current_v1(store_root)
-    if current == "":
+    if not cas_batch_digest_valid_v1(current):
         return nil
     val generation = cas_batch_read_v1(
         "{cas_batch_root_v1(store_root)}/generations/{current}.generation")
     if generation == nil:
         return nil
+    val lines = generation!.split("\n")
+    if not cas_batch_generation_header_valid_v1(lines, current):
+        return nil
     var found: text? = nil
-    for line in generation!.split("\n"):
-        val fields = line.split("|")
-        if fields.len() == 3 and fields[0] == package_key and fields[1] == action_digest:
+    for index in 5..lines.len():
+        val fields = lines[index].split("|")
+        if not cas_batch_mapping_valid_v1(fields):
+            return nil
+        if fields[0] == package_key and fields[1] == action_digest:
             if found != nil:
                 return nil
             found = Some(fields[2])
@@ -180,10 +214,16 @@ fn cas_batch_publish_v1(
             "{root}/generations/{transaction.expected_current_generation}.generation")
         if parent == nil:
             return cas_batch_error_v1(CasBatchTransactionErrorV1.unstaged_object)
-        for line in parent!.split("\n"):
+        val parent_lines = parent!.split("\n")
+        if not cas_batch_generation_header_valid_v1(
+                parent_lines, transaction.expected_current_generation):
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+        for index in 5..parent_lines.len():
+            val line = parent_lines[index]
             val fields = line.split("|")
-            if (fields.len() == 3 and
-                    not transaction.required_package_keys.contains(fields[0])):
+            if not cas_batch_mapping_valid_v1(fields):
+                return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+            if not transaction.required_package_keys.contains(fields[0]):
                 inherited_mappings = inherited_mappings.push(line)
     var generation_lines = [CAS_BATCH_SCHEMA_V1,
         "generation={transaction.next_generation}",
