@@ -117,12 +117,11 @@ branch rebuilt its Rust seed and runtime authority, then compiled 1,061
 Stage2 source files and failed only
 `src/lib/nogc_sync_mut/sffi/dynlib_snapshot_registry_v1.spl`:
 `hir: Cannot infer field type: struct 'i64' field 'accepted'`. This owner
-also passed a protected struct through an update closure. It now keeps an
-explicitly typed Simple-side registry under a mutex used only as an exclusion
-gate, matching the repaired dynlib lifetime owner. A focused bootstrap-mode
-no-stub native build compiled 37 reached files, failed zero, and linked a
-75 KB probe; that probe's missing-library refusal printed `true`. The next
-full Stage2 rerun compiled the current source, passed positional hello-world
+also passed a protected struct through an update closure. The pre-rebase
+branch repair kept typed Simple-side state under a mutex exclusion gate; a
+focused bootstrap-mode no-stub native build compiled 37 reached files, failed
+zero, and linked a 75 KB probe whose missing-library refusal printed `true`.
+The next full Stage2 rerun compiled that source, passed positional hello-world
 and struct/runtime capability admission, and published an immutable runtime
 capsule with SHA-256
 `d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`.
@@ -132,3 +131,15 @@ the test rows could not run. Stage2 as a whole is not yet a PASS. See
 Retained logs are
 `build/mini_builds/target56_stage2_owner_probe/full_bootstrap_current.log`
 and `build/mini_builds/target56_dynlib_probe/current_snapshot_build.log`.
+
+During the later rebase onto `origin/main`, the branch retained main's
+`bea378f817d` owner fix for this same registry. That implementation holds only
+an exclusion token in the mutex and keeps a Simple-side descriptor list; it
+has no protected struct or update closure. Main also added
+`dynlib_snapshot_registry_v1_spec.spl`. The preceding Stage2 receipt predates
+that conflict resolution, so it must not be presented as a test of the
+rebased source. A focused no-stub native build of the rebased owner compiled
+37 files with zero failures and linked a 75 KB probe in 5.7 seconds. Running
+that probe exited zero and printed `true` for missing-library refusal; its
+log is `build/mini_builds/target56_dynlib_probe/rebased_source_build.log`.
+The full Stage2 matrix on the rebased tree remains unproven.

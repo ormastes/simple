@@ -21,10 +21,13 @@ verification. See
 `doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
 The runtime trap and next proof are tracked in
 `doc/08_tracking/bug/target56_stage2_runtime_collection_remove_trap_2026-09-28.md`.
-The snapshot-registry state repair in
+The pre-rebase snapshot-registry state repair in
 `sffi/dynlib_snapshot_registry_v1.spl` passed its focused 37-file no-stub
 bootstrap build and the full Stage2 native build, positional hello-world
-smoke, and runtime capability proof. The in-process Stage2 compiler-test
+smoke, and runtime capability proof. The rebase retained main's independent
+Simple-side descriptor-list fix in that owner. A focused no-stub native build
+of the rebased source compiled 37 files with zero failures; its probe exited
+zero with missing-library refusal. The in-process Stage2 compiler-test
 matrix failed at its full CLI link after 1,828 seconds: the `host-gpu` core
 runtime does not supply optional GPU/SQLite/SDL/Metal and other reached
 symbols. The later test rows were blocked. See
