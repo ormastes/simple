@@ -75,6 +75,24 @@ fn _cold_hir_seed_from_entry_v1(
         module.name, source_identity, source.content_digest,
         inventory_digest, abi.unwrap(), unique_imports))
 
+fn cold_hir_semantic_seed_from_admitted_entry_v1(
+    module: HirModule, source_root: text, source_identity: text,
+    source_content: text, admitted_inventory_digest: text,
+    source: CompileSourceInventoryEntryV1
+) -> Result<ColdHirSemanticSeedV1, text>:
+    # The caller admits the complete inventory digest once and indexes its
+    # entries by source identity. This per-module boundary keeps the same
+    # path/content/typed-ABI checks without rescanning that inventory for
+    # every HIR module in a cold compile.
+    val path_error = _cold_hir_source_path_error_v1(
+        module, source_root, source_identity)
+    if path_error != "":
+        return Err(path_error)
+    if admitted_inventory_digest.len() != 64:
+        return Err("cold-hir-inventory-mismatch")
+    _cold_hir_seed_from_entry_v1(module, source_identity, source_content,
+        admitted_inventory_digest, source)
+
 fn cold_hir_semantic_seed_v1(
     module: HirModule,
     source_root: text,
@@ -93,7 +111,8 @@ fn cold_hir_semantic_seed_v1(
         inventory.entries, source_identity)
     if source_index < 0:
         return Err("cold-hir-source-absent")
-    _cold_hir_seed_from_entry_v1(module, source_identity, source_content,
+    cold_hir_semantic_seed_from_admitted_entry_v1(
+        module, source_root, source_identity, source_content,
         inventory_digest, inventory.entries[source_index])
 
 fn cold_hir_semantic_seeds_v1(
@@ -120,9 +139,10 @@ fn cold_hir_semantic_seeds_v1(
             return Err("cold-hir-source-absent")
         if produced.has(input.source_identity):
             return Err("cold-hir-source-duplicate")
-        match _cold_hir_seed_from_entry_v1(
-                input.module, input.source_identity, input.source_content,
-                inventory_digest, inventory.entries[source_indices[input.source_identity]]):
+        match cold_hir_semantic_seed_from_admitted_entry_v1(
+                input.module, source_root, input.source_identity,
+                input.source_content, inventory_digest,
+                inventory.entries[source_indices[input.source_identity]]):
             case Err(reason): return Err(reason)
             case Ok(seed):
                 seeds.push(seed)
@@ -135,3 +155,4 @@ fn cold_hir_semantic_seeds_v1(
 
 export ColdHirSemanticSeedV1, ColdHirSemanticInputV1
 export cold_hir_semantic_seed_v1, cold_hir_semantic_seeds_v1
+export cold_hir_semantic_seed_from_admitted_entry_v1

@@ -1,0 +1,59 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{cold_hir_semantic_seed_v1, cold_hir_semantic_seed_from_admitted_entry_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn seed_probe_module() -> HirModule:
+    HirModule(name: "pkg.mod", path: "/frozen/pkg/mod.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "cold HIR seed from one admitted inventory entry":
+    it "matches full-inventory admission while checking frozen source bytes":
+        val content = "fn value() -> i64: 1\n"
+        val empty = sha256_text("")
+        val entry = CompileSourceInventoryEntryV1(
+            "pkg/mod.spl", sha256_text(content), empty, empty, empty,
+            empty, content.len())
+        val inventory = CompileSourceInventoryV1(1, 1, [entry])
+        val digest = compile_source_inventory_digest_v1(inventory)
+        val module = seed_probe_module()
+        val indexed = cold_hir_semantic_seed_from_admitted_entry_v1(
+            module, "/frozen", "pkg/mod.spl", content, digest, entry)
+        val full = cold_hir_semantic_seed_v1(
+            module, "/frozen", "pkg/mod.spl", content,
+            inventory, digest)
+        expect(indexed.is_ok()).to_be(true)
+        expect(full.is_ok()).to_be(true)
+        val indexed_seed = indexed.unwrap()
+        val full_seed = full.unwrap()
+        expect(indexed_seed.source_digest).to_equal(full_seed.source_digest)
+        expect(indexed_seed.abi_digest).to_equal(full_seed.abi_digest)
+        expect(indexed_seed.inventory_digest).to_equal(full_seed.inventory_digest)
+        expect(indexed_seed.direct_imports).to_equal(full_seed.direct_imports)
+        val changed = cold_hir_semantic_seed_from_admitted_entry_v1(
+            module, "/frozen", "pkg/mod.spl", "changed", digest, entry)
+        expect(changed.is_err()).to_be(true)
+        expect(changed.unwrap_err()).to_equal("cold-hir-source-content-mismatch")
+
+    it "rejects a mismatched frozen path and missing inventory identity":
+        val content = "fn value() -> i64: 1\n"
+        val empty = sha256_text("")
+        val entry = CompileSourceInventoryEntryV1(
+            "pkg/mod.spl", sha256_text(content), empty, empty, empty,
+            empty, content.len())
+        val module = seed_probe_module()
+        val wrong_path = cold_hir_semantic_seed_from_admitted_entry_v1(
+            module, "/other", "pkg/mod.spl", content,
+            sha256_text("inventory"), entry)
+        expect(wrong_path.is_err()).to_be(true)
+        expect(wrong_path.unwrap_err()).to_equal("cold-hir-module-source-mismatch")
+        val no_digest = cold_hir_semantic_seed_from_admitted_entry_v1(
+            module, "/frozen", "pkg/mod.spl", content, "", entry)
+        expect(no_digest.is_err()).to_be(true)
+        expect(no_digest.unwrap_err()).to_equal("cold-hir-inventory-mismatch")
