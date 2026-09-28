@@ -45,6 +45,11 @@ theorem aliasExpr_has_tier_gc (fc : FnCtx) :
   apply HasTier.var
   simp [TierEnv.lookup, counterEnv]
 
+/-- The structural noalloc body walk does not reject a bare variable alias. -/
+theorem aliasExpr_noalloc_body_ok (fc : FnCtx) :
+    noallocBodyOk fc aliasExpr := by
+  simp [noallocBodyOk, aliasExpr]
+
 /-
   KEY FINDING:
   The real checker would accept a nogc_async_mut.worker module containing
