@@ -1,25 +1,46 @@
 # Target 5/6 completion
 
-Status: SESSION CLOSED BY USER (2026-09-28); production qualification remains OPEN.
+Status: ACTIVE; production qualification remains OPEN.
 
-Continuation note (2026-09-28): the user-provided full Target 5/6 goal is
-active again. A fresh isolated current-source Stage2 bootstrap failed on
-`dynlib_lifetime_owner_v1.spl` HIR state inference after three bounded
-verify/fix cycles; neither source experiment was retained. See
-`doc/08_tracking/bug/target56_stage2_dynlib_lifetime_state_inference_2026-09-28.md`.
+Continuation note (2026-09-28): the isolated current-source Stage2 candidate
+now passes its full native build and positional hello-world frontend smoke
+after repairing dynlib lifetime state inference, backend diagnostics, exact
+Cranelift O2 selection, and the raw-string UTF-8 SFFI boundary. Its compiler
+test matrix is still open: default delegated rows require owner-supplied
+MC/DC-off waiver fields. The in-process matrix's five-second RSS observer
+budget held, but its full CLI build failed in three owner update closures and
+one POSIX constructor body. The owners now use direct typed state mutation
+under their original mutexes; a focused 48-file no-stub native build passed.
+The POSIX constructor now compiles in a focused 49-file no-stub native build,
+but its close path hits the old capsule's named `rt_collection_remove` trap.
+The runtime dispatcher and pure-Simple twin have source repairs. A fresh
+Stage2 runtime capsule now passes verification, and its no-stub native
+owned-device create/close probe exits zero with owner counts returning to
+zero. The pure-Simple shadow gate and full compiler matrix still need
+verification. See
+`doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
+The runtime trap and next proof are tracked in
+`doc/08_tracking/bug/target56_stage2_runtime_collection_remove_trap_2026-09-28.md`.
+The pre-rebase snapshot-registry state repair in
+`sffi/dynlib_snapshot_registry_v1.spl` passed its focused 37-file no-stub
+bootstrap build and the full Stage2 native build, positional hello-world
+smoke, and runtime capability proof. The rebase retained main's independent
+Simple-side descriptor-list fix in that owner. A focused no-stub native build
+of the rebased source compiled 37 files with zero failures; its probe exited
+zero with missing-library refusal. The in-process Stage2 compiler-test
+matrix failed at its full CLI link after 1,828 seconds: the `host-gpu` core
+runtime does not supply optional GPU/SQLite/SDL/Metal and other reached
+symbols. The later test rows were blocked. See
+`doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
 Stage4 and the production size/startup/performance cohorts remain unavailable.
-A bootstrap-mode 36-file mini build now reproduces the same HIR failure in
-seconds; the retained command, logs, and rejected explicit-generic experiment
-are in that blocker report.
 
 The user accepted the matched-startup C reference for the Linux 1.05x size
-limit and asked to consider this isolated effort done after a commit/performance
-review. This closes the requested session and does not convert the diagnostic
-probes into a Stage4, SPipe, native performance, or release PASS. The remaining
-technical items below remain follow-up work; see
+limit during an earlier session closeout. That closeout did not convert the
+diagnostic probes into a Stage4, SPipe, native performance, or release PASS.
+The remaining technical items below remain active; see
 `doc/09_report/compiler/target56_user_closeout_2026-09-28.md`.
 
-Owner lane: `codex/target56-isolated`. This TODO carries the unfinished work
+Owner lane: `codex/target56-completion` (draft PR #1932). This TODO carries the unfinished work
 from `doc/09_report/compiler/target5_strict_core_hello_2026-09-27.md`,
 `doc/09_report/compiler/target6_cold_hir_batch_2026-09-27.md`, and
 `doc/08_tracking/bug/target56_isolated_current_source_verification_blockers_2026-09-27.md`.

@@ -1,7 +1,8 @@
 # Target 5/6 current-source Stage2 cannot infer dynlib lifetime state
 
-Status: OPEN. This blocks an admitted Stage4 compiler for the Target 5/6
-size, startup, and persistent-index qualification lanes.
+Status: DYN-LIFETIME HIR ERROR FIXED; full Stage2 native build and positional
+smoke pass, but the compiler-test matrix has not passed.
+Target 5/6 size, startup, and persistent-index qualification remain pending.
 
 ## Reproduction
 
@@ -66,13 +67,79 @@ An independent Windows MSVC full bootstrap at `e465b19cc00a706c487d788e1830cfa9c
 
 A one-file bootstrap-mode probe retained under `build/mini_builds/win_dynlib_probe/` reproduced the owner rejection in under a second. Truncating the probe before `dynlib_lifetime_register_v1` linked successfully; including registration reproduced `i64.entries`. Expanding its compact return, expanding the lookup's compact branches, and updating typed state directly under the mutex did not remove the rejection. All three source experiments were reverted. This narrows the first failing function but does not identify the specific field expression or establish a safe fix.
 
-## Next action
+## Isolated diagnosis and source repair
 
-On a fresh scoped session, use the fast bootstrap-mode reproduction to isolate
-the first rejected `entries` expression with the same seed and current source,
-preserving the phase cache. Add a focused
-regression that proves the real `Mutex` state remains
-`_DynlibLifetimeStateV1` through each lock callback, then repair the
-compiler or owner without changing close/borrow behavior. Run the existing
-cached-slot/aliased-handle scenario and resume Stage2 admission only after
-the focused case passes. Keep the three-cycle cap for that new session.
+A diagnostic seed instrumented at field access showed that
+`_dynlib_lifetime_index_v1` receives the declared
+`_DynlibLifetimeStateV1`, but the first `state.entries` in
+`dynlib_lifetime_register_v1` sees the `\state` update-closure parameter as
+`i64`. The same source also contains four more update closures. The temporary
+Rust instrumentation was reverted. The lifetime owner now updates its typed
+Simple-side state directly while holding the existing mutex in each operation;
+`dlclose` remains after unlock in the end and retire paths. This removes the
+closure inference failure without changing the admission/retirement sequence.
+
+The 36-file bootstrap-mode native repro compiled with zero failures and linked
+a 74 KB probe (`build/mini_builds/target56_dynlib_probe/direct_lock.log`). The
+current-source interpreter spec executed 14 cases: both cached-slot/aliased-
+handle and borrowed-mapping lifetime cases passed. Its final unrelated
+pre-publication refusal case failed because the fixture's
+`spl_plugin_entry_v1` symbol was unresolved, so the full spec is not green.
+The first full Stage2 rerun stopped in its RSS watchdog: process observation
+exceeded the default 1,000 ms budget, despite a 1.33 GiB observed peak below
+the unchanged 5.59 GiB cap. A second run set the watchdog's supported
+`SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000`. It compiled 595 files,
+reused 426, failed zero, and linked the 47,135 KB Stage2 binary in 377.4 s.
+The subsequent frontend admission smoke failed: the Stage2 compiler's
+positional hello-world native build exited 1 after AOP weaving with no
+diagnostic. The candidate remains at
+`build/bootstrap-target56/stage2/aarch64-unknown-linux-gnu/simple.rejected`;
+see `build/bootstrap-target56/stage3/aarch64-unknown-linux-gnu/stage2-sanity.env.frontend-bootstrap-0.log.hello-world-positional`.
+No Stage2 admission, Stage4 CLI, or Target 5/6 performance proof exists.
+
+## Current update and next action
+
+The later raw-string ABI repair moved the Stage2 candidate through the
+positional hello-world smoke and struct/runtime proof. Its compiler-test
+matrix stopped at missing delegated MC/DC waiver fields; a direct in-process
+attempt then hit the RSS observer's 1,000 ms budget before a compiler verdict.
+Complete that matrix with a supported observation budget and require its PASS
+summary before Stage3/4. Run the Target 5/6 size, startup, compile-time, and
+RSS cohorts before marking either target complete.
+
+The follow-up diagnosis and TODO are in
+`doc/08_tracking/bug/target56_stage2_positional_hello_world_silent_exit_2026-09-28.md`.
+
+## Current-source snapshot registry recurrence
+
+A fresh `--full-bootstrap --stop-after-stage2` on the rebased Target 5/6
+branch rebuilt its Rust seed and runtime authority, then compiled 1,061
+Stage2 source files and failed only
+`src/lib/nogc_sync_mut/sffi/dynlib_snapshot_registry_v1.spl`:
+`hir: Cannot infer field type: struct 'i64' field 'accepted'`. This owner
+also passed a protected struct through an update closure. The pre-rebase
+branch repair kept typed Simple-side state under a mutex exclusion gate; a
+focused bootstrap-mode no-stub native build compiled 37 reached files, failed
+zero, and linked a 75 KB probe whose missing-library refusal printed `true`.
+The next full Stage2 rerun compiled that source, passed positional hello-world
+and struct/runtime capability admission, and published an immutable runtime
+capsule with SHA-256
+`d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`.
+Its in-process compiler matrix failed at the full CLI link after 1,828 seconds;
+the test rows could not run. Stage2 as a whole is not yet a PASS. See
+`doc/08_tracking/bug/target56_stage2_full_cli_optional_runtime_link_2026-09-28.md`.
+Retained logs are
+`build/mini_builds/target56_stage2_owner_probe/full_bootstrap_current.log`
+and `build/mini_builds/target56_dynlib_probe/current_snapshot_build.log`.
+
+During the later rebase onto `origin/main`, the branch retained main's
+`bea378f817d` owner fix for this same registry. That implementation holds only
+an exclusion token in the mutex and keeps a Simple-side descriptor list; it
+has no protected struct or update closure. Main also added
+`dynlib_snapshot_registry_v1_spec.spl`. The preceding Stage2 receipt predates
+that conflict resolution, so it must not be presented as a test of the
+rebased source. A focused no-stub native build of the rebased owner compiled
+37 files with zero failures and linked a 75 KB probe in 5.7 seconds. Running
+that probe exited zero and printed `true` for missing-library refusal; its
+log is `build/mini_builds/target56_dynlib_probe/rebased_source_build.log`.
+The full Stage2 matrix on the rebased tree remains unproven.

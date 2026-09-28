@@ -17366,8 +17366,20 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     return ok;
 }
 
-/* collections.rs:1708 -- remove by key/index from array or dict. */
-SPL_RT_TRAP2(rt_collection_remove)
+/* A receiver-dispatched remove. The native method caller passes a tagged key:
+ * arrays use a tagged integer index and return the removed element; dictionaries
+ * return the removed value. Unknown receivers and missing keys return NIL. */
+int64_t rt_collection_remove(int64_t receiver, int64_t key) {
+    if (rt_core_as_array(receiver)) {
+        int64_t index = rt_core_is_int(key) ? rt_core_as_int(key) : -1;
+        return rt_array_remove(receiver, index);
+    }
+    RtCoreDict* dict = rt_core_as_dict(receiver);
+    if (!dict || key == rt_core_nil()) return rt_core_nil();
+    int64_t removed = rt_core_dict_lookup(dict, key);
+    (void)rt_core_dict_del(dict, key);
+    return removed;
+}
 
 /* collections.rs:1902 -- erased receiver.set(key, value). Real semantics for
  * the one type Rust actually supports here (Dict): mutate in place and return

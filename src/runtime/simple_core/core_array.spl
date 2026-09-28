@@ -549,6 +549,43 @@ pub fn rt_dict_remove(dict: i64, key: i64) -> i8:
     _sffi_core_array_store_i64(dict_ptr(dict), 16, last)
     1
 
+# Pure-Simple twin of the hosted collection method ABI. The core owns only
+# ordinary and byte-packed arrays; other array layouts fail closed here.
+pub fn rt_collection_remove(receiver: i64, key: i64) -> i64:
+    if array_is_valid(receiver) > 0:
+        if (key & 7) != 0:
+            return 3
+        val index = key >> 3
+        val length = array_len_value(receiver)
+        if index < 0 or index >= length:
+            return 3
+        val items = array_items(receiver)
+        val flags = array_flags(receiver)
+        if flags == 8:
+            val removed = _sffi_core_array_load_u8(items, index) << 3
+            var i = index
+            while i + 1 < length:
+                _sffi_core_array_store_u8(items, i,
+                    _sffi_core_array_load_u8(items, i + 1))
+                i = i + 1
+            set_array_len(receiver, length - 1)
+            return removed
+        if flags == 0:
+            val removed = _sffi_core_array_load_i64(items, index * 8)
+            var i = index
+            while i + 1 < length:
+                _sffi_core_array_store_i64(items, i * 8,
+                    _sffi_core_array_load_i64(items, (i + 1) * 8))
+                i = i + 1
+            set_array_len(receiver, length - 1)
+            return removed
+        return 3
+    if dict_is_valid(receiver) > 0 and key != 3:
+        val removed = rt_dict_get(receiver, key)
+        val _ = rt_dict_remove(receiver, key)
+        return removed
+    3
+
 pub fn rt_dict_clear(dict: i64) -> i8:
     if dict_ptr(dict) < 1:
         return 0

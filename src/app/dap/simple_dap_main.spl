@@ -7,7 +7,6 @@
 extern fn stdin_read_char() -> text
 extern fn print_raw(s: text)
 extern fn rt_stderr_write(s: text)
-extern fn rt_file_read_text(path: text) -> text
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 
@@ -31,7 +30,7 @@ impl SimpleDapSession:
 
     me launch(program: text):
         self.program = program
-        self.content = rt_file_read_text(program) ?? ""
+        self.content = read_file_text(program)
         self.current_line = _dap_first_executable_line(self.content)
 
     me restart():
@@ -106,31 +105,48 @@ fn _dap_log(message: text):
     rt_stderr_write("[simple-dap] " + message + "\n")
 
 fn _dap_json_escape(s: text) -> text:
+    # slice() is byte-indexed, but char_at() is character-indexed -- on
+    # non-ASCII input the two walk different position spaces, so this must
+    # use slice(i, i+1) (NOT char_at(i)) to stay aligned with the
+    # byte-length loop bound below. Accumulating one raw byte at a time
+    # (the old `result = result + ch`) also shreds multi-byte UTF-8
+    # characters in the DAP-visible value into separate U+FFFD replacement
+    # characters. The escaped bytes are all single ASCII bytes, so
+    # byte-stepping to find them is safe; copy whole runs via slice()
+    # between them instead of rebuilding byte-by-byte.
     var result = ""
+    var seg_start = 0
     var i = 0
     while i < s.len():
-        val ch = s.char_at(i)
+        val ch = s.slice(i, i + 1)
         if ch == "\"":
-            result = result + "\\\""
+            result = result + s.slice(seg_start, i) + "\\\""
+            seg_start = i + 1
         elif ch == "\\":
-            result = result + "\\\\"
+            result = result + s.slice(seg_start, i) + "\\\\"
+            seg_start = i + 1
         elif ch == "\n":
-            result = result + "\\n"
+            result = result + s.slice(seg_start, i) + "\\n"
+            seg_start = i + 1
         elif ch == "\r":
-            result = result + "\\r"
+            result = result + s.slice(seg_start, i) + "\\r"
+            seg_start = i + 1
         elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
+            result = result + s.slice(seg_start, i) + "\\t"
+            seg_start = i + 1
         i = i + 1
-    result
+    result + s.slice(seg_start, s.len())
 
 fn _dap_split_lines(content: text) -> [text]:
+    # slice() is byte-indexed, but char_at() is character-indexed -- on
+    # non-ASCII source content the two walk different position spaces, so
+    # this must use slice(i, i+1) (NOT char_at(i)) to stay aligned with
+    # the byte-length loop bound below.
     var lines: [text] = []
     var start = 0
     var i = 0
     while i < content.len():
-        if content.char_at(i) == "\n":
+        if content.slice(i, i + 1) == "\n":
             lines.push(content.slice(start, i))
             start = i + 1
         i = i + 1
@@ -289,12 +305,9 @@ fn _dap_parse_content_length(header_line: text) -> i64:
         return 0
     val trimmed = header_line.slice(prefix.len(), header_line.len()).trim()
     var result: i64 = 0
-    var i = 0
-    while i < trimmed.len():
-        val ch = trimmed.char_at(i)
+    for ch in trimmed.chars():
         if ch >= "0" and ch <= "9":
             result = result * 10 + (ch.to_int() - "0".to_int())
-        i = i + 1
     result
 
 fn _dap_find_text(s: text, needle: text) -> i64:
@@ -503,7 +516,7 @@ fn _dap_handle(json: text, session: SimpleDapSession) -> [text]:
         return out
     if command == "launch":
         val program = _dap_extract_field(json, "program")
-        if program == "" or not rt_file_exists(program):
+        if program == "" or not file_exists(program):
             out.push(_dap_error_response(req_seq, command, "program not found: " + program))
             return out
         session.launch(program)
@@ -564,5 +577,4 @@ fn simple_dap_server_main():
         if command == "disconnect":
             running = false
 
-fn main():
-    simple_dap_server_main()
+simple_dap_server_main()

@@ -1,7 +1,8 @@
 """Opt-in transactional scalar grammar VM. The legacy frontend is not called.
 
 Input is an already-tokenized source blob. MatchByte matches exactly one byte;
-keyword/lexical modes remain the dialect adapter's responsibility. All effects
+MatchTokenText compares an exact token byte span without copying source text.
+Lexical modes remain the dialect adapter's responsibility. All effects
 are private until root acceptance at token EOF. Resource errors are fatal,
 never an ordered-choice mismatch. Step fuel counts grammar AND action dispatch
 and is not part of any checkpoint. Choice copies bounded call frames and marks
@@ -28,11 +29,11 @@ fn _input_valid_v1(source: ParseSourceBlob, tokens: ParseTokenArena, limits: Par
         i = i + 1
     true
 
-pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob,
-    tokens: ParseTokenArena, entry_rule: i64, limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
-    # The public value record is reconstructible: do not trust a prior receipt.
-    if not parse_program_shape_valid_v1(program, limits):
-        return parse_program_execution_failed_v1("invalid_program", 0)
+fn _parse_grammar_execute_v2(
+    program: ParseProgramV1, literal_offsets: [i64], literal_bytes: [u8],
+    source: ParseSourceBlob, tokens: ParseTokenArena,
+    entry_rule: i64, limits: ParseProgramLimitsV1
+) -> ParseProgramExecutionV1:
     if not _input_valid_v1(source, tokens, limits):
         return parse_program_execution_failed_v1("invalid_input", 0)
     var entry_allowed = false
@@ -55,13 +56,27 @@ pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob
         val op = program.grammar_words[pc]
         val a = program.grammar_words[pc + 1]
         var mismatch = false
-        if op == PG_MATCH_KIND_V1 or op == PG_MATCH_BYTE_V1:
+        if op == PG_MATCH_KIND_V1 or op == PG_MATCH_BYTE_V1 or
+            op == PG_MATCH_TOKEN_TEXT_V2:
             var matched = false
             if cursor < tokens.kind.len():
                 if op == PG_MATCH_KIND_V1:
                     matched = tokens.kind[cursor] as i64 == a
-                elif tokens.count[cursor] == 1u32:
+                elif op == PG_MATCH_BYTE_V1 and tokens.count[cursor] == 1u32:
                     matched = source.bytes[tokens.start[cursor] as i64] as i64 == a
+                elif op == PG_MATCH_TOKEN_TEXT_V2:
+                    val literal_start = literal_offsets[a]
+                    val literal_end = literal_offsets[a + 1]
+                    val token_start = tokens.start[cursor] as i64
+                    if tokens.count[cursor] as i64 == literal_end - literal_start:
+                        matched = true
+                        var i = 0
+                        while i < literal_end - literal_start:
+                            if source.bytes[token_start + i] !=
+                                literal_bytes[literal_start + i]:
+                                matched = false
+                                break
+                            i = i + 1
             if matched:
                 state.last_start = tokens.start[cursor] as i64
                 state.last_count = tokens.count[cursor] as i64
@@ -129,4 +144,18 @@ pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob
             if choices.len() == 0: parse_semantic_clear_journal_v1(state)
     parse_program_execution_failed_v1("unreachable_executor_end", steps)
 
-export parse_grammar_execute_v1
+pub fn parse_grammar_execute_v1(program: ParseProgramV1, source: ParseSourceBlob,
+    tokens: ParseTokenArena, entry_rule: i64, limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
+    # The public value record is reconstructible: do not trust a prior receipt.
+    if not parse_program_shape_valid_v1(program, limits):
+        return parse_program_execution_failed_v1("invalid_program", 0)
+    _parse_grammar_execute_v2(program, [0], [], source, tokens, entry_rule, limits)
+
+pub fn parse_grammar_execute_v2(program: ParseProgramV2, source: ParseSourceBlob,
+    tokens: ParseTokenArena, entry_rule: i64, limits: ParseProgramLimitsV1) -> ParseProgramExecutionV1:
+    if not parse_program_shape_valid_v2(program, limits):
+        return parse_program_execution_failed_v1("invalid_program", 0)
+    _parse_grammar_execute_v2(program.base, program.literal_offsets,
+        program.literal_bytes, source, tokens, entry_rule, limits)
+
+export parse_grammar_execute_v1, parse_grammar_execute_v2

@@ -30,6 +30,7 @@ enum HirChildFrame:
     AsmMatchArm(node: HirAsmMatchArm)
     Block(node: HirBlock)
     CallArg(node: HirCallArg)
+    CatchClause(node: HirCatchClause)
     CompClause(node: HirCompClause)
     CompClauseKind(node: HirCompClauseKind)
     ComprehensionKind(node: HirComprehensionKind)
@@ -62,6 +63,7 @@ fn hir_expand_child_frames_reverse(frame: HirChildFrame, sink: HirChildFrameSink
         case AsmMatchArm(node): hir_expand_asm_match_arm_child_frames_reverse(node, sink)
         case Block(node): hir_expand_block_child_frames_reverse(node, sink)
         case CallArg(node): hir_expand_call_arg_child_frames_reverse(node, sink)
+        case CatchClause(node): hir_expand_catch_clause_child_frames_reverse(node, sink)
         case CompClause(node): hir_expand_comp_clause_child_frames_reverse(node, sink)
         case CompClauseKind(node): hir_expand_comp_clause_kind_child_frames_reverse(node, sink)
         case ComprehensionKind(node): hir_expand_comprehension_kind_child_frames_reverse(node, sink)
@@ -261,15 +263,11 @@ fn hir_children_of_expr(node: HirExpr) -> [HirNode]:
             hir_visit_nothing()
         case TypeTest(b_value, _):
             out = out.push(HirNode.Expr(b_value))
-        case TryCatch(b_body, b_clauses, b_finally):
+        case TryCatch(b_body, b_clauses, b_finally_):
             out = _hir_extend(out, hir_children_of_block(b_body))
-            for clause in b_clauses:
-                if clause.has_pattern:
-                    out = out.push(HirNode.Pattern(clause.pattern))
-                if clause.has_type_:
-                    out = out.push(HirNode.Type_(clause.type_))
-                out = _hir_extend(out, hir_children_of_block(clause.body))
-            out = _hir_extend(out, hir_children_of_block(b_finally))
+            for it1 in b_clauses:
+                out = _hir_extend(out, hir_children_of_catch_clause(it1))
+            out = _hir_extend(out, hir_children_of_block(b_finally_))
         case _: unreachable_hir_variant("HirExprKind", "hir_children_of_expr")
     out
 
@@ -517,6 +515,17 @@ fn hir_children_of_call_arg(node: HirCallArg) -> [HirNode]:
         return []
     var out: [HirNode] = []
     out = out.push(HirNode.Expr(node.value))
+    out
+
+fn hir_children_of_catch_clause(node: HirCatchClause) -> [HirNode]:
+    if node == nil:
+        return []
+    var out: [HirNode] = []
+    if node.has_pattern:
+        out = out.push(HirNode.Pattern(node.pattern))
+    if node.has_type_:
+        out = out.push(HirNode.Type_(node.type_))
+    out = _hir_extend(out, hir_children_of_block(node.body))
     out
 
 fn hir_children_of_comp_clause(node: HirCompClause) -> [HirNode]:
@@ -836,17 +845,13 @@ fn hir_expand_expr_child_frames_reverse(node: HirExpr, sink: HirChildFrameSink):
             hir_visit_nothing()
         case TypeTest(b_value, _):
             sink.push_hir_child_frame(HirChildFrame.Expr(b_value))
-        case TryCatch(b_body, b_clauses, b_finally):
-            sink.push_hir_child_frame(HirChildFrame.Block(b_finally))
-            var catch_i = b_clauses.len()
-            while catch_i > 0:
-                catch_i = catch_i - 1
-                val clause = b_clauses[catch_i]
-                sink.push_hir_child_frame(HirChildFrame.Block(clause.body))
-                if clause.has_type_:
-                    sink.push_hir_child_frame(HirChildFrame.Type_(clause.type_))
-                if clause.has_pattern:
-                    sink.push_hir_child_frame(HirChildFrame.Pattern(clause.pattern))
+        case TryCatch(b_body, b_clauses, b_finally_):
+            sink.push_hir_child_frame(HirChildFrame.Block(b_finally_))
+            var ri1 = b_clauses.len()
+            while ri1 > 0:
+                ri1 = ri1 - 1
+                val it1 = b_clauses[ri1]
+                sink.push_hir_child_frame(HirChildFrame.CatchClause(it1))
             sink.push_hir_child_frame(HirChildFrame.Block(b_body))
         case _: unreachable_hir_variant("HirExprKind", "hir_expand_expr_child_frames_reverse")
     if node.has_type_:
@@ -1119,6 +1124,15 @@ fn hir_expand_call_arg_child_frames_reverse(node: HirCallArg, sink: HirChildFram
         return
     sink.push_hir_child_frame(HirChildFrame.Expr(node.value))
 
+fn hir_expand_catch_clause_child_frames_reverse(node: HirCatchClause, sink: HirChildFrameSink):
+    if node == nil:
+        return
+    sink.push_hir_child_frame(HirChildFrame.Block(node.body))
+    if node.has_type_:
+        sink.push_hir_child_frame(HirChildFrame.Type_(node.type_))
+    if node.has_pattern:
+        sink.push_hir_child_frame(HirChildFrame.Pattern(node.pattern))
+
 fn hir_expand_comp_clause_child_frames_reverse(node: HirCompClause, sink: HirChildFrameSink):
     if node == nil:
         return
@@ -1217,5 +1231,5 @@ fn hir_expand_with_item_child_frames_reverse(node: HirWithItem, sink: HirChildFr
 
 export HirNode, HirChildFrame, HirChildFrameSink, hir_children_of, _hir_extend
 export hir_expand_child_frames_reverse
-export hir_children_of_expr, hir_children_of_stmt, hir_children_of_type, hir_children_of_pattern, hir_children_of_dim_expr, hir_children_of_dim_expr_kind, hir_children_of_effect, hir_children_of_effect_kind, hir_children_of_asm, hir_children_of_asm_constraint, hir_children_of_asm_match_arm, hir_children_of_block, hir_children_of_call_arg, hir_children_of_comp_clause, hir_children_of_comp_clause_kind, hir_children_of_comprehension_kind, hir_children_of_enum_payload, hir_children_of_if_arm, hir_children_of_interpolation, hir_children_of_match_arm, hir_children_of_param, hir_children_of_pattern_payload, hir_children_of_with_item
-export hir_expand_expr_child_frames_reverse, hir_expand_stmt_child_frames_reverse, hir_expand_type_child_frames_reverse, hir_expand_pattern_child_frames_reverse, hir_expand_dim_expr_child_frames_reverse, hir_expand_dim_expr_kind_child_frames_reverse, hir_expand_effect_child_frames_reverse, hir_expand_effect_kind_child_frames_reverse, hir_expand_asm_child_frames_reverse, hir_expand_asm_constraint_child_frames_reverse, hir_expand_asm_match_arm_child_frames_reverse, hir_expand_block_child_frames_reverse, hir_expand_call_arg_child_frames_reverse, hir_expand_comp_clause_child_frames_reverse, hir_expand_comp_clause_kind_child_frames_reverse, hir_expand_comprehension_kind_child_frames_reverse, hir_expand_enum_payload_child_frames_reverse, hir_expand_if_arm_child_frames_reverse, hir_expand_interpolation_child_frames_reverse, hir_expand_match_arm_child_frames_reverse, hir_expand_param_child_frames_reverse, hir_expand_pattern_payload_child_frames_reverse, hir_expand_with_item_child_frames_reverse
+export hir_children_of_expr, hir_children_of_stmt, hir_children_of_type, hir_children_of_pattern, hir_children_of_dim_expr, hir_children_of_dim_expr_kind, hir_children_of_effect, hir_children_of_effect_kind, hir_children_of_asm, hir_children_of_asm_constraint, hir_children_of_asm_match_arm, hir_children_of_block, hir_children_of_call_arg, hir_children_of_catch_clause, hir_children_of_comp_clause, hir_children_of_comp_clause_kind, hir_children_of_comprehension_kind, hir_children_of_enum_payload, hir_children_of_if_arm, hir_children_of_interpolation, hir_children_of_match_arm, hir_children_of_param, hir_children_of_pattern_payload, hir_children_of_with_item
+export hir_expand_expr_child_frames_reverse, hir_expand_stmt_child_frames_reverse, hir_expand_type_child_frames_reverse, hir_expand_pattern_child_frames_reverse, hir_expand_dim_expr_child_frames_reverse, hir_expand_dim_expr_kind_child_frames_reverse, hir_expand_effect_child_frames_reverse, hir_expand_effect_kind_child_frames_reverse, hir_expand_asm_child_frames_reverse, hir_expand_asm_constraint_child_frames_reverse, hir_expand_asm_match_arm_child_frames_reverse, hir_expand_block_child_frames_reverse, hir_expand_call_arg_child_frames_reverse, hir_expand_catch_clause_child_frames_reverse, hir_expand_comp_clause_child_frames_reverse, hir_expand_comp_clause_kind_child_frames_reverse, hir_expand_comprehension_kind_child_frames_reverse, hir_expand_enum_payload_child_frames_reverse, hir_expand_if_arm_child_frames_reverse, hir_expand_interpolation_child_frames_reverse, hir_expand_match_arm_child_frames_reverse, hir_expand_param_child_frames_reverse, hir_expand_pattern_payload_child_frames_reverse, hir_expand_with_item_child_frames_reverse

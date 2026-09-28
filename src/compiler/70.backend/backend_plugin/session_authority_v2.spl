@@ -210,7 +210,12 @@ fn _backend_session_record_index_v2(
         return -1
     var i = 0
     while i < owner.records.len():
-        if owner.records[i].token == token:
+        val stored = owner.records[i].token
+        # Stage2 native codegen can reject whole-struct token equality even
+        # when every field matches. Compare the authority identity explicitly.
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.receipt_hash == token.receipt_hash:
             return i
         i = i + 1
     -1
@@ -221,7 +226,10 @@ fn _backend_session_use_index_v2(
 ) -> i64:
     var i = 0
     while i < record.uses.len():
-        if record.uses[i].token == token:
+        val stored = record.uses[i].token
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.use_id == token.use_id:
             return i
         i = i + 1
     -1
@@ -232,7 +240,11 @@ fn _backend_session_result_index_v2(
 ) -> i64:
     var i = 0
     while i < use_record.results.len():
-        if use_record.results[i].token == token:
+        val stored = use_record.results[i].token
+        if stored.owner_identity == token.owner_identity and
+           stored.generation == token.generation and
+           stored.use_id == token.use_id and
+           stored.result_id == token.result_id:
             return i
         i = i + 1
     -1
@@ -316,7 +328,10 @@ fn _backend_session_claim_use_v2(
     if index < 0:
         return Err(BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
     var record = owner.records[index]
-    if record.state == BackendSessionAuthorityStateV2.Closed:
+    # Acquiring a use pins lifetime; it does not authorize starting work after
+    # close. Already retained results remain projectable/releasable while the
+    # owner drains, but an unused token must not start a provider operation.
+    if record.state != BackendSessionAuthorityStateV2.Accepting:
         return Err(BackendSessionAuthorityErrorV2.NotAccepting)
     val use_index = _backend_session_use_index_v2(record, use_token)
     if use_index < 0:

@@ -1,7 +1,8 @@
 use std.spec
-use std.io_runtime.{host_os, platform_name}
+use std.io_runtime.{host_os, host_arch, platform_name, env_get_nullable, env_set_process}
 use std.platform.{host_os as platform_host_os}
 use std.nogc_sync_mut.env.platform.{detect_os, is_windows}
+use std.nogc_sync_mut.env.variables.{env_unset}
 use std.sffi.platform.{platform_name_raw}
 
 # doc/08_tracking/bug/win_host_os_detector_disagreement_2026-09-14.md
@@ -43,3 +44,38 @@ describe "host OS detectors agree with each other":
 
         # is_windows() must be consistent with host_os() == "windows".
         expect(is_windows()).to_equal(a == "windows")
+
+    it "ignores contradictory OS and OSTYPE on a runtime-known host":
+        val raw = platform_name_raw()
+        if raw == "windows" or raw == "macos" or raw == "linux" or raw == "freebsd" or raw == "illumos" or raw == "solaris" or raw == "unix":
+            val saved_os = env_get_nullable("OS")
+            val saved_ostype = env_get_nullable("OSTYPE")
+            val expected_os = host_os()
+            val expected_arch = host_arch()
+
+            # On Windows, spoof Unix; on Unix, spoof Windows. Both variables
+            # are restored before any assertion can leave this test.
+            val spoofed_os = if raw == "windows": "Linux" else: "Windows_NT"
+            val spoofed_ostype = if raw == "windows": "linux" else: "win32"
+            val set_os = env_set_process("OS", spoofed_os)
+            val set_ostype = env_set_process("OSTYPE", spoofed_ostype)
+            val actual_os = host_os()
+            val actual_arch = host_arch()
+            val actual_platform_os = platform_host_os()
+            val actual_detect_os = detect_os()
+
+            if saved_os == nil:
+                env_unset("OS")
+            else:
+                env_set_process("OS", saved_os!)
+            if saved_ostype == nil:
+                env_unset("OSTYPE")
+            else:
+                env_set_process("OSTYPE", saved_ostype!)
+
+            expect(set_os).to_equal(true)
+            expect(set_ostype).to_equal(true)
+            expect(actual_os).to_equal(expected_os)
+            expect(actual_arch).to_equal(expected_arch)
+            expect(actual_platform_os).to_equal(expected_os)
+            expect(actual_detect_os).to_equal(expected_os)
