@@ -2137,6 +2137,21 @@ impl Lowerer {
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
 
+        // Coalescing a declared [T]? yields [T], not a nullable pointer to it.
+        // Keeping the wrapper here erases the element type at a following
+        // for-in: iterable inference accepts Array, but intentionally does not
+        // accept optional pointers. Narrow only arrays; scalar optional slots
+        // have tagged/raw representation rules above, and other shared
+        // references must not acquire unwrap semantics from this correction.
+        let result_ty = match self.module.types.get(result_ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if matches!(self.module.types.get(*inner), Some(HirType::Array { .. })) => *inner,
+            _ => result_ty,
+        };
+
         // Unwrap the then-branch: if expr is Some(x), return x, not Some(x).
         // Use rt_unwrap_or_self which handles both enum and raw values.
         let unwrapped_expr = HirExpr {
