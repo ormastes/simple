@@ -5,7 +5,16 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1, cold_hir_semantic_seed_v1}
 use compiler.driver.cache.cold_hir_package_drafts_v1.{ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1}
 use compiler.driver.cache.cold_hir_package_publication_v1.{cold_hir_package_publish_verified_v1}
-use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1, PackageArchivePublishInputV1, package_archive_publish_scc_v1}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_receipt_decode_v1, package_archive_publish_scc_v1
+}
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_lookup_receipt_digest_v1}
+use compiler.driver.cache.cas_store.{cas_blob_path, cas_get}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_open_verified_v1, pinned_archive_read_member_v1,
+    pinned_archive_close_v1
+}
 use compiler.driver.cache.package_module_index.{
     package_module_index_read_current_v1,
     package_module_index_encode_v1, package_module_index_decode_v1
@@ -13,7 +22,7 @@ use compiler.driver.cache.package_module_index.{
 use compiler.driver.cache.package_module_index_builder.{PackageModuleIndexBuildAuthorityV1, PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1}
 use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1}
-use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
@@ -102,6 +111,48 @@ fn compact_persisted_archive_fixture(
     (authority, inventory, output, published)
 
 describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
+    it "reads the persisted 542-byte archive through its pinned receipt":
+        val root = "build/tmp/cold-hir-pinned/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false)
+        expect(archive_published).to_be(true)
+        val built = cold_hir_package_index_from_outputs_v1(
+            authority, inventory, [output])
+        expect(built.is_ok()).to_be(true)
+        if built.is_ok():
+            val entry = built.unwrap().entries[0]
+            val aggregate_action_digest = sha256_text(entry.action_digest)
+            val receipt_digest = cas_batch_lookup_receipt_digest_v1(
+                root, entry.package_identity, aggregate_action_digest)
+            expect(receipt_digest != nil).to_be(true)
+            if receipt_digest != nil:
+                val encoded = cas_get(root, receipt_digest.unwrap())
+                expect(encoded != nil).to_be(true)
+                if encoded != nil:
+                    val receipt = package_archive_receipt_decode_v1(
+                        encoded.unwrap())
+                    expect(receipt != nil).to_be(true)
+                    if receipt != nil:
+                        val admitted = receipt.unwrap()
+                        val blob_path = cas_blob_path(
+                            root, admitted.archive_digest)
+                        expect(blob_path.starts_with(root + "/")).to_be(true)
+                        if blob_path.starts_with(root + "/"):
+                            val relative = blob_path.substring(
+                                root.len() + 1, blob_path.len())
+                            val opened = pinned_archive_open_verified_v1(
+                                root, relative, admitted)
+                            expect(opened.is_ok()).to_be(true)
+                            if opened.is_ok():
+                                var capability = opened.unwrap()
+                                val payload = pinned_archive_read_member_v1(
+                                    &capability, "interface.smf")
+                                expect(payload.is_ok()).to_be(true)
+                                if payload.is_ok():
+                                    expect(sha256_u8_hex(payload.unwrap())).to_equal(
+                                        output.interface_archive_digest)
+                                expect(pinned_archive_close_v1(capability).is_ok()).to_be(true)
+
     it "binds an entry-closure V3 graph to the full frozen inventory":
         val base = compact_inventory()
         val empty = sha256_text("")

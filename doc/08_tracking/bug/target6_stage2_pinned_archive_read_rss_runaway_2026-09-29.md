@@ -1,8 +1,7 @@
 # Stage-2 pinned archive read RSS runaway (2026-09-29)
 
-Status: open; observed only in the isolated no-stub Stage-2 native test worker
-linked against the hosted runtime archive. No current-source Stage-4 result is
-claimed.
+Status: focused Stage-2 native repro now passes; production memory/performance
+qualification remains open. No current-source Stage-4 result is claimed.
 
 While replacing the cold publisher's bounded CAS member check with
 `pinned_archive_open_verified_v1` and
@@ -46,3 +45,15 @@ linked, but aborted on `unwrap(None)` before reporting a pinned-read verdict
 receipt/load setup needs a guarded diagnostic before the pinned path can be
 qualified. Do not re-enable it in cold publication or claim a memory win until
 a native archive probe passes and paired time/RSS samples are recorded.
+
+## Follow-up: guarded archive receipt (2026-09-29)
+
+The earlier integration probe used a module entry's action digest to load an
+archive published under its SCC aggregate digest, then unwrapped the absent
+receipt. A guarded fixture now reads the actual batch mapping and receipt.
+It opens and reads the same 542-byte archive through the pinned capability:
+8 native examples pass, 0 failures, 8,236 KiB peak RSS. The pinned read is
+usable in this focused case. Replacing the cold publisher's whole-blob path
+did not meet the normalized time/RSS rule beyond noise, so that trial was
+reverted. See
+`doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.

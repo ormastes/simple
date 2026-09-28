@@ -123,8 +123,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
   using it as a cold publication memory optimization; see
   `doc/08_tracking/bug/target6_stage2_pinned_archive_read_rss_runaway_2026-09-29.md`.
   The synchronous file-view path now avoids a text-valued async roundtrip and
-  the pinned digest checks use hex text. A bounded direct native read passes;
-  archive integration and paired time/RSS proof remain open.
+  the pinned digest checks use hex text. A bounded 542-byte pinned archive
+  integration now passes 8 native scenarios, but the cold publisher trial
+  raised RSS and its apparent p95 gain was not consistent across 30 pairs.
+  The publisher change was reverted. Larger matched time/RSS and Stage-4
+  qualification remain open; see
+  `doc/09_report/compiler/target6_pinned_archive_native_and_cold_publisher_diagnostic_2026-09-29.md`.
 
 - [x] Retain frozen-inventory-bound typed HIR receipts across source/HIR
   eviction in the cold driver. Phase-1 digest and byte-length owners also work
