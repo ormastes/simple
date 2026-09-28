@@ -29,3 +29,24 @@ as a valid declaration to make the full CLI build pass.
 The session reached its three full CLI verify/fix attempts. The next run
 should start from an isolated reproducer and only retry the full CLI after
 the declaration lookup has a native regression test.
+
+## Focused native reproducer
+
+`test/02_integration/compiler/ast_module_decl_slots_native_probe_main.spl`
+compiled 48 source units with the admitted Stage2 pure-Simple compiler. It
+clears the module-declaration arena, appends indices 7 and 11, and reads
+both direct and wrapper accessors. With or without
+`SIMPLE_NATIVE_ARENA_DECLS=1`, it reports count 2 and slots 2. Direct slot
+reads return 7 and 11, but `module_decl_at(0)` and `(1)` both return -1. The
+probe exits 1 until that wrapper path is repaired. Splitting its combined
+bounds condition into two `if` statements did not change the result; that
+trial edit was reverted. Native disassembly shows the first count check is a
+direct `cmp index,count; b.ge` and passes. In the native-arena branch, the
+`index >= ast_module_decl_slots_len()` expression calls a comparison helper,
+then emits `cmp x0,#0; b.ge` before the `-1` return. If the helper returns a
+normal boolean 0 or 1, that signed `b.ge` is always taken. This is direct
+code-generation evidence for the wrapper's false rejection, although the
+precise helper ABI still needs a targeted check. The next repair should bind
+the slot length to an `i64` local and prove the resulting native branch uses
+a direct integer comparison; retain the invalid-index rejection in the
+regression spec.

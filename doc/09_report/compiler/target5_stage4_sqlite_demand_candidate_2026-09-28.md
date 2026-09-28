@@ -50,6 +50,9 @@ many later files showed the same pattern. Native arena mode reduced memory
 pressure but did not repair the declaration lookup. No further full CLI
 retry was run after the session's three-attempt verification cap. See
 `doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
+A 48-unit native reproducer now isolates the declaration lookup: the arena
+contains slots 7 and 11, while `module_decl_at` returns -1 for both. The
+focused probe is intentionally failing until that wrapper path is repaired.
 
 ## Remaining gates
 
