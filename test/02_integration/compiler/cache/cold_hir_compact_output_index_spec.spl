@@ -68,7 +68,7 @@ fn compact_output(module: HirModule, inventory: CompileSourceInventoryV1,
 
 fn compact_persisted_archive_fixture(
     root: text, scoped: bool, corrupt_interface: bool,
-    large_archive: bool = false
+    large_archive: bool = false, invalid_utf8: bool = false
 ) ->
         (PackageModuleIndexBuildAuthorityV1, CompileSourceInventoryV1,
          ColdHirPackageOutputV1, bool):
@@ -94,7 +94,9 @@ fn compact_persisted_archive_fixture(
     else:
         "symbol|foo|function|i64|{symbol_digest}"
     val action_prefix = "action|compile|function|foo|{compile_digest}"
-    val action_content = if large_archive:
+    val action_content = if invalid_utf8:
+        action_prefix + "é".slice(0, 1)
+    elif large_archive:
         action_prefix + "x".repeat(131072)
     else:
         action_prefix
@@ -345,3 +347,17 @@ describe "compact typed-HIR outputs to complete V2 and scoped V3 indexes":
             expect(rejected.unwrap_err()).to_equal(
                 "cold-publish-archive-decode-invalid:package-a")
         expect(package_module_index_read_current_v1(root).valid).to_be(false)
+
+    it "rejects an invalid UTF-8 member before moving CURRENT":
+        val root = "build/tmp/cold-hir-invalid-utf8/{rt_getpid()}-{rt_time_now_unix_micros()}"
+        val (authority, inventory, output, archive_published) =
+            compact_persisted_archive_fixture(root, false, false, false, true)
+        expect(archive_published).to_be(true)
+        if archive_published:
+            val rejected = cold_hir_package_publish_verified_v1(
+                root, authority, inventory, [output], "")
+            expect(rejected.is_err()).to_be(true)
+            if rejected.is_err():
+                expect(rejected.unwrap_err()).to_equal(
+                    "cold-publish-archive-member-utf8-invalid:package-a")
+            expect(package_module_index_read_current_v1(root).valid).to_be(false)

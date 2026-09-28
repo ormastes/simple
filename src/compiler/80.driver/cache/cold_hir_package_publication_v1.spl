@@ -26,7 +26,7 @@ use compiler.hir.archive.interface_action_archive.{
     interface_action_archive_payloads_decode_v1
 }
 use std.common.crypto.sha256.{sha256_text}
-use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.string_core.{text_validate_utf8}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
 
 val COLD_HIR_ARCHIVE_MAX_BYTES_V1: u64 = 1073741824
@@ -56,17 +56,15 @@ fn cold_hir_archive_payloads_v1(
             return Err("cold-publish-archive-layout-invalid")
         val end = member.offset + member.extent
         val begin_index = member.offset.to_i64()
-        val member_length = member.extent.to_i64()
-        var payload: [u8] = [0u8; member_length]
-        var byte_index = 0
-        while byte_index < member_length:
-            payload[byte_index] = archive_content.byte_at(
-                begin_index + byte_index).to_u8()
-            byte_index = byte_index + 1
-        val decoded = validated_utf8_bytes_to_text_linear(payload)
-        if decoded.is_err():
+        val end_index = end.to_i64()
+        # The archive is already resident for CAS readback. Slice exactly one
+        # member for semantic decoding instead of constructing a second
+        # member-sized [u8] before converting it back to text.
+        val payload_text = archive_content.slice(begin_index, end_index)
+        if payload_text.len().to_u64() != member.extent:
+            return Err("cold-publish-archive-layout-invalid")
+        if not text_validate_utf8(payload_text):
             return Err("cold-publish-archive-member-utf8-invalid")
-        val payload_text = decoded.unwrap()
         if sha256_text(payload_text) != member.payload_digest:
             return Err("cold-publish-archive-member-digest-mismatch")
         if index == 0:

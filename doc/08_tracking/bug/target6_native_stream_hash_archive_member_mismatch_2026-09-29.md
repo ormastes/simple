@@ -1,6 +1,7 @@
 # Target 6 native archive member streaming hash mismatch
 
-Status: open. The candidate optimization was reverted after three bounded
+Status: focused mismatch fixed; full Target 6 qualification remains open.
+The original candidate optimization was reverted after three bounded
 build/fix cycles; the previously passing archive publisher remains in source.
 
 `cold_hir_package_publication_v1.spl` currently copies each persisted archive
@@ -42,7 +43,12 @@ vectors, so those vectors did not cover this runtime-built array shape.
 working one-shot hasher used signed indices. Switching the stream's read loop
 to signed indices and adding the exact runtime-built archive-member vector
 made the no-stub native SHA spec pass 5/5, including both one-shot and
-seven-byte chunk streams. The cold archive publisher still uses its previous
-whole-member byte copy. Reapply bounded publication only after direct range
-UTF-8 validation and a paired native time/RSS cohort; this bug remains open
-until that production consumer is verified.
+seven-byte chunk streams.
+
+The selected cold-publisher change takes a validated text byte slice and
+uses the working `sha256_text` path, removing the extra member-sized byte
+array. Its no-stub native archive spec passes 10/10 and a 30-pair 8 MiB
+member cohort improves both p95 and peak RSS (normalized sum 0.613). The
+original streaming mismatch is resolved; production driver wiring, broader
+compile cohorts, and maximum-size proof are tracked by the Target 6 plan.
+See `doc/09_report/compiler/target6_bounded_archive_member_2026-09-29.md`.

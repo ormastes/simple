@@ -316,9 +316,14 @@ archive publication examples. It was reverted under the three-cycle cap.
 The native digest mismatch is now isolated to unsigned `[u8]` indexing in
 `sha256_stream_v1_update` on runtime-built byte arrays. A signed-index fix
 and exact action-member vector pass 5/5 in a no-stub Stage-2 native spec.
-The publisher still copies the whole member; direct range validation and a
-paired time/RSS cohort remain before replacing it. See
-`doc/08_tracking/bug/target6_native_stream_hash_archive_member_mismatch_2026-09-29.md`.
+The cold publisher now uses an exact text byte slice, the existing UTF-8
+validator, and `sha256_text`, removing its second member-sized `[u8]` copy.
+The no-stub native archive spec passes 10/10, including an invalid-UTF-8
+member refusal before `CURRENT`. Thirty paired 8 MiB member runs lower p95
+from 0.22 to 0.06 seconds and peak RSS from 99,476 to 33,860 KiB (normalized
+sum 0.613). This is one publication operation, not a full compile cohort;
+driver cutover and maximum-size qualification remain open. See
+`doc/09_report/compiler/target6_bounded_archive_member_2026-09-29.md`.
 
 Pinned archive file-view follow-up (2026-09-29): the POSIX descriptor reader
 now returns packed `[u8]` arrays instead of tagged `i64` slots. A copied
