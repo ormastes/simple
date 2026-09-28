@@ -144,11 +144,16 @@ fn cas_batch_begin_v1(
     val required = cas_batch_sorted_unique_v1(required_package_keys)
     if store_root == "" or scc_id == "" or required.len() != required_package_keys.len() or required.len() == 0:
         return cas_batch_error_v1(CasBatchTransactionErrorV1.incomplete_scc)
+    val current = cas_batch_current_v1(store_root)
+    if (current != "" and not cas_batch_digest_valid_v1(current)) or
+            (expected_current_generation != "" and
+                not cas_batch_digest_valid_v1(expected_current_generation)):
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+    if current != expected_current_generation:
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_changed)
     val root = cas_batch_root_v1(store_root)
     if not rt_dir_create_all("{root}/transactions") or not rt_dir_create_all("{root}/generations"):
         return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
-    if cas_batch_current_v1(store_root) != expected_current_generation:
-        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_changed)
     val required_text = cache_text_join_v1(required, ",")
     if required_text == nil:
         return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
@@ -192,6 +197,11 @@ fn cas_batch_stage_object_v1(
 fn cas_batch_publish_v1(
     transaction: CasBatchTransactionV1,
 ) -> Result[text, CasBatchTransactionErrorV1]:
+    if (not cas_batch_digest_valid_v1(transaction.transaction_id) or
+            not cas_batch_digest_valid_v1(transaction.next_generation) or
+            (transaction.expected_current_generation != "" and
+                not cas_batch_digest_valid_v1(transaction.expected_current_generation))):
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     val store_root = transaction.store_root
     val root = cas_batch_root_v1(store_root)
     val directory = cas_batch_transaction_dir_v1(store_root, transaction.transaction_id)

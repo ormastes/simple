@@ -1,0 +1,43 @@
+# Native transaction admission probe for corrupt CURRENT and cold start.
+use compiler.driver.cache.cas_batch_transaction.{CasBatchTransactionErrorV1, cas_batch_begin_v1, cas_batch_abort_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+fn main() -> i64:
+    val root = "build/tmp/cas_batch_corrupt_current_begin/{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val batch = "{root}/batch-v1"
+    if not rt_dir_create_all(batch):
+        return 1
+    val current_path = "{batch}/CURRENT"
+    if not rt_file_write_text(current_path, "../escape"):
+        return 1
+    val corrupt = cas_batch_begin_v1(root, "../escape", "scc", ["pkg"])
+    if not corrupt.is_err() or corrupt.unwrap_err() != CasBatchTransactionErrorV1.generation_corrupt:
+        print "corrupt-current-admitted"
+        return 1
+    if rt_file_exists("{batch}/transactions"):
+        print "corrupt-current-created-transaction-area"
+        return 1
+    val old = sha256_text("old-generation")
+    if not rt_file_write_text(current_path, old):
+        return 1
+    val mismatch = cas_batch_begin_v1(root, "", "scc", ["pkg"])
+    if not mismatch.is_err() or mismatch.unwrap_err() != CasBatchTransactionErrorV1.generation_changed:
+        print "current-mismatch-admitted"
+        return 1
+    if not rt_file_write_text(current_path, ""):
+        return 1
+    val cold = cas_batch_begin_v1(root, "", "scc", ["pkg"])
+    if cold.is_err():
+        print "valid-cold-start-rejected"
+        return 1
+    if cas_batch_abort_v1(cold.unwrap()).is_err():
+        print "valid-cold-abort-failed"
+        return 1
+    print "corrupt-current-rejected-cold-start-ok"
+    0

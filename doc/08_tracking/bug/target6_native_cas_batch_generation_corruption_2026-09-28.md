@@ -64,3 +64,9 @@ probe passed valid lookup and rejected a corrupt header, a corrupt unrelated
 mapping, and a traversal-shaped `CURRENT` (0.01 seconds, 1,608 KiB peak RSS).
 The new reader deliberately fails closed on older four-header-line generation
 files; production warm graph cutover is not yet admitted.
+
+Transaction admission now rejects an invalid or traversal-shaped `CURRENT`
+before creating the transaction area, and publication rejects malformed
+transaction/generation IDs. A separate 55-unit no-stub Stage2 native probe
+passed corrupt-current rejection, a valid-digest compare mismatch, and a
+valid empty-current cold start plus abort (0.00 seconds, 1,620 KiB peak RSS).
