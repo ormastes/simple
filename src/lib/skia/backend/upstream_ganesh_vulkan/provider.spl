@@ -476,15 +476,17 @@ fn _upstream_skia_render_admitted(ir: UiIr,
     var resource = gpu_provider_resource_alloc(session, byte_count, 0, usage)
     if not resource.is_live():
         val closed = session.close()
-        return Err(if closed: "upstream Skia output allocation failed" else:
-            "upstream Skia session retirement failed")
+        if closed:
+            return Err("upstream Skia output allocation failed")
+        return Err("upstream Skia session retirement failed")
     val payload_length = 16 + admission.rect_count.to_i64() * admission.rect_stride
     val payload = _upstream_skia_payload(ir, admission)
     if payload == 0:
         val released = resource.release()
         val closed = session.close()
-        return Err(if released and closed: "upstream Skia payload allocation failed" else:
-            "upstream Skia resource retirement failed")
+        if released and closed:
+            return Err("upstream Skia payload allocation failed")
+        return Err("upstream Skia resource retirement failed")
     var completion = gpu_provider_submit_raw(session, resource,
         admission.draw_format, payload,
         payload_length, correlation_id)
@@ -492,28 +494,30 @@ fn _upstream_skia_render_admitted(ir: UiIr,
     if not completion.is_live():
         val released = resource.release()
         val closed = session.close()
-        return Err(if released and closed: "upstream Skia submission failed" else:
-            "upstream Skia submission or retirement uncertain")
+        if released and closed:
+            return Err("upstream Skia submission failed")
+        return Err("upstream Skia submission or retirement uncertain")
     val receipt = gpu_provider_wait(session, completion, 5000000000)
     if not receipt.valid or receipt.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
         receipt.resource != resource.handle:
         val completion_released = completion.release()
         val resource_released = resource.release()
         val closed = session.close()
-        return Err(if completion_released and resource_released and closed:
-            "upstream Skia GPU completion failed" else:
-            "upstream Skia GPU completion or retirement uncertain")
+        if completion_released and resource_released and closed:
+            return Err("upstream Skia GPU completion failed")
+        return Err("upstream Skia GPU completion or retirement uncertain")
     val pixels = raw_alloc(byte_count)
     if pixels == 0:
         val completion_released = completion.release()
         val resource_released = resource.release()
         val closed = session.close()
-        return Err(if completion_released and resource_released and closed:
-            "upstream Skia readback allocation failed" else:
-            "upstream Skia readback retirement uncertain")
+        if completion_released and resource_released and closed:
+            return Err("upstream Skia readback allocation failed")
+        return Err("upstream Skia readback retirement uncertain")
     val readback = gpu_provider_readback_raw(session, resource, pixels, byte_count)
-    val bytes = if readback.valid and readback.length == byte_count:
-        _upstream_skia_copy_bytes(pixels, byte_count) else: []
+    var bytes: [i64] = []
+    if readback.valid and readback.length == byte_count:
+        bytes = _upstream_skia_copy_bytes(pixels, byte_count)
     raw_free(pixels, byte_count)
     # The optional native identity export is admissible only while the
     # completed resource and its observed readback still belong to this

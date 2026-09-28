@@ -26,11 +26,14 @@ use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
 
 # Process operations
 use std.nogc_sync_mut.io.process_ops.{ProcessResult}
-use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded}
+use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded, process_bounded_timed_out, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process_is_running, process_kill}
+use std.nogc_sync_mut.io.resource_scope.{ObservedProcessResult, ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult, CurrentExecutionResourceScope, process_run_observed_bounded, standard_resource_budget, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_systemd_resource_scope, begin_current_execution_resource_scope, end_current_execution_resource_scope}
 use std.nogc_sync_mut.io.process_ops.{
     process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some,
-    process_read_stdout, process_is_piped_alive, process_close_piped
+    process_read_stdout, process_is_piped_alive, process_close_piped,
+    process_pin_executable, process_close_pinned_executable,
+    process_spawn_pinned_piped
 }
 use std.nogc_sync_mut.io.process_ops.{process_output, shell}
 use std.nogc_sync_mut.io.process_ops.{shell_bool, shell_output_default, shell_output_trimmed, shell_lines, shell_int}
@@ -39,6 +42,12 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
 use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}
 use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
+use app.io.rt_hal_isolated_host.{
+    RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port,
+    rt_hal_install_isolated_exact_host,
+    rt_hal_install_isolated_exact_host_from_plan
+}
+use app.io.env_access_host.{rt_hal_install_isolated_exact_host_from_plan_path, rt_hal_install_isolated_exact_host_from_plan_path_or_fail}
 
 # Process limit enforcer
 use std.nogc_sync_mut.io.process_limit_enforcer.{build_ulimit_command, build_timeout_wrapper}
@@ -57,7 +66,8 @@ use std.nogc_sync_mut.io.time_ops.{timestamp_hour, timestamp_minute, timestamp_s
 use std.nogc_sync_mut.io.time_ops.{timestamp_now, sleep_ms}
 
 # System info
-use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname, cpu_count, path_basename}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname, cpu_count, path_basename,
+    getpid_checked, hostname_checked, cpu_count_checked}
 
 # Volatile memory operations
 use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64}
@@ -86,7 +96,7 @@ use std.nogc_sync_mut.io.string_helpers.{text_hash_native}
 
 
 # Thread management
-use std.nogc_sync_mut.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id}
+use std.nogc_sync_mut.io.thread.{thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id, thread_native_current_id, thread_native_sleep_ms}
 use std.nogc_sync_mut.io.thread.{atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange}
 
 # Math (advanced functions from moved module)
@@ -268,11 +278,21 @@ export dir_list, dir_remove
 
 # Process operations
 export ProcessResult
-export process_run, process_run_bounded, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded
+export process_run, process_run_bounded, process_bounded_timed_out, process_run_timeout, process_run_with_limits, process_run_with_limits_bounded
+export ObservedProcessResult, ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult
+export CurrentExecutionResourceScope, begin_current_execution_resource_scope, end_current_execution_resource_scope
+export process_run_observed_bounded, standard_resource_budget, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope
+export run_in_systemd_resource_scope
 export process_spawn_async, process_wait, process_is_running, process_kill
 export process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some
+export process_pin_executable, process_close_pinned_executable, process_spawn_pinned_piped
 export process_read_stdout, process_is_piped_alive, process_close_piped
 export process_spawn_async_env, process_is_alive
+export RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port
+export rt_hal_install_isolated_exact_host
+export rt_hal_install_isolated_exact_host_from_plan
+export rt_hal_install_isolated_exact_host_from_plan_path
+export rt_hal_install_isolated_exact_host_from_plan_path_or_fail
 export process_output, shell
 export shell_bool, shell_output, shell_output_default, shell_output_trimmed, shell_lines, shell_int
 export eprint
@@ -295,6 +315,7 @@ export timestamp_now, sleep_ms
 
 # System info
 export getpid, hostname, cpu_count, path_basename
+export getpid_checked, hostname_checked, cpu_count_checked
 
 # Volatile memory
 export volatile_read_u8, volatile_read_u16, volatile_read_u32, volatile_read_u64
@@ -323,6 +344,7 @@ export text_hash_native
 
 # Thread management
 export thread_available_parallelism, thread_sleep_ms, thread_yield, thread_current_id
+export thread_native_current_id, thread_native_sleep_ms
 export atomic_i64_load, atomic_i64_store, atomic_i64_fetch_add, atomic_i64_compare_exchange
 
 # Math

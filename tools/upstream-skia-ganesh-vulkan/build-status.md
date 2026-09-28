@@ -15,7 +15,7 @@ Status: **BLOCKED_ENVIRONMENT** (2026-09-26, macOS arm64 workspace; refreshed
   synced via `tools/git-sync-deps` (gn arm64 v2175 verified). The dependency
   attestation initially rejected `third_party/externals/perfetto` because the
   DEPS pin is an annotated *tag* object while the verifier compared raw commit
-  hashes; `verify-skia-deps.py` now peels pins to commits
+  hashes; `verify-skia-deps.shs` now peels pins to commits
   (`rev-parse <pin>^{commit}`) and attests all 45 Git dependencies
   (checkout-manifest digest `28e98416c16419a904936309ec00667df6bf0a1058ac0ab55229e1353c90c666`,
   manifest retained at `/private/tmp/skia-deps-manifest.json`).

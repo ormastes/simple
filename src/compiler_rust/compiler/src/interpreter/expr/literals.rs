@@ -29,7 +29,7 @@ pub(super) fn eval_literal_expr(
             NumericSuffix::Unit(unit_name) => {
                 // Create a Unit value for unit-suffixed integers
                 // Look up family from thread-local registry, with SI prefix support
-                let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                let (family, si_multiplier, base_suffix) = lookup_unit_family_with_si(unit_name);
                 // Apply SI prefix multiplier if present
                 let final_value = if let Some(mult) = si_multiplier {
                     // Convert to float and apply multiplier
@@ -37,9 +37,18 @@ pub(super) fn eval_literal_expr(
                 } else {
                     Value::Int(*value)
                 };
+                // An SI-decomposed literal has already been converted INTO the
+                // family's base unit, so it must carry the base suffix. Keeping
+                // the prefixed suffix made a later `to_<base>()` apply the
+                // family's conversion factor a second time (`2_km.to_m()` =>
+                // 2_000_000).
+                let suffix = match (&si_multiplier, &base_suffix) {
+                    (Some(_), Some(base)) => base.clone(),
+                    _ => unit_name.clone(),
+                };
                 Value::Unit {
                     value: Box::new(final_value),
-                    suffix: unit_name.clone(),
+                    suffix,
                     family,
                 }
             }
@@ -68,16 +77,22 @@ pub(super) fn eval_literal_expr(
         Expr::TypedFloat(value, suffix) => Ok(Some(match suffix {
             NumericSuffix::Unit(unit_name) => {
                 // Create a Unit value for unit-suffixed floats, with SI prefix support
-                let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                let (family, si_multiplier, base_suffix) = lookup_unit_family_with_si(unit_name);
                 // Apply SI prefix multiplier if present
                 let final_value = if let Some(mult) = si_multiplier {
                     *value * mult
                 } else {
                     *value
                 };
+                // See the integer arm above: an SI-decomposed literal carries
+                // the base suffix, never the prefixed one.
+                let suffix = match (&si_multiplier, &base_suffix) {
+                    (Some(_), Some(base)) => base.clone(),
+                    _ => unit_name.clone(),
+                };
                 Value::Unit {
                     value: Box::new(Value::Float(final_value)),
-                    suffix: unit_name.clone(),
+                    suffix,
                     family,
                 }
             }
