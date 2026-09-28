@@ -2352,6 +2352,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlsym_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlsym_process_checked", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_dynlib_snapshot_linux", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i32_i64_u32_u32_f64_bits", &[I64, I64, I64, I64, I64], &[I64]),

@@ -2396,6 +2396,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_dlopen_checked",
     "spl_dlsym_checked",
     "spl_dlsym_process_checked",
+    "spl_dynlib_snapshot_linux",
     "spl_wffi_call_i64_checked",
     "spl_wffi_try_call_i64_out",
     "spl_wffi_call_bool0_checked",

@@ -113,6 +113,118 @@ pub extern "C" fn rt_host_dynlib_close(handle: i64) -> i64 {
     }
 }
 
+/// Seed twin of `spl_dynlib_snapshot_linux` in `src/runtime/runtime_dynload.c`.
+///
+/// Copies the regular file at `path` (no symlink follow, <= 1 GiB) into a
+/// sealed memfd and returns its descriptor, or -1 on any failure / non-Linux.
+pub fn dynlib_snapshot_linux_path(path: &[u8]) -> i64 {
+    #[cfg(target_os = "linux")]
+    {
+        const LIMIT: u64 = 1 << 30;
+        if path.is_empty() || path.contains(&0) {
+            return -1;
+        }
+        let mut c_path = Vec::with_capacity(path.len() + 1);
+        c_path.extend_from_slice(path);
+        c_path.push(0);
+        unsafe {
+            let source = libc::open(
+                c_path.as_ptr() as *const libc::c_char,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            );
+            if source < 0 {
+                return -1;
+            }
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(source, &mut st) != 0
+                || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || st.st_size < 0
+                || st.st_size as u64 > LIMIT
+            {
+                libc::close(source);
+                return -1;
+            }
+            let snapshot = libc::memfd_create(
+                b"simple-sffi-provider\0".as_ptr() as *const libc::c_char,
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            );
+            if snapshot < 0 {
+                libc::close(source);
+                return -1;
+            }
+            let mut buffer = vec![0u8; 65536];
+            let mut total: u64 = 0;
+            loop {
+                let got = libc::read(source, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len());
+                if got == 0 {
+                    break;
+                }
+                if got < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    libc::close(source);
+                    libc::close(snapshot);
+                    return -1;
+                }
+                if got as u64 > LIMIT - total {
+                    libc::close(source);
+                    libc::close(snapshot);
+                    return -1;
+                }
+                total += got as u64;
+                let mut offset: isize = 0;
+                while offset < got {
+                    let put = libc::write(
+                        snapshot,
+                        buffer.as_ptr().offset(offset) as *const libc::c_void,
+                        (got - offset) as usize,
+                    );
+                    if put < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    if put <= 0 {
+                        libc::close(source);
+                        libc::close(snapshot);
+                        return -1;
+                    }
+                    offset += put;
+                }
+            }
+            if total != st.st_size as u64
+                || libc::close(source) != 0
+                || libc::lseek(snapshot, 0, libc::SEEK_SET) < 0
+                || libc::fcntl(
+                    snapshot,
+                    libc::F_ADD_SEALS,
+                    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL,
+                ) != 0
+            {
+                libc::close(snapshot);
+                return -1;
+            }
+            snapshot as i64
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        -1
+    }
+}
+
+/// spl_dynlib_snapshot_linux(path: text) -> i64 — native ABI (tagged text).
+#[no_mangle]
+pub extern "C" fn spl_dynlib_snapshot_linux(path_rv: RuntimeValue) -> i64 {
+    let raw_ptr = rt_string_data(path_rv);
+    let len = rt_string_len(path_rv);
+    if raw_ptr.is_null() || len <= 0 {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    dynlib_snapshot_linux_path(slice)
+}
+
 /// spl_dlopen(path: text) -> i64
 ///
 /// Decodes the tagged text RuntimeValue to a raw C string, calls dlopen.
@@ -905,6 +1017,30 @@ mod tests {
         assert_eq!(spl_dlopen_checked(empty, &mut handle), 1);
         assert_eq!(handle, 0);
         assert_eq!(spl_dlopen_checked(empty, std::ptr::null_mut()), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dynlib_snapshot_linux_seals_regular_files_and_rejects_others() {
+        let dir = std::env::temp_dir().join(format!("spl_dynsnap_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("provider.bin");
+        std::fs::write(&file, b"sealed-bytes").unwrap();
+        let fd = dynlib_snapshot_linux_path(file.to_str().unwrap().as_bytes());
+        assert!(fd >= 0);
+        let seals = unsafe { libc::fcntl(fd as i32, libc::F_GET_SEALS) };
+        assert!(seals & libc::F_SEAL_WRITE != 0 && seals & libc::F_SEAL_SEAL != 0);
+        let mut buf = [0u8; 32];
+        let got = unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        assert_eq!(&buf[..got as usize], b"sealed-bytes");
+        unsafe { libc::close(fd as i32) };
+        let link = dir.join("provider.link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(dynlib_snapshot_linux_path(link.to_str().unwrap().as_bytes()), -1);
+        assert_eq!(dynlib_snapshot_linux_path(dir.to_str().unwrap().as_bytes()), -1);
+        assert_eq!(dynlib_snapshot_linux_path(b""), -1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

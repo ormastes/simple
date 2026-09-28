@@ -402,6 +402,7 @@ pub use cli_sffi::{
 pub use wsffi_native::{
     rt_host_dynlib_close, rt_host_dynlib_open, rt_host_dynlib_symbol, spl_dlclose, spl_dlopen,
     spl_backend_plugin_run_v1, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked,
+    spl_dynlib_snapshot_linux, dynlib_snapshot_linux_path,
     spl_fonts_call_init_blob, spl_fonts_call_init_path, spl_fonts_call_layout_text, spl_wffi_call_bool0_checked,
     spl_wffi_call_bool1_checked, spl_wffi_call_f64, spl_wffi_call_f64_checked, spl_wffi_call_i64,
     spl_wffi_call_i32_i64_u32_u32_f64_bits, spl_wffi_call_i64_checked, spl_wffi_call_i64_into_bytes, spl_wffi_call_i64_with_bytes,
