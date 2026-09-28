@@ -7,6 +7,7 @@ use app.cli.entry_args.{get_cli_args}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use app.io.env_ops.{env_get, env_set}
 use app.io.process_ops.{process_run_timeout}
+use app.io.cli_ops.{cli_current_exe_path}
 use std.cli.log_modes.{parse_log_options}
 use app.cli.check_options.{check_option_error, check_worker_args, check_presentation_args}
 use app.check.targets.{expand_check_targets}
@@ -19,6 +20,39 @@ val CHECK_WORKER_TIMEOUT_MS = 300000
 # PARSE it. That is a failure of the worker, never of the user's target files.
 val CHECK_WORKER_ENTRY = "src/app/check/main.spl"
 val CHECK_WORKER_FALLBACK = "bin/simple"
+
+# `simple check` is run from arbitrary working directories, but the worker
+# binary (bin/release/<triple>/simple), its source entry and the bin/simple
+# fallback all live in the checkout that dispatched us. Resolving them against
+# cwd made every check outside the repo root fail with "no admitted cached
+# self-hosted check worker artifact". Anchor them on the running executable:
+# doc/08_tracking/bug/check_worker_missing_outside_repo_root_2026-09-28.md
+fn check_install_root(exe_path: text) -> text:
+    val marker = "/bin/release/"
+    val at = exe_path.find(marker) ?? -1
+    if at <= 0:
+        return ""
+    exe_path.substring(0, at)
+
+fn check_rooted_path(root: text, rel: text) -> text:
+    if root == "":
+        return rel
+    "{root}/{rel}"
+
+var _check_root_cache = ""
+var _check_root_resolved = false
+
+fn check_root() -> text:
+    if not _check_root_resolved:
+        _check_root_cache = check_install_root(cli_current_exe_path())
+        _check_root_resolved = true
+    _check_root_cache
+
+fn worker_entry_path() -> text:
+    check_rooted_path(check_root(), CHECK_WORKER_ENTRY)
+
+fn worker_fallback_path() -> text:
+    check_rooted_path(check_root(), CHECK_WORKER_FALLBACK)
 # Every worker invocation pays a fixed ~15-25s cost before main() even runs,
 # re-interpreting src/app/check/main.spl and its `compiler.core.parser` import
 # closure from source. Measured 2026-08-10 (load 79-117, so these overstate):
@@ -89,7 +123,7 @@ fn resolve_worker_binary() -> text:
         else:
             return ""
         for triple in windows_triples:
-            val candidate = "bin/release/{triple}/simple.exe"
+            val candidate = check_rooted_path(check_root(), "bin/release/{triple}/simple.exe")
             if file_exists(candidate):
                 return candidate
         return ""
@@ -102,7 +136,7 @@ fn resolve_worker_binary() -> text:
         triple = "{arch}-unknown-freebsd"
     else:
         return ""
-    val candidate = "bin/release/{triple}/simple"
+    val candidate = check_rooted_path(check_root(), "bin/release/{triple}/simple")
     if file_exists(candidate):
         return candidate
     ""
@@ -111,6 +145,7 @@ fn require_worker_binary() -> text:
     val worker_bin = resolve_worker_binary()
     if worker_bin == "":
         eprint "ERROR: no admitted cached self-hosted check worker artifact is available"
+        eprint "  looked under install root '{check_root()}' (empty = cwd); deploy bin/release/<triple>/simple or set SIMPLE_BINARY"
     worker_bin
 
 fn print_help():
@@ -225,13 +260,14 @@ fn run_worker(worker_bin: text, worker_args: [text], timeout_ms: i64) -> (text, 
     if raw_bin != nil and raw_bin != "" and raw_bin != worker_bin:
         val _set = env_set("SIMPLE_BINARY", worker_bin)
     val (stdout, stderr, code) = process_run_timeout(worker_bin, worker_args, timeout_ms)
-    if code != 0 and worker_bin != CHECK_WORKER_FALLBACK and worker_entry_load_failed(stderr):
-        eprint "check: worker {worker_bin} cannot load {CHECK_WORKER_ENTRY}; retrying on {CHECK_WORKER_FALLBACK} (that deployed binary is stale and needs a redeploy)"
-        return process_run_timeout(CHECK_WORKER_FALLBACK, worker_args, timeout_ms)
+    val fallback = worker_fallback_path()
+    if code != 0 and worker_bin != fallback and worker_entry_load_failed(stderr):
+        eprint "check: worker {worker_bin} cannot load {CHECK_WORKER_ENTRY}; retrying on {fallback} (that deployed binary is stale and needs a redeploy)"
+        return process_run_timeout(fallback, worker_args, timeout_ms)
     (stdout, stderr, code)
 
 fn run_single_worker(worker_bin: text, args: [text], as_json: bool) -> i64:
-    var worker_args = ["run", CHECK_WORKER_ENTRY]
+    var worker_args = ["run", worker_entry_path()]
     for arg in args:
         worker_args.push(arg)
     val (stdout, stderr, code) = run_worker(worker_bin, worker_args, CHECK_WORKER_TIMEOUT_MS)
@@ -246,7 +282,7 @@ fn run_worker_chunk(
     chunk: [text],
     as_json: bool
 ) -> i64:
-    var worker_args = ["run", CHECK_WORKER_ENTRY]
+    var worker_args = ["run", worker_entry_path()]
     for file in chunk:
         worker_args.push(file)
     for arg in check_presentation_args(args):
