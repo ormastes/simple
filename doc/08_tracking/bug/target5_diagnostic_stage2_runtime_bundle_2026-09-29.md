@@ -68,3 +68,31 @@ compiler backfill archive. Fifteen have no definition in either: ten
 the Stage4 core lane must not absorb. The prior 122-name scan is object-wide;
 strict section-GC linking must determine which of these fifteen are live.
 This static comparison does not claim a successful link.
+
+## Current-source dynamic lane retry (2026-09-29)
+
+The immutable Stage2 pure-Simple compiler capsule
+`d57b8ff1c676c0e250f76f713a5e8e5b0bbf3d91fd72741698e8fe0f26ad033c`
+also rejects `--runtime-bundle dynamic-runtime` during argument parsing. The
+rejection is immediate and therefore says nothing about the selected shared
+runtime's ABI or link completeness.
+
+To exercise the updated source, a separate, cache-backed Rust bootstrap driver
+was built from this worktree (`simple` SHA-256
+`23c1f72f4436dd03a879fa54c893e8474fd964b9cd55dd5006e3511a19c13a45`).
+The bootstrap driver build completed in 82.61 seconds with 3,832,192 KiB peak
+RSS. It is bootstrap tooling, not the final pure-Simple runtime candidate.
+
+That driver accepts the named dynamic lane. Its first Stage4 attempt required
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1` for a new checkout. The cold-initialized,
+no-stub attempt used `--entry-closure`, eight threads, the explicit shared
+runtime path, and a cache scoped to the driver hash. It timed out at 360 seconds
+during parsing, at 87 of 821 files; the reported parse phase had reached
+278,604 ms. It never reached runtime selection or link, and produced no Stage4
+compiler. Logs are under `build/mini_builds/target5_stage4_dynamic_compiler*`.
+
+The next attempt must keep the hash-scoped cache and cold inventory state, and
+address the Stage4 parse throughput or use an admitted current pure-Simple
+producer before an end-to-end link/size/startup claim can be made. A stale
+Stage2 binary cannot test the dynamic lane. No size or startup result is
+implied by this retry.
