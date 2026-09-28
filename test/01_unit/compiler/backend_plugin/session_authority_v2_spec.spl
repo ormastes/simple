@@ -28,6 +28,7 @@ use compiler.backend.backend.static_backend_llvm_port.{llvm_backend_port_v1}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir.*
 use std.io_runtime.{file_exists, file_size_raw}
+use std.common.crypto.sha256.{sha256_u8_hex}
 
 # `simple test` runs under the interpreter, where the K1 composition root
 # (src/compositions/kernel_llvm_cranelift) is not shadowed in and
@@ -93,6 +94,132 @@ fn authority_probe_module() -> MirModule:
         functions: functions, statics: {}, constants: {}, types: {})
 
 describe "backend session generation and compile-use authority V2":
+    it "retains exact object bytes with explicit unknown feature acceptance":
+        # @req REQ-010
+        var owner = BackendSessionAuthorityV2.create()
+        val token = backend_session_authority_open_v2(
+            owner, authority_request()).ok().unwrap()
+        val use_token = backend_session_authority_use_acquire_v2(
+            owner, token).ok().unwrap()
+        val result_token = backend_session_authority_compile_module_result_v2(
+            owner, token, use_token, authority_probe_module()).ok().unwrap()
+        val projected = backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).ok().unwrap()
+        expect(projected.schema_version).to_equal(BACKEND_SESSION_AUTHORITY_SCHEMA_V2)
+        expect(projected.provider_identity).to_equal("llvm")
+        expect(projected.backend_build_id.len()).to_be_greater_than(0)
+        expect(projected.receipt_hash).to_equal(token.receipt_hash)
+        expect(projected.target).to_equal("host")
+        expect(projected.cpu).to_equal("generic")
+        expect(projected.optimization).to_equal("debug")
+        expect(projected.compile_kind).to_equal(BackendSessionCompileKindV2.Module)
+        expect(projected.compile_cpu_request).to_equal("generic")
+        expect(projected.compile_opt_level_request).to_equal(-1)
+        expect(projected.requested_features.len()).to_equal(0)
+        expect(projected.accepted_features.len()).to_equal(0)
+        expect(projected.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.Unknown)
+        expect(projected.terminal_status).to_equal(
+            BackendSessionResultTerminalStatusV2.Emitted)
+        expect(projected.object_byte_count).to_be_greater_than(0)
+        expect(projected.object_sha256).to_equal(
+            sha256_u8_hex(projected.object_bytes))
+        expect(projected.envelope_sha256.len()).to_equal(64)
+
+        step("A caller byte mutation cannot change the owner's retained object")
+        val first_byte = projected.object_bytes[0]
+        var caller_bytes = projected.object_bytes
+        caller_bytes[0] = if first_byte == 0u8: 1u8 else: 0u8
+        val again = backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).ok().unwrap()
+        expect(again.object_bytes[0]).to_equal(first_byte)
+        expect(again.object_sha256).to_equal(projected.object_sha256)
+        expect(again.envelope_sha256).to_equal(projected.envelope_sha256)
+
+        step("The result must retire before its compile use and session")
+        expect(backend_session_authority_use_release_v2(
+            owner, token, use_token)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.ResultsLive))
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.UsesLive))
+        expect(backend_session_authority_result_release_v2(
+            owner, token, use_token, result_token)).to_equal(Ok(()))
+        expect(backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+        expect(backend_session_authority_use_release_v2(
+            owner, token, use_token)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, token)).to_equal(Ok(()))
+
+    it "retains the in-memory Cranelift AOT object with its compile inputs":
+        # @req REQ-010
+        var owner = BackendSessionAuthorityV2.create()
+        val token = backend_session_authority_open_v2(
+            owner, authority_request("cranelift")).ok().unwrap()
+        val use_token = backend_session_authority_use_acquire_v2(
+            owner, token).ok().unwrap()
+        val result_token = backend_session_authority_compile_aot_result_v2(
+            owner, token, use_token, authority_probe_module(),
+            false, 0, "generic", []).ok().unwrap()
+        val projected = backend_session_authority_result_project_v2(
+            owner, token, use_token, result_token).ok().unwrap()
+        expect(projected.compile_kind).to_equal(BackendSessionCompileKindV2.Aot)
+        expect(projected.compile_cpu_request).to_equal("generic")
+        expect(projected.compile_opt_level_request).to_equal(0)
+        expect(projected.compile_is_release).to_equal(false)
+        expect(projected.feature_acceptance).to_equal(
+            BackendSessionFeatureAcceptanceV2.Unknown)
+        expect(projected.object_byte_count).to_be_greater_than(0)
+        expect(projected.object_sha256).to_equal(
+            sha256_u8_hex(projected.object_bytes))
+        expect(backend_session_authority_result_release_v2(
+            owner, token, use_token, result_token)).to_equal(Ok(()))
+        expect(backend_session_authority_use_release_v2(
+            owner, token, use_token)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(owner, token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(owner, token)).to_equal(Ok(()))
+
+    it "rejects substituted and replayed object-result tokens":
+        # @req REQ-010
+        var first = BackendSessionAuthorityV2.create()
+        var second = BackendSessionAuthorityV2.create()
+        val first_token = backend_session_authority_open_v2(
+            first, authority_request()).ok().unwrap()
+        val second_token = backend_session_authority_open_v2(
+            second, authority_request()).ok().unwrap()
+        val first_use = backend_session_authority_use_acquire_v2(
+            first, first_token).ok().unwrap()
+        val second_use = backend_session_authority_use_acquire_v2(
+            second, second_token).ok().unwrap()
+        val result_token = backend_session_authority_compile_module_result_v2(
+            first, first_token, first_use, authority_probe_module()).ok().unwrap()
+        val substituted = BackendSessionResultTokenV2(
+            result_token.owner_identity, result_token.generation,
+            result_token.use_id, result_token.result_id + 1u64)
+        expect(backend_session_authority_result_project_v2(
+            first, first_token, first_use, substituted).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+        expect(backend_session_authority_result_project_v2(
+            second, second_token, second_use, result_token).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.ResultUnknownOrReleased)
+        expect(backend_session_authority_result_release_v2(
+            first, first_token, first_use, result_token)).to_equal(Ok(()))
+        expect(backend_session_authority_result_release_v2(
+            first, first_token, first_use, result_token)).to_equal(
+            Err(BackendSessionAuthorityErrorV2.ResultUnknownOrReleased))
+        expect(backend_session_authority_use_release_v2(
+            first, first_token, first_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(first, first_token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(first, first_token)).to_equal(Ok(()))
+        expect(backend_session_authority_result_project_v2(
+            first, first_token, first_use, result_token).err().unwrap()).to_equal(
+            BackendSessionAuthorityErrorV2.UnknownOrSubstituted)
+        expect(backend_session_authority_use_release_v2(
+            second, second_token, second_use)).to_equal(Ok(()))
+        expect(backend_session_authority_close_v2(second, second_token)).to_equal(Ok(()))
+        expect(backend_session_authority_release_v2(second, second_token)).to_equal(Ok(()))
+
     it "retains a compiled object until its use drains and close completes":
         # @req REQ-010
         expect(install_authority_k1_table()).to_equal(true)
@@ -196,6 +323,12 @@ describe "backend session generation and compile-use authority V2":
             authority_request("cranelift")).ok().unwrap()
         expect(lease.backend_name).to_equal("cranelift")
         expect(lease.receipt_hash.len()).to_equal(64)
+
+        step("A failed object publication retires the result and permits another use")
+        expect(lease.compile_aot_into_path(
+            authority_probe_module(), false, 0, "generic", [],
+            "", diagnostic_path)).to_equal(1)
+        expect(file_exists(diagnostic_path)).to_equal(true)
 
         step("The retained provider emits a real object via the driver facade")
         expect(lease.compile_aot_into_path(
