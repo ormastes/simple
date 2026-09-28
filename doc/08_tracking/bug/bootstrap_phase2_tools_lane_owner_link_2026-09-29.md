@@ -109,6 +109,17 @@ have exactly one definition in the archive. Evidence:
 `f162dc14b727c20be328a4ff02e79ced56bfac25410f2e801f8d0e5d2ca8b5d0`.
 This is a dirty-source diagnostic artifact, not an admitted generation.
 
+PR #2044's dual-implementation ratchet initially classified only
+`rt_sdl2_present_rgba` as new Rust-only debt. Its existing C owner was present
+and executed in the fresh core-C parity test, but the guard's committed-content
+extractor requires the complete C signature and opening brace on one line.
+The same multiline C definition existed at the base revision. Keeping that
+definition's signature on one line makes the real owner visible to the guard;
+the function body, ABI, lane guards, baseline, and checker are unchanged.
+The extractor's inability to recognize multiline C definitions remains a
+concrete guard limitation; this correction does not add an endpoint or waive
+the dual-owner rule.
+
 A separate pinned LLVM COFF reproduction preserves strong module-qualified
 function linkage and an unreachable wrapper calling absent `rt_net_init`.
 `/OPT:REF` still reports that reference with either distinct function sections

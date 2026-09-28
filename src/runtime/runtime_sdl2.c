@@ -834,8 +834,7 @@ static int64_t sdl2_core_pixel_at(const void* pixels, int64_t index) {
     return spl_array_get_i64((SplArray*)pixels, index);
 }
 
-bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels,
-                         int64_t width, int64_t height) {
+bool rt_sdl2_present_rgba(int64_t window_handle, SplArray* pixels, int64_t width, int64_t height) {
     if (!pixels || pixels->len < 0 || pixels->cap < pixels->len ||
             (pixels->len > 0 && !pixels->items)) return false;
     return sdl2_present_rgba_view(window_handle, pixels, pixels->len,
