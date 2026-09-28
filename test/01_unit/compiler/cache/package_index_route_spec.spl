@@ -1,6 +1,8 @@
-use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
+use compiler.driver.cache.package_index_route.{
+    package_index_route_current_v1, package_index_route_ordered_modules_v1}
 use compiler.driver.cache.package_module_index.{
-    PackageModuleIndexGenerationV1, package_module_index_decode_v1,
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_decode_v1,
     package_module_index_publish_v1
 }
 use std.spec.{describe, it, expect}
@@ -10,7 +12,29 @@ use std.nogc_sync_mut.io_runtime.{dir_remove}
 
 extern fn rt_getpid() -> i64
 
+fn route_entry(package_identity: text, module_identity: text) -> PackageModuleIndexEntryV1:
+    val digest = sha256_text(module_identity)
+    PackageModuleIndexEntryV1(
+        package_identity, module_identity, "src/{module_identity}.spl",
+        digest, digest, digest, digest, digest, digest, digest, digest,
+        "scc::{module_identity}", [], [])
+
 describe "production package-index routing":
+    it "keeps unchanged selected modules after a dirty-package schedule":
+        val entries = [
+            route_entry("pkg-a", "a"), route_entry("pkg-b", "b"),
+            route_entry("pkg-c", "c"), route_entry("pkg-outside", "z")]
+        var selected: Dict<text, bool> = {}
+        selected["a"] = true
+        selected["b"] = true
+        selected["c"] = true
+        val ordered = package_index_route_ordered_modules_v1(
+            entries, ["a", "b", "c"], selected, ["pkg-b"])
+        expect(ordered.len()).to_equal(3)
+        expect(ordered[0]).to_equal("b")
+        expect(ordered[1]).to_equal("a")
+        expect(ordered[2]).to_equal("c")
+
     it "rejects a graph requested with a different variant digest":
         val old_cache = env_get("SIMPLE_CACHE") ?? ""
         val cache_root = "build/test-artifacts/package-index-variant-{rt_getpid()}"
