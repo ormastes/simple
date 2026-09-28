@@ -214,6 +214,39 @@ describe "DBFS positioned binary write":
     it "accepts an empty patch as a no-op":
         val driver = DbFsDriver.new_hosted()
         val handle = _seed_dbfs(driver, "/dbfs-pwrite-empty.bin")
+        val generation = driver.file_generation_v1(handle).unwrap()
         expect(driver.pwrite_bytes_handle(handle, 2, []).unwrap()).to_equal(0)
+        expect(driver.pwrite_bytes_handle(handle, 9, []).unwrap()).to_equal(0)
+        expect(driver.file_generation_v1(handle).unwrap()).to_equal(generation)
+        expect(driver.fstat(handle).unwrap().size).to_equal(5u64)
         expect(driver.pread_bytes_handle(handle, 0, 5).unwrap()).to_equal(
             [0u8, 255u8, 17u8, 0u8, 128u8])
+
+describe "DBFS retained inode generation":
+    it "observes writes through driver copies and all descriptors of one inode":
+        val driver = DbFsDriver.new_hosted()
+        val copied = driver
+        val first = driver.open_path(
+            Path(raw: "/generation.bin"), OpenFlags.create_write()).unwrap()
+        val second = driver.open_path(
+            Path(raw: "/generation.bin"), OpenFlags.read_only()).unwrap()
+        expect(driver.file_generation_v1(first).unwrap()).to_equal(1u64)
+        expect(copied.file_generation_v1(second).unwrap()).to_equal(1u64)
+        copied.pwrite_bytes_handle(first, 0, [7u8]).unwrap()
+        expect(driver.file_generation_v1(second).unwrap()).to_equal(2u64)
+        driver.rename_path("/generation.bin", "/renamed-generation.bin").unwrap()
+        expect(copied.file_generation_v1(first).unwrap()).to_equal(2u64)
+        driver.close_handle(first).unwrap()
+        expect(driver.file_generation_v1(first).unwrap_err()).to_equal(
+            FsError.StaleHandle)
+        expect(driver.file_generation_v1(second).unwrap()).to_equal(2u64)
+
+    it "keeps unrelated inode mutations out of a retained observation":
+        val driver = DbFsDriver.new_hosted()
+        val first = driver.open_path(
+            Path(raw: "/observed.bin"), OpenFlags.create_write()).unwrap()
+        val other = driver.open_path(
+            Path(raw: "/other-generation.bin"), OpenFlags.create_write()).unwrap()
+        driver.write_bytes_handle(other, [1u8]).unwrap()
+        expect(driver.file_generation_v1(first).unwrap()).to_equal(1u64)
+        expect(driver.file_generation_v1(other).unwrap()).to_equal(2u64)
