@@ -1,0 +1,58 @@
+"""Pure scalar conversion shared by legacy SDN and opt-in grammar candidates.
+
+This module does not tokenize source or decide grammar acceptance.
+"""
+pub fn sdn_integer_from_span_v1(bytes: [u8], start: i64, count: i64) -> Result<i64, text>:
+    if start < 0 or count <= 0 or start > bytes.len() or count > bytes.len() - start:
+        return Err("invalid_integer_span")
+    var cursor = start
+    val negative = bytes[cursor] == 45u8
+    if negative: cursor = cursor + 1
+    if cursor == start + count: return Err("invalid_integer_span")
+    # Accumulate negatively so INT64_MIN is representable. Guard before every
+    # multiply/subtract; conversion never relies on overflow or text.to_int.
+    var value: i64 = 0
+    while cursor < start + count:
+        val byte = bytes[cursor]
+        if byte < 48u8 or byte > 57u8: return Err("invalid_integer_span")
+        val digit = (byte - 48u8) as i64
+        val last_digit = if negative: 8 else: 7
+        if value < -922337203685477580 or
+            (value == -922337203685477580 and digit > last_digit):
+            return Err("integer_overflow")
+        value = value * 10 - digit
+        cursor = cursor + 1
+    if negative: Ok(value) else: Ok(-value)
+
+
+export sdn_integer_from_span_v1
+
+pub fn sdn_unescape_scalar_v1(s: text) -> text:
+    if not s.contains("\\"):
+        return s
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == "\\" and i + 1 < s.len():
+            val nx = s.substring(i + 1, i + 2)
+            if nx == "n":
+                out = out + "\n"
+            else:
+                if nx == "t":
+                    out = out + "\t"
+                else:
+                    if nx == "r":
+                        out = out + "\r"
+                    else:
+                        if nx == "\"" or nx == "\\":
+                            out = out + nx
+                        else:
+                            out = out + ch + nx
+            i = i + 2
+        else:
+            out = out + ch
+            i = i + 1
+    out
+
+export sdn_unescape_scalar_v1
