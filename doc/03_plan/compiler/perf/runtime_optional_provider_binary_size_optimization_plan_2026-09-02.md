@@ -56,6 +56,12 @@ open. A focused Stage2 entry-closure hello built and ran at 21,016 stripped
 bytes on Linux aarch64, with only libc in `DT_NEEDED`; it is pre-Stage4 and
 does not satisfy the release-small gate. See
 `doc/09_report/compiler/target56_shb_visibility_and_hello_diagnostic_2026-09-28.md`.
+The current full CLI closure now compiles all 2,488 source units after a
+typed-row HIR fix, but Stage4 `host-gpu` linking still reports 173 distinct
+undefined symbols, chiefly from optional Vulkan, Metal, SQLite, CUDA, SDL,
+and ROCm paths. This is direct evidence that those paths still reach the core
+link instead of an admitted first-demand provider. See
+`doc/09_report/compiler/target56_stage4_cli_link_boundary_2026-09-28.md`.
 
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
