@@ -1,8 +1,9 @@
 # Stage-2 pinned archive read RSS runaway (2026-09-29)
 
-Status: bounded byte-feed trial rejected by paired time/RSS measurements;
-the prior whole-archive digest is restored. Production memory/performance
-qualification remains open. No current-source Stage-4 result is claimed.
+Status: bounded byte-feed and signed-index chunk trials rejected by paired
+time/RSS measurements; the prior whole-archive digest is restored.
+Production memory/performance qualification remains open. No current-source
+Stage-4 result is claimed.
 
 While replacing the cold publisher's bounded CAS member check with
 `pinned_archive_open_verified_v1` and
@@ -173,3 +174,26 @@ path, but that mechanism is not proven. The candidate was reverted; the
 are in `doc/09_report/compiler/target6_pinned_digest_8m_pair_2026-09-29.json`.
 Next, find a correct chunk update that avoids per-byte calls, then
 rerun this same paired workload before considering the bounded reader.
+
+## Follow-up: signed-index array update correct, still too costly (2026-09-29)
+
+`sha256_stream_v1_update` indexed its `[u8]` input with `u64`; the working
+one-shot `sha256_u8_hex` uses `i64` indexes. A temporary signed-index rewrite
+made the descriptor array update admit both the 542-byte and 131 KiB archive.
+The four native SHA stream known-vector scenarios also passed. This identifies
+a native indexing-dependent correctness defect in this call path, but the
+rewrite did not solve its allocation/performance cost.
+
+The same 8 MiB CAS fixture and Stage-2 host capsule were measured with nine
+alternating pairs after warm runs. Baseline p95 was 0.54 s with 76,760 KiB
+peak RSS; the signed-index chunk candidate was 0.78 s with 135,596 KiB.
+The p95 time ratio was 1.44, peak RSS ratio 1.77, and sum **3.21**. A separate
+trial passing the SHA stream by mutable reference during block compression
+still took 0.77 s and 135,580 KiB in one warm run. The signed-index and borrow
+edits were reverted. Full paired samples are in
+`doc/09_report/compiler/target6_pinned_digest_signed_index_8m_pair_2026-09-29.json`.
+
+Next, profile or instrument allocation in `Sha256StreamV1` block updates,
+especially class-field array writes and per-block state transfers, before
+another bounded-reader candidate. Any replacement must pass descriptor
+digest parity and the same paired time/RSS gate.
