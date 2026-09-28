@@ -43,6 +43,27 @@ This is compiler work, not a bootstrap-script change: find what HIR lowering
 retains across files (per-file HIR, symbol tables, or module caches kept for
 the whole closure) and bound it. Re-measure on this host afterwards.
 
+## Streaming HIR measurement gap
+
+Source inspection at `1cc5b43c07c` found that the canonical Stage 3 command
+sets `SIMPLE_STAGE3_STREAMING_SURFACES=1` and `SIMPLE_MEM_SNAPSHOT_FILE`, but
+`lower_and_check_streaming_surfaces_impl` did not open or write the durable
+memory snapshot. Only the retained-module HIR path called
+`mem_snapshot_begin`, the four per-module boundary records, and
+`mem_snapshot_finish`. A configured sink therefore did not provide the
+streaming path's heap-live/RSS series needed to identify the growing owner.
+
+The proposed compiler repair adds those records to the streaming path using
+the existing sink and schema. This is instrumentation, not a memory reduction
+or Stage 3 admission claim. On the next source-matched, capped macOS run,
+compare `hir-file-start`, `hir-post-lowering`, `hir-post-diagnostics`, and
+`hir-post-store` for each physical source. A rising heap-live delta after
+lowering points to retained HIR or promoted owners; rising RSS with flat
+heap-live bytes points toward allocator retention or native allocations.
+Retain the run ID, source revision, exact Stage 2 artifact, progress log,
+memory snapshot, peak process-tree RSS, and terminal outcome before changing
+any ownership rule.
+
 Related:
 - `macos_stage2_compiler_cli_build_host_gpu_link_2026-09-27.md` (the Stage 2
   compiler-test gap)

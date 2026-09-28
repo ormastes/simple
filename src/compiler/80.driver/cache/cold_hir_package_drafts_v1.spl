@@ -1,0 +1,165 @@
+# Assemble cold TLDR drafts from HIR-derived semantic seeds and complete
+# artifact receipts. The caller owns compilation and supplies real artifact
+# digests; this boundary derives graph facts and never scans source roots.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{ColdHirSemanticSeedV1}
+use compiler.driver.cache.package_tldr_metadata.{
+    PackageSmfSectionV1, PackageExportSmfV1, PackageTldrHeaderV1,
+    config_variant_digest_v1, package_export_smf_payload_validate_v1,
+    package_tldr_header_validate_v1
+}
+use compiler.driver.cache.package_module_index_builder.{
+    PackageModuleIndexBuildAuthorityV1, PackageModuleIndexDraftV1,
+    package_module_index_build_from_inventory_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexGenerationV1}
+use compiler.driver.cache.cold_package_scc_v1.{
+    ColdPackageEdgeV1, ColdPackageSccGroupV1, cold_package_scc_v1
+}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
+
+struct ColdHirPackageArtifactV1:
+    seed: ColdHirSemanticSeedV1
+    package_identity: text
+    source_witness_digest: text
+    smf_digest: text
+    smf_payload: text
+    smf_sections: [PackageSmfSectionV1]
+    export_digest: text
+    initializer_digest: text
+    provider_digest: text
+    generated_source_digest: text
+    reverse_projection_digest: text
+    interface_archive_digest: text
+    action_archive_digest: text
+    manifest_source_identity: text
+    manifest_digest: text
+
+fn cold_hir_package_drafts_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    artifacts: [ColdHirPackageArtifactV1]
+) -> Result<[PackageModuleIndexDraftV1], text>:
+    if artifacts.len() == 0:
+        return Err("cold-drafts-empty")
+    val variant_digest = config_variant_digest_v1(authority.variant)
+    if variant_digest == "":
+        return Err("cold-drafts-variant-invalid")
+    var by_module: Dict<text, i64> = {}
+    var reverse: Dict<text, [text]> = {}
+    var module_ids: [text] = []
+    var index = 0
+    while index < artifacts.len():
+        val seed = artifacts[index].seed
+        if seed.module_identity == "" or by_module.has(seed.module_identity):
+            return Err("cold-drafts-module-duplicate-or-empty:{seed.module_identity}")
+        if seed.inventory_digest != authority.inventory_digest:
+            return Err("cold-drafts-inventory-mismatch:{seed.module_identity}")
+        by_module[seed.module_identity] = index
+        reverse[seed.module_identity] = []
+        module_ids.push(seed.module_identity)
+        index = index + 1
+    for artifact in artifacts:
+        for imported in artifact.seed.direct_imports:
+            if not by_module.has(imported):
+                return Err("cold-drafts-import-missing:{artifact.seed.module_identity}:{imported}")
+            if imported == artifact.seed.module_identity:
+                return Err("cold-drafts-self-import:{imported}")
+            reverse[imported] = reverse[imported].push(artifact.seed.module_identity)
+    var drafts: [PackageModuleIndexDraftV1] = []
+    for module_identity in canonical_identity_sort_texts(module_ids):
+        val artifact = artifacts[by_module[module_identity]]
+        val seed = artifact.seed
+        val export_smf = PackageExportSmfV1(
+            1, artifact.package_identity, module_identity,
+            variant_digest,
+            artifact.smf_sections, artifact.smf_digest)
+        val smf_reason = package_export_smf_payload_validate_v1(
+            export_smf, artifact.smf_payload)
+        if smf_reason != "ok":
+            return Err("cold-drafts-smf-{smf_reason}:{module_identity}")
+        var abi_section_found = false
+        for section in artifact.smf_sections:
+            if section.kind == "abi_interface":
+                if section.digest != seed.abi_digest:
+                    return Err("cold-drafts-abi-section-mismatch:{module_identity}")
+                abi_section_found = true
+        if not abi_section_found:
+            return Err("cold-drafts-abi-section-missing:{module_identity}")
+        val header = PackageTldrHeaderV1(
+            schema_version: 1,
+            producer_digest: authority.producer_digest,
+            package_identity: artifact.package_identity,
+            module_identity: module_identity,
+            source_identity: seed.source_identity,
+            variant: authority.variant,
+            source_digest: seed.source_digest,
+            source_witness_digest: artifact.source_witness_digest,
+            smf_digest: artifact.smf_digest,
+            smf_sections: artifact.smf_sections,
+            export_digest: artifact.export_digest,
+            abi_digest: seed.abi_digest,
+            initializer_digest: artifact.initializer_digest,
+            provider_digest: artifact.provider_digest,
+            generated_source_digest: artifact.generated_source_digest,
+            reverse_projection_digest: artifact.reverse_projection_digest,
+            direct_imports: seed.direct_imports,
+            reverse_dependents: canonical_identity_sort_texts(reverse[module_identity]),
+            scc_identity: "pending",
+            scc_members: [module_identity],
+            interface_archive_digest: artifact.interface_archive_digest,
+            action_archive_digest: artifact.action_archive_digest)
+        val reason = package_tldr_header_validate_v1(header)
+        if reason != "ok":
+            return Err("cold-drafts-header-{reason}:{module_identity}")
+        drafts.push(PackageModuleIndexDraftV1(
+            header, artifact.manifest_source_identity, artifact.manifest_digest))
+    var package_ids: [text] = []
+    var package_edges: [ColdPackageEdgeV1] = []
+    for artifact in artifacts:
+        package_ids.push(artifact.package_identity)
+        for imported in artifact.seed.direct_imports:
+            package_edges.push(ColdPackageEdgeV1(
+                artifact.package_identity,
+                artifacts[by_module[imported]].package_identity))
+    val groups: [ColdPackageSccGroupV1] = match cold_package_scc_v1(
+            package_ids, package_edges, variant_digest):
+        case Err(reason): return Err("cold-drafts-scc-{reason}")
+        case Ok(value): value
+    var group_by_package: Dict<text, i64> = {}
+    var group_index = 0
+    while group_index < groups.len():
+        for package_identity in groups[group_index].packages:
+            group_by_package[package_identity] = group_index
+        group_index = group_index + 1
+    var members_by_group: Dict<i64, [text]> = {}
+    for draft in drafts:
+        val package_identity = draft.header.package_identity
+        if not group_by_package.has(package_identity):
+            return Err("cold-drafts-scc-package-missing:{package_identity}")
+        val group = group_by_package[package_identity]
+        var members = if members_by_group.has(group): members_by_group[group] else: []
+        members_by_group[group] = members.push(draft.header.module_identity)
+    index = 0
+    while index < drafts.len():
+        var draft = drafts[index]
+        val group = group_by_package[draft.header.package_identity]
+        draft.header.scc_identity = groups[group].identity
+        draft.header.scc_members = canonical_identity_sort_texts(members_by_group[group])
+        drafts[index] = draft
+        index = index + 1
+    Ok(drafts)
+
+fn cold_hir_package_index_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    inventory: CompileSourceInventoryV1,
+    artifacts: [ColdHirPackageArtifactV1]
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    match cold_hir_package_drafts_v1(authority, artifacts):
+        case Err(reason): Err(reason)
+        case Ok(drafts):
+            package_module_index_build_from_inventory_v1(
+                authority, inventory, drafts)
+
+export ColdHirPackageArtifactV1
+export cold_hir_package_drafts_v1, cold_hir_package_index_v1

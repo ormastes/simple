@@ -233,6 +233,9 @@ Required assertions:
   sections, and opens zero dependency source files;
 - missing/corrupt/stale index fails with an attributed code and zero fallback
   scans;
+- deleting an untracked source without an SCV journal event cannot reuse a
+  snapshot containing that source; warm admission either applies an exact
+  membership deletion or requires an explicit cold rebuild;
 - private-body, public-export, initializer/provider, generated-source, and
   config-variant edits produce exact distinct invalidation closures;
 - one-package edit leaves unrelated package keys/artifacts byte-identical;
@@ -290,11 +293,11 @@ export/ABI/initializer/provider metadata stops reverse propagation.
 |---|---|---|
 | Immutable SCV snapshot core | Groundwork | `src/lib/scv/compile_snapshot.spl`; add event-maintained inventory and full entrypoint routing. |
 | Native entry closure freeze | Partial | `src/app/io/_CliCompile/native_build_closure.spl`; frozen reads enforced, but replace the closure scan with admitted index lookup. |
-| Persistent index generation | Groundwork | `src/compiler/80.driver/cache/package_module_index.spl`; immutable publish/read, SCV binding, edge validation, invalidation. |
-| Canonical TLDR/SMF schema | Partial | Canonical aliases exist; add variant key, lazy section directory, typed reverse-reference receipts, and metadata producer wiring. |
+| Persistent index generation | Pure cold builder added; publication cutover open | `src/compiler/80.driver/cache/package_module_index.spl` and `package_module_index_builder.spl`; the new builder validates frozen source coverage, variant root identity, graph edges, and action digests. Wire it to typed compiler output and publish its generation instead of the binding-only index. |
+| Canonical TLDR/SMF schema | Partial | `cold_hir_package_drafts_v1.spl` assembles typed-HIR seeds and caller-supplied artifact facts into graph drafts; add actual SMF/archive producers, typed reverse-reference receipts, and metadata publication wiring. |
 | Exact invalidation | Partial | Content-vs-semantic cutoff exists; add typed consumer families and SCC transactions. |
 | Deterministic scheduler | Partial | Acyclic package order exists; add reached-graph SCC condensation and parent-authoritative parallel commit. |
 | Action/archive receipts | Partial | Native warm key/receipt binds and exposes SCV identity; bind remaining action/archive and reverse-reference receipts to the package-index generation. |
-| Git/SCV events | Not implemented | Update only `build/scv/` metadata from observed events; never install hooks or mutate Git. |
-| Full entrypoint cutover | Not implemented | Compile/check/bootstrap/MCP/LSP/daemon must share one pinned catalog owner. |
-| SPipe/native/perf proof | Not run | Existing runtime lacks required `test`/`check`; do not claim completion. |
+| Git/SCV events | Bridge implemented; admission incomplete | `src/app/compiler_entrypoint/inventory_events.spl` translates read-only Git changes and SCV filesystem journal rows into `compile_source_inventory` events. The isolated 2026-09-27 change binds the cursor and inventory digest in one atomic `source-inventory/CURRENT` record, with legacy bare-digest migration. Warm refresh now captures Git HEAD once and compares both committed and working changes to that revision, avoiding one process launch and one mixed-revision race. It still lists untracked files on each request; qualify failed rename, loss/overflow, concurrent writers, replay, current-source native behavior, and an event-maintained route before marking complete. |
+| Full entrypoint cutover | Partial | The full CLI calls `compiler_entrypoint_admit_v1` for compile/check/build/run/test/native-build/MCP/LSP/query. Admission now fails if any pinned snapshot/index environment binding cannot be published, so callers cannot proceed with stale values. The seed-run native worker refreshes inventory separately, and the published generation in `admission.spl` is binding-only with no module graph. Complete the shared pinned graph owner and remove remaining closure scans. |
+| SPipe/native/perf proof | Focused native probe only; qualification not run | A 2026-09-28 current-source focused probe prints `Results: 2 passed, 0 failed`, while a broad test worker still fails to link optional GPU externs and a tiny cold-admission fixture returns `observed-event-apply:event-invalid` under the historical Stage2 producer. One-event controls pass; the bridge batch remains suspect. See `doc/09_report/compiler/target6_test_worker_build_2026-09-27.md` and `doc/08_tracking/bug/historical_stage2_cold_git_event_batch_invalid_2026-09-28.md`. No Target 6 SPipe or native performance cohort has passed; do not claim completion. |

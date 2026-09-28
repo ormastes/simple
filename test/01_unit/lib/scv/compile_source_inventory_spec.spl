@@ -2,6 +2,10 @@ use std.spec.*
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.*
 use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+
+extern fn rt_getpid() -> i64
 
 fn inventory_digest(label: text) -> text:
     sha256_text(label)
@@ -21,6 +25,152 @@ fn empty_inventory() -> CompileSourceInventoryV1:
     CompileSourceInventoryV1(1, 0, [])
 
 describe "event-maintained compile source inventory":
+    it "does not publish Git changes when the filesystem journal overflows":
+        val cache_root = "build/test-artifacts/scv-observed-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val rejected = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 1, kind: "overflow", path: "", related: "")])
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("inventory-event-overflow")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val accepted = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git], [])
+        expect(accepted.valid).to_equal(true)
+        if accepted.valid:
+            expect(accepted.inventory!.entries[0].source_identity).to_equal("src/a.spl")
+            expect(accepted.inventory!.generation).to_equal(1)
+            expect(compile_source_inventory_read_current_v1(cache_root).digest).to_equal(accepted.digest)
+        dir_remove(cache_root, true)
+
+    it "rejects invalid cursor metadata before publishing an inventory":
+        val cache_root = "build/test-artifacts/scv-cursor-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val rejected = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git], [], "invalid-head", 0,
+            inventory_digest("empty-journal"))
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal(
+            "inventory-publication-failed:publish-cursor-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "rejects unknown and unpaired filesystem events before publishing Git changes":
+        val cache_root = "build/test-artifacts/scv-event-kind-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val unknown = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 1, kind: "mystery", path: "README.md", related: "")])
+        expect(unknown.valid).to_equal(false)
+        expect(unknown.reason).to_equal("inventory-event-kind-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val unpaired = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git],
+            [FsWatchEvent(seq: 2, kind: "renamed", path: "src/b.spl", related: "")])
+        expect(unpaired.valid).to_equal(false)
+        expect(unpaired.reason).to_equal("inventory-event-rename-unpaired")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        dir_remove(cache_root, true)
+
+    it "removes a source renamed to a non-source path":
+        val cache_root = "build/test-artifacts/scv-rename-out-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val git = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val seeded = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [git], [])
+        expect(seeded.valid).to_equal(true)
+        val renamed = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [],
+            [FsWatchEvent(seq: 1, kind: "renamed", path: "src/a.txt",
+                related: "src/a.spl")])
+        expect(renamed.valid).to_equal(true)
+        if renamed.valid:
+            expect(renamed.inventory!.entries.len()).to_equal(0)
+            expect(renamed.inventory!.generation).to_equal(2)
+        dir_remove(cache_root, true)
+
+    it "replaces the complete inventory on an explicit cold rebuild":
+        val cache_root = "build/test-artifacts/scv-cold-rebuild-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val first = compile_source_inventory_git_event_v1(
+            "create", "src/a.spl", "export fn a(): 1")
+        val disappeared = compile_source_inventory_git_event_v1(
+            "create", "src/b.spl", "export fn b(): 2")
+        val seeded = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [first, disappeared], [])
+        expect(seeded.valid).to_equal(true)
+        val warm = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [first], [])
+        expect(warm.valid).to_equal(true)
+        if warm.valid:
+            expect(warm.inventory!.entries.len()).to_equal(2)
+        val rebuilt = compile_source_inventory_apply_observed_events_v1(
+            ".", cache_root, [first], [], "", -1, "", "", true)
+        expect(rebuilt.valid).to_equal(true)
+        if rebuilt.valid:
+            expect(rebuilt.inventory!.entries.len()).to_equal(1)
+            expect(rebuilt.inventory!.entries[0].source_identity).to_equal("src/a.spl")
+            expect(rebuilt.inventory!.generation).to_equal(seeded.inventory!.generation + 1)
+        dir_remove(cache_root, true)
+
+    it "keeps the prior cursor when a writer publishes from a stale pointer":
+        val cache_root = "build/test-artifacts/scv-cas-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val inventory = empty_inventory()
+        val empty_pointer_digest = inventory_digest("")
+        val journal_digest = inventory_digest("")
+        val (first_digest, first_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, inventory, "0123456789abcdef0123456789abcdef01234567",
+            0, journal_digest, empty_pointer_digest)
+        expect(first_reason).to_equal("ok")
+        expect(first_digest != "").to_equal(true)
+        val first_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(first_pointer).to_contain("simple-compile-event-cursor-v1")
+        val (rejected_digest, rejected_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, inventory, "abcdef0123456789abcdef0123456789abcdef01",
+            0, journal_digest, empty_pointer_digest)
+        expect(rejected_digest).to_equal("")
+        expect(rejected_reason).to_equal("publish-cursor-superseded")
+        expect(compile_source_inventory_read_pointer_content_v1(cache_root) ?? "").to_equal(first_pointer)
+        expect(compile_source_inventory_read_at_pointer_v1(
+            cache_root, first_pointer).digest).to_equal(first_digest)
+        dir_remove(cache_root, true)
+
+    it "binds both untracked scopes in the atomic cursor record":
+        val cache_root = "build/test-artifacts/scv-membership-{rt_getpid()}/build/scv"
+        dir_remove(cache_root, true)
+        val src_digest = inventory_digest("src-membership")
+        val test_digest = inventory_digest("test-membership")
+        val (missing_digest, missing_reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, empty_inventory(),
+            "0123456789abcdef0123456789abcdef01234567", 0,
+            inventory_digest(""), inventory_digest(""),
+            src_digest, "")
+        expect(missing_digest).to_equal("")
+        expect(missing_reason).to_equal("publish-untracked-cursor-invalid")
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(false)
+        val (digest, reason) = compile_source_inventory_publish_reasoned_v1(
+            cache_root, empty_inventory(),
+            "0123456789abcdef0123456789abcdef01234567", 0,
+            inventory_digest(""), inventory_digest(""),
+            src_digest, test_digest)
+        expect(reason).to_equal("ok")
+        expect(digest != "").to_equal(true)
+        val pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+        expect(pointer).to_contain("simple-compile-event-cursor-v2")
+        expect(pointer).to_contain("untracked_src_digest={src_digest}")
+        expect(pointer).to_contain("untracked_test_digest={test_digest}")
+        expect(pointer.len() < 768).to_equal(true)
+        expect(compile_source_inventory_read_current_v1(cache_root).valid).to_equal(true)
+        dir_remove(cache_root, true)
+
     it "applies Git and filesystem events without source discovery":
         val created = compile_source_inventory_apply_event_v1(
             empty_inventory(), inventory_event(

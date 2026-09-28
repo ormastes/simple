@@ -1,0 +1,101 @@
+"""Native probe for inventory-bound cold HIR batch seed creation."""
+
+use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
+    cold_hir_semantic_seeds_v1}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1,
+    compile_source_inventory_digest_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_env_get(key: text) -> text?
+
+fn probe_module() -> HirModule:
+    HirModule(name: "pkg.mod", path: "/repo/pkg/mod.spl",
+        imports: [HirImport("z.dep", [], false, Span.empty()),
+                  HirImport("a.dep", [], false, Span.empty()),
+                  HirImport("z.dep", [], false, Span.empty())],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn benchmark_module(name: text, path: text) -> HirModule:
+    HirModule(name: name, path: path, imports: [],
+        exports: [], domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn benchmark(mode: text) -> i64:
+    val content = "fn entry() -> i64: 1\n"
+    val empty = sha256_text("")
+    val source_digest = sha256_text(content)
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var inputs: [ColdHirSemanticInputV1] = []
+    var index = 0
+    while index < 64:
+        val source = "pkg/module_{index}.spl"
+        entries.push(CompileSourceInventoryEntryV1(source, source_digest,
+            empty, empty, empty, empty, content.len()))
+        inputs.push(ColdHirSemanticInputV1(
+            benchmark_module("pkg.module_{index}", "/repo/{source}"),
+            source, content))
+        index = index + 1
+    val inventory = CompileSourceInventoryV1(1, 1, entries)
+    val digest = compile_source_inventory_digest_v1(inventory)
+    var checksum = 0
+    var iteration = 0
+    while iteration < 32:
+        if mode == "batch":
+            match cold_hir_semantic_seeds_v1(inputs, "/repo", inventory, digest):
+                case Err(reason):
+                    print "FAIL batch-benchmark:" + reason
+                    return 3
+                case Ok(seeds):
+                    for seed in seeds:
+                        checksum = checksum + seed.abi_digest.len()
+        else:
+            for input in inputs:
+                match cold_hir_semantic_seed_v1(input.module, "/repo",
+                        input.source_identity, input.source_content,
+                        inventory, digest):
+                    case Err(reason):
+                        print "FAIL single-benchmark:" + reason
+                        return 4
+                    case Ok(seed):
+                        checksum = checksum + seed.abi_digest.len()
+        iteration = iteration + 1
+    if checksum != 131072:
+        print "FAIL checksum={checksum}"
+        return 5
+    print "CHECKSUM {checksum}"
+    0
+
+fn main() -> i64:
+    val mode = rt_env_get("COLD_HIR_BENCH_MODE") ?? ""
+    if mode == "batch" or mode == "single":
+        return benchmark(mode)
+    val content = "fn entry() -> i64: 1\n"
+    val empty = sha256_text("")
+    val inventory = CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1("pkg/mod.spl", sha256_text(content),
+            empty, empty, empty, empty, content.len())])
+    val inputs = [ColdHirSemanticInputV1(probe_module(), "pkg/mod.spl", content)]
+    val result = cold_hir_semantic_seeds_v1(
+        inputs, "/repo", inventory, compile_source_inventory_digest_v1(inventory))
+    match result:
+        case Err(reason):
+            print "FAIL batch:" + reason
+            return 1
+        case Ok(seeds):
+            if seeds.len() != 1 or seeds[0].module_identity != "pkg.mod" or
+                    seeds[0].direct_imports != ["a.dep", "z.dep"]:
+                print "FAIL batch-values"
+                return 2
+    print "PASS cold_hir_batch_native_probe"
+    0

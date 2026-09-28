@@ -41,9 +41,12 @@ events; it never grants permission to mutate Git or user-authored files.
 1. Reuse dependency export headers without opening source bodies.
 2. Confirm bounded `PackageTldrHeaderV1` records locate only demanded indexed
    `PackageExportSmfV1` sections.
-3. Reuse admitted package actions/archives and confirm input, ordered member
+3. Validate the complete export SMF payload digest and each demanded section's
+   byte extent and digest before admitting its bytes; reject a mismatched
+   section or trailing payload bytes.
+4. Reuse admitted package actions/archives and confirm input, ordered member
    payload, producer, target, toolchain, and variant identities match.
-4. Confirm dependency source-body reads and dependency recompiles are zero.
+5. Confirm dependency source-body reads and dependency recompiles are zero.
 
 ### Invalidate one package at a time
 
@@ -92,7 +95,9 @@ events; it never grants permission to mutate Git or user-authored files.
 1. Refuse untrusted package metadata without recovery authority.
 2. Confirm missing, stale, corrupt, and tampered forms produce `PKG-IDX-001`,
    `PKG-IDX-002`, `PKG-IDX-003`, and `PKG-IDX-004` respectively.
-3. Confirm compilation does not start and no fallback scan occurs.
+3. Confirm a stale complete graph remains the prior generation; the temporary
+   binding-only admission path cannot overwrite it.
+4. Confirm compilation does not start and no fallback scan occurs.
 
 ### Allow only a bounded rebuild
 

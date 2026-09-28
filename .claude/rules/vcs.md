@@ -96,7 +96,9 @@ expires after 10 min, so under parallel landing it never stays green. The owner
 reviews and overrides with `--admin` instead (first used on release PR #1863).
 
 Rules: never force-land a PR whose checks are **failing** (only stuck/behind),
-never a draft (someone's in-progress lane), and never without step 1-2 — a
+never ANOTHER session's active draft (newest commit < 20 min, or its body names
+an unmet evidence precondition) — your OWN finished draft: `gh pr ready`, then
+land it; and never without step 1-2 — a
 bypassed merge skips the strict up-to-date re-run, so the stale-snapshot class
 (`doc/07_guide/infra/vcs/stale_merge_snapshot_rewind.md`) is on you. If the
 projection ever drops the bypass, `github-policy.shs verify-live` shows the drift;
@@ -203,6 +205,8 @@ verification above was run with such a name and left
 that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
 and which deletes cleanly.
 ## Pre-push guards
+
+**(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL.
 
 ### What ACTUALLY runs on push (verified 2026-09-01 — read this before trusting any "Wired into" line below)
 

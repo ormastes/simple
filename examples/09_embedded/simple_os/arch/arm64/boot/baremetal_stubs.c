@@ -3948,13 +3948,121 @@ static int _simpleos_name_eq(const uint8_t *e, const char name11[11])
     return 1;
 }
 
-/* Scan a directory cluster chain for an 8.3 entry. want_dir selects file vs
- * directory. On a match, sets *size_out (file size) and returns the first
- * cluster (>=2). Returns 0 if not found. */
-static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11],
-                                     int want_dir, uint32_t *size_out)
+/* ---- VFAT long-file-name support for the syscall-layer path resolver ----
+ *
+ * fsexec_include_tree_insert.py stages the guest /INCLUDE header tree with
+ * LFN entries for every name that is not exactly its uppercase 8.3 form
+ * (e.g. "__algorithm", "c++", "to_chars_base_10.h"); hundreds of the 2149
+ * staged names collide in pure 8.3, so short-name-only matching cannot
+ * resolve the libc++ tree. The encoding below mirrors the guest Simple-side
+ * validator (src/lib/nogc_async_mut/fs_driver/fat32_parsers.spl): 13 UTF-16LE
+ * units at the standard byte offsets, 0x40 flag + highest sequence on the
+ * physically-first slot (which carries the name TAIL), one 0x0000 then
+ * 0xFFFF padding on the terminal slot, checksum over the 11 SFN bytes. */
+
+/* VFAT LFN unit byte offsets (lo byte; hi byte is offset+1) in a 32-byte
+ * directory slot. */
+static const uint8_t _simpleos_lfn_pos[13] = {
+    1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30
+};
+
+static uint8_t _simpleos_sfn_checksum(const uint8_t *e)
+{
+    uint32_t sum = 0;
+    for (int i = 0; i < 11; i++) {
+        uint32_t carry = (sum & 1U) ? 0x80U : 0U;
+        sum = (carry + (sum >> 1) + e[i]) & 0xFFU;
+    }
+    return (uint8_t)sum;
+}
+
+/* Decode one LFN slot's name units. Returns the unit count, or -1 when a
+ * unit is outside the printable-ASCII range this lane stages. */
+static int _simpleos_lfn_slot_units(const uint8_t *e, char out[13])
+{
+    int n = 0;
+    for (int i = 0; i < 13; i++) {
+        uint32_t u = _simpleos_rd16(e + _simpleos_lfn_pos[i]);
+        if (u == 0U || u == 0xFFFFU) break;
+        if (u >= 0x80U) return -1;
+        out[n++] = (char)u;
+    }
+    return n;
+}
+
+/* ASCII case-insensitive equality between a raw path component (mixed case)
+ * and a reconstructed LFN name. */
+static int _simpleos_comp_eq_lfn(const char *comp, uint32_t comp_len,
+                                 const char *lfn, int lfn_len)
+{
+    if ((int)comp_len != lfn_len) return 0;
+    for (uint32_t i = 0; i < comp_len; i++) {
+        char a = comp[i];
+        char b = lfn[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/* Render an 8.3 short-name entry to its dot-name form ("SORT    H  " ->
+ * "sort.h", "REMOVE_C H  "-style truncations render as "remove_c.h") and
+ * compare case-insensitively against a raw path component. Comparing NAMES
+ * (not raw 11-byte SFNs) matters: make_8_3("remove_cv.h") collides with
+ * remove_const.h's stored SFN bytes, while the rendered comparison keeps
+ * the truncated spellings distinct — the same equivalence the guest
+ * Simple-side FAT driver uses (fat32_parsers._parse_short_name). */
+static int _simpleos_comp_eq_sfn(const uint8_t *e, const char *comp,
+                                 uint32_t comp_len)
+{
+    char rendered[13];
+    uint32_t n = 0;
+    uint32_t base = 8U;
+    while (base > 0U && e[base - 1U] == 0x20U) base--;
+    for (uint32_t i = 0; i < base; i++) {
+        char c = (char)e[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        rendered[n++] = c;
+    }
+    uint32_t ext = 11U;
+    while (ext > 8U && e[ext - 1U] == 0x20U) ext--;
+    if (ext > 8U) {
+        rendered[n++] = '.';
+        for (uint32_t i = 8U; i < ext; i++) {
+            char c = (char)e[i];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            rendered[n++] = c;
+        }
+    }
+    if (n != comp_len) return 0;
+    for (uint32_t i = 0; i < comp_len; i++) {
+        char a = comp[i];
+        char b = rendered[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/* Scan a directory cluster chain for ONE path component (no '/'), matching
+ * either its VFAT long name (case-insensitive) or its 8.3 short name
+ * (exact). want_dir selects the entry type: 1 = directory (intermediate
+ * path components), 0 = regular file, -1 = either (the FINAL component —
+ * stat/open legitimately target directories, e.g. cc1 -v stats each -I
+ * dir). On a match sets *size_out (file size; 0 for directories) and
+ * *is_dir_out (when non-null), and returns the first cluster (>=2).
+ * Returns 0 if not found. */
+static uint32_t _simpleos_find_entry(uint32_t dir_cluster,
+                                     const char *comp, uint32_t comp_len,
+                                     int want_dir, uint32_t *size_out,
+                                     int *is_dir_out)
 {
     uint8_t sec[512];
+    char lfn[256];
+    int lfn_len = 0;
+    int lfn_next = 0;
+    int lfn_ck = -1;
     uint32_t cluster = dir_cluster;
     while (cluster >= 2U && cluster < 0x0ffffff8U) {
         uint32_t first_lba = _simpleos_fat_cluster_lba(cluster);
@@ -3963,11 +4071,47 @@ static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11]
             for (uint32_t off = 0; off < 512U; off += 32U) {
                 const uint8_t *e = sec + off;
                 if (e[0] == 0x00U) return 0;          /* end of directory */
-                if (e[0] == 0xe5U || e[11] == 0x0fU) continue; /* free / LFN */
-                if (!_simpleos_name_eq(e, name11)) continue;
+                if (e[0] == 0xe5U) {                  /* deleted: breaks LFN chain */
+                    lfn_len = 0; lfn_next = 0; lfn_ck = -1;
+                    continue;
+                }
+                if (e[11] == 0x0fU) {                 /* LFN slot */
+                    int seq = e[0] & 0x1fU;
+                    char units[13];
+                    int un = _simpleos_lfn_slot_units(e, units);
+                    if (e[0] & 0x40U) {               /* chain start: name tail */
+                        lfn_ck = e[13];
+                        lfn_next = seq;
+                    }
+                    if (lfn_ck >= 0 && un >= 0 && seq == lfn_next &&
+                        (int)e[13] == lfn_ck &&
+                        (seq - 1) * 13 + un <= (int)sizeof(lfn)) {
+                        __builtin_memcpy(lfn + (seq - 1) * 13, units,
+                                         (uint32_t)un);
+                        /* Only the 0x40 (tail) slot sets the name end; the
+                         * head slots arriving later fill earlier positions
+                         * and must not shrink lfn_len. */
+                        if (e[0] & 0x40U)
+                            lfn_len = (seq - 1) * 13 + un;
+                        lfn_next = seq - 1;
+                    } else {
+                        lfn_len = 0; lfn_next = 0; lfn_ck = -1;
+                    }
+                    continue;
+                }
                 int is_dir = (e[11] & 0x10U) != 0;
-                if (is_dir != want_dir) continue;
+                int matched = 0;
+                if (lfn_ck >= 0 && lfn_next == 0 && lfn_len > 0 &&
+                    _simpleos_sfn_checksum(e) == (uint8_t)lfn_ck &&
+                    _simpleos_comp_eq_lfn(comp, comp_len, lfn, lfn_len))
+                    matched = 1;
+                if (!matched && _simpleos_comp_eq_sfn(e, comp, comp_len))
+                    matched = 1;
+                lfn_len = 0; lfn_next = 0; lfn_ck = -1;
+                if (!matched) continue;
+                if (want_dir >= 0 && is_dir != want_dir) continue;
                 if (size_out) *size_out = _simpleos_rd32(e + 28U);
+                if (is_dir_out) *is_dir_out = is_dir;
                 return ((uint32_t)_simpleos_rd16(e + 20U) << 16) |
                        _simpleos_rd16(e + 26U);
             }
@@ -3980,9 +4124,11 @@ static uint32_t _simpleos_find_entry(uint32_t dir_cluster, const char name11[11]
 /* Resolve an absolute path like /sys/apps/hello_world.smf to its first cluster
  * and size by walking each directory component from the root. Returns first
  * cluster (>=2) and sets *size_out, or 0 if not found. */
-static uint32_t _simpleos_resolve_path(const char *path, int64_t path_len, uint32_t *size_out)
+static uint32_t _simpleos_resolve_path(const char *path, int64_t path_len, uint32_t *size_out,
+                                       int *is_dir_out)
 {
     if (size_out) *size_out = 0;
+    if (is_dir_out) *is_dir_out = 0;
     if (!path || path_len <= 0) return 0;
 
     /* probe BPB so geometry is valid (also confirms sector 0 magic) */
@@ -3991,6 +4137,7 @@ static uint32_t _simpleos_resolve_path(const char *path, int64_t path_len, uint3
     uint32_t cluster = 2U;      /* root cluster */
     int64_t i = 0;
     uint32_t found_size = 0;
+    int found_is_dir = 0;
     int matched_any = 0;
 
     while (i < path_len) {
@@ -4005,20 +4152,23 @@ static uint32_t _simpleos_resolve_path(const char *path, int64_t path_len, uint3
             if (path[j] != '/') { is_last = 0; break; }
         }
 
-        char name11[11];
-        if (!_simpleos_make_8_3(path + start, comp_len, name11)) return 0;
-
+        /* Intermediate components must be directories; the final component
+         * may be either (clang stats/opens directories, e.g. each -I dir). */
         uint32_t sz = 0;
-        uint32_t next = _simpleos_find_entry(cluster, name11, is_last ? 0 : 1, &sz);
+        int isd = 0;
+        uint32_t next = _simpleos_find_entry(cluster, path + start, comp_len,
+                                             is_last ? -1 : 1, &sz, &isd);
         if (next < 2U) return 0;
         cluster = next;
         found_size = sz;
+        found_is_dir = isd;
         matched_any = 1;
         if (is_last) break;
     }
 
     if (!matched_any) return 0;
     if (size_out) *size_out = found_size;
+    if (is_dir_out) *is_dir_out = found_is_dir;
     return cluster;
 }
 
@@ -4051,7 +4201,7 @@ int64_t simpleos_fat32_read_path_size(const char *path, int64_t path_len)
 {
     if (!_simpleos_blk_bringup()) return 0;
     uint32_t file_size = 0;
-    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size, 0);
     if (cluster < 2U) return 0;
     return (int64_t)file_size;
 }
@@ -4060,7 +4210,7 @@ int64_t simpleos_fat32_read_path(const char *path, int64_t path_len)
 {
     if (!_simpleos_blk_bringup()) return -1;
     uint32_t file_size = 0;
-    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size, 0);
     if (cluster < 2U || file_size == 0U) return -1;
     if (file_size > simpleos_fat32_path_read_buf_size) return -2;
     __builtin_memset(simpleos_fat32_path_read_buf, 0, file_size);
@@ -4075,7 +4225,7 @@ RuntimeValue simpleos_fat32_read_path_array(const char *path, int64_t path_len)
 {
     if (!_simpleos_blk_bringup()) return rt_array_new((RuntimeValue)0);
     uint32_t file_size = 0;
-    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size);
+    uint32_t cluster = _simpleos_resolve_path(path, path_len, &file_size, 0);
     if (cluster < 2U || file_size == 0U ||
         file_size > simpleos_fat32_path_read_buf_size)
         return rt_array_new((RuntimeValue)0);
@@ -4953,7 +5103,7 @@ static void svc_fat32_ensure_queue(void)
         if (!s_probe_done) {
             s_probe_done = 1;
             uint32_t sz = 0;
-            uint32_t cl = _simpleos_resolve_path("/HELLO.C", 8, &sz);
+            uint32_t cl = _simpleos_resolve_path("/HELLO.C", 8, &sz, 0);
             serial_puts("[resolve-probe] /HELLO.C cluster=");
             serial_put_dec((int64_t)cl);
             serial_puts(" size=");
@@ -4990,6 +5140,19 @@ static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t
             st[49] = (uint8_t)((size >> 8) & 0xFF);
             st[50] = (uint8_t)((size >> 16) & 0xFF);
             st[51] = (uint8_t)((size >> 24) & 0xFF);
+            /* Unique inode per open file (R7): LLVM's FileManager keys file
+             * identity by (st_dev, st_ino); all-zero inodes aliased every
+             * file to the first-opened entry's cached content. FAT files
+             * use their first cluster; guest-created RAM files a synthetic
+             * base plus their RAM slot. */
+            uint32_t ino = g_svc_fds[fd].cluster != 0U
+                ? g_svc_fds[fd].cluster
+                : 0x40000000U + (uint32_t)(g_svc_fds[fd].ram_index >= 0
+                                           ? g_svc_fds[fd].ram_index : 0);
+            st[8] = (uint8_t)(ino & 0xFF);
+            st[9] = (uint8_t)((ino >> 8) & 0xFF);
+            st[10] = (uint8_t)((ino >> 16) & 0xFF);
+            st[11] = (uint8_t)((ino >> 24) & 0xFF);
             /* S_IFIFO, not mode 0 (R6): clang's FileManager builds its
              * FileEntry from open+fstat, and getBufferForFile only falls back
              * to the size-probing stream read when the entry is a named pipe
@@ -5031,12 +5194,17 @@ static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t
         }
     }
     uint32_t size = 0;
+    int is_dir = 0;
+    uint32_t ino = 0;
     int ri = svc_ram_find(path);
     if (ri >= 0) {
         size = g_svc_ram_files[ri].size;
+        ino = 0x40000000U + (uint32_t)ri;   /* unique per guest-created file */
     } else {
         svc_fat32_ensure_queue();
-        uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+        uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size,
+                                                 &is_dir);
+        ino = cluster;
         /* TEMP DIAG (lane-C1 bring-up): log the resolve outcome per path. */
         serial_puts("[stat] path=");
         serial_puts(path);
@@ -5045,16 +5213,33 @@ static int64_t arm64_svc_file_stat(uint64_t path_va, uint64_t path_len, uint64_t
         serial_puts(" size=");
         serial_put_dec((int64_t)size);
         serial_puts("\r\n");
-        if (cluster < 2U) return -38; /* ENOSYS — the guest tolerates this on
-            absent probe paths (run-20260926_045921: it spins on a real
-            ENOENT); existing files still get the real stat. */
+        if (cluster < 2U) return -2; /* ENOENT — the truthful errno for an
+            absent path. (The early lane used -ENOSYS because the errno
+            lowering was broken then, run-20260926_045921/055241; fixed
+            since. clang's FileManager / __has_include NEED ENOENT here:
+            -ENOSYS reads as "exists but broken", which both kept -I dirs
+            that failed to stat AND made __has_include(<missing>) TRUE —
+            R7 boot-4/5 evidence.) */
     }
     /* struct stat: mode u32 @16 (S_IFREG|0644 = 0x81A4 LE), nlink u64 @24,
-     * size i64 @48. */
+     * size i64 @48, ino u64 @8. The inode MUST be unique per file: LLVM's
+     * FileManager keys file identity by (st_dev, st_ino) (R7: every file
+     * used to answer ino 0, so <string> aliased /WSTL.CPP's cached entry
+     * and the lexer re-entered /WSTL.CPP:28 until "include nested too
+     * deeply"). The FAT first cluster is unique per staged file/dir. */
     uint8_t st[96];
     __builtin_memset(st, 0, sizeof(st));
-    st[16] = 0xA4; st[17] = 0x81;               /* mode = 0x81A4 (S_IFREG|0644) */
-    st[24] = 1;                                 /* nlink = 1 */
+    st[8] = (uint8_t)(ino & 0xFF);
+    st[9] = (uint8_t)((ino >> 8) & 0xFF);
+    st[10] = (uint8_t)((ino >> 16) & 0xFF);
+    st[11] = (uint8_t)((ino >> 24) & 0xFF);
+    if (is_dir) {
+        st[16] = 0xED; st[17] = 0x41;           /* mode = 0x41ED (S_IFDIR|0755) */
+        st[24] = 2;                             /* nlink = 2 (directory) */
+    } else {
+        st[16] = 0xA4; st[17] = 0x81;           /* mode = 0x81A4 (S_IFREG|0644) */
+        st[24] = 1;                             /* nlink = 1 */
+    }
     st[48] = (uint8_t)(size & 0xFF);
     st[49] = (uint8_t)((size >> 8) & 0xFF);
     st[50] = (uint8_t)((size >> 16) & 0xFF);
@@ -5114,14 +5299,15 @@ static int64_t arm64_svc_file_open(uint64_t path_va, uint64_t path_len, uint64_t
     }
     svc_fat32_ensure_queue();
     uint32_t size = 0;
-    uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size);
+    uint32_t cluster = _simpleos_resolve_path(path, (int64_t)path_len, &size, 0);
     serial_puts("[open] resolve cluster=");
     serial_put_dec((int64_t)cluster);
     serial_puts(" size=");
     serial_put_dec((int64_t)size);
     serial_puts("\r\n");
-    if (cluster < 2U) return -38; /* ENOSYS — see stat: tolerated on absent
-        probe paths; existing files open normally. */
+    if (cluster < 2U) return -2; /* ENOENT — see the stat handler: the
+        truthful errno for an absent path; clang's __has_include probe
+        requires it (-ENOSYS reads as "exists", R7 boot-4/5). */
     g_svc_fds[fd].used = 1;
     g_svc_fds[fd].writable = 0;
     g_svc_fds[fd].cluster = cluster;

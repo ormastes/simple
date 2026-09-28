@@ -1,0 +1,186 @@
+# Cold package/module index builder. The caller supplies typed TLDR/SMF facts
+# from the frozen SCV snapshot; this owner validates and assembles one complete
+# graph generation without opening source roots or publishing a partial index.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_module_index.{
+    PACKAGE_MODULE_INDEX_SCHEMA_V1, PackageModuleIndexEntryV1,
+    PackageModuleIndexGenerationV1, package_module_index_entry_action_digest_v1,
+    package_module_index_validate_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{
+    ConfigVariantKeyV1, PackageTldrHeaderV1,
+    config_variant_digest_v1, package_tldr_header_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1
+}
+
+val PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1: text = sha256_text(
+    "simple/package-module-index/no-manifest/v1")
+
+struct PackageModuleIndexBuildAuthorityV1:
+    producer_digest: text
+    root_generation: text
+    scv_revision_id: text
+    scv_commit_id: text
+    scv_tree_id: text
+    inventory_digest: text
+    variant: ConfigVariantKeyV1
+
+struct PackageModuleIndexDraftV1:
+    header: PackageTldrHeaderV1
+    manifest_source_identity: text
+    manifest_digest: text
+
+fn _index_builder_digest_valid_v1(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    var index = 0
+    while index < digest.len():
+        val code = digest.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn _index_builder_identity_valid_v1(identity: text) -> bool:
+    identity != "" and not identity.contains("\n") and
+        not identity.contains("\r")
+
+fn package_module_index_root_for_variant_v1(
+    authority: PackageModuleIndexBuildAuthorityV1
+) -> text:
+    val variant_digest = config_variant_digest_v1(authority.variant)
+    if variant_digest == "" or
+            not _index_builder_identity_valid_v1(authority.root_generation):
+        return ""
+    # V1 has one root-generation field and no separate variant column. Bind
+    # both identities here so a different target/options set cannot reuse the
+    # same graph or its action/archive receipts.
+    sha256_text("simple/package-module-root/v1|" +
+        "{authority.root_generation.len()}:{authority.root_generation}|" +
+        variant_digest)
+
+fn package_module_index_build_from_inventory_v1(
+    authority: PackageModuleIndexBuildAuthorityV1,
+    inventory: CompileSourceInventoryV1,
+    drafts: [PackageModuleIndexDraftV1]
+) -> Result<PackageModuleIndexGenerationV1, text>:
+    if not _index_builder_digest_valid_v1(authority.producer_digest) or
+            not _index_builder_identity_valid_v1(authority.scv_revision_id) or
+            not _index_builder_identity_valid_v1(authority.scv_commit_id) or
+            not _index_builder_identity_valid_v1(authority.scv_tree_id):
+        return Err("index-builder-authority-invalid")
+    val variant_digest = config_variant_digest_v1(authority.variant)
+    val root_generation = package_module_index_root_for_variant_v1(authority)
+    if variant_digest == "" or root_generation == "":
+        return Err("index-builder-variant-invalid")
+    val current_inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if current_inventory_digest == "" or
+            current_inventory_digest != authority.inventory_digest:
+        return Err("index-builder-inventory-mismatch")
+    if drafts.len() == 0:
+        return Err("index-builder-drafts-empty")
+
+    # Keep one inventory array as the value authority. A map of full entry
+    # aggregates duplicates graph-sized metadata and exercises the native
+    # aggregate-in-Dict path; a path-to-index map retains only scalar slots.
+    var sources: Dict<text, i64> = {}
+    var source_count = 0
+    var source_index = 0
+    while source_index < inventory.entries.len():
+        val source = inventory.entries[source_index]
+        sources[source.source_identity] = source_index
+        if source.source_identity.ends_with(".spl"):
+            source_count = source_count + 1
+        source_index = source_index + 1
+
+    var draft_by_module: Dict<text, i64> = {}
+    var source_seen: Dict<text, bool> = {}
+    var module_ids: [text] = []
+    var index = 0
+    while index < drafts.len():
+        val draft = drafts[index]
+        val header = draft.header
+        val reason = package_tldr_header_validate_v1(header)
+        if reason != "ok":
+            return Err("index-builder-header-{reason}:{header.module_identity}")
+        if header.producer_digest != authority.producer_digest or
+                config_variant_digest_v1(header.variant) != variant_digest:
+            return Err("index-builder-producer-or-variant-mismatch:{header.module_identity}")
+        if draft_by_module.has(header.module_identity) or
+                source_seen.has(header.source_identity):
+            return Err("index-builder-duplicate-module-or-source:{header.module_identity}")
+        if not sources.has(header.source_identity) or
+                not header.source_identity.ends_with(".spl"):
+            return Err("index-builder-source-absent:{header.source_identity}")
+        if inventory.entries[sources[header.source_identity]].content_digest !=
+                header.source_digest:
+            return Err("index-builder-source-digest-mismatch:{header.source_identity}")
+        if not _index_builder_digest_valid_v1(draft.manifest_digest):
+            return Err("index-builder-manifest-digest-invalid:{header.module_identity}")
+        if draft.manifest_digest == PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1:
+            if draft.manifest_source_identity != "":
+                return Err("index-builder-manifest-identity-invalid:{header.module_identity}")
+        else:
+            val manifest_path = draft.manifest_source_identity
+            if (manifest_path != "simple.sdn" and
+                    not manifest_path.ends_with("/simple.sdn")) or
+                    not sources.has(manifest_path):
+                return Err("index-builder-manifest-absent:{header.module_identity}")
+            if inventory.entries[sources[manifest_path]].content_digest !=
+                    draft.manifest_digest:
+                return Err("index-builder-manifest-digest-mismatch:{header.module_identity}")
+        draft_by_module[header.module_identity] = index
+        source_seen[header.source_identity] = true
+        module_ids.push(header.module_identity)
+        index = index + 1
+    if drafts.len() != source_count:
+        return Err("index-builder-source-coverage-incomplete")
+
+    var entries: [PackageModuleIndexEntryV1] = []
+    for module_identity in canonical_identity_sort_texts(module_ids):
+        val draft = drafts[draft_by_module[module_identity]]
+        val header = draft.header
+        entries.push(PackageModuleIndexEntryV1(
+            package_identity: header.package_identity,
+            module_identity: header.module_identity,
+            source_identity: header.source_identity,
+            source_digest: header.source_digest,
+            smf_metadata_digest: header.smf_digest,
+            export_digest: header.export_digest,
+            abi_digest: header.abi_digest,
+            initializer_digest: header.initializer_digest,
+            provider_digest: header.provider_digest,
+            action_digest: sha256_text("pending-action"),
+            manifest_digest: draft.manifest_digest,
+            scc_identity: header.scc_identity,
+            direct_imports: header.direct_imports,
+            reverse_dependents: header.reverse_dependents))
+    var generation = PackageModuleIndexGenerationV1(
+        schema_version: PACKAGE_MODULE_INDEX_SCHEMA_V1,
+        producer_digest: authority.producer_digest,
+        root_generation: root_generation,
+        scv_revision_id: authority.scv_revision_id,
+        scv_commit_id: authority.scv_commit_id,
+        scv_tree_id: authority.scv_tree_id,
+        inventory_digest: authority.inventory_digest,
+        entries: entries)
+    index = 0
+    while index < generation.entries.len():
+        var entry = generation.entries[index]
+        entry.action_digest = package_module_index_entry_action_digest_v1(
+            generation, entry)
+        generation.entries[index] = entry
+        index = index + 1
+    val validation = package_module_index_validate_v1(generation)
+    if validation != "ok":
+        return Err("index-builder-graph-{validation}")
+    Ok(generation)
+
+export PACKAGE_MODULE_INDEX_NO_MANIFEST_DIGEST_V1
+export PackageModuleIndexBuildAuthorityV1, PackageModuleIndexDraftV1
+export package_module_index_root_for_variant_v1
+export package_module_index_build_from_inventory_v1

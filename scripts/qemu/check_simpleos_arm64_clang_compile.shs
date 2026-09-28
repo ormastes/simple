@@ -3,8 +3,8 @@
 #
 # aarch64 in-guest clang compile bring-up (lane-C1 aarch64 guest milestone).
 #
-# Rungs (single boot covers R2-R5 + R6; the guest entry sequences them):
-#   R1  image staged + host-verified (FAT32 root, 8.3 names)
+# Rungs (single boot covers R2-R5 + R6 + R7; the guest entry sequences them):
+#   R1  image staged + host-verified (FAT32 root, 8.3 names + /INCLUDE tree)
 #   R2  guest boots to the clang-bringup entry (VFS up)
 #   R3  /CLANG.ELF --version prints in-guest
 #   R4a /CLANG.ELF -cc1 ... /HELLO.C -o /HELLO.O     (in-guest compile)
@@ -14,7 +14,14 @@
 #   R6b /LLD.ELF -T /SIMPLEOS.LD /CRT0.O /WITNESS.O /LIBCXX.A /LIBC.A
 #       /CXXABI.A /RTBUILT.A -o /WITNESS2.ELF       (in-guest C++ link)
 #   R6c /WITNESS2.ELF runs, prints WITNESS_CXX_42 (virtual -> 42)
+#   R7a /CLANG.ELF -cc1 -x c++ -std=c++17 -I/INCLUDE/c++/v1 -I/INCLUDE ...
+#       /WSTL.CPP -o /WSTL.O   (in-guest STL compile: std::string/std::vector/
+#       <algorithm> instantiated from the /INCLUDE libc++ header tree)
+#   R7b /LLD.ELF -T /SIMPLEOS.LD /CRT0.O /WSTL.O /LIBCXX.A /LIBC.A
+#       /CXXABI.A /RTBUILT.A -o /WSTL2.ELF          (in-guest STL link)
+#   R7c /WSTL2.ELF runs, prints WITNESS_STL_OK (computed sort/find/string check)
 # Final marker: CLANG_IN_GUEST_ARM64_OK (R1-R5) + CLANG_IN_GUEST_ARM64_CXX_OK (R6)
+#   + CLANG_IN_GUEST_ARM64_STL_OK (R7)
 #
 # Toolchain inputs come from the lane-C1 aarch64 build
 # (/home/yoon/llvm-project-simpleos/build-os-llvm): guest-runnable static
@@ -35,6 +42,13 @@
 #              LD_LIBRARY_PATH="$HOME/.local/lib"; \
 #              sh scripts/qemu/check_simpleos_arm64_clang_compile.shs'
 # ACCEL=tcg GUEST_CPU=max stays available as the no-KVM fallback.
+# Guest sizing (host-local knobs, env-only — never committed per-host):
+#   A64_MEM   guest RAM   (default: 32G)
+#   A64_SMP   guest cores (default: 10)
+# GUEST_CPU defaults to the host CPU (kvm -cpu host); override per host as
+# needed. The guest kernel image currently maps a 768 MiB RAM region (linker
+# script), so A64_MEM beyond that is headroom for future heap growth, not yet
+# usable by the in-kernel bump heap (512 MiB, baremetal_stubs.c).
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -43,9 +57,14 @@ cd "$ROOT_DIR"
 LLVM_WORK="${LLVM_WORK:-/home/yoon/llvm-project-simpleos/build-os-llvm}"
 GUEST_BIN_DIR="$LLVM_WORK/cross-aarch64-unknown-simpleos/bin"
 SYSROOT_A64="$LLVM_WORK/sysroot-aarch64"
-STAGE_DIR=build/os/elfexec_clang_arm64
+# Multi-session note: multiple agent sessions share this repo and may run
+# this gate concurrently. Override A64_STAGE_DIR/A64_KERNEL to keep runs
+# disjoint (private image/kernel/serial logs) — a shared stage dir means a
+# concurrent session's R1 re-staging rewrites the image under a running
+# guest and its cleanup can SIGKILL the other session's QEMU.
+STAGE_DIR="${A64_STAGE_DIR:-build/os/elfexec_clang_arm64}"
 IMAGE="$STAGE_DIR/fat32-clang-arm64.img"
-KERNEL=build/os/simpleos_arm64_clang_bringup.elf
+KERNEL="${A64_KERNEL:-build/os/simpleos_arm64_clang_bringup.elf}"
 OUT="$STAGE_DIR/run-$(date +%Y%m%d_%H%M%S)"
 # Compiler selection: this gate's kernel REQUIRES the FAM RuntimeArray
 # inline-accessor fix (commit 1b3e40d8b9b, 2026-09-25) — the committed
@@ -111,7 +130,7 @@ note "guest clang=${CLANG_BYTES}B lld=${LLD_BYTES}B"
 
 # ------------------------------------------------------------------- R1: img --
 note "R1: staging FAT32 image"
-mkdir -p "$STAGE_DIR/stage" "$OUT"
+mkdir -p "$STAGE_DIR/stage" "$STAGE_DIR/tmp" "$OUT"
 cp "$SYSROOT_A64/lib/crt0.o"                      "$STAGE_DIR/stage/CRT0.O"
 cp "$SYSROOT_A64/share/simpleos/simpleos.ld"      "$STAGE_DIR/stage/SIMPLEOS.LD"
 cp "$SYSROOT_A64/lib/libsimpleos_c.a"             "$STAGE_DIR/stage/LIBC.A"
@@ -122,23 +141,55 @@ EOF
 # R6 C++ witness: stage the C++ link archives + the witness payloads.
 #   /WITNESS.CPP = the canonical witness source (scripts/os/fsexec_witness_arm64.cpp)
 #     staged RAW — self-contained, no #includes, no PCH).
+# R7 STL witness: the REAL libc++ proof — a TU that #includes <string>,
+# <vector>, <algorithm> and instantiates std::sort/std::find/std::string
+# IN-GUEST against the /INCLUDE header tree. The sysroot libc++.a/libc++abi.a
+# are NO-exceptions builds (fork revert bae562f21bd6; nm: no __cxa_throw /
+# _Unwind_*), so the witness uses no throw/try/catch and the R7a cc1 line
+# omits any exceptions flag (the guest cc1 compiles exceptions OUT by
+# default and REJECTS an explicit -fno-exceptions as an unknown argument).
 cp "$SYSROOT_A64/lib/libc++.a"                          "$STAGE_DIR/stage/LIBCXX.A"
 cp "$SYSROOT_A64/lib/libc++abi.a"                       "$STAGE_DIR/stage/CXXABI.A"
 cp "$SYSROOT_A64/lib/libclang_rt.builtins-aarch64.a"    "$STAGE_DIR/stage/RTBUILT.A"
 cp scripts/os/fsexec_witness_arm64.cpp                  "$STAGE_DIR/stage/WITNESS.CPP"
+cp scripts/os/fsexec_witness_stl_arm64.cpp              "$STAGE_DIR/stage/WSTL.CPP"
 WITNESS_BYTES=$(wc -c < "$STAGE_DIR/stage/WITNESS.CPP" | tr -d ' ')
+WITNESS_STL_BYTES=$(wc -c < "$STAGE_DIR/stage/WSTL.CPP" | tr -d ' ')
 LIBCXX_BYTES=$(wc -c < "$STAGE_DIR/stage/LIBCXX.A" | tr -d ' ')
 CXXABI_BYTES=$(wc -c < "$STAGE_DIR/stage/CXXABI.A" | tr -d ' ')
 RTBUILT_BYTES=$(wc -c < "$STAGE_DIR/stage/RTBUILT.A" | tr -d ' ')
 note "R6: witness=${WITNESS_BYTES}B libc++.a=${LIBCXX_BYTES}B libc++abi.a=${CXXABI_BYTES}B builtins=${RTBUILT_BYTES}B"
+note "R7: witness_stl=${WITNESS_STL_BYTES}B"
 printf '%s\n' "$CLANG_BYTES"   > "$STAGE_DIR/clang_size.txt"
 printf '%s\n' "$LLD_BYTES"    > "$STAGE_DIR/lld_size.txt"
 printf '%s\n' "$WITNESS_BYTES" > "$STAGE_DIR/witness_size.txt"
+printf '%s\n' "$WITNESS_STL_BYTES" > "$STAGE_DIR/witness_stl_size.txt"
 printf '%s\n' "$LIBCXX_BYTES"  > "$STAGE_DIR/libcxx_size.txt"
 printf '%s\n' "$CXXABI_BYTES"  > "$STAGE_DIR/cxxabi_size.txt"
 printf '%s\n' "$RTBUILT_BYTES" > "$STAGE_DIR/rtbuilt_size.txt"
 
+# R7 include tree: mirror the full sysroot include tree (simpleos C headers
+# + libc++ c++/v1) into the stage dir, then plan the exact FAT32 cluster
+# reservation the stager must account for. The tree lands in the guest as
+# /INCLUDE (C headers at /INCLUDE/*.h, libc++ at /INCLUDE/c++/v1/*) via
+# fsexec_include_tree_insert.py AFTER the payload assembly.
+note "R7: staging sysroot include tree"
+rm -rf "$STAGE_DIR/stage_include"
+mkdir -p "$STAGE_DIR/stage_include"
+cp -a "$SYSROOT_A64/include/." "$STAGE_DIR/stage_include/"
+INCLUDE_TREE_PLAN=$(python3 scripts/os/fsexec_include_tree_insert.py plan \
+    --tree-root "$STAGE_DIR/stage_include") \
+    || fail "include tree plan failed"
+note "R7: $INCLUDE_TREE_PLAN"
+TREE_CLUSTERS=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_clusters=\([0-9]*\).*/\1/p')
+[ -n "$TREE_CLUSTERS" ] || fail "tree_clusters missing from plan"
+printf '%s\n' "$TREE_CLUSTERS" > "$STAGE_DIR/include_tree_clusters.txt"
+INCLUDE_TREE_BYTES=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_bytes=\([0-9]*\).*/\1/p')
+INCLUDE_TREE_FILES=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_files=\([0-9]*\).*/\1/p')
+INCLUDE_TREE_DIRS=$(printf '%s\n' "$INCLUDE_TREE_PLAN" | sed -n 's/.*tree_dirs=\([0-9]*\).*/\1/p')
+
 note "R1: running FAT32 structural-prefix writer (seed interpreter)"
+A64_STAGE_DIR="$STAGE_DIR"; export A64_STAGE_DIR
 "$SEED" run scripts/os/fsexec_mkimg_clang_arm64.spl > "$OUT/mkimg.log" 2>&1 \
     || { cat "$OUT/mkimg.log"; fail "image writer failed"; }
 STATUS=$(grep -o 'fsexec_mkimg_clang_arm64_status=ok.*' "$OUT/mkimg.log" | head -1)
@@ -151,11 +202,15 @@ P3_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload3_start=\([0-9]*\).*/\1
 P4_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload4_start=\([0-9]*\).*/\1/p')
 P5_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload5_start=\([0-9]*\).*/\1/p')
 P6_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload6_start=\([0-9]*\).*/\1/p')
+P7_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* payload7_start=\([0-9]*\).*/\1/p')
+TREE_START=$(printf '%s\n' "$STATUS" | sed -n 's/.* tree_start=\([0-9]*\).*/\1/p')
+TREE_CLUSTERS_STAGER=$(printf '%s\n' "$STATUS" | sed -n 's/.* tree_clusters=\([0-9]*\).*/\1/p')
+ROOT_ENTRIES=$(printf '%s\n' "$STATUS" | sed -n 's/.* root_entries=\([0-9]*\).*/\1/p')
 FAT_SECTORS=$(printf '%s\n' "$STATUS" | sed -n 's/.* fat_sectors=\([0-9]*\).*/\1/p')
 TOTAL=$(printf '%s\n' "$STATUS"    | sed -n 's/.* total_bytes=\([0-9]*\).*/\1/p')
 PREFIX="$STAGE_DIR/fat32-clang-arm64-prefix.bin"
 [ -f "$PREFIX" ] || fail "prefix not written"
-note "R1: assembling image (prefix + 6 payloads, ${TOTAL} bytes)"
+note "R1: assembling image (prefix + 7 payloads + /INCLUDE tree, ${TOTAL} bytes)"
 cp "$PREFIX" "$IMAGE"
 # Data area base: (reserved + num_fats*fat_sectors) * 512; cluster N offset:
 DATA_BASE=$(( (32 + FAT_SECTORS) * 512 ))
@@ -170,24 +225,36 @@ append_payload "$P3_START" "$STAGE_DIR/stage/WITNESS.CPP"
 append_payload "$P4_START" "$STAGE_DIR/stage/LIBCXX.A"
 append_payload "$P5_START" "$STAGE_DIR/stage/CXXABI.A"
 append_payload "$P6_START" "$STAGE_DIR/stage/RTBUILT.A"
+append_payload "$P7_START" "$STAGE_DIR/stage/WSTL.CPP"
 truncate -s "$TOTAL" "$IMAGE"
+
+# R7: write the /INCLUDE tree into its reserved cluster range (subdir + LFN
+# directory entries the guest FAT32 read path resolves), then byte-verify.
+note "R1: inserting /INCLUDE tree (start=$TREE_START clusters=$TREE_CLUSTERS_STAGER root_slot=$ROOT_ENTRIES)"
+python3 scripts/os/fsexec_include_tree_insert.py insert \
+    --image "$IMAGE" --tree-root "$STAGE_DIR/stage_include" \
+    --tree-start "$TREE_START" --tree-clusters "$TREE_CLUSTERS_STAGER" \
+    --fat-sectors "$FAT_SECTORS" --root-slot "$ROOT_ENTRIES" \
+    || fail "include tree insert failed"
 
 # Host-side path verification: parse the image root directory and check every
 # expected 8.3 entry exists with the right size; spot-check the CLANG.ELF magic.
 note "R1: verifying image root directory (host-side)"
 ROOT_OFF="$DATA_BASE"
-python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" "$WITNESS_BYTES" "$LIBCXX_BYTES" "$CXXABI_BYTES" "$RTBUILT_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
+python3 - "$IMAGE" "$ROOT_OFF" "$CLANG_BYTES" "$LLD_BYTES" "$WITNESS_BYTES" "$LIBCXX_BYTES" "$CXXABI_BYTES" "$RTBUILT_BYTES" "$WITNESS_STL_BYTES" <<'PYEOF' || fail "image root-dir verification failed"
 import sys
 (img, root_off) = sys.argv[1], int(sys.argv[2])
-clang_b, lld_b, wit_b, lxx_b, abi_b, rtb_b = (int(x) for x in sys.argv[3:9])
+clang_b, lld_b, wit_b, lxx_b, abi_b, rtb_b, wstl_b = (int(x) for x in sys.argv[3:10])
 data = open(img, 'rb').read()
 # FAT 8.3 raw names are 11 space-padded bytes with NO dot; normalize by
 # dropping spaces (CRT0.O -> CRT0O, SIMPLEOS.LD -> SIMPLEOSLD).
 want = {'CRT0O': None, 'SIMPLEOSLD': None, 'LIBCA': None, 'HELLOC': None,
         'CLANGELF': clang_b, 'LLDELF': lld_b,
         'WITNESSCPP': wit_b,
-        'LIBCXXA': lxx_b, 'CXXABIA': abi_b, 'RTBUILTA': rtb_b}
+        'LIBCXXA': lxx_b, 'CXXABIA': abi_b, 'RTBUILTA': rtb_b,
+        'WSTLCPP': wstl_b}
 found = {}
+attrs = {}
 for slot in range(64):
     e = data[root_off + slot*32 : root_off + slot*32 + 32]
     if e[0] == 0x00:
@@ -199,13 +266,17 @@ for slot in range(64):
     name = e[0:11].replace(b' ', b'').decode('ascii', 'replace')
     size = int.from_bytes(e[28:32], 'little')
     found[name] = size
+    attrs[name] = e[11]
 missing = [k for k in want if k not in found]
 badsize = [k for k, sz in want.items() if sz is not None and k in found and found[k] != sz]
 if missing or badsize:
     print(f"image_verify FAIL missing={missing} badsize={badsize} found={found}")
     sys.exit(1)
+if 'INCLUDE' not in found or not (attrs['INCLUDE'] & 0x10):
+    print(f"image_verify FAIL INCLUDE dir missing/attr={attrs.get('INCLUDE')}")
+    sys.exit(1)
 print(f"image_verify OK entries={sorted(found)} "
-      f"CLANGELF={found['CLANGELF']} LLDELF={found['LLDELF']}")
+      f"CLANGELF={found['CLANGELF']} LLDELF={found['LLDELF']} INCLUDE_dir=ok")
 PYEOF
 note "R1 PASS: image at $IMAGE ($(wc -c < "$IMAGE" | tr -d ' ') bytes)"
 [ "$R1_ONLY" = 1 ] && { note "--r1-only: stopping before kernel build/boot"; exit 0; }
@@ -231,8 +302,17 @@ scripts/check/check-simpleos-arm64-fs-exec-elf.shs "$KERNEL" || fail "kernel ELF
 note "kernel ready: $KERNEL"
 
 # ------------------------------------------------------------- R2-R5: boot --
-note "R2-R5: booting arm64 guest (KVM, 2G, virtio-blk FAT32)"
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-600}"
+# The R7a STL rung reads ~430 files (247 unique headers + has_include probes)
+# through the syscall layer's single-sector virtio path (~2-5 s/file: dir
+# re-scans + 512 B sector reads — an I/O-granularity cost, NOT the old TCG
+# AST wall, which KVM removed). Measured on this host (KVM, 32G/10):
+# R1-R6 complete in ~4 min; R7a cc1 then compiles the <string>/<vector>/
+# <algorithm> closure at ~9 s/unique-header single-vCPU — 381 unique headers
+# in 60 min, killed by the old 3600 s budget at __variant/monostate.h.
+# Measured again 20:13Z: R7a alone exceeded 95 min — all 475 unique headers
+# parsed cleanly, then killed mid-codegen by the 9600 s budget. Full R1-R7
+# needs the 4 h budget below.
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-14400}"
 # ACCEL/GUEST_CPU overrides: the host rule prefers KVM, but hosts where the
 # invoking user lacks /dev/kvm access (no kvm group / no logind seat ACL) can
 # run ACCEL=tcg GUEST_CPU=max to execute the same rungs without privileges.
@@ -241,8 +321,12 @@ GUEST_CPU="${GUEST_CPU:-host}"
 if [ "$ACCEL" = "tcg" ] && [ "$GUEST_CPU" = "host" ]; then
     GUEST_CPU=max
 fi
+# Guest sizing: 32G RAM / 10 cores by default (host rule), env-overridable.
+A64_MEM="${A64_MEM:-32G}"
+A64_SMP="${A64_SMP:-10}"
+note "R2-R5: booting arm64 guest (KVM, ${A64_MEM}, smp ${A64_SMP}, virtio-blk FAT32)"
 timeout "$BOOT_TIMEOUT" qemu-system-aarch64 \
-    -machine virt -accel "$ACCEL" -cpu "$GUEST_CPU" -m 2G -smp 4 \
+    -machine virt -accel "$ACCEL" -cpu "$GUEST_CPU" -m "$A64_MEM" -smp "$A64_SMP" \
     -nographic -monitor none -no-reboot \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMAGE,if=none,id=armdisk,format=raw" \
@@ -276,10 +360,15 @@ R6C=FAIL; grep -q 'rung=R6c-run-witness2 rc=0' "$OUT/serial.log" && R6C=PASS
 # The product's own output marker on serial (proves the C++ binary really ran,
 # not just exited 0 — the R5b hollow-green lesson).
 R6M=FAIL; grep -q 'WITNESS_CXX_42' "$OUT/serial.log" && R6M=PASS
+R7A=FAIL; grep -q 'rung=R7a-cc1-stl-compile rc=0' "$OUT/serial.log" && R7A=PASS
+R7B=FAIL; grep -q 'rung=R7b-lld-stl-link rc=0' "$OUT/serial.log" && R7B=PASS
+R7C=FAIL; grep -q 'rung=R7c-run-witness-stl rc=0' "$OUT/serial.log" && R7C=PASS
+R7M=FAIL; grep -q 'WITNESS_STL_OK' "$OUT/serial.log" && R7M=PASS
 OK=FAIL; grep -q 'CLANG_IN_GUEST_ARM64_OK' "$OUT/serial.log" && \
-     grep -q 'CLANG_IN_GUEST_ARM64_CXX_OK' "$OUT/serial.log" && OK=PASS
+     grep -q 'CLANG_IN_GUEST_ARM64_CXX_OK' "$OUT/serial.log" && \
+     grep -q 'CLANG_IN_GUEST_ARM64_STL_OK' "$OUT/serial.log" && OK=PASS
 
-note "rung table: R1=$R1S R2=$R2 R3=$R3 R4=$R4 R5=$R5 R6a=$R6A R6b=$R6B R6c=$R6C R6marker=$R6M FINAL=$OK"
-[ "$OK" = PASS ] && [ "$R6M" = PASS ] && { note "ALL RUNGS PASS (C + C++)"; exit 0; }
+note "rung table: R1=$R1S R2=$R2 R3=$R3 R4=$R4 R5=$R5 R6a=$R6A R6b=$R6B R6c=$R6C R6marker=$R6M R7a=$R7A R7b=$R7B R7c=$R7C R7marker=$R7M FINAL=$OK"
+[ "$OK" = PASS ] && [ "$R6M" = PASS ] && [ "$R7M" = PASS ] && { note "ALL RUNGS PASS (C + C++ + STL)"; exit 0; }
 note "rungs missed — see $OUT/serial.log"
 exit 1

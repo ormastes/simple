@@ -1,0 +1,42 @@
+"""Positioned writes must invalidate previously retained execute identities."""
+
+use std.spec.*
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{MountTable, PositionedDriverKind}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions, OpenFlags, ExecuteTrust}
+
+describe "MountTable positioned write generations":
+    it "keeps a failed wrong-driver write inert and invalidates after bytes change":
+        var table = MountTable.new()
+        var opts = MountOptions.default()
+        opts.allow_untrusted_exec = true
+        table.mount("/", DriverInstance.Nvfs(NvfsDriver.new("positioned-generation")),
+                    opts).unwrap()
+        table.mkdir("/bin", 0o755).unwrap()
+        val file = table.open("/bin/tool", OpenFlags.create_write()).unwrap()
+        table.positioned_write_bytes(
+            file.id, PositionedDriverKind.Nvfs, 0u64, [1u8]).unwrap()
+        table.close(file).unwrap()
+
+        val retained = table.open_for_execute("/bin/tool", ExecuteTrust.Untrusted).unwrap()
+        expect(table.execute_binding_is_current(retained)).to_be(true)
+        val writer = table.open("/bin/tool", OpenFlags.read_write()).unwrap()
+        expect(table.positioned_write_bytes(
+            writer.id, PositionedDriverKind.Dbfs, 0u64, [7u8]).is_err()).to_be(true)
+        expect(table.execute_binding_is_current(retained)).to_be(true)
+        val before_stat = table.positioned_fstat(writer.id).unwrap()
+        val before_size = before_stat.size
+        expect(table.positioned_write_bytes(
+            writer.id, PositionedDriverKind.Nvfs, before_size + 1u64, []).unwrap()).to_equal(0u64)
+        val after_stat = table.positioned_fstat(writer.id).unwrap()
+        expect(after_stat.size).to_equal(before_size)
+        val after_bytes = table.positioned_read_bytes(
+            writer.id, PositionedDriverKind.Nvfs, 0u64, before_size).unwrap()
+        expect(after_bytes).to_equal([1u8])
+        expect(table.execute_binding_is_current(retained)).to_be(true)
+        expect(table.positioned_write_bytes(
+            writer.id, PositionedDriverKind.Nvfs, 0u64, [7u8]).unwrap()).to_equal(1u64)
+        expect(table.execute_binding_is_current(retained)).to_be(false)
+        table.close(writer).unwrap()
+        table.close(retained.file_handle).unwrap()
