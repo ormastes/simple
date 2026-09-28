@@ -105,3 +105,11 @@ A trial preallocated member copy built with 3 changed and 320 cached units
 but the full spec stayed at 2/4 with the same digest mismatch; the trial was
 reverted. The specific native operation losing bytes is still unproven. Do
 not count this as a cold publication PASS or a memory/performance improvement.
+
+The subsequent bounded native byte probe kept the same 92-byte and 88-byte
+member lengths with both `push` and indexed preallocation, yet each decoded
+member failed its expected hash and the action prefix contained control
+bytes. The earlier three-byte copy passed. This rules out simply changing
+the copy method as a qualified publication fix; the byte source and
+conversion boundary need byte-by-byte diagnosis. The production code was
+left unchanged after the failed trial.
