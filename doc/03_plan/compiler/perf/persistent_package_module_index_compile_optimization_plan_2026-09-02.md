@@ -344,6 +344,15 @@ an entry-closure compile may lower fewer modules; cold publication must
 resolve this scope mismatch without inventing missing receipts. See
 `doc/09_report/compiler/target6_typed_hir_receipt_2026-09-29.md`.
 
+Scoped graph follow-up (2026-09-29): a V3 index now binds one entry source to
+the full frozen inventory digest and admits only its complete reached graph.
+Cold publication verifies persisted archives before moving `CURRENT`; warm
+routing rejects another entry and full-build requests. Focused no-stub native
+tests pass for scoped build/publication, warm refusal, and unchanged V1/V2
+roundtrip. The driver still must retain typed HIR receipts, attach real archive
+outputs, and call the publisher; no production compile or performance gate is
+claimed. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
 The 2026-09-28 full CLI retry compiled its 2,488-unit source closure after
 the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173
 distinct symbols. This still blocks full-CLI Target 6 qualification; the

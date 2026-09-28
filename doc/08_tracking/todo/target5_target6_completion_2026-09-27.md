@@ -114,6 +114,12 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Define a serialized entry-scoped graph when entry-closure compilation
+  lowers fewer sources than the full frozen inventory. V3 binds the full
+  inventory digest and exact entry, rejects missing/redundant graph nodes,
+  verifies reached archives before publication, and refuses mismatched warm
+  requests. See `doc/09_report/compiler/target6_scoped_cold_graph_2026-09-29.md`.
+
 - [x] Prevent a stale binding-only index publication from replacing a graph
   generation after a concurrent writer wins. The pointer CAS has focused
   native and SPipe evidence in

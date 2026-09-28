@@ -32,6 +32,13 @@ The driver owns `PersistentSmfPackageIndexV1`, canonical package/module lookup,
 generation pinning, and explicit bounded rebuild. CLI, bootstrap, MCP, LSP, and
 daemon paths call this owner and may not maintain alternate closure walkers.
 
+The catalog distinguishes a complete-inventory V2 graph from an entry-scoped
+V3 graph. V3 binds the entry source identity and the digest of the full frozen
+SCV inventory. Every stored module must be reachable from that entry and all
+its direct imports must be stored. Warm routing refuses a V3 graph for a
+different entry or a full-build request. The inventory digest alone never
+implies that an entry-scoped graph covers every source in that inventory.
+
 ### Metadata owner
 
 `PackageTldrHeaderV1` contains the package/module identity, variant identity,
