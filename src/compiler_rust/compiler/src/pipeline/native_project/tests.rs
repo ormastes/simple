@@ -6902,6 +6902,7 @@ fn test_cxx_abi_symbols_are_not_stub_candidates() {
     for symbol in [
         "_cfgetispeed",
         "_clock_getres",
+        "_flock",
         "_recvmsg",
         "_sendfile",
         "_sigaltstack",
