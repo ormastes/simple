@@ -308,4 +308,38 @@ def CapState.deriveToken (s : CapState) (src : Principal) (newTok : CapToken) : 
 def syscallAuthorize (s : CapState) (caller : Principal) (kind : CapKind) : Bool :=
   s.check caller kind
 
+/-- Invariant for the `CapSet.full` wildcard: only the trusted init/kernel
+    principal may hold the full capability set. -/
+def CapState.fullSetOnlyFor (s : CapState) (trusted : Principal) : Prop :=
+  ∀ pid, s.findRecord pid = some { pid := pid, caps := CapSet.full } → pid = trusted
+
+/-- Runtime init_task sanitizer: non-trusted principals cannot ingest the
+    ambient full-set shape through the generic init path. -/
+def sanitizeInitCaps (trusted pid : Principal) (caps : CapSet) : CapSet :=
+  if pid == trusted && caps.isFullSet then CapSet.full
+  else if caps.isFullSet then CapSet.empty
+  else caps
+
+/-- Abstract file-access gate: normal file capability must pass first; unveil
+    path permission narrows access only after capability succeeds. -/
+def fileAccessAllowed (hasFileCap isUnveiled unveilAllows : Bool) : Bool :=
+  hasFileCap && (!isUnveiled || unveilAllows)
+
+/-- File-access gate with permission validation: invalid permission strings
+    fail before capability or unveil path checks. -/
+def fileAccessAllowedWithPerm
+    (permissionValid hasFileCap isUnveiled unveilAllows : Bool) : Bool :=
+  permissionValid && fileAccessAllowed hasFileCap isUnveiled unveilAllows
+
+/-- Abstract segment-aware path prefix gate.  A prefix allows a path when it is
+    root, exact, or a real prefix followed by a path separator. -/
+def segmentPrefixAllowed (isRoot isExact hasPrefix hasBoundary : Bool) : Bool :=
+  isRoot || isExact || (hasPrefix && hasBoundary)
+
+/-- Two-bit read/write file gate.  A requested right must have its matching
+    capability bit. -/
+def rwFileAccessAllowed
+    (hasRead hasWrite requestRead requestWrite : Bool) : Bool :=
+  (!requestRead || hasRead) && (!requestWrite || hasWrite)
+
 end KernelCapabilities

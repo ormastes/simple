@@ -43,11 +43,14 @@ inductive ProcState
 open ProcState
 
 /-- A process-table entry. `parent` is the reaping pid (init's pid is `INIT`);
-    `waiting` records that the parent is currently blocked in `wait()` on it. -/
+    `waiting` records that the parent is currently blocked in `wait()` on it.
+    `resources` abstracts the per-task resource table entries owned by the
+    process. -/
 structure Proc where
   state   : ProcState
   parent  : Nat
   waiting : Bool
+  resources : Nat
   deriving DecidableEq, Repr
 
 /-- Conventional init pid that adopts orphans and always reaps. -/
@@ -55,7 +58,7 @@ def INIT : Nat := 1
 
 /-- `spawn parent` mirrors `rt_process_spawn_async`: a fresh Created child that
     nobody is yet waiting on. -/
-def spawn (parent : Nat) : Proc := { state := Created, parent := parent, waiting := false }
+def spawn (parent : Nat) : Proc := { state := Created, parent := parent, waiting := false, resources := 0 }
 
 /-! ### Guarded transitions (each returns `none` when not applicable). -/
 
@@ -68,7 +71,7 @@ def doRun (p : Proc) : Option Proc :=
 /-- A Running process exits, becoming a zombie awaiting reap. -/
 def doExit (p : Proc) : Option Proc :=
   match p.state with
-  | Running => some { p with state := Exited }
+  | Running => some { p with state := Exited, resources := 0 }
   | _       => none
 
 /-- Reap an Exited process: this is the ONLY transition that consumes a status. -/
@@ -108,6 +111,14 @@ theorem exit_from_running {p p' : Proc} (h : doExit p = some p') :
   cases hs : p.state <;> rw [hs] at h <;> simp only [Option.some.injEq, reduceCtorEq] at h
   subst h
   simp_all
+
+/-- Exit cleanup drains all per-task resources before the zombie can be reaped. -/
+theorem exit_clears_resources {p p' : Proc} (h : doExit p = some p') :
+    p'.resources = 0 := by
+  unfold doExit at h
+  cases hs : p.state <;> rw [hs] at h <;> simp only [Option.some.injEq, reduceCtorEq] at h
+  subst h
+  rfl
 
 /-- A reap is only ever applied to an Exited process. -/
 theorem reap_requires_exited {p p' : Proc} (h : doReap p = some p') :
