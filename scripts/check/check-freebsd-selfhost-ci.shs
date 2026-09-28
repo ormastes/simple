@@ -111,12 +111,29 @@ if [ "$stage2_status" -ne 0 ]; then
     # The bootstrap writes Cargo's actual diagnostic to a second log inside
     # the FreeBSD VM. The host artifact upload cannot see that guest path, so
     # print a bounded tail here before the VM is destroyed.
-    for rust_seed_log in "$OUTPUT_DIR"/logs/*/rust-seed-build.log; do
-        [ -f "$rust_seed_log" ] || continue
-        printf 'freebsd-selfhost-error: Rust seed diagnostic tail: %s\n' \
-            "$rust_seed_log" >&2
-        tail -n 120 "$rust_seed_log" >&2 || true
-    done
+    # The Rust seed log is only relevant when the seed build itself failed;
+    # once Stage 2 native-build ran, its logs (and the stage2 sanity frontend
+    # logs) hold the real diagnostic, so print those instead of cargo noise.
+    if grep -q 'stage2-native-build log:' "$stage2_log"; then
+        for guest_log in \
+            "$OUTPUT_DIR"/logs/*/stage2-native-build.log* \
+            "$OUTPUT_DIR"/stage3/*/stage2-sanity.env.frontend-* \
+            "$OUTPUT_DIR"/stage3/*/stage2-receiver.log \
+            "$OUTPUT_DIR"/stage3/*/stage2-command.transcript; do
+            [ -f "$guest_log" ] || continue
+            printf 'freebsd-selfhost-error: guest log tail (last 300 lines): %s\n' \
+                "$guest_log" >&2
+            tail -n 300 "$guest_log" >&2 || true
+            printf 'freebsd-selfhost-error: end of %s\n' "$guest_log" >&2
+        done
+    else
+        for rust_seed_log in "$OUTPUT_DIR"/logs/*/rust-seed-build.log; do
+            [ -f "$rust_seed_log" ] || continue
+            printf 'freebsd-selfhost-error: Rust seed diagnostic tail: %s\n' \
+                "$rust_seed_log" >&2
+            tail -n 120 "$rust_seed_log" >&2 || true
+        done
+    fi
     exit "$stage2_status"
 fi
 
