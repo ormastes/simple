@@ -227,6 +227,37 @@ the VFS maps back to `/system/service_manager.smf`. Its
 silent image ambiguity but does not manufacture a service-manager executable:
 the target-native binary build and QEMU transcript remain required evidence.
 
+## Scheduler contract restoration — 2026-09-14
+
+The scheduler owns `TaskControlBlock.security: TaskSecurity`; the compact
+`TaskSecurityBinding` is trusted launch input, not the stored policy type.
+`scheduler_security_types.spl` defines both values and their creation/fork
+rules, and `scheduler_types.spl` re-exports that canonical surface. Every TCB
+creation path initializes security explicitly. New tasks receive PID-backed
+identities with all policy and root/reaper grants absent. There is no implicit
+kernel-task syscall exemption. The three older ID-only constructors now take
+the scheduler's paired task/lifecycle identity reservation.
+
+`_Scheduler/scheduler_authority.spl` commits each authority operation's returned
+task table through mutable `me` methods. Root authority requires a nonzero live
+lifecycle generation, a policy-bound user task, and separately installed
+root-mint and reaper grants. Managed binding and authority use reject
+`PreparingExit` and `Zombie`. PreparingExit retains process diagnostic code 4;
+Ready/Running/Blocked/Zombie retain codes 0/1/2/3. The enum variant is appended
+so existing variant ordinals remain intact.
+
+The adjacent filesystem view fields are restored with an empty, denied,
+unbound default. Resource/domain updates preserve an existing view. Fork
+retains the parent's restrictive security and isolation fields with fresh
+principal/CSpace/audit/lifecycle identities; it clears root/reaper grants.
+
+Focused representation and owner-update scenarios live in
+`test/01_unit/os/kernel/scheduler/scheduler_security_contract_spec.spl`.
+Their execution is **MissingEvidence**: this isolated checkout has no admitted
+current self-hosted runner. They do not establish guest boot, physical mapping,
+or production readiness. This repair does not replace the separate managed
+launch and exit-finalization owners.
+
 ## Error policy
 
 - Unknown task, stale generation, missing capability, or unresolved context is
