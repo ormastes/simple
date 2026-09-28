@@ -65,6 +65,14 @@ The unused Wasm mapper import in `backend/common/mod.spl` has also been
 removed; the widened closure audit now reports 3 K0-to-P, 13 K1-to-P, and 9
 kernel-to-app/OS edges with zero unresolved imports. The structural gate
 still fails.
+The 2026-09-29 C backend cleanup removed the compiler's duplicate
+`CCodegenAdapter` and moved the standalone C compile entry to
+`src/plugins/backend_c/compile_c_entry.spl`. The registry already uses the
+plugin-owned adapter. The widened closure audit now reports 3 K0-to-P, 9
+K1-to-P, and 9 kernel-to-app/OS edges with zero unresolved imports. The
+structural gate still fails; this source relocation does not establish a
+Stage4 binary size or startup result. See
+`doc/09_report/compiler/target5_c_backend_partition_cleanup_2026-09-29.md`.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
