@@ -53,7 +53,7 @@ static int rt_log_hosted_probe_on(void) {
 }
 
 static void rt_log_hosted_probe(const char *tag, int64_t level, int64_t ptr, int64_t len) {
-    char head[64];
+    char head[128];
     int n;
     if (!rt_log_hosted_probe_on()) {
         return;
@@ -61,7 +61,11 @@ static void rt_log_hosted_probe(const char *tag, int64_t level, int64_t ptr, int
     n = snprintf(head, sizeof(head), "[HOSTED-LOG-PROBE] %s level=%lld len=%lld payload=",
                  tag, (long long)level, (long long)len);
     if (n > 0) {
-        ssize_t ignored = write(2, head, (size_t)n);
+        size_t head_len = (size_t)n;
+        if (head_len >= sizeof(head)) {
+            head_len = sizeof(head) - 1;
+        }
+        ssize_t ignored = write(2, head, head_len);
         (void)ignored;
     }
     /* Only dereference a plausible pointer/length pair -- the whole point of
