@@ -1,0 +1,56 @@
+# Native provider evidence requires linking runtime_sqlite.c as a separate
+# shared library via SIMPLE_LINK_OBJECTS; an interpreter pass is parity only.
+use std.spec.{describe, it, expect, step}
+use common.ui.access.{UiAccessEvent}
+use nogc_sync_mut.ui.access_store.{UiAccessStore}
+use std.database.sql.connection.{Database}
+use std.database.sql.stmt_cache.{StatementCache}
+use std.database.sql.types.{DbValue}
+
+describe "UI access SQLite provider":
+    it "persists and reads an event through a separate native provider":
+        step("Open an in-memory UI access store")
+        var store = UiAccessStore.memory()?
+        val event = UiAccessEvent(
+            surface_id: "main",
+            widget_id: "go",
+            canonical_id: "main#go",
+            event_kind: "action",
+            payload: "click",
+            sequence: 1
+        )
+        val next_event = UiAccessEvent(
+            surface_id: "main",
+            widget_id: "next",
+            canonical_id: "main#next",
+            event_kind: "action",
+            payload: "tap",
+            sequence: 2
+        )
+        step("Reuse the cached insert and read statements")
+        store.insert_event(event)?
+        store.insert_event(next_event)?
+        val rows = store.list_events("main", 10)?
+        expect(rows.len()).to_equal(2)
+        expect(rows[0].canonical_id).to_equal("main#next")
+        expect(rows[0].payload).to_equal("tap")
+        expect(rows[1].canonical_id).to_equal("main#go")
+        expect(rows[1].payload).to_equal("click")
+        val repeated = store.list_events("main", 10)?
+        expect(repeated.len()).to_equal(2)
+        expect(repeated[0].canonical_id).to_equal("main#next")
+        store.close()?
+
+    it "finalizes uncached statements on success and bind failure":
+        var db = Database.memory()?
+        db.cache = StatementCache.new(0)
+        db.exec_sql("CREATE TABLE t (v TEXT)")?
+        val bad = db.exec("INSERT INTO t (v) VALUES (?)", [
+            DbValue.Text(value: "first"), DbValue.Text(value: "extra")])
+        expect(bad.is_err()).to_equal(true)
+        db.exec("INSERT INTO t (v) VALUES (?)", [DbValue.Text(value: "main#go")])?
+        val rows = db.query("SELECT v FROM t WHERE v = ?", [
+            DbValue.Text(value: "main#go")])?
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].get_text("v") ?? "").to_equal("main#go")
+        db.close()?

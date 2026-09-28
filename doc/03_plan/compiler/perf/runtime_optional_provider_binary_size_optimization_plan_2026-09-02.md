@@ -67,6 +67,21 @@ The command-level dependency and first-demand provider cut is specified in
 An isolated Office product analogue still fails on 106 GPU-family symbols,
 so separate executable packaging alone is not yet a demand-load pass.
 
+Focused SQLite provider probe (2026-09-28, not admitted): the existing
+`runtime_sqlite.c` links as a 21,872-byte shared library with 27 exported
+`rt_sqlite_*` symbols in the O2 build with a SONAME. A 121,392-byte no-stub native UI
+access-store spec binary links against a debug provider and passes repeated
+insert/read plus disabled-cache cleanup coverage (2 examples, 0 failures).
+`PreparedStatement.execute()`
+and `query_rows()` previously finalized cached statements before reset/reuse,
+causing a use-after-free. The UI row decoders also passed optional values
+directly into text fields; explicit unwraps after nil checks preserve the
+returned text. Uncached statements now finalize on success and binding
+failure. The spec binary names the provider in `DT_NEEDED`, so it is
+eagerly loaded and remains a prerequisite probe, not a first-demand provider
+or a release-small pass. See
+`doc/09_report/compiler/target5_sqlite_shared_provider_probe_2026-09-28.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.
