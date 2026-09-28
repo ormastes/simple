@@ -114,6 +114,10 @@ The isolated changes are groundwork and diagnostics, not production acceptance.
 
 ## Target 6 — persistent compile index
 
+- [x] Prevent a stale binding-only index publication from replacing a graph
+  generation after a concurrent writer wins. The pointer CAS has focused
+  native and SPipe evidence in
+  `doc/09_report/compiler/target6_package_index_binding_cas_2026-09-28.md`.
 - [x] Apply warm multi-event inventory batches without one full-inventory
   rebuild per event. A 30-sample no-stub native fixture improves both p95
   time and peak RSS; serial-equivalence and atomic-rejection probes pass.

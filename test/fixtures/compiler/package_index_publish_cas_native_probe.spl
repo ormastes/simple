@@ -1,0 +1,49 @@
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+fn main() -> i64:
+    val cache_root = "build/mini_builds/package-index-cas-{rt_getpid()}"
+    dir_remove(cache_root, true)
+    val binding = PackageModuleIndexGenerationV1(
+        1, sha256_text("producer"), "root", "revision", "commit", "tree",
+        sha256_text("inventory"), [])
+    if not package_module_index_publish_if_current_v1(cache_root, binding, ""):
+        return 1
+    val bound = package_module_index_read_current_v1(cache_root)
+    if not bound.valid:
+        return 2
+    val digest = sha256_text("source")
+    val draft_entry = PackageModuleIndexEntryV1(
+        "package", "module", "src/module.spl", digest, digest,
+        digest, digest, digest, digest, digest, digest, "scc", [], [])
+    var graph = PackageModuleIndexGenerationV1(
+        1, binding.producer_digest, binding.root_generation,
+        binding.scv_revision_id, binding.scv_commit_id,
+        binding.scv_tree_id, binding.inventory_digest, [draft_entry])
+    var entry = graph.entries[0]
+    entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+    graph.entries[0] = entry
+    if not package_module_index_publish_if_current_v1(
+            cache_root, graph, bound.digest):
+        return 3
+    val admitted = package_module_index_read_current_v1(cache_root)
+    if not admitted.valid or admitted.generation == nil or
+            admitted.generation!.entries.len() != 1:
+        return 4
+    if package_module_index_publish_if_current_v1(
+            cache_root, binding, bound.digest):
+        return 5
+    val retained = package_module_index_read_current_v1(cache_root)
+    if not retained.valid or retained.digest != admitted.digest:
+        return 6
+    dir_remove(cache_root, true)
+    print "PASS package_index_publish_cas_native_probe"
+    0

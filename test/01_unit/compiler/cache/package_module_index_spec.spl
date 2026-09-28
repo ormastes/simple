@@ -1,12 +1,17 @@
-use app.spipe.testing.*
+use std.spec.{describe, it, expect}
 use compiler.driver.cache.package_module_index.{
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
     PackageTldrHeaderV1, PersistentSmfPackageIndexV1,
     package_module_index_encode_v1, package_module_index_decode_v1,
     package_module_index_entry_action_digest_v1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1,
     package_module_index_invalidate_changes_v1, PackageModuleChangeV1
 }
 use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+extern fn rt_getpid() -> i64
 
 fn package_index_entry(
     module_identity: text, direct_imports: [text], reverse_dependents: [text],
@@ -59,6 +64,26 @@ fn admitted_package_index() -> PersistentSmfPackageIndexV1:
     package_index_generation(entries)
 
 describe "persistent package/module index":
+    it "does not let a stale snapshot binding replace a graph":
+        val cache_root = "build/test-artifacts/package-index-cas-{rt_getpid()}"
+        dir_remove(cache_root, true)
+        val binding = package_index_generation([])
+        expect(package_module_index_publish_if_current_v1(
+            cache_root, binding, "")).to_equal(true)
+        val bound = package_module_index_read_current_v1(cache_root)
+        expect(bound.valid).to_equal(true)
+        val graph = admitted_package_index()
+        expect(package_module_index_publish_if_current_v1(
+            cache_root, graph, bound.digest)).to_equal(true)
+        val graphed = package_module_index_read_current_v1(cache_root)
+        expect(graphed.valid).to_equal(true)
+        expect(graphed.generation!.entries.len()).to_equal(4)
+        expect(package_module_index_publish_if_current_v1(
+            cache_root, binding, bound.digest)).to_equal(false)
+        expect(package_module_index_read_current_v1(cache_root).digest).to_equal(
+            graphed.digest)
+        dir_remove(cache_root, true)
+
     it "round-trips one canonical SCV-bound generation":
         val generation = admitted_package_index()
         val encoded = package_module_index_encode_v1(generation)

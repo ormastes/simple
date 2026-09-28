@@ -9,6 +9,7 @@ use std.common.crypto.sha256.{sha256_text}
 # Byte-wise order: native text relational operators compare tagged addresses.
 use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
 use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 
 extern fn rt_file_exists(path: text) -> bool
@@ -438,16 +439,19 @@ fn package_module_index_digest_v1(generation: PackageModuleIndexGenerationV1) ->
 fn package_module_index_storage_dir_v1(cache_root: text) -> text:
     cache_root + "/package-module-index-v1"
 
-fn package_module_index_publish_v1(
-    cache_root: text, generation: PackageModuleIndexGenerationV1
+fn _package_module_index_publish_locked_v1(
+    dir: text, content: text, digest: text,
+    compare_current: bool, expected_current_digest: text
 ) -> bool:
-    val content = package_module_index_encode_v1(generation)
-    val digest = package_module_index_digest_v1(generation)
-    if content == "" or digest == "":
-        return false
-    val dir = package_module_index_storage_dir_v1(cache_root)
-    if not rt_dir_create_all(dir):
-        return false
+    val pointer = "{dir}/CURRENT"
+    if compare_current:
+        val current = package_module_index_read_file_v1(pointer, 64)
+        if current == nil:
+            # Missing is different from an unreadable or malformed pointer.
+            if expected_current_digest != "" or rt_file_exists(pointer):
+                return false
+        elif current! != expected_current_digest:
+            return false
     val immutable_path = "{dir}/{digest}.index"
     if rt_file_exists(immutable_path):
         val existing = package_module_index_read_file_v1(
@@ -460,7 +464,6 @@ fn package_module_index_publish_v1(
                 immutable_path, PACKAGE_MODULE_INDEX_MAX_BYTES_V1) ?? ""
             if raced_text != content:
                 return false
-    val pointer = "{dir}/CURRENT"
     val pointer_tmp = "{pointer}.tmp.{digest}"
     if not file_create_excl(pointer_tmp, digest):
         val staged = package_module_index_read_file_v1(pointer_tmp, 64) ?? ""
@@ -471,6 +474,44 @@ fn package_module_index_publish_v1(
         val published = package_module_index_read_file_v1(pointer, 64) ?? ""
         return published == digest
     true
+
+fn _package_module_index_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    compare_current: bool, expected_current_digest: text
+) -> bool:
+    if compare_current and expected_current_digest != "" and
+            not package_module_index_digest_valid_v1(expected_current_digest):
+        return false
+    val content = package_module_index_encode_v1(generation)
+    val digest = package_module_index_digest_v1(generation)
+    if content == "" or digest == "":
+        return false
+    val dir = package_module_index_storage_dir_v1(cache_root)
+    if not rt_dir_create_all(dir):
+        return false
+    # The graph writer and binding-only fallback share this lock. Compare and
+    # replace the pointer while holding it, so a late fallback cannot erase a
+    # graph published after its earlier read.
+    val lock = file_lock("{dir}/CURRENT.lock", 30)
+    if lock < 0:
+        return false
+    val published = _package_module_index_publish_locked_v1(
+        dir, content, digest, compare_current, expected_current_digest)
+    if not file_unlock(lock):
+        return false
+    published
+
+fn package_module_index_publish_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1
+) -> bool:
+    _package_module_index_publish_v1(cache_root, generation, false, "")
+
+fn package_module_index_publish_if_current_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    expected_current_digest: text
+) -> bool:
+    _package_module_index_publish_v1(
+        cache_root, generation, true, expected_current_digest)
 
 fn package_module_index_read_current_v1(cache_root: text) -> PackageModuleIndexReadV1:
     val dir = package_module_index_storage_dir_v1(cache_root)
@@ -650,7 +691,8 @@ export package_module_index_entry_encode_v1, package_module_index_entry_decode_v
 export package_module_index_validate_v1, package_module_index_encode_v1
 export package_module_index_decode_v1, package_module_index_digest_v1
 export package_module_index_entry_action_digest_v1
-export package_module_index_publish_v1, package_module_index_read_current_v1
+export package_module_index_publish_v1, package_module_index_publish_if_current_v1
+export package_module_index_read_current_v1
 export package_module_index_gc_v1
 export package_module_index_find_v1, package_module_index_invalidate_v1
 export package_module_index_invalidate_changes_v1
