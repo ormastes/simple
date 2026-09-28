@@ -1,0 +1,110 @@
+use std.spec.*
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMap
+
+describe "OrderedMap generic AVL storage":
+    it "orders integer keys whose raw words resemble float tags":
+        var map: OrderedMap<i64, text> = OrderedMap.new()
+        expect(map.put(18, "eighteen")).to_be(true)
+        expect(map.put(3, "three")).to_be(true)
+        expect(map.put(10, "ten")).to_be(true)
+        expect(map.keys()).to_equal([3, 10, 18])
+        expect(map.get(10) ?? "").to_equal("ten")
+        expect(map.remove(10) ?? "").to_equal("ten")
+        expect(map.keys()).to_equal([3, 18])
+
+    it "keeps integer keys ordered and values attached through rotations":
+        var map: OrderedMap<i64, text> = OrderedMap.new()
+        for index in 0..1024:
+            expect(map.put(index as i64, "value-{index}")).to_be(true)
+        expect(map.put(511, "replacement")).to_be(false)
+        expect(map.len()).to_equal(1024)
+        expect(map.tree_height()).to_be_less_than(20)
+        expect(map.get(511) ?? "").to_equal("replacement")
+        expect(map.get(1024)).to_be_nil()
+        val keys = map.keys()
+        expect(keys[0]).to_equal(0)
+        expect(keys[1023]).to_equal(1023)
+
+    it "inserts and replaces through one measured AVL search path":
+        var map: OrderedMap<i64, text> = OrderedMap.new()
+        for key in 0..128:
+            expect(map.put(key as i64, "value")).to_be(true)
+            expect(map.update_comparisons()).to_be_less_than(2 * map.tree_height() + 3)
+        expect(map.put(64, "replacement")).to_be(false)
+        expect(map.update_comparisons()).to_be_less_than(2 * map.tree_height() + 3)
+        expect(map.len()).to_equal(128)
+        expect(map.get(64) ?? "").to_equal("replacement")
+
+    it "bounds measured lookup comparisons at geometric sizes":
+        val sizes = [16, 32, 64, 128]
+        val exclusive_height_limits = [8, 10, 12, 14]
+        for sample in 0..sizes.len():
+            val size = sizes[sample]
+            var map: OrderedMap<i64, text> = OrderedMap.new()
+            for key in 0..size:
+                map.put(key as i64, "value")
+            val miss_comparisons = map.lookup_comparisons(size as i64)
+            val hit_comparisons = map.lookup_comparisons((size - 1) as i64)
+            expect(miss_comparisons).to_be_less_than(2 * exclusive_height_limits[sample] + 2)
+            expect(hit_comparisons).to_be_less_than(2 * exclusive_height_limits[sample] + 2)
+            expect(miss_comparisons).to_be_less_than(2 * map.tree_height() + 3)
+            expect(hit_comparisons).to_be_less_than(2 * map.tree_height() + 3)
+            expect(map.get(size as i64)).to_be_nil()
+            expect(map.contains_key((size - 1) as i64)).to_be(true)
+
+    it "preserves generic payloads through two-child removal and slot reuse":
+        var map: OrderedMap<text, i64> = OrderedMap.new()
+        for key in ["m", "a", "z", "c", "b", "y", "x", "q", "r"]:
+            map.put(key, key.len() as i64)
+        expect(map.remove("m") ?? -1).to_equal(1)
+        expect(map.get("q") ?? -1).to_equal(1)
+        expect(map.keys()).to_equal(["a", "b", "c", "q", "r", "x", "y", "z"])
+        val slots = map.allocated_slots()
+        for key in ["a", "b", "c", "q", "r", "x", "y", "z"]:
+            expect(map.remove(key) ?? -1).to_equal(1)
+        expect(map.len()).to_equal(0)
+        for key in ["aa", "bb", "cc", "qq", "rr", "xx", "yy", "zz"]:
+            map.put(key, 2)
+        expect(map.allocated_slots()).to_equal(slots)
+        expect(map.len()).to_equal(8)
+
+    it "removes a key whose optional payload is nil":
+        var map: OrderedMap<i64, text?> = OrderedMap.new()
+        expect(map.put(7, nil)).to_be(true)
+        expect(map.contains_key(7)).to_be(true)
+        map.remove(7)
+        expect(map.contains_key(7)).to_be(false)
+        expect(map.len()).to_equal(0)
+
+    it "orders negative and zero integer keys before positive keys":
+        var map: OrderedMap<i64, i64> = OrderedMap.new()
+        expect(map.put(-9, 90)).to_be(true)
+        expect(map.put(0, 0)).to_be(true)
+        expect(map.put(7, 70)).to_be(true)
+        expect(map.len()).to_equal(3)
+        val keys = map.keys()
+        expect(keys.len()).to_equal(3)
+        expect(keys[0]).to_equal(-9)
+        expect(keys[1]).to_equal(0)
+        expect(keys[2]).to_equal(7)
+        expect(map.contains_key(-9)).to_be(true)
+        expect(map.get(-9) ?? -1).to_equal(90)
+        expect(map.remove(0) ?? -1).to_equal(0)
+        expect(map.keys()).to_equal([-9, 7])
+
+    it "orders wide integer keys by value across tagged and boxed forms":
+        var map: OrderedMap<i64, text> = OrderedMap.new()
+        val first: i64 = 1152921504606846976
+        val second: i64 = 1152921504606846977
+        expect(map.put(second, "second")).to_be(true)
+        expect(map.put(7, "small")).to_be(true)
+        expect(map.put(first, "first")).to_be(true)
+        expect(map.keys()).to_equal([7, first, second])
+        val found = map.get(first)
+        expect(found ?? "").to_equal("first")
+
+    it "keeps text keys whose byte comparison differs by two":
+        var map: OrderedMap<text, i64> = OrderedMap.new()
+        expect(map.put("c", 3)).to_be(true)
+        expect(map.put("a", 1)).to_be(true)
+        expect(map.keys()).to_equal(["a", "c"])

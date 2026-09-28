@@ -35,6 +35,25 @@ package export SMF may be published until the remaining semantic section owners
 supply their own bytes and receipts.
 The new payload admission check has not run on a current-source test worker.
 
+## 2026-09-28 continuation: reverse-reference section
+
+`cold_hir_reverse_projection_v1.spl` now emits versioned, length-framed bytes
+for the reached module's direct imports and graph-derived reverse dependents.
+`cold_hir_package_drafts_v1.spl` recomputes this projection after building the
+reached graph and rejects a missing section or a section/TLDR digest that does
+not match its actual bytes. The focused unit fixture covers canonical ordering,
+a forged receipt, and a stale projection after an edge edit. This closes one
+caller-asserted metadata gap. The current-source Stage4 worker remains blocked
+by the Stage2 HIR error recorded in
+`doc/08_tracking/bug/target56_stage2_dynlib_lifetime_state_inference_2026-09-28.md`;
+the Rust bootstrap seed ran the focused unit spec with `Results: 6 total, 6
+passed, 0 failed` and the graph/SCC integration spec with `Results: 1 total,
+1 passed, 0 failed`. Logs are retained under
+`build/mini_builds/target56_reverse_projection/`. These are seed-scoped
+diagnostics, not an admitted current-source worker or native performance
+cohort. Initializer,
+provider, generated-source, export, and archive producers remain open.
+
 The isolated archive reader now validates digest bytes and canonicalizes
 dependency digests with the shared heap sort. This removes native text
 comparison and quadratic sorting from that admission step. It does not

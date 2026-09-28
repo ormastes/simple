@@ -1,0 +1,99 @@
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, draw_ir, fail_closed
+"""Stage-1 Web scene admission must not lose unproved paint effects."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir.{
+    draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop,
+    draw_ir_glyph_run_payload}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    upstream_skia_ganesh_vulkan_preflight}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    WEB_OPAQUE_BOX_HTML_SHA256, web_opaque_box_gpu_scene_from_html,
+    web_opaque_box_plain_rect_rejection_reason}
+
+val FIXTURE: text = "test/fixtures/simple_2d_skia/web_opaque_box_v1.html"
+
+describe "pinned Web opaque-box Stage-1 lowering":
+    it "rejects changed HTML before calling layout":
+        step("Hash the exact pinned input and change one authored background")
+        val html = read_file(FIXTURE)
+        expect(sha256_text(html)).to_equal(WEB_OPAQUE_BOX_HTML_SHA256)
+        val changed = html.replace("#2771c7", "#2771c8")
+        expect(changed == html).to_be(false)
+        match web_opaque_box_gpu_scene_from_html(changed):
+            case Err(reason):
+                expect(reason).to_equal("web-opaque-box-html-sha256-mismatch")
+            case Ok(_): fail_test("changed HTML must not be admitted")
+
+    it "rejects even a trailing input byte":
+        step("Check the input identity before any GPU scene can be admitted")
+        val html = read_file(FIXTURE)
+        match web_opaque_box_gpu_scene_from_html(html + " "):
+            case Err(reason):
+                expect(reason).to_equal("web-opaque-box-html-sha256-mismatch")
+            case Ok(_): fail_test("extra input byte must not be admitted")
+
+    it "rejects partial clip, translucent paint and unknown effects":
+        step("Probe the same plain-rect admission used on Web producer commands")
+        val full = draw_ir_rect_bounds(0, 0, 16, 16)
+        val clipped = draw_ir_rect_bounds(1, 0, 15, 16)
+        val partial = draw_ir_rect_clipped("box", 4, 4, 8, 8,
+            0xFF2771C7u32, clipped)
+        expect(web_opaque_box_plain_rect_rejection_reason(partial)).to_start_with(
+            "unhandled-command-clip:")
+        val translucent = draw_ir_rect_clipped("box", 4, 4, 8, 8,
+            0x802771C7u32, full)
+        expect(web_opaque_box_plain_rect_rejection_reason(translucent)).to_start_with(
+            "unhandled-command-alpha:")
+        var unknown = draw_ir_rect_clipped("box", 4, 4, 8, 8,
+            0xFF2771C7u32, full)
+        unknown.computed_style = [draw_ir_style_prop("future-paint-effect", "on")]
+        expect(web_opaque_box_plain_rect_rejection_reason(unknown)).to_start_with(
+            "unhandled-paint-style-key:")
+        var image = draw_ir_rect_clipped("box", 4, 4, 8, 8,
+            0xFF2771C7u32, full)
+        image.computed_style = [draw_ir_style_prop("background-image", "url(box.png)")]
+        expect(web_opaque_box_plain_rect_rejection_reason(image)).to_start_with(
+            "unhandled-paint-style-value:")
+        var malformed_glyphs = draw_ir_rect_clipped("box", 4, 4, 8, 8,
+            0xFF2771C7u32, full)
+        malformed_glyphs.glyph_run = draw_ir_glyph_run_payload(
+            [7u32], [], [], [], false)
+        expect(web_opaque_box_plain_rect_rejection_reason(
+            malformed_glyphs)).to_start_with("unhandled-command-payload:")
+
+    it "admits the exact producer projection with retained source mapping":
+        step("Run the real 16 by 16 Web layout producer")
+        val html = read_file(FIXTURE)
+        match web_opaque_box_gpu_scene_from_html(html):
+            case Err(reason): fail_test("pinned Web box admission failed: {reason}")
+            case Ok(scene):
+                step("Compare every GPU rectangle against its retained source command")
+                expect(scene.html_sha256).to_equal(WEB_OPAQUE_BOX_HTML_SHA256)
+                expect(scene.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(scene.source_draw_ir)))
+                expect(scene.gpu_draw_ir.batches.len()).to_equal(1)
+                expect(draw_ir_to_ui_ir(scene.gpu_draw_ir).accepted).to_equal(true)
+                expect(upstream_skia_ganesh_vulkan_preflight(
+                    scene.gpu_draw_ir).accepted).to_equal(true)
+                expect(scene.source_command_indexes.len()).to_equal(
+                    scene.gpu_command_count)
+                var i = 0
+                while i < scene.gpu_draw_ir.batches[0].commands.len():
+                    val source_index = scene.source_command_indexes[i]
+                    val source = scene.source_draw_ir.batches[0].commands[source_index]
+                    val gpu = scene.gpu_draw_ir.batches[0].commands[i]
+                    expect(gpu.x).to_equal(source.x)
+                    expect(gpu.y).to_equal(source.y)
+                    expect(gpu.width).to_equal(source.width)
+                    expect(gpu.height).to_equal(source.height)
+                    expect(gpu.color).to_equal(source.color)
+                    expect(gpu.parent_id).to_equal("")
+                    i = i + 1

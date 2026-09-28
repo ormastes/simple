@@ -2334,7 +2334,7 @@ if [ -e "${rust_authority_current_marker}.transaction" ]; then
 fi
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
-# Detect the pinned LLVM 23.1.1 provider for LLVM backends.
+# Detect an admitted LLVM 23.1 provider for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
@@ -2342,7 +2342,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM_SYS_231_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     if [ "$LLVM_VERSION" != 23 ]; then
-      echo "error: LLVM backend requires LLVM 23.1.1, found LLVM ${LLVM_VERSION}" >&2
+      echo "error: LLVM backend requires admitted LLVM 23.1, found LLVM ${LLVM_VERSION}" >&2
       exit 1
     fi
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
@@ -2368,7 +2368,7 @@ if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
       export SDKROOT="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || true)}"
     fi
   else
-    echo "error: LLVM 23.1.1 not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
+    echo "error: admitted LLVM 23.1.1 (native FreeBSD: 23.1.2) not found (shared platform detection: scripts/setup/platform-detect.shs, versions: ${LLVM_VERSIONS:-23})" >&2
     echo "error: install LLVM or select --backend=cranelift explicitly" >&2
     exit 1
   fi
@@ -2581,8 +2581,8 @@ if [ "${full_bootstrap}" -eq 1 ]; then
       exit 1
     }
     if [ -n "${rust_llvm_version}" ] &&
-       [ "${rust_llvm_version}" != 23.1.1 ]; then
-      echo "error: Rust LLVM authority must be 23.1.1, got ${rust_llvm_version}" >&2
+       ! _llvm23_version_admitted "${rust_llvm_version}"; then
+      echo "error: Rust LLVM authority has unadmitted LLVM 23.1 version ${rust_llvm_version}" >&2
       exit 1
     fi
     if [ "${os}" = windows ] &&

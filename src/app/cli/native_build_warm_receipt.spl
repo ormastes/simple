@@ -2,11 +2,13 @@
 #
 # The closure walker publishes a pid-private candidate during the real worker.
 # After a successful build the parent binds the final artifact to the compiler,
-# normalized argv/link environment, exact source closure, runtime/link inputs,
+# normalized argv/link environment, collection profile bytes when supplied,
+# exact source closure, runtime/link inputs,
 # and the object/capsule receipts selected from build_cache.sdn.  A later exact
 # hit restores the cached artifact atomically and does not start the worker.
 
 use app.io.env_ops.{env_get, env_set, cwd}
+use app.cli.native_build_collection_profile_digest.{native_build_warm_collection_profile_digest}
 use compiler.common.structural_contracts.frontend_offload_switch.{frontend_offload_rows}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1
@@ -29,6 +31,7 @@ pub class NativeBuildWarmReceiptState:
     candidate_path: text
     artifact_path: text
     artifact_digest: text
+    collection_profile_digest: text
     output_path: text
     args: [text]
     closure_count: i64
@@ -37,7 +40,7 @@ fn _warm_empty_state() -> NativeBuildWarmReceiptState:
     NativeBuildWarmReceiptState(
         eligible: false, hit: false, key: "", receipt_path: "",
         candidate_path: "", artifact_path: "", artifact_digest: "",
-        output_path: "", args: [],
+        output_path: "", args: [], collection_profile_digest: "",
         closure_count: 0)
 
 fn _warm_valid_digest(value: text) -> bool:
@@ -347,15 +350,18 @@ fn _warm_scv_prepare(args: [text]) -> bool:
 
 fn _warm_frontend_identity(
     args: [text], simple_bin: text, environment_variant_policy_identity: text
-) -> text:
+) -> (text, text):
     if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
-        return ""
+        return ("", "")
     val binary_digest = file_hash_sha256(simple_bin)
     if not _warm_valid_digest(binary_digest):
-        return ""
+        return ("", "")
     val scv_binding = _warm_scv_binding()
     if scv_binding == "":
-        return ""
+        return ("", "")
+    val profile_identity = native_build_warm_collection_profile_digest(args)
+    if not profile_identity[0]:
+        return ("", "")
     var rows = [
         "binary=" + binary_digest,
         "scv=" + scv_binding,
@@ -371,11 +377,12 @@ fn _warm_frontend_identity(
         "sysroot=" + (env_get("SIMPLE_SYSROOT") ?? ""),
         "path=" + (env_get("PATH") ?? ""),
         "environment_variant_policy=" + environment_variant_policy_identity,
+        "collection_profile_digest=" + profile_identity[1],
         "args=" + _warm_canonical_args(args)
     ]
     for row in _warm_frontend_offload_rows():
         rows.push(row)
-    _warm_digest_text(rows.join("\n"))
+    (_warm_digest_text(rows.join("\n")), profile_identity[1])
 
 # The same env keys and the same `FRONTEND_OFFLOAD_GPU_PARSE_AVAILABLE` the
 # driver applies, so the receipt names the decision the build actually made.
@@ -671,8 +678,9 @@ pub fn native_build_warm_receipt_prepare(
     if ((env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0" or
             (env_get("SIMPLE_HIR_CACHE") ?? "") == "0"):
         return _warm_empty_state()
-    val key = _warm_frontend_identity(
+    val identity = _warm_frontend_identity(
         args, simple_bin, environment_variant_policy_identity)
+    val key = identity[0]
     if key == "":
         return _warm_empty_state()
     val output_path = _warm_output_path(args)
@@ -692,10 +700,14 @@ pub fn native_build_warm_receipt_prepare(
         receipt_path: receipt_path, candidate_path: candidate_path,
         artifact_path: artifact_path, output_path: output_path, args: args,
         artifact_digest: artifact_digest,
+        collection_profile_digest: identity[1],
         closure_count: closure_count)
 
 pub fn native_build_warm_artifact_restore(state: NativeBuildWarmReceiptState) -> bool:
     if not state.eligible or not state.hit:
+        return false
+    val profile_identity = native_build_warm_collection_profile_digest(state.args)
+    if not profile_identity[0] or profile_identity[1] != state.collection_profile_digest:
         return false
     if _warm_copy_verified_atomic(
             state.artifact_path, state.output_path, state.artifact_digest):
@@ -742,8 +754,10 @@ pub fn native_build_warm_receipt_finish(
 ) -> bool:
     if not state.eligible:
         return false
+    val profile_identity = native_build_warm_collection_profile_digest(state.args)
+    val profile_unchanged = profile_identity[0] and profile_identity[1] == state.collection_profile_digest
     var promoted = false
-    if worker_ok and output_ok and file_exists(state.candidate_path):
+    if worker_ok and output_ok and profile_unchanged and file_exists(state.candidate_path):
         val candidate = _warm_checked_payload(
             file_read(state.candidate_path), NATIVE_BUILD_WARM_CANDIDATE_VERSION)
         if candidate != "":

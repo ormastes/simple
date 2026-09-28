@@ -230,6 +230,31 @@ impl Scheduler:
     me exit_task(code: i32):
         self.exit_task_by_id(self.current, code)
 
+    pub me quarantine_failed_user_handoff_v2(id: TaskId) -> bool:
+        """Retain failed launch resources without claiming a guest exit.
+
+        This is a serialized owner operation, not reclamation. The returned
+        Scheduler must remain owned for later recovery; no wait evidence is
+        issued and no address space is destroyed while entry is uncertain.
+        """
+        val slot = self._find_slot(id)
+        if slot < 0: return false
+        val maybe_task = self.tasks[slot]
+        if maybe_task == nil: return false
+        var task = maybe_task.unwrap()
+        if not task.is_user: return false
+        val eligible = match task.state:
+            case TaskState.Ready: true
+            case TaskState.Running: true
+            case TaskState.Blocked(reason): true
+            case TaskState.PreparingExit: true
+            case _: false
+        if not eligible: return false
+        task.state = TaskState.PreparingExit
+        self.tasks[slot] = task
+        self._remove_ready(id)
+        true
+
     me exit_task_by_id(id: TaskId, code: i32):
         scheduler_execution_observe_exit_v1(id.id, code)
         # The scheduler is the canonical TCB/ready-queue owner. Publish the

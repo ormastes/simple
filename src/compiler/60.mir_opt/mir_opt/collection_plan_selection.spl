@@ -1,0 +1,189 @@
+# Typed CollectionPlan physical selection. This module is advisory until the
+# HIR extraction and MIR lowering paths provide and consume these facts.
+
+enum CollectionPlanAlgorithm:
+    Original
+    Linear
+    Hash
+    Ordered
+
+struct CollectionPlanFacts:
+    """Facts proved by typed analysis before a physical substitution."""
+    collection_kind: text
+    equality_pure: bool
+    duplicate_semantics_preserved: bool
+    order_insensitive: bool
+    mutation_epoch_stable: bool
+    key_hashable: bool
+    key_orderable: bool
+    target_has_hash: bool
+    target_has_ordered: bool
+    ordered_update_bound_proven: bool
+    p0_correctness_ready: bool
+    policy: text
+    attribute: text
+    static_size: i64
+    static_lookups: i64
+    hard_size_bound: i64
+    profile_admitted: bool
+    profile_size_p95: i64
+    profile_lookups_p95: i64
+    linear_size_limit: i64
+    lookup_promotion_count: i64
+    profile_hash_probes_p95: i64 = -1
+    profile_hash_collisions_p95: i64 = -1
+
+struct CollectionPlanDecision:
+    selected: CollectionPlanAlgorithm
+    evidence: text
+    reason: text
+    linear_rejection: text
+    hash_rejection: text
+    ordered_rejection: text
+
+fn collection_plan_unproven_facts() -> CollectionPlanFacts:
+    """Fail-closed starting point; typed analysis must fill every proof field."""
+    CollectionPlanFacts(
+        collection_kind: "",
+        equality_pure: false,
+        duplicate_semantics_preserved: false,
+        order_insensitive: false,
+        mutation_epoch_stable: false,
+        key_hashable: false,
+        key_orderable: false,
+        target_has_hash: false,
+        target_has_ordered: false,
+        ordered_update_bound_proven: false,
+        p0_correctness_ready: false,
+        policy: "moderate",
+        attribute: "auto",
+        static_size: -1,
+        static_lookups: -1,
+        hard_size_bound: -1,
+        profile_admitted: false,
+        profile_size_p95: -1,
+        profile_lookups_p95: -1,
+        linear_size_limit: 8,
+        lookup_promotion_count: 32,
+        profile_hash_probes_p95: -1,
+        profile_hash_collisions_p95: -1
+    )
+
+fn _collection_plan_original(
+    reason: text, linear_rejection: text,
+    hash_rejection: text, ordered_rejection: text
+) -> CollectionPlanDecision:
+    CollectionPlanDecision(
+        selected: CollectionPlanAlgorithm.Original,
+        evidence: "none",
+        reason: reason,
+        linear_rejection: linear_rejection,
+        hash_rejection: hash_rejection,
+        ordered_rejection: ordered_rejection
+    )
+
+fn _collection_plan_selected(
+    algorithm: CollectionPlanAlgorithm, evidence: text, reason: text,
+    linear_rejection: text, hash_rejection: text, ordered_rejection: text
+) -> CollectionPlanDecision:
+    CollectionPlanDecision(
+        selected: algorithm, evidence: evidence, reason: reason,
+        linear_rejection: linear_rejection,
+        hash_rejection: hash_rejection, ordered_rejection: ordered_rejection
+    )
+
+fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
+    """Choose only a candidate whose semantic, target and policy guards hold."""
+    if facts.collection_kind != "set" and facts.collection_kind != "map":
+        return _collection_plan_original("unsupported-collection-kind", "not-evaluated", "not-evaluated", "not-evaluated")
+    if facts.attribute != "auto" and facts.attribute != "linear" and
+            facts.attribute != "hash" and facts.attribute != "ordered":
+        return _collection_plan_original("invalid-collection-attribute", "not-evaluated", "not-evaluated", "not-evaluated")
+    if facts.policy != "moderate" and facts.policy != "strict" and
+            facts.policy != "robust" and facts.policy != "critical":
+        return _collection_plan_original("invalid-complexity-policy", "not-evaluated", "not-evaluated", "not-evaluated")
+    if facts.linear_size_limit < 0 or facts.lookup_promotion_count < 1 or
+            facts.static_size < -1 or facts.static_lookups < -1 or facts.hard_size_bound < -1:
+        return _collection_plan_original("invalid-static-cost-facts", "not-evaluated", "not-evaluated", "not-evaluated")
+    if facts.profile_admitted and (facts.profile_size_p95 < 0 or facts.profile_lookups_p95 < 0):
+        return _collection_plan_original("invalid-profile-facts", "not-evaluated", "not-evaluated", "not-evaluated")
+    if (facts.profile_hash_probes_p95 < 0) != (facts.profile_hash_collisions_p95 < 0) or
+            facts.profile_hash_probes_p95 < -1 or facts.profile_hash_collisions_p95 < -1 or
+            (facts.profile_hash_probes_p95 >= 0 and
+                facts.profile_hash_collisions_p95 > facts.profile_hash_probes_p95) or
+            (not facts.profile_admitted and facts.profile_hash_probes_p95 >= 0):
+        return _collection_plan_original("invalid-profile-hash-facts", "not-evaluated", "not-evaluated", "not-evaluated")
+    if not facts.p0_correctness_ready:
+        return _collection_plan_original("p0-correctness-gate", "p0-correctness-gate", "p0-correctness-gate", "p0-correctness-gate")
+    if not facts.equality_pure or not facts.duplicate_semantics_preserved or
+            not facts.order_insensitive or not facts.mutation_epoch_stable:
+        return _collection_plan_original("semantic-proof-missing", "semantic-proof-missing", "semantic-proof-missing", "semantic-proof-missing")
+
+    val hash_rejection = if not facts.key_hashable:
+        "key-not-hashable"
+    elif not facts.target_has_hash:
+        "target-hash-unavailable"
+    elif facts.policy == "robust" or facts.policy == "critical":
+        "unbounded-hash-worst-case"
+    else:
+        ""
+    val ordered_rejection = if not facts.key_orderable:
+        "key-not-orderable"
+    elif not facts.target_has_ordered:
+        "target-ordered-unavailable"
+    elif not facts.ordered_update_bound_proven:
+        "ordered-update-bound-unproven"
+    else:
+        ""
+
+    if facts.attribute == "linear":
+        if (facts.policy == "robust" or facts.policy == "critical") and
+                (facts.hard_size_bound < 0 or facts.hard_size_bound > facts.linear_size_limit):
+            return _collection_plan_original("explicit-linear-bound-unproven", "hard-size-bound-unproven", hash_rejection, ordered_rejection)
+        return _collection_plan_selected(CollectionPlanAlgorithm.Linear, "attribute", "explicit-linear", "", hash_rejection, ordered_rejection)
+    if facts.attribute == "hash":
+        if hash_rejection != "":
+            return _collection_plan_original("explicit-hash-rejected", "attribute-forces-hash", hash_rejection, ordered_rejection)
+        return _collection_plan_selected(CollectionPlanAlgorithm.Hash, "attribute", "explicit-hash", "attribute-forces-hash", "", ordered_rejection)
+    if facts.attribute == "ordered":
+        if ordered_rejection != "":
+            return _collection_plan_original("explicit-ordered-rejected", "attribute-forces-ordered", hash_rejection, ordered_rejection)
+        return _collection_plan_selected(CollectionPlanAlgorithm.Ordered, "attribute", "explicit-ordered", "attribute-forces-ordered", hash_rejection, "")
+
+    val size_hint = if facts.profile_admitted: facts.profile_size_p95 else: facts.static_size
+    val lookup_hint = if facts.profile_admitted: facts.profile_lookups_p95 else: facts.static_lookups
+    val evidence = if facts.profile_admitted: "admitted-profile" else: "static"
+    val known_small = size_hint >= 0 and size_hint <= facts.linear_size_limit
+    val known_quiet = lookup_hint >= 0 and lookup_hint < facts.lookup_promotion_count
+    val bounded_small = facts.hard_size_bound >= 0 and facts.hard_size_bound <= facts.linear_size_limit
+    val needs_hard_bound = facts.policy == "robust" or facts.policy == "critical"
+    if known_small and known_quiet and (not needs_hard_bound or bounded_small):
+        return _collection_plan_selected(CollectionPlanAlgorithm.Linear, evidence, "small-quiet-collection", "", hash_rejection, ordered_rejection)
+    val linear_rejection = if size_hint > facts.linear_size_limit:
+        "size-exceeds-linear-limit"
+    elif needs_hard_bound and not bounded_small:
+        "hard-size-bound-unproven"
+    elif lookup_hint >= facts.lookup_promotion_count:
+        "lookup-pressure"
+    else:
+        "insufficient-cost-evidence"
+    val known_pressure = (size_hint > facts.linear_size_limit or
+        lookup_hint >= facts.lookup_promotion_count)
+    if not known_pressure and not needs_hard_bound:
+        return _collection_plan_original("insufficient-cost-evidence", linear_rejection, hash_rejection, ordered_rejection)
+    if facts.policy == "robust" or facts.policy == "critical":
+        if ordered_rejection == "":
+            return _collection_plan_selected(CollectionPlanAlgorithm.Ordered, evidence, "bounded-lookup-policy", linear_rejection, hash_rejection, "")
+        return _collection_plan_original("bounded-algorithm-unavailable", linear_rejection, hash_rejection, ordered_rejection)
+    if facts.profile_admitted and facts.profile_hash_probes_p95 >= facts.lookup_promotion_count and
+            facts.profile_hash_collisions_p95 > facts.profile_hash_probes_p95 / 4 and
+            hash_rejection == "" and ordered_rejection == "":
+        return _collection_plan_selected(CollectionPlanAlgorithm.Ordered, evidence, "hash-collision-pressure", linear_rejection, "profile-hash-collisions", "")
+    if hash_rejection == "":
+        return _collection_plan_selected(CollectionPlanAlgorithm.Hash, evidence, "lookup-or-size-pressure", linear_rejection, "", ordered_rejection)
+    if ordered_rejection == "":
+        return _collection_plan_selected(CollectionPlanAlgorithm.Ordered, evidence, "hash-unavailable", linear_rejection, hash_rejection, "")
+    _collection_plan_original("no-proven-candidate", linear_rejection, hash_rejection, ordered_rejection)
+
+export CollectionPlanAlgorithm, CollectionPlanFacts, CollectionPlanDecision
+export collection_plan_select, collection_plan_unproven_facts

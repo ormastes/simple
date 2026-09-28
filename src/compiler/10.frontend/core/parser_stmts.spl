@@ -27,6 +27,7 @@ use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_UNDERSCORE}
 use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_KW_LAZY}
+use compiler.core.tokens.{TOK_AT}
 use compiler.core.tokens.{TOK_KW_DEFER, TOK_KW_ERRDEFER}
 use compiler.core.tokens.{TOK_LABEL}
 use compiler.core.tokens.{TOK_KW_STATIC_FOR, TOK_KW_COMPTIME}
@@ -35,7 +36,7 @@ use compiler.core.tokens.{TOK_BACKSLASH}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT}
 use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
-use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit}
+use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
@@ -47,12 +48,18 @@ use compiler.core.types.{named_type_name, TYPE_NAMED_BASE}
 use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_source_len}
+use compiler.frontend.core.lexer.{lex_source_slice}
+use std.io_runtime.{hash_text}
+use compiler.frontend.core.collection_feedback.{parser_collection_attributed_expr, parser_collection_local_site_id, parser_collection_module_key}
+use compiler.frontend.core.collection_feedback.{parser_collection_site_owner_push, parser_collection_site_owner_restore}
 use compiler.frontend.core._ParserStmt.match_type_pattern.{parse_match_type_pattern}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
+use compiler.core.ast.{stmt_get_expr, stmt_get_name, module_get_path}
+use compiler.core.ast_stmt.{stmt_i64_set}
 use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_if_stmt_with_single_else, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
 use compiler.core.ast.{stmt_match_stmt, stmt_break_stmt, stmt_continue_stmt, stmt_break_labeled, stmt_continue_labeled, stmt_labeled_loop, STMT_LABELED_LOOP}
 use compiler.core.ast.{STMT_STATIC_FOR, stmt_static_for_stmt}
@@ -344,6 +351,7 @@ fn parse_block_flat_body_can_start(kind: i64) -> bool:
     if kind == 53: return true        # async
     if kind == 54: return true        # await
     if kind == 169: return true       # _ (discard assignment)
+    if kind == TOK_AT: return true    # attributed local container declaration
     if kind == 195: return true       # do
     if kind == 197: return true       # spawn
     if kind == 203: return true       # mixin
@@ -649,12 +657,111 @@ fn parse_unsafe_block_expr_if_present() -> i64:
     parser_tok_restore(unsafe_tok_nums, unsafe_tok_text)
     -1
 
+fn collection_attribute_error_stmt() -> i64:
+    # An invalid decorator must still consume tokens so parse_block can make
+    # progress. The parser error already makes this module inadmissible.
+    while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+        parser_advance()
+    if par_kind_get() == TOK_NEWLINE:
+        parser_advance()
+    stmt_expr_stmt(expr_unit(0), 0)
+
+fn parser_collection_declared_family_hint() -> text:
+    # Capture a written type before parsing the declaration. The flat type
+    # tag can erase an imported generic family such as AdaptiveMap<K, V>.
+    val snap = lex_snapshot_save()
+    val (tok_nums, tok_text) = parser_tok_save()
+    var family = ""
+    parser_advance()
+    if par_kind_get() == TOK_IDENT:
+        parser_advance()
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            if par_kind_get() == TOK_IDENT:
+                family = par_text_get()
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(tok_nums, tok_text)
+    family
+
+fn try_parse_collection_algorithm_stmt() -> i64:
+    if par_kind_get() != TOK_AT:
+        return -1
+    val attr_snap = lex_snapshot_save()
+    val (attr_tok_nums, attr_tok_text) = parser_tok_save()
+    parser_advance()
+    if par_kind_get() != TOK_IDENT or par_text_get() != "collection_algorithm":
+        lex_snapshot_rollback(attr_snap)
+        parser_tok_restore(attr_tok_nums, attr_tok_text)
+        return -1
+    lex_snapshot_commit(attr_snap)
+    parser_advance()
+    if not parser_expect(TOK_LPAREN):
+        return collection_attribute_error_stmt()
+    if par_kind_get() != TOK_STRING_LIT:
+        parser_error("@collection_algorithm requires one string algorithm name")
+        return collection_attribute_error_stmt()
+    val algorithm = par_text_get()
+    parser_advance()
+    if not parser_expect(TOK_RPAREN):
+        return collection_attribute_error_stmt()
+    if algorithm != "auto" and algorithm != "linear" and algorithm != "hash" and algorithm != "ordered":
+        parser_error("unknown collection algorithm: " + algorithm)
+        return collection_attribute_error_stmt()
+    parser_skip_newlines()
+    val decl_kind = par_kind_get()
+    if decl_kind != TOK_KW_VAL and decl_kind != TOK_KW_VAR:
+        parser_error("@collection_algorithm requires a val or var declaration")
+        return collection_attribute_error_stmt()
+    val declaration_start = lex_token_start_get()
+    if decl_kind == TOK_KW_VAR:
+        # Plain `var x: T` synthesizes a default-value expression, so checking
+        # the returned statement alone would mistake it for an initializer.
+        val init_snap = lex_snapshot_save()
+        val (init_tok_nums, init_tok_text) = parser_tok_save()
+        var has_assign = false
+        while par_kind_get() != TOK_NEWLINE and par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+            if par_kind_get() == TOK_ASSIGN:
+                has_assign = true
+                break
+            parser_advance()
+        lex_snapshot_rollback(init_snap)
+        parser_tok_restore(init_tok_nums, init_tok_text)
+        if not has_assign:
+            parser_error("@collection_algorithm requires an initialized container")
+            return collection_attribute_error_stmt()
+    val declared_family = parser_collection_declared_family_hint()
+    val decl = if decl_kind == TOK_KW_VAL: parse_val_decl_stmt() else: parse_var_decl_stmt()
+    val initializer = stmt_get_expr(decl)
+    if initializer < 0:
+        parser_error("@collection_algorithm requires an initialized container")
+        return decl
+    # Hash the declaration, excluding the algorithm attribute. Switching its
+    # physical algorithm must retain this site's previously measured workload.
+    # A parse-local ordinal still distinguishes identical declarations.
+    val declaration_text = lex_source_slice(declaration_start, lex_token_start_get())
+    val source_hash = hash_text(declaration_text)
+    val module_key = parser_collection_module_key(module_get_path())
+    val site_id = parser_collection_local_site_id(module_key, stmt_get_name(decl), source_hash)
+    # The typed static method checks the container family; an explicit site or
+    # target from the initializer retains precedence over this generated site.
+    val call = parser_collection_attributed_expr(initializer, algorithm, site_id, declared_family)
+    if call < 0:
+        parser_error("@collection_algorithm requires an adaptive set or map initializer with a known family")
+        return decl
+    stmt_expr[decl] = call
+    stmt_i64_set(decl, "EXPR", call)
+    decl
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
     val contract_stmt = try_parse_contract_stmt()
     if contract_stmt >= 0:
         return contract_stmt
     kind = par_kind_get()
+    if kind == TOK_AT:
+        val attributed = try_parse_collection_algorithm_stmt()
+        if attributed >= 0:
+            return attributed
     if kind == 21:
         return parse_val_decl_stmt()
 
@@ -1025,7 +1132,9 @@ fn parse_statement() -> i64:
         if par_kind_get() == TOK_IDENT:
             val me_stmt_name = par_text_get()
             parser_advance()
+            val previous_collection_owner = parser_collection_site_owner_push(me_stmt_name)
             val me_stmt_lambda = parse_fn_lambda_after_kw()
+            parser_collection_site_owner_restore(previous_collection_owner)
             lex_snapshot_commit(me_snap)
             return stmt_val_decl(me_stmt_name, 0, me_stmt_lambda, 0)
         lex_snapshot_rollback(me_snap)
@@ -1050,7 +1159,9 @@ fn parse_statement() -> i64:
         if kind == TOK_IDENT:
             val nested_fn_name = par_text_get()
             parser_advance()  # consume name
+            val previous_collection_owner = parser_collection_site_owner_push(nested_fn_name)
             val nested_lambda = parse_fn_lambda_after_kw()
+            parser_collection_site_owner_restore(previous_collection_owner)
             return stmt_val_decl(nested_fn_name, 0, nested_lambda, 0)
         # fn(...): ... with no name — anonymous lambda expression statement.
         val anon_lambda = parse_fn_lambda_after_kw()

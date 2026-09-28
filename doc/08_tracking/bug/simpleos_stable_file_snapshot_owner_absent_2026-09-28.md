@@ -1,6 +1,28 @@
 # SimpleOS stable file snapshot owner is absent
 
-**Status:** open. **Scope:** signed catalog boot ingestion, authenticated argv
+**Status:** owner restored 2026-09-28; acceptance evidence still open.
+
+**Update 2026-09-28.** The owner was not a missing design. The stale snapshot
+commit `4edef8fab8e` deleted it from `mount_table.spl`. It has been restored
+from `4edef8fab8e^`, together with its dispatch, support, DBFS and NVFS-POSIX
+backing (`StableFileSnapshotLeaseV1/InfoV1/SealV1`, `open_stable_snapshot`,
+`begin_stable_snapshot_promotion_hash_v1`, `read_stable_snapshot`,
+`finish_stable_snapshot_v1`, `promote_stable_snapshot_for_execute_v1`,
+`close_stable_snapshot`). The argv owner's temporary `_StableSnapshotOpenView`
+and local `StableFileSnapshotSealV1` are deleted, and it now imports the
+canonical records. The same was done for the local `ExecutePathOpenV1` stand-in
+in `authenticated_fs_exec_submission_service_v1.spl` and the local
+`DbfsRootMountSealInfoV1` stand-in in `server_data_namespace_owner.spl`.
+`signed_catalog_snapshot_reader_v1_spec` went from 0/6 to 3/6. The other 3
+call catalog functions that no ref has ever defined.
+`stable_file_snapshot_spec` (restored) is 8/11. One failure is FAT32, see
+`fat32_mount_table_dispatch_drops_core_mutations_interpreter_2026-09-28.md`.
+Two expect namespace mutations to invalidate a snapshot, but the restored owner
+binds snapshots to per-file generations. The spec predates that code.
+The acceptance evidence below (cold-boot guest run, negative cases) is still
+not collected.
+
+**Original status:** open. **Scope:** signed catalog boot ingestion, authenticated argv
 file bindings, and SimpleOS release evidence provenance. **Inspected:**
 `origin/main` at `e4243e67153` on 2026-09-28.
 

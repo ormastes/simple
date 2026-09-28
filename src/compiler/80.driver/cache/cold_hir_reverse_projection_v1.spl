@@ -1,0 +1,48 @@
+# Canonical reached-graph reverse-reference bytes for a cold package SMF.
+# The caller supplies typed direct imports and the graph builder's reverse
+# dependents; neither list is inferred from an executable code image.
+
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use compiler.driver.cache.package_tldr_metadata.{
+    PackageSmfSectionV1, package_smf_sections_validate_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+struct ColdHirReverseProjectionV1:
+    payload: text
+    section: PackageSmfSectionV1
+    digest: text
+    reverse_dependents: [text]
+
+fn _cold_reverse_identity_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn cold_hir_reverse_projection_v1(
+    module_identity: text, direct_imports: [text], reverse_dependents: [text]
+) -> Result<ColdHirReverseProjectionV1, text>:
+    if not _cold_reverse_identity_valid_v1(module_identity):
+        return Err("cold-reverse-module-invalid")
+    val imports = canonical_identity_sort_texts(direct_imports)
+    val dependents = canonical_identity_sort_texts(reverse_dependents)
+    var chunks: [text] = [
+        "simple/cold-reverse-projection/v1\n",
+        "module={module_identity.len()}:{module_identity}\n",
+        "imports={imports.len()}\n"]
+    for imported in imports:
+        if not _cold_reverse_identity_valid_v1(imported):
+            return Err("cold-reverse-import-invalid")
+        chunks.push("{imported.len()}:{imported}\n")
+    chunks.push("reverse={dependents.len()}\n")
+    for dependent in dependents:
+        if not _cold_reverse_identity_valid_v1(dependent):
+            return Err("cold-reverse-dependent-invalid")
+        chunks.push("{dependent.len()}:{dependent}\n")
+    val payload = chunks.join("")
+    val digest = sha256_text(payload)
+    val section = PackageSmfSectionV1(
+        "reverse_projection", 0, payload.len(), digest)
+    if package_smf_sections_validate_v1([section]) != "ok":
+        return Err("cold-reverse-section-invalid")
+    Ok(ColdHirReverseProjectionV1(payload, section, digest, dependents))
+
+export ColdHirReverseProjectionV1, cold_hir_reverse_projection_v1

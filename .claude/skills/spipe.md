@@ -867,6 +867,16 @@ observation itself.
 | Binary layout | `BinaryLayoutIR` field/bit checks (round trip, one-hot, adjacent-preservation, reserved policy) |
 | Domain profile (scene/sim/audio/perf/ML/hw) | oracle bundle over the profile's canonical evidence |
 
+For a perf profile, pair baseline and candidate cohorts on the same workload,
+host, fixture, warmup, and sample count. Record immutable binary identities,
+p50/p95 time, and peak/steady RSS for each startup, warm, or build row. First
+seek an improvement in both time and memory. If one metric regresses, accept
+the tradeoff only when `candidate_p95 / baseline_p95 +
+candidate_peak_RSS / baseline_peak_RSS < 2` beyond measurement noise and both
+independent hard budgets pass. Report both ratios and their sum. Missing or
+unmatched samples cannot pass; use `perf_joint_compare_v1` for the typed SPipe
+verdict, and keep release cohort-size gates separate.
+
 Module: `src/lib/common/spec/evidence/model.spl` (selectors, `OracleCheck`,
 `OracleSpec`), `evidence_comparator.spl` (`compare_evidence`).
 

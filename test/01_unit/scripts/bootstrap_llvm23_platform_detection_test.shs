@@ -26,9 +26,13 @@ EOF
     Darwin) printf shared >"$prefix/lib/libLLVM.dylib" ;;
     *) printf shared >"$prefix/lib/libLLVM-23.so" ;;
   esac
+  # The same fixture also exercises a simulated FreeBSD host below.
+  printf shared >"$prefix/lib/libLLVM-23.so"
 }
 
 make_prefix "$tmp/llvm23" 23.1.1
+make_prefix "$tmp/llvm232" 23.1.2
+make_prefix "$tmp/llvm233" 23.1.3
 make_prefix "$tmp/llvm230" 23.1.0
 make_prefix "$tmp/llvm18" 18.1.8
 
@@ -43,12 +47,29 @@ make_prefix "$tmp/llvm18" 18.1.8
   [ "$LLVM_PREFIX" = "$tmp/llvm23" ] || fail wrong-prefix
   [ "$LLVM_SYS_231_PREFIX" = "$tmp/llvm23" ] || fail wrong-rust-prefix
   LLVM_FOUND=0
+  PLATFORM_UNAME=Linux
+  PLATFORM_OS=linux
   if _llvm_try_prefix "$tmp/llvm230" 23; then fail older-23-admitted; fi
+  if _llvm_try_prefix "$tmp/llvm232" 23; then fail freebsd-patch-admitted-on-other-host; fi
+  if _llvm_try_prefix "$tmp/llvm233" 23; then fail future-patch-admitted; fi
   if _llvm_try_prefix "$tmp/llvm18" 23; then fail llvm18-admitted; fi
+  PLATFORM_OS=freebsd
+  if _llvm_try_prefix "$tmp/llvm232" 23; then fail cross-target-override-admitted-freebsd-patch; fi
+  PLATFORM_UNAME=FreeBSD
+  _llvm_try_prefix "$tmp/llvm232" 23 || fail freebsd-llvm23-patch-rejected
+  if _llvm_try_prefix "$tmp/llvm233" 23; then fail freebsd-future-patch-admitted; fi
 )
 
 grep -Fq 'if [ "$LLVM_VERSION" != 23 ]; then' "$bootstrap" ||
   fail bootstrap-does-not-reject-other-major
-grep -Fq 'LLVM 23.1.1 not found' "$bootstrap" ||
+grep -Fq '! _llvm23_version_admitted "${rust_llvm_version}"' "$bootstrap" ||
+  fail bootstrap-does-not-check-rust-llvm-patch
+grep -Fq 'admitted LLVM 23.1.1 (native FreeBSD: 23.1.2) not found' "$bootstrap" ||
   fail bootstrap-error-not-pinned
+# The Rust seed's aya-llvm-sys build script must admit the same FreeBSD patch.
+aya_build="$root/src/compiler_rust/vendor/aya-llvm-sys/build.rs"
+grep -Fq 'FREEBSD_ADMITTED_LLVM_VERSION: &str = "23.1.2"' "$aya_build" ||
+  fail aya-llvm-sys-freebsd-patch-not-admitted
+grep -Fq 'cfg!(target_os = "freebsd") && actual == FREEBSD_ADMITTED_LLVM_VERSION' "$aya_build" ||
+  fail aya-llvm-sys-freebsd-admission-not-host-scoped
 echo 'bootstrap_llvm23_platform_detection_test: PASS'

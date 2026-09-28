@@ -1,9 +1,11 @@
 # Production bridge from Git/filesystem change journals to the compile-owned
 # source inventory. Git commands are read-only; all writes stay under build/scv.
 
-use app.io.mod.{file_exists, file_read, process_run_bounded}
+use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_at_pointer_v1, compile_source_inventory_read_pointer_content_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
 use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_v1}
 
@@ -379,7 +381,7 @@ fn compiler_inventory_journal_prefix_digest_v1(
         index = index + 1
     nil
 
-fn compiler_inventory_refresh_v1(
+fn _compiler_inventory_refresh_locked_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
 ) -> CompilerInventoryRefreshV1:
     # A cold refresh replaces the inventory, so source_roots must cover the
@@ -398,7 +400,15 @@ fn compiler_inventory_refresh_v1(
         if (not current.valid or current.inventory == nil or
                 current.digest != cursor.inventory_digest or
                 current.inventory!.generation != cursor.inventory_generation):
-            return compiler_inventory_invalid_v1("compile-event-inventory-binding-mismatch")
+            var detail = "generation"
+            if not current.valid:
+                detail = current.reason
+            elif current.inventory == nil:
+                detail = "inventory-absent"
+            elif current.digest != cursor.inventory_digest:
+                detail = "digest"
+            return compiler_inventory_invalid_v1(
+                "compile-event-inventory-binding-mismatch:" + detail)
         if cursor.untracked_src_digest == "" or
                 cursor.untracked_test_digest == "":
             return compiler_inventory_invalid_v1(
@@ -491,6 +501,25 @@ fn compiler_inventory_refresh_v1(
             "observed-event-apply:" + inventory.reason)
     CompilerInventoryRefreshV1(
         true, "ok", inventory.digest, inventory.inventory!.generation)
+
+fn compiler_inventory_refresh_v1(
+    root: text, cache_root: text, source_roots: [text], cold_init: bool
+) -> CompilerInventoryRefreshV1:
+    # Inventory publication and event-cursor publication form one compiler
+    # refresh. Keep both reads and writes under the same refresh lock.
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return compiler_inventory_invalid_v1("inventory-cache-root-invalid")
+    val event_root = compiler_inventory_event_root_v1(cache_root)
+    if not dir_create(event_root, true):
+        return compiler_inventory_invalid_v1("compile-event-refresh-lock-directory-failed")
+    val refresh_lock = file_lock("{event_root}/refresh.lock", 300)
+    if refresh_lock < 0:
+        return compiler_inventory_invalid_v1("compile-event-refresh-lock-unavailable")
+    val result = _compiler_inventory_refresh_locked_v1(
+        root, cache_root, source_roots, cold_init)
+    if not file_unlock(refresh_lock):
+        return compiler_inventory_invalid_v1("compile-event-refresh-unlock-failed")
+    result
 
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1

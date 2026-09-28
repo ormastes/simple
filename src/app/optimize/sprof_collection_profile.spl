@@ -1,0 +1,792 @@
+# Collection workload records in the sprof-v2 envelope.
+# The existing v1 counter loader remains the authority for module/workload
+# admission; collection records are admitted only after that check succeeds.
+
+use app.optimize.sprof_loader.{
+    SprofCounterRecord, sprof_counter_record_valid,
+    sprof_load_profile_text, sprof_serialize_record
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{
+    AdaptiveSetObservation, AdaptiveSetWorkloadProfile, AdaptiveTextSet,
+    adaptive_set_install_feedback, adaptive_set_clear_feedback
+}
+use std.nogc_sync_mut.src.collections.adaptive_text_map.{AdaptiveTextMap}
+use std.nogc_sync_mut.src.collections.adaptive_map.{AdaptiveMap}
+use std.nogc_sync_mut.src.collections.adaptive_set.{AdaptiveSet}
+use std.hash.Hash
+use collections.hashset.HashSet
+use collections.hashmap.HashMap
+use std.io.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.io_runtime.{hash_text}
+use compiler.frontend.core.collection_feedback.{collection_project_relative_path}
+use compiler.core.lexer_struct.{
+    CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text,
+    core_lexer_token_start, core_lexer_token_end
+}
+use compiler.frontend.core.tokens.{
+    TOK_AT, TOK_IDENT, TOK_LPAREN, TOK_STRING_LIT, TOK_RPAREN, TOK_EOF
+}
+
+struct SprofCollectionLoad:
+    status: text
+    profile_count: i64
+    samples: [SprofCollectionSample]
+    metrics: [SprofCollectionMetricSample]
+    diagnostic_count: i64
+    diagnostics: [text]
+
+fn _sprof_source_char_slice(chars: [text], start: i64, finish: i64) -> text:
+    var parts: [text] = []
+    var i = start
+    while i < finish:
+        parts.push(chars[i])
+        i = i + 1
+    parts.join("")
+
+fn sprof_source_module_identity_from_text(source_path: text, source: text) -> text:
+    """Bind feedback to source semantics while permitting an algorithm switch."""
+    val normalized_path = collection_project_relative_path(source_path)
+    # Preserve every source byte except the string token in a syntactically
+    # valid collection attribute. In particular, a lookalike in a comment or
+    # ordinary string must still affect the identity when that text changes.
+    var lexer = make_core_lexer(source)
+    val chars = lexer.source_chars
+    var canonical_parts: [text] = []
+    var copied_through: i64 = 0
+    var state: i64 = 0
+    var algorithm_start: i64 = -1
+    var algorithm_end: i64 = -1
+    var token_count: i64 = 0
+    var reached_eof = false
+    while token_count <= chars.len() * 4 + 16:
+        val scan = core_lexer_next_token(lexer)
+        lexer = scan[0]
+        val kind = scan[1]
+        if kind == TOK_EOF:
+            reached_eof = true
+            break
+        token_count = token_count + 1
+        if state == 0:
+            if kind == TOK_AT:
+                state = 1
+        elif state == 1:
+            if kind == TOK_IDENT and core_lexer_token_text(lexer) == "collection_algorithm":
+                state = 2
+            elif kind != TOK_AT:
+                state = 0
+        elif state == 2:
+            if kind == TOK_LPAREN:
+                state = 3
+            else:
+                state = 0
+        elif state == 3:
+            val name = core_lexer_token_text(lexer)
+            if kind == TOK_STRING_LIT and
+                    (name == "auto" or name == "linear" or name == "hash" or name == "ordered"):
+                algorithm_start = core_lexer_token_start(lexer)
+                algorithm_end = core_lexer_token_end(lexer)
+                state = 4
+            else:
+                state = 0
+        else:
+            if kind == TOK_RPAREN and algorithm_start >= copied_through and
+                    algorithm_end > algorithm_start and algorithm_end <= chars.len():
+                canonical_parts.push(_sprof_source_char_slice(chars, copied_through, algorithm_start))
+                canonical_parts.push("\"collection-algorithm\"")
+                copied_through = algorithm_end
+            state = 0
+    if not reached_eof:
+        # A malformed/non-progressing token stream cannot authorize feedback.
+        return "source-fnv64-collection-v2:{hash_text(normalized_path)}:{hash_text(source)}"
+    canonical_parts.push(_sprof_source_char_slice(chars, copied_through, chars.len()))
+    val canonical = canonical_parts.join("")
+    "source-fnv64-collection-v2:{hash_text(normalized_path)}:{hash_text(canonical)}"
+
+fn sprof_source_module_identity(source_path: text) -> text:
+    sprof_source_module_identity_from_text(source_path, file_read(source_path))
+
+struct SprofCollectionSample:
+    sample_id: i64
+    profile: AdaptiveSetWorkloadProfile
+
+struct SprofCollectionMetric:
+    site_id: text
+    target_profile_id: text
+    name: text
+    value: i64
+
+struct SprofCollectionMetricSample:
+    sample_id: i64
+    metric: SprofCollectionMetric
+
+struct SprofCollectionMetricStats:
+    found: bool
+    count: i64
+    min: i64
+    max: i64
+    mean: f64
+    p50: i64
+    p95: i64
+    histogram: [i64]
+
+struct SprofCollectionMetricGroup:
+    values: [i64]
+
+struct SprofCollectionMetricIndex:
+    admitted: bool
+    metric_count: i64
+    positions: HashMap
+    summaries: [SprofCollectionMetricStats]
+
+struct SprofCollectionSelection:
+    found: bool
+    profile: AdaptiveSetWorkloadProfile
+
+struct SprofCollectionSetGroup:
+    site_id: text
+    target_profile_id: text
+    sizes: [i64]
+    lookups: [i64]
+    hits: [i64]
+    misses: [i64]
+
+struct SprofCollectionSetIndex:
+    admitted: bool
+    sample_count: i64
+    positions: HashMap
+    profiles: [AdaptiveSetWorkloadProfile]
+
+fn _collection_field(line: text, key: text) -> text:
+    val prefix = "{key}="
+    for part in line.split(";"):
+        if part.starts_with(prefix):
+            return part.substring(prefix.len(), part.len())
+    ""
+
+fn _collection_field_count(line: text, key: text) -> i64:
+    val prefix = "{key}="
+    var count: i64 = 0
+    for part in line.split(";"):
+        if part.starts_with(prefix):
+            count = count + 1
+    count
+
+fn _collection_line_shape_valid(line: text) -> bool:
+    if line.split(";").len() != 9:
+        return false
+    for key in ["sample", "site", "target", "samples", "size_p95", "lookup_p95", "hits_p95", "misses_p95"]:
+        if _collection_field_count(line, key) != 1:
+            return false
+    true
+
+fn _collection_metric_line_shape_valid(line: text) -> bool:
+    if line.split(";").len() != 6:
+        return false
+    for key in ["sample", "site", "target", "name", "value"]:
+        if _collection_field_count(line, key) != 1:
+            return false
+    true
+
+fn _collection_header_shape_valid(line: text) -> bool:
+    line.split(";").len() == 4 and
+        _collection_field_count(line, "schema") == 1 and
+        _collection_field_count(line, "module") == 1 and
+        _collection_field_count(line, "workload") == 1
+
+fn _collection_counter_line_shape_valid(line: text) -> bool:
+    if line.starts_with("function;"):
+        return line.split(";").len() == 3 and
+            _collection_field_count(line, "key") == 1 and
+            _collection_field_count(line, "count") == 1
+    if line.starts_with("block;"):
+        return line.split(";").len() == 4 and
+            _collection_field_count(line, "function") == 1 and
+            _collection_field_count(line, "key") == 1 and
+            _collection_field_count(line, "count") == 1
+    if line.starts_with("edge;"):
+        return line.split(";").len() == 4 and
+            _collection_field_count(line, "from") == 1 and
+            _collection_field_count(line, "to") == 1 and
+            _collection_field_count(line, "count") == 1
+    false
+
+fn _collection_token_safe(value: text) -> bool:
+    value != "" and not value.contains(";") and not value.contains("\n") and not value.contains("\r")
+
+fn sprof_collection_record_valid(record: AdaptiveSetWorkloadProfile) -> bool:
+    record.site_id.starts_with("ast://") and
+        _collection_token_safe(record.site_id) and
+        _collection_token_safe(record.target_profile_id) and
+        record.sample_count > 0 and record.size_p95 >= 0 and
+        record.lookup_count_p95 >= 0 and record.hit_count_p95 >= 0 and
+        record.miss_count_p95 >= 0
+
+fn _collection_sample_counts_valid(record: AdaptiveSetWorkloadProfile) -> bool:
+    record.hit_count_p95 <= record.lookup_count_p95 and
+        record.miss_count_p95 == record.lookup_count_p95 - record.hit_count_p95
+
+fn sprof_collection_metric_valid(metric: SprofCollectionMetric) -> bool:
+    if not metric.site_id.starts_with("ast://") or not _collection_token_safe(metric.site_id) or
+            not _collection_token_safe(metric.target_profile_id) or metric.value < 0:
+        return false
+    val names = [
+        "collection_size", "loop_trip_count", "lookup_count", "distinct_key_count",
+        "join_output_count", "filter_selectivity", "hash_probe_count",
+        "hash_collision_count", "allocation_bytes", "materialization_count",
+        "early_exit_position"
+    ]
+    var known = false
+    for name in names:
+        if metric.name == name:
+            known = true
+            break
+    if not known:
+        return false
+    # Selectivity is encoded as an integer number of millionths.
+    metric.name != "filter_selectivity" or metric.value <= 1000000
+
+fn sprof_collection_record_from_set(set: AdaptiveTextSet) -> AdaptiveSetWorkloadProfile:
+    """Capture one container's measured load with its stable site and target."""
+    set.workload_profile_sample()
+
+fn sprof_collection_record_from_map(map: AdaptiveTextMap) -> AdaptiveSetWorkloadProfile:
+    """Capture one text map's measured load using the same v2 sample shape."""
+    map.workload_profile_sample()
+
+fn sprof_collection_record_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> AdaptiveSetWorkloadProfile where K: Hash + Eq + Ord:
+    """Capture a typed map without erasing its key or value semantics."""
+    map.workload_profile_sample()
+
+fn sprof_collection_record_from_generic_set<K>(set: AdaptiveSet<K>) -> AdaptiveSetWorkloadProfile where K: Hash + Eq + Ord:
+    """Capture a typed set using the same admitted v2 sample shape."""
+    set.workload_profile_sample()
+
+fn _sprof_collection_metrics_from_observation(
+    observation: AdaptiveSetObservation
+) -> [SprofCollectionMetric]:
+    if not observation.site_id.starts_with("ast://") or observation.target_profile_id == "":
+        return []
+    [
+        SprofCollectionMetric(site_id: observation.site_id, target_profile_id: observation.target_profile_id, name: "collection_size", value: observation.peak_size),
+        SprofCollectionMetric(site_id: observation.site_id, target_profile_id: observation.target_profile_id, name: "lookup_count", value: observation.lookups),
+        SprofCollectionMetric(site_id: observation.site_id, target_profile_id: observation.target_profile_id, name: "distinct_key_count", value: observation.size)
+    ]
+
+fn sprof_collection_metrics_from_set(set: AdaptiveTextSet) -> [SprofCollectionMetric]:
+    """Map measured set state to the P6 metrics this container can prove."""
+    _sprof_collection_metrics_from_observation(set.observation())
+
+fn sprof_collection_metrics_from_map(map: AdaptiveTextMap) -> [SprofCollectionMetric]:
+    """Map measured text-map state to the same collection metric names."""
+    _sprof_collection_metrics_from_observation(map.observation())
+
+fn sprof_collection_metrics_from_generic_map<K, V>(map: AdaptiveMap<K, V>) -> [SprofCollectionMetric] where K: Hash + Eq + Ord:
+    _sprof_collection_metrics_from_observation(map.observation())
+
+fn sprof_collection_metrics_from_generic_set<K>(set: AdaptiveSet<K>) -> [SprofCollectionMetric] where K: Hash + Eq + Ord:
+    _sprof_collection_metrics_from_observation(set.observation())
+
+fn sprof_serialize_collection_profile(
+    module_identity: text,
+    workload_label: text,
+    counters: [SprofCounterRecord],
+    profiles: [AdaptiveSetWorkloadProfile]
+) -> text:
+    """Write function counters and collection samples in one v2 profile body."""
+    if not _collection_token_safe(module_identity) or not _collection_token_safe(workload_label):
+        return ""
+    if profiles.len() > 100000:
+        return ""
+    var lines: [text] = ["header;schema=sprof-v2;module={module_identity};workload={workload_label}"]
+    for counter in counters:
+        if not sprof_counter_record_valid(counter):
+            return ""
+        lines.push(sprof_serialize_record(counter))
+    var sample_id: i64 = 0
+    for profile in profiles:
+        if not sprof_collection_record_valid(profile) or profile.sample_count != 1 or
+                not _collection_sample_counts_valid(profile):
+            return ""
+        lines.push("collection;sample={sample_id};site={profile.site_id};target={profile.target_profile_id};samples=1;size_p95={profile.size_p95};lookup_p95={profile.lookup_count_p95};hits_p95={profile.hit_count_p95};misses_p95={profile.miss_count_p95}")
+        sample_id = sample_id + 1
+    lines.join("\n")
+
+fn sprof_serialize_collection_profile_with_metrics(
+    module_identity: text,
+    workload_label: text,
+    counters: [SprofCounterRecord],
+    profiles: [AdaptiveSetWorkloadProfile],
+    metrics: [SprofCollectionMetric]
+) -> text:
+    """Append named P6 measurements to a validated v2 profile envelope."""
+    if metrics.len() > 100000 or profiles.len() > 100000 - metrics.len():
+        return ""
+    val base = sprof_serialize_collection_profile(module_identity, workload_label, counters, profiles)
+    if base == "":
+        return ""
+    var lines: [text] = [base]
+    var sample_id = profiles.len()
+    for metric in metrics:
+        if not sprof_collection_metric_valid(metric):
+            return ""
+        lines.push("metric;sample={sample_id};site={metric.site_id};target={metric.target_profile_id};name={metric.name};value={metric.value}")
+        sample_id = sample_id + 1
+    lines.join("\n")
+
+fn sprof_merge_collection_profile_text(
+    existing_body: text, captured_body: text,
+    module_identity: text, workload_label: text
+) -> text:
+    """Accumulate separate runs after validating both envelopes and sample records."""
+    val existing = sprof_load_collection_profile_text(
+        existing_body, module_identity, workload_label
+    )
+    val captured = sprof_load_collection_profile_text(
+        captured_body, module_identity, workload_label
+    )
+    if existing.status != "loaded" or captured.status != "loaded" or
+            existing.samples.len() + existing.metrics.len() +
+            captured.samples.len() + captured.metrics.len() > 100000:
+        return ""
+    val existing_counters = sprof_load_profile_text(
+        existing_body, module_identity, workload_label
+    )
+    val captured_counters = sprof_load_profile_text(
+        captured_body, module_identity, workload_label
+    )
+    if existing_counters.status != "loaded" or captured_counters.status != "loaded" or
+            existing_counters.diagnostic_count > 0 or captured_counters.diagnostic_count > 0:
+        return ""
+    var counters: [SprofCounterRecord] = []
+    for record in existing_counters.records:
+        counters.push(record)
+    for record in captured_counters.records:
+        counters.push(record)
+    var profiles: [AdaptiveSetWorkloadProfile] = []
+    for sample in existing.samples:
+        profiles.push(sample.profile)
+    for sample in captured.samples:
+        profiles.push(sample.profile)
+    var metrics: [SprofCollectionMetric] = []
+    for sample in existing.metrics:
+        metrics.push(sample.metric)
+    for sample in captured.metrics:
+        metrics.push(sample.metric)
+    # Serialization gives every retained sample a fresh, unique identity.
+    sprof_serialize_collection_profile_with_metrics(
+        module_identity, workload_label, counters, profiles, metrics
+    )
+
+fn sprof_write_collection_profile_file(
+    path: text,
+    module_identity: text,
+    workload_label: text,
+    counters: [SprofCounterRecord],
+    profiles: [AdaptiveSetWorkloadProfile]
+) -> bool:
+    if path == "":
+        return false
+    val body = sprof_serialize_collection_profile(module_identity, workload_label, counters, profiles)
+    if body == "":
+        return false
+    file_atomic_write(path, body)
+
+fn sprof_write_collection_profile_file_with_metrics(
+    path: text,
+    module_identity: text,
+    workload_label: text,
+    counters: [SprofCounterRecord],
+    profiles: [AdaptiveSetWorkloadProfile],
+    metrics: [SprofCollectionMetric]
+) -> bool:
+    if path == "":
+        return false
+    val body = sprof_serialize_collection_profile_with_metrics(
+        module_identity, workload_label, counters, profiles, metrics
+    )
+    if body == "":
+        return false
+    file_atomic_write(path, body)
+
+fn _collection_record_from_line(line: text) -> AdaptiveSetWorkloadProfile:
+    AdaptiveSetWorkloadProfile(
+        site_id: _collection_field(line, "site"),
+        target_profile_id: _collection_field(line, "target"),
+        sample_count: _collection_field(line, "samples").to_i64() ?? -1,
+        size_p95: _collection_field(line, "size_p95").to_i64() ?? -1,
+        lookup_count_p95: _collection_field(line, "lookup_p95").to_i64() ?? -1,
+        hit_count_p95: _collection_field(line, "hits_p95").to_i64() ?? -1,
+        miss_count_p95: _collection_field(line, "misses_p95").to_i64() ?? -1
+    )
+
+fn _collection_metric_from_line(line: text) -> SprofCollectionMetric:
+    SprofCollectionMetric(
+        site_id: _collection_field(line, "site"),
+        target_profile_id: _collection_field(line, "target"),
+        name: _collection_field(line, "name"),
+        value: _collection_field(line, "value").to_i64() ?? -1
+    )
+
+fn _collection_p95(values: [i64]) -> i64:
+    if values.len() == 0:
+        return -1
+    var sorted: [i64] = []
+    for value in values:
+        sorted.push(value)
+    sorted.sort()
+    sorted[(sorted.len() * 95 - 1) / 100]
+
+fn sprof_load_collection_profile_text(
+    body: text, expected_module: text, expected_workload: text
+) -> SprofCollectionLoad:
+    """Reject stale, malformed, or ambiguous collection feedback before use."""
+    val base = sprof_load_profile_text(body, expected_module, expected_workload)
+    if base.status != "loaded":
+        return SprofCollectionLoad(
+            status: base.status, profile_count: 0, samples: [], metrics: [],
+            diagnostic_count: base.diagnostic_count, diagnostics: base.diagnostics
+        )
+    if base.schema_version != "sprof-v2":
+        return SprofCollectionLoad(
+            status: "incompatible", profile_count: 0, samples: [], metrics: [],
+            diagnostic_count: 1, diagnostics: ["collection_schema_requires_sprof_v2"]
+        )
+    if base.diagnostic_count > 0:
+        return SprofCollectionLoad(
+            status: "invalid", profile_count: 0, samples: [], metrics: [],
+            diagnostic_count: base.diagnostic_count, diagnostics: base.diagnostics
+        )
+    var samples: [SprofCollectionSample] = []
+    var metrics: [SprofCollectionMetricSample] = []
+    var seen_sample_ids = HashSet.with_capacity(64)
+    var diagnostics: [text] = []
+    var diagnostic_count: i64 = 0
+    var line_number = 0
+    var header_count = 0
+    for raw_line in body.split("\n"):
+        line_number = line_number + 1
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.starts_with("header;"):
+            header_count = header_count + 1
+            if not _collection_header_shape_valid(line):
+                diagnostic_count = diagnostic_count + 1
+                if diagnostics.len() < 8:
+                    diagnostics.push("invalid_header_record:{line_number}")
+            continue
+        if line.starts_with("function;") or line.starts_with("block;") or line.starts_with("edge;"):
+            if not _collection_counter_line_shape_valid(line):
+                diagnostic_count = diagnostic_count + 1
+                if diagnostics.len() < 8:
+                    diagnostics.push("invalid_counter_record:{line_number}")
+            continue
+        if line.starts_with("metric;"):
+            val metric_id = _collection_field(line, "sample").to_i64() ?? -1
+            val metric = _collection_metric_from_line(line)
+            if not _collection_metric_line_shape_valid(line) or metric_id < 0 or
+                    not sprof_collection_metric_valid(metric):
+                diagnostic_count = diagnostic_count + 1
+                if diagnostics.len() < 8:
+                    diagnostics.push("invalid_collection_metric:{line_number}")
+            elif seen_sample_ids.contains("{metric_id}"):
+                diagnostic_count = diagnostic_count + 1
+                if diagnostics.len() < 8:
+                    diagnostics.push("duplicate_collection_sample:{line_number}")
+            elif samples.len() + metrics.len() >= 100000:
+                diagnostic_count = diagnostic_count + 1
+                if diagnostics.len() < 8:
+                    diagnostics.push("collection_sample_limit")
+            else:
+                seen_sample_ids.insert("{metric_id}")
+                metrics.push(SprofCollectionMetricSample(sample_id: metric_id, metric: metric))
+            continue
+        if not line.starts_with("collection;"):
+            diagnostic_count = diagnostic_count + 1
+            if diagnostics.len() < 8:
+                diagnostics.push("unknown_profile_record:{line_number}")
+            continue
+        val sample_id = _collection_field(line, "sample").to_i64() ?? -1
+        val record = _collection_record_from_line(line)
+        if not _collection_line_shape_valid(line) or sample_id < 0 or
+                not sprof_collection_record_valid(record) or record.sample_count != 1 or
+                not _collection_sample_counts_valid(record):
+            diagnostic_count = diagnostic_count + 1
+            if diagnostics.len() < 8:
+                diagnostics.push("invalid_collection_record:{line_number}")
+        elif seen_sample_ids.contains("{sample_id}"):
+            diagnostic_count = diagnostic_count + 1
+            if diagnostics.len() < 8:
+                diagnostics.push("duplicate_collection_sample:{line_number}")
+        elif samples.len() + metrics.len() >= 100000:
+            diagnostic_count = diagnostic_count + 1
+            if diagnostics.len() < 8:
+                diagnostics.push("collection_sample_limit")
+        else:
+            seen_sample_ids.insert("{sample_id}")
+            samples.push(SprofCollectionSample(sample_id: sample_id, profile: record))
+    if header_count != 1:
+        diagnostic_count = diagnostic_count + 1
+        if diagnostics.len() < 8:
+            diagnostics.push("invalid_header_count:{header_count}")
+    if diagnostic_count > 0:
+        return SprofCollectionLoad(
+            status: "invalid", profile_count: 0, samples: [], metrics: [],
+            diagnostic_count: diagnostic_count, diagnostics: diagnostics
+        )
+    SprofCollectionLoad(
+        status: "loaded", profile_count: samples.len(), samples: samples, metrics: metrics,
+        diagnostic_count: 0, diagnostics: []
+    )
+
+fn sprof_load_collection_profile_file(
+    path: text, expected_module: text, expected_workload: text
+) -> SprofCollectionLoad:
+    sprof_load_collection_profile_text(file_read(path), expected_module, expected_workload)
+
+fn sprof_collection_profile_for_site(
+    loaded: SprofCollectionLoad, site_id: text, target_profile_id: text
+) -> SprofCollectionSelection:
+    """One-off exact-site lookup using the same admitted summary as hot callers."""
+    sprof_prepared_collection_profile_for_site(
+        sprof_build_collection_set_index(loaded), site_id, target_profile_id)
+
+fn _collection_set_identity(site_id: text, target_profile_id: text) -> text:
+    site_id + ";" + target_profile_id
+
+fn _empty_collection_set_selection() -> SprofCollectionSelection:
+    SprofCollectionSelection(
+        found: false,
+        profile: AdaptiveSetWorkloadProfile(
+            site_id: "", target_profile_id: "", sample_count: 0,
+            size_p95: 0, lookup_count_p95: 0, hit_count_p95: 0, miss_count_p95: 0
+        )
+    )
+
+fn sprof_build_collection_set_index(loaded: SprofCollectionLoad) -> SprofCollectionSetIndex:
+    """Group admitted set samples and compute site/target p95 once."""
+    var positions = HashMap.with_capacity(64)
+    var profiles: [AdaptiveSetWorkloadProfile] = []
+    if loaded.status != "loaded":
+        return SprofCollectionSetIndex(admitted: false, sample_count: 0, positions: positions, profiles: profiles)
+    val metric_index = sprof_build_collection_metric_index(loaded)
+    var groups: [SprofCollectionSetGroup] = []
+    for sample in loaded.samples:
+        val profile = sample.profile
+        val key = _collection_set_identity(profile.site_id, profile.target_profile_id)
+        val raw_position = positions.get(key) ?? ""
+        val position = raw_position.to_i64() ?? -1
+        if position >= 0 and position < groups.len():
+            var group = groups[position]
+            group.sizes.push(profile.size_p95)
+            group.lookups.push(profile.lookup_count_p95)
+            group.hits.push(profile.hit_count_p95)
+            group.misses.push(profile.miss_count_p95)
+            groups[position] = group
+        else:
+            val next = groups.len()
+            groups.push(SprofCollectionSetGroup(
+                site_id: profile.site_id, target_profile_id: profile.target_profile_id,
+                sizes: [profile.size_p95], lookups: [profile.lookup_count_p95],
+                hits: [profile.hit_count_p95], misses: [profile.miss_count_p95]
+            ))
+            positions.insert(key, "{next}")
+    for group in groups:
+        val probes = sprof_indexed_collection_metric_stats(
+            metric_index, group.site_id, group.target_profile_id, "hash_probe_count")
+        val collisions = sprof_indexed_collection_metric_stats(
+            metric_index, group.site_id, group.target_profile_id, "hash_collision_count")
+        val paired = probes.found and collisions.found and probes.count == collisions.count and
+            collisions.p95 <= probes.p95
+        profiles.push(AdaptiveSetWorkloadProfile(
+            site_id: group.site_id, target_profile_id: group.target_profile_id,
+            sample_count: group.sizes.len(), size_p95: _collection_p95(group.sizes),
+            lookup_count_p95: _collection_p95(group.lookups),
+            hit_count_p95: _collection_p95(group.hits),
+            miss_count_p95: _collection_p95(group.misses),
+            hash_probe_count_p95: if paired: probes.p95 else: -1,
+            hash_collision_count_p95: if paired: collisions.p95 else: -1
+        ))
+    SprofCollectionSetIndex(
+        admitted: true, sample_count: loaded.samples.len(),
+        positions: positions, profiles: profiles
+    )
+
+fn sprof_prepared_collection_profile_for_site(
+    index: SprofCollectionSetIndex, site_id: text, target_profile_id: text
+) -> SprofCollectionSelection:
+    """Read a precomputed exact-site p95 without scanning raw samples."""
+    if not index.admitted or not _collection_token_safe(site_id) or
+            not _collection_token_safe(target_profile_id):
+        return _empty_collection_set_selection()
+    val key = _collection_set_identity(site_id, target_profile_id)
+    val raw_position = index.positions.get(key) ?? ""
+    val position = raw_position.to_i64() ?? -1
+    if position < 0 or position >= index.profiles.len():
+        return _empty_collection_set_selection()
+    SprofCollectionSelection(found: true, profile: index.profiles[position])
+
+fn sprof_adapt_text_set_with_prepared_profile(
+    source: AdaptiveTextSet, index: SprofCollectionSetIndex
+) -> AdaptiveTextSet:
+    """Apply admitted prior load to exactly one instance before its first operation."""
+    var set = source
+    val identity = set.observation()
+    val selected = sprof_prepared_collection_profile_for_site(
+        index, identity.site_id, identity.target_profile_id
+    )
+    if selected.found:
+        set.apply_workload_profile(selected.profile)
+    set
+
+fn sprof_install_collection_feedback(
+    loaded: SprofCollectionLoad, target_profile_id: text
+) -> bool:
+    """Publish admitted, grouped samples for attributed sets in the next run."""
+    adaptive_set_clear_feedback()
+    if loaded.status != "loaded" or not _collection_token_safe(target_profile_id):
+        return false
+    val index = sprof_build_collection_set_index(loaded)
+    if not index.admitted:
+        return false
+    var selected: [AdaptiveSetWorkloadProfile] = []
+    for profile in index.profiles:
+        if profile.target_profile_id == target_profile_id:
+            selected.push(profile)
+    if selected.len() == 0:
+        return false
+    adaptive_set_install_feedback(target_profile_id, selected)
+
+fn sprof_load_and_install_collection_feedback_text(
+    body: text, expected_module: text, expected_workload: text,
+    target_profile_id: text
+) -> bool:
+    """Admit one prior workload before execution and install its target slice."""
+    val loaded = sprof_load_collection_profile_text(body, expected_module, expected_workload)
+    sprof_install_collection_feedback(loaded, target_profile_id)
+
+fn sprof_load_and_install_collection_feedback_file(
+    path: text, expected_module: text, expected_workload: text,
+    target_profile_id: text
+) -> bool:
+    """Load a prior run once at startup; attributed constructors use memory only."""
+    val loaded = sprof_load_collection_profile_file(path, expected_module, expected_workload)
+    sprof_install_collection_feedback(loaded, target_profile_id)
+
+fn _empty_collection_metric_stats() -> SprofCollectionMetricStats:
+    SprofCollectionMetricStats(
+        found: false, count: 0, min: 0, max: 0, mean: 0.0,
+        p50: 0, p95: 0, histogram: []
+    )
+
+fn _collection_metric_stats_from_values(measured: [i64]) -> SprofCollectionMetricStats:
+    if measured.len() == 0:
+        return _empty_collection_metric_stats()
+    var values = measured
+    values.sort()
+    var sum: f64 = 0.0
+    for value in values:
+        sum = sum + (value as f64)
+    var histogram: [i64] = []
+    for _ in 0..64:
+        histogram.push(0)
+    for value in values:
+        var bucket: i64 = 0
+        var remaining = value
+        while remaining > 0 and bucket < 63:
+            remaining = remaining / 2
+            bucket = bucket + 1
+        histogram[bucket] = histogram[bucket] + 1
+    SprofCollectionMetricStats(
+        found: true, count: values.len(), min: values[0], max: values[values.len() - 1],
+        mean: sum / (values.len() as f64),
+        p50: values[(values.len() * 50 - 1) / 100],
+        p95: values[(values.len() * 95 - 1) / 100],
+        histogram: histogram
+    )
+
+fn sprof_collection_metric_stats(
+    loaded: SprofCollectionLoad, site_id: text, target_profile_id: text, name: text
+) -> SprofCollectionMetricStats:
+    """Summarize one admitted P6 metric from loaded samples."""
+    if loaded.status != "loaded" or site_id == "" or target_profile_id == "":
+        return _empty_collection_metric_stats()
+    var values: [i64] = []
+    for sample in loaded.metrics:
+        val metric = sample.metric
+        if metric.site_id == site_id and metric.target_profile_id == target_profile_id and metric.name == name:
+            values.push(metric.value)
+    _collection_metric_stats_from_values(values)
+
+fn _collection_metric_identity(site_id: text, target_profile_id: text, name: text) -> text:
+    site_id + ";" + target_profile_id + ";" + name
+
+fn sprof_build_collection_metric_index(loaded: SprofCollectionLoad) -> SprofCollectionMetricIndex:
+    """Prepare exact-site summaries once, outside compiler plan lookup paths."""
+    var positions = HashMap.with_capacity(64)
+    var summaries: [SprofCollectionMetricStats] = []
+    if loaded.status != "loaded":
+        return SprofCollectionMetricIndex(admitted: false, metric_count: 0, positions: positions, summaries: summaries)
+    var groups: [SprofCollectionMetricGroup] = []
+    for sample in loaded.metrics:
+        val metric = sample.metric
+        val key = _collection_metric_identity(metric.site_id, metric.target_profile_id, metric.name)
+        val raw_position = positions.get(key) ?? ""
+        val position = raw_position.to_i64() ?? -1
+        if position >= 0 and position < groups.len():
+            var group = groups[position]
+            group.values.push(metric.value)
+            groups[position] = group
+        else:
+            val next = groups.len()
+            groups.push(SprofCollectionMetricGroup(values: [metric.value]))
+            positions.insert(key, "{next}")
+    for group in groups:
+        summaries.push(_collection_metric_stats_from_values(group.values))
+    SprofCollectionMetricIndex(
+        admitted: true, metric_count: loaded.metrics.len(),
+        positions: positions, summaries: summaries
+    )
+
+fn sprof_indexed_collection_metric_stats(
+    index: SprofCollectionMetricIndex, site_id: text, target_profile_id: text, name: text
+) -> SprofCollectionMetricStats:
+    """Read a prepared site/target/metric summary without scans or sorting."""
+    if not index.admitted or not _collection_token_safe(site_id) or
+            not _collection_token_safe(target_profile_id) or not _collection_token_safe(name):
+        return _empty_collection_metric_stats()
+    val key = _collection_metric_identity(site_id, target_profile_id, name)
+    val raw_position = index.positions.get(key) ?? ""
+    val position = raw_position.to_i64() ?? -1
+    if position < 0 or position >= index.summaries.len():
+        return _empty_collection_metric_stats()
+    index.summaries[position]
+
+export SprofCollectionLoad
+export SprofCollectionSample
+export SprofCollectionSelection
+export SprofCollectionSetIndex
+export SprofCollectionMetric, SprofCollectionMetricSample, SprofCollectionMetricStats
+export SprofCollectionMetricIndex
+export sprof_collection_record_valid, sprof_collection_record_from_set
+export sprof_collection_record_from_map
+export sprof_collection_record_from_generic_map, sprof_collection_record_from_generic_set
+export sprof_collection_metrics_from_set
+export sprof_collection_metrics_from_map
+export sprof_collection_metrics_from_generic_map, sprof_collection_metrics_from_generic_set
+export sprof_serialize_collection_profile, sprof_write_collection_profile_file
+export sprof_collection_metric_valid, sprof_serialize_collection_profile_with_metrics
+export sprof_merge_collection_profile_text
+export sprof_write_collection_profile_file_with_metrics
+export sprof_load_collection_profile_text, sprof_load_collection_profile_file
+export sprof_source_module_identity
+export sprof_source_module_identity_from_text
+export sprof_collection_profile_for_site
+export sprof_build_collection_set_index, sprof_prepared_collection_profile_for_site
+export sprof_adapt_text_set_with_prepared_profile
+export sprof_install_collection_feedback
+export sprof_load_and_install_collection_feedback_text
+export sprof_load_and_install_collection_feedback_file
+export sprof_collection_metric_stats
+export sprof_build_collection_metric_index, sprof_indexed_collection_metric_stats

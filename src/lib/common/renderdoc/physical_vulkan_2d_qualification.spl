@@ -1,0 +1,252 @@
+# codex-impl
+# Pair contract for the controlled rectangle slice. Capture artifacts must be
+# produced by trusted backend adapters after real submit, fence and readback.
+# This module never turns a CPU mirror or an unqualified API result into pixels.
+
+use std.fs.{read_file}
+use std.io_runtime.{file_exists}
+use std.common.crypto.sha256.{sha256_text}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture,
+    FinalOutputComparison, FinalOutputTolerance, compare_final_output_pixels,
+    final_output_validate}
+use common.renderdoc.controlled_rect_oracle.{
+    controlled_rect_capture_matches_oracle}
+use common.renderdoc.controlled_clip_oracle.{
+    controlled_clip_capture_matches_oracle}
+
+pub val CONTROLLED_RECT_FIXTURE_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_opaque_rect_v1.sdn"
+pub val CONTROLLED_RECT_FIXTURE_SHA256: text =
+    "90fc023c54e082fff358647440e8213d45185a6d949d81b6d848c553839484b3"
+pub val CONTROLLED_CLIP_FIXTURE_PATH: text =
+    "test/fixtures/simple_2d_skia/controlled_clipped_rect_v2.sdn"
+pub val CONTROLLED_CLIP_FIXTURE_SHA256: text =
+    "b16d53f7785a09559bf209797fcb724906f896b93d23eff512bda69ec44d8f2f"
+
+struct PreparedRenderScene:
+    fixture_id: text
+    source_path: text
+    source_sha256: text
+    scene_scope: text
+    render_degraded: bool
+    degrade_reason: text
+
+struct VulkanBackendCaptureArtifact:
+    backend_id: text
+    fixture_id: text
+    fixture_sha256: text
+    producer_authenticated: bool
+    provider_identity: i64
+    device_name: text
+    device_type: text
+    driver_identity: text
+    # Vulkan 1.1 VkPhysicalDeviceIDProperties, encoded as 32 lowercase hex
+    # digits by each backend owner. Opaque backend handles and enumeration
+    # indices are never compared across processes.
+    physical_device_uuid: text
+    driver_uuid: text
+    # Engine2D: positive selected-device generation token. Skia: zero-based
+    # enumeration index. Never compare these numbers across backends.
+    device_identity: i64
+    backend_handle: i64
+    submit_count: i64
+    fence_count: i64
+    readback_source: text
+    fallback_required: bool
+    capture: FinalOutputCapture?
+
+struct Vulkan2DQualificationReceipt:
+    status: text
+    reason: text
+    source_sha256: text
+    engine2d_device: text
+    skia_device: text
+    comparison: FinalOutputComparison?
+
+fn _blocked(reason: text, digest: text, engine_device: text,
+    skia_device: text) -> Vulkan2DQualificationReceipt:
+    Vulkan2DQualificationReceipt(status: "blocked", reason: reason,
+        source_sha256: digest, engine2d_device: engine_device,
+        skia_device: skia_device, comparison: nil)
+
+fn _physical_type(device_type: text) -> bool:
+    device_type == "discrete" or device_type == "integrated"
+
+fn _vulkan_uuid_valid(value: text) -> bool:
+    if value.len() != 32 or value == "00000000000000000000000000000000":
+        return false
+    var i = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 97 and code <= 102)):
+            return false
+        i = i + 1
+    true
+
+fn _controlled_scene_recognized(scene: PreparedRenderScene) -> bool:
+    val rectangle = scene.fixture_id == "controlled-opaque-rect-v1" and
+        scene.scene_scope == "controlled-rectangle-only" and
+        scene.source_path == CONTROLLED_RECT_FIXTURE_PATH and
+        scene.source_sha256 == CONTROLLED_RECT_FIXTURE_SHA256
+    val clipped = scene.fixture_id == "controlled-clipped-rect-v2" and
+        scene.scene_scope == "controlled-clipped-rectangle-only" and
+        scene.source_path == CONTROLLED_CLIP_FIXTURE_PATH and
+        scene.source_sha256 == CONTROLLED_CLIP_FIXTURE_SHA256
+    rectangle or clipped
+
+fn _controlled_capture_matches_oracle(scene: PreparedRenderScene,
+    capture: FinalOutputCapture) -> Result<bool, text>:
+    if scene.fixture_id == "controlled-clipped-rect-v2":
+        controlled_clip_capture_matches_oracle(capture)
+    else:
+        controlled_rect_capture_matches_oracle(capture)
+
+fn _controlled_oracle_mismatch_reason(scene: PreparedRenderScene,
+    backend: text) -> text:
+    val prefix = if scene.fixture_id == "controlled-clipped-rect-v2":
+        "controlled-clip-oracle-mismatch:" else:
+        "controlled-rectangle-oracle-mismatch:"
+    prefix + backend
+
+fn _artifact_reason(scene: PreparedRenderScene,
+    artifact: VulkanBackendCaptureArtifact, expected_backend: text) -> text:
+    if artifact.backend_id != expected_backend:
+        return "backend-identity-mismatch:" + expected_backend
+    if artifact.fixture_id != scene.fixture_id or
+        artifact.fixture_sha256 != scene.source_sha256:
+        return "fixture-domain-mismatch:" + expected_backend
+    if not artifact.producer_authenticated:
+        return "producer-authentication-missing:" + expected_backend
+    if expected_backend == "upstream-skia-ganesh-vulkan" and
+        artifact.provider_identity != 0x534b4941564b0001:
+        return "skia-provider-identity-mismatch"
+    # Human-readable driver and device labels are diagnostics. Backends may
+    # format them differently; UUIDs and physical type carry pair identity.
+    if not _physical_type(artifact.device_type) or artifact.device_identity < 0 or
+        (expected_backend == "engine2d-vulkan" and
+         artifact.device_identity == 0):
+        return "physical-device-provenance-missing:" + expected_backend
+    if not _vulkan_uuid_valid(artifact.physical_device_uuid) or
+        not _vulkan_uuid_valid(artifact.driver_uuid):
+        return "physical-device-uuid-missing:" + expected_backend
+    if artifact.backend_handle <= 0 or artifact.submit_count <= 0 or
+        artifact.fence_count <= 0 or artifact.readback_source != "device_readback" or
+        artifact.fallback_required:
+        return "completed-device-readback-missing:" + expected_backend
+    if val Some(capture) = artifact.capture:
+        if capture.metadata.fixture_id != scene.fixture_id or
+            capture.metadata.fixture_digest != scene.source_sha256:
+            return "capture-fixture-domain-mismatch:" + expected_backend
+        if capture.metadata.width != 16 or capture.metadata.height != 16 or
+            capture.metadata.crop_x != 0 or capture.metadata.crop_y != 0 or
+            capture.metadata.crop_width != 16 or
+            capture.metadata.crop_height != 16:
+            return "capture-controlled-extent-mismatch:" + expected_backend
+        match final_output_validate(capture):
+            case Err(err): return "capture-invalid:" + expected_backend + ":" + err.code
+            case Ok(_): return ""
+    "final-output-capture-missing:" + expected_backend
+
+fn qualify_physical_vulkan_2d_pair(scene: PreparedRenderScene,
+    engine2d: VulkanBackendCaptureArtifact?,
+    skia: VulkanBackendCaptureArtifact?) -> Vulkan2DQualificationReceipt:
+    """Compare only two completed, authenticated physical Vulkan captures.
+
+    The pinned file is hashed here, independently of either producer's digest.
+    Backend owners can supply capture and selected-device UUID metadata, but
+    this function cannot authenticate a caller-constructed artifact. Matching
+    fields and pixels remain candidates until independent native provenance.
+    """
+    if not _controlled_scene_recognized(scene):
+        return _blocked("unrecognized-controlled-fixture", "", "", "")
+    if not file_exists(scene.source_path):
+        return _blocked("fixture-source-missing", "", "", "")
+    val independently_hashed_source = sha256_text(read_file(scene.source_path))
+    if independently_hashed_source != scene.source_sha256:
+        return _blocked("fixture-source-sha256-mismatch",
+            independently_hashed_source, "", "")
+    if scene.render_degraded or scene.degrade_reason != "":
+        return _blocked("source-render-degraded", independently_hashed_source,
+            "", "")
+    if val Some(engine_artifact) = engine2d:
+        if val Some(skia_artifact) = skia:
+            val engine_reason = _artifact_reason(scene, engine_artifact,
+                "engine2d-vulkan")
+            if engine_reason != "":
+                return _blocked(engine_reason, independently_hashed_source,
+                    engine_artifact.device_name, skia_artifact.device_name)
+            val skia_reason = _artifact_reason(scene, skia_artifact,
+                "upstream-skia-ganesh-vulkan")
+            if skia_reason != "":
+                return _blocked(skia_reason, independently_hashed_source,
+                    engine_artifact.device_name, skia_artifact.device_name)
+            if engine_artifact.device_type != skia_artifact.device_type or
+                engine_artifact.physical_device_uuid != skia_artifact.physical_device_uuid or
+                engine_artifact.driver_uuid != skia_artifact.driver_uuid:
+                return _blocked("physical-device-pair-mismatch",
+                    independently_hashed_source,
+                    engine_artifact.device_name, skia_artifact.device_name)
+            if val Some(left) = engine_artifact.capture:
+                if val Some(right) = skia_artifact.capture:
+                    val exact = FinalOutputTolerance(fixture_id: scene.fixture_id,
+                        verified_source_digest: independently_hashed_source,
+                        max_channel_delta: 0, max_excess_pixels: 0)
+                    val comparison = compare_final_output_pixels(left, right, exact)
+                    if comparison.passed:
+                        match _controlled_capture_matches_oracle(scene, left):
+                            case Err(reason):
+                                return _blocked("engine2d-oracle-unavailable:" + reason,
+                                    independently_hashed_source,
+                                    engine_artifact.device_name, skia_artifact.device_name)
+                            case Ok(matches):
+                                if not matches:
+                                    return Vulkan2DQualificationReceipt(
+                                        status: "fail",
+                                        reason: _controlled_oracle_mismatch_reason(scene,
+                                            "engine2d-vulkan"),
+                                        source_sha256: independently_hashed_source,
+                                        engine2d_device: engine_artifact.device_name,
+                                        skia_device: skia_artifact.device_name,
+                                        comparison: Some(comparison))
+                        match _controlled_capture_matches_oracle(scene, right):
+                            case Err(reason):
+                                return _blocked("skia-oracle-unavailable:" + reason,
+                                    independently_hashed_source,
+                                    engine_artifact.device_name, skia_artifact.device_name)
+                            case Ok(matches):
+                                if not matches:
+                                    return Vulkan2DQualificationReceipt(
+                                        status: "fail",
+                                        reason: _controlled_oracle_mismatch_reason(scene,
+                                            "upstream-skia-ganesh-vulkan"),
+                                        source_sha256: independently_hashed_source,
+                                        engine2d_device: engine_artifact.device_name,
+                                        skia_device: skia_artifact.device_name,
+                                        comparison: Some(comparison))
+                    # This contract can validate supplied bytes and domains,
+                    # but it cannot authenticate the caller's device claims.
+                    # A trusted native capture/replay adapter must promote a
+                    # matching candidate after independent provenance checks.
+                    return Vulkan2DQualificationReceipt(
+                        status: if comparison.passed: "candidate" else: "fail",
+                        reason: if comparison.passed:
+                            "pixel-match-provenance-unverified" else:
+                            comparison.status,
+                        source_sha256: independently_hashed_source,
+                        engine2d_device: engine_artifact.device_name,
+                        skia_device: skia_artifact.device_name,
+                        comparison: Some(comparison))
+            _blocked("final-output-capture-missing", independently_hashed_source,
+                engine_artifact.device_name, skia_artifact.device_name)
+        else:
+            _blocked("upstream-skia-ganesh-vulkan-capture-missing",
+                independently_hashed_source, engine_artifact.device_name, "")
+    else:
+        _blocked("engine2d-vulkan-capture-missing",
+            independently_hashed_source, "", "")
+
+export CONTROLLED_RECT_FIXTURE_PATH, CONTROLLED_RECT_FIXTURE_SHA256
+export CONTROLLED_CLIP_FIXTURE_PATH, CONTROLLED_CLIP_FIXTURE_SHA256
+export PreparedRenderScene, VulkanBackendCaptureArtifact,
+    Vulkan2DQualificationReceipt
