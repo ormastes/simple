@@ -383,6 +383,8 @@ pub fn runtime_symbols_for_baremetal(is_baremetal: bool) -> Vec<&'static str> {
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
 pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
+    // The struct allocator is called directly by generated JIT code.
+    "rt_struct_alloc",
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
@@ -657,6 +659,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_payload",
     // Raw memory allocation
     "rt_alloc",
+    "rt_realloc",
     "rt_free",
     "rt_ptr_to_value",
     "rt_value_to_ptr",
