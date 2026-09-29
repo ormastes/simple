@@ -495,13 +495,27 @@ if grep -Eq 'continue-on-error:|\|\|[[:space:]]*true|^  (verify-qemu|x86-baremet
 fi
 [ "$(grep -Fc "'scripts/check/check-native-option-try-target-fail.shs'" "${multiplatform}")" -eq 2 ] || fail "target Option compile helper workflow trigger missing"
 [ "$(grep -Fc "'test/fixtures/compiler/native_option_try_*_loud.spl'" "${multiplatform}")" -eq 2 ] || fail "target Option compile fixture workflow trigger missing"
-grep -Fq 'run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full' "${freebsd_workflow}" || fail "FreeBSD full execution wiring missing"
-grep -Fq 'if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi' "${freebsd_workflow}" || fail "FreeBSD QEMU workflow cannot use KVM acceleration"
+# Hosted runners do not carry the reviewed qcow2 or its digest. Require the
+# offline media refusal contract here; the full QEMU proof runs only on an
+# admitted host. A workflow claiming a VM result without media is false green.
+for required in \
+  'name: FreeBSD offline media admission contract' \
+  'sh -n scripts/qemu/simple-freebsd-media.shs' \
+  'sh -n scripts/check/check-freebsd-bootstrap-qemu.shs' \
+  'sh -n scripts/check/check-freebsd-wm-seam-refusal.shs' \
+  'if sh scripts/qemu/simple-freebsd-media.shs --check; then' \
+  'echo "unprovisioned runner unexpectedly admitted FreeBSD media" >&2' \
+  'exit 1'; do
+  grep -Fq "${required}" "${freebsd_workflow}" || fail "FreeBSD offline media refusal wiring missing: ${required}"
+done
+if grep -Eq 'check-freebsd-bootstrap-qemu\.shs --(full|smoke)|continue-on-error:|\|\|[[:space:]]*true' "${freebsd_workflow}"; then
+  fail "FreeBSD hosted media contract claims VM proof or softens failure"
+fi
 freebsd_qemu=scripts/check/check-freebsd-bootstrap-qemu.shs
 grep -Fq 'FREEBSD_VERSION="14.4"' "${freebsd_qemu}" || fail "FreeBSD QEMU image is not a supported release"
 grep -Fq 'simple-freebsd-media.shs' "${freebsd_qemu}" || fail "FreeBSD QEMU image admission helper missing"
 grep -Fq 'simple-freebsd-media.shs' scripts/check/check-freebsd-wm-seam-refusal.shs || fail "FreeBSD WM seam media admission helper missing"
-if grep -Eq 'Latest|--download|curl |wget ' "${freebsd_qemu}"; then
+if grep -Eq 'Latest|--download|(^|[;|&]|\$\()[[:space:]]*(if[[:space:]]+)?(![[:space:]]+)?(command[[:space:]]+)?(curl|wget)([[:space:]]|$)' "${freebsd_qemu}"; then
   fail "FreeBSD QEMU media admission must remain offline and pinned"
 fi
 grep -Fq '#cloud-config' "${freebsd_qemu}" || fail "FreeBSD firstboot seed is not cloud-config"
@@ -512,7 +526,17 @@ grep -Fq 'command -v perl' "${freebsd_qemu}" || fail "FreeBSD bootstrap does not
 write_files_line=$(grep -n '^write_files:' "${freebsd_qemu}" | cut -d: -f1)
 runcmd_line=$(grep -n '^runcmd:' "${freebsd_qemu}" | cut -d: -f1)
 [ "${write_files_line}" -lt "${runcmd_line}" ] || fail "FreeBSD firstboot flags are written after runcmd"
-grep -Fq 'if ! $VM_SSH "cd ${VM_HOME}/simple && env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp --jobs=2"; then' "${freebsd_qemu}" || fail "FreeBSD bootstrap output or library search paths are incorrect"
+for required in \
+  'GUEST_ENV="env LIBRARY_PATH=/usr/local/lib PKG_CONFIG_PATH=/usr/local/libdata/pkgconfig"' \
+  '--backend=llvm --mode=dynload --full-bootstrap --stop-after-stage2 --no-mcp --jobs=2' \
+  'produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage3 --reason=verify-landed-compiler-fix' \
+  'freebsd-stage3-planner-admission-v2.env\" --resume-stage3-from-admitted=build/bootstrap --mode=dynload --no-mcp --jobs=1' \
+  'produce-bootstrap-planner-admission-v2.shs --target=//bootstrap:stage4 --reason=self-host-convergence-check' \
+  'freebsd-stage4-planner-admission-v2.env\" --resume-stage4-from-admitted=build/bootstrap --release --strategy=full --mode=dynload --no-mcp --jobs=1'; do
+  grep -Fq -- "${required}" "${freebsd_qemu}" || fail "FreeBSD admitted bootstrap wiring missing: ${required}"
+done
+[ "$(grep -Fc '${GUEST_ENV} sh scripts/bootstrap/bootstrap-from-scratch.sh' "${freebsd_qemu}")" -eq 3 ] ||
+  fail "FreeBSD Stage 2/3/4 bootstrap commands do not all use library search paths"
 grep -Fq 'error: failed to fingerprint Rust seed inputs' scripts/bootstrap/bootstrap-from-scratch.sh || fail "seed fingerprint failure is silent"
 grep -Fq 'STAGE_BIN="${VM_HOME}/simple/build/bootstrap/stage3/x86_64-unknown-freebsd/simple"' scripts/check/check-freebsd-bootstrap-qemu.shs || fail "FreeBSD Stage4 dynload proof lacks the fresh Stage3 path"
 freebsd_dynload_archive_body=$(awk '
