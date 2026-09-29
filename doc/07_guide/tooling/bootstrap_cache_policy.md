@@ -55,25 +55,16 @@ compiler binaries and attempt evidence are outside the clean scope.
 A normal failed build releases its writer after the build stops, so a matching
 retry resumes completed work. A signal or forced process termination retains
 the writer when shutdown is uncertain. A dead wrapper PID alone cannot prove
-its descendants stopped. Verify their termination first, then explicitly
-repair the recorded idle attempt using its `.writer/nonce`:
+its descendants stopped. The current lock records identify only the acquiring
+wrapper; execution can continue in another session, cgroup or systemd unit.
+`--repair-idle-writer=RECORDED_NONCE` checks ownership and identity, then refuses
+these incomplete records without removing the lock or cached objects. Neither
+a nonce nor an absent wrapper process group proves execution stopped.
 
-```sh
-sh scripts/bootstrap/clean-bootstrap-cache.shs \
-  --root /absolute/owned/cache-root --lineage /absolute/owned/cache-root/selected-entry \
-  --repair-idle-writer=RECORDED_NONCE
-```
-
-Repair checks owner, PID and nonce, refuses a live or ambiguous writer, removes
-only the lock records and preserves objects. The nonce selects the attempt;
-the existing portable process-lock authority must positively verify that its
-recorded PID/start identity and complete native process group are absent.
-Missing or ambiguous process-group evidence refuses repair. It is separate
-from cache clean.
-The operator must also resolve the bootstrap output/session lock using the
-existing process-group ownership protocol. There is no automatic crash-lock
-reclamation.
-
+Genuine execution-owner registration and unit/group verification for manual
+crash repair remain an open follow-up. There is no automatic crash-lock
+reclamation or supported manual removal of an unresolved writer. Caught-failure
+retry and explicit clean of an owned idle lineage remain available.
 ## Evidence and progress
 
 Each retry gets a unique attempt archive. Terminal files have SHA-256 receipts
@@ -84,10 +75,10 @@ Enabling a cache or finding a directory is never reported as a cache hit.
 
 Focused contract: `test/01_unit/scripts/bootstrap_cache_lineage_resume_test.shs`.
 It exercises partial failure/retry, incompatible bindings, explicit invalidation,
-idle/active clean, signals, forced termination, guarded manual repair and receipt
+idle/active clean, signals, forced termination, manual repair refusal and receipt
 counters without a full bootstrap.
 
-The focused owner contract passed once on Windows Git Bash and once on Linux
+The original focused owner contract passed once on Windows Git Bash and once on Linux
 Ubuntu WSL using private fixtures. These checks verify admission, preservation
 and cleanup rules; they do not verify a full compiler build. The native compiler
 summary change remains subject to the next candidate's normal compiler smoke.

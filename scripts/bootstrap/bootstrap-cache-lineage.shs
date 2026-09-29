@@ -142,7 +142,7 @@ bootstrap_cache_native_environment() (
   ' "$bc_names" "$bc_names.values"
 )
 bootstrap_cache_writer_acquire() {
-  mkdir "$1.writer" 2>/dev/null || bootstrap_cache_error "active or unresolved writer: $1.writer; after verifying all descendants stopped, use clean-bootstrap-cache.shs --root CACHE_ROOT --lineage $1 --repair-idle-writer=NONCE (nonce recorded in .writer/nonce); objects preserved" || return 1
+  mkdir "$1.writer" 2>/dev/null || bootstrap_cache_error "active or unresolved writer: $1.writer; wrapper-only crash records cannot authorize repair; genuine execution-owner evidence required; objects preserved" || return 1
   printf '%s\n' "$$" > "$1.writer/pid" || return 1
   printf '%s\n' "$(date -u '+%Y%m%dT%H%M%S')-$$" > "$1.writer/nonce" || return 1
   printf '%s\n' "$(id -u)" > "$1.writer/owner" || return 1
@@ -215,28 +215,12 @@ bootstrap_cache_repair_idle_writer() (
   [ "$(cat "$bc_lock/owner")" = "$(id -u)" ] && [ "$(cat "$bc_lock/nonce")" = "$3" ] || return 1
   bc_pid=$(cat "$bc_lock/pid")
   case "$bc_pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
-  # Reuse the reviewed native process-group authority. The nonce only selects
-  # the attempt; positive kernel proof of an absent group authorizes repair.
-  if kill -0 "$bc_pid" 2>/dev/null; then bootstrap_cache_error 'writer PID still live; idle repair refused'; return 1; fi
-  bc_process_helper=${BOOTSTRAP_CACHE_PROCESS_HELPER_PATH:-${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-}}
-  [ -f "$bc_process_helper" ] && [ ! -L "$bc_process_helper" ] &&
-    [ -f "$bc_lock/process.env" ] && [ ! -L "$bc_lock/process.env" ] ||
-    bootstrap_cache_error 'process-group authority unavailable; writer retained' || return 1
-  awk -F= 'NR==1 {if($1!="pid" || $2!~/^[1-9][0-9]*$/) bad=1} NR==2 {if($1!="start_hex" || $2!~/^[0-9a-f]+$/) bad=1} NR==3 {if($1!="pgid" || $2!~/^[1-9][0-9]*$/) bad=1} END {exit(bad || NR!=3)}' "$bc_lock/process.env" || return 1
-  bc_native_pid=$(sed -n 's/^pid=//p' "$bc_lock/process.env")
-  bc_native_start=$(sed -n 's/^start_hex=//p' "$bc_lock/process.env")
-  bc_native_pgid=$(sed -n 's/^pgid=//p' "$bc_lock/process.env")
-  [ "$(perl "$bc_process_helper" claim-state "$bc_native_pid" "$bc_native_start" "$bc_native_pgid")" = dead ] ||
-    bootstrap_cache_error 'live/unknown process-group authority; writer retained' || return 1
-  mkdir "$bc_lock.repair" 2>/dev/null || return 1
-  trap 'rmdir "$bc_lock.repair"' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  [ "$(cat "$bc_lock/nonce")" = "$3" ] || return 1
-  [ "$(perl "$bc_process_helper" claim-state "$bc_native_pid" "$bc_native_start" "$bc_native_pgid")" = dead ] || return 1
-  rm -f "$bc_lock/pid" "$bc_lock/nonce" "$bc_lock/owner" "$bc_lock/birth" "$bc_lock/process.env" && rmdir "$bc_lock"
-  echo "repaired explicitly confirmed idle writer: $2; cache objects preserved"
+  # Current records identify the acquiring wrapper only. A compiler may run
+  # in a different session, cgroup or systemd unit, so even an absent wrapper
+  # group does not prove the actual cache writer stopped. No execution-owner
+  # receipt is currently registered here: preserve the lock until one exists.
+  bootstrap_cache_error 'execution ownership unproven: wrapper PID/group evidence cannot authorize repair; writer and cache retained; genuine execution-owner repair remains unavailable'
+  return 1
 )
 bootstrap_cache_prepare() {
   # ROOT DIRECTORY PHASE PRODUCER-SHA INPUTS-SHA ENTRY reuse|invalidate|clean
