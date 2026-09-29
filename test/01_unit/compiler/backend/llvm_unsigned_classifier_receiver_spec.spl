@@ -1,0 +1,53 @@
+# Purpose: preserve the receiver ABI of LLVM unsigned type classification.
+# @req REQ-LLVM-UNSIGNED-RECEIVER
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.backend.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.mir.mir_data.*
+
+fn classifier_math_ir(kind: MirTypeKind) -> text:
+    val translator = MirToLlvm.create("test.llvm.unsigned_receiver", CodegenTarget.X86_64, nil)
+    translator.local_types[0] = "i64"
+    translator.defined_locals[0] = true
+    translator.llvm_cast_impl(LocalId(id: 1), mir_operand_copy(LocalId(id: 0)), MirType(kind: kind))
+    val amount = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(32), MirType.i64()))
+    val divisor = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(10), MirType.i64()))
+    translator.translate_binop(LocalId(id: 2), MirBinOp.Shr, mir_operand_copy(LocalId(id: 1)), amount)
+    translator.translate_binop(LocalId(id: 3), MirBinOp.Div, mir_operand_copy(LocalId(id: 1)), divisor)
+    translator.builder.build()
+
+describe "LLVM unsigned classifier receiver ABI":
+    it "classifies every unsigned width through an instance call":
+        step("classifies every unsigned width through an instance call")
+        val translator = MirToLlvm.create("test.llvm.unsigned_kinds", CodegenTarget.X86_64, nil)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.U8)).to_equal(true)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.U16)).to_equal(true)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.U32)).to_equal(true)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.U64)).to_equal(true)
+
+    it "keeps signed and noninteger kinds outside unsigned classification":
+        step("keeps signed and noninteger kinds outside unsigned classification")
+        val translator = MirToLlvm.create("test.llvm.signed_kinds", CodegenTarget.X86_64, nil)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.I8)).to_equal(false)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.I16)).to_equal(false)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.I32)).to_equal(false)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.I64)).to_equal(false)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.F64)).to_equal(false)
+        expect(translator.is_unsigned_mir_kind(MirTypeKind.Bool)).to_equal(false)
+
+    it "carries an unsigned cast into logical shift and unsigned division":
+        step("carries an unsigned cast into logical shift and unsigned division")
+        val ir = classifier_math_ir(MirTypeKind.U64)
+        expect(ir).to_contain("lshr i64")
+        expect(ir).to_contain("udiv i64")
+        expect(ir.contains("ashr i64")).to_equal(false)
+        expect(ir.contains("sdiv i64")).to_equal(false)
+
+    it "preserves arithmetic shift and signed division for signed casts":
+        step("preserves arithmetic shift and signed division for signed casts")
+        val ir = classifier_math_ir(MirTypeKind.I64)
+        expect(ir).to_contain("ashr i64")
+        expect(ir).to_contain("sdiv i64")
+        expect(ir.contains("lshr i64")).to_equal(false)
+        expect(ir.contains("udiv i64")).to_equal(false)
