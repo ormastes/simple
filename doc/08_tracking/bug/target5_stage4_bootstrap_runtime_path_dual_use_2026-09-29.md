@@ -63,3 +63,24 @@ bootstrap producer or a refreshed pure-Simple Stage2 archive contract, not a
 repeat of this debug run. Its log is
 `build/target5-link-reproduce/stage4_build_named_sffi.log` in the isolated
 worktree.
+
+Optimized bootstrap follow-up: a release-profile bootstrap-only executable
+(SHA-256 `640620f7f31cbc66b0656f1d8f247612e847c40db35eda128af9e0f900db2060`)
+completed all 821 source-closure files in 22 seconds, then reported
+`semantic: unknown extern function: rt_string_substr_from`. The symbol was
+already present in native C and Rust runtimes and native codegen's SFFI table,
+but was missing from interpreter dispatch. The new handler returns owned text,
+counts UTF-8 characters, clamps a negative start to zero, and rejects bad
+argument types/counts. Its focused test passed, including dispatch
+registration and distinct zero-offset text ownership.
+
+After rebuilding the optimized bootstrap executable, the same Stage4 command
+passed that foreign-call site and entered parse. A 300-second bound expired
+with 43 of 821 files parsed; the last progress record was
+`src/compiler/50.mir/hwir/trap_frontend.spl`. The run reported no later
+semantic or link failure, but produced no Stage4 compiler. Logs are
+`build/target5-link-reproduce/stage4_release_seed{,_substr}.log`. The current
+blocker is the slow bootstrap interpreter parse path on this large closure.
+Do not infer a link or size pass from the partial parse. A refreshed pure-Simple
+Stage2 archive contract or a measured parse-path improvement is needed before
+the current-source Stage4 compiler and hello capture can be completed.
