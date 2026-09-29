@@ -23,6 +23,7 @@ bootstrap_resume_log=
 bootstrap_resume_release_lock=1
 stage3_guard_unit=
 stage3_guard_evidence=
+stage3_containment_backend=systemd
 bootstrap_resume_verdict() {
   bootstrap_resume_verdict_written=1
   line="VERDICT — $1"
@@ -34,6 +35,11 @@ bootstrap_resume_verdict() {
 bootstrap_resume_trap() {
   status=$?
   sig=${1:-none}
+  if [ "$stage3_containment_backend" = cgroupfs ] &&
+     [ -n "${stage3_guard_unit:-}" ]; then
+    bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
+      "$stage3_guard_evidence" || bootstrap_resume_release_lock=0
+  fi
   if [ "$sig" != none ]; then
     trap - HUP INT TERM
     case "$sig" in HUP) status=129 ;; INT) status=130 ;; TERM) status=143 ;; esac
@@ -698,6 +704,65 @@ bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" ||
 stage3_guard_watch=disabled-platform
 case "$platform" in
   *-linux-*)
+    stage3_containment_backend=${SIMPLE_BOOTSTRAP_STAGE3_CONTAINMENT:-systemd}
+    case "$stage3_containment_backend" in
+    cgroupfs)
+      stage3_cgroupfs_python=$(command -v python3) ||
+        bootstrap_stage3_error 'cgroupfs Python unavailable'
+      stage3_cgroupfs_python_sha=$(bootstrap_stage3_hash_file "$stage3_cgroupfs_python") ||
+        bootstrap_stage3_error 'cgroupfs Python identity unavailable'
+      stage3_cgroupfs_helper="$root/scripts/bootstrap/lib/stage3-cgroupfs.py"
+      # This helper is executable bootstrap authority. Bind its bytes to the
+      # admitted source HEAD, rather than accepting a fresh hash of a dirty file.
+      stage3_cgroupfs_helper_blob=$(git -C "$root" rev-parse \
+        HEAD:scripts/bootstrap/lib/stage3-cgroupfs.py) ||
+        bootstrap_stage3_error 'cgroupfs helper is absent from admitted source'
+      [ "$(git -C "$root" hash-object "$stage3_cgroupfs_helper")" = \
+        "$stage3_cgroupfs_helper_blob" ] ||
+        bootstrap_stage3_error 'cgroupfs helper differs from admitted source'
+      stage3_cgroupfs_blob_snapshot=$(mktemp "$tmp/cgroupfs-source-blob.XXXXXX") ||
+        bootstrap_stage3_error 'cgroupfs source snapshot unavailable'
+      git -C "$root" cat-file blob "$stage3_cgroupfs_helper_blob" \
+        >"$stage3_cgroupfs_blob_snapshot" || {
+          rm -f "$stage3_cgroupfs_blob_snapshot"
+          bootstrap_stage3_error 'cgroupfs source blob unavailable'
+        }
+      stage3_cgroupfs_helper_sha=$(bootstrap_stage3_hash_file \
+        "$stage3_cgroupfs_blob_snapshot") ||
+        bootstrap_stage3_error 'cgroupfs source blob hash unavailable'
+      rm -f "$stage3_cgroupfs_blob_snapshot"
+      stage3_guard_unit=${SIMPLE_BOOTSTRAP_STAGE3_CGROUPFS_WORKER:-}
+      stage3_guard_evidence="$memory_admission"
+      bootstrap_stage3_cgroupfs_call() {
+        [ "$(bootstrap_stage3_hash_file "$stage3_cgroupfs_helper")" = \
+          "$stage3_cgroupfs_helper_sha" ] || return 125
+        [ "$(bootstrap_stage3_hash_file "$stage3_cgroupfs_python")" = \
+          "$stage3_cgroupfs_python_sha" ] || return 125
+        "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" "$1" \
+          --group "$stage3_guard_unit" \
+          --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+          --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
+      }
+      bootstrap_stage3_cgroupfs_call validate >>"$memory_admission" ||
+        bootstrap_stage3_error 'delegated cgroupfs containment unavailable'
+      {
+        echo "containment_python_path=$stage3_cgroupfs_python"
+        echo "containment_python_sha256=$stage3_cgroupfs_python_sha"
+        echo "containment_helper_source_blob=$stage3_cgroupfs_helper_blob"
+      } >>"$memory_admission"
+      # These functions are the existing watch/signal cleanup interface. The
+      # default systemd definitions remain effective outside this explicit case.
+      bootstrap_stage3_memory_terminate_unit() {
+        [ "$1" = "$stage3_guard_unit" ] || return 125
+        bootstrap_stage3_cgroupfs_call stop || return 125
+        echo 'containment_kernel_shutdown=empty' >>"$2"
+      }
+      bootstrap_stage3_memory_unit_inactive() {
+        [ "$1" = "$stage3_guard_unit" ] || return 125
+        bootstrap_stage3_cgroupfs_call inactive
+      }
+      ;;
+    systemd)
     command -v systemd-run >/dev/null 2>&1 &&
       command -v systemctl >/dev/null 2>&1 &&
       command -v timeout >/dev/null 2>&1 &&
@@ -709,6 +774,10 @@ case "$platform" in
     [ "$(timeout -k 1 3 systemctl --user show "$stage3_guard_unit" \
         --property=LoadState --value 2>/dev/null)" = not-found ] ||
       bootstrap_stage3_error 'Stage 3 cgroup unit name collision'
+      ;;
+    *) bootstrap_stage3_error 'unknown Stage 3 containment backend' ;;
+    esac
+    stage3_guard_watch=linux-proc-memavailable
     ;;
 esac
 {
@@ -811,7 +880,22 @@ set +e
 worker="$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"
 [ -x "$worker" ] || bootstrap_stage3_error "Stage 3 cgroup worker is not executable: $worker"
 stage3_timeout_seconds=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
-if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
+if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
+   [ "$stage3_containment_backend" = cgroupfs ]; then
+  bootstrap_stage3_cgroupfs_call validate >/dev/null ||
+    bootstrap_stage3_error 'cgroupfs authority changed before launch'
+  "$stage3_cgroupfs_python" -I "$stage3_cgroupfs_helper" join \
+    --group "$stage3_guard_unit" \
+    --high "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    --maximum "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" -- \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
     --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M" \
@@ -914,6 +998,10 @@ while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_gu
 done
 wait "$stage3_guard_pid"
 status=$?
+if [ "$stage3_containment_backend" = cgroupfs ]; then
+  bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
+    "$memory_admission" || status=125
+fi
 if [ -n "$stage3_guard_unit" ] &&
    ! bootstrap_stage3_memory_unit_inactive "$stage3_guard_unit"; then
   echo 'runtime_headroom_watch_shutdown=unverified-after-supervisor-exit' \

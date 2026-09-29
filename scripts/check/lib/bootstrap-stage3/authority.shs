@@ -4099,6 +4099,67 @@ public static class Stage3MaterializedConsumer {
         if (!GetFileInformationByHandle(h, out i)) throw Error("api.file-identity");
         return i;
     }
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern uint GetFileType(SafeFileHandle h);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, IntPtr info, uint size);
+    // Snapshot names are mutable; this is atomic replacement, not an identity
+    // compare-and-swap. Rename the held source, never dereference a swapped
+    // destination symlink, and retain all ancestor handles until publication.
+    public static void PublishSnapshot(string source, string destination) {
+        var held = new List<SafeFileHandle>();
+        try {
+            source = Path.GetFullPath(source);
+            destination = Path.GetFullPath(destination);
+            if (String.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("publication.same-path");
+            Parents(source, false, held);
+            Parents(destination, false, held);
+            using (var input = Open(source, true, 0x80010000u)) { // read + DELETE
+                var src = Identity(input);
+                if (GetFileType(input) != 1 || (src.Attributes & 0x410u) != 0 || src.Links != 1)
+                    throw new IOException("publication.source-not-regular");
+                using (var parent = Open(Path.GetDirectoryName(destination), true, 0)) {
+                    var dir = Identity(parent);
+                    if ((dir.Attributes & 0x410u) != 0x10u || src.Volume != dir.Volume)
+                        throw new IOException("publication.parent-or-volume");
+                    bool replace = false;
+                    uint attrs = GetFileAttributesW(destination);
+                    int error = Marshal.GetLastWin32Error();
+                    if (attrs != 0xFFFFFFFFu) {
+                        using (var previous = Open(destination, true, 0)) {
+                            var dst = Identity(previous);
+                            if (GetFileType(previous) != 1 || (dst.Attributes & 0x410u) != 0 ||
+                                dst.Links != 1 || dst.Volume != src.Volume)
+                                throw new IOException("publication.destination-not-regular");
+                        }
+                        replace = true;
+                    } else if (error != 2 && error != 3) {
+                        throw Error("publication.destination-attributes");
+                    }
+                    // FILE_RENAME_INFO: BOOL at0, aligned HANDLE, DWORD length,
+                    // UTF-16 filename. Absolute name; RootDirectory stays NULL.
+                    // No copy fallback: a cross-volume rename must fail closed.
+                    byte[] name = Encoding.Unicode.GetBytes(destination);
+                    int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                    int nameOffset = lengthOffset + 4;
+                    int size = nameOffset + name.Length + 2;
+                    IntPtr rename = Marshal.AllocHGlobal(size);
+                    try {
+                        Marshal.Copy(new byte[size], 0, rename, size);
+                        Marshal.WriteInt32(rename, replace ? 1 : 0);
+                        Marshal.WriteInt32(rename, lengthOffset, name.Length);
+                        Marshal.Copy(name, 0, IntPtr.Add(rename, nameOffset), name.Length);
+                        // Kernel rename replaces the final name without following
+                        // its reparse target. If initially absent, an appeared
+                        // destination is refused rather than overwritten.
+                        if (!SetFileInformationByHandle(input, 3, rename, (uint)size))
+                            throw Error("publication.rename");
+                    } finally { Marshal.FreeHGlobal(rename); }
+                }
+            }
+        } finally { foreach (var h in held) h.Dispose(); }
+    }
     // Retain handles without write/delete sharing through the protected action.
     // Starting at the volume/share root prevents ancestor rename/reparse swaps.
     static void Parents(string path, bool create, List<SafeFileHandle> held) {
@@ -4871,7 +4932,7 @@ public static class Stage3MaterializedConsumer {
             if (Fingerprint(policyHandle) != policyIdentity) throw new IOException("policy.changed");
             Tick();
             File.WriteAllText(Environment.GetEnvironmentVariable("STAGE3_RESULT"), result, new UTF8Encoding(false));
-            File.Move(Environment.GetEnvironmentVariable("STAGE3_RESULT"), Environment.GetEnvironmentVariable("STAGE3_OUTPUT"));
+            PublishSnapshot(Environment.GetEnvironmentVariable("STAGE3_RESULT"), Environment.GetEnvironmentVariable("STAGE3_OUTPUT"));
 
         } finally { watchdog.Dispose(); if (policyStream != null) policyStream.Dispose(); foreach (var h in held) h.Dispose(); }
     }
