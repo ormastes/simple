@@ -44,9 +44,24 @@ reads back the persisted generation before publishing `CURRENT`. The existing
 zero and one dependencies, but has no passing native execution receipt yet.
 The standalone Stage4 compiler cannot build this multi-module probe directly;
 the full self-hosted CLI rejected its first entry-closure build with
-`SCV-E-ADMISSION: compile-event-journal-missing`. The next bounded attempt must
-explicitly cold-initialize the checkout's SCV inventory, then run the binary.
+`SCV-E-ADMISSION: compile-event-journal-missing`. That attempt required an
+explicit cold initialization of the checkout's SCV inventory.
 No serializer correction or successful round trip is inferred from this check.
+
+Continuation on 2026-09-29: `SIMPLE_SCV_INVENTORY_COLD_INIT=1` passed the
+missing-journal gate, but the full self-hosted `native-build --entry-closure`
+command consumed CPU for over five minutes with no new log output or binary;
+the bounded diagnostic was terminated. The multi-file standalone Stage4 AOT
+probe stopped during source loading on the existing
+`src/app/package/registry/auth.spl` versus
+`src/app/package.registry/auth.spl` sanitized-module collision. A one-file
+runtime string-builder reproducer reached LLVM code generation, then `llc`
+exited 1 without a binary; the compiler reported an IR diagnostic path that
+was no longer present after the failed build. The source reproducer is
+`doc/09_report/compiler/evidence/target6_cas_text_builder_stage4_reproducer_20260929.spl`.
+These are build-path boundaries, not evidence that CAS serialization passed or
+failed. The next CAS test needs a qualified narrow entry-closure builder and
+must still prove persisted generation readback, load, pin, and decode.
 
 ## Candidate repair evidence
 
