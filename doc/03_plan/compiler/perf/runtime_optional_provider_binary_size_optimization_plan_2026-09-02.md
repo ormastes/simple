@@ -27,6 +27,10 @@ outdated SQLite contract in the available pure-Simple Stage2 tool; a refreshed
 bootstrap-only tool then hit the shared runtime-path/interpreter-provider
 conflict before codegen. The exact blocker and acceptance are in
 `doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
+The bootstrap provider now distinguishes an archive directory from a dynamic
+library path, and the generic SFFI error names its function and argument.
+Those focused Rust tests pass; a refreshed bootstrap executable and Stage4
+retry remain open.
 
 ## Phase 0 — Baselines and Attribution
 

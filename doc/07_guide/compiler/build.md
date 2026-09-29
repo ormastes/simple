@@ -86,6 +86,12 @@ capture is opt-in because it copies every link input and can be large. The
 archive records the Simple link; a matched C size claim also needs a C build
 using the same startup and required runtime/link inputs.
 
+For the bootstrap-only Rust tool, an existing directory in
+`SIMPLE_RUNTIME_PATH` supplies native link archives and leaves interpreter
+symbols on the static provider by default. An explicit runtime library file
+path still selects dynamic loading. `SIMPLE_RUNTIME_LOAD` can select a
+different interpreter mode when the path is a directory.
+
 ### Quality Commands
 
 ```bash
