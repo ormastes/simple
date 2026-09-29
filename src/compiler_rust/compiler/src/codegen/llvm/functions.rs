@@ -4039,6 +4039,35 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn typed_dict_len_llvm_uses_runtime_owner() {
+        let source = include_str!("../../../../../../test/fixtures/native/typed_dict_len/main.spl");
+        let mut parser = simple_parser::Parser::new(source);
+        let ast = parser.parse().expect("parse Dict length fixture");
+        let hir = crate::hir::lower(&ast).expect("type Dict length fixture");
+        let mir = crate::mir::lower_to_mir(&hir).expect("lower Dict length fixture");
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        let object = backend.compile(&mir).expect("emit actual LLVM Dict length object");
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("@rt_dict_len("), "Dict length must reference its runtime ABI: {ir}");
+        assert!(!ir.contains("rt_len_inline"), "typed Dict length must bypass the generic inline layout: {ir}");
+        for name in ["dict_len_field", "dict_len_alias_field", "dict_len_alias_local", "dict_len_parameter", "dict_len_receiver_once"] {
+            let start = ir.find(&format!("@{name}(" )).expect("exported length probe must survive object optimization");
+            let body = &ir[start..start + ir[start..].find("\n}").unwrap()];
+            assert!(body.contains("@rt_dict_len("), "{name}: actual probe must call the Dict owner: {body}");
+        }
+        backend.verify().unwrap();
+        // An opt-in test artifact feeds the separately owned Core C link/run.
+        // The test passes only its real compiler assertions; artifact emission
+        // does not claim that external execution happened.
+        if let Some(output) = std::env::var_os("SIMPLE_DICT_LEN_TEST_OBJECT") {
+            std::fs::write(output, &object).expect("write LLVM component object");
+        }
+        if let Some(output) = std::env::var_os("SIMPLE_DICT_LEN_TEST_IR") {
+            std::fs::write(output, &ir).expect("write LLVM component IR");
+        }
+    }
+
+    #[test]
     fn erased_collection_set_fallback_is_exact_arity_and_any_only() {
         // This control prevents one or many unrelated Owner.set symbols from
         // changing erased Dict dispatch: user targets are resolved directly,
