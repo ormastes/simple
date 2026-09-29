@@ -71,6 +71,17 @@ No fourth verify/fix cycle ran. Item 3 remains incomplete: the real driver
 quiet-resolver path is still opt-in, registry/extraction integration is
 unfinished, and the required cross-engine/NFR/self-hosted gates have not passed.
 
+## Diagnostic manual generation (2026-09-30)
+
+The same Phase 1 runner generated the mirrored manual without executing the
+capped integration tests. It reported one complete document and zero stubs,
+but also seven authoring warnings: short introductory documentation, missing
+Overview/Description and Syntax/Examples sections, and missing requirement,
+plan, design, and research links. The generated scenario steps and folded
+source were inspected. Zero stubs does not establish manual-quality acceptance;
+that gate remains open along with admitted docgen/maintenance and execution.
+Log: `build/native_probe/index-compatibility-tdd/item3-docgen.log`.
+
 Independent read-only review also identified filter contract gaps: admission
 does not constrain Array element type or prove a boolean callback result;
 the existing MIR filter path decodes i64 and treats a nonzero callback result
