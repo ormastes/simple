@@ -65,6 +65,9 @@ use compiler.driver.cache.phase_compatibility_admission.{
 }
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    cold_hir_native_objects_persist_v1
+}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_codegen_schedule_v1}
 use compiler.driver.action_graph.scc_compile_outputs.{
     SccCompileOutputsV1, SccModuleCompileOutputV1
@@ -1011,15 +1014,50 @@ pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV
 # keeps a compact post-codegen path binding for the cold graph publisher; warm
 # builds and compiles without a frozen HIR inventory pay no extra allocation.
 pub fn driver_cold_hir_record_verified_object_v1(
-    ctx: CompileContext, module_name: text, object_path: text
+    ctx: CompileContext, module_name: text, object_path: text,
+    capsule_identity: text
 ) -> text:
     if ctx.cold_hir_typed_receipts.len() == 0:
         return ""
-    if module_name == "" or object_path == "":
+    if module_name == "" or object_path == "" or capsule_identity == "":
         return "cold-hir-object-identity-invalid"
-    if ctx.cold_hir_native_object_paths.has(module_name):
+    if ctx.cold_hir_native_object_paths.has(module_name) or
+            ctx.cold_hir_objectless_modules.has(module_name):
         return "cold-hir-object-duplicate:{module_name}"
     ctx.cold_hir_native_object_paths[module_name] = object_path
+    ctx.cold_hir_native_capsule_identities[module_name] = capsule_identity
+    ""
+
+pub fn driver_cold_hir_record_objectless_v1(
+    ctx: CompileContext, module_name: text
+) -> text:
+    if ctx.cold_hir_typed_receipts.len() == 0:
+        return ""
+    if module_name == "":
+        return "cold-hir-objectless-identity-invalid"
+    if ctx.cold_hir_objectless_modules.has(module_name) or
+            ctx.cold_hir_native_object_paths.has(module_name):
+        return "cold-hir-object-duplicate:{module_name}"
+    ctx.cold_hir_objectless_modules[module_name] = true
+    ""
+
+# Called after every object passed its native capsule gate and before linking.
+# A failed persistence leaves at most immutable, unreferenced CAS blobs; no
+# package-index pointer moves on this path.
+pub fn driver_cold_hir_persist_verified_objects_v1(
+    ctx: CompileContext, cache_root: text
+) -> text:
+    ctx.cold_hir_native_object_artifacts = []
+    if ctx.cold_hir_typed_receipts.len() == 0:
+        return ""
+    val persisted = cold_hir_native_objects_persist_v1(
+        cache_root, ctx.cold_hir_typed_receipts,
+        ctx.cold_hir_native_object_paths,
+        ctx.cold_hir_native_capsule_identities,
+        ctx.cold_hir_objectless_modules)
+    if persisted.is_err():
+        return persisted.unwrap_err()
+    ctx.cold_hir_native_object_artifacts = persisted.unwrap()
     ""
 
 # The owner-only cache checkpoint is the ONE failure path in this file that never
@@ -1789,6 +1827,10 @@ impl CompilerDriver:
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
             if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
+                val objectless_reason = driver_cold_hir_record_objectless_v1(
+                    ctx, name)
+                if objectless_reason != "":
+                    return CompileResult.CodegenError(objectless_reason)
                 continue
             val cache_source = driver_native_module_cache_source(ctx, name)
             var used_cache = false
@@ -1866,6 +1908,7 @@ impl CompilerDriver:
                     # MIR without changing either public interface. Bind the
                     # candidate to the CURRENT MIR/storage capsule receipt.
                     var capsule_matches = false
+                    var cached_capsule_identity = ""
                     if all_in_scope and scoped_outputs.len() == 1 and outputs_exist:
                         val cached_capsules = ctx.freeze_native_module_capsules_v1(
                             [name], object_base, backend_name, native_target,
@@ -1875,9 +1918,11 @@ impl CompilerDriver:
                             capsule_matches = cached_capsule.ok
                                 and scoped_outputs[0] == cached_capsule.object_path
                                 and driver_native_capsule_result_valid_v1(cached_capsule)
+                            if capsule_matches:
+                                cached_capsule_identity = cached_capsule.capsule_identity
                     if capsule_matches:
                         val handoff_reason = driver_cold_hir_record_verified_object_v1(
-                            ctx, name, scoped_outputs[0])
+                            ctx, name, scoped_outputs[0], cached_capsule_identity)
                         if handoff_reason != "":
                             return CompileResult.CodegenError(handoff_reason)
                         print "[NATIVE] cache hit: {name}"
@@ -2096,7 +2141,7 @@ impl CompilerDriver:
                     capsule.reason
                 if capsule.ok and capsule_reason == "":
                     val handoff_reason = driver_cold_hir_record_verified_object_v1(
-                        ctx, name, obj_path)
+                        ctx, name, obj_path, capsule.capsule_identity)
                     if handoff_reason != "":
                         return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
@@ -2215,6 +2260,12 @@ impl CompilerDriver:
             else:
                 ""
             return CompileResult.CodegenError("native-build produced no object files{entry_hint} — no modules compiled. Try adding an import (use std.text) or using the standard entry point.")
+
+        val cold_object_reason = driver_cold_hir_persist_verified_objects_v1(
+            ctx, machine_cache_root())
+        if cold_object_reason != "":
+            return CompileResult.CodegenError(
+                "cold HIR native object publication failed: {cold_object_reason}")
 
         if emit_object_requested:
             if object_files.len() == 0:
