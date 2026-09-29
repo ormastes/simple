@@ -29,8 +29,10 @@ conflict before codegen. The exact blocker and acceptance are in
 `doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
 The bootstrap provider now distinguishes an archive directory from a dynamic
 library path, and the generic SFFI error names its function and argument.
-Those focused Rust tests pass; a refreshed bootstrap executable and Stage4
-retry remain open.
+Those focused Rust tests pass. A refreshed debug bootstrap executable was
+built and attempted, but reached a 300-second timeout before a Stage4 result;
+an optimized producer is needed for the next attempt. The current-source
+Stage4 compiler and hello capture remain open.
 
 ## Phase 0 — Baselines and Attribution
 

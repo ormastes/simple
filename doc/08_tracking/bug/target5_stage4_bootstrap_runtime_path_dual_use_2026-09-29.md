@@ -53,5 +53,13 @@ The native-loader bootstrap provider now treats an existing
 An explicit library file path still selects `DynamicPath`. Three focused
 native-loader tests pass. The generic dynamic SFFI refusal is unchanged and
 now names the function and argument index; 21 focused compiler tests pass.
-The refreshed bootstrap tool has not been rebuilt or rerun with these edits,
-so Stage4 admission and the exact foreign call remain unresolved.
+The refreshed bootstrap-only executable was built with these edits (SHA-256
+`bb02dd648769b2dd5ca202a5f88d0fd1a5bd6aed401fc89e0c8892c522c2d3c4`).
+Its current-source Stage4 attempt emitted no dynamic-directory provider
+warning, but the debug executable reached a 300-second timeout before it
+reported a compiler result or the exact foreign call. The process is no
+longer live; no Stage4 compiler exists. The next attempt needs an optimized
+bootstrap producer or a refreshed pure-Simple Stage2 archive contract, not a
+repeat of this debug run. Its log is
+`build/target5-link-reproduce/stage4_build_named_sffi.log` in the isolated
+worktree.
