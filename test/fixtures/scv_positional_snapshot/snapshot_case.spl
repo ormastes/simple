@@ -1,0 +1,108 @@
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use app.io.file_ops.{path_absolute}
+use std.io_runtime.{dir_create_all, file_write, file_exists, file_read}
+use std.scv.compile_source_inventory.{
+    CompileSourceEventV1, compile_source_inventory_git_event_v1,
+    compile_source_inventory_apply_and_publish_v1
+}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+
+pub fn positional_snapshot_case(root_path: text, remaining_only: bool = false) -> text:
+    val root = path_absolute(root_path).replace("\\", "/")
+    if root == "" or not dir_create_all(root + "/src/app/demo"):
+        return "fixture-root"
+    if not dir_create_all(root + "/src/lib") or not dir_create_all(root + "/src/compiler"):
+        return "fixture-directories"
+    if not dir_create_all(root + "/test/fixture"):
+        return "fixture-entry-parent"
+    val paths = ["src/app/demo/main.spl", "src/app/demo/sibling.spl",
+        "src/lib/dependency.spl", "src/compiler/tool.spl",
+        "test/fixture/main.spl", "test/fixture/sibling.spl"]
+    val contents = ["use .sibling\nuse std.dependency\nfn main() -> i64: 0\n",
+        "pub fn sibling() -> i64: 7\n", "pub fn dependency() -> i64: 9\n",
+        "pub fn tool() -> i64: 11\n",
+        "use .sibling\nuse std.dependency\nfn main() -> i64: 0\n",
+        "pub fn sibling() -> i64: 13\n"]
+    var events: [CompileSourceEventV1] = []
+    var index = 0
+    while index < paths.len():
+        if not file_write(root + "/" + paths[index], contents[index]):
+            return "fixture-write"
+        events = events.push(compile_source_inventory_git_event_v1(
+            "create", paths[index], contents[index]))
+        index = index + 1
+    if not file_write(root + "/src/app/demo/unadmitted.spl", "fn unadmitted(): 99\n"):
+        return "unadmitted-write"
+    val cache = root + "/build/scv"
+    val published = compile_source_inventory_apply_and_publish_v1(cache, events)
+    if not published.valid:
+        return "publish:" + published.reason
+    val roots = native_build_snapshot_source_roots_v1(paths[0], [])
+    val snapshot = scv_compile_snapshot_acquire_v1(root, cache, roots)
+    if not snapshot.valid:
+        return "snapshot:" + snapshot.reason
+    # Cycle 2 already proved these criteria. The remaining component entry
+    # omits their assertions while retaining the real setup they depend on.
+    if not remaining_only:
+        if snapshot.inventory_count != 4:
+            return "default-inventory-count"
+        index = 0
+        while index < 4:
+            val frozen = snapshot.snapshot_root + "/" + paths[index]
+            if not file_exists(frozen) or file_read(frozen) != contents[index]:
+                return "frozen-membership:" + paths[index]
+            index = index + 1
+        if file_exists(snapshot.snapshot_root + "/" + paths[4]):
+            return "default-selected-unrelated-test-source"
+        if file_exists(snapshot.snapshot_root + "/src/app/demo/unadmitted.spl"):
+            return "unadmitted-source-leaked"
+        val sibling_roots = native_build_snapshot_source_roots_v1(paths[4], [])
+        val outside = scv_compile_snapshot_acquire_v1(root, cache, sibling_roots)
+        if not outside.valid:
+            return "entry-parent-snapshot:" + outside.reason
+        if outside.inventory_count != paths.len():
+            return "entry-parent-inventory-count"
+        index = 0
+        while index < paths.len():
+            if file_read(outside.snapshot_root + "/" + paths[index]) != contents[index]:
+                return "entry-parent-membership:" + paths[index]
+            index = index + 1
+        val explicit_roots = native_build_snapshot_source_roots_v1(paths[0], ["src/app/demo"])
+        val explicit_snapshot = scv_compile_snapshot_acquire_v1(root, cache, explicit_roots)
+        if not explicit_snapshot.valid:
+            return "explicit-snapshot:" + explicit_snapshot.reason
+        if explicit_snapshot.inventory_count != 2:
+            return "explicit-inventory-count"
+        index = 0
+        while index < 2:
+            if file_read(explicit_snapshot.snapshot_root + "/" + paths[index]) != contents[index]:
+                return "explicit-membership:" + paths[index]
+            index = index + 1
+        if file_exists(explicit_snapshot.snapshot_root + "/" + paths[2]):
+            return "explicit-selection-widened"
+    # realpath resolves an existing outside directory on POSIX. A nonexistent
+    # one uses an unnormalized fallback, making its exact refusal OS-dependent.
+    if not dir_create_all(root + "/../outside"):
+        return "outside-fixture-directory"
+    val escape = scv_compile_snapshot_acquire_v1(root, cache, ["../outside"])
+    if escape.valid or escape.reason != "snapshot-inventory-unavailable":
+        return "explicit-scope-escape:valid={escape.valid}:reason={escape.reason}"
+    if not file_write(root + "/src/app/demo/sibling.spl", "changed after admission\n"):
+        return "drift-write"
+    if file_read(snapshot.snapshot_root + "/src/app/demo/sibling.spl") != contents[1]:
+        return "frozen-source-drifted"
+    if not file_write(root + "/src/app/demo/sibling.spl", contents[1]):
+        return "drift-restore"
+    val missing = "src/app/demo/missing.spl"
+    val changed = compile_source_inventory_apply_and_publish_v1(cache,
+        [compile_source_inventory_git_event_v1("create", missing, "fn missing(): 1\n")])
+    if not changed.valid:
+        return "missing-publish:" + changed.reason
+    # The next generation names bytes that never existed in this fixture.
+    # It must not use the older snapshot or invent a live source fallback.
+    val refused = scv_compile_snapshot_acquire_v1(root, cache, roots)
+    if refused.valid:
+        return "missing-admitted-source-accepted"
+    if refused.reason != "snapshot-read-failed:" + missing:
+        return "wrong-refusal:" + refused.reason
+    ""
