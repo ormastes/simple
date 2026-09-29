@@ -151,3 +151,94 @@ Evidence under build/native_probe/config-layout/:
 No additional full rebuild is used to relabel the remaining failures as a
 pass. Required compiler/lib/MCP checks, core/native smokes and the new SSpec
 remain pending; landing and release are blocked.
+
+## Cycle 3 preparation: optional Let annotations
+
+Make the Let annotation explicitly HirType? and use bare lifted values from
+the four val/var producers. Preserve absence through substitution, type
+inference, effect/union inspection, MIR and post-mono verification. Backport
+main's existing HirTypeKind walker transport repair and nil-name guards;
+all unknown variants still fail with bounded E-MONO-031 receipts.
+
+Regressions cover absent/present annotations, rejecting a leftover type
+parameter, visiting an erroneous initializer under an absent annotation,
+and preserving absence while substituting the initializer. The native
+fixture now also checks an explicitly typed mutable binding.
+
+Schema regeneration is pending. The configured release-path executable
+identified itself as a Rust bootstrap seed and failed parsing the schema
+generator dependency execution_metrics.spl (unexpected Indent). It was not
+used again as normal tooling. The visitor generator strips optional node
+suffixes, and the codec already encodes nullable nodes with presence tags;
+their existing Let traversal/codec bodies therefore require no manual
+change. The schema registry and fold digest still require a successful
+generator run with qualified pure-Simple tooling before landing.
+
+Further error review found that the loader manifest refers to a legacy
+Effect enum whose full variant set is not declared by the current source.
+The two currently declared Effect types are not compatible substitutes.
+Main's lexer fix d55e104683c also changes Token.kind to a faithful wire-code
+enum; its import edits cannot safely be copied alone. Neither blocker is
+hidden with dummy types or removed validation.
+
+## Cycle 3 verification result
+
+Stage 2 admission passed on the optional-annotation candidate, including
+bootstrap sanity and receiver/runtime capability. Native ps monitoring
+observed 3,811,472 KiB peak process-tree RSS (3.64 GiB). Ten compiler workers
+were confirmed by a process sample. Neither the 8 GiB memory ceiling nor
+the 1 GiB free-disk reserve stopped the build.
+
+The full checked-in block-tail fixture remains FAIL. It completes HIR 1/1,
+then fails closed in value-struct layout validation with
+`internal error: value struct layout owner module index is invalid`.
+Exit 1, 0.76 seconds, 171,098,112 bytes maximum RSS. This happens before
+post-mono verification and does not by itself prove the earlier crash fixed.
+The relevant lookup is `owner_module_indices[walk.node_key]` in
+`src/compiler/35.semantics/value_struct_layout.spl`; no layout guard was removed.
+
+A separate scalar probe isolates tuple/inferred bindings and an explicitly
+typed mutable binding. Exact source bytes are retained as
+`test/fixtures/compiler/rc1_hir_let_annotation_scalar.spl`:
+
+- Previous admitted Stage 2 producer: native compilation exits 139 immediately
+  after the mono summary, using the identical scalar source.
+- New admitted Stage 2 producer: native compilation exits 0; its emitted
+  executable prints `optional let scalar probe PASS` and exits 0.
+- Negative control changes the mutable-binding expectation from 42 to 43.
+  It compiles, then exits 2 without printing PASS. The runtime checks are live.
+
+The compiler explicitly reports the bootstrap-flat pipeline: normal MIR
+lowering, borrow checking and flat MIR passes are skipped. These results
+prove a narrow native bootstrap regression repair; they do not qualify the
+full compiler, test runner or normal language pipeline. The SSpec cases
+remain unexecuted. Producer and fixture hashes are recorded in
+`build/native_probe/config-layout/optional-let-comparison.sha256`.
+
+Building the actual schema-generator entry with the new pure-Simple compiler
+was attempted in its own cache. It failed HIR on facade imports (including
+dir_create_all and env/runtime helpers) and generic Future/Poll declarations.
+No generator executable or regenerated schema is claimed. This confirms that
+regeneration is currently blocked by remaining compiler failures, rather than
+just a missing invocation.
+
+Other-session review: draft #2051 binds parallel CLI/test-runner producers
+after Stage 3 admission; its positive execution remains pending and it does
+not change this bootstrap resume's one-worker requirement. Draft #2061 fixes
+SHB reader/UI callback callers with execution pending. Neither is bootstrap
+completion evidence. Upstream 43ead88be55 couples generic-template HIR handling
+with MIR exclusion and a regression; deleting the current declaration fatal
+alone would be incomplete.
+
+**Overall STATUS: FAIL.** The three scoped rebuild cycles are exhausted.
+Further rebuilds require an explicit decision under the repository's
+AGENTS.md termination guard. No fourth full build or redundant full Stage 3
+sweep was started. Pending: layout-owner repair, full-closure resolution,
+generic-template backport, schema regeneration, SSpec/compiler/lib/MCP and
+core/native gates, bootstrap completion, and reviewed PR landing.
+
+Additional evidence: optional-let-stage2.log, optional-let-stage2-resources.tsv,
+optional-let-stage2-sample.txt, optional-let-fixture-build.log,
+optional-let-scalar-build.log, optional-let-scalar-run.log,
+optional-let-scalar-old-producer.log, optional-let-scalar-negative-run.log,
+and optional-let-schema-build.log under build/native_probe/config-layout/.

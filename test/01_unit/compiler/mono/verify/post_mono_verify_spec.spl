@@ -225,7 +225,7 @@ describe "post-monomorphization invariant verifier (plan section 9.5)":
     it "uses owner-qualified HIR variants in every semantic match arm":
         step("Bare variants collide across imported HIR enums in a self-compiled Stage 2")
         val src = post_mono_verify_source()
-        val type_walker = source_section(src, "me walk_type(ty: HirType):", "me walk_types(")
+        val type_walker = source_section(src, "me walk_type_kind(kind: HirTypeKind):", "me walk_type_kinds(")
         val expr_walker = source_section(src, "me walk_expr(expr: HirExpr):", "me walk_comp_clause(")
         val comp_walker = source_section(src, "me walk_comp_clause(clause: HirCompClause):", "# Patterns —")
         val pattern_walker = source_section(src, "me walk_pattern(pattern: HirPattern):", "me walk_stmt(")
@@ -234,7 +234,7 @@ describe "post-monomorphization invariant verifier (plan section 9.5)":
         val enum_payload_walker = source_section(src, "me walk_enum_payload(payload: HirEnumPayload?):", "me walk_pairs(")
         expect(count_of(type_walker, "case HirTypeKind.")).to_equal(27)
         expect(count_of(type_walker, "case _:")).to_equal(1)
-        expect(type_walker).to_contain("val bad_disc = rt_enum_discriminant(ty.kind)")
+        expect(type_walker.contains("rt_enum_discriminant(ty.kind)")).to_be(false)
         expect(type_walker).to_contain("self.hit_unreachable(\"HirTypeKind\", \"walk_type\")")
         expect(src).to_contain("val POST_MONO_TRANSPORT_RECEIPT_LIMIT: i64 = 16")
         expect(src.contains("me hit_unreachable_type(ty: HirType):")).to_be(false)
@@ -324,3 +324,25 @@ describe "post-monomorphization invariant verifier (plan section 9.5)":
         val (result, _) = run_monomorphization(real_mono_modules())
         val r = post_mono_verify_modules(result)
         expect(r.generic_emitted_definition).to_equal(1)  # oracle: 1 — named expected value from the requirement
+
+
+describe "optional let annotation verification":
+    it "accepts an absent annotation without inventing a malformed type":
+        var verifier = PostMonoVerifier.create()
+        verifier.walk_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 1), nil,
+            mk_expr(HirExprKind.IntLit(42, nil))), span: mk_span()))
+        expect(post_mono_report_total(verifier.r)).to_equal(0)
+
+    it "still rejects an unresolved type parameter in a present annotation":
+        var verifier = PostMonoVerifier.create()
+        verifier.walk_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 1), t_type(),
+            mk_expr(HirExprKind.IntLit(42, nil))), span: mk_span()))
+        expect(verifier.r.unresolved_type_param).to_equal(1)
+        expect(verifier.r.unreachable_variant).to_equal(0)
+
+    it "visits the initializer when its binding has no annotation":
+        var verifier = PostMonoVerifier.create()
+        verifier.walk_stmt(HirStmt(kind: HirStmtKind.Let(SymbolId(id: 1), nil,
+            mk_typed_expr(HirExprKind.IntLit(42, nil), mk_type(HirTypeKind.Error))), span: mk_span()))
+        expect(verifier.r.error_from_substitution).to_equal(1)
+        expect(verifier.r.unreachable_variant).to_equal(0)
