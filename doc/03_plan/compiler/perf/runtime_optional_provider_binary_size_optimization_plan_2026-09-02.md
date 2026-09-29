@@ -17,6 +17,11 @@ share exact input identities, so this is not the matched-size gate. The next
 build must retain exact linker inputs, archive hashes, and a map alongside
 the Stage4 hello before producing the required same-input C comparator; see
 `doc/09_report/compiler/target5_stage4_hello_c_attribution_2026-09-29.md`.
+The Linux direct LLD linker now supports opt-in exact input reproduction with
+an output/archive/linker hash receipt. Its focused no-stub native probe passes;
+the saved hello must be rebuilt with this capture, and BS7 still needs a
+checked C-comparator input binding before the 1.05 gate can pass. See
+`doc/09_report/compiler/target5_native_link_reproduction_capture_2026-09-29.md`.
 
 ## Phase 0 — Baselines and Attribution
 
