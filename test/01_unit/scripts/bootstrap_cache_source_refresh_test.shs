@@ -1,0 +1,90 @@
+#!/bin/sh
+# Actual cache-owner/context functions; no compiler-hit qualification.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+. "$repo/scripts/bootstrap/bootstrap-cache-release-vector.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:?absolute private fixture root required}
+bootstrap_cache_new_path_validate "$parent" || exit 64
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+work=$(mktemp -d "$parent/source-refresh.XXXXXX")
+trap 'status=$?; bootstrap_cache_release_all; printf "Retained source-refresh fixture: %s\n" "$work"; exit "$status"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir "$work/old" "$work/new" "$work/records"
+printf 'old source\n' > "$work/old/source-inputs-before.txt"
+printf 'changed source\n' > "$work/new/source-inputs-before.txt"
+for name in runtime-admitted.txt tool-authority-before.txt; do
+  printf 'unchanged %s\n' "$name" > "$work/old/$name"
+  cp "$work/old/$name" "$work/new/$name"
+done
+sed -n '/^bootstrap_cache_context_payload()/,/^}/p' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/context.sh"
+sed -n '/^bootstrap_cache_context_hash()/,/^}/p' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" >> "$work/context.sh"
+. "$work/context.sh"
+hash_stream() { sha256sum | awk '{print $1}'; }
+repo_root=$repo PLATFORM=x86_64-unknown-linux-gnu backend=llvm bootstrap_mode=dynload
+simple_abi_policy=v1 SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_KERNEL_K1_POLICY=llvm-cranelift
+SIMPLE_COVERAGE_CUTOVER_STATE=atomic-apk-only k1_composition_sha256_before=composition
+stage3_source_before=$work/new/source-inputs-before.txt
+runtime_admitted_snapshot=$work/new/runtime-admitted.txt tool_authority_before=$work/new/tool-authority-before.txt
+producer=$(printf 'fixture producer' | hash_stream)
+old=$(bootstrap_cache_context_hash stage2 "$work/old")
+new=$(bootstrap_cache_context_hash stage2)
+cache=$work/cache/entry
+bootstrap_cache_prepare "$work/cache" "$cache" stage2 "$producer" "$old" bootstrap-main reuse
+mkdir "$cache/objects"
+printf 'completed valid engine-owned object fixture\n' > "$cache/objects/stable.o"
+object=$(bootstrap_cache_hash_file "$cache/objects/stable.o")
+bootstrap_cache_writer_release "$cache"
+BOOTSTRAP_CACHE_WRITERS=
+if bootstrap_cache_prepare "$work/cache" "$cache" stage2 "$producer" "$new" bootstrap-main reuse > "$work/default.log" 2>&1; then exit 1; fi
+grep -q 'incompatible producer/options/runtime/tool ABI/source identity' "$work/default.log"
+bootstrap_cache_refresh_source "$work/cache" "$cache" stage2 "$producer" "$old" "$new" bootstrap-main "$work/old" "$work/new" "$work/records/transition1"
+[ "$(bootstrap_cache_hash_file "$cache/objects/stable.o")" = "$object" ]
+[ "$(sed -n 's/^inputs_sha256=//p' "$cache/.bootstrap-cache-binding")" = "$new" ]
+[ -f "$work/records/transition1/attempt-files.sha256" ]
+if bootstrap_cache_refresh_source "$work/cache" "$cache" stage2 "$producer" "$new" "$old" bootstrap-main "$work/new" "$work/old" "$work/records/running" > "$work/running.log" 2>&1; then exit 1; fi
+bootstrap_cache_writer_release "$cache"
+BOOTSTRAP_CACHE_WRITERS=
+binding=$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")
+reject() {
+  if bootstrap_cache_refresh_source "$work/cache" "$cache" stage2 "$1" "$2" "$old" bootstrap-main "$work/new" "$work/old" "$work/records/$3" > "$work/$3.log" 2>&1; then exit 1; fi
+  [ "$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")" = "$binding" ]
+  [ "$(bootstrap_cache_hash_file "$cache/objects/stable.o")" = "$object" ]
+}
+other=$(printf 'different producer' | hash_stream)
+reject "$other" "$new" producer
+bootstrap_link_compat_sha256=changed
+options=$(bootstrap_cache_context_hash stage2)
+reject "$producer" "$options" options
+bootstrap_link_compat_sha256=absent
+repo_root=$work
+relocated=$(bootstrap_cache_context_hash stage2)
+reject "$producer" "$relocated" relocation
+repo_root=$repo
+for name in runtime-admitted.txt tool-authority-before.txt; do
+  printf 'changed incompatible input\n' > "$work/old/$name"
+  reject "$producer" "$new" "$name"
+  cp "$work/new/$name" "$work/old/$name"
+done
+mv "$work/old/source-inputs-before.txt" "$work/old/source.saved"
+if bootstrap_cache_context_hash stage2 "$work/old" > "$work/missing-source.log" 2>&1; then exit 1; fi
+[ "$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")" = "$binding" ]
+mv "$work/old/source.saved" "$work/old/source-inputs-before.txt"
+# Release inline Stage2 strips ambient policy fields, whereas inherited tool
+# contexts preserve absent versus present-empty fields and reject multiline data.
+SIMPLE_ABI_POLICY='ambient-stage2-policy'; export SIMPLE_ABI_POLICY
+[ "$(bootstrap_cache_context_hash stage2)" = "$new" ]
+unset SIMPLE_ABI_POLICY
+absent_options=$(bootstrap_cache_release_options_v1 inherited '' absent)
+SIMPLE_ABI_POLICY=; export SIMPLE_ABI_POLICY
+empty_options=$(bootstrap_cache_release_options_v1 inherited '' absent)
+[ "$absent_options" != "$empty_options" ]
+SIMPLE_ABI_POLICY='invalid
+snapshot'; export SIMPLE_ABI_POLICY
+if bootstrap_cache_release_options_v1 inherited '' absent > "$work/malformed-env.log" 2>&1; then exit 1; fi
+[ "$(bootstrap_cache_hash_file "$cache/.bootstrap-cache-binding")" = "$binding" ]
+[ "$(bootstrap_cache_hash_file "$cache/objects/stable.o")" = "$object" ]
+printf 'PASS source refresh: actual context rederivation, default rejection, explicit immutable transition, retained completed objects, incompatible inputs/relocation and active writer refusal; no compiler execution\n'

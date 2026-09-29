@@ -1,0 +1,101 @@
+#!/bin/sh
+# HIR forwarding only: no compiler execution, hit claim or resource limits.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-hir-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_new_path_validate "$parent" || exit 64
+work=$(mktemp -d "$parent/hir-controls.XXXXXX")
+case "$work" in "$parent"/hir-controls.*) ;; *) exit 1 ;; esac
+cleanup() {
+  fixture_status=$?
+  if [ "$fixture_status" -eq 0 ]; then rm -rf -- "$work"
+  else printf 'Retained failed HIR fixture: %s\n' "$work" >&2; fi
+  return "$fixture_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fail() { echo "FAIL bootstrap HIR forwarding: $*" >&2; exit 1; }
+producer=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+phase3="$work/cache/stage3/$producer/bootstrap-main"
+phase4="$work/cache/stage4/$producer/full-cli"
+mkdir -p "$phase3" "$phase4"
+# Shared export overwrites inherited disables and attempt-specific paths only
+# for managed bootstrap entries, and canonical semantic serialization agrees.
+SIMPLE_FRONTEND_CACHE=0 SIMPLE_FRONTEND_CACHE_DIR="$work/old-home/frontend"
+SIMPLE_HIR_CACHE=0 SIMPLE_HIR_CACHE_DIR="$work/old-home/hir"
+export SIMPLE_FRONTEND_CACHE SIMPLE_FRONTEND_CACHE_DIR SIMPLE_HIR_CACHE SIMPLE_HIR_CACHE_DIR
+bootstrap_cache_enable_persistence "$phase3"
+[ "$SIMPLE_FRONTEND_CACHE" = 1 ] && [ "$SIMPLE_HIR_CACHE" = 1 ] || fail 'inherited disable survived'
+[ "$SIMPLE_HIR_CACHE_DIR" = "$phase3/hir" ] || fail 'HIR follows attempt HOME'
+bootstrap_cache_native_environment "$repo" > "$work/actual-semantic.env"
+grep -Fxq 'SIMPLE_HIR_CACHE=1:1' "$work/actual-semantic.env" || fail 'effective HIR enable not in semantic key'
+grep -Fxq "SIMPLE_HIR_CACHE_DIR=${#SIMPLE_HIR_CACHE_DIR}:$SIMPLE_HIR_CACHE_DIR" "$work/actual-semantic.env" || fail 'effective HIR directory not in semantic key'
+phase3_hir=$SIMPLE_HIR_CACHE_DIR
+bootstrap_cache_enable_persistence "$phase4"
+[ "$SIMPLE_HIR_CACHE_DIR" = "$phase4/hir" ] && [ "$SIMPLE_HIR_CACHE_DIR" != "$phase3_hir" ] || fail 'phases share HIR directory'
+bootstrap_cache_persistence_policy > "$work/policy"
+grep -Fxq 'hir-cache=1' "$work/policy" && grep -Fxq 'hir-cache-location=selected-entry/hir' "$work/policy" || fail 'Phase 2/3 binding omits HIR controls'
+SIMPLE_STAGE3_MISSION_CRITICAL=1 bootstrap_cache_stage3_assurance > "$work/assurance"
+grep -Fxq 'hir-cache=1' "$work/assurance" || fail 'resume assurance omits HIR controls'
+
+# Release runs Stage 3 inline. Capture its real invocation and separately
+# execute the recorded-hash expression; no compiler or admission is simulated.
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+absolute_path() { printf '%s\n' "$1"; }
+awk '/^  stage3_build_args_sha256=/{on=1} on{print} on && /^  \)$/{exit}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/stage3-hash.shs"
+awk '/^  bootstrap_stage3_run_transcribed \\/{count++; if(count==2) on=1} on{print} on && /-o "\$\{stage3_bin\}" src\/app\/cli\/bootstrap_main.spl$/{exit}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/stage3-run.shs"
+awk '/^stage3_args=/{on=1} on{print} on && /src\/app\/cli\/bootstrap_main.spl\)$/{exit}' \
+  "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" > "$work/resume-hash.shs"
+awk '/^bootstrap_stage3_run_transcribed /{on=1} on{print} on && /^  src\/app\/cli\/bootstrap_main.spl$/{exit}' \
+  "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" > "$work/resume-run.shs"
+for f in stage3-hash stage3-run resume-hash resume-run; do [ -s "$work/$f.shs" ] || fail "missing actual $f"; done
+bootstrap_stage3_run_transcribed() {
+  shift 6
+  : > "$work/actual.args"
+  while [ "$1" != -- ]; do printf '%s\n' "$1" >> "$work/actual.args"; shift; done
+  shift 2
+  printf '%s\n' "$@" >> "$work/actual.args"
+  set --
+  while IFS= read -r actual_arg; do set -- "$@" "$actual_arg"; done < "$work/actual.args"
+  actual_hash=$(bootstrap_stage3_args_sha256 "$@")
+}
+repo_root=$repo log_dir=$work stage3_command_transcript="$work/transcript"
+stage3_home_absolute=$work stage3_tmp_absolute=$work stage_build_path=$PATH
+stage_build_rust_log=error bootstrap_link_library_path= bootstrap_link_compat_sha256=absent
+stage3_cache_absolute=$phase3 stage2_admitted_absolute="$work/compiler with spaces"
+stage_runtime_absolute="$work/runtime with spaces" stage3_bin="$work/candidate"
+build_progress_events="$work/progress" stage3_phase_profile="$work/profile"
+stage3_memory_snapshot="$work/memory" stage3_evidence_run_id=fixture
+stage3_diagnostic_env= backend=cranelift selfhost_jobs=1 bootstrap_mode=dynload
+for PLATFORM in x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+  . "$work/stage3-hash.shs"
+  . "$work/stage3-run.shs"
+  [ "$actual_hash" = "$stage3_build_args_sha256" ] || fail "$PLATFORM inline Stage3 hash mismatch"
+  grep -Fxq "SIMPLE_HIR_CACHE_DIR=$phase3/hir" "$work/actual.args" || fail 'inline Stage3 HIR directory wrong'
+  root=$repo stage3_transcript=$stage3_command_transcript stage3_log="$work/log"
+  home=$work tmp=$work path=$PATH stage3_cache=$phase3 runtime=$stage_runtime_absolute
+  admitted=$stage2_admitted_absolute candidate=$stage3_bin progress=$build_progress_events
+  phase_profile=$stage3_phase_profile memory_snapshot=$stage3_memory_snapshot evidence_run_id=fixture
+  platform=$PLATFORM stage2_backend=$backend
+  . "$work/resume-hash.shs"
+  . "$work/resume-run.shs"
+  [ "$actual_hash" = "$stage3_args" ] || fail "$PLATFORM resumed Stage3 hash mismatch"
+  grep -Fxq "SIMPLE_HIR_CACHE_DIR=$phase3/hir" "$work/actual.args" || fail 'resume HIR directory wrong'
+done
+
+# Check all main transcript+actual and resume transcript forwarding sites.
+main="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+[ "$(grep -c 'SIMPLE_HIR_CACHE_DIR=${stage2_cache_absolute}/hir' "$main")" -eq 2 ] || fail 'Stage 2 transcript/actual mismatch'
+[ "$(grep -c 'SIMPLE_HIR_CACHE_DIR=.*stage3_cache_absolute.*/hir' "$main")" -eq 2 ] || fail 'Stage 3 transcript/actual mismatch'
+grep -Fq '"SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir"' "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume transcript omits HIR pair'
+[ "$(grep -c 'SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir"' "$main")" -eq 3 ] || fail 'tool semantic keys do not match selected directories'
+grep -Fq 'bootstrap_cache_enable_persistence "$(absolute_path "$3")"' "$main" || fail 'actual inherited tool env omits HIR pair'
+echo 'PASS bootstrap HIR forwarding: inherited disable overridden, persistent selected directory, phase separation, semantic keys, actual release inline producer/resume vectors and transcripts; no compiler hit qualification'
