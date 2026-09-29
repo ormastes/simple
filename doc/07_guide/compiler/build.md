@@ -76,6 +76,16 @@ diagnostic scratch. Use `--print-intermediates` (or
 `SIMPLE_PRINT_BUILD_INTERMEDIATES=1`) to retain and print each exact path.
 The legacy `SIMPLE_KEEP_LLVM_IR=1` remains supported for LLVM IR only.
 
+For an exact Linux LLD native-link input capture, set `SIMPLE_LINKER=lld` and
+`SIMPLE_NATIVE_LINK_REPRODUCE_PATH` to a new absolute `.tar` path for one
+native output. LLD writes the input bytes and response file into the archive;
+the linker writes `<archive>.receipt` with SHA-256 hashes of the archive,
+output, and linker. A requested capture fails if the route uses another
+linker, a cross compiler, SMF inputs, or a compiler-driver fallback. The
+capture is opt-in because it copies every link input and can be large. The
+archive records the Simple link; a matched C size claim also needs a C build
+using the same startup and required runtime/link inputs.
+
 ### Quality Commands
 
 ```bash
