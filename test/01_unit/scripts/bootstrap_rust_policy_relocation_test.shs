@@ -1,0 +1,131 @@
+#!/bin/sh
+# Fingerprint contract only: metadata fixtures refuse every build invocation.
+set -eu
+case "${1:-full}" in full|projection-only) ;; *) exit 64 ;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+tmp_base=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+fixture=$(mktemp -d "$tmp_base/bootstrap-policy-relocation.XXXXXX")
+fixture=$(CDPATH= cd -- "$fixture" && pwd -P)
+case "$fixture" in "$tmp_base"/bootstrap-policy-relocation.*) ;; *) exit 1 ;; esac
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+a="$fixture/root one"
+b="$fixture/root two"
+mkdir -p "$a/src/compiler_rust" "$a/src/runtime" "$a/hosted" \
+    "$a/tools/counterpart/sdk/c" "$b" "$fixture/tools"
+printf '[toolchain]\nchannel = "nightly"\n' >"$a/src/compiler_rust/rust-toolchain.toml"
+printf '[dependencies]\nfixture = { path = "../../hosted" }\n' >"$a/src/compiler_rust/Cargo.toml"
+printf 'fixture lock\n' >"$a/src/compiler_rust/Cargo.lock"
+printf 'fn fixture() {}\n' >"$a/src/compiler_rust/main.rs"
+printf 'int fixture(void) { return 0; }\n' >"$a/src/runtime/runtime.c"
+printf '#define FIXTURE 1\n' >"$a/src/runtime/runtime.h"
+printf '#define COUNTERPART_FIXTURE 1\n' >"$a/tools/counterpart/sdk/c/simple_counterpart_abi.h"
+printf '[package]\nname = "fixture"\n' >"$a/hosted/Cargo.toml"
+printf 'pub fn dependency() {}\n' >"$a/hosted/lib.rs"
+printf '1.0.0-fixture\n' >"$a/VERSION"
+cp -R "$a/." "$b/"
+cat >"$fixture/tools/rustc" <<'EOF'
+#!/bin/sh
+case "$*" in
+    '-vV') cat "${0%/*}/rust-version" ;;
+    *) exit 91 ;;
+esac
+EOF
+cat >"$fixture/tools/cargo" <<'EOF'
+#!/bin/sh
+[ "$*" = '-V' ] || exit 92
+printf 'cargo fixture1\n'
+EOF
+cat >"$fixture/tools/clang" <<'EOF'
+#!/bin/sh
+[ "$*" = '--version' ] || exit 93
+printf 'fixture Clang version\n'
+EOF
+chmod +x "$fixture/tools/rustc" "$fixture/tools/cargo" "$fixture/tools/clang"
+printf 'rustc fixture1\nhost: x86_64-unknown-linux-gnu\n' >"$fixture/tools/rust-version"
+ledger() {
+    printf 'rust-policy-path=%s/src/compiler_rust/rust-toolchain.toml\nrust-policy-sha256=%s\nrust-channel=nightly\nrust-sysroot=%s\nrustc-path=%s/rustc\ncargo-path=%s/cargo\n' \
+        "$1" "$(bootstrap_stage3_hash_file "$1/src/compiler_rust/rust-toolchain.toml")" \
+        "$fixture/tools" "$fixture/tools" "$fixture/tools"
+}
+raw_a=$(ledger "$a")
+raw_b=$(ledger "$b")
+id_a=$(bootstrap_stage3_seed_rust_policy_identity "$a" "$raw_a")
+id_b=$(bootstrap_stage3_seed_rust_policy_identity "$b" "$raw_b")
+[ "$raw_a" != "$raw_b" ] || fail 'raw observed policy paths were hidden'
+[ "$id_a" = "$id_b" ] || fail 'equivalent relocation changed logical identity'
+[ "$(printf '%s\n' "$id_a" | sed '/^rust-policy-id=/d')" = \
+  "$(printf '%s\n' "$raw_a" | sed '/^rust-policy-path=/d')" ] || fail 'non-location identity changed'
+refuse() {
+    if bootstrap_stage3_seed_rust_policy_identity "$a" "$2" >"$fixture/refusal"; then
+        fail "accepted $1"
+    fi
+    [ ! -s "$fixture/refusal" ] || fail "emitted accepted records for $1"
+}
+refuse missing-path "$(printf '%s\n' "$raw_a" | sed '/^rust-policy-path=/d')"
+refuse missing-hash "$(printf '%s\n' "$raw_a" | sed '/^rust-policy-sha256=/d')"
+refuse duplicate-path "$raw_a
+$(printf '%s\n' "$raw_a" | sed -n '/^rust-policy-path=/p')"
+refuse duplicate-hash "$raw_a
+$(printf '%s\n' "$raw_a" | sed -n '/^rust-policy-sha256=/p')"
+refuse wrong-owner "$raw_b"
+refuse malformed-path "$(printf '%s\n' "$raw_a" | sed 's/^rust-policy-path=/rust-policy-path :/')"
+refuse wrong-hash "$(printf '%s\n' "$raw_a" | sed 's/^rust-policy-sha256=.*/rust-policy-sha256=invalid/')"
+refuse conflicting-id "$raw_a
+rust-policy-id=unreviewed-owner"
+printf '# changed policy content\n' >>"$a/src/compiler_rust/rust-toolchain.toml"
+refuse stale-content "$raw_a"
+[ "$(bootstrap_stage3_seed_rust_policy_identity "$a" "$(ledger "$a")")" != "$id_a" ] || fail 'policy content did not invalidate'
+cp "$b/src/compiler_rust/rust-toolchain.toml" "$a/src/compiler_rust/rust-toolchain.toml"
+for field in rust-channel rust-sysroot rustc-path cargo-path; do
+    changed=$(printf '%s\n' "$raw_a" | sed "s/^$field=.*/$field=changed-fixture-identity/")
+    [ "$(bootstrap_stage3_seed_rust_policy_identity "$a" "$changed")" != "$id_a" ] || fail "$field was normalized away"
+done
+if [ "${1:-full}" = projection-only ]; then
+    printf 'PASS: canonical policy projection with spaces and strict refusals\n'
+    exit 0
+fi
+
+# Exercise the complete production fingerprint over finite real source files.
+# Only discovery of the installed Rust/LLVM provider is substituted: no fake
+# compiler admission, executable artifact, generation, stamp or receipt exists.
+bootstrap_stage3_resolve_rust_toolchain() { ledger "$1"; }
+bootstrap_stage3_resolve_llvm_build_authority() { printf 'llvm-build-status=disabled\n'; }
+tool_path="$fixture/tools:/usr/bin:/bin"
+CC="$fixture/tools/clang"
+LLVM_CONFIG="$fixture/tools/absent-llvm-config"
+CXX=fixture-cxx AR=fixture-ar LD=fixture-ld RUSTFLAGS=fixture-rustflags
+SIMPLE_ABI_POLICY=v1
+export CC LLVM_CONFIG CXX AR LD RUSTFLAGS SIMPLE_ABI_POLICY
+full() { bootstrap_stage3_seed_inputs_fingerprint "$1" "${2:-cranelift}" "${3:-none}" "$tool_path" "${4:-x86_64-unknown-linux-gnu}"; }
+base=$(full "$a")
+bootstrap_stage3_valid_fingerprint "$base" || fail 'invalid aggregate'
+[ "$(full "$b")" = "$base" ] || fail 'full relocated fingerprint changed'
+different() { [ "$1" != "$base" ] || fail "$2 did not invalidate aggregate"; }
+for relative in src/compiler_rust/main.rs src/runtime/runtime.c src/runtime/runtime.h \
+    tools/counterpart/sdk/c/simple_counterpart_abi.h hosted/lib.rs src/compiler_rust/rust-toolchain.toml; do
+    printf '\nchanged fingerprint fixture\n' >>"$a/$relative"
+    different "$(full "$a")" "$relative content"
+    cp "$b/$relative" "$a/$relative"
+done
+printf 'fn added() {}\n' >"$a/src/compiler_rust/added.rs"
+different "$(full "$a")" 'Rust membership'
+rm "$a/src/compiler_rust/added.rs"
+printf '#define ADDED 1\n' >"$a/src/runtime/added.h"
+different "$(full "$a")" 'runtime membership'
+rm "$a/src/runtime/added.h"
+different "$(full "$a" llvm)" 'backend'
+different "$(full "$a" cranelift changed-feature)" 'features'
+different "$(full "$a" cranelift none x86_64-unknown-freebsd)" 'target'
+SIMPLE_ABI_POLICY=unreviewed
+if full "$a" >"$fixture/abi-refusal"; then fail 'unreviewed ABI admitted'; fi
+[ ! -s "$fixture/abi-refusal" ] || fail 'ABI refusal emitted an aggregate'
+SIMPLE_ABI_POLICY=v1
+printf '# changed executable bytes\n' >>"$fixture/tools/rustc"
+different "$(full "$a")" 'Rust executable bytes'
+sed '$d' "$fixture/tools/rustc" >"$fixture/rustc-restored"
+cat "$fixture/rustc-restored" >"$fixture/tools/rustc"
+printf 'rustc fixture2\nhost: x86_64-unknown-linux-gnu\n' >"$fixture/tools/rust-version"
+different "$(full "$a")" 'Rust version'
+printf 'PASS: policy relocation is invariant; content, membership, ABI and tool identities stay bound\n'
