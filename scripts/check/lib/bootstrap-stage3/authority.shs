@@ -1725,6 +1725,46 @@ bootstrap_stage3_resolve_rust_toolchain() (
         "$bootstrap_stage3_cargo"
 )
 
+# Seed reuse binds policy ownership/content, not the checkout's location.
+# Keep the resolver's absolute observations unchanged for tool provenance.
+bootstrap_stage3_seed_rust_policy_identity() (
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_policy_identity_root=$1
+    bootstrap_stage3_policy_identity_authority=$2
+    [ "$(bootstrap_stage3_canonical_path \
+        "$bootstrap_stage3_policy_identity_root")" = \
+        "$bootstrap_stage3_policy_identity_root" ] || return 1
+    bootstrap_stage3_policy_identity_path=\
+"$bootstrap_stage3_policy_identity_root/src/compiler_rust/rust-toolchain.toml"
+    [ "$(bootstrap_stage3_canonical_file \
+        "$bootstrap_stage3_policy_identity_path")" = \
+        "$bootstrap_stage3_policy_identity_path" ] || return 1
+    bootstrap_stage3_policy_identity_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_policy_identity_path") || return 1
+    bootstrap_stage3_valid_fingerprint \
+        "$bootstrap_stage3_policy_identity_hash" || return 1
+    printf '%s\n' "$bootstrap_stage3_policy_identity_authority" |
+        awk -v expected_path="$bootstrap_stage3_policy_identity_path" \
+            -v expected_hash="$bootstrap_stage3_policy_identity_hash" '
+            /^rust-policy-path=/ {
+                if (++paths != 1 || $0 != "rust-policy-path=" expected_path)
+                    invalid = 1
+                records[NR] = "rust-policy-id=repo:src/compiler_rust/rust-toolchain.toml"
+                next
+            }
+            /^rust-policy-sha256=/ {
+                if (++hashes != 1 || $0 != "rust-policy-sha256=" expected_hash)
+                    invalid = 1
+            }
+            /^rust-policy-id=/ { invalid = 1 }
+            { records[NR] = $0 }
+            END {
+                if (invalid || paths != 1 || hashes != 1) exit 1
+                for (i = 1; i <= NR; i++) print records[i]
+            }
+        '
+)
+
 # The MSVC `LIB` search path is a semicolon-separated list of NATIVE Windows
 # directories. Emit it as newline-separated POSIX paths so the `.lib` token
 # branch can test each one. Empty when LIB is unset (a non-MSVC lane), which
@@ -5535,7 +5575,12 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         [ -x "$bootstrap_stage3_seed_cargo" ] || exit 1
         bootstrap_stage3_seed_trace rust-toolchain-binaries-executable
         bootstrap_stage3_seed_trace hash-rust-toolchain
-        printf '%s\n' "$bootstrap_stage3_seed_rust_authority" \
+        bootstrap_stage3_seed_rust_identity=$(
+            bootstrap_stage3_seed_rust_policy_identity \
+                "$bootstrap_stage3_seed_root" \
+                "$bootstrap_stage3_seed_rust_authority"
+        ) || exit 1
+        printf '%s\n' "$bootstrap_stage3_seed_rust_identity" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         printf 'rustc-toolchain-sha256=%s\ncargo-toolchain-sha256=%s\n' \
             "$(bootstrap_stage3_hash_file \
