@@ -27,4 +27,16 @@ catch-all behavior into an unreported fallthrough.
 `test/01_unit/compiler/frontend/match_case_fat_arrow_spec.spl` asserts AST body
 tags, exact return values, complete block lengths, alternative guards, REQC004,
 rationale preservation, existing separators and malformed-body rejection.
-Execution evidence is pending. The old product batch is not rerun.
+Bootstrap-only source-built parser evidence passed across two bounded cycles:
+cases1–4 on d405819f00df98f51320631f8001550ba5852e89, then corrected case5 and
+previously unrun cases6–9 on77edb2042354935ded483e015a4422263949445d. Production
+parser bytes are identical between those commits. Each component build linked
+87 modules; cycle2 exited0 with exact expected stdout, unchanged input pins and
+empty owned-process cleanup. RSS monitoring did not enforce a memory cap.
+
+The original pipe-alternative case5 failed and remains an open separate bug:
+`match_pipe_alternative_consumed_as_bitwise_or_2026-09-29.md`. The corrected
+case uses comma-separated alternatives to isolate guard/body preservation.
+Passing cases1–4 were not rerun. No original-suite, full CLI, native producer,
+interpreter-wide, MCP/LSP or bootstrap qualification is claimed. The old product
+batch was not rerun.
