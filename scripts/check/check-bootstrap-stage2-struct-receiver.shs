@@ -27,9 +27,17 @@ else
 fi
 
 stage2_probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-stage2-receiver.XXXXXX")
-trap 'rm -rf "$stage2_probe_dir"' EXIT HUP INT TERM
+# Preserve failed probes for diagnosis; successful probes may be retained explicitly.
+trap 'stage2_cleanup_status=$?; if [ "$stage2_cleanup_status" -ne 0 ] || [ "${STAGE2_RECEIVER_KEEP_PROBE_DIR:-0}" = 1 ]; then printf "stage2_receiver_probe_dir=%s\n" "$stage2_probe_dir" >&2; else rm -rf "$stage2_probe_dir"; fi; exit "$stage2_cleanup_status"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard"
+stage2_probe_suffix=''
+case "$stage2_target" in
+    *windows*) stage2_probe_suffix=.exe ;;
+esac
+stage2_probe_bin="$stage2_probe_dir/bootstrap-struct-receiver-guard$stage2_probe_suffix"
 # Both admission probes must reject unresolved-symbol stubs on every target.
 # A macOS fixture printed the expected output after linking seven generated
 # stubs when this gate cleared the caller's strict flag outside windows-msvc.
@@ -57,7 +65,7 @@ case "$stage2_target" in
     *windows-gnu*)  stage2_windows_abi=gnu;  stage2_linker_flavor=gnu ;;
     *) stage2_windows_abi=; stage2_linker_flavor= ;;
 esac
-if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+if env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_WINDOWS_ABI="$stage2_windows_abi" \
     SIMPLE_LINKER_FLAVOR="$stage2_linker_flavor" \
@@ -72,8 +80,11 @@ if ! env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     --entry test/04_smoke/bootstrap_struct_receiver_guard.spl \
     --runtime-path "$stage2_runtime_dir" \
     -o "$stage2_probe_bin"; then
-    echo "error: stage2 lacks the mutable receiver/runtime capability" >&2
-    exit 1
+    :
+else
+    stage2_compile_status=$?
+    echo "error: stage2 receiver compilation failed with status $stage2_compile_status" >&2
+    exit "$stage2_compile_status"
 fi
 
 [ -x "$stage2_probe_bin" ] || {
@@ -82,7 +93,7 @@ fi
 }
 
 set +e
-stage2_probe_output=$($stage2_probe_bin 2>&1)
+stage2_probe_output=$("$stage2_probe_bin" 2>&1)
 stage2_probe_status=$?
 set -e
 [ "$stage2_probe_status" -eq 0 ] || {
@@ -100,7 +111,7 @@ echo "bootstrap_stage2_struct_receiver=PASS"
 # receiver probe above names its entry with `--entry`; bootstrap_main routes
 # that shape through rt_native_build, so it proves seed/delegate compatibility
 # but not the admitted compiler's pure-Simple in-process driver.
-stage2_route_bin="$stage2_probe_dir/bootstrap-stage3-route-guard"
+stage2_route_bin="$stage2_probe_dir/bootstrap-stage3-route-guard$stage2_probe_suffix"
 stage2_route_log="$stage2_probe_dir/bootstrap-stage3-route-guard.log"
 stage2_route_fixture=scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl
 stage2_route_timeout=${STAGE2_SELFHOST_ROUTE_TIMEOUT_SECONDS:-180}
@@ -154,7 +165,7 @@ set -e
     echo "error: stage2 positional Stage-3 route reported success without an executable" >&2
     exit 1
 }
-stage2_route_output=$($stage2_route_bin 2>&1)
+stage2_route_output=$("$stage2_route_bin" 2>&1)
 stage2_route_expected=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main')
 [ "$stage2_route_output" = "$stage2_route_expected" ] || {
     echo "error: stage2 positional Stage-3 route returned unexpected output: $stage2_route_output" >&2
