@@ -495,7 +495,10 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
     #[cfg(unix)]
     if let Some(mode) = existing_mode {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode));
+        if std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return 0;
+        }
     }
 
     if std::fs::rename(&temp_path, &target).is_err() {
@@ -2294,8 +2297,18 @@ sandbox_lowering:
         unsafe {
             assert_eq!(rt_file_atomic_write(path, rv_text("first")), 1);
             assert_eq!(fs::read_to_string(&file_path).unwrap(), "first");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&file_path, fs::Permissions::from_mode(0o4740)).unwrap();
+            }
             assert_eq!(rt_file_atomic_write(path, rv_text("second")), 1);
             assert_eq!(fs::read_to_string(&file_path).unwrap(), "second");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777, 0o4740);
+            }
         }
         // No .tmp.* residue in the directory.
         let leftovers: Vec<_> = fs::read_dir(temp_dir.path())
@@ -2317,6 +2330,16 @@ sandbox_lowering:
             assert_eq!(rt_file_atomic_write(path, rv_text("deep")), 1);
             assert_eq!(fs::read_to_string(&nested).unwrap(), "deep");
             assert_eq!(rt_file_atomic_write(rv_text(""), rv_text("x")), 0);
+
+            let occupied = temp_dir.path().join("occupied");
+            fs::create_dir(&occupied).unwrap();
+            let before = fs::read_dir(temp_dir.path()).unwrap().count();
+            assert_eq!(
+                rt_file_atomic_write(rv_text(occupied.to_str().unwrap()), rv_text("x")),
+                0
+            );
+            assert!(occupied.is_dir());
+            assert_eq!(fs::read_dir(temp_dir.path()).unwrap().count(), before);
         }
     }
 }
