@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Validate stdin-only base64 encoding, including attachment paths with spaces.
+set -euo pipefail
+repo=$(cd "$(dirname "$0")/../../../../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/mail-portable-attachment.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT
+. "$repo/tools/mail-cli/lib/format.shs"
+printf '%s' 'portable attachment' > "$scratch/with spaces.txt"
+# BSD base64 may reject positional filenames. Enforce the common stdin form.
+base64() {
+  [ "$#" -eq 0 ] || { echo 'unexpected base64 filename argument' >&2; return 1; }
+  command base64
+}
+mail_format_message_id() { printf '%s\n' '<portable-test@example.invalid>'; }
+mail_format_mime_boundary() { printf '%s\n' 'portable-test-boundary'; }
+message=$(mail_format_compose_multipart 'sender@example.invalid' 'to@example.invalid' \
+  'portable test' 'body' '' '' '' '' "$scratch/with spaces.txt")
+case "$message" in
+  *'cG9ydGFibGUgYXR0YWNobWVudA=='*) ;;
+  *) echo 'attachment bytes missing from MIME output' >&2; exit 1 ;;
+esac
+case "$message" in
+  *'filename="with spaces.txt"'*) ;;
+  *) echo 'attachment filename missing from MIME output' >&2; exit 1 ;;
+esac
+printf '%s\n' 'PASS: portable attachment encoding and spaced filename'

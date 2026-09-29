@@ -8,6 +8,7 @@ cmd_auth() {
 
   case "$subcmd" in
     login)   cmd_auth_login "$@" ;;
+    password) cmd_auth_password "$@" ;;
     logout)  cmd_auth_logout "$@" ;;
     status)  cmd_auth_status "$@" ;;
     *)
@@ -18,6 +19,9 @@ cmd_auth() {
       echo ""
       echo "COMMANDS"
       echo "  login     Add or update an email account"
+      echo "  password  Validate and save a replacement password"
+      echo "  --protocol imap|pop3  Incoming protocol (default imap)"
+      echo "  --password-file FILE Explicit password source"
       echo "  logout    Remove an email account"
       echo "  status    Show account status"
       echo ""
@@ -34,17 +38,28 @@ cmd_auth() {
 }
 
 cmd_auth_login() {
-  local account_name="default" provider="" password_cmd=""
+  local account_name="${MAIL_ACCOUNT:-default}" provider="" password_cmd="" protocol=imap
+  if [ "${MAIL_NONINTERACTIVE:-0}" = 1 ]; then
+    echo "error: account setup is interactive; configure the shared account file first, then use auth password --password-file FILE" >&3
+    return 2
+  fi
 
   while [ $# -gt 0 ]; do
     case "$1" in
+      --account|--provider|--password-cmd|--protocol)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a value" >&3; return 2; } ;;
+    esac
+    case "$1" in
       --account)       account_name="$2"; shift 2 ;;
       --provider)      provider="$2"; shift 2 ;;
+      --protocol)      protocol="$2"; shift 2 ;;
       --password-cmd)  password_cmd="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
 
+  case "$protocol" in imap|pop3) ;; *) echo "error: protocol must be imap or pop3" >&3; return 2 ;; esac
+  if [ "$protocol" = pop3 ]; then provider=other; fi
   mail_config_init
 
   # Select provider
@@ -94,13 +109,13 @@ cmd_auth_login() {
     tls_mode=$(mail_preset "$provider" "tls")
     echo "  Using ${provider} preset: IMAP=${imap_server}:${imap_port}, SMTP=${smtp_server}:${smtp_port}"
   else
-    echo "? IMAP server:"
+    echo "? ${protocol} server:"
     printf "  > "
     read -r imap_server
-    echo "? IMAP port (default: 993):"
+    echo "? ${protocol} port (default: $([ "$protocol" = pop3 ] && echo 995 || echo 993)):"
     printf "  > "
     read -r imap_port
-    [ -z "$imap_port" ] && imap_port="993"
+    [ -z "$imap_port" ] && imap_port=$([ "$protocol" = pop3 ] && echo 995 || echo 993)
     echo "? SMTP server:"
     printf "  > "
     read -r smtp_server
@@ -133,60 +148,43 @@ cmd_auth_login() {
       ;;
   esac
 
-  local password=""
-  if [ -n "$password_cmd" ]; then
-    password=$(bash -c "$password_cmd" 2>/dev/null)
-    if [ -z "$password" ]; then
-      echo "${C_RED}error:${C_RESET} --password-cmd produced no output" >&2
-      return 1
-    fi
+  local password="" override_rc=0
+  _mail_password_override || override_rc=$?
+  if [ "$override_rc" = 0 ]; then
+    password="$MAIL_ACCT_PASSWORD"
+  elif [ "$override_rc" != 3 ]; then
+    return "$override_rc"
   else
-    echo "? Password / App Password:"
-    printf "  > "
-    if [ -t 0 ]; then
-      stty -echo 2>/dev/null || true
-      read -r password
-      stty echo 2>/dev/null || true
-      echo ""
-    else
-      read -r password
-    fi
+    _mail_password_input "Password / App Password: " || return $?
+    password="$MAIL_ACCT_PASSWORD"
   fi
+  _mail_password_valid "$password" || return $?
 
-  # Test IMAP connection
-  printf -- "- Testing IMAP connection..."
-  local imap_url
-  local -a imap_extra_args=()
-  case "$tls_mode" in
-    none|plain)
-      imap_url="imap://${imap_server}:${imap_port}/"
-      ;;
-    starttls)
-      imap_url="imap://${imap_server}:${imap_port}/"
-      imap_extra_args+=(--ssl-reqd)
-      ;;
-    implicit|*)
-      imap_url="imaps://${imap_server}:${imap_port}/"
-      ;;
-  esac
-  local test_result
-  test_result=$(_mail_curl -s --url "$imap_url" \
-    --user "${username}:${password}" \
-    --request "NOOP" "${imap_extra_args[@]}" -o /dev/null -w "%{http_code}" 2>&1)
-  local test_exit=$?
-
-  if [ $test_exit -ne 0 ]; then
-    echo " FAILED"
-    echo "${C_RED}error:${C_RESET} could not connect to IMAP server — $(_mail_curl_error_message "$test_exit")" >&2
+  # Use one protocol-aware login probe and never save an unverified secret.
+  MAIL_ACCT_NAME="$account_name"
+  MAIL_ACCT_USERNAME="$username"
+  MAIL_ACCT_PASSWORD="$password"
+  MAIL_ACCT_PROTOCOL="$protocol"
+  MAIL_ACCT_IMAP_SERVER="$imap_server"; MAIL_ACCT_IMAP_PORT="$imap_port"
+  MAIL_ACCT_POP3_SERVER="$imap_server"; MAIL_ACCT_POP3_PORT="$imap_port"
+  MAIL_ACCT_TLS="$tls_mode"
+  local MAIL_AUTH_RECOVERY=0
+  if ! _mail_check_login; then
+    echo "error: login failed; account was not saved" >&3
     return 1
   fi
-  echo " OK"
+  if [ -z "$password_cmd" ]; then
+    password=$(printf '%s\n' "$password" | _mail_encrypt_password) || return 1
+  else
+    password=""
+  fi
 
   # Save account. When --password-cmd is set, store the command instead of
   # the plaintext password (config.shs resolves it at use-time).
   local account_json
   account_json=$(jq -n \
     --arg provider "$provider" \
+    --arg protocol "$protocol" \
     --arg email "$email" \
     --arg username "$username" \
     --arg display "$display_name" \
@@ -199,6 +197,7 @@ cmd_auth_login() {
     --arg tls "$tls_mode" \
     '{
       provider: $provider,
+      protocol: $protocol,
       email: $email,
       username: $username,
       display_name: $display,
@@ -208,9 +207,10 @@ cmd_auth_login() {
       smtp_port: ($sport | tonumber),
       tls: $tls
     }
+    + (if $protocol == "pop3" then {pop3_server: $imap, pop3_port: ($iport | tonumber)} else {} end)
     + (if $pass_cmd != "" then {password_cmd: $pass_cmd} else {password: $pass} end)')
 
-  mail_config_set_account "$account_name" "$account_json"
+  mail_config_set_account "$account_name" "$account_json" || return 1
 
   # Set as default if first account
   local current_default
@@ -222,6 +222,7 @@ cmd_auth_login() {
   echo ""
   echo "${C_GREEN}✓${C_RESET} Account '${account_name}' configured (${email} via ${provider})"
   [ "$(mail_config_get_default)" = "$account_name" ] && echo "  Set as default account"
+  return 0
 }
 
 cmd_auth_logout() {
@@ -260,69 +261,19 @@ cmd_auth_logout() {
 }
 
 cmd_auth_status() {
-  mail_config_init
-
-  local accounts
-  accounts=$(mail_config_list_accounts)
-  local default_acc
-  default_acc=$(mail_config_get_default)
-
-  if [ -z "$accounts" ]; then
-    echo "No accounts configured. Run 'mail auth login' to add one." >&2
-    return 1
-  fi
-
-  echo "$accounts" | while read -r name; do
-    local acc
-    acc=$(mail_config_get_account "$name")
-    local email username provider
-    email=$(echo "$acc" | jq -r '.email')
-    username=$(echo "$acc" | jq -r '.username // .email')
-    provider=$(echo "$acc" | jq -r '.provider')
-    local imap_server imap_port tls_mode
-    imap_server=$(echo "$acc" | jq -r '.imap_server')
-    imap_port=$(echo "$acc" | jq -r '.imap_port')
-    tls_mode=$(echo "$acc" | jq -r '.tls // "implicit"')
-
-    local default_mark=""
-    [ "$name" = "$default_acc" ] && default_mark=" (default)"
-
-    echo "${name}${default_mark}"
-    echo "  ✓ ${email} (${provider})"
-    echo "  - IMAP: ${imap_server}:${imap_port}"
-
-    # Resolve password (honors password_cmd, same as mail_resolve_account)
-    local status_password status_password_cmd
-    status_password_cmd=$(echo "$acc" | jq -r '.password_cmd // empty')
-    if [ -n "$status_password_cmd" ]; then
-      status_password=$(bash -c "$status_password_cmd" 2>/dev/null)
+  local accounts name failed=0
+  accounts="${MAIL_ACCOUNT:-}"
+  [ -n "$accounts" ] || accounts=$(mail_config_list_accounts)
+  [ -n "$accounts" ] || { echo "No accounts configured." >&3; return 1; }
+  while IFS= read -r name; do
+    local MAIL_ACCOUNT="$name"
+    echo "$name"
+    if mail_resolve_account && _mail_check_login; then
+      echo "  Connection OK (${MAIL_ACCT_PROTOCOL})"
     else
-      status_password=$(echo "$acc" | jq -r '.password // empty')
+      failed=1
+      echo "  Connection failed" >&3
     fi
-
-    # Quick connection test
-    local test_exit
-    local imap_url
-    local -a imap_extra_args=()
-    case "$tls_mode" in
-      none|plain)
-        imap_url="imap://${imap_server}:${imap_port}/"
-        ;;
-      starttls)
-        imap_url="imap://${imap_server}:${imap_port}/"
-        imap_extra_args+=(--ssl-reqd)
-        ;;
-      implicit|*)
-        imap_url="imaps://${imap_server}:${imap_port}/"
-        ;;
-    esac
-    if _mail_curl -s --url "$imap_url" \
-      --user "${username}:${status_password}" \
-      --request "NOOP" "${imap_extra_args[@]}" -o /dev/null 2>/dev/null; then
-      echo "  ✓ Connection OK"
-    else
-      test_exit=$?
-      echo "  ✗ Connection failed — $(_mail_curl_error_message "$test_exit")"
-    fi
-  done
+  done <<< "$accounts"
+  return "$failed"
 }
