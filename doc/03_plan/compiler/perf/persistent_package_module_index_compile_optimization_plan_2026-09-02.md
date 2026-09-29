@@ -11,6 +11,14 @@ The admitted-compiler warm proof remains pending. It does not substitute for
 the persistent-index Git/SCV events, full
 entrypoint cutover, or native performance proof required by this plan.
 
+Non-AOT compiler requests no longer construct the native no-op cache request.
+This removes compiler/environment identity work from check, interpret, JIT,
+and other modes that cannot consume that receipt. The change is source-level
+only so far; it has no measured time/RSS claim. The focused Stage4 compiler
+directory check stopped on existing parse errors in `90.tools/sffi_gen`, and
+single-file checks could not resolve the driver's module imports. A qualified
+current-source compiler check and paired performance cohort remain required.
+
 **Parent plans:**
 
 - `doc/03_plan/compiler/macos_bootstrap_reverse_reference_harmonization_plan_2026-08-30.md`
