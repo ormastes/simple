@@ -3,6 +3,8 @@
 Status: IN_PROGRESS; production verification TEST_BLOCKED.
 Owner and merge owner: primary Codex session. Sidecars: N/A.
 Order authorized by the user: all seven Windows items, then macOS; push PRs.
+Latest goal update: all seven Windows items, then Linux through WSL; keep the
+earlier macOS host scope separate and unverified.
 No item is certified complete by this report.
 
 ## Scope retained
@@ -126,8 +128,19 @@ It does not establish the root cause or prove the full detector executes correct
    verification, then establish an admitted self-hosted Windows CLI.
 4. Claim/reconcile all seven task records through the canonical TODO interface.
    Complete implementation gaps and the umbrella's Windows acceptance gates.
-5. Continue all seven items on macOS only after Windows completion; macOS needs
-   independent architecture, runtime and host execution evidence.
+5. Continue all seven items on Linux through WSL after Windows completion, per
+   the latest goal update. Keep WSL and native-Linux evidence distinct. The
+   earlier macOS scope still needs independent runtime and host evidence.
 
 Verification status for the seven-item objective: **FAIL / incomplete**.
 The passing diagnostic cannot close any host/item cell or authorize release.
+
+## Follow-up: hosted compiler discovery
+
+The next bounded diagnostic exposed a separate, reproducible discovery defect:
+the installed clang-cl passes the headerless compiler probe but cannot find
+`stdlib.h` when compiling the runtime. The probe now requires that header;
+real-tool positive and negative controls behaved as expected. See the
+[bug and validation record](../../../../08_tracking/bug/windows_hosted_cc_probe_accepts_missing_sdk_2026-09-29.md).
+Rebuilt Simple execution and the compiler/lib/MCP/LSP acceptance gates remain
+blocked. The source fix does not close the original host-identity investigation.
