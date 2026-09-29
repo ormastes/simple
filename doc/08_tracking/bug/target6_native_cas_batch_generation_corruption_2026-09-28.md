@@ -36,6 +36,18 @@ CAS batch publication.
    and native time/RSS cohort. Do not treat the manifest-only pass as a warm
    route or Target 6 completion receipt.
 
+## 2026-09-29 verification boundary
+
+This branch already uses `cache_text_join_v1` for generation serialization and
+reads back the persisted generation before publishing `CURRENT`. The existing
+`cas_batch_native_publish_main.spl` checks publish, load, pin, and decode for
+zero and one dependencies, but has no passing native execution receipt yet.
+The standalone Stage4 compiler cannot build this multi-module probe directly;
+the full self-hosted CLI rejected its first entry-closure build with
+`SCV-E-ADMISSION: compile-event-journal-missing`. The next bounded attempt must
+explicitly cold-initialize the checkout's SCV inventory, then run the binary.
+No serializer correction or successful round trip is inferred from this check.
+
 ## Candidate repair evidence
 
 A one-unit no-stub Stage2 native reproducer returned zero bytes for
