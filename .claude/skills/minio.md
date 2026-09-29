@@ -50,7 +50,7 @@ Run `bin/itf minio stat <bucket> <key>` (SigV4 HEAD via `adapter_minio.spl::_min
 
 ## Prerequisite Checks
 
-- `bin/itf minio` requires a `[minio]` section in `~/.config/itf/auth.sdn` (url + region + access_key/secret_key) — the SigV4 adapter (`load_minio_config`) reads these. This is the only prerequisite for the built-in subcommands.
+- `bin/itf minio` requires a `[minio]` section in `~/.config/devhub/auth.sdn` (url + region + access_key/secret_key) — the SigV4 adapter (`load_minio_config`) reads these. This is the only prerequisite for the built-in subcommands.
 - `mc --version` / `mc alias list` - needed **only** for the explicit "drop to `mc`" escape hatches (recursive/prefix ls/get/put/share); the `bin/itf minio` subcommands do not call `mc`.
 
 ## Integration

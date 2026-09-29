@@ -51,7 +51,7 @@ Constraints (per `mc-alias-set-2026`):
 
 ### Step 3 - Persist Alias for ITF
 
-Save the alias name to `~/.config/itf/auth.sdn` so `cmd_minio.spl` can pick it up. The file format mirrors the existing `confluence:` / `jira:` sections (yaml-style key-value):
+Save the alias name to `~/.config/devhub/auth.sdn` so `cmd_minio.spl` can pick it up. The file format mirrors the existing `confluence:` / `jira:` sections (yaml-style key-value):
 
 ```
 minio:
@@ -79,7 +79,7 @@ curl -s -o /dev/null -w "%{http_code}\n" https://minio.corp:9000/minio/health/re
 - [ ] `mc --version` succeeds
 - [ ] `mc --json alias list` shows the new alias
 - [ ] `mc --json ls <alias>` returns at least the bucket listing
-- [ ] `~/.config/itf/auth.sdn` contains a `minio:` section with `alias_name`
+- [ ] `~/.config/devhub/auth.sdn` contains a `minio:` section with `alias_name`
 
 ## Error Handling
 

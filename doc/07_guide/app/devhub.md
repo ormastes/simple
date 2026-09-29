@@ -34,14 +34,20 @@ credentialed backend operations remain explicit terminal commands.
 It uses the registered Simple OS `fluid_light` default: the light, macOS-like
 liquid-glass package compiled from `config/themes/raw/fluid_os/DESIGN.md`.
 
-Two separate config files, because the email facade predates and outgrew the
-original `itf` config format:
+DevHub keeps general settings, credentials, and email accounts in three SDN
+files under one directory:
 
 | What | Path | Holds |
 |---|---|---|
-| Main config | `~/.config/itf/config.sdn` | Confluence/Jira URLs, `wiki.default_backend`, `tasks.default_backend`, `tasks.jira_done_status`, editor/pager overrides, `[token_cmd]` section |
-| Main auth | `~/.config/itf/auth.sdn` | Per-provider tokens/credentials: `confluence`, `jira`, `bitbucket`, `minio`, `outlook` sections |
-| Email config | `~/.config/devhub/email.sdn` | `default_account` + one or more `accounts` blocks (provider, email, `password_cmd`, and Graph tenant/client fields) — see `facade_email.md` §7 |
+| Main config | `~/.config/devhub/config.sdn` | Confluence/Jira URLs, `wiki.default_backend`, `tasks.default_backend`, `tasks.jira_done_status`, editor/pager overrides, `[token_cmd]` section |
+| Main auth | `~/.config/devhub/auth.sdn` | Per-provider tokens/credentials: `confluence`, `jira`, `bitbucket`, `minio`, `outlook` sections |
+| Email config | `~/.config/devhub/email.sdn` | Shared by DevHub email and mail-cli: `default_account` + `accounts` blocks (provider, email, `password_cmd`, optional IMAP/SMTP settings, and Graph tenant/client fields) — see `facade_email.md` §7 |
+
+DevHub reads legacy `~/.config/itf/config.sdn` and `auth.sdn` when the
+corresponding DevHub file is absent. New writes go to `~/.config/devhub/`;
+the legacy files are left in place. mail-cli imports the former shared
+`email.json` or its older `~/.config/mail-cli/config.json` into `email.sdn`
+when the SDN file is absent.
 
 `devhub auth login`/`status`/`logout` only automates **Confluence and Jira**:
 
@@ -67,7 +73,7 @@ directly. acli is used only when no token is configured
 `[token_cmd]`, then `auth.sdn`. `jira.email` is required only for basic auth.
 
 ```sdn
-# ~/.config/itf/config.sdn — Jira Data Center (REST v2, Bearer PAT)
+# ~/.config/devhub/config.sdn — Jira Data Center (REST v2, Bearer PAT)
 jira:
     url: https://jira.corp:8443/jira      # any base URL; port and context path allowed
     deployment: datacenter                # datacenter -> /rest/api/2 | cloud (default) -> /rest/api/3
@@ -77,7 +83,7 @@ token_env:
 ```
 
 ```sdn
-# ~/.config/itf/config.sdn — Jira Cloud (REST v3, basic email + API token)
+# ~/.config/devhub/config.sdn — Jira Cloud (REST v3, basic email + API token)
 jira:
     url: https://company.atlassian.net
     deployment: cloud
@@ -197,14 +203,14 @@ the source is named in errors so a surprising choice is traceable:
 | 1 | `--backend` flag | `devhub gh --backend bitbucket pr list` |
 | 2 | environment | `DEVHUB_GIT_BACKEND=bitbucket` |
 | 3 | repo config (committed, shared) | `.spipe/config.sdn` → `devhub:` → `git_backend:` |
-| 4 | user config | `~/.config/itf/config.sdn` → `git:` → `default_backend:` |
+| 4 | user config | `~/.config/devhub/config.sdn` → `git:` → `default_backend:` |
 | 5 | remote host sniff | an `origin` pointing at `github.com` / `bitbucket.org` |
 
 Nothing resolved is an **error naming every way to fix it**, never a guess.
 
 Bitbucket coordinates resolve on the same shape:
 `--workspace`/`--repo` > `BB_WORKSPACE`/`BB_REPO` > `.spipe/config.sdn`
-(`bb_workspace`, `bb_repo`) > `~/.config/itf/config.sdn` (`[bitbucket]`).
+(`bb_workspace`, `bb_repo`) > `~/.config/devhub/config.sdn` (`[bitbucket]`).
 
 ```sdn
 # .spipe/config.sdn — tracked by git, so NAMES of secrets only, never secrets
@@ -224,7 +230,7 @@ each developer configured it in their own home directory, and an agent in a
 fresh clone silently got the hardcoded default. Each facade now resolves:
 
 ```
---backend flag  >  DEVHUB_{GIT,WIKI,TASKS}_BACKEND  >  .spipe/config.sdn  >  ~/.config/itf/config.sdn  >  default
+--backend flag  >  DEVHUB_{GIT,WIKI,TASKS}_BACKEND  >  .spipe/config.sdn  >  ~/.config/devhub/config.sdn  >  default
 ```
 
 (`git` adds the origin-remote sniff before its default, and errors rather than
@@ -365,7 +371,7 @@ stripped. When `bitbucket.deployment` is unset, any URL that is not
 `--project` is the project key.
 
 ```sdn
-# ~/.config/itf/config.sdn — Bitbucket Server/DC 8.19, Bearer PAT
+# ~/.config/devhub/config.sdn — Bitbucket Server/DC 8.19, Bearer PAT
 bitbucket:
     url: https://host:222            # also ok: https://host:222/context
     deployment: datacenter           # optional for non-bitbucket.org URLs
@@ -458,7 +464,7 @@ confluence.public:
 ```
 
 ```sdn
-# ~/.config/itf/auth.sdn
+# ~/.config/devhub/auth.sdn
 confluence.internal:
     token: "..."
 confluence.public:
@@ -665,7 +671,7 @@ Honest, currently-open gaps — do not expect these to work:
   its own colon, like a URL, would otherwise truncate).
 - **CLI banner still says "itf"**: `devhub --help`/`--version` print
   `itf`-branded text (`itf — gh-like CLI for Jira + Confluence`,
-  `Config: ~/.config/itf/config.sdn`) — cosmetic only, verified by running
+  `Config: ~/.config/devhub/config.sdn`) — cosmetic only, verified by running
   `bin/devhub --help` directly; functionality is unaffected.
 - **Top-level `--help` is incomplete**: `devhub --help` only lists
   `wiki, jira, api, auth, bb, minio, outlook, github, daily-debug` — it omits

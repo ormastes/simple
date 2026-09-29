@@ -52,7 +52,7 @@ step("routes the default (no --backend) identically to explicit --backend conflu
 step("Verify: routes the default (no --backend) identically to explicit --backend confluence")
 # @req: REQ-APP-DEVHUB-001
 # Pinned to FIXTURE_HOME with no wiki config so this holds
-# deterministically even on a machine whose real ~/.config/itf
+# deterministically even on a machine whose real ~/.config/devhub
 # sets `wiki: default_backend: github` (see header comment).
 _clear_wiki_config()
 val code_default = _run_wiki_with_home(["list"])

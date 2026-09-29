@@ -84,17 +84,22 @@ def main():
         server = threading.Thread(target=serve, daemon=True)
         server.start()
         home = work / "home"
-        config_dir = home / ".config/mail-cli"
+        config_dir = home / ".config/devhub"
         config_dir.mkdir(parents=True)
-        config = config_dir / "config.json"
-        config.write_text(json.dumps({
-            "default_account": "loopback", "accounts": {"loopback": {
-                "protocol": "pop3", "email": "alice@example.test",
-                "username": "alice@example.test", "display_name": "Fixture",
-                "pop3_server": "127.0.0.1", "pop3_port": port,
-                "tls": "implicit", "password": "loopback-fixture-password",
-            }},
-        }))
+        config = config_dir / "email.sdn"
+        config.write_text(
+            'default_account: "loopback"\n\naccounts:\n'
+            '  loopback:\n'
+            '    provider: other\n'
+            '    protocol: pop3\n'
+            '    email: "alice@example.test"\n'
+            '    username: "alice@example.test"\n'
+            '    display_name: "Fixture"\n'
+            '    pop3_server: "127.0.0.1"\n'
+            f'    pop3_port: "{port}"\n'
+            '    tls: implicit\n'
+            '    password: "loopback-fixture-password"\n'
+        )
         config.chmod(0o600)
         env = {name: value for name, value in os.environ.items()
                if not name.startswith("MAIL_") and name not in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "SSL_CERT_DIR")}

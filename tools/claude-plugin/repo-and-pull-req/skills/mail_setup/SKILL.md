@@ -71,4 +71,4 @@ Set default: `bin/mail config set default_account work`
 - [ ] `bin/mail version` succeeds
 - [ ] `bin/mail auth status` shows connected account
 - [ ] `bin/mail inbox` lists messages
-- [ ] `~/.config/mail-cli/config.json` exists (mode 600)
+- [ ] `~/.config/devhub/email.sdn` exists (mode 600)

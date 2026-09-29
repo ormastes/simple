@@ -1,6 +1,6 @@
 # @cover src/app/devhub/config.spl 60%
 
-use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_config, save_confluence_target, save_auth_token, load_auth_token}
+use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_config, save_confluence_target, save_auth_token, load_auth_token, config_path, auth_path}
 use app.devhub.errors.{ItfError}
 
 extern fn rt_env_get(key: text) -> text?
@@ -13,16 +13,16 @@ extern fn rt_file_delete(path: text) -> bool
 # Fixture-HOME harness (same pattern as wiki_backend_routing_spec.spl /
 # cmd_jira_spec.spl / cmd_tasks_spec.spl): points HOME at a throwaway
 # build/ directory so load_config()/load_auth_token()/save_auth_token()
-# never touch the real ~/.config/itf, and always restores HOME afterward.
+# never touch the real ~/.config/devhub, and always restores HOME afterward.
 val FIXTURE_HOME = "build/test-itf-config-colon-fixture/home"
 
 
 fn _load_config_with_fixture_config(config_body: text) -> ItfConfig:
-    """Write FIXTURE_HOME/.config/itf/config.sdn with `config_body` (via the
+    """Write FIXTURE_HOME/.config/devhub/config.sdn with `config_body` (via the
     real rt_file_write_text extern — NOT save_config, so this isolates the
     READ side while reproducing bug itf-config-colon-value-split), then call
     load_config() with HOME pointed at the fixture. Always restores HOME."""
-    val dir = "{FIXTURE_HOME}/.config/itf"
+    val dir = "{FIXTURE_HOME}/.config/devhub"
     val _mk = rt_dir_create_all(dir)
     val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
     val _no_auth = rt_file_delete("{dir}/auth.sdn")
@@ -36,7 +36,7 @@ fn _load_config_with_fixture_config(config_body: text) -> ItfConfig:
 fn _auth_token_roundtrip(provider: text, token: text) -> text:
     """save_auth_token(provider, token) then load_auth_token(provider), with
     HOME pointed at the fixture. Always restores HOME."""
-    val dir = "{FIXTURE_HOME}/.config/itf"
+    val dir = "{FIXTURE_HOME}/.config/devhub"
     val _mk = rt_dir_create_all(dir)
     val original_home = rt_env_get("HOME") ?? ""
     val _set_home = rt_env_set("HOME", FIXTURE_HOME)
@@ -47,7 +47,7 @@ fn _auth_token_roundtrip(provider: text, token: text) -> text:
 
 
 fn _load_target_with_fixture(config_body: text, target: text) -> ItfConfig:
-    val dir = "{FIXTURE_HOME}/.config/itf"
+    val dir = "{FIXTURE_HOME}/.config/devhub"
     val _mk = rt_dir_create_all(dir)
     val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
     val original_home = rt_env_get("HOME") ?? ""
@@ -58,7 +58,7 @@ fn _load_target_with_fixture(config_body: text, target: text) -> ItfConfig:
 
 
 fn _resolve_target_token_with_fixture(config_body: text, auth_body: text, target: text) -> text:
-    val dir = "{FIXTURE_HOME}/.config/itf"
+    val dir = "{FIXTURE_HOME}/.config/devhub"
     val _mk = rt_dir_create_all(dir)
     val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
     val _auth = rt_file_write_text("{dir}/auth.sdn", auth_body)
@@ -71,6 +71,50 @@ fn _resolve_target_token_with_fixture(config_body: text, auth_body: text, target
 
 
 describe "ITF configuration":
+
+    context "DevHub config directory migration":
+        it "reads legacy ITF files and writes merged settings under DevHub":
+            val legacy_dir = "{FIXTURE_HOME}/.config/itf"
+            val new_dir = "{FIXTURE_HOME}/.config/devhub"
+            val _legacy_mk = rt_dir_create_all(legacy_dir)
+            val _new_mk = rt_dir_create_all(new_dir)
+            val _new_config_clear = rt_file_delete("{new_dir}/config.sdn")
+            val _new_auth_clear = rt_file_delete("{new_dir}/auth.sdn")
+            val _legacy_config = rt_file_write_text("{legacy_dir}/config.sdn", "jira:\n    url: https://legacy.example\n")
+            val _legacy_auth = rt_file_write_text("{legacy_dir}/auth.sdn", "confluence:\n    token: old-token\n\njira:\n    token: old-jira\n")
+            val original_home = rt_env_get("HOME") ?? ""
+            val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+            val loaded = load_config()
+            val legacy_token = load_auth_token("confluence")
+            val saved_config = save_config(loaded)
+            val saved_token = save_auth_token("jira", "new-jira")
+            val new_config_path = config_path()
+            val new_auth_path = auth_path()
+            val new_auth = rt_file_read_text(new_auth_path) ?? ""
+            val old_auth = rt_file_read_text("{legacy_dir}/auth.sdn") ?? ""
+            val _restore_home = rt_env_set("HOME", original_home)
+            expect(loaded.jira_url).to_equal("https://legacy.example")
+            expect(legacy_token).to_equal("old-token")
+            expect(saved_config).to_equal(true)
+            expect(saved_token).to_equal(true)
+            expect(new_config_path).to_equal("{new_dir}/config.sdn")
+            expect(new_auth_path).to_equal("{new_dir}/auth.sdn")
+            expect(new_auth).to_contain("old-token")
+            expect(new_auth).to_contain("new-jira")
+            expect(old_auth).to_contain("old-jira")
+
+        it "prefers a DevHub config file when both locations exist":
+            val legacy_dir = "{FIXTURE_HOME}/.config/itf"
+            val new_dir = "{FIXTURE_HOME}/.config/devhub"
+            val _legacy_mk = rt_dir_create_all(legacy_dir)
+            val _new_mk = rt_dir_create_all(new_dir)
+            val _legacy_config = rt_file_write_text("{legacy_dir}/config.sdn", "jira:\n    url: https://legacy.example\n")
+            val _new_config = rt_file_write_text("{new_dir}/config.sdn", "jira:\n    url: https://new.example\n")
+            val original_home = rt_env_get("HOME") ?? ""
+            val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+            val loaded = load_config()
+            val _restore_home = rt_env_set("HOME", original_home)
+            expect(loaded.jira_url).to_equal("https://new.example")
 
     context "ItfConfig.default":
         it "creates config with sensible defaults":
@@ -135,7 +179,7 @@ describe "ITF configuration":
             expect(confluence_target_from_args(["list", "--host=alpha", "--profile=beta"])).to_equal("__invalid_confluence_selector__")
 
         it "target writes preserve nested header maps in sibling targets":
-            val dir = "{FIXTURE_HOME}/.config/itf"
+            val dir = "{FIXTURE_HOME}/.config/devhub"
             val _mk = rt_dir_create_all(dir)
             val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    headers:\n        X-Alpha: replace\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    headers:\n        X-Beta: keep\n        X-Scope: one\n"
             val _write = rt_file_write_text("{dir}/config.sdn", body)
