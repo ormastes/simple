@@ -2,8 +2,20 @@
 # mail-cli multi-account config
 # Config stored at: ~/.config/mail-cli/config.json
 
-MAIL_CONFIG_DIR="${HOME}/.config/mail-cli"
-MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
+mail_expand_path() {
+  local path="$1" home_dir="${HOME:-${USERPROFILE:-}}"
+  case "$path" in
+    '{home}'|'{home}/'*)
+      [ -n "$home_dir" ] || { echo "error: home directory is unavailable" >&2; return 2; }
+      printf '%s%s\n' "$home_dir" "${path#\{home\}}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+_mail_default_config='{home}/.config/mail-cli'
+MAIL_CONFIG_DIR=$(mail_expand_path "${MAIL_CONFIG_DIR:-$_mail_default_config}")
+MAIL_CONFIG_FILE=$(mail_expand_path "${MAIL_CONFIG_FILE:-${MAIL_CONFIG_DIR}/config.json}")
+MAIL_CONFIG_DIR=$(dirname -- "$MAIL_CONFIG_FILE")
 
 # Dup the script's original stderr onto fd 3 *before* any call site adds its
 # own `2>/dev/null` (imap.shs/smtp.shs/auth.shs all silence _mail_curl's
@@ -173,16 +185,41 @@ _mail_curl_retry_codes_default="6 7 28 52 55 56"
 _mail_curl() {
   local codes="${_mail_curl_retry_codes:-$_mail_curl_retry_codes_default}"
   local max="${MAIL_CURL_MAX_RETRIES:-3}" delay="${MAIL_CURL_RETRY_DELAY:-1}"
-  local attempt=1 rc tmp
-  tmp=$(mktemp "${TMPDIR:-/tmp}/mail-cli-curl.XXXXXX")
+  local attempt=1 rc tmp auth="" escaped recovered=0
+  local -a args=()
+  # Use curl's config pipe for credentials; --user must never reach exec argv.
+  while [ $# -gt 0 ]; do
+    if [ "$1" = --user ]; then
+      [ $# -ge 2 ] || return 2
+      auth="$2"; shift 2
+    else
+      args+=("$1"); shift
+    fi
+  done
+  tmp=$(mktemp "${TMPDIR:-/tmp}/mail-cli-curl.XXXXXX") || return 1
 
   local _progress_host
-  _progress_host=$(_mail_curl_host_from_args "$@")
+  _progress_host=$(_mail_curl_host_from_args "${args[@]}")
   _mail_progress_start "$_progress_host"
 
   while :; do
-    curl --connect-timeout 10 --max-time 60 "$@" >"$tmp"
-    rc=$?
+    escaped=${auth//\\/\\\\}; escaped=${escaped//\"/\\\"}
+    case "$escaped" in *$'\r'*|*$'\n'*) rm -f "$tmp"; return 2 ;; esac
+    rc=0
+    # stdin works with native Windows curl too; /dev/fd process substitutions
+    # do not. Message uploads use files, leaving stdin exclusively for auth.
+    printf 'user = "%s"\n' "$escaped" | curl --disable --config - \
+      --connect-timeout 10 --max-time 60 "${args[@]}" >"$tmp" || rc=$?
+    if [ "$rc" -eq 67 ] && [ "$recovered" -eq 0 ] && \
+       [ "${MAIL_AUTH_RECOVERY:-1}" = 1 ] && [ -n "${MAIL_ACCT_NAME:-}" ] && \
+       [ -z "${MAIL_PASSWORD_FILE:-}${MAIL_PASSWORD_COMMAND:-}" ]; then
+      echo "Login rejected for ${MAIL_ACCT_NAME}." >&3
+      if _mail_password_input "New password (saved after successful login): "; then
+        auth="${MAIL_ACCT_USERNAME}:${MAIL_ACCT_PASSWORD}"
+        recovered=1
+        continue
+      fi
+    fi
     case " ${codes} " in
       *" ${rc} "*)
         if [ "$attempt" -ge "$max" ]; then break; fi
@@ -194,6 +231,16 @@ _mail_curl() {
     esac
     break
   done
+  if [ "$rc" -eq 0 ] && [ "$recovered" = 1 ]; then
+    # The operation has already succeeded (possibly SMTP delivery). A failed
+    # save must not turn success into an error that invites duplicate delivery.
+    if ! _mail_save_password; then
+      echo "warning: operation succeeded, but replacement password was not saved" >&3
+    fi
+  fi
+  if [ "$rc" -eq 67 ]; then
+    echo "error: authentication rejected; run mail auth password --account ${MAIL_ACCT_NAME:-NAME} --password-file FILE" >&3
+  fi
   _mail_progress_end
   cat "$tmp"
   rm -f "$tmp"
@@ -252,7 +299,7 @@ mail_preset() {
 }
 
 mail_config_dir() {
-  mkdir -p "$MAIL_CONFIG_DIR"
+  (umask 077; mkdir -p "$MAIL_CONFIG_DIR")
 }
 
 mail_config_exists() {
@@ -298,13 +345,21 @@ mail_config_get_account() {
   fi
 }
 
-mail_config_set_account() {
+mail_config_set_account() (
+  umask 077
   local name="$1" account_json="$2"
   mail_config_init
-  local tmp="${MAIL_CONFIG_FILE}.tmp"
-  jq --arg n "$name" --argjson acc "$account_json" '.accounts[$n] = $acc' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
-  chmod 600 "$MAIL_CONFIG_FILE"
-}
+  local tmp lock="${MAIL_CONFIG_FILE}.lock"
+  mkdir "$lock" 2>/dev/null || { echo "error: mail configuration is busy" >&3; return 1; }
+  tmp=$(mktemp "${MAIL_CONFIG_FILE}.XXXXXX") || { rmdir "$lock"; return 1; }
+  trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT
+  # Feed both documents over stdin: native Windows jq cannot open /dev/fd,
+  # and legacy callers may still contain secrets that must stay off argv.
+  { cat "$MAIL_CONFIG_FILE"; printf '\n%s\n' "$account_json"; } | \
+    jq --arg n "$name" -s '.[0] as $config | .[1] as $acc | $config | .accounts[$n] = $acc' \
+    > "$tmp" || return 1
+  chmod 600 "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+)
 
 mail_config_delete_account() {
   local name="$1"
@@ -342,19 +397,15 @@ mail_resolve_account() {
   MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server')
   MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port')
   MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
+  MAIL_ACCT_PROTOCOL=$(printf '%s' "$acc" | jq -r '.protocol // "imap"')
+  MAIL_ACCT_POP3_SERVER=$(printf '%s' "$acc" | jq -r '.pop3_server // empty')
+  MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // 995')
 
   # Password resolution: password_cmd (if set) takes priority over the
   # stored plaintext password. This keeps the secret out of config.json —
   # e.g. a password manager CLI or `pass show mail/gmail`.
-  local password_cmd
-  password_cmd=$(echo "$acc" | jq -r '.password_cmd // empty')
-  if [ -n "$password_cmd" ]; then
-    MAIL_ACCT_PASSWORD=$(bash -c "$password_cmd" 2>/dev/null)
-    if [ -z "$MAIL_ACCT_PASSWORD" ]; then
-      echo "${C_RED}error:${C_RESET} password_cmd for account '${name}' produced no output" >&2
-      return 1
-    fi
-  else
-    MAIL_ACCT_PASSWORD=$(echo "$acc" | jq -r '.password // empty')
-  fi
+  if [ "${MAIL_SKIP_PASSWORD_RESOLVE:-0}" = 1 ]; then return 0; fi
+  _mail_resolve_password "$acc"
 }
+
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/credentials.shs"
