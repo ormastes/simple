@@ -12,6 +12,7 @@ pub mod emitter;
 mod functions;
 mod gpu_instructions;
 mod instructions;
+mod named_callable;
 pub(crate) mod raw_asm;
 mod types;
 mod wasm_imports;

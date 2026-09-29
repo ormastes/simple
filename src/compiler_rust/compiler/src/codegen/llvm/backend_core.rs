@@ -950,11 +950,12 @@ impl LlvmBackend {
                 let closure_ptr = builder
                     .build_int_to_ptr(closure_pi, ptr_type, "closure_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("closure inttoptr", &e))?;
-                let fn_addr = callee.as_global_value().as_pointer_value();
+                let adapter = self.named_callable_adapter(m, callee)?;
+                let fn_addr = adapter.as_global_value().as_pointer_value();
                 let fn_addr_i = builder
                     .build_ptr_to_int(fn_addr, i64_type, "fn_addr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("fn ptrtoint", &e))?;
-                let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
+                let closure_marker = i64_type.const_zero();
                 builder
                     .build_store(closure_ptr, fn_addr_i)
                     .map_err(|e| crate::error::factory::llvm_build_failed("closure store fn", &e))?;
@@ -964,7 +965,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("closure gep", &e))?
                 };
                 builder
-                    .build_store(marker_slot, direct_marker)
+                    .build_store(marker_slot, closure_marker)
                     .map_err(|e| crate::error::factory::llvm_build_failed("closure store marker", &e))?;
                 store_to_global(global_name, closure_pi)?;
             }
