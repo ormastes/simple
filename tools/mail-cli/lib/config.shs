@@ -302,7 +302,11 @@ mail_config_set_account() {
   local name="$1" account_json="$2"
   mail_config_init
   local tmp="${MAIL_CONFIG_FILE}.tmp"
-  jq --arg n "$name" --argjson acc "$account_json" '.accounts[$n] = $acc' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  # Keep account secrets in-process and on stdin, never in external jq argv.
+  builtin printf '%s' "$account_json" |
+    jq -s --arg n "$name" --slurpfile config "$MAIL_CONFIG_FILE" \
+      'if length != 1 or ($config | length) != 1 then error("expected one account and one config JSON value") else .[0] as $account | $config[0] | .accounts[$n] = $account end' > "$tmp" || return 1
+  mv "$tmp" "$MAIL_CONFIG_FILE" || return 1
   chmod 600 "$MAIL_CONFIG_FILE"
 }
 
