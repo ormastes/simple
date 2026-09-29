@@ -31,9 +31,11 @@ The hardware adapter's three bool probes now call the production leaf
 `hardware_tcp_probe(host: text, port: i64) -> bool`. It rejects empty hosts
 and ports outside 1–65535, brackets bare IPv6 hosts without doubling existing
 brackets, and rejects unmatched brackets. It uses the existing public
-`io_tcp_connect_timeout(addr: text, ms: i64) -> i64` with 500ms. Numeric
+`TcpStream.connect_fd_timeout(addr: text, ms: i64) -> i64` with 500ms. Numeric
 connection failures return false; a successful handle is closed once through
-`io_tcp_close(fd: i64) -> bool` before returning true. Adapter APIs, retry
+`tcp_fd_close(fd: i64) -> bool` before returning true. These existing public
+`std.nogc_sync_mut.io.tcp` APIs are available on main and release/1.0 without
+depending on the main-only generated SFFI alias module. Adapter APIs, retry
 counts, sleep intervals and process lifecycle remain unchanged.
 
 The numeric-only provider rejects hostnames with
@@ -55,6 +57,8 @@ bare/bracketed IPv6, hostname resolution/fallback, bounded `.invalid` DNS
 failure, and invalid input. The raw provider's numeric-only `-101` result for
 `localhost` is asserted before testing DNS fallback. EOF is distinguished
 from a read failure; accepted peer handles and listeners are explicitly closed.
+The tests use the same shared public I/O facade; `TcpStream.read(1)` retains
+`Ok(empty bytes)` versus `Err(IoError)` to distinguish EOF from a failed read.
 The scenarios establish socket closure only, not allocation-leak freedom.
 
 ## Separate pre-existing provider allocation issue
@@ -72,3 +76,21 @@ the supported network runtime provider. No Rust-only reimplementation or
 placeholder pass is accepted as evidence. The earlier admitted TRACE32 mini
 compile reached its 180-second startup guard without a verdict; that result
 is not repeated or claimed as evidence for this repair.
+
+
+## 2026-09-29 integration diagnostics
+
+Conflict resolution retains the shared TcpStream/TcpListener facade introduced
+in PR #2046. Its scalar connection and close methods delegate to the same
+network owner used by the previously landed calls. The integration spec was
+invoked through `/home/yoon/dev/simple/bin/release/aarch64-unknown-linux-gnu/simple`.
+The executable identified itself as a Rust-built bootstrap seed, so the result
+is diagnostic only and is not admitted self-hosted app verification. Further
+app testing through that executable was stopped.
+
+The diagnostic executed seven examples: five passed, while localhost and
+`.invalid` hostname cases failed with `semantic: invalid socket address`
+before the expected native `-101` fallback. This demonstrates an interpreter
+versus native-provider error-contract mismatch; it does not prove a native
+probe failure or a successful native test. Log: `/tmp/pr2046-hardware-test.log`.
+A supported self-hosted/native provider harness remains required for this gate.
