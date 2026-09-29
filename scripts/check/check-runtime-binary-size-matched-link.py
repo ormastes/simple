@@ -89,12 +89,17 @@ def extract_reproduction(archive: Path, destination: Path) -> Path:
 
 def check(args: argparse.Namespace) -> str:
     paths = [args.archive, args.receipt, args.simple_binary,
-             args.simple_stripped, args.c_source, args.c_binary,
+             args.simple_stripped, args.c_source, args.expected_stdout,
+             args.c_binary,
              args.c_stripped, args.clang, args.lld, args.strip]
     for path in paths:
         require(path.is_file(), f"input-missing:{path}")
-    for path in paths[:7]:
+    for path in paths[:8]:
         require(not path.is_symlink(), f"input-symlink:{path}")
+    expected_stdout = args.expected_stdout.read_bytes()
+    require(0 < len(expected_stdout) <= 4096 and
+            expected_stdout.endswith(b"\n") and b"\0" not in expected_stdout,
+            "expected-stdout-invalid")
     fields = receipt_fields(args.receipt)
     require(digest(args.archive) == fields["archive_sha256"],
             "archive-digest-mismatch")
@@ -136,7 +141,7 @@ def check(args: argparse.Namespace) -> str:
         require(global_symbols(simple_object, True) == {"__simple_main"} and
                 global_symbols(c_object, True) == {"__simple_main"} and
                 global_symbols(simple_object, False) == {"rt_println_str"} and
-                global_symbols(c_object, False) == {"rt_println_str"},
+                global_symbols(c_object, False) == {"puts"},
                 "hello-object-symbol-contract-invalid")
         c_response = ["-o c-hello" if line == outputs[0] else
                       "c-hello.o" if line == modules[0] else line
@@ -151,9 +156,9 @@ def check(args: argparse.Namespace) -> str:
         require(digest(root / "c-hello-stripped") == digest(args.c_stripped),
                 "c-strip-replay-mismatch")
         for binary in (root / "simple-stripped", root / "c-hello-stripped"):
-            result = subprocess.run([str(binary)], cwd=root, text=True,
+            result = subprocess.run([str(binary)], cwd=root,
                                     capture_output=True, check=False)
-            require(result.returncode == 0 and result.stdout == "Hello World\n",
+            require(result.returncode == 0 and result.stdout == expected_stdout,
                     f"hello-output-mismatch:{binary.name}")
 
     simple_bytes = args.simple_stripped.stat().st_size
@@ -169,7 +174,8 @@ def check(args: argparse.Namespace) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("archive", "receipt", "simple-binary", "simple-stripped",
-                 "c-source", "c-binary", "c-stripped", "clang", "lld", "strip"):
+                 "c-source", "expected-stdout", "c-binary", "c-stripped",
+                 "clang", "lld", "strip"):
         parser.add_argument(f"--{name}", required=True, type=Path)
     args = parser.parse_args()
     for name in vars(args):

@@ -88,17 +88,20 @@ using the same startup and required runtime/link inputs.
 For the Linux one-source hello gate, run
 `scripts/check/check-runtime-binary-size-matched-link.py` with the archive,
 its receipt, both unstripped and stripped outputs, the one-function C source,
-and the exact Clang, LLD, and strip tools. It replays the Simple link byte for
+expected stdout bytes, and the exact Clang, LLD, and strip tools. It replays
+the Simple link byte for
 byte, replaces only the program object for C, and checks the 15 KiB and 1.05x
 limits. The full BS7 cohort still requires its separate admission, provider,
 NoGC, startup, and RSS evidence.
 On Linux, the BS7 producer and checker require the unstripped Simple and C
 outputs, captured archive and receipt, C source, and the Clang, LLD, and strip
-tools through their `--matched-*` options. They bind all input hashes in the
+tools through their `--matched-*` options. The C entry calls `puts` and both
+outputs must match `--matched-expected-stdout`. They bind all input hashes in the
 cohort receipt and rerun the exact replay; `matched-startup-v1` by itself is
-not size evidence. Pass `--python-binary` as the baseline executable; the
-receipt binds its hash and the checker requires each Simple/Python sample row
-to name the matching lane's binary hash.
+not size evidence. Pass the NoGC hello as `--simple-binary`, the startup
+executable as `--interpreter-binary`, and Python as `--python-binary`. The
+receipt binds all three hashes; each startup sample row must name its
+interpreter or Python executable hash.
 
 For the bootstrap-only Rust tool, an existing directory in
 `SIMPLE_RUNTIME_PATH` supplies native link archives and leaves interpreter
