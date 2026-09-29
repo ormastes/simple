@@ -121,3 +121,61 @@ before those guards are relaxed to `<= 0` would silently disarm them.
   `.len()`/`.length()` lowering.
 - `src/runtime/runtime_native.c:1741-1745` (`rt_string_len`), `:4825+`
   (`rt_dict_len`).
+
+## 2026-09-29: independently confirmed Rust bootstrap LLVM owner gap
+
+A separate bootstrap compiler failure reproduces the same result for a
+statically typed `ParserModule.functions: Dict<text, ParserFunction>` field.
+The retained component debugger observations show the same Core C dictionary
+handle with heap kind 6, capacity 8 and live count 1 before and after capture
+take, while the generated length expression computes -1. The memory component
+stops at assertion 10; its later body, retention and restore checks remain
+unverified. Its three diagnostic cycles were not repeated for this repair.
+
+The Rust MIR method lowerer lacked a structural Dict nullary length route.
+LLVM generic method handling reached `compile_inline_len` before its later
+Dict-specific fallback. That inline code recognizes string and array layouts
+and rejects Core C dictionary kind 6. Adding kind 6 to its shared offset-8 load
+would return dictionary capacity, not the live count at offset 16.
+
+The narrow correction in `lowering_expr_method.rs` uses the existing structural
+`receiver_is_dict` check for zero-argument `len` and `length`, then emits a
+direct `rt_dict_len` call using the already evaluated receiver. Registered
+aliases, recovered fields, locals and parameters keep their type owner;
+nominal methods retain their own dispatch. The existing runtime ABI returns
+an unboxed i64 count and owns each runtime's layout. Runtime and backend layout
+code are unchanged.
+
+One focused repair cycle on base
+`f1496d6ca5423ebe55e8a8dc9a91ef2eceddc37a` passed three executed Rust bootstrap
+compiler regressions: structural MIR owner and single receiver evaluation,
+Cranelift JIT results, and actual LLVM Linux object/IR ownership. The shared
+fixture checks counts 0, 1, 2 and 3, insertion, replacement without growth,
+removal, typed and alias fields, alias locals, typed parameters, an allocating
+receiver and distinct nominal `len`/`length` results. A C entry linked the fresh
+LLVM object to production Core C provider objects and executed all eight
+fixture functions successfully, printing `typed Dict LEN Core C PASS` with
+exit 0. Linker tracing identifies `runtime_native.o` as the sole `rt_dict_len`
+provider. All 103 complete retained runtime closure inputs are byte-identical
+to this source; all 40 provider object hashes and the compiler hash match the
+retained production census. No provider rebuild or Rust runtime substitution
+was used.
+
+Evidence is retained under
+`D:/dev/simple-wsl-recovery-20260928/typed-dict-len-f149-20260929/`:
+`cycle1-inputs.json`, `result-fresh-tests-cycle1.env`, the three
+`test-fresh-cycle1-*.stdout.log` files, `post-test-source-binding.json`, and
+`corec-cycle1/result.json`, `link.log` and `link.map`. The compiler test build
+took 322.4 seconds, with observed OS process peak working set 4,086,685,696
+bytes. Short test RSS was unmeasured. An initial launcher selected an older
+executable and ran zero tests; those logs are invalid and are not PASS evidence.
+The new tests each ran once on the freshly emitted executable. A full post-test
+Git scope check failed because the pinned PATH lacked git-lfs; independent
+physical input hashes and the owned Rust/fixture scope check passed.
+
+This repairs the tested typed Rust bootstrap compiler route. Cranelift's
+generic length implementation already supported both Dict layouts, so JIT
+alone would not prove the LLVM/Core C correction. Generic `len(value)`, erased
+or Any receivers, and the historical pure-Simple erased receiver issue above
+remain outside this repair. These component results do not admit a rebuilt
+bootstrap phase or qualify the full compiler CLI.

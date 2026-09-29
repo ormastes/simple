@@ -1613,6 +1613,22 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Dict owns a distinct length layout in each runtime. The generic
+        // LLVM length fast path only handles strings/arrays, so preserve the
+        // structural receiver and call the existing Dict owner directly.
+        if matches!(method, "len" | "length") && args.is_empty() && self.receiver_is_dict(receiver, receiver_local_ty) {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_dict_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
         if method == "len" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();

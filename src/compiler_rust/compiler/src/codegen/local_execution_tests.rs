@@ -37,6 +37,16 @@ fn test_cranelift_jit_typed_dict_float_literal_key_compatibility() {
     assert_eq!(em.execute("float_membership", &[]).expect("float literal membership"), 1);
 }
 
+#[test]
+fn test_cranelift_jit_typed_dict_len_live_count() {
+    let mir = source_to_mir(include_str!("../../../../../test/fixtures/native/typed_dict_len/main.spl"));
+    let mut em = LocalExecutionManager::cranelift().expect("initialize Dict length JIT");
+    em.compile_module(&mir).expect("compile typed Dict length fixture");
+    for (name, expected) in [("dict_len_sequence", 0), ("dict_len_field", 2), ("dict_len_alias_field", 1), ("dict_len_alias_local", 3), ("dict_len_parameter_case", 2), ("dict_len_receiver_once", 1), ("dict_len_nominal", 23), ("dict_len_nominal_length", 28)] {
+        assert_eq!(em.execute(name, &[]).expect(name), expected, "{name}: raw live count or authored nominal result");
+    }
+}
+
 // =============================================================================
 // Cranelift JIT Tests
 // =============================================================================
