@@ -27,7 +27,11 @@ snapshots, ABI/plugin/K1/coverage/link options. Stage 3 additionally binds its
 actual assurance profile and warning policy. Later tool entries use the
 compiler's canonical semantic environment field list, after their actual
 forced overrides, including CPU, linker, MIR bulk operations and safety profile.
-The full CLI records its actual one-binary mode.
+The full CLI records its actual one-binary mode. Phase 3 additionally binds the
+bytes of the genuine, fully verified Stage 2 ABI admission receipt. Resume
+forwards that receipt and its matching recorded policy through the hermetic
+worker, and refuses an absent, changed or different-producer transfer. Cache
+configuration and forwarding checks do not replace compiler admission.
 
 Phase 2 and Phase 3 retain the canonical cache roots committed by their
 transcripts and use separate immutable producer/entry bindings. Later tool

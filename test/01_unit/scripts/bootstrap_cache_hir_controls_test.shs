@@ -47,23 +47,33 @@ grep -Fxq 'hir-cache=1' "$work/assurance" || fail 'resume assurance omits HIR co
 # branch solely to avoid any host resource-limit change; no compiler is called.
 fake_root="$work/capture-root"
 mkdir -p "$fake_root/scripts/check/lib" "$work/home-a" "$work/home-b" "$work/tmp-a" "$work/tmp-b"
+BOOTSTRAP_CACHE_FIXTURE_REPO=$repo
+export BOOTSTRAP_CACHE_FIXTURE_REPO
 cat > "$fake_root/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'CAPTURE'
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 bootstrap_stage3_run_transcribed() { printf '%s\n' "$@" > "$3"; }
 CAPTURE
+# Transfer-only fixture for the worker's ABI guard; this is not an admitted
+# compiler and never enters the canonical caller's full admission verifier.
+printf 'capture-only producer fixture\n' > "$work/no-compiler"
+producer_sha=$(bootstrap_cache_hash_file "$work/no-compiler")
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=%s\n' "$producer_sha" > "$work/transfer-only.env"
+receipt_sha=$(bootstrap_cache_hash_file "$work/transfer-only.env")
 SIMPLE_HIR_CACHE=0 SIMPLE_HIR_CACHE_DIR="$work/ambient-hir" \
   sh "$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
   "$work/transcript-a" "$fake_root" "$work/worker-a.args" \
   "$work/home-a" "$work/tmp-a" "$PATH" "$work/no-compiler" \
   fixture-apple-darwin cranelift 1 '' "$phase3" "$work/runtime" \
   "$work/candidate-a" "$work/progress-a" "$work/profile-a" "$work/memory-a" \
-  fixture-a direct none 1 '' '' '' 1
+  fixture-a direct none 1 '' '' '' 1 v1 "$work/transfer-only.env" "$receipt_sha"
 SIMPLE_HIR_CACHE=0 SIMPLE_HIR_CACHE_DIR="$work/another-ambient-hir" \
   sh "$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
   "$work/transcript-b" "$fake_root" "$work/worker-b.args" \
   "$work/home-b" "$work/tmp-b" "$PATH" "$work/no-compiler" \
   fixture-apple-darwin cranelift 1 '' "$phase3" "$work/runtime" \
   "$work/candidate-b" "$work/progress-b" "$work/profile-b" "$work/memory-b" \
-  fixture-b direct none 1 '' '' '' 1
+  fixture-b direct none 1 '' '' '' 1 v1 "$work/transfer-only.env" "$receipt_sha"
 for captured in "$work/worker-a.args" "$work/worker-b.args"; do
   grep -Fxq 'SIMPLE_HIR_CACHE=1' "$captured" || fail 'actual worker omitted enable override'
   grep -Fxq "SIMPLE_HIR_CACHE_DIR=$phase3/hir" "$captured" || fail 'actual worker omitted persistent directory'
