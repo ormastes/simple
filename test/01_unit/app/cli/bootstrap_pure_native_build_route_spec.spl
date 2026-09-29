@@ -4,8 +4,45 @@ use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use app.cli.bootstrap_main.{run_native_build_bootstrap, bootstrap_native_build_worker_args}
 use app.io._CliCompile.compile_targets.{cli_native_build_option_error}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
+
+fn binding_error(actual: text, binary: text, bin: text) -> text:
+    match bootstrap_native_build_producer_binding(actual, binary, bin):
+        case Ok(_): ""
+        case Err(reason): reason
 
 describe "pure bootstrap native CLI ownership":
+    it "binds child identity to the real process image with matching overrides":
+        val actual = cli_kernel_executable_path()
+        expect(actual != "").to_equal(true)
+        val bound = match bootstrap_native_build_producer_binding(actual, "", ""):
+            case Ok(binary): binary
+            case Err(reason):
+                print reason
+                ""
+        expect(bound != "").to_equal(true)
+        expect(binding_error(actual, actual, actual)).to_equal("")
+        val matching = match bootstrap_native_build_producer_binding(actual, bound, bound):
+            case Ok(binary): binary
+            case Err(_): ""
+        expect(matching).to_equal(bound)
+
+    it "refuses missing self identity without a repository or seed fallback":
+        expect(binding_error("", "bin/simple", "")).to_equal(
+            "bootstrap native-build cannot resolve the invoking executable")
+        expect(binding_error("test/fixtures/missing-producer.spl", "", "")).to_equal(
+            "bootstrap native-build cannot resolve the invoking executable")
+
+    it "rejects existing conflicting and missing requested producers independently":
+        val actual = cli_kernel_executable_path()
+        expect(binding_error(actual, "src/app/cli/bootstrap_main.spl", "")).to_equal(
+            "bootstrap native-build producer mismatch: SIMPLE_BINARY")
+        expect(binding_error(actual, actual, "src/app/cli/bootstrap_main.spl")).to_equal(
+            "bootstrap native-build producer mismatch: SIMPLE_BIN")
+        expect(binding_error(actual, "test/fixtures/missing-producer.spl", "")).to_equal(
+            "bootstrap native-build producer mismatch: SIMPLE_BINARY")
+
     it "rejects unsupported options before compiler admission":
         val args = ["simple", "native-build", "--source", "src",
             "--entry", "test/fixtures/nonexistent-route-entry.spl", "--unsupported-native-route-flag"]

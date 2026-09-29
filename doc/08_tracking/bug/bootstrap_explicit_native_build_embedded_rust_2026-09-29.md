@@ -18,6 +18,10 @@ in its external evidence directory.
 
 Base: `09d340400e02e0b133d244d7969c9a106e8fb017`.
 
+Reconciled base after SCV PR2089 landed:
+`232842ecdafd0a08361f2df80a1076d6d90da566`. Its frozen resolver-root selection
+and snapshot admission remain owned by the existing closure module.
+
 Ordinary explicit entries and project input forms use the existing compiled
 native CLI coordinator. Its native argument owner validates options, retains
 source-root order, shared output flags and worker counts, and rejects missing or
@@ -35,12 +39,24 @@ The coordinator's cold source inventory now refreshes `src` and `test` together,
 matching `compiler_entrypoint_admit_v1`. This does not repair or bypass the
 separate repository-root `simple.sdn` policy completeness issue.
 
+Bootstrap-internal coordinator children now bind to the kernel-reported image
+of the invoking process. Both requested `SIMPLE_BINARY` and `SIMPLE_BIN` must
+canonicalize to that image if supplied; a missing or conflicting path fails
+before policy collection, inventory refresh, or child spawning. POSIX symlinks,
+Windows drive casing and extended/UNC path prefixes use canonical comparison.
+No argv, repository binary or seed fallback is allowed for that binding. The
+ordinary tool resolver retains its previous behavior. No runtime ABI was added.
+
 ## Required evidence
 
 - The focused unit spec and native regression fixture must execute against the
   refreshed source and producer; source review alone is not a test PASS.
 - A positive source-bounded native fixture must compile and run, with the actual
   pure driver/coordinator call chain bound to producer/source/runtime identities.
+  Both positional entry plus `--source` and explicit `--entry` forms must build
+  `test/fixtures/bootstrap/pure_native_build_source_entry.spl` and print its
+  marker. Matching producer overrides must succeed; conflicting overrides must
+  reject before inventory mutation or child spawning. These checks are pending.
 - The first serialized cold tools build must produce a real full-scope inventory
   receipt before warm children run. No hand-written inventory or freshness stamp.
 - Caret, DevHub and MCP product/runtime checks remain pending until a refreshed

@@ -1,0 +1,31 @@
+# Bootstrap-internal child identity. Ordinary tool resolution is independent.
+use app.io.file_ops.{path_absolute}
+use std.io_runtime.{file_exists}
+
+fn canonical_producer_path(path: text) -> text:
+    var canonical = path_absolute(path).replace("\\", "/")
+    if canonical.starts_with("//?/UNC/"):
+        canonical = "//" + canonical.substring(8)
+    elif canonical.starts_with("//?/"):
+        canonical = canonical.substring(4)
+    # Windows image paths and canonicalized overrides may differ in casing.
+    if canonical.starts_with("//") or (canonical.len() >= 3 and canonical.substring(1).starts_with(":")):
+        canonical = canonical.lower()
+    canonical
+
+pub fn bootstrap_native_build_producer_binding(
+    actual_executable: text, requested_binary: text, requested_bin: text
+) -> Result<text, text>:
+    if actual_executable == "" or not file_exists(actual_executable):
+        return Err("bootstrap native-build cannot resolve the invoking executable")
+    val actual = canonical_producer_path(actual_executable)
+    if actual == "" or actual.ends_with(".spl"):
+        return Err("bootstrap native-build cannot resolve the invoking executable")
+    val requested = [requested_binary, requested_bin]
+    val labels = ["SIMPLE_BINARY", "SIMPLE_BIN"]
+    for index in 0..2:
+        val path = requested[index]
+        if path != "":
+            if not file_exists(path) or canonical_producer_path(path) != actual:
+                return Err("bootstrap native-build producer mismatch: " + labels[index])
+    Ok(actual)

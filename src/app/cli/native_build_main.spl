@@ -2,7 +2,8 @@
 
 use app.io.env_ops.{env_get, env_set, cwd}
 use app.io.process_ops.{process_run_timeout, process_run_timeout_live, process_spawn_async, process_wait, process_kill}
-use app.io.cli_ops.{_cli_self_exe_via_pid_query}
+use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
+use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
 # Unambiguous, non-builtin stderr write for the worker-failure relay path
@@ -800,6 +801,23 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64):
     print "[hir-shard] {done}/{count} shard(s) completed split={mode}"
 
 pub fn run_native_build_worker(args: [text]) -> i64:
+    val compiled_bootstrap_route =
+        (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
+    val simple_bin = if compiled_bootstrap_route:
+        match bootstrap_native_build_producer_binding(
+            cli_kernel_executable_path(), env_get("SIMPLE_BINARY") ?? "", env_get("SIMPLE_BIN") ?? ""):
+            case Ok(binary): binary
+            case Err(reason):
+                eprint "error: " + reason
+                return 1
+    else:
+        resolve_simple_binary()
+    if not native_build_worker_binary_valid(simple_bin, file_exists(simple_bin)):
+        eprint "error: native-build worker binary is unavailable: {simple_bin}"
+        return 1
+    if compiled_bootstrap_route:
+        env_set("SIMPLE_BINARY", simple_bin)
+        env_set("SIMPLE_BIN", simple_bin)
     val policy = match environment_variant_policy_handoff_prepare_v1(args):
         case Ok(value): value
         case Err(failure):
@@ -834,8 +852,6 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # itself. Do not label that native subprocess lane as interpreted: doing so
     # clamps parse warming to one child before the memory-aware clamp is even
     # consulted. Source-run wrappers retain the established interpreter marker.
-    val compiled_bootstrap_route =
-        (env_get("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING") ?? "") == "1"
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "interpret")
     for arg in forwarded_args:
@@ -843,10 +859,6 @@ pub fn run_native_build_worker(args: [text]) -> i64:
         # removes the one internal handoff argument before cli_native_build.
         worker_args = worker_args.push(arg)
     val requested_output = output_path_arg(args)
-    val simple_bin = resolve_simple_binary()
-    if not native_build_worker_binary_valid(simple_bin, file_exists(simple_bin)):
-        eprint "error: native-build worker binary is unavailable: {simple_bin}"
-        return 1
     # Propagate the resolved absolute/validated binary so the worker (and any
     # child it spawns) inherit a runnable SIMPLE_BINARY instead of re-deriving
     # an empty one.
