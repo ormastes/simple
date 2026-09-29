@@ -17,6 +17,7 @@ use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.type_aliases.*
 use compiler.hir.hir_lowering.types.{hir_type_env_get}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -235,10 +236,13 @@ impl HirLowering:
     me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
         if source_name != "":
+            var arguments: [HirType] = []
+            for argument in parser_type_kind_named_args(type_.kind):
+                arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, source_name)
             if raw_symbol_id >= 0:
-                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+                return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: raw_symbol_id), arguments, type_.span), span: type_.span)
             # Level-gated OWNER probe (default off). This fall-through hands the
             # type to `lower_type`, which resolves in the IMPORTER's scope; the
             # resulting `unresolved type: X` carries a SYNTHESIZED span
@@ -249,7 +253,7 @@ impl HirLowering:
             # LocalId produced zero probe lines of any kind.
             if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
                 eprint("[ist-scalar-fallthrough] name={source_name} owner={imported_module_name} lowering={self.module_filename}")
-            return self.lower_type(type_)
+            return HirType(kind: self.lower_named_kind(source_name, arguments, type_.span), span: type_.span)
         # COMPOSITE shapes must be projected ELEMENTWISE.
         #
         # Only a TOP-LEVEL Named type used to be projected through the
@@ -305,12 +309,8 @@ impl HirLowering:
             return HirType(kind: HirTypeKind.Union(projected_members), span: type_.span)
         val array_element_name = parser_type_kind_array_element_name(type_.kind)
         if array_element_name != "":
-            val raw_element_id = self.symbols.lookup_qualified_type_raw(
-                imported_module_name, array_element_name)
-            val element = if raw_element_id >= 0:
-                HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
-            else:
-                HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
+            val source_element = parser_type_kind_array_element(type_.kind, type_)
+            val element = self.imported_surface_type(source_element, imported_module_name)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         # ARRAY WHOSE ELEMENT IS NOT A PLAIN NAMED TYPE must still be projected
         # ELEMENTWISE. The branch above is keyed on
@@ -354,10 +354,13 @@ impl HirLowering:
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
+            var arguments: [HirType] = []
+            for argument in parser_type_kind_named_args(type_.kind):
+                arguments = arguments.push(self.imported_surface_type(argument, imported_module_name))
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
                 imported_module_name, type_name)
             if raw_symbol_id >= 0:
-                return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
+                return HirType(kind: self.lower_named_symbol_kind(SymbolId(id: raw_symbol_id), arguments, type_.span), span: type_.span)
             # `has_X` is the optional sugar for `X?`; the surface records it
             # verbatim. Project the BASE through the owner's qualified scope
             # before falling back, otherwise lower_named_kind strips the
@@ -369,22 +372,13 @@ impl HirLowering:
                 val has_symbol_id = self.symbols.lookup_qualified_type_raw(
                     imported_module_name, type_name[4:])
                 if has_symbol_id >= 0:
-                    return HirType(kind: HirTypeKind.Optional(HirType(kind: HirTypeKind.Named(SymbolId(id: has_symbol_id), []), span: type_.span)), span: type_.span)
+                    return HirType(kind: HirTypeKind.Optional(HirType(kind: self.lower_named_symbol_kind(SymbolId(id: has_symbol_id), [], type_.span), span: type_.span)), span: type_.span)
             if hir_type_env_get("SIMPLE_HIR_UNRESOLVED_TYPE_TRACE") == "1":
                 eprint("[ist-proj-miss] name={type_name} owner={imported_module_name} lowering={self.module_filename}")
-            return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
+            return HirType(kind: self.lower_named_kind(type_name, arguments, type_.span), span: type_.span)
         if array_element_name != "":
-            val raw_element_id = self.symbols.lookup_qualified_type_raw(
-                imported_module_name, array_element_name)
-            var element: HirType = HirType(kind: HirTypeKind.Error, span: type_.span)
-            if raw_element_id >= 0:
-                element = HirType(
-                    kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []),
-                    span: type_.span)
-            else:
-                element = HirType(
-                    kind: self.lower_named_kind(array_element_name, [], type_.span),
-                    span: type_.span)
+            val source_element = parser_type_kind_array_element(type_.kind, type_)
+            val element = self.imported_surface_type(source_element, imported_module_name)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
         self.imported_surface_type(type_, imported_module_name)
 

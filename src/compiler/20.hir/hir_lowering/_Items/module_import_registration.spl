@@ -16,6 +16,8 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
 use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
@@ -570,17 +572,16 @@ impl HirLowering:
             # decl kind gives the local name a real type, so `v.field` and
             # method dispatch behave exactly as they do through the target name.
             #
-            # Only a single-name target that the SAME module declares as a
+            # Only a bare named target that the SAME module declares as a
             # NON-alias is followed. That keeps this strictly non-recursive (the
             # re-entry can only land on a composite / enum / trait / callable /
             # const branch, never back here), so an `type A = B` / `type B = A`
-            # cycle cannot spin. Generic and compound targets (`type M = {text:
-            # V}`, `type Symbol = text`) have no single declared target and keep
-            # the plain TypeAlias binding below.
+            # cycle cannot spin. Generic and compound targets retain a lazy
+            # template below instead of pretending to be a nominal type.
             val alias_decl = imported_mod.type_alias_values[alias_position]
-            val alias_targets = parser_type_named_dependencies(alias_decl.type_)
-            if alias_decl.type_params.len() == 0 and alias_targets.len() == 1:
-                val alias_target = alias_targets[0]
+            val alias_target = parser_type_kind_named_name(alias_decl.type_.kind)
+            val alias_target_args = parser_type_kind_named_args(alias_decl.type_.kind)
+            if alias_decl.type_params.len() == 0 and alias_target != "" and alias_target_args.len() == 0:
                 if alias_target != imported_name and
                    module_surface_name_position(imported_mod.type_alias_names, alias_target) < 0 and
                    hir_module_declares_item(imported_mod, alias_target):
@@ -595,6 +596,26 @@ impl HirLowering:
                 # cycle or competing import cannot shadow the first binding.
                 val imported_type = self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
                 self.symbols.rename_symbol(imported_type, imported_name)
+                self.symbols.bind_qualified_type(imported_mod.module_name, imported_name, imported_type)
+                self.register_type_alias_template(imported_type, alias_decl.type_, alias_decl.type_params, imported_mod.module_name)
+                # Publish the template before following its dependencies, so
+                # recursive aliases terminate registration and are diagnosed
+                # during expansion. Bind dependencies in the owner's scope.
+                var dependency_types: [Type] = [alias_decl.type_]
+                for parameter in alias_decl.type_params:
+                    if parameter.has_default:
+                        dependency_types = dependency_types.push(parameter.default)
+                for dependency_type in dependency_types:
+                    for dependency in parser_type_named_dependencies(dependency_type):
+                        var is_parameter = false
+                        for parameter in alias_decl.type_params:
+                            if parameter.name == dependency:
+                                is_parameter = true
+                        if not is_parameter and not hir_dependency_is_builtin_type(dependency):
+                            self.materialize_imported_callable_declared_dependency(imported_mod, imported_mod_name, dependency, import_span, materialize_enum)
+                            self.materialize_imported_callable_explicit_dependency(imported_mod, dependency, import_span, materialize_enum)
+                            if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) < 0:
+                                self.materialize_imported_field_package_dependency(imported_index, dependency, import_span, materialize_enum)
         elif callable_position >= 0:
             # Repeated glob roots and physical module aliases can revisit the
             # same local callable. Function symbols are not first-write-wins,
