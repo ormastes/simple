@@ -1,0 +1,81 @@
+# Production Trace32Client regression through a local fake command transport.
+# Linux/POSIX fixture: /bin/sh stands in for t32rem, with the script as host.
+# No Trace32 hardware or copied polling implementation is used.
+use std.spec.*
+use app.io.{dir_create_all, file_write, file_read_text, file_exists, getpid, host_os}
+use app.io.time_ops.{time_now_micros}
+use std.nogc_sync_mut.debug.remote.protocol.trace32.{Trace32Client}
+
+fn stop_fixture(name: text, body: text) -> Trace32Client:
+    val directory = "build/trace32 wait spec/{getpid()}"
+    expect(dir_create_all(directory)).to_equal(true)
+    val path = "{directory}/{name}.shs"
+    val script = "#!/bin/sh\n" +
+        "printf '%s\\n' \"$2\" >> \"$0.log\"\n" +
+        "case \"$2\" in\n'EVAL STATE.RUN()') ;;\n*) exit 8 ;;\nesac\n" + body
+    expect(file_write(path, script)).to_equal(true)
+    Trace32Client(host: path, port: 20000, t32rem_path: "/bin/sh",
+        backend: "remote_cmd", connected: true, program: "", bp_counter: 0)
+
+fn stop_fixture_log(client: Trace32Client) -> text:
+    file_read_text("{client.host}.log")
+
+fn stop_error(result: Result<text, text>) -> text:
+    match result:
+        Err(message): message
+        Ok(value):
+            expect("unexpected success: {value}").to_equal("")
+            ""
+
+if host_os() != "windows":
+    describe "Trace32Client bounded wait_for_stop":
+        it "returns stopped immediately without sending Break":
+            val client = stop_fixture("initially_stopped", "printf 'FALSE\\n'\n")
+            expect(client.wait_for_stop(2000)).to_equal(Ok("stopped"))
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\n")
+
+        it "polls a running target until it stops without forcing halt":
+            val client = stop_fixture("transition",
+                "if test -f \"$0.state\"; then printf 'FALSE\\n'; else touch \"$0.state\"; printf 'TRUE\\n'; fi\n")
+            expect(client.wait_for_stop(2000)).to_equal(Ok("stopped"))
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\nEVAL STATE.RUN()\n")
+
+        it "times out when the target remains running":
+            val client = stop_fixture("running_timeout", "printf 'TRUE\\n'\n")
+            expect(stop_error(client.wait_for_stop(200))).to_contain("timed out after 200ms")
+            val commands = stop_fixture_log(client)
+            expect(commands.contains("EVAL STATE.RUN()")).to_equal(true)
+            expect(commands.contains("Break")).to_equal(false)
+
+        it "bounds a stalled transport by the wait deadline":
+            val client = stop_fixture("stalled_transport", "exec sleep 30\n")
+            val started_us = time_now_micros()
+            val error = stop_error(client.wait_for_stop(200))
+            val elapsed_ms = (time_now_micros() - started_us) / 1000
+            expect(error.contains("TIMEOUT") or error.contains("timed out")).to_equal(true)
+            expect(elapsed_ms).to_be_less_than(5000)
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\n")
+
+        it "rejects malformed execution state":
+            val client = stop_fixture("malformed", "printf 'not-a-state\\n'\n")
+            expect(stop_error(client.wait_for_stop(2000))).to_equal(
+                "invalid Trace32 STATE.RUN() response: not-a-state")
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\n")
+
+        it "propagates transport failures":
+            val client = stop_fixture("transport_error", "printf 'connection refused\\n' >&2\nexit 7\n")
+            expect(stop_error(client.wait_for_stop(2000))).to_contain("t32rem error: connection refused")
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\n")
+
+        it "rejects a protocol error even when the transport exits successfully":
+            val client = stop_fixture("protocol_error", "printf 'Error accessing Trace32\\n'\n")
+            expect(stop_error(client.wait_for_stop(2000))).to_equal("Error accessing Trace32")
+            expect(stop_fixture_log(client)).to_equal("EVAL STATE.RUN()\n")
+
+        it "does not launch a transport for a nonpositive timeout":
+            val client = stop_fixture("zero_timeout", "printf 'FALSE\\n'\n")
+            expect(stop_error(client.wait_for_stop(0))).to_contain("timed out after 0ms")
+            expect(stop_error(client.wait_for_stop(-1))).to_contain("timed out after -1ms")
+            expect(file_exists("{client.host}.log")).to_equal(false)
+else:
+    skip("Trace32Client bounded wait_for_stop", "POSIX fake transport requires /bin/sh")
