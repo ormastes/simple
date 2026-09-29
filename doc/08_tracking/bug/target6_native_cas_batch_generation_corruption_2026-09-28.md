@@ -36,6 +36,40 @@ CAS batch publication.
    and native time/RSS cohort. Do not treat the manifest-only pass as a warm
    route or Target 6 completion receipt.
 
+## 2026-09-29 verification boundary
+
+This branch already uses `cache_text_join_v1` for generation serialization and
+reads back the persisted generation before publishing `CURRENT`. The existing
+`cas_batch_native_publish_main.spl` checks publish, load, pin, and decode for
+zero and one dependencies, but has no passing native execution receipt yet.
+The standalone Stage4 compiler cannot build this multi-module probe directly;
+the full self-hosted CLI rejected its first entry-closure build with
+`SCV-E-ADMISSION: compile-event-journal-missing`. That attempt required an
+explicit cold initialization of the checkout's SCV inventory.
+No serializer correction or successful round trip is inferred from this check.
+
+Continuation on 2026-09-29: `SIMPLE_SCV_INVENTORY_COLD_INIT=1` passed the
+missing-journal gate, but the full self-hosted `native-build --entry-closure`
+command consumed CPU for over five minutes with no new log output or binary;
+the bounded diagnostic was terminated. The multi-file standalone Stage4 AOT
+probe stopped during source loading on the existing
+`src/app/package/registry/auth.spl` versus
+`src/app/package.registry/auth.spl` sanitized-module collision. A one-file
+runtime string-builder reproducer reached LLVM code generation, then `llc`
+exited 1 without a binary; the compiler reported an IR diagnostic path that
+was no longer present after the failed build. The source reproducer is
+`doc/09_report/compiler/evidence/target6_cas_text_builder_stage4_reproducer_20260929.spl`.
+These are build-path boundaries, not evidence that CAS serialization passed or
+failed. The next CAS test needs a qualified narrow entry-closure builder and
+must still prove persisted generation readback, load, pin, and decode.
+
+The publication guard now validates the joined generation against every
+expected row before creating the generation file. Its subsequent exact
+readback still checks the persisted bytes before moving `CURRENT`. This keeps
+the normal path to one row split and rejects a three-byte serializer result
+without writing an orphan generation. The root native serialization failure
+and a passing native round trip remain unproven.
+
 ## Candidate repair evidence
 
 A one-unit no-stub Stage2 native reproducer returned zero bytes for

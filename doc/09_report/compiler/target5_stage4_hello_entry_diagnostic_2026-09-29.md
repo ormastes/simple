@@ -6,8 +6,81 @@ fixes. Its one hello AOT smoke still fails with
 `PLUG-E-NOTFOUND: backend=llvm` after MIR/AOP processing. The K1 composition
 binding remains the next blocker; no hello size/startup/RSS cohort exists.
 
-Status: BLOCKED for production qualification. This is an investigation of the
-standalone compiler entry, not an admitted Stage4 build or a size result.
+Later continuation (2026-09-29): the standalone entry now installs its
+selected K1 backend table before JIT/AOT work. Hello AOT passes that gate,
+then exposed the positional AOT empty-MIR stub. Lowering positional AOT
+sources moves the same request into backend compilation, where the newly
+opened session lease is rejected. A trial that skipped the copied `retired`
+flag still failed the authority token check and was reverted. The exact
+Stage4 compiler still links (3 compiled, 863 cached, zero failures); no
+working hello or matched size/startup/RSS measurement is claimed. See
+`doc/08_tracking/bug/stage4_standalone_aot_backend_session_lease_2026-09-29.md`.
+The unstripped compiler diagnostic grew from 23,596,040 to 23,599,976 bytes
+(+3,936 bytes, +0.017%) after the entry and MIR changes. This is compiler
+size, not the release-small hello size gate.
+The required ancillary smokes were attempted with the installed self-hosted
+runtime because this isolated worktree has no `bin/simple`: core eval/source
+passed, but `check-core-runtime-smoke.shs` expected `42` in compile output
+and observed only `Compiled ... -> ...smf`; the MCP native smoke stopped at
+`raw-source launch in t32_mcp_server`. Neither check validates this new
+Stage4 source, and neither is claimed PASS. The Stage4 hello blocker above
+remains the next focused implementation step.
+
+## Lease receiver and hello continuation
+
+A diagnostic trace found that a call intended for
+`BackendSession.compile_aot_into_path` re-entered the same-named
+`BackendSessionOwnedLeaseV2` method with a different object layout. Giving the
+lease method the unique name `compile_owned_aot_into_path_v2` removed that
+collision. The current-source Stage4 compiler compiled 866 units with no
+failures and linked a 23,622,696-byte unstripped executable. It compiled and
+linked a 21,448-byte ARM64 hello, SHA-256
+`fcf5d4bb072c107f0e2603db7c5f864117c06cd9ba01b84e60b33cf8fda41e7a`;
+the hello executable ran and printed `Hello World` with exit 0.
+
+The compiler itself returned exit 1 after linking because native no-op
+receipt publication saw zero usable source paths and refused to encode a
+receipt. That fail-closed refusal is correct for the observed empty path. The
+owner-copy bug is tracked in
+`doc/08_tracking/bug/stage4_positional_aot_noop_receipt_source_paths_2026-09-29.md`.
+No matched C hello size, startup, RSS, or release qualification is claimed.
+
+The next bounded trace narrowed this failure: the loaded hello path is 51
+characters, while `driver_source_owner_text_copy(loaded_source.path)` returns
+an empty string immediately. The owner vector still has one slot at
+publication, but its empty path is rejected by receipt validation. The
+non-streaming context assignment did not cause this loss. The helper's
+`rt_bytes_to_text(value.bytes())` copy needs a native-proven replacement;
+the diagnostic prints were removed and no additional build retry was made
+after the third focused cycle.
+
+## Owned source copy and diagnostic hello cohort
+
+Replacing the failed byte-array round-trip with the runtime's zero-offset
+substring produced one owned text copy and repaired the Stage4 hello build.
+The exact compiler rebuilt 866 units with zero failures in 66.3 seconds; the
+hello AOT command then returned exit 0 and its executable printed
+`Hello World` with exit 0. The unstripped hello is 21,448 bytes; an
+`llvm-strip --strip-all` copy is **13,544 bytes**, 1,816 bytes below the
+15,360-byte absolute limit. This is not yet a matched C ratio or BS7 release
+qualification. A repeated identical hello build still did full compiler/link
+work instead of reporting a no-op admission hit; see
+`doc/08_tracking/bug/stage4_native_noop_admission_misses_after_publication_2026-09-29.md`.
+
+A same-host 30-pair diagnostic used a small C `fork`/`wait4` harness with
+alternating order and warmups. The stripped Simple hello measured p95 1.248 ms
+and 1,076 KiB max RSS; `/usr/bin/python3 -c "print('Hello World')"` measured
+p95 20.893 ms and 9,440 KiB. The normalized time-plus-RSS ratio sum is
+0.174. The raw samples and harness are in
+`doc/09_report/compiler/evidence/target5_stage4_hello_30pair_20260929.tsv`
+and `target5_stage4_hello_cohort_harness_20260929.c` beside it. Earlier
+Python-parent `fork`/`posix_spawn` measurements inherited the parent's peak
+RSS and were discarded. This cohort is diagnostic because the matched C
+binary, Stage4 admission receipt, NoGC inventory, and provider trace are not
+yet assembled for the release checker.
+
+Status: exact Stage4 compiler and hello AOT build exit 0; diagnostic size and
+startup/RSS evidence exists. Matched C and production qualification are open.
 
 Worktree: `codex/target5-stage4-sqlite-demand-20260928`, starting at
 `27e0e47d653`. The previous current-source dynamic compiler diagnostic checks

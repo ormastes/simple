@@ -89,11 +89,28 @@ full-CLI, optional-provider, matched-hello, or Phase 7 gates. See
 `doc/09_report/compiler/target5_stage4_dynamic_vs_static_diagnostic_2026-09-29.md`.
 An exact `core-c-bootstrap` Stage4 ARM64 compiler now links after the live
 character-helper and partial-linker fixes (866 compiled units, zero failures,
-23,596,040-byte unstripped executable). Its `--version` smoke passes, but
-hello AOT reaches `PLUG-E-NOTFOUND: backend=llvm`. The K1 composition binding,
+23,596,040-byte unstripped executable). Its `--version` smoke passes. Before
+the standalone entry fix, hello AOT reached `PLUG-E-NOTFOUND: backend=llvm`. The K1 composition binding,
 working hello, matched size/startup/RSS cohort, and optional-provider gates
 remain open. See
 `doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
+The standalone entry now installs the committed K1 table, and positional AOT
+lowers its input into MIR. Hello advances to backend compilation but rejects
+the session lease; the matched hello gates remain open. See
+`doc/08_tracking/bug/stage4_standalone_aot_backend_session_lease_2026-09-29.md`.
+The lease receiver collision is fixed for the tested path: an ARM64 hello now
+links and runs. The compiler still exits 1 because no-op receipt publication
+sees zero usable source paths after the link. Source-owner preservation and the
+matched size/startup/RSS gate remain open; see
+`doc/08_tracking/bug/stage4_positional_aot_noop_receipt_source_paths_2026-09-29.md`.
+The receipt blocker is now localized to the source-owner text copy: the
+loaded 51-character hello path becomes empty before it is placed in the
+owner vector. Fix that copy and prove a successful receipt before treating
+the runnable hello as an admitted size/startup/RSS candidate.
+The source-owner copy is now repaired for the tested Stage4 hello. Hello AOT
+returns exit 0 and the stripped executable is 13,544 bytes; a diagnostic
+30-pair startup/RSS cohort has normalized sum 0.174. The matched C ratio,
+optional-provider gates, no-op cache hit, and BS7 receipts remain open.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline

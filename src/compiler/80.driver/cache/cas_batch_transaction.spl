@@ -256,6 +256,19 @@ fn cas_batch_publish_v1(
     val generation_content = cache_text_join_v1(generation_lines, "\n") ?? ""
     if generation_content == "":
         return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+    # Validate the serializer result before touching the filesystem. An exact
+    # readback below then proves that the persisted bytes match these rows.
+    val serialized_lines = generation_content.split("\n")
+    if (serialized_lines.len() != generation_lines.len() or
+            serialized_lines[0] != CAS_BATCH_SCHEMA_V1 or
+            serialized_lines[1] != "generation={transaction.next_generation}" or
+            serialized_lines[2] != "parent={transaction.expected_current_generation}" or
+            serialized_lines[3] != "scc={transaction.scc_id}" or
+            serialized_lines[4] != "transaction={transaction.transaction_id}"):
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
+    for index in 5..serialized_lines.len():
+        if serialized_lines[index] != generation_lines[index]:
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     val generation_path = "{root}/generations/{transaction.next_generation}.generation"
     if not file_create_excl(generation_path, generation_content) or not rt_file_fsync(generation_path) or not rt_file_fsync("{root}/generations"):
         return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
@@ -270,19 +283,6 @@ fn cas_batch_publish_v1(
     if persisted_content != generation_content:
         rt_file_delete(generation_path)
         return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
-    val persisted_lines = persisted_content.split("\n")
-    if (persisted_lines.len() != generation_lines.len() or
-            persisted_lines[0] != CAS_BATCH_SCHEMA_V1 or
-            persisted_lines[1] != "generation={transaction.next_generation}" or
-            persisted_lines[2] != "parent={transaction.expected_current_generation}" or
-            persisted_lines[3] != "scc={transaction.scc_id}" or
-            persisted_lines[4] != "transaction={transaction.transaction_id}"):
-        rt_file_delete(generation_path)
-        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
-    for index in 5..persisted_lines.len():
-        if persisted_lines[index] != generation_lines[index]:
-            rt_file_delete(generation_path)
-            return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     if not file_create_excl("{directory}/SEALED", transaction.next_generation) or not rt_file_fsync("{directory}/SEALED") or not rt_file_fsync(directory):
         return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     val lock = file_lock("{root}/publication.lock", 5)
