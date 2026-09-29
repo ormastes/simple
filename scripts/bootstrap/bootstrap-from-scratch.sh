@@ -2233,7 +2233,6 @@ bootstrap_stage_sanity() (
         frontend_log_durable="${evidence_path}.frontend-failure.log"
         if cp -f "${frontend_log}" "${frontend_log_durable}"; then
           echo "bootstrap-sanity-error: full frontend smoke log preserved at ${frontend_log_durable}" >&2
-          rm -f "${frontend_log}"
         else
           echo "bootstrap-sanity-error: preserving original frontend smoke log at ${frontend_log}" >&2
         fi
@@ -2241,7 +2240,10 @@ bootstrap_stage_sanity() (
     else
       echo "bootstrap-sanity-error: frontend smoke log is empty (${frontend_log})" >&2
     fi
-  else
+  fi
+  # A durable sanity receipt binds this original log on both pass and fail.
+  # Cleanup only scratch evidence that has no published receipt.
+  if [ -z "${evidence_path}" ]; then
     rm -f "${frontend_log}"
   fi
   [ "${sanity_status}" = pass ]
