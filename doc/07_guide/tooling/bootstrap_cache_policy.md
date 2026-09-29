@@ -103,6 +103,13 @@ invalidating a justified scope. Preserve Cargo authority targets and completed
 native/frontend/runtime work on failure. Ephemeral HOME/config/tmp cleanup is
 separate from build cache invalidation.
 
+Managed bootstrap entries explicitly set `SIMPLE_FRONTEND_CACHE=1` and
+`SIMPLE_HIR_CACHE=1`, with directories under the admitted entry's `frontend`
+and `hir` children. Their actual settings are bound into the cache inputs.
+The compiler still enforces its feature and semantic-policy admission rules;
+these settings do not authorize incompatible cache hits. Existing bindings
+from before the explicit HIR settings require justified scope invalidation.
+
 Keep frontend and HIR persistence enabled throughout repairs. Inherited
 `SIMPLE_FRONTEND_CACHE=0` disables both; a cold-cache timing or RSS comparison
 alone does not justify disabling them. A bounded diagnostic may disable
