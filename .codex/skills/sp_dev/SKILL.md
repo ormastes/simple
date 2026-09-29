@@ -3,6 +3,15 @@ name: sp_dev
 description: "SPipe dev entrypoint: refine a feature/bug/TODO into acceptance criteria, then continue through the SPipe pipeline."
 ---
 
+
+## SPipe home routing
+
+Reusable core lives at `~/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `~/spipe` (`SPIPE_WORKSPACE`). `~/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
 # SP Dev -- SPipe Development Entrypoint
 
 `/sp_dev` is the Codex entrypoint for the SPipe development workflow. The

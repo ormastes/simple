@@ -8,7 +8,7 @@ Date: 2026-09-08. Status: scoped implementation handoff, refined by Astra.
 1. Preserve the supplied research as a dated artifact and reconcile this design
    with current SPipe setup/resolver surfaces.
 2. Retain the shipped `.spipe/.spipe` and direct project-submodule compatibility
-   modes. Refine new installation to canonical `~/spipe`, private `~/.spipe`,
+   modes. Refine new installation to canonical `~/.spipe`, private `~/spipe`,
    and a `common` link; route Simple `.spipe/common` to that canonical checkout through
    reviewed integration, preserving legacy mounts and pins until cutover.
 3. Update common/company/organization/project/user/host wiki navigation and

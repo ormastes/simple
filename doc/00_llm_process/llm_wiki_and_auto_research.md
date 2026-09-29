@@ -1,5 +1,14 @@
 # llm wiki and auto-research
 
+## SPipe home routing
+
+Reusable core lives at `~/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `~/spipe` (`SPIPE_WORKSPACE`). `~/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
+
 This repository already realizes the two patterns Andrej Karpathy describes as
 **LLM Wiki** (a living, self-healing markdown knowledge base the agent writes and
 maintains) and **Auto-Research** (a measure-edit-keep-or-revert improvement loop).
