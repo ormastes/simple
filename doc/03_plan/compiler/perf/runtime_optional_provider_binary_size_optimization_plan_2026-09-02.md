@@ -4,23 +4,30 @@
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
 
-Current-source diagnostic (2026-09-29): exact Stage4 hello AOT now exits 0
+Current size status (2026-09-29): the exact Linux LLD hello replay yields
+13,544-byte Simple and 13,608-byte matched C stripped outputs (ratio 0.995297).
+BS7 now requires and independently replays that captured link on Linux;
+`matched-startup-v1` alone cannot pass. NoGC/provider traces, admitted
+startup/RSS cohorts, full optional-provider closure, and Phase 7 cutover
+remain open.
+
+Earlier current-source diagnostic (2026-09-29): exact Stage4 hello AOT now exits 0
 and runs. Its stripped ARM64 binary is 13,544 bytes, below the 15,360-byte
 absolute limit; a 30-pair Simple/Python startup and RSS cohort has normalized
-p95 ratio sum 0.174. This does not close the matched C 1.05x size gate,
+p95 ratio sum 0.174. At that point it did not close the matched C 1.05x size gate,
 optional-provider closure, or BS7 production receipts. Evidence is in
 `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
-An attribution follow-up built a 7,744-byte C hello using the Simple entry
+The earlier attribution follow-up built a 7,744-byte C hello using the Simple entry
 calls and an available core-C runtime archive, versus the saved 13,544-byte
 Simple hello (1.75x). That archive and the saved Simple link are not proven to
-share exact input identities, so this is not the matched-size gate. The next
-build must retain exact linker inputs, archive hashes, and a map alongside
+share exact input identities, so it was not the matched-size gate. The next
+build at that point needed exact linker inputs, archive hashes, and a map alongside
 the Stage4 hello before producing the required same-input C comparator; see
 `doc/09_report/compiler/target5_stage4_hello_c_attribution_2026-09-29.md`.
 The Linux direct LLD linker now supports opt-in exact input reproduction with
 an output/archive/linker hash receipt. Its focused no-stub native probe passes;
-the saved hello must be rebuilt with this capture, and BS7 still needs a
-checked C-comparator input binding before the 1.05 gate can pass. See
+the saved hello still needed rebuilding with capture and BS7 still needed a
+checked C-comparator input binding. Those follow-ups are now done; see
 `doc/09_report/compiler/target5_native_link_reproduction_capture_2026-09-29.md`.
 The first fresh Stage4 compiler attempt compiled 866 source units but hit an
 outdated SQLite contract in the available pure-Simple Stage2 tool; a refreshed
@@ -204,9 +211,14 @@ both outputs run. After the same strip tool, Simple is 13,544 bytes and C is
 13,608 bytes (ratio 0.995297), so this matched Linux size comparison passes.
 The fail-closed replay checker and two rejection probes are recorded in
 `doc/09_report/compiler/target5_exact_hello_link_c_gate_2026-09-29.md`.
-The generic BS7 checker still trusts the `matched-startup-v1` label; wire
-this replay proof into BS7 admission and complete NoGC/provider traces plus
-30/100-sample cohorts before marking the phase or Target 5 complete.
+The BS7 producer now binds the unstripped outputs, C source, archive,
+capture receipt, and tool hashes in its cohort receipt. Its Linux checker
+requires those inputs and replays both links; the old label-only path is
+rejected. A real-LLD synthetic fixture passes the clean path and rejects
+evidence mutations. The cohort receipt now also binds the Python executable,
+and every Simple/Python sample row must name its lane's exact binary digest.
+Complete NoGC/provider traces, 30/100-sample production
+cohorts, and the feature closure before marking Target 5 complete.
 
 ## Phase 6 — Feature and Architecture Qualification
 
