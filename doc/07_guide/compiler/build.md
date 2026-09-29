@@ -572,3 +572,10 @@ before publishing a terminal state; consumers must observe the acquire-based
 state API before reading the receipt. Link spill validation rejects overflowing
 output extents. These changes still require admitted native/SPipe verification;
 the report records the Windows CRT and WSL Stage 4 blockers.
+
+The later builtin Array identity candidate is not merge-ready: expanded
+execution checks fail and native/interpreter filter typing is inconsistent.
+Its ordinary HIR codec is `spl-hircodec-v3`, canonical codec is
+`spl-hircodec-canonical-v2`, and older cache identities are invalidated. See
+[the item 3 evidence](../../03_plan/evidence/seven_plans/windows/item3_builtin_identity_2026-09-29.md)
+before using this development branch; no optimizer/fusion capability is claimed.

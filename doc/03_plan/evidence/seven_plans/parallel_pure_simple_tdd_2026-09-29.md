@@ -8,7 +8,7 @@ matrix remain in `doc/03_plan/seven_plans_host_completion_2026-09-29.md`.
 |---|---|---|
 | 1. Platform unification | 22 umbrella requirements plus inherited parser/dynload/SimpleOS contracts; existing source slices | Authority convergence, qualified bootstrap, parser/provider scenarios, immutable release and live guest evidence |
 | 2. Distributed textual databases | 36 requirements; identity validation plus a new pure candidate identity map | Durable settlement, authority/receipt integration, two-clone recovery; five system checkers remain fail-fast |
-| 3. Typed collections and optimizer | 11 requirements; planner source exists | Production typed extraction/MIR integration, semantic prerequisites, cross-engine and performance evidence |
+| 3. Typed collections and optimizer | 11 requirements; canonical builtin-identity candidate and generated codec now added | Candidate has failing execution checks and P1 filter parity/type concerns; registry, extraction, optimization and host evidence remain incomplete |
 | 4. Linker | Contracts, ELF/COFF work, relocation and working-set owners exist; spill extent overflow fixed | Exact-head executable/compiler corpus, supported-format admission and performance evidence |
 | 5. Optional providers and size | Metadata admission exists; terminal metadata overwrite fixed | Native provider qualification, real exclusion/size/startup/RSS evidence; synthetic fixtures cannot close these gates |
 | 6. Compile optimization | All ten persistent-index matrix areas remain incomplete; cache-marker rejection fixed | Production graph publisher, full entrypoint cutover, invalidation and end-to-end performance; index plan is only part of umbrella scope |
@@ -26,7 +26,9 @@ clang-cl. Diagnostic interpreter runs do not establish native compiler use.
 
 | Scope | Pre-fix failure | Post-fix diagnostic |
 |---|---|---|
+| Item 1 frozen paths | Suspected prefix mismatch did not reproduce; no production fix | 4/4 Windows Phase 1 before portable/Windows-specific spec split |
 | Item 2 identity-map state | High-water retry regression; later duplicate/foreign bindings | 7/7 Windows, Phase 1; all three cycles used |
+| Item 3 builtin identity | Real parsed Array call lacked resolved identity | Identity/codec intermediate check 2/2; expanded final check 1/3, with serializer-import and filter-result failures |
 | Item 4 spill extent | Overflowing logical output range admitted | 6/6 Windows, Phase 1 |
 | Item 5 provider finalization | Duplicate publication/rejection mutates terminal metadata | 13/13 Windows, Phase 1; native concurrency unverified |
 | Item 6 compatibility markers | Rejected generation leaves old producer marker | 2/2 Windows and 2/2 WSL, Phase 1 |
@@ -45,8 +47,15 @@ Readers must use the existing acquire-based state API.
 - Parent: checked Windows/WSL lanes have no qualified deployed Stage 4 runner.
   WSL bootstrap previously stopped at compiler-test admission. Fix/admit that
   gate without a fabricated waiver before general SPipe or release execution.
+  A subsequent [in-process Stage 2 probe](linux-wsl/stage2_pure_verification_2026-09-29.md)
+  passed compiler identity validation but timed out building its full CLI;
+  dependent test rows remain blocked/unsupported and the cache is retained.
 - Item 7 owner: retain the collision-profile failure and diagnose in a new bounded
   task; its three-cycle allowance is exhausted. Do not weaken the expected metric.
+- Item 3 owner: all three cycles are exhausted. Fix the missing test import,
+  localize the filter result, and address the independently reviewed filter
+  predicate/element-type parity gaps before acceptance. The candidate is
+  draft-only, with required failing regression active and no skip annotation.
 - Parent: earlier runtime-compiler spec remains 10/12 and has exhausted its own
   three-cycle allowance. No rerun was performed by this parallel implementation.
 - Parent: required compiler/lib/MCP/LSP checks, native runtime/MCP smoke,
@@ -57,4 +66,6 @@ Readers must use the existing acquire-based state API.
 
 See `.spipe/seven_plans_parallel_pure_simple/state.md` for ownership. Agent
 findings were reviewed by the parent; independent code review is retained in
-the session. Publication is an implementation handoff, never release admission.
+the session. Initial bounded fixes had no introduced P0/P1 findings; the later
+item 3 candidate has two explicit P1 findings and is not ready to merge.
+Publication is an implementation handoff, never release admission.

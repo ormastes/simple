@@ -15,6 +15,7 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -1180,6 +1181,17 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
+        # Consume canonical builtin identity before receiver evaluation. Reuse
+        # the established loop emitter without evaluating the receiver twice.
+        # Revalidate after cache/provider transport; a forged identity fails.
+        match resolution:
+            case BuiltinCollection(_):
+                val admitted = resolve_builtin_collection_operation(receiver, method, args)
+                if admitted == nil or admitted.unwrap() != resolution:
+                    panic("invalid builtin collection identity at MIR lowering")
+                return self.lower_method_call(receiver, method, args,
+                    MethodResolution.Unresolved, static_receiver_name_hint, static_receiver_symbol_hint)
+            case _: ()
         # Level-gated: these ~38 receipts were unconditional and fired on every
         # method call lowered. Retained (not deleted) per the log-retention
         # policy -- set any of the trace env vars to bring them all back.
@@ -1265,6 +1277,7 @@ impl MirLowering:
             case InstanceMethod(_, _): resolution_is_instance_method = true
             case StaticMethod(_, _): resolution_is_static_method = true
             case TraitMethod(_, _): ()
+            case BuiltinCollection(_): ()
         val result_ok_type: HirType? = if method == "unwrap" or method == "unwrap_or":
             self.result_ok_hir_type(receiver)
         else:
@@ -2932,6 +2945,8 @@ impl MirLowering:
         if mir_mc_trace_state == 1:
             eprint("[mir-method-call] resolution-enter method={method} unresolved={resolution_is_unresolved}\n")
         match resolution:
+            case BuiltinCollection(_):
+                panic("builtin collection identity bypassed MIR admission")
             case InstanceMethod(type_id, method_id):
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=instance method={method}\n")

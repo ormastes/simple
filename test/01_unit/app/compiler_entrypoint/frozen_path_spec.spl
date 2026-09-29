@@ -1,0 +1,43 @@
+# codex-system-test
+# @req seven-plans-item-1-host-path-parity
+use std.spec.{describe, it, expect, step}
+use app.io.env_ops.{cwd, env_get, env_set}
+use app.compiler_entrypoint.admission.{CompilerEntrypointAdmissionV1, compiler_entrypoint_frozen_path_v1, compiler_entrypoint_frozen_env_path_v1}
+
+fn frozen_path_admission(valid: bool) -> CompilerEntrypointAdmissionV1:
+    val root = cwd().replace("\\", "/")
+    CompilerEntrypointAdmissionV1(valid, "fixture", root, root + "/build/frozen-path-fixture", "fixture-revision", "fixture-index", 1)
+
+describe "Compiler frozen source path mapping":
+    it "maps an existing source and repository root to the admitted snapshot":
+        step("Use an existing source so the host performs real canonicalization")
+        val admission = frozen_path_admission(true)
+        val source = "src/lib/scv/distributed_identity.spl"
+        expect(compiler_entrypoint_frozen_path_v1(admission, source)).to_equal(admission.snapshot_root + "/" + source)
+        step("Map the repository root itself")
+        expect(compiler_entrypoint_frozen_path_v1(admission, ".")).to_equal(admission.snapshot_root)
+
+    it "refuses outside-root paths and invalid admission":
+        step("Resolve the existing parent directory outside the admitted root")
+        expect(compiler_entrypoint_frozen_path_v1(frozen_path_admission(true), "..")).to_equal("")
+        step("Refuse an existing source without valid admission")
+        expect(compiler_entrypoint_frozen_path_v1(frozen_path_admission(false), "src/lib/scv/distributed_identity.spl")).to_equal("")
+        expect(compiler_entrypoint_frozen_path_v1(frozen_path_admission(true), "")).to_equal("")
+
+    it "keeps existing frozen source paths unchanged through environment admission":
+        step("Bind an existing directory as the frozen root")
+        val old_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+        val old_revision = env_get("SIMPLE_SCV_REVISION_ID") ?? ""
+        val old_index = env_get("SIMPLE_PACKAGE_INDEX_DIGEST") ?? ""
+        val root = cwd().replace("\\", "/")
+        val set_root = env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root + "/src")
+        val set_revision = env_set("SIMPLE_SCV_REVISION_ID", "fixture-revision")
+        val set_index = env_set("SIMPLE_PACKAGE_INDEX_DIGEST", "fixture-index")
+        val resolved = compiler_entrypoint_frozen_env_path_v1("src/lib/scv/distributed_identity.spl")
+        step("Restore environment state before checking the resolved identity")
+        val restore_root = env_set("SIMPLE_SCV_SNAPSHOT_ROOT", old_root)
+        val restore_revision = env_set("SIMPLE_SCV_REVISION_ID", old_revision)
+        val restore_index = env_set("SIMPLE_PACKAGE_INDEX_DIGEST", old_index)
+        expect(set_root and set_revision and set_index).to_be(true)
+        expect(restore_root and restore_revision and restore_index).to_be(true)
+        expect(resolved).to_equal(root + "/src/lib/scv/distributed_identity.spl")

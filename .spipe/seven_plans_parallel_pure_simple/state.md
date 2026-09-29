@@ -57,6 +57,14 @@ these agents use the inherited model. Parent reviews manuals and done marks.
 
 implementation-in-progress
 
+The first reviewed batch was pushed as `27d73c00e51` to draft PR #2108.
+The later item 3 candidate expands ownership to canonical HIR declarations,
+generated codec/versioning, resolver transport, exhaustive type/effect/provider
+consumers, and MIR/interpreter dispatch. Its three-cycle budget is exhausted;
+final diagnostics are 1/3 and review found two P1 filter parity/type concerns.
+It must remain draft-only. Item 1 path coverage adds portable and explicitly
+Windows-only specs, with no speculative production fix.
+
 ## Evidence Limits
 
 At resumption no plan is certified complete on Windows or WSL. Windows SDK is
