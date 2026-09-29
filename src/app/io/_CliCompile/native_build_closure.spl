@@ -8,6 +8,7 @@
 use app.io.env_ops (env_get, env_set)
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
@@ -129,8 +130,17 @@ fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:
     entry + "|" + source_dirs.join("|") + "|scv=" + revision
 
 fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
+    val entry_relative = _nb_scv_relative_path_v1(entry)
+    val effective_roots = native_build_snapshot_source_roots_v1(
+        entry_relative, source_dirs)
+    if effective_roots.len() == 0:
+        if entry_relative != "" and not entry_relative.contains("/"):
+            _cli_eprint("SCV-E-ENTRY: root-level entry requires explicit finite --source roots; repository-wide admission is unsupported")
+        else:
+            _cli_eprint("SCV-E-ENTRY: entry is outside the admitted source root")
+        return (false, "", [])
     val key = _nb_scv_key_v1(
-        entry, source_dirs, env_get("SIMPLE_SCV_REVISION_ID") ?? "")
+        entry, effective_roots, env_get("SIMPLE_SCV_REVISION_ID") ?? "")
     if _nb_scv_snapshot_key_v1 != key:
         val inherited_root = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
         if inherited_root != "":
@@ -147,12 +157,12 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
                 return (false, "", [])
             _nb_scv_snapshot_root_v1 = opened.snapshot_root
             _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
-                entry, source_dirs, opened.revision_id)
+                entry, effective_roots, opened.revision_id)
             if (env_get("SIMPLE_SCV_SOURCE_DRIFTED") ?? "") == "1":
                 _cli_eprint(
                     "SCV-W-DRIFT: frozen revision retained; schedule a new build")
         else:
-            var inventory_roots = source_dirs
+            var inventory_roots = effective_roots
             if not inventory_roots.contains(entry):
                 inventory_roots = inventory_roots.push(entry)
             val snapshot = scv_compile_snapshot_acquire_v1(
@@ -166,7 +176,7 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
             _nb_scv_snapshot_tree_v1 = snapshot.tree_id
             _nb_scv_snapshot_inventory_v1 = snapshot.inventory_digest
             _nb_scv_snapshot_key_v1 = _nb_scv_key_v1(
-                entry, source_dirs, snapshot.revision_id)
+                entry, effective_roots, snapshot.revision_id)
             env_set("SIMPLE_SCV_SNAPSHOT_ROOT", snapshot.snapshot_root)
             env_set("SIMPLE_SCV_REVISION_ID", snapshot.revision_id)
             env_set("SIMPLE_SCV_COMMIT_ID", snapshot.commit_id)
@@ -181,7 +191,7 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
         _cli_eprint("SCV-E-ENTRY: entry absent from frozen inventory")
         return (false, "", [])
     var frozen_dirs: [text] = []
-    for source_dir in source_dirs:
+    for source_dir in effective_roots:
         val frozen = _nb_scv_snapshot_path_v1(source_dir)
         if frozen == "":
             _cli_eprint("SCV-E-SOURCE: source root absent from frozen inventory")
