@@ -303,6 +303,7 @@ if [ "${1:-}" = --candidate-path-negative-only ]; then
     exit 0
 fi
 
+if [ "${1:-}" != --configured-output-only ]; then
 # --- fixture 1: the gate is satisfiable -------------------------------------
 if [ "${1:-}" != --windows-candidate-only ]; then
 ok_root="$scratch/ok"
@@ -332,6 +333,8 @@ check_noncanonical_candidate_path
 if [ "${1:-}" = --windows-candidate-only ]; then
     echo "PASS — $checked fixture(s) checked (Windows candidate paths)"
     exit 0
+fi
+
 fi
 
 # --- configured output: admission follows the bootstrap output owner --------
@@ -391,7 +394,7 @@ for custom_receipt in "$custom_sanity" "$custom_provenance"; do
         "$custom_receipt"
 done
 run_custom_output_producer "$custom_root" "$custom_output" >"$scratch/custom-output.log" 2>&1 ||
-    fail "producer refused allowlisted external bootstrap output"
+    fail "producer refused allowlisted external bootstrap output: $(tail -3 "$scratch/custom-output.log" | tr '\n' ' ')"
 # bootstrap_planner_v2_verify is a shell FUNCTION, not an external command, so
 # a `VAR=x func` prefix assignment PERSISTS in this shell after the call. The
 # positive case below therefore used to leak the allowlist into the negative
@@ -410,6 +413,25 @@ if bootstrap_planner_v2_verify "$custom_root/custom-output-receipt.env" \
     fail "external-output receipt verified without its explicit allowlist"
 fi
 checked=$((checked + 1))
+
+# A valid receipt from a sibling output is not authority for this parent.
+sibling="$scratch/sibling-output"
+mkdir -p "$sibling"
+cp "$custom_admission" "$sibling/admission.env"
+sibling_receipt_esc=$(printf '%s' "$sibling/admission.env" | sed 's/[\/&]/\\&/g')
+for custom_receipt in "$custom_sanity" "$custom_provenance"; do
+    replace_in_file "s/^admission_receipt_path=.*/admission_receipt_path=$sibling_receipt_esc/" "$custom_receipt"
+done
+if run_custom_output_producer "$custom_root" "$custom_output" >"$scratch/sibling-output.log" 2>&1; then
+    fail "configured output borrowed a sibling admission receipt"
+fi
+grep -q 'parent-stage2-admission-outside-bootstrap' "$scratch/sibling-output.log" ||
+    fail "sibling authority was not rejected at the output owner boundary"
+checked=$((checked + 1))
+if [ "${1:-}" = --configured-output-only ]; then
+    echo "PASS — $checked fixture(s) checked (configured output ownership)"
+    exit 0
+fi
 
 # --- fixture 2: a forged argv digest is refused ------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/argv.env"
