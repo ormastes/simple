@@ -1592,8 +1592,11 @@ ${cache_persistence_payload}"
       ;;
     stage3)
       cache_assurance_payload=$(bootstrap_cache_persistence_policy) || return 1
+      cache_admission_payload=$(bootstrap_cache_abi_admission_options \
+        "${stage2_admission_receipt_absolute}" "${simple_abi_policy}") || return 1
       cache_options_payload="${cache_options_payload}
-${cache_assurance_payload}"
+${cache_assurance_payload}
+${cache_admission_payload}"
       ;;
     stage4*|stage5*)
       if [ "$1" = stage4 ]; then

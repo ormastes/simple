@@ -472,6 +472,14 @@ if stage2_hir_cache=$(stage2_env_value SIMPLE_HIR_CACHE); then
 elif grep -q '^explicit-env:[0-9][0-9]*:SIMPLE_HIR_CACHE' "$stage2_transcript"; then
   bootstrap_stage3_error 'recorded Stage 2 HIR controls are incomplete or malformed'
 fi
+resume_abi_policy=$(stage2_env_value SIMPLE_ABI_POLICY) || \
+  bootstrap_stage3_error 'recorded ABI policy is absent'
+[ "$resume_abi_policy" = v1 ] || bootstrap_stage3_error 'recorded ABI policy is unsupported'
+if [ -n "${SIMPLE_ABI_POLICY:-}" ] && [ "$SIMPLE_ABI_POLICY" != "$resume_abi_policy" ]; then
+  bootstrap_stage3_error 'caller ABI policy disagrees with the admitted transcript'
+fi
+SIMPLE_ABI_POLICY=$resume_abi_policy
+export SIMPLE_ABI_POLICY
 bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 # Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
@@ -546,6 +554,7 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   "$tool_before" "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_sanity" \
   "$(dirname -- "$stage2_sanity")" "$stage2_receiver" "$stage2_receiver" \
   "$stage2_receiver_log" "$stage2_receiver_log" "$root"
+resume_abi_receipt_sha=$(bootstrap_stage3_hash_file "$stage2_admission") || exit 1
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
@@ -636,8 +645,11 @@ resume_cache_action=${RESUME_STAGE3_CACHE_ACTION:-reuse}
 [ "${RESUME_STAGE3_FRESH_CACHE:-0}" != 1 ] || resume_cache_action=clean
 resume_cache_options=$(bootstrap_cache_release_options_v1 stripped '' absent) || exit 1
 resume_cache_persistence=$(bootstrap_cache_persistence_policy) || exit 1
+resume_cache_admission=$(bootstrap_cache_abi_admission_options \
+  "$stage2_admission" "$resume_abi_policy") || exit 1
 resume_cache_options="$resume_cache_options
-$resume_cache_persistence"
+$resume_cache_persistence
+$resume_cache_admission"
 resume_cache_payload=$(bootstrap_cache_phase_inputs "$root" "$platform" "$stage2_backend" \
   dynload "$source_before" "$runtime_admitted" "$tool_before" "$resume_cache_options") ||
   bootstrap_stage3_error 'cannot bind current cache inputs'
@@ -827,7 +839,10 @@ case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
 esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_BOOTSTRAP=1" \
+  "SIMPLE_ABI_POLICY=$resume_abi_policy" \
+  "SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission" \
+  "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
@@ -874,7 +889,8 @@ if [ "$stage3_guard_watch" = linux-proc-memavailable ] &&
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
   systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
     --property=KillMode=control-group \
@@ -886,7 +902,8 @@ elif [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
   # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
   # The watchdog must honor a Stage 3 process cap configured below the tree
@@ -913,7 +930,8 @@ elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 else
   "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
     "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
@@ -921,7 +939,8 @@ else
     "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
     "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
     "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
-    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" \
+    "$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &
 fi
 stage3_guard_pid=$!
 stage3_guard_tripped=0
