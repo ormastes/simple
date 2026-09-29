@@ -4,7 +4,7 @@ set -eu
 # Internal worker for resume-stage3-from-admitted.sh.  The launcher runs this
 # file in a dedicated systemd user-service cgroup so every descendant remains
 # kernel-owned even after double-fork/reparenting.
-[ "$#" -eq 25 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
+[ "$#" -eq 28 ] || { echo 'stage3 worker: invalid argument count' >&2; exit 64; }
 transcript=$1 root=$2 log=$3 worker_home=$4 worker_tmp=$5 worker_path=$6
 admitted=$7 platform=$8 backend=$9
 shift 9
@@ -14,11 +14,30 @@ shift 9
 requested_route=$1 fallback_route=$2 process_max_kib=$3 mc_env=$4 cold_env=$5
 diagnostic_env=$6
 memory_high_mib=$7
+abi_policy=$8 abi_receipt=$9 abi_receipt_sha=${10}
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+# The caller fully verified admission. Refuse a missing or changed transfer
+# before env-i can erase its policy, or before the compiler can use its bytes.
+stage3_abi_transfer_error() {
+  echo 'stage3 worker: verified ABI admission transfer is absent or changed' >&2
+  exit 64
+}
+[ -f "$admitted" ] && [ ! -L "$admitted" ] || stage3_abi_transfer_error
+abi_producer_sha=$(bootstrap_stage3_hash_file "$admitted") || stage3_abi_transfer_error
+[ "${#abi_receipt_sha}" -eq 64 ] && [ "${#abi_producer_sha}" -eq 64 ] || stage3_abi_transfer_error
+case "$abi_receipt_sha$abi_producer_sha" in *[!0-9a-f]*) stage3_abi_transfer_error ;; esac
+[ "$abi_policy" = v1 ] && bootstrap_stage3_normalized_absolute "$abi_receipt" &&
+  [ -f "$abi_receipt" ] && [ ! -L "$abi_receipt" ] &&
+  [ "$(bootstrap_stage3_hash_file "$abi_receipt")" = "$abi_receipt_sha" ] &&
+  [ "$(bootstrap_stage3_manifest_value schema "$abi_receipt")" = simple-bootstrap-stage2-admission-v2 ] &&
+  [ "$(bootstrap_stage3_manifest_value status "$abi_receipt")" = admitted ] &&
+  [ "$(bootstrap_stage3_manifest_value simple_abi_policy "$abi_receipt")" = "$abi_policy" ] &&
+  [ "$(bootstrap_stage3_manifest_value candidate_sha256 "$abi_receipt")" = "$abi_producer_sha" ] || stage3_abi_transfer_error
 
 # On Linux, prove the memory controller limits are effective inside this worker
 # before the compiler can allocate. Other platforms retain the portable ulimit
@@ -52,6 +71,7 @@ timeout_args=
 bootstrap_stage3_run_transcribed "$transcript" "$root" "$log" \
   "$worker_home" "$worker_tmp" "$worker_path" RUST_LOG=error LIBRARY_PATH= \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
+  SIMPLE_ABI_POLICY="$abi_policy" SIMPLE_ABI_ADMISSION_RECEIPT="$abi_receipt" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
   SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE="$requested_route" \
   SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE="$fallback_route" \

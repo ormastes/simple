@@ -1,0 +1,133 @@
+#!/bin/sh
+# Receipt transfer and env-i forwarding only, not compiler/admission evidence.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-abi-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_new_path_validate "$parent" || exit 64
+work=$(mktemp -d "$parent/abi-forwarding.XXXXXX")
+case "$work" in "$parent"/abi-forwarding.*) ;; *) exit 1 ;; esac
+cleanup() {
+  fixture_status=$?
+  if [ "$fixture_status" -eq 0 ]; then rm -rf -- "$work"
+  else printf 'Retained failed ABI fixture: %s\n' "$work" >&2; fi
+  return "$fixture_status"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fail() { echo "FAIL Stage 3 ABI forwarding: $*" >&2; exit 1; }
+fake_root="$work/fixture-root"
+mkdir -p "$fake_root/scripts/check/lib" "$fake_root/scripts/resource" "$work/home" "$work/tmp" "$work/cache"
+BOOTSTRAP_CACHE_FIXTURE_REPO=$repo
+export BOOTSTRAP_CACHE_FIXTURE_REPO
+# Run the actual transcript and env-i owner. The fixture watchdog only forwards
+# its command, so this test imposes no resource limit or process signal.
+cat > "$fake_root/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'FACADE'
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$BOOTSTRAP_CACHE_FIXTURE_REPO/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+FACADE
+cat > "$fake_root/scripts/resource/process-tree-rss-watchdog.pl" <<'WATCHDOG'
+use strict; use warnings;
+shift @ARGV while @ARGV && $ARGV[0] ne '--';
+@ARGV && shift @ARGV;
+@ARGV or die "fixture watchdog: command missing\n";
+exec @ARGV or die "fixture watchdog: exec failed: $!\n";
+WATCHDOG
+cat > "$work/transfer-producer.shs" <<'PRODUCER'
+#!/bin/sh
+set -eu
+printf 'effective-policy=%s\neffective-receipt=%s\n' "$SIMPLE_ABI_POLICY" "$SIMPLE_ABI_ADMISSION_RECEIPT"
+sha256sum "$SIMPLE_ABI_ADMISSION_RECEIPT"
+PRODUCER
+chmod +x "$work/transfer-producer.shs"
+producer_sha=$(bootstrap_cache_hash_file "$work/transfer-producer.shs")
+# Synthetic transfer fields are never offered to full bootstrap admission.
+# The production caller already invokes its full canonical receipt verifier.
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\nsimple_abi_policy=v1\ncandidate_sha256=%s\n' "$producer_sha" > "$work/transfer-only.env"
+receipt_sha=$(bootstrap_cache_hash_file "$work/transfer-only.env")
+bootstrap_cache_abi_admission_options "$work/transfer-only.env" v1 > "$work/options-a"
+if bootstrap_cache_abi_admission_options "$work/../$(basename "$work")/transfer-only.env" v1 > "$work/traversal.guard" 2>&1; then
+  fail 'traversal receipt path accepted'
+fi
+mkdir "$work/receipt-parent"
+cp "$work/transfer-only.env" "$work/receipt-parent/transfer-only.env"
+if ln -s "$work/receipt-parent" "$work/linked-parent" 2> "$work/link-create.log" && [ -L "$work/linked-parent" ]; then
+  if bootstrap_cache_abi_admission_options "$work/linked-parent/transfer-only.env" v1 > "$work/linked.guard" 2>&1; then
+    fail 'linked receipt parent accepted'
+  fi
+else
+  printf 'Fixture limit: native parent symlink unavailable on this host\n'
+fi
+resume="$repo/scripts/bootstrap/resume-stage3-from-admitted.sh"
+awk '/^stage3_args=\$\(bootstrap_stage3_args_sha256/{on=1} on{print} on && /src\/app\/cli\/bootstrap_main.spl\)$/{exit}' \
+  "$resume" > "$work/parent-vector.shs"
+[ -s "$work/parent-vector.shs" ] || fail 'actual parent Stage 3 vector missing'
+timeout_seconds= stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env=
+run_worker() {
+  sh "$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh" \
+    "$work/$1.transcript" "$fake_root" "$work/$1.log" "$work/home" "$work/tmp" "$PATH" \
+    "$work/transfer-producer.shs" fixture-apple-darwin cranelift 1 "$timeout_seconds" "$work/cache" "$work/runtime" \
+    "$work/candidate" "$work/progress" "$work/profile" "$work/memory" fixture direct none 1 \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" 1 \
+    "$2" "$3" "$4"
+}
+verify_parent_worker_vector() (
+  vector_transcript=$1
+  resume_abi_policy=v1 stage2_admission="$work/transfer-only.env"
+  stage3_requested_route=direct stage3_fallback_route=none
+  stage3_cache="$work/cache" progress="$work/progress" phase_profile="$work/profile"
+  memory_snapshot="$work/memory" evidence_run_id=fixture
+  platform=fixture-apple-darwin stage3_threads=1 stage2_backend=cranelift
+  runtime="$work/runtime" admitted="$work/transfer-producer.shs" candidate="$work/candidate"
+  stage3_timeout_args=
+  [ -z "$timeout_seconds" ] || stage3_timeout_args="--timeout $timeout_seconds"
+  . "$work/parent-vector.shs"
+  # The actual canonical worker transcript length-frames these newline-free
+  # arguments. Validate framing before constructing the complete vector.
+  awk '
+    /^explicit-env:|^argv:/ {
+      rest=substr($0,index($0,":")+1); colon=index(rest,":"); count=substr(rest,1,colon-1); value=substr(rest,colon+1)
+      if (count !~ /^[0-9]+$/ || length(value)!=count) exit 1
+      print value
+    }
+  ' "$vector_transcript" > "$work/worker-vector.args" || fail 'worker transcript framing invalid'
+  set --
+  while IFS= read -r vector_arg; do set -- "$@" "$vector_arg"; done < "$work/worker-vector.args"
+  worker_args=$(bootstrap_stage3_args_sha256 "$@")
+  [ "$stage3_args" = "$worker_args" ] || fail 'complete parent hash differs from actual worker transcript vector'
+)
+SIMPLE_ABI_POLICY=ambient-wrong SIMPLE_ABI_ADMISSION_RECEIPT="$work/ambient-wrong.env" \
+  run_worker forwarded v1 "$work/transfer-only.env" "$receipt_sha"
+verify_parent_worker_vector "$work/forwarded.transcript"
+grep -Fxq 'effective-policy=v1' "$work/forwarded.log" || fail 'policy lost through actual env-i owner'
+grep -Fxq "effective-receipt=$work/transfer-only.env" "$work/forwarded.log" || fail 'receipt lost through actual env-i owner'
+grep -q "^$receipt_sha " "$work/forwarded.log" || fail 'effective receipt bytes differ'
+grep -q 'SIMPLE_ABI_POLICY=v1$' "$work/forwarded.transcript" || fail 'policy not in actual transcript'
+grep -Fq "SIMPLE_ABI_ADMISSION_RECEIPT=$work/transfer-only.env" "$work/forwarded.transcript" || fail 'receipt not in actual transcript'
+timeout_seconds=17 stage3_mc_env='SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1'
+stage3_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 stage3_diagnostic_env=SIMPLE_DIAGNOSTIC_FORMAT=text
+run_worker optional v1 "$work/transfer-only.env" "$receipt_sha"
+verify_parent_worker_vector "$work/optional.transcript"
+timeout_seconds= stage3_mc_env= stage3_cold_init_env= stage3_diagnostic_env=
+if run_worker absent v1 "$work/missing.env" "$receipt_sha" > "$work/absent.guard" 2>&1; then fail 'absent receipt accepted'; fi
+if run_worker no-digest v1 "$work/transfer-only.env" '' > "$work/digest.guard" 2>&1; then fail 'absent verified digest accepted'; fi
+if run_worker wrong-policy incompatible "$work/transfer-only.env" "$receipt_sha" > "$work/policy.guard" 2>&1; then fail 'incompatible policy accepted'; fi
+printf 'changed receipt bytes\n' >> "$work/transfer-only.env"
+bootstrap_cache_abi_admission_options "$work/transfer-only.env" v1 > "$work/options-b"
+if cmp -s "$work/options-a" "$work/options-b"; then fail 'receipt bytes absent from cache options'; fi
+if run_worker changed v1 "$work/transfer-only.env" "$receipt_sha" > "$work/changed.guard" 2>&1; then fail 'receipt changed after verification accepted'; fi
+changed_sha=$(bootstrap_cache_hash_file "$work/transfer-only.env")
+printf 'changed producer bytes\n' >> "$work/transfer-producer.shs"
+if run_worker wrong-producer v1 "$work/transfer-only.env" "$changed_sha" > "$work/producer.guard" 2>&1; then fail 'receipt from other producer accepted'; fi
+
+[ "$(grep -c '"$resume_abi_policy" "$stage2_admission" "$resume_abi_receipt_sha" &' "$resume")" -eq 4 ] || fail 'one launch branch omits verified receipt transfer'
+grep -Fq '"SIMPLE_ABI_POLICY=$resume_abi_policy"' "$resume" || fail 'hashed argv omits effective policy'
+grep -Fq '"SIMPLE_ABI_ADMISSION_RECEIPT=$stage2_admission"' "$resume" || fail 'hashed argv omits effective receipt'
+grep -q 'resume_cache_admission=$(bootstrap_cache_abi_admission_options' "$resume" || fail 'resume cache binding omits receipt bytes'
+grep -q 'cache_admission_payload=$(bootstrap_cache_abi_admission_options' "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" || fail 'canonical binding differs from resume'
+echo 'PASS Stage 3 ABI forwarding: complete actual parent/worker vectors, env-i policy/receipt bytes, missing/mutated/wrong-policy/wrong-producer refusal, cache binding and four launch branches; no compiler or admission qualification'
