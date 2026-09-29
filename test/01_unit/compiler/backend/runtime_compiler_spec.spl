@@ -1,7 +1,7 @@
 use std.spec.*
-use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, find_runtime_source_dir, runtime_abi_policy_v1, runtime_abi_define_args_v1, runtime_core_c_sources_v1, runtime_object_paths_v1, _is_mingw, _is_msvc_cc, _runtime_dir_walk_up, _runtime_dir_not_found_message}
 use app.io.mod.{cwd}
-use std.io_runtime.{file_read_raw, process_run}
+use std.io_runtime.{file_read_nullable, process_run}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text)
@@ -70,12 +70,12 @@ describe "Runtime Compiler":
         )
 
     it "fails closed before host compiler discovery when a cross driver is missing":
-        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val finder_pos = source.find("fn find_c_compiler()")
         val discovery_pos = source.find("# Runtime Source Discovery")
         val finder_source = source.substring(finder_pos, discovery_pos)
         val cross_pos = finder_source.find("val plan = hosted_c_compiler_plan")
-        val lookup_pos = finder_source.find("command -v {plan.command}")
+        val lookup_pos = finder_source.find(r"command -v {plan.command}")
         val windows_pos = finder_source.find("if _is_windows()")
         val guarded = finder_source.substring(cross_pos, windows_pos)
         expect(cross_pos).to_be_greater_than(-1)
@@ -84,51 +84,63 @@ describe "Runtime Compiler":
         expect(guarded).to_contain("return \"\"")
 
     it "cleans every planned runtime object on post-plan failure":
-        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val compile_pos = source.find("fn compile_runtime_objects(")
         val cleanup_fn_pos = source.find("fn cleanup_runtime_objects(")
         val compile_source = source.substring(compile_pos, cleanup_fn_pos)
         expect(compile_source.split("cleanup_runtime_objects(objects)").len() - 1).to_equal(4)
-        expect(compile_source).to_contain("if not rt_file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
-        expect(compile_source).to_contain("if comp_code != 0:\n            cleanup_runtime_objects(objects)\n            return Err(\"Failed to compile")
+        expect(compile_source).to_contain("if not file_exists(src_path):\n            cleanup_runtime_objects(objects)\n            return Err(\"Required runtime source not found")
+        val failure_pos = compile_source.find("if comp_code != 0:")
+        val failure_end = compile_source.find("object_count = object_count + 1")
+        expect(failure_pos).to_be_greater_than(-1)
+        expect(failure_end).to_be_greater_than(failure_pos)
+        val failure_source = compile_source.substring(failure_pos, failure_end)
+        val cleanup_pos = failure_source.find("cleanup_runtime_objects(objects)")
+        val return_pos = failure_source.find("return Err(")
+        expect(cleanup_pos).to_be_greater_than(-1)
+        expect(return_pos).to_be_greater_than(cleanup_pos)
         expect(compile_source).to_contain("if object_count == 0:\n        cleanup_runtime_objects(objects)\n        return Err(\"No runtime source files were compiled\")")
         expect(compile_source).to_contain("if object_count < sources.len():\n        cleanup_runtime_objects(objects)\n        return Err(\"Expected ")
 
     it "routes runtime compilation through exact canonical I/O owners":
         step("Verify: canonical facades preserve nullable env and direct process semantics")
-        val source = read_file_text("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         expect(source).to_contain("use std.io_runtime.{host_arch, host_os, env_get_nullable, file_exists, file_delete, process_run}")
         expect(source).to_contain("use std.nogc_sync_mut.io.sysinfo_ops.{getpid}")
-        expect(source).not.to_contain("extern fn rt_env_get")
-        expect(source).not.to_contain("extern fn rt_file_exists")
-        expect(source).not.to_contain("extern fn rt_file_delete")
-        expect(source).not.to_contain("extern fn rt_process_run")
-        expect(source).not.to_contain("extern fn rt_getpid")
+        expect(source.contains("extern fn rt_env_get")).to_be(false)
+        expect(source.contains("extern fn rt_file_exists")).to_be(false)
+        expect(source.contains("extern fn rt_file_delete")).to_be(false)
+        expect(source.contains("extern fn rt_process_run")).to_be(false)
+        expect(source.contains("extern fn rt_getpid")).to_be(false)
         expect(source.split("env_get_nullable(").len() - 1).to_equal(14)
         expect(source.split("file_exists(").len() - 1).to_equal(7)
         expect(source.split("process_run(cc, comp_args)").len() - 1).to_equal(1)
-        expect(source.split("getpid()").len() - 1).to_equal(1)
+        expect(source.split("val pid = getpid()").len() - 1).to_equal(1)
+        expect(source.split("val compile_pid = getpid()").len() - 1).to_equal(1)
         # rt_path_absolute remains direct until a nullable facade preserves its
         # failure sentinel instead of narrowing it to non-nullable text.
         expect(source.split("extern fn rt_path_absolute(path: text) -> text?").len() - 1).to_equal(1)
         expect(source.split("file_delete(obj)").len() - 1).to_equal(1)
 
     it "includes the contract ABI owner in every fresh hosted runtime bundle":
-        val source = file_read_raw("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
         val compile_pos = source.find("fn compile_runtime_objects(")
         val cleanup_fn_pos = source.find("fn cleanup_runtime_objects(")
         val compile_source = source.substring(compile_pos, cleanup_fn_pos)
-        val source_entry = "\"runtime_native\", \"runtime_contracts\", \"runtime_rocm\""
-        val object_prefix_text = "{" + "object_prefix}"
-        val ext_text = "{" + "ext}"
-        val contract_object = "\"" + object_prefix_text + "runtime_contracts" + ext_text + "\""
-        val object_entry = "\"" + object_prefix_text + "runtime_native" + ext_text + "\",\n        " + contract_object + ",\n        \"" + object_prefix_text + "runtime_rocm" + ext_text + "\""
+        # Ordinary and Stage4 profiles retain the initial owner list; core-C
+        # selects the shared source plan and uses the same object mapper.
         expect(compile_source.split("\"runtime_contracts\"").len() - 1).to_equal(1)
-        expect(compile_source.split(contract_object).len() - 1).to_equal(1)  # oracle: 1 — named expected value from the requirement
-        expect(compile_source).to_contain(source_entry)
-        expect(compile_source).to_contain(object_entry)
-        expect(compile_source.find(source_entry)).to_be_less_than(compile_source.find(object_entry))
-        expect(compile_source.find(object_entry)).to_be_less_than(compile_source.find("for name in sources:"))
+        expect(compile_source).to_contain("sources = runtime_core_c_sources_v1()")
+        expect(compile_source).to_contain("val objects = runtime_object_paths_v1(sources, object_prefix, ext)")
+        val core_sources = runtime_core_c_sources_v1()
+        var contract_count = 0
+        for name in core_sources:
+            if name == "runtime_contracts":
+                contract_count = contract_count + 1
+        expect(contract_count).to_equal(1)
+        val objects = runtime_object_paths_v1(core_sources, "build/core/", ".o")
+        expect(objects.len()).to_equal(core_sources.len())
+        expect(objects).to_contain("build/core/runtime_contracts.o")
 
     it "honors SIMPLE_PROJECT_ROOT override before cwd fallback":
         val project_root = cwd()
