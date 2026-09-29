@@ -30,9 +30,13 @@ conflict before codegen. The exact blocker and acceptance are in
 The bootstrap provider now distinguishes an archive directory from a dynamic
 library path, and the generic SFFI error names its function and argument.
 Those focused Rust tests pass. A refreshed debug bootstrap executable was
-built and attempted, but reached a 300-second timeout before a Stage4 result;
-an optimized producer is needed for the next attempt. The current-source
-Stage4 compiler and hello capture remain open.
+built and attempted, but reached a 300-second timeout before a Stage4 result.
+An optimized bootstrap then exposed a missing interpreter dispatch for
+`rt_string_substr_from` after 821/821 source-closure files. The dispatch is
+fixed and its focused test passes. A rebuilt optimized bootstrap entered
+parse but reached the 300-second limit at 43/821 parsed files. The
+current-source Stage4 compiler and hello capture remain open; the bootstrap
+parse path or pure-Simple Stage2 SQLite archive contract needs repair.
 
 ## Phase 0 — Baselines and Attribution
 

@@ -63,3 +63,12 @@ index. Focused Rust tests pass (3 native-loader, 21 dynamic-SFFI). The
 refreshed debug bootstrap executable then timed out after 300 seconds on a
 Stage4 attempt without a provider-directory warning or a named foreign call.
 No fresh Stage4 compiler or hello capture has been produced from these edits.
+
+Optimized bootstrap follow-up: the release-profile bootstrap reached all 821
+closure files in 22 seconds and exposed a missing interpreted
+`rt_string_substr_from` dispatch. That dispatch is now registered and its
+character-indexed, owning behavior passes a focused test. A rebuilt optimized
+bootstrap entered parse, then reached the 300-second limit at 43/821 parsed
+files. The native link path remains unexercised for current-source Stage4;
+the exact-input hello and C comparator are still pending. Details and log
+locations are in the Stage4 bootstrap bug report above.
