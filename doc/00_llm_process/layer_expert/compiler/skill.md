@@ -52,3 +52,9 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   process-global environment publication is not a concurrent transaction.
   See [the bounded implementation report](../../../03_plan/evidence/seven_plans/parallel_pure_simple_tdd_2026-09-29.md)
   for source owners, diagnostic counts, remaining host gates, and retry limits.
+
+- The subsequent item 3 candidate appends `MethodResolution.BuiltinCollection`
+  rather than fabricating a callable SymbolId. Preserve existing codec tags,
+  regenerate through `compiler_schema`, and bind both cache codec versions.
+  This candidate has failing MIR/interpreter checks and P1 filter admission
+  parity findings; see the collection-planner feature expert before resuming.

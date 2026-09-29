@@ -13,6 +13,7 @@ use compiler.backend.backend.interpreter.{
     interp_enum_discriminant_raw
 }
 use compiler.backend.backend.interpreter_calls.*
+use compiler.semantics.perf_facts.builtin_collection.{resolve_builtin_collection_operation}
 
 impl InterpreterBackendImpl:
     fn eval_expr(expr: HirExpr, ctx: EvalContext) -> Result<Value, BackendError>:
@@ -329,6 +330,28 @@ impl InterpreterBackendImpl:
             # Block/Expr arms below.
             case HirExprKind.MethodCall(receiver, method_name, args, resolution):
                 match resolution:
+                    case MethodResolution.BuiltinCollection(operation):
+                        val admitted = resolve_builtin_collection_operation(receiver, method_name, args)
+                        if admitted == nil or admitted.unwrap() != resolution:
+                            return Err(BackendError.type_error("invalid builtin collection identity", Some(expr.span)))
+                        val source = self.eval_expr(receiver, ctx)?
+                        val callback = self.eval_expr(args[0].value, ctx)?
+                        match source:
+                            case Value.Array(elements):
+                                var output: [Value] = []
+                                for element in elements:
+                                    val result = self.call_function(callback, [element], ctx, expr.span)?
+                                    match operation:
+                                        case CollectionBuiltinOperation.ArrayMap: output.push(result)
+                                        case CollectionBuiltinOperation.ArrayFilter:
+                                            match result:
+                                                case Value.Bool(keep):
+                                                    if keep: output.push(element)
+                                                case _:
+                                                    return Err(BackendError.type_error("Array filter predicate must return bool", Some(expr.span)))
+                                Ok(Value.Array(output))
+                            case _:
+                                Err(BackendError.type_error("builtin collection receiver must be Array", Some(expr.span)))
                     case MethodResolution.StaticMethod(_, method_id):
                         # Static method: ClassName.method(args) - no receiver needed
                         var arg_values: [Value] = []
