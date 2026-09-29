@@ -3,6 +3,8 @@
 # Returns parsed data structs (VarInfo, FrameInfo, etc.) matching GdbMiClient.
 
 use app.io.{shell, ProcessResult}
+use app.io.process_ops.{process_run_bounded_direct}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros, sleep_ms}
 use std.nogc_sync_mut.debug.coordinator.{VarInfo, FrameInfo, LocationInfo}
 use std.nogc_sync_mut.debug.remote.types.{DebugConfig, DebugError}
 
@@ -99,6 +101,52 @@ impl Trace32Client:
 
     fn step_out() -> Result<text, text>:
         self.run_command("Step.Out")
+
+    # Observe target execution without forcing a halt. The deadline includes
+    # each remote command; a stalled transport cannot extend the polling loop.
+    fn wait_for_stop(timeout_ms: i32) -> Result<text, text>:
+        val timeout_error = "Trace32 wait_for_stop timed out after {timeout_ms}ms"
+        if timeout_ms <= 0:
+            return Err(timeout_error)
+        val deadline_us = time_now_micros() + (timeout_ms as i64) * 1000
+        while true:
+            val remaining_ms = (deadline_us - time_now_micros()) / 1000
+            if remaining_ms <= 0:
+                return Err(timeout_error)
+            val running = match self.bounded_running_state(remaining_ms):
+                Ok(state): state
+                Err(message):
+                    if (deadline_us - time_now_micros()) / 1000 <= 0:
+                        return Err(timeout_error)
+                    return Err(message)
+            if time_now_micros() >= deadline_us:
+                return Err(timeout_error)
+            if running == "false":
+                return Ok("stopped")
+            if running != "true":
+                return Err("invalid Trace32 STATE.RUN() response: {running}")
+            val sleep_budget_ms = (deadline_us - time_now_micros()) / 1000
+            if sleep_budget_ms <= 0:
+                return Err(timeout_error)
+            val poll_ms = if sleep_budget_ms < 50: sleep_budget_ms else: 50
+            sleep_ms(poll_ms)
+
+    # Same EVAL and error normalization as the status reader, with direct argv
+    # and the remaining wait budget supplied to the process owner facade.
+    fn bounded_running_state(timeout_ms: i64) -> Result<text, text>:
+        val (stdout, stderr, exit_code) = process_run_bounded_direct(
+            self.t32rem_path,
+            [self.host, "port={self.port}", "EVAL STATE.RUN()"],
+            timeout_ms, 4096
+        )
+        if exit_code != 0:
+            return Err("t32rem error: {stderr}")
+        val stdout_trimmed = stdout.trim()
+        val stderr_trimmed = stderr.trim()
+        val error_text = if stderr_trimmed != "": stderr_trimmed else: stdout_trimmed
+        if Trace32Parser.looks_like_error(error_text):
+            return Err(error_text)
+        Ok(Trace32Parser.normalize_boolish(stdout_trimmed))
 
     # --- Variable Inspection (returns parsed structs) ---
 
