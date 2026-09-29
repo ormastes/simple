@@ -1,0 +1,79 @@
+# Fixed-width unsigned suffixes retain their exact word in the existing i64
+# flat-AST payload. The suffix supplies the unsigned type when the bridge
+# constructs the existing Cast node; no AST tag or payload layout changes.
+use compiler.core.parser.{parser_error}
+
+fn parser_unsigned_integer_suffix(suffix: text) -> bool:
+    suffix == "u8" or suffix == "u16" or suffix == "u32" or suffix == "u64"
+
+fn parse_unsigned_int_literal_text(token_text: text, suffix: text) -> i64:
+    var max_high: i64 = 0
+    var max_low: i64 = 0
+    if suffix == "u8":
+        max_low = 255
+    elif suffix == "u16":
+        max_low = 65535
+    elif suffix == "u32":
+        max_low = 4294967295
+    elif suffix == "u64":
+        max_high = 4294967295
+        max_low = 4294967295
+    else:
+        parser_error("unsupported unsigned integer literal suffix '" + suffix + "'")
+        return 0
+
+    var radix: i64 = 10
+    var index = 0
+    if token_text.len() >= 2 and token_text.byte_at(0) == 48:
+        val prefix = token_text.byte_at(1)
+        if prefix == 120 or prefix == 88:
+            radix = 16
+            index = 2
+        elif prefix == 98 or prefix == 66:
+            radix = 2
+            index = 2
+        elif prefix == 111 or prefix == 79:
+            radix = 8
+            index = 2
+
+    # Base-2**32 limbs keep every arithmetic intermediate within signed i64.
+    # Even the largest step, 0xffffffff * 16 + 15, is below 2**36. A final
+    # shift/or creates the exact existing signed carrier without arithmetic
+    # overflow or a conversion of the source text through signed int().
+    val limb_base: i64 = 4294967296
+    var high: i64 = 0
+    var low: i64 = 0
+    var digits = 0
+    var malformed = false
+    var too_big = false
+    while index < token_text.len():
+        val code = token_text.byte_at(index)
+        if code != 95:
+            var digit: i64 = -1
+            if code >= 48 and code <= 57:
+                digit = code - 48
+            elif code >= 65 and code <= 70:
+                digit = code - 65 + 10
+            elif code >= 97 and code <= 102:
+                digit = code - 97 + 10
+            if digit < 0 or digit >= radix:
+                malformed = true
+            else:
+                digits = digits + 1
+                if not too_big:
+                    val low_step = low * radix + digit
+                    val next_high = high * radix + low_step / limb_base
+                    val next_low = low_step % limb_base
+                    if next_high > max_high or (next_high == max_high and next_low > max_low):
+                        too_big = true
+                    else:
+                        high = next_high
+                        low = next_low
+        index = index + 1
+    if malformed or digits == 0:
+        parser_error("malformed integer literal token text '" + token_text + "'")
+        return 0
+    if too_big:
+        parser_error("integer literal out of range for " + suffix + ": '" + token_text + "'")
+        return 0
+    (high << 32) | low
