@@ -72,8 +72,34 @@ pure-Simple build evidence. Do not raise the timeout again for this route.
 The source-selected pure route takes one positional `.spl` entry, no `--entry`
 or `--source`, and no parallel-thread request; it reaches
 `compiler_driver_create` / `compiler_driver_run_compile` at lines 485-488.
-That route has not been executed here. Preserve the runtime capsule bindings
-when preparing it; do not manufacture Stage 3/4 markers to change dispatch.
+The subsequent bounded positional probe is recorded below. Preserve the runtime
+capsule bindings; do not manufacture Stage 3/4 markers to change dispatch.
 
 Retry log: `build/native_probe/index-compatibility-tdd/wsl-cli-resume.log`.
 All seven-plan admission and host-completion gates remain open.
+
+## Pure driver positional probe, 2026-09-30
+
+Executed the same compiler snapshot from the unchanged bootstrap source with:
+`native-build src/app/cli/main.spl --backend llvm -o <work>/outputs/pure-driver/simple_cli`.
+The runtime capsule remained the producer-bound capsule above; the runtime
+bundle was `core-c-bootstrap`, target `x86_64-unknown-linux-gnu`, ABI `v1`,
+threads 1, and both Stage 3/4 markers were 0. Clang 23 remained selected.
+No-stub and no-delegate flags remained enabled. The separate
+`<work>/pure-driver-cache` avoids treating Rust-builder outputs as interchangeable
+with pure-driver outputs; no prior cache was deleted.
+
+The process selected the pure compiler-driver route and reported source closure
+of 2,445 files. Its last parse progress was 413/2,445 succeeded, cached 0,
+failed 0 at 114,263 ms. The outer 120-second timeout terminated it with exit 124.
+This proves route selection and partial frontend progress, not successful
+compilation, test execution, cache reuse, or host completion. A timeout alone
+does not establish a compiler correctness defect or performance regression.
+
+Log: `build/native_probe/index-compatibility-tdd/wsl-positional-pure-route.log`.
+The three build attempts in this lane (90-second verifier, 600-second retained
+retry, 120-second corrected-route probe) exhaust the repository's session cycle
+cap. Do not automatically restart or extend this build loop. A future explicitly
+scoped continuation must preserve these results and the remaining admission gates.
+Windows was also rechecked: no `vcruntime.h` was found in either standard Visual
+Studio installation root, and no installer process was observed.
