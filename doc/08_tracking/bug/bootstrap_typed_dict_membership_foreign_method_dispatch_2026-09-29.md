@@ -52,9 +52,13 @@ This change does not claim a general scalar-key Dict ABI migration.
 An initial general literal-key boxing change introduced a float indexing/get
 regression because those readers preserved raw bits. That change is narrowed
 to Boolean literal keys, and membership likewise preserves raw float bits.
-Focused float literal index/get/membership regressions and F32/F64 MIR
-assertions are prepared; execution requires explicit authorization beyond the
-three verification cycles already consumed.
+The user authorized one additional focused verification cycle. Float literal
+index/get/all four membership spellings, F32/F64 scalar MIR, and the retained
+original integer/Boolean JIT regression each passed with exit 0 on exact
+`b2d4dc93b5be905f806d39e98298f597af1cd0a5`. The Windows bootstrap-only seed
+build also passed with exit 0. This is focused compiler/component evidence;
+the archived corrected seed was not executed or admitted as a Phase 2/3
+runtime in this lane, and the original full bootstrap crash was not rerun.
 
 ## Regression evidence
 
