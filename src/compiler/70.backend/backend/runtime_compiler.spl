@@ -450,7 +450,7 @@ fn _runtime_dir_not_found_message() -> text:
 # Runtime Object Cache
 # ============================================================================
 
-fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text, abi_policy: text) -> text:
+fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dynload: bool, include_stage4_legacy_compat: bool, target: text, ext: text, abi_policy: text, sources: [text], runtime_profile: text, legacy_owner: bool) -> text:
     """Directory holding prebuilt C-runtime objects for this exact input set.
 
     The C runtime was recompiled from source on EVERY native build: 27
@@ -478,7 +478,11 @@ fn _runtime_object_cache_dir(rt_dir: text, cc: text, opt_level: i64, include_dyn
     # input identical, so without them a flag flip would hit a stale object.
     # Adding inputs to the key can only cause MORE misses, never fewer.
     val riscv_vec = env_get_nullable("SIMPLE_RUNTIME_RISCV64_VECTOR") ?? ""
-    val flag_sig = "v4;cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy}"
+    var source_sig = ""
+    for name in sources:
+        source_sig = source_sig + ";" + name
+    val timestamp_owner = runtime_profile == "core-c-bootstrap"
+    val flag_sig = "v5;profile={runtime_profile};sources={source_sig};timestamp_owner={timestamp_owner};legacy_owner={legacy_owner};cc={cc};opt={opt_level};dyn={include_dynload};legacy={include_stage4_legacy_compat};target={target};ext={ext};rt_dir={rt_dir};riscv_vec={riscv_vec};host_arch={host_arch()};abi_policy={abi_policy}"
     var cmd = "( printf '%s\\n' '" + flag_sig + "'; '" + cc + "' --version 2>/dev/null; "
     cmd = cmd + "find '" + rt_dir + "' -type f \\( -name '*.c' -o -name '*.h' \\) 2>/dev/null | LC_ALL=C sort | xargs -r sha256sum 2>/dev/null "
     cmd = cmd + ") | sha256sum 2>/dev/null | cut -c1-40"
@@ -521,10 +525,39 @@ pub fn runtime_cache_stage_bytes_v1(object_sizes: [i64], hard_linked: bool) -> i
             copied = copied + size
     copied
 
-fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false) -> Result<[text], text>:
+pub fn runtime_object_profile_v1(runtime_bundle: text, stage4_legacy: bool) -> text:
+    """Closed composition identity: aliases share owners, Stage4 stays distinct."""
+    if stage4_legacy:
+        return "stage4-legacy"
+    match runtime_bundle:
+        case "core-c-bootstrap": "core-c-bootstrap"
+        case "core_c_bootstrap": "core-c-bootstrap"
+        case "core-c": "core-c-bootstrap"
+        case "core_c": "core-c-bootstrap"
+        case _: "ordinary"
+
+pub fn runtime_core_c_sources_v1() -> [text]:
+    """Standalone hosted C owners, sharing the portable seed core-C composition.
+
+    runtime.c is excluded: its monolithic exports collide with runtime_native
+    and the narrow core provider owners. Extra existing media/device providers
+    retain their C ABI; this profile never adds Rust archives or trap stubs.
+    """
+    ["runtime_native", "runtime_core_intrinsics", "runtime_file_view", "runtime_cache_host_authority_v1", "runtime_framebuffer", "runtime_directx_core", "runtime_legacy_core", "runtime_core_io_exports", "runtime_core_host_services", "runtime_fork", "runtime_memtrack", "runtime_process", "runtime_memory", "runtime_process_owned", "runtime_coverage_core", "runtime_contracts", "runtime_font", "runtime_thread", "runtime_simd_utf8", "runtime_simd_case", "runtime_simd_search", "runtime_simd_dispatch", "runtime_packed_span", "runtime_terminal", "runtime_prof_sample", "runtime_core_exports", "runtime_backend_plugin", "runtime_rocm", "runtime_renderdoc", "runtime_timestamp", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime"]
+
+pub fn runtime_object_paths_v1(sources: [text], prefix: text, ext: text) -> [text]:
+    """Keep each object basename paired with the source that produced it."""
+    var objects: [text] = []
+    for name in sources:
+        objects = objects.push("{prefix}{name}{ext}")
+    objects
+
+fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool = true, compiler: text = "", include_stage4_legacy_compat: bool = false, runtime_bundle: text = "") -> Result<[text], text>:
     """Compile all C runtime source files to object files.
 
-    Compiles runtime.c, runtime_native.c, runtime_rocm.c, runtime_directx_core.c, runtime_thread.c,
+    The selected core-c-bootstrap profile excludes runtime.c and uses the
+    portable standalone C owners; other profiles retain their source lists.
+    Compiles runtime_native.c, runtime_rocm.c, runtime_directx_core.c, runtime_thread.c,
     runtime_memtrack.c, runtime_timestamp.c, runtime_fork.c, runtime_process.c, runtime_prof_sample.c
     with appropriate flags for linking with LLVM-generated code.
 
@@ -567,6 +600,15 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     # also teaching the object-path builder below to create nested
     # directories -- left as a follow-up, not silently dropped.
     var sources = ["runtime", "runtime_native", "runtime_file_view", "runtime_backend_plugin", "runtime_contracts", "runtime_coverage_core", "runtime_rocm", "runtime_renderdoc", "runtime_directx_core", "runtime_thread", "runtime_memtrack", "runtime_timestamp", "runtime_fork", "runtime_process", "runtime_process_owned", "runtime_memory", "runtime_simd_utf8", "runtime_simd_search", "runtime_simd_case", "runtime_simd_dispatch", "runtime_packed_span", "runtime_font", "runtime_glfw", "runtime_sdl2", "runtime_sdl3", "runtime_audio", "runtime_framebuffer", "runtime_image", "runtime_socket_nonblock", "counterpart_abi_runtime", "runtime_terminal", "runtime_prof_sample"]
+    # Stage4 retains its separately admitted provider projection composition.
+    val runtime_profile = runtime_object_profile_v1(runtime_bundle, include_stage4_legacy_compat)
+    val core_c_profile = runtime_profile == "core-c-bootstrap"
+    if core_c_profile:
+        sources = runtime_core_c_sources_v1()
+        if host_os() == "linux":
+            # Existing portable compositor non-target owners, as in tools.rs.
+            sources = sources.push("hosted_cocoa")
+            sources = sources.push("hosted_win32")
     val tmp_dir = _get_temp_dir()
     val ext = _obj_ext()
     val use_msvc = _is_msvc_cc(cc)
@@ -579,74 +621,24 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
     if abi_defines.len() != 2:
         return Err("SIMPLE_ABI_POLICY '{abi_policy}' has no canonical runtime ABI defines")
     val object_prefix = "{tmp_dir}/simple_rt_{compile_pid}_{target}_"
-    var objects = [
-        "{object_prefix}runtime{ext}",
-        "{object_prefix}runtime_native{ext}",
-        "{object_prefix}runtime_backend_plugin{ext}",
-        "{object_prefix}runtime_contracts{ext}",
-        "{object_prefix}runtime_coverage_core{ext}",
-        "{object_prefix}runtime_rocm{ext}",
-        "{object_prefix}runtime_renderdoc{ext}",
-        "{object_prefix}runtime_directx_core{ext}",
-        "{object_prefix}runtime_thread{ext}",
-        "{object_prefix}runtime_memtrack{ext}",
-        "{object_prefix}runtime_timestamp{ext}",
-        "{object_prefix}runtime_fork{ext}",
-        "{object_prefix}runtime_process{ext}",
-        "{object_prefix}runtime_process_owned{ext}",
-        "{object_prefix}runtime_file_view{ext}",
-        "{object_prefix}runtime_memory{ext}",
-        "{object_prefix}runtime_simd_utf8{ext}",
-        "{object_prefix}runtime_simd_search{ext}",
-        "{object_prefix}runtime_simd_case{ext}",
-        "{object_prefix}runtime_simd_dispatch{ext}",
-        # SimplePackedSpanV1 C resolve (F2).
-        "{object_prefix}runtime_packed_span{ext}",
-        "{object_prefix}runtime_font{ext}",
-        "{object_prefix}runtime_glfw{ext}",
-        "{object_prefix}runtime_sdl2{ext}",
-        "{object_prefix}runtime_sdl3{ext}",
-        "{object_prefix}runtime_audio{ext}",
-        "{object_prefix}runtime_framebuffer{ext}",
-        "{object_prefix}runtime_image{ext}",
-        "{object_prefix}runtime_socket_nonblock{ext}",
-        "{object_prefix}counterpart_abi_runtime{ext}",
-        # Terminal probes (rt_terminal_is_tty / rt_terminal_stdout_is_tty / raw
-        # mode / size / rt_stdin_read_byte) backing the std.tui.terminal externs
-        # at src/lib/nogc_sync_mut/tui/terminal.spl:42-47. This list never
-        # carried it, so a self-hosted native link of anything reaching
-        # std.tui.terminal left rt_terminal_* undefined -- the tolerated-
-        # undefined then NULL-GOT SIGSEGV class of
-        # stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.
-        # The seed's core-C list (native_project/tools.rs) has always compiled
-        # it unconditionally on every target, so the Linux/macOS build is
-        # already proven; it needs no SDK and no extra link flags, and it is
-        # the sole .c definer of all 7 of its symbols (zero collisions with the
-        # other members of this list). Analysis:
-        # doc/08_tracking/bug/c_runtime_source_list_divergence_2026-08-30.md
-        "{object_prefix}runtime_terminal{ext}",
-        # Env-gated SIGPROF PC sampler (src/runtime/runtime_prof_sample.c).
-        # Zero-cost unless SIMPLE_PROF_SAMPLE_FILE is set; needs no extra link
-        # flags and defines no symbols other than the constructor and the
-        # prof_sample_force_link archive-retention anchor.
-        "{object_prefix}runtime_prof_sample{ext}"
-    ]
     if include_stage4_legacy_compat:
         sources = sources.push("runtime_legacy_core")
-        objects = objects.push("{object_prefix}runtime_legacy_core{ext}")
     if include_dynload:
         sources = sources.push("runtime_dynload")
-        objects = objects.push("{object_prefix}runtime_dynload{ext}")
     if include_stage4_legacy_compat and host_os() == "linux" and include_dynload:
         # Stage4 offers the checked SQLite bridge as a selectable runtime
         # owner. The provider library itself stays outside the executable and
         # is admitted on first SQLite use.
         sources = sources.push("runtime_sqlite_demand")
-        objects = objects.push("{object_prefix}runtime_sqlite_demand{ext}")
+    var legacy_owner = false
+    for name in sources:
+        if name == "runtime_legacy_core":
+            legacy_owner = true
+    val objects = runtime_object_paths_v1(sources, object_prefix, ext)
     var object_count = 0
     val cache_dir = _runtime_object_cache_dir(
         rt_dir, cc, opt_level, include_dynload,
-        include_stage4_legacy_compat, target, ext, abi_policy)
+        include_stage4_legacy_compat, target, ext, abi_policy, sources, runtime_profile, legacy_owner)
     if trace:
         print "[RT-COMPILE] object cache dir={cache_dir}"
     if trace:
@@ -674,10 +666,14 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # CRT header guards behind C11 (fatal C1189 otherwise). clang-cl
             # accepts it and it matches the -std=gnu11 the clang branch passes.
             comp_args = ["/c", msvc_opt, "/Gy", "/MD", "/std:c11", "/I", rt_dir, "/I", "{rt_dir}/platform", "/Fo{obj_path}", src_path]
+            if core_c_profile:
+                for abi_define in abi_defines:
+                    comp_args.push(abi_define)
+                comp_args.push("/DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1")
             # runtime_memory.c is always in this bundle and canonically owns
             # the overlapping allocator/pointer ABI, including native-all.
             comp_args.push("/DSIMPLE_RUNTIME_MEMORY_OWNER=1")
-            if include_dynload:
+            if include_dynload or core_c_profile:
                 # Only the standalone core-C composition may suppress hosted
                 # providers. native-all needs runtime_native/thread/process
                 # hosted fallbacks even though runtime_memory remains present.
@@ -685,8 +681,10 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # runtime_dynload.c is in this bundle and owns spl_dlopen/
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
-                comp_args.push("/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
-                # This composition sets SIMPLE_CORE_C_STANDALONE but does NOT
+                if include_dynload:
+                    comp_args.push("/DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                # Select the CPU-count owner from the actual legacy provider.
+                # The ordinary composition sets SIMPLE_CORE_C_STANDALONE but does NOT
                 # include runtime_legacy_core.c (see include_stage4_legacy_compat
                 # below), and legacy_core.c is the sole owner of
                 # spl_thread_cpu_count under that define -- so without this the
@@ -695,7 +693,7 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
                 # function rt_pool_get_parallelism` (measured 2026-09-02). State
                 # the ownership explicitly rather than letting runtime_thread.c
                 # guess from the platform.
-                if not include_stage4_legacy_compat:
+                if not legacy_owner:
                     comp_args.push("/DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
         else:
             # GCC/Clang flags (-fPIC only on Unix, not needed on Windows)
@@ -716,17 +714,20 @@ fn compile_runtime_objects(verbose: bool, opt_level: i64, include_dynload: bool 
             # Keep runtime_memory.c as the sole allocator/pointer ABI owner in
             # both dynload and native-all/non-dynload compositions.
             comp_args.push("-DSIMPLE_RUNTIME_MEMORY_OWNER=1")
-            if include_dynload:
+            if core_c_profile:
+                comp_args.push("-DSIMPLE_RUNTIME_TIMESTAMP_OWNER=1")
+            if include_dynload or core_c_profile:
                 # Standalone core-C suppresses hosted fallbacks; native-all
                 # must retain them and therefore must not receive this flag.
                 comp_args.push("-DSIMPLE_CORE_C_STANDALONE=1")
                 # runtime_dynload.c is in this bundle and owns spl_dlopen/
                 # spl_dlsym/spl_dlclose. Compile runtime_native.c's per-lane
                 # fallback copies out so exactly ONE definition ships.
-                comp_args.push("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
+                if include_dynload:
+                    comp_args.push("-DSIMPLE_RUNTIME_DYNLOAD_OWNER=1")
                 # Same ownership statement as the MSVC branch above. Inert
                 # wherever runtime_legacy_core.c IS in the list.
-                if not include_stage4_legacy_compat:
+                if not legacy_owner:
                     comp_args.push("-DSIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1")
             if target.starts_with("aarch64-") or (target == "host" and host_arch() == "aarch64"):
                 comp_args.push("-mno-outline-atomics")

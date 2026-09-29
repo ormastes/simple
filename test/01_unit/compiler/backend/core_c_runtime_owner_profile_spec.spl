@@ -1,0 +1,36 @@
+use std.spec.*
+use compiler.backend.backend.runtime_compiler.{runtime_core_c_sources_v1, runtime_object_paths_v1, runtime_object_profile_v1}
+
+describe "Standalone core-C runtime owners":
+    it "keeps public core-C aliases consistent while separating ordinary and Stage4 owners":
+        for alias in ["core-c-bootstrap", "core_c_bootstrap", "core-c", "core_c"]:
+            expect(runtime_object_profile_v1(alias, false)).to_equal("core-c-bootstrap")
+            expect(runtime_object_profile_v1(alias, true)).to_equal("stage4-legacy")
+        expect(runtime_object_profile_v1("host-gpu", false)).to_equal("ordinary")
+        expect(runtime_object_profile_v1("untrusted'profile", false)).to_equal("ordinary")
+
+    it "uses narrow portable C owners without the colliding monolith or Rust trap bridge":
+        val sources = runtime_core_c_sources_v1()
+        expect(sources).to_contain("runtime_native")
+        expect(sources).to_contain("runtime_core_intrinsics")
+        expect(sources).to_contain("runtime_legacy_core")
+        expect(sources).to_contain("runtime_core_exports")
+        expect(sources).to_contain("runtime_core_io_exports")
+        expect(sources).to_contain("runtime_core_host_services")
+        expect(sources).to_contain("runtime_memory")
+        expect(sources).to_contain("runtime_thread")
+        for name in sources:
+            expect(name == "runtime").to_be(false)
+            expect(name == "runtime_pool").to_be(false)
+            expect(name == "runtime_cranelift_bridge_stub").to_be(false)
+
+    it "pairs each source with its own object when source order changes":
+        # The former independent arrays placed file_view and backend_plugin
+        # at different indices, poisoning both object labels and warm cache.
+        val sources = ["runtime_native", "runtime_file_view", "runtime_backend_plugin"]
+        val objects = runtime_object_paths_v1(sources, "private/", ".obj")
+        expect(objects).to_equal([
+            "private/runtime_native.obj", "private/runtime_file_view.obj",
+            "private/runtime_backend_plugin.obj"])
+        val reordered = runtime_object_paths_v1(["runtime_backend_plugin", "runtime_file_view"], "other/", ".o")
+        expect(reordered).to_equal(["other/runtime_backend_plugin.o", "other/runtime_file_view.o"])
