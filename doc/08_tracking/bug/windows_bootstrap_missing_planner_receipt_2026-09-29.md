@@ -19,7 +19,8 @@ planner receipt producer against that exact parent, and resumes admitted
 Stage 3. The receipt producer and verification guards remain authoritative.
 The existing AOT workflow uses this same two-phase admission pattern.
 
-The requested Windows/Linux concurrency is set to 10 Cargo jobs and Stage 2 jobs.
+The requested Windows/Linux concurrency requests 10 Cargo jobs and Stage 2 jobs. The existing incremental profile
+limits actual Stage 2 compiler workers to two; this patch preserves that bound.
 Stage 3 resume requires one thread by its current implementation; it rejects
 other job counts. This change does not claim Stage 3 uses 10 threads.
 
@@ -34,3 +35,11 @@ runners. Local Windows host profile DESKTOP-5A4V03J has no connection endpoint
 or CPU inventory. Ten jobs therefore does not establish ten available cores.
 
 No full bootstrap was restarted during this repair.
+
+Resume artifact paths now follow the admitted host triple: Windows executables
+use .exe, MSVC archives use .lib with no lib prefix, and GNU Windows archives
+keep lib*.a. The workflow explicitly exports the MSVC ABI so Git Bash does not
+select GNU for the receipt/resume subprocesses. Backend remains bound to the
+admitted Stage 2 command transcript. Original Windows/Linux Cranelift used
+--no-mcp and no --full-cli; bootstrap-from-scratch stops after Stage 3 in that
+configuration, so the resumed flow retains the requested stage scope.
