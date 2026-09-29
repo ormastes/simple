@@ -67,8 +67,30 @@ The publication guard now validates the joined generation against every
 expected row before creating the generation file. Its subsequent exact
 readback still checks the persisted bytes before moving `CURRENT`. This keeps
 the normal path to one row split and rejects a three-byte serializer result
-without writing an orphan generation. The root native serialization failure
-and a passing native round trip remain unproven.
+without writing an orphan generation. At that point, the root native
+serialization failure and a passing native round trip remained unproven.
+
+## Post-merge current-source narrow native round trip (2026-09-29)
+
+At `main` merge `a43c26becaf0`, the pure-Simple Stage2 bootstrap compiler
+(SHA-256 `5d71c26b371b83d0041e10b815dae153a38b9f7c61aa0931f3473aaee919e2f6`)
+built `test/02_integration/compiler/cas_batch_native_publish_main.spl` with
+`--source src/compiler --source src/lib --entry-closure`, using
+`SIMPLE_NO_STUB_FALLBACK=1`. The 43-unit entry closure linked with zero
+failures and no generated unresolved-symbol stubs. The native binary SHA-256
+was `2b396aaa9e9dc5bbcbd89afa686f4017502e8361c6ffdff33b480a453e926839`.
+Its single fail-fast run exited 0 and printed
+`publish-load-pin-ok:zero:generation-bytes=328` and
+`publish-load-pin-ok:one:generation-bytes=525`. This proves the current-source
+narrow publish, persisted generation, load, and pin path for zero and one
+dependency counts under that producer. The full CLI, production cold graph
+cutover, and native performance cohort remain open.
+
+The same producer without `SIMPLE_NO_STUB_FALLBACK=1` linked 29 fallback
+stubs, including `flock`, and the run stopped at `publish-failed:zero` after
+writing a 328-byte generation but before `CURRENT`. Its CLI ignored an
+attempted `--no-stub-fallback` flag. That run is only a toolchain diagnostic;
+the environment variable is required for this producer.
 
 ## Candidate repair evidence
 
