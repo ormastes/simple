@@ -22,6 +22,24 @@ fn hir_stmt_kind_disc(k: StmtKind) -> i64:
 # ============================================================================
 
 impl HirLowering:
+    me hir_stmt_requires_multi_lowering(s: Stmt) -> bool:
+        # Keep the tuple marker identical to lower_hir_stmt_multi. Ordinary
+        # statements can use their fresh typed return without a singleton array.
+        val stmt_kind_value: StmtKind = s.kind
+        val sk_disc: i64 = hir_stmt_kind_disc(stmt_kind_value)
+        val sk_dummy: Expr = Expr(kind: ExprKind.NilLit, span: s.span)
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Val("", nil, sk_dummy)):
+            val name: text = match stmt_kind_value:
+                case StmtKind.Val(value, _, _): value
+                case _: ""
+            return name.len() > 1 and name[0:1] == "("
+        if sk_disc == hir_stmt_kind_disc(StmtKind.Var("", nil, nil)):
+            val name: text = match stmt_kind_value:
+                case StmtKind.Var(value, _, _): value
+                case _: ""
+            return name.len() > 1 and name[0:1] == "("
+        false
+
     # Nested-field-access support (native --entry path bug -- see
     # struct_field_types_by_name / local_struct_types doc comments in
     # types.spl). `val/var x = StructName(...)` is the only local-declared-
@@ -362,11 +380,14 @@ impl HirLowering:
                 case _:
                     sk_dummy
             val v_hir_type = if v_type.?:
-                Some(self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span)))
+                self.lower_type(v_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
+            # Let.type_ is a plain HirType. Keep the symbol table's existing
+            # optional representation separate from the Let payload.
+            val v_symbol_type = if v_type.?: Some(v_hir_type) else: nil
             val v_hir_init = self.lower_hir_expr(v_init)
-            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_hir_type, s.span, false, false, nil)
+            val v_symbol = self.symbols.define(v_name, SymbolKind.Variable, v_symbol_type, s.span, false, false, nil)
             self.try_register_local_struct_type(v_symbol, v_init)
             self.try_register_local_tuple_type(v_symbol, v_init)
             return HirStmt(kind: HirStmtKind.Let(v_symbol, v_hir_type, v_hir_init), span: s.span)
@@ -387,14 +408,15 @@ impl HirLowering:
                 case _:
                     nil
             val vr_hir_type = if vr_type.?:
-                Some(self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span)))
+                self.lower_type(vr_type ?? Type(kind: TypeKind.Infer, span: s.span))
             else:
                 nil
+            val vr_symbol_type = if vr_type.?: Some(vr_hir_type) else: nil
             val vr_hir_init = if vr_init.?:
                 self.lower_hir_expr(vr_init ?? sk_dummy)
             else:
                 HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_hir_type, s.span, false, true, nil)
+            val vr_symbol = self.symbols.define(vr_name, SymbolKind.Variable, vr_symbol_type, s.span, false, true, nil)
             if val vr_init_present = vr_init:
                 self.try_register_local_struct_type(vr_symbol, vr_init_present)
                 self.try_register_local_tuple_type(vr_symbol, vr_init_present)
@@ -476,23 +498,25 @@ impl HirLowering:
         val kind: HirStmtKind = match stmt_kind_value:
             case StmtKind.Val(name, type_, init):
                 val hir_type = if type_.?:
-                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
+                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
+                val symbol_type = if type_.?: Some(hir_type) else: nil
                 val hir_init = self.lower_hir_expr(init)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, false, nil)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, symbol_type, s.span, false, false, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Var(name, type_, init):
                 val hir_type = if type_.?:
-                    Some(self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span)))
+                    self.lower_type(type_ ?? Type(kind: TypeKind.Infer, span: s.span))
                 else:
                     nil
+                val symbol_type = if type_.?: Some(hir_type) else: nil
                 val hir_init = if init.?:
                     self.lower_hir_expr(init ?? Expr(kind: ExprKind.NilLit, span: s.span))
                 else:
                     HirExpr(kind: HirExprKind.NilLit, type_: nil, span: s.span)
-                val symbol = self.symbols.define(name, SymbolKind.Variable, hir_type, s.span, false, true, nil)
+                val symbol = self.symbols.define(name, SymbolKind.Variable, symbol_type, s.span, false, true, nil)
                 HirStmtKind.Let(symbol, hir_type, hir_init)
 
             case StmtKind.Assign(target, op, value):
