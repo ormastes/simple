@@ -1,9 +1,8 @@
-# Stage4 positional AOT emits hello but cannot publish no-op receipt
+# Stage4 positional AOT source-owner copy emptied the no-op receipt path
 
-- **Status:** Open
+- **Status:** Fixed for the tested Stage4 hello path
 - **Found:** 2026-09-29, Linux ARM64 exact Stage4 standalone compiler
-- **Impact:** compiler exits 1 after linking a runnable hello; blocks admitted
-  size/startup/RSS qualification and native no-op compile cache authority
+- **Impact:** before the fix, compiler exited 1 after linking a runnable hello
 
 After the backend lease receiver fix, the exact Stage4 compiler compiled one
 hello module, linked a 21,448-byte ARM64 executable, and that executable ran
@@ -24,15 +23,18 @@ its only string was empty. The copy helper currently uses
 `rt_bytes_to_text(value.bytes())`; this native-compiled path did not preserve
 the input text. Temporary trace prints were removed.
 
-**Next:** replace or repair `driver_source_owner_text_copy` with a native-proven
-owned text copy, then verify the path, content, and module-name owner fields
-at the loader boundary and receipt publication. Preserve
-the no-op receipt's authenticated source inventory and fail-closed behavior;
-do not turn off the receipt for positional AOT just to make this build green.
-Then require compiler exit 0, executable output, and matched size/startup/RSS
-evidence. This session stopped after three focused build/check cycles.
+The helper now uses `rt_string_substr_from(value, 0)`, which makes one owned
+runtime string copy without building an intermediate byte array. The exact
+Stage4 compiler rebuilt 866 units without failure. Hello AOT returned exit 0,
+wrote a 21,448-byte ARM64 executable, and that executable printed
+`Hello World` with exit 0. Receipt publication therefore accepted the
+source inventory in this path. A second identical build returned exit 0 but
+did not hit no-op admission; that performance issue is tracked separately.
+The matched C size ratio and production startup/RSS receipts remain open.
 
 Evidence: `build/mini_builds/target5_stage4_lease_unique_build.log`,
 `target5_stage4_lease_unique_hello.log`, and
 `target5_stage4_noop_trace_hello.log`. The loader-boundary proof is in
 `target5_stage4_owner_copy_trace_hello.log`.
+The successful build is in `target5_stage4_owner_substr_build.log` and
+`target5_stage4_owner_substr_hello.log` under `build/mini_builds/`.

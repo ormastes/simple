@@ -54,8 +54,33 @@ non-streaming context assignment did not cause this loss. The helper's
 the diagnostic prints were removed and no additional build retry was made
 after the third focused cycle.
 
-Status: exact Stage4 compiler links and emits a runnable hello, but the hello
-build exits 1 after linking. Production size/startup/RSS qualification is open.
+## Owned source copy and diagnostic hello cohort
+
+Replacing the failed byte-array round-trip with the runtime's zero-offset
+substring produced one owned text copy and repaired the Stage4 hello build.
+The exact compiler rebuilt 866 units with zero failures in 66.3 seconds; the
+hello AOT command then returned exit 0 and its executable printed
+`Hello World` with exit 0. The unstripped hello is 21,448 bytes; an
+`llvm-strip --strip-all` copy is **13,544 bytes**, 1,816 bytes below the
+15,360-byte absolute limit. This is not yet a matched C ratio or BS7 release
+qualification. A repeated identical hello build still did full compiler/link
+work instead of reporting a no-op admission hit; see
+`doc/08_tracking/bug/stage4_native_noop_admission_misses_after_publication_2026-09-29.md`.
+
+A same-host 30-pair diagnostic used a small C `fork`/`wait4` harness with
+alternating order and warmups. The stripped Simple hello measured p95 1.248 ms
+and 1,076 KiB max RSS; `/usr/bin/python3 -c "print('Hello World')"` measured
+p95 20.893 ms and 9,440 KiB. The normalized time-plus-RSS ratio sum is
+0.174. The raw samples and harness are in
+`doc/09_report/compiler/evidence/target5_stage4_hello_30pair_20260929.tsv`
+and `target5_stage4_hello_cohort_harness_20260929.c` beside it. Earlier
+Python-parent `fork`/`posix_spawn` measurements inherited the parent's peak
+RSS and were discarded. This cohort is diagnostic because the matched C
+binary, Stage4 admission receipt, NoGC inventory, and provider trace are not
+yet assembled for the release checker.
+
+Status: exact Stage4 compiler and hello AOT build exit 0; diagnostic size and
+startup/RSS evidence exists. Matched C and production qualification are open.
 
 Worktree: `codex/target5-stage4-sqlite-demand-20260928`, starting at
 `27e0e47d653`. The previous current-source dynamic compiler diagnostic checks

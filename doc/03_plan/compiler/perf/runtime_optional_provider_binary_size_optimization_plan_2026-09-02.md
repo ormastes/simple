@@ -4,6 +4,13 @@
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
 
+Current-source diagnostic (2026-09-29): exact Stage4 hello AOT now exits 0
+and runs. Its stripped ARM64 binary is 13,544 bytes, below the 15,360-byte
+absolute limit; a 30-pair Simple/Python startup and RSS cohort has normalized
+p95 ratio sum 0.174. This does not close the matched C 1.05x size gate,
+optional-provider closure, or BS7 production receipts. Evidence is in
+`doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
+
 ## Phase 0 — Baselines and Attribution
 
 - Add matched Simple/Python startup/RSS and Simple/C binary-size harnesses.
