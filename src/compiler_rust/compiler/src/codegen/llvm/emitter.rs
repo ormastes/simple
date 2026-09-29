@@ -818,80 +818,9 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         args: &[VReg],
         _effect: Effect,
     ) -> Result<(), String> {
-        let callee_val = self.get(callee)?;
-        let i8_type = self.backend.context_ref().i8_type();
-        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
-
-        if let BasicValueEnum::PointerValue(closure_ptr) = callee_val {
-            // Load function pointer from closure (at offset 0)
-            let base_ptr = self
-                .builder
-                .build_pointer_cast(closure_ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("cast failed: {}", e))?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(0, false);
-            let fn_ptr_slot = unsafe {
-                self.builder
-                    .build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let fn_ptr_slot = self
-                .builder
-                .build_pointer_cast(
-                    fn_ptr_slot,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "fn_ptr_slot_cast",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            let func_ptr = self
-                .builder
-                .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
-                .map_err(|e| format!("load failed: {}", e))?;
-
-            if let BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
-                let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::new();
-                for arg in args {
-                    let val = self.get(*arg)?;
-                    arg_vals.push(val.into());
-                }
-
-                let llvm_param_types: Result<Vec<inkwell::types::BasicMetadataTypeEnum>, String> = param_types
-                    .iter()
-                    .map(|ty| self.backend.llvm_type(ty).map(|t| t.into()).map_err(|e| e.to_string()))
-                    .collect();
-                let llvm_param_types = llvm_param_types?;
-
-                let fn_type = if return_type == TypeId::VOID {
-                    self.backend.context_ref().void_type().fn_type(&llvm_param_types, false)
-                } else {
-                    let ret_llvm = self.backend.llvm_type(&return_type).map_err(|e| e.to_string())?;
-                    match ret_llvm {
-                        inkwell::types::BasicTypeEnum::ArrayType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::FloatType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::IntType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::PointerType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::StructType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::VectorType(t) => t.fn_type(&llvm_param_types, false),
-                        inkwell::types::BasicTypeEnum::ScalableVectorType(t) => {
-                            t.fn_type(&llvm_param_types, false)
-                        }
-                    }
-                };
-
-                let call_site = self
-                    .builder
-                    .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
-                    .map_err(|e| format!("indirect call failed: {}", e))?;
-
-                if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                        self.set(*d, ret_val);
-                    }
-                }
-            }
-        } else {
-            return Err("IndirectCall requires closure pointer".to_string());
-        }
-        Ok(())
+        self.backend.compile_indirect_call(
+            *dest, callee, param_types, &return_type, args, self.vreg_map, self.builder,
+        ).map_err(|error| error.to_string())
     }
 
     // =========================================================================
@@ -1405,103 +1334,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         capture_offsets: &[u32],
         captures: &[VReg],
     ) -> Result<(), String> {
-        let i8_type = self.backend.context_ref().i8_type();
-        let i8_ptr_type = self.backend.context_ref().ptr_type(inkwell::AddressSpace::default());
-        // Closures can escape the creator via runtime pool/thread APIs. Heap
-        // allocation keeps captures stable after the creating frame advances.
-        let i64_type = self.backend.runtime_int_type();
-        let alloc_fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
-        let alloc_fn = self
-            .module
-            .get_function("rt_alloc")
-            .unwrap_or_else(|| self.module.add_function("rt_alloc", alloc_fn_type, None));
-        let allocation_size = closure_size.max(16);
-        let size_val = i64_type.const_int(allocation_size as u64, false);
-        let alloc_call = self
-            .builder
-            .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
-            .map_err(|e| format!("rt_alloc call failed: {}", e))?;
-        let alloc_value = alloc_call
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "rt_alloc did not return a value".to_string())?;
-        let closure_ptr = match alloc_value {
-            BasicValueEnum::PointerValue(ptr) => self
-                .builder
-                .build_pointer_cast(ptr, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("cast failed: {}", e))?,
-            BasicValueEnum::IntValue(iv) => self
-                .builder
-                .build_int_to_ptr(iv, i8_ptr_type, "closure_ptr")
-                .map_err(|e| format!("int_to_ptr failed: {}", e))?,
-            _ => return Err("rt_alloc returned unsupported value kind".to_string()),
-        };
-
-        // Store function pointer at offset 0
-        let func_ptr = self
-            .module
-            .get_function(func_name)
-            .map(|f| f.as_global_value().as_pointer_value())
-            .unwrap_or_else(|| i8_ptr_type.const_null());
-        let func_ptr_cast = self
-            .builder
-            .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
-            .map_err(|e| format!("cast failed: {}", e))?;
-        let fn_slot = self
-            .builder
-            .build_pointer_cast(
-                closure_ptr,
-                self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                "fn_slot",
-            )
-            .map_err(|e| format!("cast failed: {}", e))?;
-        self.builder
-            .build_store(fn_slot, func_ptr_cast)
-            .map_err(|e| format!("store failed: {}", e))?;
-
-        if closure_size < 16 {
-            let offset_val = self.backend.context_ref().i32_type().const_int(8, false);
-            let marker_ptr = unsafe {
-                self.builder
-                    .build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let marker_slot = self
-                .builder
-                .build_pointer_cast(
-                    marker_ptr,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "closure_marker_slot",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            self.builder
-                .build_store(marker_slot, i64_type.const_zero())
-                .map_err(|e| format!("store failed: {}", e))?;
-        }
-
-        // Store captured values at their offsets
-        for (offset, value) in capture_offsets.iter().zip(captures.iter()) {
-            let capture_val = self.get(*value)?;
-            let offset_val = self.backend.context_ref().i32_type().const_int(*offset as u64, false);
-            let field_ptr = unsafe {
-                self.builder
-                    .build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr")
-                    .map_err(|e| format!("gep failed: {}", e))?
-            };
-            let typed_ptr = self
-                .builder
-                .build_pointer_cast(
-                    field_ptr,
-                    self.backend.context_ref().ptr_type(inkwell::AddressSpace::default()),
-                    "cap_typed_ptr",
-                )
-                .map_err(|e| format!("cast failed: {}", e))?;
-            self.builder
-                .build_store(typed_ptr, capture_val)
-                .map_err(|e| format!("store failed: {}", e))?;
-        }
-        self.set(dest, closure_ptr.into());
-        Ok(())
+        let size = u32::try_from(closure_size)
+            .map_err(|_| "LLVM closure size exceeds MIR layout".to_string())?;
+        let capture_types = vec![TypeId::I64; captures.len()];
+        self.backend.compile_closure_create(
+            dest, func_name, size, capture_offsets, &capture_types, captures,
+            self.vreg_map, self.builder, self.module,
+        ).map_err(|error| error.to_string())
     }
 
     // =========================================================================
