@@ -436,5 +436,12 @@ the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173
 distinct symbols. This still blocks full-CLI Target 6 qualification; the
 focused V3 probes are narrower evidence. See
 `doc/09_report/compiler/target56_stage4_cli_link_boundary_2026-09-28.md`.
+The 2026-09-29 standalone Stage4 self-hosting attempt removed reintroduced
+stale `app.package.registry` and `app.ffi_gen.specs` duplicate source paths;
+the canonical package CLI spec passed 3/3. The older Stage4 flat loader then
+collapsed two distinct GC-family regex facades to `tooling.regex_nfa` before
+compilation. This is a source-root naming blocker, not a current-source
+compiler or Target 6 performance pass. See
+`doc/08_tracking/bug/stage4_module_collisions_and_stale_imports_2026-07-24.md`.
 The marker bridge's focused native evidence and limits are in
 `doc/09_report/compiler/target6_index_compat_marker_publication_2026-09-28.md`.
