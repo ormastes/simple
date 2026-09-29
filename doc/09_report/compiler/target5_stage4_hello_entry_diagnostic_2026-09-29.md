@@ -206,3 +206,12 @@ archive ownership. Import classification or a blanket undefined-symbol waiver
 would not supply behavior. The build produced no Stage4 executable or hello
 size/startup/RSS cohort. This is the session's third focused fix/check cycle;
 no further build retry was made.
+
+## PR #2050 integration correction
+
+The standalone selected-K1 installation gate now applies only to AOT. JIT
+retains its pre-existing `jit_compile_and_run()` -> `CodegenPipeline.jit()`
+-> `CraneliftCodegenState` path; it does not consume the selected K1 table.
+This removes the newly introduced default-stub rejection before JIT dispatch
+while keeping AOT fail-closed. This correction was reviewed from the call
+paths; it does not add runtime JIT or full compiler qualification evidence.
