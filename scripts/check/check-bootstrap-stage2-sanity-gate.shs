@@ -17,6 +17,11 @@
 # cases is ERROR, never a pass.
 
 set -u
+case "${1:-}" in
+  '') lifecycle_only=0 ;;
+  --driver-log-lifecycle-only) lifecycle_only=1 ;;
+  *) echo "ERROR — usage: $0 [--driver-log-lifecycle-only]"; exit 2 ;;
+esac
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 src="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
 work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
@@ -85,7 +90,11 @@ candidate_frontend_capture_setup() {
   export CANDIDATE_FRONTEND_CAPTURE_KIND CANDIDATE_FRONTEND_CAPTURE_PARENT
 }
 candidate_frontend_pinned_smoke() {
-  printf 'probe=synthetic driver=begin\n' >"$2" || return 126
+  if [ "${driver_fixture:-nonempty}" = empty ]; then
+    : >"$2" || return 126
+  else
+    printf 'probe=synthetic driver=begin\n' >"$2" || return 126
+  fi
   candidate_frontend_smoke "$1"
 }
 # candidate_frontend_smoke: real one compiles a fixture. Stub delegates to the
@@ -112,7 +121,7 @@ candidate_frontend_smoke() {
     {
       echo schema=simple-candidate-frontend-status-v2
       [ "$smoke_status" -eq 0 ] && echo result=pass || echo result=fail
-      echo probe=synthetic
+      echo probe=complete
       echo raw_status="$smoke_status"
       echo bootstrap_mode="${CANDIDATE_FRONTEND_BOOTSTRAP:-0}"
       echo backend="${CANDIDATE_FRONTEND_BACKEND:-cranelift}"
@@ -129,14 +138,18 @@ candidate_frontend_smoke() {
   fi
   return "$smoke_status"
 }
+# Production globals normally initialized by bootstrap-from-scratch.sh.
 backend=llvm
+os=$(uname -s | tr "[:upper:]" "[:lower:]")
+llvm_features=llvm
 EOF
 
 drive() { # drive <candidate> <evidence>  -> echoes rc on its own line
-  ( . "${harness}"
+  ( driver_fixture=${3:-nonempty}
+    . "${harness}"
     . "${repo_root}/scripts/check/lib/bootstrap-stage3/sanity.shs"
     repo_root="${REPO_ROOT_OVERRIDE}"; . "${preflight_fn}"; . "${fn}"
-    bootstrap_stage_sanity "$1" "$2" "${work}/h" "${work}/t" "$PATH" >/dev/null 2>&1
+    bootstrap_stage_sanity "$1" "$2" "${work}/h" "${work}/t" "$PATH" >"$2.producer.log" 2>&1
     echo "RC=$?" )
 }
 
@@ -179,6 +192,71 @@ check() { # check <name> <expect pass|fail> <candidate> [expect_status_field]
 }
 
 REPO_ROOT_OVERRIDE="${repo_root}"
+
+# Drive the shipped producer, then its real receipt reader. Candidates and
+# frontend rows are explicit synthetic fixtures, not compiler qualification.
+driver_lifecycle_consume() (
+  BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  export BOOTSTRAP_STAGE3_FACADE_PATH
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+  bootstrap_stage3_verify_sanity_evidence_receipt "$1" "$1" "$work" "$2" "$repo_root"
+)
+driver_lifecycle_case() {
+  lifecycle_name=$1 lifecycle_candidate=$2 lifecycle_expect=$3 lifecycle_kind=$4
+  lifecycle_evidence="$work/$lifecycle_name.env"
+  lifecycle_out=$(drive "$lifecycle_candidate" "$lifecycle_evidence" "$lifecycle_kind")
+  lifecycle_rc=$(printf '%s' "$lifecycle_out" | sed -n 's/^RC=//p')
+  lifecycle_status=$(sed -n 's/^status=//p' "$lifecycle_evidence")
+  lifecycle_log=$(sed -n 's/^frontend_smoke_driver_log_path=//p' "$lifecycle_evidence")
+  lifecycle_sha=$(sed -n 's/^frontend_smoke_driver_log_sha256=//p' "$lifecycle_evidence")
+  CASES_RUN=$((CASES_RUN + 1))
+  if [ "$lifecycle_rc" = "$lifecycle_expect" ] &&
+     [ -f "$lifecycle_log" ] && [ ! -L "$lifecycle_log" ] &&
+     [ "$(sha256sum "$lifecycle_log" | cut -d' ' -f1)" = "$lifecycle_sha" ]; then
+    if [ "$lifecycle_expect" = 0 ]; then
+      if [ "$lifecycle_status" = pass ] && driver_lifecycle_consume "$lifecycle_evidence" "$lifecycle_candidate" >"$work/$lifecycle_name.reader.log" 2>&1; then
+        note "$lifecycle_name: PASS (producer log retained; real receipt reader accepted)"
+      else
+        FAILURES="$FAILURES $lifecycle_name(reader-rejected)"
+        note "$lifecycle_name: FAIL (real receipt reader rejected)"
+        tail -n 20 "$work/$lifecycle_name.reader.log" >&2
+      fi
+    elif [ "$lifecycle_status" = fail ]; then
+      note "$lifecycle_name: PASS (failed producer retained original receipt-bound log)"
+    else
+      FAILURES="$FAILURES $lifecycle_name(unexpected-status)"
+    fi
+  else
+    FAILURES="$FAILURES $lifecycle_name(log-lifecycle-or-status)"
+    note "$lifecycle_name: FAIL (receipt log missing/mutated or wrong producer status)"
+    tail -n 20 "$lifecycle_evidence.producer.log" >&2
+  fi
+}
+REPO_VERSION=$(sed -n '1s/[[:space:]]*$//p' "$repo_root/VERSION")
+mk_candidate "$work/lifecycle-good" "$REPO_VERSION" 0 "$REJECT_RUN"
+mk_candidate "$work/lifecycle-broken" "$REPO_VERSION" 1 "$REJECT_RUN"
+driver_lifecycle_case driver_log_pass_nonempty "$work/lifecycle-good" 0 nonempty
+driver_lifecycle_case driver_log_pass_empty "$work/lifecycle-good" 0 empty
+driver_lifecycle_case driver_log_fail_retained "$work/lifecycle-broken" 1 nonempty
+# Recreate the observed deletion only in synthetic test evidence; the reader
+# must still fail closed rather than accepting a receipt-bound missing log.
+lifecycle_good="$work/driver_log_pass_empty.env"
+mv "$lifecycle_good.frontend-driver.log" "$work/driver.saved"
+CASES_RUN=$((CASES_RUN + 1))
+if driver_lifecycle_consume "$lifecycle_good" "$work/lifecycle-good" >"$work/deleted-driver.reader.log" 2>&1; then
+  FAILURES="$FAILURES deleted_driver_log(accepted)"
+  note "deleted_driver_log: FAIL (reader accepted missing log)"
+elif grep -q 'sanity-receipt role=driver failure=authority' "$work/deleted-driver.reader.log"; then
+  note "deleted_driver_log: PASS (real reader rejected authority loss)"
+else
+  FAILURES="$FAILURES deleted_driver_log(wrong-rejection)"
+  note "deleted_driver_log: FAIL (unexpected reader rejection)"
+fi
+if [ "$lifecycle_only" = 1 ]; then
+  if [ -n "$FAILURES" ]; then echo "FAIL — $CASES_RUN lifecycle fixture cases:$FAILURES"; exit 1; fi
+  echo "PASS — $CASES_RUN lifecycle fixture cases; no compiler qualification claim"
+  exit 0
+fi
 
 echo "bootstrap_stage_sanity gate cases:"
 
