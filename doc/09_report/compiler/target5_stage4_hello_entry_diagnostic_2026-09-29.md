@@ -26,8 +26,27 @@ and observed only `Compiled ... -> ...smf`; the MCP native smoke stopped at
 Stage4 source, and neither is claimed PASS. The Stage4 hello blocker above
 remains the next focused implementation step.
 
-Status: BLOCKED for production qualification. This is an investigation of the
-standalone compiler entry, not an admitted Stage4 build or a size result.
+## Lease receiver and hello continuation
+
+A diagnostic trace found that a call intended for
+`BackendSession.compile_aot_into_path` re-entered the same-named
+`BackendSessionOwnedLeaseV2` method with a different object layout. Giving the
+lease method the unique name `compile_owned_aot_into_path_v2` removed that
+collision. The current-source Stage4 compiler compiled 866 units with no
+failures and linked a 23,622,696-byte unstripped executable. It compiled and
+linked a 21,448-byte ARM64 hello, SHA-256
+`fcf5d4bb072c107f0e2603db7c5f864117c06cd9ba01b84e60b33cf8fda41e7a`;
+the hello executable ran and printed `Hello World` with exit 0.
+
+The compiler itself returned exit 1 after linking because native no-op
+receipt publication saw zero source paths and refused to encode a receipt.
+That fail-closed refusal is correct for the observed empty inventory. The
+cause of the lost owner vector is still open in
+`doc/08_tracking/bug/stage4_positional_aot_noop_receipt_source_paths_2026-09-29.md`.
+No matched C hello size, startup, RSS, or release qualification is claimed.
+
+Status: exact Stage4 compiler links and emits a runnable hello, but the hello
+build exits 1 after linking. Production size/startup/RSS qualification is open.
 
 Worktree: `codex/target5-stage4-sqlite-demand-20260928`, starting at
 `27e0e47d653`. The previous current-source dynamic compiler diagnostic checks

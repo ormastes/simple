@@ -98,6 +98,11 @@ The standalone entry now installs the committed K1 table, and positional AOT
 lowers its input into MIR. Hello advances to backend compilation but rejects
 the session lease; the matched hello gates remain open. See
 `doc/08_tracking/bug/stage4_standalone_aot_backend_session_lease_2026-09-29.md`.
+The lease receiver collision is fixed for the tested path: an ARM64 hello now
+links and runs. The compiler still exits 1 because no-op receipt publication
+sees zero source paths after the link. Source-owner preservation and the
+matched size/startup/RSS gate remain open; see
+`doc/08_tracking/bug/stage4_positional_aot_noop_receipt_source_paths_2026-09-29.md`.
 Structural/checker results below are therefore kept distinct from runtime and
 native qualification. The selected policy must be receipt-bound. Performance
 qualification remains blocked until an admitted architecture-matched baseline
