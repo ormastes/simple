@@ -74,18 +74,21 @@ cmd_config() {
         echo "Usage: mail config set <key> <value>" >&2; return 2
       fi
       mail_config_init
-      local tmp="${MAIL_CONFIG_FILE}.tmp"
-      jq --arg k "$1" --arg v "$2" '.[$k] = $v' < "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
-      chmod 600 "$MAIL_CONFIG_FILE"
+      if [ "$1" != default_account ]; then
+        echo "Only default_account is set here; use 'mail auth login' for account settings." >&2
+        return 2
+      fi
+      mail_config_set_default "$2"
       echo "${C_GREEN}✓${C_RESET} Set ${1}"
       ;;
     get)
       [ $# -lt 1 ] && { echo "Usage: mail config get <key>" >&2; return 2; }
-      jq -r ".${1} // empty" < "$MAIL_CONFIG_FILE" 2>/dev/null
+      [ "$1" = default_account ] || { echo "Unknown config key: $1" >&2; return 2; }
+      mail_config_get_default
       ;;
     list)
       mail_config_init
-      jq '.' < "$MAIL_CONFIG_FILE" 2>/dev/null
+      cat "$MAIL_CONFIG_FILE"
       ;;
     *)
       echo "Manage mail-cli configuration"
@@ -147,8 +150,8 @@ cmd_help() {
   echo "  --password-file FILE  Override saved password (one line; never argv)"
   echo "  --password-cmd CMD    Obtain a password from a command"
   echo "  --non-interactive     Never prompt for credentials"
-  echo "  --config-file FILE    Shared account JSON file (e.g. {home}/.config/devhub/email.json)"
-  echo "  --config-dir DIR      Account directory containing config.json"
+  echo "  --config-file FILE    Shared account SDN file (e.g. {home}/.config/devhub/email.sdn)"
+  echo "  --config-dir DIR      Account directory containing email.sdn"
   echo "  Paths accept a leading {home}; quote it in launch commands"
   echo "  POP3: auth login --protocol pop3; inbox/read/reply/forward/send supported"
   echo "  POP3 message numbers can change between sessions; folders/flags/search unavailable"
@@ -175,7 +178,7 @@ cmd_help() {
   echo "  Fastmail      App Password"
   echo "  Other         Any standard IMAP/SMTP server"
   echo "  All           --password-cmd CMD (auth login) keeps the password"
-  echo "                out of config.json — runs CMD to obtain it"
+  echo "                out of email.sdn — runs CMD to obtain it"
   echo ""
   echo "${C_BOLD}EXAMPLES${C_RESET}"
   echo "  mail auth login --provider gmail         # Setup Gmail"
@@ -195,7 +198,7 @@ cmd_help() {
   echo "  mail move 123 'Work'                     # Move to folder"
   echo ""
   echo "${C_BOLD}CONFIG${C_RESET}"
-  echo "  Credentials: ~/.config/mail-cli/config.json"
+  echo "  Credentials: ~/.config/devhub/email.sdn"
 }
 
 main() {
@@ -219,7 +222,8 @@ main() {
           MAIL_CONFIG_DIR=$(dirname -- "$MAIL_CONFIG_FILE")
         else
           MAIL_CONFIG_DIR=$(mail_expand_path "$2") || return $?
-          MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
+          MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/email.sdn"
+          MAIL_LEGACY_CONFIG_FILE="${MAIL_CONFIG_DIR}/email.json"
         fi
         shift 2 ;;
       --account|--password-file|--password-cmd)

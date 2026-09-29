@@ -79,12 +79,12 @@ Before any non-`report` command:
 - `bin/itf jira auth status` — Jira read access (needed for `fw`/`dump`/`notes`/`find-key`).
 - `bin/itf minio status` — MinIO endpoint + credentials reachable.
 - Configs expected:
-  - `~/.config/itf/config.sdn` (jira.url, minio.endpoint, minio.bucket)
-  - `~/.config/itf/auth.sdn` (jira.token, minio.access_key, minio.secret_key)
-  - `~/.config/itf/spipe_daily.sdn` (auto-managed watermark, mode 0600)
+  - `~/.config/devhub/config.sdn` (jira.url, minio.endpoint, minio.bucket)
+  - `~/.config/devhub/auth.sdn` (jira.token, minio.access_key, minio.secret_key)
+  - `~/.config/devhub/spipe_daily.sdn` (auto-managed watermark, mode 0600)
 
 If any check fails, redirect to `/repo_and_pull_req setup jira`,
-`/mail setup`, or print the missing section of `~/.config/itf/config.sdn`
+`/mail setup`, or print the missing section of `~/.config/devhub/config.sdn`
 and exit 1.
 
 ## Integration

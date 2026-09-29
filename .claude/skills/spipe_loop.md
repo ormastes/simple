@@ -32,7 +32,7 @@ description: SPipe Loop — periodic check-and-implement plus daily-debug ingest
 
 | # | Step | Driver call | Side effects |
 |---|------|-------------|--------------|
-| 1 | Load watermark | read `~/.config/itf/spipe_daily.sdn` key `last_run` (ISO 8601). Default = now − 24h on first run. | none |
+| 1 | Load watermark | read `~/.config/devhub/spipe_daily.sdn` key `last_run` (ISO 8601). Default = now − 24h on first run. | none |
 | 2 | List inbox since watermark | `outlook_list_messages(folder=Inbox, filter="receivedDateTime ge {last_run}")` via `adapter_outlook_curl.spl` (Agent A/B). | network read |
 | 3 | Per-message extract | regex `[A-Z][A-Z0-9]+-\d+` for Jira keys; regex `https?://[^/]+/[^/]+/[^\s]+` for MinIO URLs. | none |
 | 4 | Triage classify | by URL extension: `.bin/.elf/.hex` → `fw`; `.dmp/.core/.crash` → `dump`; `.log/.txt/.md` → `note`; else `unknown`. | none |

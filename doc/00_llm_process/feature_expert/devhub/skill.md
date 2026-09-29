@@ -56,7 +56,7 @@ mechanical causes, all now closed:
    itself: same typing, devhub underneath.
 3. **`git.default_backend` did not exist** — the design doc named this drift
    under D1 and it sat open. `backend_resolve.spl` now owns one chain:
-   `--backend > DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] > ~/.config/itf > git remote sniff > error`.
+   `--backend > DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] > ~/.config/devhub > git remote sniff > error`.
 
 **Traps found the hard way — do not re-learn these:**
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # mail-cli multi-account config
-# Config stored at: ~/.config/mail-cli/config.json
+# Shared with DevHub: ~/.config/devhub/email.sdn
 
 mail_expand_path() {
   local path="$1" home_dir="${HOME:-${USERPROFILE:-}}"
@@ -12,10 +12,14 @@ mail_expand_path() {
   esac
 }
 
-_mail_default_config='{home}/.config/mail-cli'
+_mail_default_config='{home}/.config/devhub'
 MAIL_CONFIG_DIR=$(mail_expand_path "${MAIL_CONFIG_DIR:-$_mail_default_config}")
-MAIL_CONFIG_FILE=$(mail_expand_path "${MAIL_CONFIG_FILE:-${MAIL_CONFIG_DIR}/config.json}")
+MAIL_CONFIG_FILE=$(mail_expand_path "${MAIL_CONFIG_FILE:-${MAIL_CONFIG_DIR}/email.sdn}")
 MAIL_CONFIG_DIR=$(dirname -- "$MAIL_CONFIG_FILE")
+MAIL_LEGACY_CONFIG_FILE="${MAIL_LEGACY_CONFIG_FILE:-${MAIL_CONFIG_DIR}/email.json}"
+if [ ! -f "$MAIL_LEGACY_CONFIG_FILE" ]; then
+  MAIL_LEGACY_CONFIG_FILE=$(mail_expand_path '{home}/.config/mail-cli/config.json')
+fi
 
 # Dup the script's original stderr onto fd 3 *before* any call site adds its
 # own `2>/dev/null` (imap.shs/smtp.shs/auth.shs all silence _mail_curl's
@@ -306,66 +310,195 @@ mail_config_exists() {
   [ -f "$MAIL_CONFIG_FILE" ]
 }
 
+_mail_config_json() {
+  [[ "$MAIL_CONFIG_FILE" == *.json ]]
+}
+
 mail_config_init() {
   mail_config_dir
   if ! mail_config_exists; then
+    if _mail_config_json; then
+      (umask 077; printf '{"default_account":"","accounts":{}}\n' > "$MAIL_CONFIG_FILE")
+      return
+    fi
+    if [ -f "$MAIL_LEGACY_CONFIG_FILE" ] && ! jq -e '.accounts | type == "object"' "$MAIL_LEGACY_CONFIG_FILE" >/dev/null 2>&1; then
+      echo "${C_RED}error:${C_RESET} cannot import invalid legacy config: ${MAIL_LEGACY_CONFIG_FILE}" >&2
+      return 1
+    fi
     cat > "$MAIL_CONFIG_FILE" <<'EOF'
-{
-  "default_account": "",
-  "accounts": {}
-}
+default_account: ""
+
+accounts:
 EOF
     chmod 600 "$MAIL_CONFIG_FILE"
+    # Import once. Leave the old file untouched so the user can inspect or
+    # remove it after verifying the shared SDN configuration.
+    if [ -f "$MAIL_LEGACY_CONFIG_FILE" ]; then
+      local name account_json old_default
+      while IFS= read -r name; do
+        _mail_config_valid_name "$name" || continue
+        account_json=$(jq -c --arg n "$name" '.accounts[$n]' "$MAIL_LEGACY_CONFIG_FILE")
+        if [ "$(jq -r '.provider // empty' <<< "$account_json")" = outlook ] &&
+           [ "$(jq -r '.protocol // empty' <<< "$account_json")" != graph ]; then
+          account_json=$(jq -c '.provider = "outlook_imap"' <<< "$account_json")
+        fi
+        mail_config_set_account "$name" "$account_json"
+      done < <(jq -r '.accounts | keys[]' "$MAIL_LEGACY_CONFIG_FILE")
+      old_default=$(jq -r '.default_account // empty' "$MAIL_LEGACY_CONFIG_FILE")
+      [ -z "$old_default" ] || mail_config_set_default "$old_default"
+    fi
+  fi
+}
+
+_mail_config_valid_name() {
+  [[ "$1" =~ ^[a-zA-Z0-9_.@+-]+$ ]]
+}
+
+# Keep the same deliberately small SDN shape parsed by DevHub's
+# load_email_config: top-level default_account and two-space account blocks.
+# Quoted values use JSON string escapes, which are also valid SDN strings.
+_mail_config_query() {
+  local mode="$1" name="${2:-}" key="${3:-}"
+  [ -f "$MAIL_CONFIG_FILE" ] || return 0
+  awk -v mode="$mode" -v wanted="$name" -v key="$key" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    function unquote(s) {
+      s=trim(s)
+      if (s ~ /^".*"$/) { s=substr(s,2,length(s)-2); gsub(/\\"/, "\"", s); gsub(/\\\\/, "\\", s) }
+      return s
+    }
+    /^accounts:[[:space:]]*$/ { in_accounts=1; current=""; next }
+    /^default_account:[[:space:]]*/ {
+      if (mode=="default") { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
+      next
+    }
+    in_accounts && /^[^ #[:space:]][^:]*:/ { in_accounts=0; current="" }
+    in_accounts && /^  [^ #[:space:]][^:]*:[[:space:]]*$/ {
+      current=$0; sub(/^  /,"",current); sub(/:[[:space:]]*$/,"",current)
+      if (mode=="list") print current
+      next
+    }
+    in_accounts && current==wanted && /^    [a-zA-Z_][a-zA-Z0-9_]*:[[:space:]]*/ {
+      s=$0; field=s; sub(/:.*/, "", field); field=trim(field)
+      sub(/^[^:]*:[[:space:]]*/, "", s)
+      if (mode=="field" && field==key) print unquote(s)
+      if (mode=="account") {
+        # Values written by this tool are JSON-quoted. For bare SDN scalars,
+        # quote them for the existing JSON consumers.
+        s=trim(s)
+        if (s !~ /^".*"$/) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); s="\"" s "\"" }
+        if (count++) printf ","
+        printf "\"%s\":%s", field, s
+      }
+    }
+    END { if (mode=="account" && count) print "}" }
+  ' "$MAIL_CONFIG_FILE" | if [ "$mode" = account ]; then
+    # Prefix in the same stream so callers receive one complete JSON object.
+    awk 'NR==1 { print "{" $0; next } { print }'
+  else
+    cat
   fi
 }
 
 mail_config_list_accounts() {
-  if mail_config_exists; then
+  if _mail_config_json; then
     jq -r '.accounts | keys[]' < "$MAIL_CONFIG_FILE" 2>/dev/null
+    return
   fi
+  _mail_config_query list
 }
 
 mail_config_get_default() {
-  if mail_config_exists; then
+  if _mail_config_json; then
     jq -r '.default_account // empty' < "$MAIL_CONFIG_FILE" 2>/dev/null
+    return
   fi
+  _mail_config_query default
 }
 
 mail_config_set_default() {
   local name="$1"
-  local tmp="${MAIL_CONFIG_FILE}.tmp"
-  jq --arg n "$name" '.default_account = $n' < "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  [ -z "$name" ] || _mail_config_valid_name "$name" || return 2
+  mail_config_init
+  local tmp
+  tmp=$(mktemp "${MAIL_CONFIG_FILE}.tmp.XXXXXX")
+  if _mail_config_json; then
+    jq --arg n "$name" '.default_account = $n' < "$MAIL_CONFIG_FILE" > "$tmp" || return 1
+    mv "$tmp" "$MAIL_CONFIG_FILE"
+    chmod 600 "$MAIL_CONFIG_FILE"
+    return
+  fi
+  printf 'default_account: %s\n' "$(jq -n --arg v "$name" '$v')" > "$tmp"
+  awk '!/^default_account:[[:space:]]*/' "$MAIL_CONFIG_FILE" >> "$tmp"
+  mv "$tmp" "$MAIL_CONFIG_FILE"
   chmod 600 "$MAIL_CONFIG_FILE"
 }
 
 mail_config_get_account() {
   local name="$1"
-  if mail_config_exists; then
+  _mail_config_valid_name "$name" || return 2
+  if _mail_config_json; then
     jq --arg n "$name" '.accounts[$n] // empty' < "$MAIL_CONFIG_FILE" 2>/dev/null
+    return
   fi
+  _mail_config_query account "$name"
 }
 
 mail_config_set_account() (
   umask 077
   local name="$1" account_json="$2"
+  _mail_config_valid_name "$name" || return 2
   mail_config_init
   local tmp lock="${MAIL_CONFIG_FILE}.lock"
   mkdir "$lock" 2>/dev/null || { echo "error: mail configuration is busy" >&3; return 1; }
-  tmp=$(mktemp "${MAIL_CONFIG_FILE}.XXXXXX") || { rmdir "$lock"; return 1; }
+  tmp=$(mktemp "${MAIL_CONFIG_FILE}.tmp.XXXXXX") || { rmdir "$lock"; return 1; }
   trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT
-  # Feed both documents over stdin: native Windows jq cannot open /dev/fd,
-  # and legacy callers may still contain secrets that must stay off argv.
-  { cat "$MAIL_CONFIG_FILE"; printf '\n%s\n' "$account_json"; } | \
-    jq --arg n "$name" -s '.[0] as $config | .[1] as $acc | $config | .accounts[$n] = $acc' \
-    > "$tmp" || return 1
-  chmod 600 "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+  if _mail_config_json; then
+    { cat "$MAIL_CONFIG_FILE"; printf '\n%s\n' "$account_json"; } |
+      jq --arg n "$name" -s '.[0] as $config | .[1] as $acc | $config | .accounts[$n] = $acc' > "$tmp" || return 1
+    mv "$tmp" "$MAIL_CONFIG_FILE"
+    return
+  fi
+  _mail_config_without_account "$name" > "$tmp"
+  printf '\n  %s:\n' "$name" >> "$tmp"
+  local field value
+  for field in provider protocol email username display_name imap_server imap_port pop3_server pop3_port smtp_server smtp_port tls password_cmd password tenant_id client_id client_secret_env shared_mailbox; do
+    value=$(jq -r --arg k "$field" '.[$k] // empty' <<< "$account_json")
+    if [ -n "$value" ]; then
+      printf '    %s: %s\n' "$field" "$(jq -n --arg v "$value" '$v')" >> "$tmp"
+    fi
+  done
+  mv "$tmp" "$MAIL_CONFIG_FILE"
+  chmod 600 "$MAIL_CONFIG_FILE"
 )
+
+_mail_config_without_account() {
+  local name="$1"
+  awk -v wanted="$name" '
+    /^accounts:[[:space:]]*$/ { in_accounts=1; skip=0; print; next }
+    in_accounts && /^[^ #[:space:]][^:]*:/ { in_accounts=0; skip=0 }
+    in_accounts && /^  [^ #[:space:]][^:]*:[[:space:]]*$/ {
+      current=$0; sub(/^  /,"",current); sub(/:[[:space:]]*$/,"",current)
+      skip=(current==wanted)
+    }
+    !skip { print }
+  ' "$MAIL_CONFIG_FILE"
+}
 
 mail_config_delete_account() {
   local name="$1"
+  _mail_config_valid_name "$name" || return 2
   if mail_config_exists; then
-    local tmp="${MAIL_CONFIG_FILE}.tmp"
-    jq --arg n "$name" 'del(.accounts[$n])' < "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+    local tmp
+    tmp=$(mktemp "${MAIL_CONFIG_FILE}.tmp.XXXXXX")
+    if _mail_config_json; then
+      jq --arg n "$name" 'del(.accounts[$n])' < "$MAIL_CONFIG_FILE" > "$tmp" || return 1
+      mv "$tmp" "$MAIL_CONFIG_FILE"
+      chmod 600 "$MAIL_CONFIG_FILE"
+      return
+    fi
+    _mail_config_without_account "$name" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+    chmod 600 "$MAIL_CONFIG_FILE"
   fi
 }
 
@@ -388,21 +521,32 @@ mail_resolve_account() {
   fi
 
   # Export account fields for use by other modules
+  local provider
+  provider=$(printf '%s' "$acc" | jq -r '.provider // empty')
+  if [ "$provider" = outlook ] && ! _mail_config_json; then
+    echo "${C_RED}error:${C_RESET} account '${name}' uses Outlook Graph; use 'devhub email' for this account" >&2
+    return 2
+  fi
+  [ "$provider" = outlook_imap ] && provider=outlook
   MAIL_ACCT_NAME="$name"
   MAIL_ACCT_EMAIL=$(echo "$acc" | jq -r '.email')
   MAIL_ACCT_USERNAME=$(echo "$acc" | jq -r '.username // .email')
   MAIL_ACCT_DISPLAY=$(echo "$acc" | jq -r '.display_name // .email')
-  MAIL_ACCT_IMAP_SERVER=$(echo "$acc" | jq -r '.imap_server')
-  MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port')
-  MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server')
-  MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port')
+  MAIL_ACCT_IMAP_SERVER=$(echo "$acc" | jq -r '.imap_server // empty')
+  MAIL_ACCT_IMAP_PORT=$(echo "$acc" | jq -r '.imap_port // empty')
+  MAIL_ACCT_SMTP_SERVER=$(echo "$acc" | jq -r '.smtp_server // empty')
+  MAIL_ACCT_SMTP_PORT=$(echo "$acc" | jq -r '.smtp_port // empty')
+  [ -n "$MAIL_ACCT_IMAP_SERVER" ] || MAIL_ACCT_IMAP_SERVER=$(mail_preset "$provider" imap)
+  [ -n "$MAIL_ACCT_IMAP_PORT" ] || MAIL_ACCT_IMAP_PORT=$(mail_preset "$provider" imap_port)
+  [ -n "$MAIL_ACCT_SMTP_SERVER" ] || MAIL_ACCT_SMTP_SERVER=$(mail_preset "$provider" smtp)
+  [ -n "$MAIL_ACCT_SMTP_PORT" ] || MAIL_ACCT_SMTP_PORT=$(mail_preset "$provider" smtp_port)
   MAIL_ACCT_TLS=$(echo "$acc" | jq -r '.tls // "implicit"')
   MAIL_ACCT_PROTOCOL=$(printf '%s' "$acc" | jq -r '.protocol // "imap"')
   MAIL_ACCT_POP3_SERVER=$(printf '%s' "$acc" | jq -r '.pop3_server // empty')
   MAIL_ACCT_POP3_PORT=$(printf '%s' "$acc" | jq -r '.pop3_port // 995')
 
   # Password resolution: password_cmd (if set) takes priority over the
-  # stored plaintext password. This keeps the secret out of config.json —
+  # stored plaintext password. This keeps the secret out of email.sdn —
   # e.g. a password manager CLI or `pass show mail/gmail`.
   if [ "${MAIL_SKIP_PASSWORD_RESOLVE:-0}" = 1 ]; then return 0; fi
   _mail_resolve_password "$acc"

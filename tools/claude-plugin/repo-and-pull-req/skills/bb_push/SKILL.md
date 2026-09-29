@@ -15,7 +15,7 @@ Never push directly to `main`. The orchestrator owns the merge.
 
 ## Prerequisites
 
-- `bb_setup` completed (`bitbucket:` token in `~/.config/itf/auth.sdn`)
+- `bb_setup` completed (`bitbucket:` token in `~/.config/devhub/auth.sdn`)
 - Local changes committed via `jj commit`
 - `BB_WORKSPACE` + `BB_REPO` set or `--workspace`/`--repo` ready to pass
 - /sync file-count safety protocol
