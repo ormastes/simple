@@ -1541,16 +1541,13 @@ pub fn flat_decl_pools_dump() -> text:
     # dies with "method `len` not found on type `i64`" — the exact failure
     # that killed native-build of the MCP closure at parse time (the readers
     # already dodge this via arm_get_body; the encoder was the straggler).
-    # Refill the owner IN PLACE. ast_reset clears arm_body in place, so it has
-    # one process-lifetime owner; the former `arm_body = arm_body_rebuilt`
-    # installed an array born inside the driver's per-file transient scope,
-    # which scope end freed and the next ast_reset then cleared. That made
-    # every cache-MISS parse (capture armed) corrupt the next module: the
-    # stage-4 specs crashed in HIR of compiler.backend.backend_types.
-    arm_body.clear()
+    # Reconstruct only an encoder-local view. A cache dump must not install
+    # temporary inner arrays into the process-lived flat pool: a bounded
+    # serialization scope reclaims these arrays before the bridge runs.
+    var encoded_arm_body: [[i64]] = []
     for arm_flat_entry in arm_body_flat:
-        arm_body.push(ast_i64_list_split(arm_flat_entry))
-    parts = parts.push(flat_pool_enc_i64_list(arm_body))
+        encoded_arm_body.push(ast_i64_list_split(arm_flat_entry))
+    parts = parts.push(flat_pool_enc_i64_list(encoded_arm_body))
     parts = parts.push(flat_pool_enc_text(arm_body_flat))
     parts = parts.push(flat_pool_enc_i64(arm_guard))
     parts = parts.push(flat_pool_enc_i64(arm_pattern))
@@ -1559,13 +1556,11 @@ pub fn flat_decl_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_i64(ast_decl_mirror_high_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_count_slot))
     parts = parts.push(flat_pool_enc_i64(ast_module_decl_mirror_high_slot))
-    # Same erasure dodge as arm_body above: rebuild from the flat mirror
-    # instead of touching the possibly-erased nested [[i64]] arena. Refilled
-    # in place for the same owner-lifetime reason as arm_body.
-    decl_body_stmts.clear()
+    # Same erasure dodge, without changing the pool owner or its children.
+    var encoded_decl_body_stmts: [[i64]] = []
     for decl_body_flat_entry in decl_body_stmts_flat:
-        decl_body_stmts.push(ast_i64_list_split(decl_body_flat_entry))
-    parts = parts.push(flat_pool_enc_i64_list(decl_body_stmts))
+        encoded_decl_body_stmts.push(ast_i64_list_split(decl_body_flat_entry))
+    parts = parts.push(flat_pool_enc_i64_list(encoded_decl_body_stmts))
     parts = parts.push(flat_pool_enc_text(decl_body_stmts_flat))
     parts = parts.push(flat_pool_enc_text_list(decl_clocked_args))
     parts = parts.push(flat_pool_enc_text_list(decl_derives))
