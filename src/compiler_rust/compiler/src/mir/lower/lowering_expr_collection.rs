@@ -481,9 +481,13 @@ impl<'a> MirLowerer<'a> {
         // `receiver_is_dict`). Float/bool VALUE boxing remains a follow-up.
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
-            // Dictionary keys use the same RuntimeValue ABI for writes and
-            // membership reads, including boolean and floating-point tags.
-            let key_reg = self.box_arg_for_any_param(key_reg, key_expr)?;
+            // Boolean keys must match tagged membership/index reads. Preserve
+            // the existing write ABI for every other key type, including floats.
+            let key_reg = if key_expr.ty == TypeId::BOOL {
+                self.box_arg_for_any_param(key_reg, key_expr)?
+            } else {
+                self.box_int_operand(key_reg, key_expr.ty)?
+            };
             let value_reg = self.lower_expr(value_expr)?;
             let value_reg = self.box_int_operand(value_reg, value_expr.ty)?;
             let insert_target = CallTarget::from_name("rt_dict_set");
