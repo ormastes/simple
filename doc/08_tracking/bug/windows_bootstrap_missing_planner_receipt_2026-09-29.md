@@ -19,8 +19,9 @@ planner receipt producer against that exact parent, and resumes admitted
 Stage 3. The receipt producer and verification guards remain authoritative.
 The existing AOT workflow uses this same two-phase admission pattern.
 
-The requested Windows/Linux concurrency requests 10 Cargo jobs and Stage 2 jobs. The existing incremental profile
-limits actual Stage 2 compiler workers to two; this patch preserves that bound.
+The requested Windows/Linux concurrency uses 10 Cargo jobs and explicitly selects
+--incremental-unlimited --jobs=10 for Stage 2. This opts these invocations out
+of the default two-worker profile without changing the global default.
 Stage 3 resume requires one thread by its current implementation; it rejects
 other job counts. This change does not claim Stage 3 uses 10 threads.
 
@@ -43,3 +44,13 @@ select GNU for the receipt/resume subprocesses. Backend remains bound to the
 admitted Stage 2 command transcript. Original Windows/Linux Cranelift used
 --no-mcp and no --full-cli; bootstrap-from-scratch stops after Stage 3 in that
 configuration, so the resumed flow retains the requested stage scope.
+
+The planner producer and bound verifier derive planner.exe from an admitted
+.exe parent, sharing one helper. Exact path pinning and argv digests still
+use the same derived path; alternate executable names are not admitted.
+
+Existing admission producer regression gate fails before fixtures: it points
+its producer variable at bootstrap-from-scratch.sh and expects the planner
+entry-closure invocation there, although that invocation belongs to
+produce-bootstrap-planner-admission-v2.shs. This preexisting gate mismatch
+means full admission regression coverage is not claimed by this repair.
