@@ -3623,6 +3623,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      "SIMPLE_HIR_CACHE=1" \
+      "SIMPLE_HIR_CACHE_DIR=${stage2_cache_absolute}/hir" \
       ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
       ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
       ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
@@ -3691,6 +3693,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
       "SIMPLE_FRONTEND_CACHE=1" \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage3_cache_absolute}/frontend" \
+      "SIMPLE_HIR_CACHE=1" \
+      "SIMPLE_HIR_CACHE_DIR=${stage3_cache_absolute}/hir" \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
@@ -3768,6 +3772,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       SIMPLE_FRONTEND_CACHE=1 \
       "SIMPLE_FRONTEND_CACHE_DIR=${stage2_cache_absolute}/frontend" \
+      SIMPLE_HIR_CACHE=1 \
+      "SIMPLE_HIR_CACHE_DIR=${stage2_cache_absolute}/hir" \
       ${bootstrap_stage2_darwin_env:+"CC=${CC:-}"} \
       ${bootstrap_stage2_darwin_env:+"CXX=${CXX:-}"} \
       ${bootstrap_stage2_darwin_env:+"AR=${AR:-}"} \
@@ -4683,6 +4689,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     SIMPLE_MIR_TAG_PROBE="${SIMPLE_MIR_TAG_PROBE:-}" \
     SIMPLE_FRONTEND_CACHE=1 \
     SIMPLE_FRONTEND_CACHE_DIR="${stage3_cache_absolute}/frontend" \
+    SIMPLE_HIR_CACHE=1 \
+    SIMPLE_HIR_CACHE_DIR="${stage3_cache_absolute}/hir" \
     SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ="${stage2_compatibility_manifest_absolute}" \
     SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT="${stage3_cache_absolute}" \
     MALLOC_ARENA_MAX=2 \
