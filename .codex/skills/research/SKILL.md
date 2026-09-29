@@ -19,7 +19,7 @@ description: "Codex research skill (Step 2 in cooperative pipeline). Forked para
 
 Before repository research, locate common SPipe through the shared locator when
 available. The target order is `SPIPE_HOME`, the project's configured common
-route, `~/.spipe`, `~/spipe/common`, then legacy `.spipe/spipe` compatibility.
+route, `{home}/.spipe`, `{home}/spipe/common`, then legacy `.spipe/spipe` compatibility.
 Load applicable common and authorized scope `skills/`, the ownership/setup
 guides, and `wiki/index.md` before selecting leaves. A path is not authorization;
 do not probe denied scopes or recursively scan every wiki. If common cannot be

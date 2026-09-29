@@ -6,20 +6,32 @@ machine-specific checkout paths remain in a private local registry.
 
 ## Canonical home deployment
 
-The September 29 layout places reusable core at `~/.spipe` and private/local
-knowledge at `~/spipe`. `~/spipe/common` links to `~/.spipe`; project
+The September 29 layout places reusable core at `{home}/.spipe` and private/local
+knowledge at `{home}/spipe`. `{home}/spipe/common` links to `{home}/.spipe`; project
 `.spipe/common` links through that private workspace route. Set `SPIPE_HOME`
 to override core and `SPIPE_WORKSPACE` to override the private workspace.
 Keep these roots distinct, including when either is a symlink.
 
 ```text
-~/.spipe/                 reusable SPipe core checkout
-~/spipe/                  private/local workspace
-├── common -> ~/.spipe
+{home}/.spipe/                 reusable SPipe core checkout
+{home}/spipe/                  private/local workspace
+├── common -> {home}/.spipe
 ├── companies/            authorized company and organization knowledge
 ├── projects/             independent project registrations
 ├── users/                personal knowledge and private mount paths
 └── runtime/              local cache, retained state, and active runs
+```
+
+`{home}` means the current user's home directory, expanded by the supported
+SPipe path options and Simple's `SPIPE_HOME` / `SPIPE_WORKSPACE` wrappers.
+Only a leading token is expanded; path contents are never evaluated as code.
+Use real checkout-relative executable paths when launching commands.
+
+From an existing core checkout, preview installation and then apply it:
+
+```sh
+node scripts/install-spipe.mjs --checkout "{home}/.spipe" --workspace "{home}/spipe"
+node scripts/install-spipe.mjs --checkout "{home}/.spipe" --workspace "{home}/spipe" --apply
 ```
 
 From the core checkout, run `sh scripts/setup-local-knowledge.sh --mode user`
@@ -34,10 +46,18 @@ Legacy project submodules remain compatibility routes with their pins intact.
 Run the host bootstrap:
 
 ```sh
-sh scripts/setup-spipe-local.shs --project <logical-project-id>
+SPIPE_HOME="{home}/.spipe" SPIPE_WORKSPACE="{home}/spipe" sh scripts/setup-spipe-local.shs --project example-project
 ```
 
-On PowerShell, run `scripts/setup-spipe-local.ps1 -Project <id>`. The bootstrap
+On PowerShell, launch from the Simple checkout:
+
+```powershell
+$env:SPIPE_HOME = '{home}/.spipe'
+$env:SPIPE_WORKSPACE = '{home}/spipe'
+./scripts/setup-spipe-local.ps1 -Project example-project
+```
+
+The bootstrap
 initializes the revision already recorded by the project. Current legacy hosts
 with `.spipe/spipe` are supported without moving or overwriting their state.
 
@@ -111,11 +131,12 @@ knowledge to `hosts/machines/<host>/`, and private account paths to
 `users/<user>/hosts/<host>/mounts.json`. Host defaults/profiles describe desired
 setup; runtime probes provide actual capability evidence.
 
-The canonical resolver selects explicit `SPIPE_HOME`, project `.spipe/common`,
-`~/.spipe`, `~/spipe/common`, direct current SPipe package, then verified
-legacy mounts. This latest order supersedes the supplied package's
-project-local-first preference. Existing pins still require validation; route
-migration never silently upgrades or removes a recorded submodule.
+The canonical resolver selects explicit `SPIPE_HOME`, then project `.spipe/common`,
+legacy `.spipe/spipe`, `.spipe/spipe_project`, and identified `.spipe` packages.
+Home fallbacks are `{home}/.spipe`, `{home}/spipe/common`, legacy `{home}/spipe`,
+and legacy `{home}/.spipe/common`, followed by the current identified package.
+Project pins retain precedence; route migration never silently upgrades or
+removes a recorded submodule.
 
 Load task skills, enter authorized scope/wiki indexes, retrieve relevant leaves,
 reuse only matching runtime state, then follow `doc` for approved decisions and
