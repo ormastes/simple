@@ -990,8 +990,8 @@ The older handoff instructions below recommend that legacy route and editing
 PR bodies to trigger a check. **They are conflicting historical guidance, not
 an authorized workaround for the current skill.** Do not fabricate receipts or
 change a PR solely to obtain skipped admission. First run the canonical guide,
-inspect current configuration, and have the policy owner align the skill,
-workflow, wiki, and broker. A completed code review is not itself admission;
+inspect current configuration, and resolve the skill/workflow/wiki/broker
+mismatch through the authorized process while retaining landing ownership. A completed code review is not itself admission;
 missing bootstrap evidence remains a separate blocker.
 
 See the [dated evidence, agent mistakes, and recovery procedure](../08_tracking/bug/spipe_admission_skill_workflow_mismatch_2026-09-29.md).
