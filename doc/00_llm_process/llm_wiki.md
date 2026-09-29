@@ -961,6 +961,21 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## Protected GitHub PR handoff
 
+### Creating LLM owns landing (user instruction, 2026-09-29)
+
+The LLM that creates a PR must self-review it, fix the problems it finds, run
+required checks, and land its own PR unless an unresolved conflict prevents
+it. Do not hand a self-authored PR back to the user merely because author
+GitHub approval is unavailable. Missing admission or failed checks are work
+for the creating LLM to diagnose and resolve, not grounds to request that a
+human perform the merge. Keep ownership across turns and report any actual
+unresolved conflict with its concrete evidence. Completion means the merge
+is confirmed, not that a branch or PR was merely created.
+
+Use the supported admission route and normal protected merge. This ownership
+rule does not make fabricated review evidence or a protection bypass valid.
+
+
 ### Admission route mismatch observed 2026-09-29
 
 The user can authorize self-review and landing, and SPipe exposes admission

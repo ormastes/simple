@@ -54,8 +54,11 @@ fabricated to make the API accept a request.
    the required exact-head review. Distinguish review evidence from admission.
 2. Inspect current broker configuration and workflow inputs. Retain this report's
    dated evidence; do not assume the mismatch still exists after a repair.
-3. The policy owner must align the wiki, installed skill, workflow, and actual
-   broker implementation. Under the current guide, configure the pinned broker,
+3. The creating LLM retains responsibility for resolving the mismatch and
+   landing its PR. Prepare and verify the necessary integration repairs; do not
+   hand off a merge merely because admission is missing. Align the wiki,
+   installed skill, workflow, and actual broker implementation through the
+   authorized process. Under the current guide, configure the pinned broker,
    signed v2 policy/trust data, authentic review/user-authorization receipts,
    and status expiry/invalidation before issuing admission.
 4. Use exactly the selected implementation. Do not manufacture a body edit to
@@ -70,3 +73,12 @@ The Caret wiki search tool returned `centralized worktree storage is unavailable
 This project-owned report is linked from the canonical repository wiki at
 `doc/00_llm_process/llm_wiki.md`; no private account material was published to
 SPipe common or another scope.
+
+## Subsequent user clarification
+
+The user explicitly requires the creating LLM to self-review, fix, and land
+its own PR unless an unresolved conflict prevents it. This report diagnoses
+a blocker; it does not transfer landing responsibility to the user. Missing
+checks require investigation and repair. The agent must confirm the actual
+merge before claiming completion, while preserving the integrity of policy
+and review evidence.
