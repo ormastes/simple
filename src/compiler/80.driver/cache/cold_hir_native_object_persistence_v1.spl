@@ -23,21 +23,36 @@ struct ColdHirNativeObjectArtifactV1:
 
 fn cold_hir_native_objects_persist_v1(
     cache_root: text, receipts: [ColdHirTypedReceiptV1],
-    object_paths: Dict<text, text>
+    object_paths: Dict<text, text>,
+    accepted_capsule_identities: Dict<text, text>,
+    objectless_modules: Dict<text, bool>
 ) -> Result<[ColdHirNativeObjectArtifactV1], text>:
     if cache_root == "" or receipts.len() == 0 or
-            object_paths.len() != receipts.len():
+            object_paths.len() + objectless_modules.len() != receipts.len() or
+            accepted_capsule_identities.len() != object_paths.len():
         return Err("cold-object-inventory-incomplete")
     var seen: Dict<text, bool> = {}
     var artifacts: [ColdHirNativeObjectArtifactV1] = []
     for receipt in receipts:
         val module_identity = receipt.seed.module_identity
-        if module_identity == "" or seen.has(module_identity) or
-                not object_paths.has(module_identity):
+        if module_identity == "" or seen.has(module_identity):
             return Err("cold-object-module-missing-or-duplicate:{module_identity}")
         seen[module_identity] = true
+        if objectless_modules.has(module_identity):
+            if not objectless_modules[module_identity] or
+                    object_paths.has(module_identity) or
+                    accepted_capsule_identities.has(module_identity):
+                return Err("cold-object-objectless-conflict:{module_identity}")
+            artifacts.push(ColdHirNativeObjectArtifactV1(
+                module_identity, "", 0, "none", "", ""))
+            continue
+        if not object_paths.has(module_identity) or
+                not accepted_capsule_identities.has(module_identity):
+            return Err("cold-object-module-missing-or-duplicate:{module_identity}")
         val path = object_paths[module_identity]
-        if path == "":
+        val accepted_capsule_identity =
+            accepted_capsule_identities[module_identity]
+        if path == "" or accepted_capsule_identity == "":
             return Err("cold-object-path-empty:{module_identity}")
         val read = file_read_regular_no_follow_bounded_bytes(
             path, BINARY_OBJECT_CAS_MAX_BYTES)
@@ -55,7 +70,7 @@ fn cold_hir_native_objects_persist_v1(
         val receipt_text = receipt_read.unwrap()
         val lines = receipt_text.split("\n")
         if lines.len() != 6 or lines[0] != "native-capsule-result-v1" or
-                lines[1] == "" or lines[2] != path or
+                lines[1] != accepted_capsule_identity or lines[2] != path or
                 (lines[3].to_i64() ?? -1) != bytes.len() or
                 lines[4] != object_digest or lines[5] != "":
             return Err("cold-object-capsule-receipt-mismatch:{module_identity}")
