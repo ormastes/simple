@@ -31,7 +31,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
-    --progress-interval)
+    --progress-interval|--invalidate-cache)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
         case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
@@ -773,6 +773,11 @@ if [ -n "${resume_stage3_output}" ]; then
     SIMPLE_BOOTSTRAP_REASON_RECEIPT="${bootstrap_receipt_path}"
     export SIMPLE_BOOTSTRAP_REASON_RECEIPT
   fi
+  case "${invalidate_cache_scope}" in ''|stage3) ;; *) echo 'error: Stage 3 resume can invalidate only stage3' >&2; exit 64 ;; esac
+  RESUME_STAGE3_CACHE_ACTION=reuse
+  [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean
+  [ "${invalidate_cache_scope}" != stage3 ] || RESUME_STAGE3_CACHE_ACTION=invalidate
+  export RESUME_STAGE3_CACHE_ACTION
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -1595,12 +1600,12 @@ ${cache_assurance_payload}"
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" "SIMPLE_CACHE_SCOPE=$1" \
           SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
-          SIMPLE_BOOTSTRAP_LOW_MEMORY=1 SIMPLE_NATIVE_ARENA_DECLS=1 \
+          "SIMPLE_BOOTSTRAP_LOW_MEMORY=${NATIVE_LOW_MEMORY}" SIMPLE_NATIVE_ARENA_DECLS=1 \
           "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
           "SIMPLE_NATIVE_BUILD_CACHE_DIR=${native_cache_dir}" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
           SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=${native_cache_dir}/frontend" \
           SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=${native_cache_dir}/hir" \
-          SIMPLE_NO_STUB_FALLBACK=1) || return 1
+          SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
       elif [ "$1" = stage4b-ui-backend ]; then
         cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
           "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
@@ -1757,6 +1762,8 @@ bootstrap_stage3_archive_prior_evidence() (
     echo "error: could not archive prior Stage 3 evidence: ${bsape_path}" >&2
     return 1
   }
+  printf '%s  %s\n' "$(hash_file "${bsape_archive}")" "${bsape_archive##*/}" > "${bsape_archive}.sha256" || return 1
+  chmod a-w "${bsape_archive}" "${bsape_archive}.sha256"
   echo "  Stage 3 evidence: archived prior ${bsape_path}"
 )
 
@@ -3244,6 +3251,7 @@ else
     mv "${stage2_cleanup_marker_tmp}" \
       "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}"
   fi
+  # Cache cleanup occurs only after binding and acquiring the selected writer.
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
   bootstrap_acquire_rust_authority || exit 1
@@ -3494,6 +3502,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
   bootstrap_step_mark phase1-snapshot-preserve
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
+  bootstrap_cache_new_path_validate "$(absolute_path "${stage2_provenance_cache}")" &&
+    bootstrap_cache_new_path_validate "$(absolute_path "${stage3_provenance_cache}")" || {
+      echo 'error: noncanonical Phase 2/3 cache selection; no cache files changed' >&2; exit 1;
+    }
   mkdir -p "${stage2_provenance_cache}"
   # M3 manifests bind canonical filesystem roots, not unresolved future path
   # spellings. Create the separate Phase 3 ownership root before Phase 2 emits

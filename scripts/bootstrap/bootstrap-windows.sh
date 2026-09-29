@@ -20,6 +20,12 @@ for arg in "$@"; do
   esac
 done
 
+# Help is read-only and exposes the canonical cache-policy flags before any
+# submodule/materialization setup changes the checkout.
+for arg in "${forward[@]}"; do
+  case "$arg" in --help|-h) exec sh "${script_dir}/bootstrap-from-scratch.sh" "${forward[@]}" ;; esac
+done
+
 case "${abi}" in
   "") ;;
   gnu|msvc) export SIMPLE_WINDOWS_ABI="${abi}" ;;

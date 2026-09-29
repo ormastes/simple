@@ -4,6 +4,8 @@ set "BOOTSTRAP_BASH="
 
 rem Prefer the Bash shipped beside Git.  Windows' System32 bash.exe is the
 rem WSL launcher and cannot consume the native path passed below.
+rem Cache policy flags are forwarded unchanged: --clean-rebuild and
+rem --invalidate-cache=PHASE. Compatible caches persist by default.
 for /f "delims=" %%G in ('where git.exe 2^>nul') do call :bash_from_git "%%~dpG"
 if not defined BOOTSTRAP_BASH if exist "C:\Program Files\Git\bin\bash.exe" set "BOOTSTRAP_BASH=C:\Program Files\Git\bin\bash.exe"
 if not defined BOOTSTRAP_BASH if exist "C:\msys64\usr\bin\bash.exe" set "BOOTSTRAP_BASH=C:\msys64\usr\bin\bash.exe"

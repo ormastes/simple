@@ -10,6 +10,8 @@ bootstrap_stage3_error() {
 }
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
 
 # VERDICT-on-exit contract: every run of this script must end with exactly one
@@ -599,6 +601,7 @@ for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$st
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
 rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"
+# Matching retries retain objects; explicit cleanup is guarded by lineage ownership.
 bootstrap_cache_new_path_validate "$stage3_cache" || bootstrap_stage3_error 'noncanonical stage3 cache selection'
 mkdir -p "$home" "$tmp" "$(dirname "$stage3_log")"
 
@@ -816,7 +819,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
-  "SIMPLE_FRONTEND_CACHE=0" \
+  "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
@@ -962,6 +965,7 @@ while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_gu
 done
 wait "$stage3_guard_pid"
 status=$?
+bootstrap_cache_report_log "$stage3_log"
 if [ "$stage3_containment_backend" = cgroupfs ]; then
   bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
     "$memory_admission" || status=125
