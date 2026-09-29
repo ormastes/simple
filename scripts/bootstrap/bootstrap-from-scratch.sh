@@ -31,7 +31,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
-    --progress-interval)
+    --progress-interval|--invalidate-cache)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
         case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
@@ -258,7 +258,11 @@ Options:
   --full-cli         Relink the full CLI after the staged pure-Simple build
                      (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
-  --fresh-cache      Clear the dynload native cache once before rebuilding
+  --clean-rebuild    Explicitly clear caches for the build phases requested
+  --invalidate-cache=PHASE
+                     Explicitly invalidate only PHASE's selected entry cache
+                     (stage2, stage3, stage4, stage4b-ui-backend, stage5N).
+  --fresh-cache      Compatibility alias for --clean-rebuild
   --incremental-unlimited
                      Reuse incremental caches, including one-binary Stage 4,
                      and use every detected host CPU; retain Stage 4
@@ -277,8 +281,8 @@ Options:
                      Admitted pure-Simple worker used by diagnostic check
                      processes (default: bin/simple; env:
                      SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER)
-  --clean-release    Final release proof: deploy and test a clean build while
-                     clearing every reusable native cache before each batch
+  --clean-release    Final release proof: deploy and test an explicitly clean
+                     build, clearing only its selected phase entry caches
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --release          Deploy, then run the release-blocking whole test suite
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
@@ -321,6 +325,7 @@ resume_stage3_output=""
 resume_stage4_output=""
 full_cli=0
 fresh_cache=0
+invalidate_cache_scope=""
 release_tests=0
 diagnostic_sweep=0
 stop_after_stage2=0
@@ -403,8 +408,13 @@ while [ "$#" -gt 0 ]; do
     --full-cli)
       full_cli=1
       ;;
-    --fresh-cache|--no-cache)
+    --fresh-cache|--no-cache|--clean-rebuild)
       fresh_cache=1
+      ;;
+    --invalidate-cache=*)
+      selected_invalidation_scope=${1#*=}
+      case "${selected_invalidation_scope}" in stage2|stage3|stage4|stage4b-ui-backend|stage5[0-9]*) ;; *) echo 'error: --invalidate-cache requires a build phase scope' >&2; exit 64 ;; esac
+      invalidate_cache_scope="${invalidate_cache_scope:+${invalidate_cache_scope},}${selected_invalidation_scope}"
       ;;
     --incremental-unlimited)
       execution_profile=incremental-unlimited
@@ -711,6 +721,7 @@ case "${execution_profile}" in
 esac
 
 . "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
+. "${bootstrap_entry_dir}/bootstrap-cache-lineage.shs"
 bootstrap_strategy_validate "${bootstrap_strategy}" || {
   echo "error: unknown --strategy '${bootstrap_strategy}' (expected adhoc, normal, or full)" >&2
   exit 1
@@ -727,7 +738,7 @@ fi
 
 if [ -n "${resume_stage3_output}" ]; then
   [ "${full_bootstrap}" -eq 0 ] && [ "${full_cli}" -eq 0 ] &&
-    [ "${fresh_cache}" -eq 0 ] && [ "${deploy}" -eq 0 ] &&
+    [ "${deploy}" -eq 0 ] &&
     [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
     [ "${diagnostics_mode}" = off ] || {
     echo "error: Stage 3 resume is mutually exclusive with rebuild/deploy/diagnostic options" >&2
@@ -743,6 +754,11 @@ if [ -n "${resume_stage3_output}" ]; then
     SIMPLE_BOOTSTRAP_REASON_RECEIPT="${bootstrap_receipt_path}"
     export SIMPLE_BOOTSTRAP_REASON_RECEIPT
   fi
+  case "${invalidate_cache_scope}" in ''|stage3) ;; *) echo 'error: Stage 3 resume can invalidate only stage3' >&2; exit 64 ;; esac
+  RESUME_STAGE3_CACHE_ACTION=reuse
+  [ "${fresh_cache}" -eq 0 ] || RESUME_STAGE3_CACHE_ACTION=clean
+  [ "${invalidate_cache_scope}" != stage3 ] || RESUME_STAGE3_CACHE_ACTION=invalidate
+  export RESUME_STAGE3_CACHE_ACTION
   exec /bin/sh "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
@@ -1057,6 +1073,16 @@ bootstrap_cleanup() {
     wait "${bootstrap_progress_pid}" 2>/dev/null || true
   fi
   if [ -z "${bootstrap_abnormal_signal:-}" ]; then
+    bootstrap_cache_release_all
+    if [ -n "${attempt_archive:-}" ] && [ -d "${attempt_archive}" ]; then
+      for terminal in "${log_dir}"/stage[23]*.log "${stage3_provenance_dir}"/*.env "${stage3_provenance_dir}"/*.transcript; do
+        [ ! -f "${terminal}" ] || cp -p "${terminal}" "${attempt_archive}/terminal.${terminal##*/}"
+      done
+      if ! bootstrap_cache_freeze_attempt "${attempt_archive}"; then
+        echo "bootstrap-evidence-error: could not freeze attempt ${attempt_archive}" >&2
+        [ "${bootstrap_status}" -ne 0 ] || bootstrap_status=1
+      fi
+    fi
     if [ -n "${deploy_lock_handle}" ]; then
       portable_lock_release "${deploy_lock_handle}"
       deploy_lock_handle=
@@ -1525,148 +1551,98 @@ echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfh
 } >"${output_dir}/selected-build-jobs.env"
 
 native_cache_dir="${output_dir}/native_cache"
-native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
-native_cache_freshened=0
 
-bootstrap_wide_inputs_hash() {
-  {
-    # Module fingerprints cover source edits, but unchanged modules must also
-    # be rebuilt when the compiler/runtime that emits their objects changes.
-    case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
-      llvm-cranelift) ;;
-      *) echo "error: unknown SIMPLE_KERNEL_K1_POLICY '${SIMPLE_KERNEL_K1_POLICY}'" >&2; return 1 ;;
-    esac
-    printf 'platform=%s backend=%s mode=%s k1_policy=%s stub_fallback=forbidden\n' \
-      "${PLATFORM}" "${backend}" "${bootstrap_mode}" "${SIMPLE_KERNEL_K1_POLICY:-unselected}"
-    printf 'seed-inputs=%s\n' "${seed_inputs_fingerprint:-missing}"
-    KERNEL_CLOSURE_ROOT="${repo_root}" \
-      KERNEL_CLOSURE_MANIFEST="doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn" \
-      /bin/sh "${repo_root}/scripts/lib/kernel-closure-inputs.shs" || return 1
-    env | LC_ALL=C sort | awk '/^SIMPLE_.*(AOP|MDSOC|WEAV|LOAD|INTERPRET|EXECUTION|LIB|NATIVE_BUILD)/ { print }'
-  } | hash_stream
-}
-
-# Prune native-build cache scope directories older than a TTL.
-#
-# Scope dirs are named
-# `backend=...;cpu=...;opt=...;compiler=<sha>+src<fingerprint>n<count>` and are
-# mint-once: as soon as any input in the closure changes, the source
-# fingerprint changes and a NEW scope dir is minted. The old one is never
-# consulted again, and nothing else ever collects it. That was harmless only
-# while the wrappers wiped the entire cache dir on every run; now that these
-# caches persist across runs (so an unchanged tree gets a real cache hit) the
-# wipe is gone and scope dirs would otherwise accumulate without bound.
-#
-# Age-based rather than LRU on purpose: it needs no bookkeeping sidecar and no
-# lock protocol. Several bootstrap lanes build concurrently on this host, and a
-# scope dir whose mtime is older than the TTL cannot belong to a live build, so
-# this can never pull artifacts out from under a running lane. Only entries
-# matching the `backend=*` scope-dir shape are ever removed, so sibling files
-# (build_cache.sdn, *.smf) are untouched. Override the window with
-# BOOTSTRAP_NATIVE_CACHE_TTL_DAYS; 0 or a non-numeric value disables pruning.
-bootstrap_native_cache_prune() {
-  bnc_dir=$1
-  bnc_ttl=${BOOTSTRAP_NATIVE_CACHE_TTL_DAYS:-7}
-  [ -d "${bnc_dir}" ] || return 0
-  case "${bnc_ttl}" in
-    ''|*[!0-9]*) return 0 ;;
-  esac
-  [ "${bnc_ttl}" -gt 0 ] || return 0
-  bnc_n=$(find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
-    -mtime +"${bnc_ttl}" -print 2>/dev/null | wc -l)
-  [ "${bnc_n}" -gt 0 ] || return 0
-  find "${bnc_dir}" -maxdepth 1 -type d -name 'backend=*' \
-    -mtime +"${bnc_ttl}" -exec rm -rf {} + 2>/dev/null || true
-  echo "  native cache: pruned ${bnc_n} scope dir(s) older than ${bnc_ttl}d in ${bnc_dir}"
-  # NOTE: the Rust seed's stage-2/3 native-build cache uses a DIFFERENT
-  # layout — `scope-<16hex>/objects/<16hex>.o`, keyed by lane +
-  # compiler_fingerprint (native_project/mod.rs: cache_scope_segment). An
-  # mtime-based TTL is UNSAFE for that layout: writes land in
-  # `scope-*/objects/`, not the scope dir itself, so the in-use scope's own
-  # mtime goes stale under continuous use and a naive TTL sweep here would
-  # eventually delete the dir a build is actively reading (and would not
-  # remove a freshly-orphaned scope from a seed rebuild until the TTL
-  # elapses either). That case is handled at its own call site instead —
-  # see the scope-name-provable prune right after the Stage 2 native-build
-  # log is written in the main script, keyed off the seed's own
-  # `[native-build] ... scope=<name>` receipt rather than mtime.
-}
-
-# Per-lane private cache. Each stage gets build/bootstrap/native_cache/<lane>/
-# instead of every stage sharing one native_cache, so a phase-2 entry can never be
-# picked up by a phase-3 lane running a different compiler over the same source.
-# Guarded fail-closed by scripts/check/check-cache-scope-ownership.shs.
-# Design: doc/05_design/compiler/incremental_build/per_lane_private_caches.md
+# Compatible caches persist. Module content/dependency keys select individual
+# misses; producer/runtime/tool/options/source-root identity is immutable.
 native_cache_base_dir="${native_cache_dir}"
-bootstrap_cache_scope_guard="${repo_root:-.}/scripts/check/check-cache-scope-ownership.shs"
-
-bootstrap_select_cache_lane() {
-  bscl_label=$1
-  bscl_lane=$(printf '%s' "${bscl_label}" | tr -c 'A-Za-z0-9._-' '_')
-  [ -n "${bscl_lane}" ] || bscl_lane=default
-  native_cache_dir="${native_cache_base_dir}/${bscl_lane}"
-  native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
-  # Propagate to the compilers themselves (both engines read SIMPLE_CACHE_SCOPE).
-  SIMPLE_CACHE_SCOPE="${bscl_lane}"
-  export SIMPLE_CACHE_SCOPE
-  mkdir -p "${native_cache_dir}"
-  # Old checkouts may not have the guard yet; stay additive rather than fatal.
-  if [ -f "${bootstrap_cache_scope_guard}" ]; then
-    if ! sh "${bootstrap_cache_scope_guard}" "${native_cache_dir}" "${bscl_lane}"; then
-      echo "  ${bscl_label}: refusing to build against a foreign cache scope" >&2
-      exit 1
-    fi
-  fi
+bootstrap_cache_action() {
+  bootstrap_selected_action=reuse
+  [ "${fresh_cache}" -eq 0 ] || bootstrap_selected_action=clean
+  [ "${execution_profile}" != clean-release ] || bootstrap_selected_action=clean
+  case ",${invalidate_cache_scope}," in *",$1,"*) bootstrap_selected_action=invalidate ;; esac
 }
-
+bootstrap_cache_context_hash() {
+  cache_options_payload=$(bootstrap_cache_explicit_options "${simple_abi_policy}" \
+    "${SIMPLE_PLUGIN_MANIFEST_POLICY}" "${SIMPLE_KERNEL_K1_POLICY}" \
+    "${SIMPLE_COVERAGE_CUTOVER_STATE}" "${k1_composition_sha256_before}" \
+    "${bootstrap_link_library_path:-}" "${bootstrap_link_compat_sha256:-absent}") || return 1
+  case "$1" in
+    stage3)
+      cache_assurance_payload=$(bootstrap_cache_stage3_assurance) || return 1
+      cache_options_payload="${cache_options_payload}
+${cache_assurance_payload}"
+      ;;
+    stage4*|stage5*)
+      if [ "$1" = stage4 ]; then
+        cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
+          "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" "SIMPLE_CACHE_SCOPE=$1" \
+          SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
+          "SIMPLE_BOOTSTRAP_LOW_MEMORY=${NATIVE_LOW_MEMORY}" SIMPLE_NATIVE_ARENA_DECLS=1 \
+          "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
+          "SIMPLE_NATIVE_BUILD_CACHE_DIR=${native_cache_dir}" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
+          SIMPLE_PACKAGE_INDEX_COLD_INIT=1 SIMPLE_NO_STUB_FALLBACK=1) || return 1
+      elif [ "$1" = stage4b-ui-backend ]; then
+        cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
+          "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
+          "SIMPLE_CACHE_SCOPE=$1" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}") || return 1
+        cache_environment_payload="${cache_environment_payload}
+SIMPLE_STUB_MISSING_RT=1"
+      else
+        cache_environment_payload=$(bootstrap_cache_native_environment "${repo_root}" \
+          "SIMPLE_BINARY=$(absolute_path "${cache_producer}")" \
+          "SIMPLE_CACHE_SCOPE=$1" "SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}" \
+          SIMPLE_NO_STUB_FALLBACK=1) || return 1
+      fi
+      cache_options_payload="${cache_options_payload}
+${cache_environment_payload}"
+      ;;
+  esac
+  cache_input_payload=$(bootstrap_cache_phase_inputs "${repo_root}" "${PLATFORM}" "${backend}" \
+    "${cache_build_mode:-${bootstrap_mode}}" "${stage3_source_before}" \
+    "${runtime_admitted_snapshot}" "${tool_authority_before}" "${cache_options_payload}") || return 1
+  printf '%s\n' "${cache_input_payload}" | hash_stream
+}
+bootstrap_prepare_phase_cache() {
+  bootstrap_cache_action "$2"
+  bootstrap_cache_prepare "$(absolute_path "$1")" "$(absolute_path "$3")" \
+    "$2" "$(hash_file "$4")" "$(bootstrap_cache_context_hash "$2")" "$5" \
+    "${bootstrap_selected_action}" || exit 1
+  SIMPLE_CACHE_SCOPE=$2
+  export SIMPLE_CACHE_SCOPE
+}
 prepare_native_cache() {
   label=$1
-  bootstrap_select_cache_lane "${label}"
-  if [ "${execution_profile}" = "clean-release" ]; then
-    echo "  ${label}: clearing native cache (clean-release profile)"
-    rm -rf "${native_cache_dir}/"
-    mkdir -p "${native_cache_dir}"
-    return
-  fi
-  if bootstrap_cache_force_clear_one_binary \
-    "${execution_profile}" "${bootstrap_mode}"; then
-    echo "  ${label}: clearing native cache (one-binary mode)"
-    rm -rf "${native_cache_dir}/"
-    return
-  fi
-
-  mkdir -p "${native_cache_dir}"
-  current_hash=$(bootstrap_wide_inputs_hash)
-  if [ "${fresh_cache}" -eq 1 ] && [ "${native_cache_freshened}" -eq 0 ]; then
-    echo "  ${label}: clearing native cache (--fresh-cache)"
-    rm -rf "${native_cache_dir}/"
-    mkdir -p "${native_cache_dir}"
-    printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
-    native_cache_freshened=1
-    return
-  fi
-  if [ ! -f "${native_cache_stamp}" ] || [ "$(cat "${native_cache_stamp}" 2>/dev/null)" != "${current_hash}" ]; then
-    echo "  ${label}: clearing native cache (platform/backend/AOP build context changed)"
-    rm -rf "${native_cache_dir}/"
-    mkdir -p "${native_cache_dir}"
-    printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
-  else
-    echo "  ${label}: reusing native cache (${bootstrap_mode} mode)"
-  fi
-  bootstrap_native_cache_prune "${native_cache_dir}"
-  bootstrap_stamp_cache_lane
+  cache_producer=$2 cache_entry=$3
+  cache_build_mode=${bootstrap_mode}
+  [ "${label}" != stage4 ] || cache_build_mode=one-binary
+  # Each entry and exact producer receives a separate writable object/frontend
+  # namespace. Previous producers remain available for explicit manual clean.
+  producer_sha=$(hash_file "${cache_producer}") || exit 1
+  native_cache_dir="${native_cache_base_dir}/${label}/${producer_sha}/${cache_entry}"
+  bootstrap_prepare_phase_cache "${native_cache_base_dir}" "${label}" \
+    "${native_cache_dir}" "${cache_producer}" "${cache_entry}"
+  echo "  ${label}: ${bootstrap_selected_action} native cache (producer ${producer_sha})"
 }
-
-# Re-stamp the ownership marker: every clear path above `rm -rf`s the dir, which
-# removes it. An unmarked dir is claimable, so this is belt-and-braces, but it
-# keeps the marker present for out-of-band inspection.
-bootstrap_stamp_cache_lane() {
-  [ -n "${native_cache_dir:-}" ] || return 0
-  mkdir -p "${native_cache_dir}" 2>/dev/null || return 0
-  printf 'lane=%s\n' "${SIMPLE_CACHE_SCOPE:-default}" \
-    > "${native_cache_dir}/.cache_scope" 2>/dev/null || true
+bootstrap_cache_stage4_context() {
+  stage_runtime_absolute=$(bootstrap_stage3_physical_directory \
+    "${bootstrap_runtime_authority_path:?Stage 4 runtime authority is required}") || return 1
+  bootstrap_runtime_authority_path=${stage_runtime_absolute}
+  SIMPLE_RUNTIME_PATH=${stage_runtime_absolute}
+  export SIMPLE_RUNTIME_PATH
+  # Resume-only and CLI-managed staged branches need their own current
+  # snapshots. Normal staged runs reuse the already checked source/runtime.
+  if [ -n "${stage3_source_before:-}" ] && [ -f "${stage3_source_before}" ] &&
+    [ -n "${runtime_admitted_snapshot:-}" ] && [ -f "${runtime_admitted_snapshot}" ] &&
+    [ -n "${tool_authority_before:-}" ] && [ -f "${tool_authority_before}" ]; then return 0; fi
+  cache_context_dir="${output_dir}/cache-context-${PLATFORM}/attempt-$(date -u '+%Y%m%dT%H%M%S')-$$"
+  mkdir -p "${cache_context_dir}" || return 1
+  stage3_source_before="${cache_context_dir}/source.txt"
+  runtime_admitted_snapshot="${cache_context_dir}/runtime.txt"
+  tool_authority_before="${cache_context_dir}/tools.txt"
+  bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" &&
+    bootstrap_stage3_directory_snapshot "${runtime_admitted_snapshot}" "${stage_runtime_absolute}" &&
+    bootstrap_stage3_tool_authority_snapshot "${tool_authority_before}" "${PATH}" "${repo_root}"
 }
-
 # Stage 3 evidence is run-scoped even though its canonical filenames are
 # stable. A reused output may therefore contain a complete prior run. Preserve
 # that evidence with a same-directory atomic rename before applying the fresh
@@ -1693,6 +1669,8 @@ bootstrap_stage3_archive_prior_evidence() (
     echo "error: could not archive prior Stage 3 evidence: ${bsape_path}" >&2
     return 1
   }
+  printf '%s  %s\n' "$(hash_file "${bsape_archive}")" "${bsape_archive##*/}" > "${bsape_archive}.sha256" || return 1
+  chmod a-w "${bsape_archive}" "${bsape_archive}.sha256"
   echo "  Stage 3 evidence: archived prior ${bsape_path}"
 )
 
@@ -1776,6 +1754,8 @@ run_logged() {
   label=$1
   shift
   log_file="${log_dir}/${label}.log"
+  bootstrap_stage3_archive_prior_evidence "${log_file}" \
+    "attempt-$(date -u '+%Y%m%dT%H%M%S')-$$" || exit 1
   {
     echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] ${label}"
     echo "cwd: $(pwd)"
@@ -1794,6 +1774,7 @@ run_logged() {
   set -e
 
   echo "  ${label} log: ${log_file}"
+  bootstrap_cache_report_log "${log_file}"
   if [ "${status}" -ne 0 ]; then
     echo "error: ${label} failed with exit ${status}" >&2
     if [ "${status}" -ge 128 ]; then
@@ -3143,13 +3124,29 @@ else
   mkdir -p "${stage3_provenance_dir}"
   bootstrap_stage2_sanity_output_preflight "${stage2_sanity_evidence}" || exit 1
   bootstrap_stage2_sanity_output_preflight "${stage3_sanity_evidence}" || exit 1
-  # A previous fail-closed run may leave its admitted authority deliberately
-  # frozen (directories 0500, files 0400/0500). Thaw only this private output
-  # tree before replacing it; source/runtime authorities remain untouched.
-  chmod -R u+w "${stage3_provenance_dir}" || {
-    echo "error: could not thaw previous Stage 3 provenance output" >&2
+  # Keep each prior attempt's immutable evidence and admitted binaries. Only
+  # the parent needs write permission for rename; never thaw old receipts.
+  chmod u+w "${stage3_provenance_dir}" || {
+    echo "error: could not prepare Stage 3 provenance parent" >&2
     exit 1
   }
+  attempt_archive="${stage3_provenance_dir}/attempts/attempt-$(date -u '+%Y%m%dT%H%M%S')-$$"
+  mkdir -p "${attempt_archive}"
+  for prior in "${stage3_provenance_manifest}" \
+    "${stage3_source_before}" "${stage3_source_after}" \
+    "${stage3_git_before}" "${stage3_git_after}" \
+    "${stage2_command_transcript}" "${stage3_command_transcript}" \
+    "${stage2_sanity_evidence}" "${stage2_receiver_evidence}" \
+    "${stage2_receiver_log}" "${stage3_sanity_evidence}" \
+    "${runtime_origin_before}" "${runtime_origin_after}" \
+    "${runtime_admitted_snapshot}" "${tool_authority_before}" "${tool_authority_after}" \
+    "${stage2_admitted_dir}" "${stage2_runtime_authority}"; do
+    [ ! -L "${prior}" ] || { echo "error: refusing linked prior attempt artifact: ${prior}" >&2; exit 1; }
+    [ ! -e "${prior}" ] || mv "${prior}" "${attempt_archive}/" || exit 1
+  done
+  for phase_log in "${log_dir}/stage2-native-build.log" "${log_dir}/stage3-native-build.log"; do
+    [ ! -e "${phase_log}" ] || mv "${phase_log}" "${attempt_archive}/" || exit 1
+  done
   rm -f "${stage3_provenance_manifest}" \
     "${stage3_source_before}" "${stage3_source_after}" \
     "${stage3_git_before}" "${stage3_git_after}" \
@@ -3157,8 +3154,7 @@ else
     "${stage2_sanity_evidence}" "${stage2_receiver_evidence}" \
     "${stage2_receiver_log}" "${stage3_sanity_evidence}"
   rm -rf "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
-    "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
-    "${stage2_admitted_dir}" "${stage2_runtime_authority}"
+    "${stage3_provenance_home}" "${stage3_provenance_tmp}"
   if [ -n "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER:-}" ]; then
     stage2_cleanup_marker_tmp="${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}.tmp.$$"
     {
@@ -3170,23 +3166,7 @@ else
     mv "${stage2_cleanup_marker_tmp}" \
       "${SIMPLE_BOOTSTRAP_STAGE2_CLEANUP_MARKER}"
   fi
-  # Stage 2/3 native-build caches are content-hash keyed by the pure-Simple
-  # driver itself (driver_native_sources_fingerprint scopes each cache entry
-  # under the loaded source set's combined hash — see
-  # src/compiler/80.driver/driver_aot_native_output.spl), so an unchanged
-  # source tree naturally misses on any real change and never serves a stale
-  # object. Unconditionally wiping them here defeated ALL cross-run
-  # incrementality even when nothing changed. Preserve them by default;
-  # --fresh-cache/--clean-release still forces a clean rebuild.
-  if [ "${fresh_cache}" -eq 1 ] || [ "${execution_profile}" = "clean-release" ]; then
-    echo "  provenance: clearing stage2/stage3 native caches (--fresh-cache/--clean-release)"
-    rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}"
-  else
-    # Preserved caches still need a reaper: scope dirs are mint-once and
-    # nothing else collects them now that the unconditional wipe is gone.
-    bootstrap_native_cache_prune "${stage2_provenance_cache}"
-    bootstrap_native_cache_prune "${stage3_provenance_cache}"
-  fi
+  # Cache cleanup occurs only after binding and acquiring the selected writer.
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
   bootstrap_acquire_rust_authority || exit 1
@@ -3437,6 +3417,10 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
   bootstrap_step_mark phase1-snapshot-preserve
   bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
+  bootstrap_cache_new_path_validate "$(absolute_path "${stage2_provenance_cache}")" &&
+    bootstrap_cache_new_path_validate "$(absolute_path "${stage3_provenance_cache}")" || {
+      echo 'error: noncanonical Phase 2/3 cache selection; no cache files changed' >&2; exit 1;
+    }
   mkdir -p "${stage2_provenance_cache}"
   # M3 manifests bind canonical filesystem roots, not unresolved future path
   # spellings. Create the separate Phase 3 ownership root before Phase 2 emits
@@ -3581,6 +3565,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       -o "${stage2_bin}"
   )
   stage3_evidence_run_id="stage3-${PLATFORM}-$$"
+  bootstrap_prepare_phase_cache "${stage3_provenance_dir}" stage2 \
+    "${stage2_provenance_cache}" "${stage2_seed_absolute}" bootstrap-main
   stage3_memory_snapshot="${stage3_provenance_dir}/memory-snapshot-v1.events"
   stage3_phase_profile="${stage3_provenance_dir}/phase-profile-v1.events"
   # Narrowly-scoped diagnostic pass-through for Stage 3.  Computed ONCE here and
@@ -3804,6 +3790,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     exit 1
   }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
+  bootstrap_cache_report_log "${stage2_native_log}"
   # See bootstrap_prune_stale_seed_scope_dirs (bootstrap-cache-policy.shs)
   # for the full rationale and safety rules (Stage-2-success gate, exact
   # scope-<16 hex> match, single-value requirement, warn-not-fail on rm).
@@ -4550,13 +4537,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
   bootstrap_progress_mark stage3 "$(absolute_path "${log_dir}/stage3-native-build.log")"
-  # See the cache-preservation note above (~line 1300): this cache is
-  # content-hash scoped by the driver itself, so keep it across runs unless
-  # a clean rebuild was explicitly requested.
-  if [ "${fresh_cache}" -eq 1 ] || [ "${execution_profile}" = "clean-release" ]; then
-    rm -rf "${stage3_provenance_cache}"
-  fi
-  mkdir -p "${stage3_provenance_cache}"
+  bootstrap_prepare_phase_cache "${stage3_provenance_dir}" stage3 "${stage3_provenance_cache}" "${stage2_admitted_absolute}" bootstrap-main
 
   stage3_ok=0
   rm -f "${stage3_bin}"
@@ -4721,6 +4702,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   fi
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
+  bootstrap_cache_report_log "${log_dir}/stage3-native-build.log"
   if [ "${SIMPLE_KERNEL_K1_POLICY:-}" = "llvm-cranelift" ]; then
     k1_composition_receipt="${log_dir}/stage2-stage3-k1-composition.env"
     sh scripts/bootstrap/write-k1-composition-receipt.shs \
@@ -5053,7 +5035,8 @@ stage4_source_revision_before="$(stage4_source_revision "${repo_root}")" || {
   echo "error: could not fingerprint Stage 4 source authority" >&2
   exit 1
 }
-prepare_native_cache stage4
+bootstrap_cache_stage4_context || { echo 'error: could not bind current Stage 4 cache context' >&2; exit 1; }
+prepare_native_cache stage4 "${stage_for_build}" full-cli
 stage4_parent="$(bootstrap_stage3_canonical_file "$(absolute_path "${stage_for_build}")")" || {
   echo "error: Stage 4 parent compiler path is not canonical" >&2
   exit 1
@@ -5168,7 +5151,7 @@ echo "  Stage 3 current acceptance: ${stage3_acceptance_receipt}"
 echo "Stage 4b: compiling cached UI backend..."
 bootstrap_progress_mark stage4b "$(absolute_path "${log_dir}/stage4b-ui-backend.log")"
 ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"
-prepare_native_cache stage4b-ui-backend
+prepare_native_cache stage4b-ui-backend "${full_bin}" ui-backend
 run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 \
   SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
@@ -5205,7 +5188,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     mcp_log="stage5${mcp_stage}-mcp-native-build"
 
     echo "  Stage 5${mcp_stage}: ${mcp_name}"
-    prepare_native_cache "stage5${mcp_stage}"
+    prepare_native_cache "stage5${mcp_stage}" "${stage_for_build}" "${mcp_name}"
     rm -f "${full_dir}/${mcp_name}${exe_suffix}"
     set +e
     env RUST_LOG="${RUST_LOG:-error}" \
@@ -5228,6 +5211,7 @@ if [ "${build_mcp}" -eq 1 ]; then
     mcp_status=$?
     set -e
     echo "  ${mcp_log} log: ${log_dir}/${mcp_log}.log"
+    bootstrap_cache_report_log "${log_dir}/${mcp_log}.log"
     if [ "${mcp_status}" -ne 0 ]; then
       mcp_build_ok=0
       echo "  WARNING: ${mcp_name} build failed (exit ${mcp_status})"

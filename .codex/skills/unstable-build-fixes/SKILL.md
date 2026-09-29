@@ -7,11 +7,44 @@ description: Use when a Simple bootstrap/native-build is unstable, slow, or fail
 
 Goal: produce the requested Simple executable without throwing away useful cache.
 
+## Cache policy during repairs
+
+Use cached builds until the known failures are fixed, then perform one explicit
+clean rebuild as the final verification. Follow the
+[bootstrap cache guide](../../../doc/07_guide/tooling/bootstrap_cache_policy.md)
+for supported invalidation commands and their scope.
+
+- Before creating a cache, locate the previous attempt's cache for the same
+  platform, phase and entry. Compare its recorded producer, source/dependencies,
+  build options, runtime and tool identities. A new attempt or worktree alone
+  does not justify starting over.
+- Resume compatible completed objects, persisted frontend/HIR records, runtime
+  objects and Cargo outputs. Preserve failed caches and attempt logs. Do not
+  claim that in-memory HIR can be resumed when it was never persisted.
+- Keep frontend/HIR persistence enabled during repairs. A cold-cache speed or
+  memory comparison alone does not justify disabling it: `SIMPLE_FRONTEND_CACHE=0`
+  also disables the HIR cache. Record any demonstrated correctness blocker
+  before disabling persistence for a bounded diagnostic.
+- After a fix, explicitly invalidate the affected work. Use dependency-level
+  invalidation when the cache owner can prove it correct; otherwise invalidate
+  the affected entry and state why. Preserve other phases, entries and valid
+  dependencies. Never rewrite identity stamps to make stale objects look valid.
+- Before an unavoidable rebuild, name the incompatible input and affected
+  scope. Record actual reuse counts, such as
+  `Cache: reused 117 modules; rebuilt 2.` A directory's existence is not a hit.
+- Keep live builds and their caches intact. Parallel lanes need separate writable
+  caches; reuse an idle compatible lane rather than inventing a fresh directory
+  for every retry. A cache donor must be idle before copying its mutable files.
+- Defer the clean verification until fixes and focused checks pass, unless the
+  user explicitly requests a clean build earlier. Keep the successful cached
+  artifacts and evidence while qualifying the clean output separately.
+
 ## Rules
 
 - Keep one main cache-backed build as source of truth:
   `--cache-dir build/bootstrap/native_cache --mode dynload`.
-- Do not delete the cache between retries unless a concrete stale-cache bug is proven.
+- Preserve caches between retries; use explicit scoped invalidation for changed
+  inputs and explicit clean rebuild only at the verification boundary above.
 - Do not run parallel writers into the same cache dir. Use isolated shard caches:
   `build/mini_cache_<entry>`.
 - Bind tool caches to both the producing compiler phase and the entry closure.
@@ -45,9 +78,13 @@ Goal: produce the requested Simple executable without throwing away useful cache
    - `src/app/test_runner_new/main.spl` -> phase-bound `test-runner`
 3. For each failure, group by the first real error, not warnings.
 4. Fix the smallest shared root cause. Add one focused regression.
-5. Rerun only failed shards first, with the same shard cache.
-6. Rerun the main build with the same main cache.
-7. Stop when `build/native_probe/simple` or the requested deployed `bin/simple` exists.
+5. Rerun only failed shards first, reusing their compatible caches and recording
+   any explicit invalidation needed for the fix.
+6. Resume the main build with its compatible cache. Respect the session's
+   verification-cycle limit; do not repeat already-passing focused checks.
+7. Once fixes and focused checks pass, perform the requested final clean build
+   and sanity checks. Binary existence alone is not completion; report the
+   actual requested executable behavior and any remaining verification gaps.
 
 ## Patterns
 

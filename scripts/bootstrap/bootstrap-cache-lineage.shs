@@ -1,0 +1,279 @@
+#!/bin/sh
+# Mutable build caches only. Admission, source, binary and attempt evidence
+# never belong to a lineage directory and are never removed here.
+bootstrap_cache_error() { echo "bootstrap-cache-error: $*" >&2; return 1; }
+bootstrap_cache_hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  else return 1; fi
+}
+bootstrap_cache_freeze_attempt() (
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  bootstrap_cache_new_path_validate "$1" || return 1
+  bc_attempt_root=$1
+  bc_list=$(mktemp "${1%/*}/.attempt-enumeration.XXXXXX") || return 1
+  trap 'rm -f "$bc_list" "$bc_list.sorted" "$bc_list.links" "$bc_attempt_root/attempt-files.sha256.tmp"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  cd -- "$1" || return 1
+  [ ! -e attempt-files.sha256 ] && [ ! -L attempt-files.sha256 ] || bootstrap_cache_error 'duplicate attempt freeze refused; receipt not re-admitted' || return 1
+  find . -type l -print > "$bc_list.links" || return 1
+  [ ! -s "$bc_list.links" ] || return 1
+  find . -type f ! -name 'attempt-files.sha256*' > "$bc_list" || return 1
+  LC_ALL=C sort "$bc_list" > "$bc_list.sorted" || return 1
+  while IFS= read -r bc_evidence; do
+    bc_evidence_sha=$(bootstrap_cache_hash_file "$bc_evidence") || exit 1
+    bootstrap_cache_digest "$bc_evidence_sha" || exit 1
+    printf '%s  %s\n' "$bc_evidence_sha" "$bc_evidence"
+  done < "$bc_list.sorted" > attempt-files.sha256.tmp || return 1
+  mv attempt-files.sha256.tmp attempt-files.sha256 || return 1
+  chmod -R a-w .
+)
+bootstrap_cache_digest() {
+  [ "${#1}" -eq 64 ] || return 1
+  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+bootstrap_cache_storage_path() {
+  case "$1" in /*) return 0 ;; *) return 1 ;; esac
+}
+bootstrap_cache_new_path_validate() (
+  bootstrap_cache_storage_path "$1" || return 1
+  case "$1" in /|*/|*//*) return 1 ;; esac
+  case "/$1/" in */./*|*/../*) return 1 ;; esac
+  bc_parent=$1
+  while [ ! -e "$bc_parent" ] && [ ! -L "$bc_parent" ]; do bc_parent=$(dirname -- "$bc_parent"); done
+  [ -d "$bc_parent" ] && [ ! -L "$bc_parent" ] || return 1
+  [ "$(CDPATH= cd -- "$bc_parent" && pwd -P)" = "$bc_parent" ]
+)
+bootstrap_cache_validate_paths() {
+  # Both paths must already exist and resolve canonically within the root.
+  bc_root=$(CDPATH= cd -- "$1" 2>/dev/null && pwd -P) || return 1
+  bc_dir=$(CDPATH= cd -- "$2" 2>/dev/null && pwd -P) || return 1
+  [ "$bc_root" = "$1" ] && [ "$bc_dir" = "$2" ] || return 1
+  case "$bc_dir" in "$bc_root"/*) ;; *) return 1 ;; esac
+  bootstrap_cache_storage_path "$bc_root" || return 1
+  [ ! -L "$bc_dir" ] && [ ! -L "$bc_root" ] || return 1
+}
+bootstrap_cache_owner() { printf 'schema=simple-bootstrap-cache-root-v1\nowner=%s\n' "$(id -u)"; }
+bootstrap_cache_root_claim() {
+  bootstrap_cache_new_path_validate "$1" || bootstrap_cache_error 'noncanonical cache root; no files changed' || return 1
+  mkdir -p "$1" || return 1
+  bc_owner="$1/.bootstrap-cache-root"
+  if [ -e "$bc_owner" ] || [ -L "$bc_owner" ]; then
+    [ ! -L "$bc_owner" ] && [ -f "$bc_owner" ] &&
+      [ "$(cat "$bc_owner")" = "$(bootstrap_cache_owner)" ] ||
+      bootstrap_cache_error "foreign cache root: $1" || return 1
+  else
+    (set -C; bootstrap_cache_owner > "$bc_owner") || return 1
+  fi
+}
+bootstrap_cache_binding() {
+  printf 'schema=simple-bootstrap-cache-lineage-v1\nphase=%s\nproducer_sha256=%s\ninputs_sha256=%s\nentry=%s\n' "$1" "$2" "$3" "$4"
+}
+bootstrap_cache_binding_valid() {
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  awk -F= '
+    NR==1 { if ($0!="schema=simple-bootstrap-cache-lineage-v1") bad=1 }
+    NR==2 { if ($1!="phase" || $2!~/^stage[1-5][A-Za-z0-9._-]*$/) bad=1 }
+    NR==3 { if ($1!="producer_sha256" || length($2)!=64 || $2~/[^0-9a-f]/) bad=1 }
+    NR==4 { if ($1!="inputs_sha256" || length($2)!=64 || $2~/[^0-9a-f]/) bad=1 }
+    NR==5 { if ($1!="entry" || $2!~/^[A-Za-z0-9._-]+$/) bad=1 }
+    END { exit (bad || NR!=5) }
+  ' "$1"
+}
+bootstrap_cache_phase_inputs() {
+  # ROOT PLATFORM BACKEND MODE SOURCE-SNAPSHOT RUNTIME-SNAPSHOT TOOL-SNAPSHOT
+  [ "$#" -eq 7 ] || [ "$#" -eq 8 ] || return 1
+  printf 'cache-inputs-v1\nsource-root=%s\nplatform=%s\nbackend=%s\nmode=%s\n' "$1" "$2" "$3" "$4"
+  for bc_input in "$5" "$6" "$7"; do
+    [ -f "$bc_input" ] && [ ! -L "$bc_input" ] || return 1
+    printf 'snapshot-bytes=%s\n' "$(wc -c < "$bc_input" | tr -d ' ')"
+    cat "$bc_input" || return 1
+    printf '\n'
+  done
+  printf 'semantic-options=%s\n' "${8:-}"
+}
+bootstrap_cache_explicit_options() {
+  [ "$#" -eq 7 ] || return 1
+  printf 'abi=%s\nplugin-policy=%s\nk1-policy=%s\ncoverage=%s\ncomposition=%s\nlibrary-path=%s\nlink-compat=%s\nstub-fallback=forbidden\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+}
+bootstrap_cache_stage3_assurance() {
+  printf 'frontend-cache=1\nfrontend-cache-location=selected-entry/frontend\n'
+  case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
+    '') printf 'safety-profile=@absent\nassurance-warning-phase=@absent\n' ;;
+    1) printf 'safety-profile=critical\nassurance-warning-phase=1\n' ;;
+    *) bootstrap_cache_error 'SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1' ;;
+  esac
+}
+bootstrap_cache_native_environment() (
+  # The compiler owner is the source of semantic field names. Caller overlays
+  # are the actual forced environment values applied before its native build.
+  bc_source="$1/src/compiler/80.driver/cache/native_build_environment_identity.spl"
+  shift
+  [ -f "$bc_source" ] || return 1
+  bc_names=$(mktemp "${TMPDIR:-/tmp}/cache-env-names.XXXXXX") || return 1
+  trap 'rm -f "$bc_names" "$bc_names.values"' EXIT
+  awk '
+    /^val NATIVE_BUILD_SEMANTIC_ENVIRONMENT_FIELDS_V1:/ { active=1; next }
+    active && /^]/ { active=0; complete=1 }
+    active && match($0, /"[A-Z][A-Z0-9_]*"/) { print substr($0,RSTART+1,RLENGTH-2); count++ }
+    END { if (!complete || count==0) exit 1 }
+  ' "$bc_source" > "$bc_names" || return 1
+  env > "$bc_names.values" || return 1
+  for bc_override in "$@"; do
+    case "$bc_override" in *=*) printf '%s\n' "$bc_override" >> "$bc_names.values" ;; *) return 1 ;; esac
+  done
+  awk '
+    FNR==NR { names[++count]=$0; wanted[$0]=1; next }
+    { equal=index($0,"="); name=substr($0,1,equal-1); if(wanted[name]) { observed[name]=1; values[name]=substr($0,equal+1) } }
+    END { for(i=1;i<=count;i++) { name=names[i]; if(observed[name]) print name "=" length(values[name]) ":" values[name]; else print name "=@absent" } }
+  ' "$bc_names" "$bc_names.values"
+)
+bootstrap_cache_writer_acquire() {
+  mkdir "$1.writer" 2>/dev/null || bootstrap_cache_error "active or unresolved writer: $1.writer; after verifying all descendants stopped, use clean-bootstrap-cache.shs --root CACHE_ROOT --lineage $1 --repair-idle-writer=NONCE (nonce recorded in .writer/nonce); objects preserved" || return 1
+  printf '%s\n' "$$" > "$1.writer/pid" || return 1
+  printf '%s\n' "$(date -u '+%Y%m%dT%H%M%S')-$$" > "$1.writer/nonce" || return 1
+  printf '%s\n' "$(id -u)" > "$1.writer/owner" || return 1
+  ps -p "$$" -o lstart= 2>/dev/null > "$1.writer/birth" || true
+  bc_process_helper=${BOOTSTRAP_CACHE_PROCESS_HELPER_PATH:-${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-}}
+  if [ -f "$bc_process_helper" ] && [ ! -L "$bc_process_helper" ]; then
+    perl "$bc_process_helper" owner-snapshot > "$1.writer/process.env" || rm -f "$1.writer/process.env"
+  fi
+}
+bootstrap_cache_writer_release() {
+  [ -f "$1.writer/pid" ] || return 0
+  [ "$(cat "$1.writer/pid")" = "$$" ] || return 1
+  rm -f "$1.writer/pid" "$1.writer/nonce" "$1.writer/owner" "$1.writer/birth" "$1.writer/process.env" && rmdir "$1.writer"
+}
+bootstrap_cache_release_all() {
+  [ -n "${BOOTSTRAP_CACHE_WRITERS:-}" ] || return 0
+  printf '%s\n' "$BOOTSTRAP_CACHE_WRITERS" | while IFS= read -r bc_release; do
+    [ -z "$bc_release" ] || bootstrap_cache_writer_release "$bc_release"
+  done
+  BOOTSTRAP_CACHE_WRITERS=
+}
+bootstrap_cache_clear_locked() {
+  # Validate immediately before the only recursive removal. Never follow links.
+  bootstrap_cache_validate_paths "$1" "$2" || bootstrap_cache_error 'refusing noncanonical/out-of-root clean' || return 1
+  [ -f "$1/.bootstrap-cache-root" ] && [ ! -L "$1/.bootstrap-cache-root" ] &&
+    [ "$(cat "$1/.bootstrap-cache-root")" = "$(bootstrap_cache_owner)" ] || return 1
+  if [ -e "$2/.bootstrap-cache-binding" ] || [ -L "$2/.bootstrap-cache-binding" ]; then
+    bootstrap_cache_binding_valid "$2/.bootstrap-cache-binding" || bootstrap_cache_error 'invalid lineage metadata; cache preserved' || return 1
+  else
+    [ -n "${3:-}" ] && [ -f "$2/.cache_scope" ] && [ ! -L "$2/.cache_scope" ] &&
+      [ "$(cat "$2/.cache_scope")" = "lane=$3" ] ||
+      bootstrap_cache_error 'manual clean requires an owned lineage binding' || return 1
+  fi
+  bc_links=$(mktemp "$2.links.XXXXXX") || return 1
+  if ! find "$2" -type l -print > "$bc_links"; then rm -f "$bc_links"; return 1; fi
+  if [ -s "$bc_links" ]; then rm -f "$bc_links"; bootstrap_cache_error 'refusing linked cache payload'; return 1; fi
+  rm -f "$bc_links" || return 1
+  rm -rf -- "$2" || return 1
+  mkdir -p "$2"
+}
+bootstrap_cache_report_log() {
+  # Read actual compiler receipts only; cache existence/enabling is no hit.
+  awk '
+    /^\[native-build\] compiled=[0-9]+ reused=[0-9]+ failed=0 / {
+      split($2, compiled, "="); split($3, reused, "=")
+      message="Cache: reused " reused[2] " modules; rebuilt " compiled[2] "."
+    }
+    /^Cache: reused [0-9]+ modules; rebuilt [0-9]+\.$/ { message=$0 }
+    END { if (message != "") print message }
+  ' "$1"
+}
+bootstrap_cache_clean() (
+  [ "$#" -eq 2 ] || return 1
+  bootstrap_cache_validate_paths "$1" "$2" || return 1
+  bootstrap_cache_writer_acquire "$2" || return 1
+  trap 'bc_clean_status=$?; bootstrap_cache_writer_release "$2"; exit "$bc_clean_status"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  bootstrap_cache_clear_locked "$1" "$2"
+)
+bootstrap_cache_repair_idle_writer() (
+  [ "$#" -eq 3 ] || return 1
+  bootstrap_cache_validate_paths "$1" "$2" || return 1
+  bootstrap_cache_binding_valid "$2/.bootstrap-cache-binding" || return 1
+  [ "$(cat "$1/.bootstrap-cache-root" 2>/dev/null)" = "$(bootstrap_cache_owner)" ] || return 1
+  bc_lock="$2.writer"
+  [ -d "$bc_lock" ] && [ ! -L "$bc_lock" ] || return 1
+  for bc_field in pid nonce owner birth; do [ -f "$bc_lock/$bc_field" ] && [ ! -L "$bc_lock/$bc_field" ] || return 1; done
+  [ "$(cat "$bc_lock/owner")" = "$(id -u)" ] && [ "$(cat "$bc_lock/nonce")" = "$3" ] || return 1
+  bc_pid=$(cat "$bc_lock/pid")
+  case "$bc_pid" in ''|*[!0-9]*|0|1) return 1 ;; esac
+  # Reuse the reviewed native process-group authority. The nonce only selects
+  # the attempt; positive kernel proof of an absent group authorizes repair.
+  if kill -0 "$bc_pid" 2>/dev/null; then bootstrap_cache_error 'writer PID still live; idle repair refused'; return 1; fi
+  bc_process_helper=${BOOTSTRAP_CACHE_PROCESS_HELPER_PATH:-${PORTABLE_LOCK_ATOMIC_HELPER_PATH:-}}
+  [ -f "$bc_process_helper" ] && [ ! -L "$bc_process_helper" ] &&
+    [ -f "$bc_lock/process.env" ] && [ ! -L "$bc_lock/process.env" ] ||
+    bootstrap_cache_error 'process-group authority unavailable; writer retained' || return 1
+  awk -F= 'NR==1 {if($1!="pid" || $2!~/^[1-9][0-9]*$/) bad=1} NR==2 {if($1!="start_hex" || $2!~/^[0-9a-f]+$/) bad=1} NR==3 {if($1!="pgid" || $2!~/^[1-9][0-9]*$/) bad=1} END {exit(bad || NR!=3)}' "$bc_lock/process.env" || return 1
+  bc_native_pid=$(sed -n 's/^pid=//p' "$bc_lock/process.env")
+  bc_native_start=$(sed -n 's/^start_hex=//p' "$bc_lock/process.env")
+  bc_native_pgid=$(sed -n 's/^pgid=//p' "$bc_lock/process.env")
+  [ "$(perl "$bc_process_helper" claim-state "$bc_native_pid" "$bc_native_start" "$bc_native_pgid")" = dead ] ||
+    bootstrap_cache_error 'live/unknown process-group authority; writer retained' || return 1
+  mkdir "$bc_lock.repair" 2>/dev/null || return 1
+  trap 'rmdir "$bc_lock.repair"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [ "$(cat "$bc_lock/nonce")" = "$3" ] || return 1
+  [ "$(perl "$bc_process_helper" claim-state "$bc_native_pid" "$bc_native_start" "$bc_native_pgid")" = dead ] || return 1
+  rm -f "$bc_lock/pid" "$bc_lock/nonce" "$bc_lock/owner" "$bc_lock/birth" "$bc_lock/process.env" && rmdir "$bc_lock"
+  echo "repaired explicitly confirmed idle writer: $2; cache objects preserved"
+)
+bootstrap_cache_prepare() {
+  # ROOT DIRECTORY PHASE PRODUCER-SHA INPUTS-SHA ENTRY reuse|invalidate|clean
+  [ "$#" -eq 7 ] || return 1
+  case "$3" in stage[12345]*) ;; *) return 1 ;; esac
+  case "$3" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  bootstrap_cache_digest "$4" && bootstrap_cache_digest "$5" || return 1
+  case "$6" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$7" in reuse|invalidate|clean) ;; *) return 1 ;; esac
+  bootstrap_cache_new_path_validate "$1" && bootstrap_cache_new_path_validate "$2" || bootstrap_cache_error 'noncanonical cache selection; no files changed' || return 1
+  case "$2" in "$1"/*) ;; *) bootstrap_cache_error 'cache selection outside root; no files changed'; return 1 ;; esac
+  bootstrap_cache_root_claim "$1" || return 1
+  mkdir -p "$2" || return 1
+  bootstrap_cache_validate_paths "$1" "$2" || bootstrap_cache_error 'cache paths must be canonical and owned' || return 1
+  bootstrap_cache_writer_acquire "$2" || return 1
+  bc_expected=$(bootstrap_cache_binding "$3" "$4" "$5" "$6")
+  bc_binding="$2/.bootstrap-cache-binding"
+  bc_status=0
+  if [ -e "$bc_binding" ] || [ -L "$bc_binding" ]; then
+    if ! bootstrap_cache_binding_valid "$bc_binding"; then
+      bootstrap_cache_error "invalid binding: $bc_binding"; bc_status=1
+    elif [ "$(sed -n 's/^phase=//p' "$bc_binding")" != "$3" ] ||
+      [ "$(sed -n 's/^entry=//p' "$bc_binding")" != "$6" ]; then
+      bootstrap_cache_error "foreign phase/entry cache: $2; selected scope cannot clean it"; bc_status=1
+    elif [ "$7" != reuse ]; then
+      bootstrap_cache_clear_locked "$1" "$2" || bc_status=1
+    elif [ "$(cat "$bc_binding")" != "$bc_expected" ]; then
+      bootstrap_cache_error "incompatible producer/options/runtime/tool ABI/source identity: $2; specify --invalidate-cache=$3 or select a compatible cache; old cache preserved"
+      bc_status=1
+    fi
+  else
+    if ! bc_payload=$(find "$2" -mindepth 1 ! -name .cache_scope -print -quit); then
+      bootstrap_cache_error 'cannot enumerate existing cache; preserved'; bc_status=1
+    elif [ -n "$bc_payload" ]; then
+      # Never admit old objects by adding a stamp. Explicit invalidation may
+      # remove an old cache only when its existing phase marker matches.
+      if [ "$7" != reuse ] && [ -f "$2/.cache_scope" ] &&
+        [ "$(cat "$2/.cache_scope")" = "lane=$3" ]; then
+        bootstrap_cache_clear_locked "$1" "$2" "$3" || bc_status=1
+      else
+        bootstrap_cache_error "unbound nonempty cache preserved: $2; explicitly invalidate the owned phase or choose a new cache directory"; bc_status=1
+      fi
+    fi
+  fi
+  if [ "$bc_status" -ne 0 ]; then bootstrap_cache_writer_release "$2"; return 1; fi
+  if [ ! -e "$bc_binding" ]; then
+    (set -C; printf '%s\n' "$bc_expected" > "$bc_binding") || { bootstrap_cache_writer_release "$2"; return 1; }
+  fi
+  BOOTSTRAP_CACHE_WRITERS="${BOOTSTRAP_CACHE_WRITERS:+$BOOTSTRAP_CACHE_WRITERS
+}$2"
+}

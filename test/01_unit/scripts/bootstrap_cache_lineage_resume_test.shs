@@ -1,0 +1,232 @@
+#!/bin/sh
+# Executable cache owner fixtures, no full compiler/bootstrap run.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$repo/scripts/check/lib/portable-hardlink-lock.pl"
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+. "$repo/scripts/bootstrap/bootstrap-cache-policy.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_storage_path "$parent" || { echo 'test requires an isolated canonical absolute fixture root' >&2; exit 64; }
+work=$(mktemp -d "$parent/resume.XXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
+case "$work" in "$parent"/resume.*) ;; *) exit 1 ;; esac
+fixture_cleanup() {
+  fixture_status=$?
+  bootstrap_cache_release_all
+  if [ "$fixture_status" -eq 0 ]; then
+    chmod -R u+w "$work"
+    rm -rf -- "$work"
+  else
+    printf 'Retained failed fixture: %s\n' "$work" >&2
+  fi
+  return "$fixture_status"
+}
+trap fixture_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fail() { echo "FAIL cache lineage: $*" >&2; exit 1; }
+sha_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+sha_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+sha_c=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+cache_root="$work/cache"
+phase2="$cache_root/stage2/$sha_a/bootstrap-main"
+phase3="$cache_root/stage3/$sha_a/bootstrap-main"
+entry2="$cache_root/stage2/$sha_a/full-cli"
+mkdir -p "$phase2" "$phase3" "$entry2"
+bootstrap_cache_prepare "$cache_root" "$phase2" stage2 "$sha_a" "$sha_b" bootstrap-main reuse
+printf 'completed object after partial failure\n' > "$phase2/a.o"
+printf 'source-a\n' > "$phase2/frontend"
+mkdir "$phase2/runtime"
+printf 'completed runtime object\n' > "$phase2/runtime/runtime.o"
+printf 'failure: module-b not completed\n' > "$work/attempt1.log"
+cp "$phase2/.bootstrap-cache-binding" "$work/binding1"
+bootstrap_cache_release_all
+# A failed attempt keeps completed native/frontend/runtime units. The retry
+# resumes from the same binding and completes the previously missing object.
+bootstrap_cache_prepare "$cache_root" "$phase2" stage2 "$sha_a" "$sha_b" bootstrap-main reuse
+cmp -s "$work/binding1" "$phase2/.bootstrap-cache-binding" || fail 'retry altered immutable binding'
+[ "$(cat "$phase2/a.o")" = 'completed object after partial failure' ] || fail 'failed object removed'
+[ -f "$phase2/frontend" ] && [ -f "$phase2/runtime/runtime.o" ] || fail 'frontend/runtime partial state lost'
+printf 'retry completed b\n' > "$phase2/b.o"
+bootstrap_cache_release_all
+bootstrap_cache_prepare "$cache_root" "$phase3" stage3 "$sha_a" "$sha_b" bootstrap-main reuse
+printf 'unrelated phase object\n' > "$phase3/a.o"
+bootstrap_cache_release_all
+bootstrap_cache_prepare "$cache_root" "$entry2" stage2 "$sha_a" "$sha_b" full-cli reuse
+printf 'unrelated entry object\n' > "$entry2/a.o"
+bootstrap_cache_release_all
+# Producer, semantic source/options/runtime/tool digests and entry changes must
+# refuse rather than delete objects or rewrite metadata to fake admission.
+for changed in producer inputs entry; do
+  producer=$sha_a inputs=$sha_b entry=bootstrap-main
+  case "$changed" in producer) producer=$sha_c ;; inputs) inputs=$sha_c ;; entry) entry=mcp ;; esac
+  if bootstrap_cache_prepare "$cache_root" "$phase2" stage2 "$producer" "$inputs" "$entry" reuse >"$work/$changed.log" 2>&1; then
+    fail "$changed mismatch admitted"
+  fi
+  if [ "$changed" = entry ]; then
+    grep -q 'foreign phase/entry' "$work/$changed.log" || fail 'missing entry ownership diagnostic'
+  else
+    grep -q -- '--invalidate-cache=stage2' "$work/$changed.log" || fail 'missing actionable mismatch diagnostic'
+  fi
+  cmp -s "$work/binding1" "$phase2/.bootstrap-cache-binding" || fail 'mismatch altered binding'
+  [ -f "$phase2/a.o" ] && [ -f "$phase2/b.o" ] || fail 'mismatch discarded completed work'
+done
+# The actual input serializer distinguishes source identity, source content,
+# backend/options, runtime bytes and resolved tool bytes.
+printf 'original-source\n' > "$work/source"
+printf 'runtime-v1\n' > "$work/runtime"
+printf 'tool-abi-v1\n' > "$work/tools"
+bootstrap_cache_phase_inputs "$repo" target llvm dynload "$work/source" "$work/runtime" "$work/tools" > "$work/input0"
+for changed in source runtime tools options root; do
+  cp "$work/source" "$work/source0"; cp "$work/runtime" "$work/runtime0"; cp "$work/tools" "$work/tools0"
+  backend=llvm source_root=$repo
+  case "$changed" in source|runtime|tools) printf 'semantic-fix\n' >> "$work/$changed" ;; options) backend=cranelift ;; root) source_root="$repo/other" ;; esac
+  bootstrap_cache_phase_inputs "$source_root" target "$backend" dynload "$work/source" "$work/runtime" "$work/tools" > "$work/input1"
+  if cmp -s "$work/input0" "$work/input1"; then fail "$changed missing from semantic input binding"; fi
+  mv "$work/source0" "$work/source"; mv "$work/runtime0" "$work/runtime"; mv "$work/tools0" "$work/tools"
+done
+# A semantic fix is refused by default. Explicit selected-phase invalidation
+# permits the corrected output, keeping the other entry/phase object intact.
+bootstrap_cache_prepare "$cache_root" "$phase2" stage2 "$sha_a" "$sha_c" bootstrap-main invalidate
+[ ! -e "$phase2/a.o" ] && [ ! -e "$phase2/frontend" ] && [ ! -e "$phase2/runtime" ] || fail 'explicit selected invalidation left invalid objects'
+printf 'corrected source result\n' > "$phase2/a.o"
+bootstrap_cache_release_all
+[ "$(cat "$phase2/a.o")" = 'corrected source result' ] || fail 'fix not applied'
+[ -f "$phase3/a.o" ] && [ -f "$entry2/a.o" ] && [ -f "$work/attempt1.log" ] || fail 'invalidation touched unrelated scope/evidence'
+# A real second process cannot clean while the writer holds the lineage lock.
+bootstrap_cache_prepare "$cache_root" "$phase2" stage2 "$sha_a" "$sha_c" bootstrap-main reuse
+if sh "$repo/scripts/bootstrap/clean-bootstrap-cache.shs" --root "$cache_root" --lineage "$phase2" > "$work/active-clean.log" 2>&1; then fail 'clean accepted active writer'; fi
+[ -f "$phase2/a.o" ] || fail 'running clean removed object'
+bootstrap_cache_release_all
+sh "$repo/scripts/bootstrap/clean-bootstrap-cache.shs" --root "$cache_root" --lineage "$phase2" > "$work/idle-clean.log"
+[ ! -e "$phase2/a.o" ] && [ -f "$phase3/a.o" ] && [ -f "$entry2/a.o" ] || fail 'manual clean scope incorrect'
+# No TTL/success hook may collect another producer after compiler rebuild.
+printf '[native-build] compiled=1 reused=2 failed=0 scope=scope-aaaaaaaaaaaaaaaa\n' > "$work/compiler.log"
+mkdir -p "$phase3/scope-aaaaaaaaaaaaaaaa" "$phase3/scope-bbbbbbbbbbbbbbbb"
+printf kept > "$phase3/scope-bbbbbbbbbbbbbbbb/old.o"
+bootstrap_prune_stale_seed_scope_dirs 0 "$work/compiler.log" "$phase3"
+[ -f "$phase3/scope-bbbbbbbbbbbbbbbb/old.o" ] || fail 'automatic success hook deleted old producer'
+if bootstrap_cache_force_clear_one_binary incremental one-binary; then fail 'implicit onebinary clean'; fi
+# Clean-rebuild is an explicit wider operation, still selected and guarded.
+bootstrap_cache_prepare "$cache_root" "$phase3" stage3 "$sha_a" "$sha_b" bootstrap-main clean
+[ ! -e "$phase3/a.o" ] && [ -f "$entry2/a.o" ] || fail 'clean rebuild crossed scope'
+bootstrap_cache_release_all
+if bootstrap_cache_clean "$cache_root" "$work" > "$work/traversal.log" 2>&1; then fail 'out-of-root clean'; fi
+mkdir "$cache_root/unbound"
+printf immutable > "$cache_root/unbound/admission.env"
+if bootstrap_cache_clean "$cache_root" "$cache_root/unbound" > "$work/unbound.log" 2>&1; then fail 'unbound evidence accepted as cache'; fi
+[ -f "$cache_root/unbound/admission.env" ] || fail 'receipt cleaned'
+# Corrupt metadata and foreign-phase clean requests never delete payload.
+cp "$phase3/.bootstrap-cache-binding" "$work/phase3-binding"
+printf 'unknown-metadata\n' > "$phase3/.bootstrap-cache-binding"
+printf preserved > "$phase3/protected.o"
+if bootstrap_cache_clean "$cache_root" "$phase3" > "$work/corrupt-clean.log" 2>&1; then fail 'corrupt binding cleaned'; fi
+[ -f "$phase3/protected.o" ] || fail 'corrupt metadata lost payload'
+cp "$work/phase3-binding" "$phase3/.bootstrap-cache-binding"
+if bootstrap_cache_prepare "$cache_root" "$phase3" stage2 "$sha_a" "$sha_b" bootstrap-main invalidate > "$work/foreign-clean.log" 2>&1; then fail 'foreign phase invalidated'; fi
+[ -f "$phase3/protected.o" ] || fail 'foreign phase lost payload'
+# Reject traversal before the first mkdir/root marker mutation.
+if bootstrap_cache_prepare "$work/cache/../outside" "$work/cache/../outside/stage2" stage2 "$sha_a" "$sha_b" bootstrap-main reuse > "$work/path.log" 2>&1; then fail 'traversal accepted'; fi
+[ ! -e "$work/outside" ] || fail 'rejected selection mutated outside root'
+# Real TERM while the clean owner is paused cannot continue clearing after
+# releasing its writer. The EXIT trap preserves the signal status.
+cat > "$work/signal-clean.shs" <<'SIGNAL'
+#!/bin/sh
+set -eu
+. "$1"
+pause_marker=$4 continued_marker=$5
+bootstrap_cache_clear_locked() { sh -c 'printf "%s\n" "$PPID"' > "$pause_marker"; sleep 1; printf continued > "$continued_marker"; }
+bootstrap_cache_clean "$2" "$3"
+SIGNAL
+sh "$work/signal-clean.shs" "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs" "$cache_root" "$phase3" "$work/paused" "$work/continued" &
+signal_pid=$!
+poll=0
+while [ ! -f "$work/paused" ] && [ "$poll" -lt 40 ]; do sleep 0.05; poll=$((poll+1)); done
+[ -f "$work/paused" ] || fail 'signal fixture never acquired writer'
+kill -TERM "$(cat "$work/paused")"
+signal_status=0; wait "$signal_pid" || signal_status=$?
+[ "$signal_status" -eq 143 ] || fail "TERM status not preserved: $signal_status"
+[ ! -e "$work/continued" ] && [ ! -d "$phase3.writer" ] || fail 'clean continued after signal/unreleased writer'
+# SIGKILL retains the writer and completed cache. No automatic dead-PID repair:
+# the nonce selects the recorded attempt; native group authority proves idle.
+cat > "$work/crash-worker.shs" <<'CRASH'
+#!/bin/sh
+set -eu
+. "$1"
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH=$7
+bootstrap_cache_prepare "$2" "$3" stage3 "$4" "$5" bootstrap-main reuse
+sleep 20 &
+child=$!
+printf '%s\n' "$child" > "$6"
+wait "$child"
+CRASH
+perl "$repo/scripts/check/lib/portable-session-exec.pl" /bin/sh "$work/crash-worker.shs" "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs" "$cache_root" "$phase3" "$sha_a" "$sha_b" "$work/crash-ready" "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" &
+crash_pid=$!
+poll=0
+while [ ! -f "$work/crash-ready" ] && [ "$poll" -lt 40 ]; do sleep 0.05; poll=$((poll+1)); done
+[ -f "$work/crash-ready" ] || fail 'crash fixture never acquired writer'
+crash_nonce=$(cat "$phase3.writer/nonce")
+crash_child=$(cat "$work/crash-ready")
+if bootstrap_cache_repair_idle_writer "$cache_root" "$phase3" "$crash_nonce" > "$work/live-repair.log" 2>&1; then fail 'repair accepted live writer'; fi
+kill -KILL "$crash_pid"; wait "$crash_pid" 2>/dev/null || true
+[ -d "$phase3.writer" ] && [ -f "$phase3/protected.o" ] || fail 'crash lost lock/object'
+kill -0 "$crash_child" 2>/dev/null || fail 'orphan fixture child did not survive owner'
+if bootstrap_cache_repair_idle_writer "$cache_root" "$phase3" "$crash_nonce" > "$work/live-child-repair.log" 2>&1; then fail 'repair accepted dead parent with live child'; fi
+[ -f "$phase3/protected.o" ] && [ -d "$phase3.writer" ] || fail 'live-child refusal lost cache/writer'
+kill -TERM "$crash_child"
+# The host reaper owns this orphan. Require the same native group authority
+# to observe the complete group gone before the positive repair case.
+native_pid=$(sed -n 's/^pid=//p' "$phase3.writer/process.env")
+native_start=$(sed -n 's/^start_hex=//p' "$phase3.writer/process.env")
+native_pgid=$(sed -n 's/^pgid=//p' "$phase3.writer/process.env")
+poll=0
+while [ "$poll" -lt 40 ]; do
+  group_state=$(perl "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" claim-state "$native_pid" "$native_start" "$native_pgid" 2>/dev/null)
+  [ "$group_state" != dead ] || break
+  sleep 0.05; poll=$((poll+1))
+done
+[ "$group_state" = dead ] || fail 'terminated owned child was not reaped; repair correctly remains refused'
+if bootstrap_cache_prepare "$cache_root" "$phase3" stage3 "$sha_a" "$sha_b" bootstrap-main reuse > "$work/orphan.log" 2>&1; then fail 'crash silently repaired ambiguous writer'; fi
+if bootstrap_cache_repair_idle_writer "$cache_root" "$phase3" wrong-nonce > "$work/wrong-nonce.log" 2>&1; then fail 'repair accepted wrong identity'; fi
+bootstrap_cache_repair_idle_writer "$cache_root" "$phase3" "$crash_nonce" > "$work/repaired.log"
+bootstrap_cache_prepare "$cache_root" "$phase3" stage3 "$sha_a" "$sha_b" bootstrap-main reuse
+[ -f "$phase3/protected.o" ] || fail 'repaired retry lost cache'
+bootstrap_cache_release_all
+# Canonical compiler field names bind actual native inputs and caller overrides.
+SIMPLE_NATIVE_CPU=cpu-a SIMPLE_SAFETY_PROFILE=standard \
+  bootstrap_cache_native_environment "$repo" > "$work/env-a"
+SIMPLE_NATIVE_CPU=cpu-b SIMPLE_SAFETY_PROFILE=standard \
+  bootstrap_cache_native_environment "$repo" > "$work/env-b"
+if cmp -s "$work/env-a" "$work/env-b"; then fail 'canonical CPU omitted'; fi
+SIMPLE_NATIVE_CPU=cpu-a SIMPLE_SAFETY_PROFILE=critical \
+  bootstrap_cache_native_environment "$repo" > "$work/env-critical"
+if cmp -s "$work/env-a" "$work/env-critical"; then fail 'canonical safety omitted'; fi
+SIMPLE_NATIVE_CPU=ambient \
+  bootstrap_cache_native_environment "$repo" SIMPLE_NATIVE_CPU=forced > "$work/env-override"
+grep -q '^SIMPLE_NATIVE_CPU=6:forced$' "$work/env-override" || fail 'actual forced override not bound'
+SIMPLE_STAGE3_MISSION_CRITICAL=1 bootstrap_cache_stage3_assurance > "$work/assurance-critical"
+SIMPLE_STAGE3_MISSION_CRITICAL= bootstrap_cache_stage3_assurance > "$work/assurance-standard"
+if cmp -s "$work/assurance-critical" "$work/assurance-standard"; then fail 'actual Stage3 assurance omitted'; fi
+grep -Fq '"SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend"' "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" || fail 'resume args disable/misplace frontend cache'
+grep -Fq 'SIMPLE_FRONTEND_CACHE=1 SIMPLE_FRONTEND_CACHE_DIR="$cache/frontend"' "$repo/scripts/bootstrap/lib/stage3-native-build-worker.sh" || fail 'actual worker disables/misplaces frontend cache'
+# Immutable attempt publication fails closed on partial enumeration and on a
+# preexisting unverified manifest. Its positive receipt hashes actual bytes.
+mkdir "$work/freeze-failed" "$work/freeze-duplicate" "$work/freeze-good"
+printf attempt > "$work/freeze-failed/result.log"
+find() { if [ "${3:-}" = f ]; then printf './result.log\n'; return 1; fi; command find "$@"; }
+if bootstrap_cache_freeze_attempt "$work/freeze-failed" > "$work/freeze-failed.log" 2>&1; then fail 'partial enumeration admitted'; fi
+unset -f find
+[ ! -e "$work/freeze-failed/attempt-files.sha256" ] || fail 'partial enumeration published receipt'
+printf invalid > "$work/freeze-duplicate/attempt-files.sha256"
+if bootstrap_cache_freeze_attempt "$work/freeze-duplicate" > "$work/freeze-duplicate.log" 2>&1; then fail 'invalid existing manifest re-admitted'; fi
+printf actual > "$work/freeze-good/result.log"
+bootstrap_cache_freeze_attempt "$work/freeze-good"
+[ "$(awk '{print $1}' "$work/freeze-good/attempt-files.sha256")" = "$(bootstrap_cache_hash_file "$work/freeze-good/result.log")" ] || fail 'attempt receipt content mismatch'
+# A prompt reports actual compiler result counters, never configuration.
+[ "$(bootstrap_cache_report_log "$work/compiler.log")" = 'Cache: reused 2 modules; rebuilt 1.' ] || fail 'actual cache prompt counts'
+printf 'Cache enabled\n' > "$work/no-hits.log"
+[ -z "$(bootstrap_cache_report_log "$work/no-hits.log")" ] || fail 'configuration mislabeled as hit'
+echo 'PASS bootstrap cache lineage: partial failure/retry, 8 identity changes, explicit scope invalidation, idle clean, active refusal, no implicit prune, actual counters'
