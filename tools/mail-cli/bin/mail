@@ -23,6 +23,7 @@
 #   config     Manage settings
 
 set -euo pipefail
+umask 077
 
 VERSION="0.1.0"
 
@@ -43,6 +44,7 @@ MAIL_ACCOUNT=""
 . "${LIB_DIR}/config.shs"
 . "${LIB_DIR}/format.shs"
 . "${LIB_DIR}/imap.shs"
+. "${LIB_DIR}/pop3.shs"
 . "${LIB_DIR}/smtp.shs"
 . "${LIB_DIR}/auth.shs"
 . "${LIB_DIR}/inbox.shs"
@@ -54,15 +56,12 @@ check_deps() {
   for cmd in curl jq base64; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       echo "${C_RED}error:${C_RESET} '${cmd}' is required but not installed." >&2
-      echo "  Install: brew install ${cmd}" >&2
+      echo "  Install ${cmd} with your platform's package manager (see tools/mail-cli/README.md)." >&2
       exit 1
     fi
   done
-  # Verify curl has IMAP/SMTP support
-  if ! curl --version | grep -q 'imaps'; then
-    echo "${C_RED}error:${C_RESET} curl does not support IMAP. Rebuild curl with IMAP support." >&2
-    exit 1
-  fi
+  # Each transport reports curl's unsupported-protocol error at use-time.
+  # A POP3-only curl build must still be able to configure/use POP3 accounts.
 }
 
 cmd_config() {
@@ -76,17 +75,17 @@ cmd_config() {
       fi
       mail_config_init
       local tmp="${MAIL_CONFIG_FILE}.tmp"
-      jq --arg k "$1" --arg v "$2" '.[$k] = $v' "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
+      jq --arg k "$1" --arg v "$2" '.[$k] = $v' < "$MAIL_CONFIG_FILE" > "$tmp" && mv "$tmp" "$MAIL_CONFIG_FILE"
       chmod 600 "$MAIL_CONFIG_FILE"
       echo "${C_GREEN}✓${C_RESET} Set ${1}"
       ;;
     get)
       [ $# -lt 1 ] && { echo "Usage: mail config get <key>" >&2; return 2; }
-      jq -r ".${1} // empty" "$MAIL_CONFIG_FILE" 2>/dev/null
+      jq -r ".${1} // empty" < "$MAIL_CONFIG_FILE" 2>/dev/null
       ;;
     list)
       mail_config_init
-      jq '.' "$MAIL_CONFIG_FILE" 2>/dev/null
+      jq '.' < "$MAIL_CONFIG_FILE" 2>/dev/null
       ;;
     *)
       echo "Manage mail-cli configuration"
@@ -145,6 +144,15 @@ cmd_help() {
   echo "${C_BOLD}GLOBAL FLAGS${C_RESET}"
   echo "  --account NAME   Use specific account (overrides default)"
   echo "  --json           Output as JSON"
+  echo "  --password-file FILE  Override saved password (one line; never argv)"
+  echo "  --password-cmd CMD    Obtain a password from a command"
+  echo "  --non-interactive     Never prompt for credentials"
+  echo "  --config-file FILE    Shared account JSON file (e.g. {home}/.config/devhub/email.json)"
+  echo "  --config-dir DIR      Account directory containing config.json"
+  echo "  Paths accept a leading {home}; quote it in launch commands"
+  echo "  POP3: auth login --protocol pop3; inbox/read/reply/forward/send supported"
+  echo "  POP3 message numbers can change between sessions; folders/flags/search unavailable"
+  echo "  auth password         Validate and save a replacement password"
   echo ""
   echo "${C_BOLD}INBOX/SEARCH FLAGS${C_RESET}"
   echo "  --unread         Only unread messages (inbox)"
@@ -195,6 +203,57 @@ main() {
 
   local command="${1:-help}"
   shift 2>/dev/null || true
+
+  local config_kind=""
+  local -a remaining=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --config-file|--config-dir)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a value" >&2; return 2; }
+        if [ -n "$config_kind" ] && [ "$config_kind" != "$1" ]; then
+          echo "error: choose --config-file or --config-dir" >&2; return 2
+        fi
+        config_kind="$1"
+        if [ "$1" = --config-file ]; then
+          MAIL_CONFIG_FILE=$(mail_expand_path "$2") || return $?
+          MAIL_CONFIG_DIR=$(dirname -- "$MAIL_CONFIG_FILE")
+        else
+          MAIL_CONFIG_DIR=$(mail_expand_path "$2") || return $?
+          MAIL_CONFIG_FILE="${MAIL_CONFIG_DIR}/config.json"
+        fi
+        shift 2 ;;
+      --account|--password-file|--password-cmd)
+        [ $# -ge 2 ] && [ -n "$2" ] || { echo "error: $1 needs a value" >&2; return 2; }
+        case "$1" in
+          --account) MAIL_ACCOUNT="$2" ;;
+          --password-file) MAIL_PASSWORD_FILE="$2" ;;
+          --password-cmd) MAIL_PASSWORD_COMMAND="$2" ;;
+        esac
+        # Auth login/logout still parse these flags themselves.
+        if [ "$command" = auth ] && [ "$1" != --password-file ]; then remaining+=("$1" "$2"); fi
+        shift 2 ;;
+      --non-interactive) MAIL_NONINTERACTIVE=1; shift ;;
+      *) remaining+=("$1"); shift ;;
+    esac
+  done
+  set -- "${remaining[@]}"
+  if [ -n "${MAIL_PASSWORD_FILE:-}" ] && [ -n "${MAIL_PASSWORD_COMMAND:-}" ]; then
+    echo "error: choose --password-file or --password-cmd" >&2; return 2
+  fi
+  case "$command" in
+    inbox|read|send|reply|forward|search|folder|star|archive|delete|move|draft)
+      local selected="${MAIL_ACCOUNT:-}" protocol
+      [ -n "$selected" ] || selected=$(mail_config_get_default)
+      protocol=$(mail_config_get_account "$selected" | jq -r '.protocol // "imap"')
+      case "$protocol" in ''|imap|pop3) ;; *) echo "error: unknown mail protocol" >&2; return 2 ;; esac
+      if [ "$protocol" = pop3 ]; then
+        case "$command" in
+          inbox) cmd_pop3_inbox "$@"; return $? ;;
+          read|send|reply|forward) ;;
+          *) echo "error: POP3 does not support ${command}" >&2; return 2 ;;
+        esac
+      fi ;;
+  esac
 
   case "$command" in
     auth)    cmd_auth "$@" ;;
