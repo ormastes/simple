@@ -1515,18 +1515,48 @@ pub(super) fn parse_archive_weak_global_symbols(output: &str, macho: bool) -> BT
     for line in output.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if macho {
-            // Require a defined address and section followed by weak external.
+            // LLVM bitcode definitions use dashes until link. Undefined weak
+            // references still carry an explicit (undefined) section.
+            let has_address = fields.first().is_some_and(|address| {
+                address.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || matches!(*address, "--------" | "----------------")
+            });
             if fields.len() < 5
-                || !fields[0].bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !has_address
                 || !fields[1].starts_with('(')
+                || !fields[1].ends_with(')')
                 || fields[1] == "(undefined)"
-                || fields[2..4] != ["weak", "external"]
             {
                 continue;
             }
-            let name = match &fields[4..] {
-                [name] => *name,
-                ["automatically", "hidden", name] => *name,
+            let mut flags = &fields[2..];
+            if flags.starts_with(&["[referenced", "dynamically]"]) {
+                flags = &flags[2..];
+            }
+            if !flags.starts_with(&["weak", "external"]) {
+                continue;
+            }
+            flags = &flags[2..];
+            if flags.starts_with(&["automatically", "hidden"]) {
+                flags = &flags[2..];
+            }
+            loop {
+                let annotation_len = if flags.starts_with(&["[no", "dead", "strip]"]) {
+                    3
+                } else if flags.starts_with(&["[symbol", "resolver]"])
+                    || flags.starts_with(&["[alt", "entry]"])
+                    || flags.starts_with(&["[cold", "func]"])
+                {
+                    2
+                } else if flags.starts_with(&["[Thumb]"]) {
+                    1
+                } else {
+                    break;
+                };
+                flags = &flags[annotation_len..];
+            }
+            let name = match flags {
+                [name] if !name.starts_with('[') => *name,
                 _ => continue,
             };
             weak.insert(name.to_string());
