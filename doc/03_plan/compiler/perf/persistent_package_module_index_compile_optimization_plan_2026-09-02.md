@@ -443,5 +443,12 @@ collapsed two distinct GC-family regex facades to `tooling.regex_nfa` before
 compilation. This is a source-root naming blocker, not a current-source
 compiler or Target 6 performance pass. See
 `doc/08_tracking/bug/stage4_module_collisions_and_stale_imports_2026-07-24.md`.
+An entry walk with that older Stage4 binary bypassed the GC-family collision
+but rejected 124 current-source declarations during parse; forcing the
+closure flag before the walk loaded only the entry and left imports unresolved.
+Neither route produced a current-source compiler. The 12 remaining canonical
+`ffi_gen.specs` files that imported `NL` from the wrong module now use
+`std.text.{NL}`. The full production cutover still needs the current-source
+self-hosted build and qualification gates above.
 The marker bridge's focused native evidence and limits are in
 `doc/09_report/compiler/target6_index_compat_marker_publication_2026-09-28.md`.
