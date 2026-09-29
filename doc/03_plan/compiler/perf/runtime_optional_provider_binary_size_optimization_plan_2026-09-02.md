@@ -10,6 +10,13 @@ absolute limit; a 30-pair Simple/Python startup and RSS cohort has normalized
 p95 ratio sum 0.174. This does not close the matched C 1.05x size gate,
 optional-provider closure, or BS7 production receipts. Evidence is in
 `doc/09_report/compiler/target5_stage4_hello_entry_diagnostic_2026-09-29.md`.
+An attribution follow-up built a 7,744-byte C hello using the Simple entry
+calls and an available core-C runtime archive, versus the saved 13,544-byte
+Simple hello (1.75x). That archive and the saved Simple link are not proven to
+share exact input identities, so this is not the matched-size gate. The next
+build must retain exact linker inputs, archive hashes, and a map alongside
+the Stage4 hello before producing the required same-input C comparator; see
+`doc/09_report/compiler/target5_stage4_hello_c_attribution_2026-09-29.md`.
 
 ## Phase 0 — Baselines and Attribution
 
