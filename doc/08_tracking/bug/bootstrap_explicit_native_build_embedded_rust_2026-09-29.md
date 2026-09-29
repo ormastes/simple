@@ -44,6 +44,10 @@ of the invoking process. Both requested `SIMPLE_BINARY` and `SIMPLE_BIN` must
 canonicalize to that image if supplied; a missing or conflicting path fails
 before policy collection, inventory refresh, or child spawning. POSIX symlinks,
 Windows drive casing and extended/UNC path prefixes use canonical comparison.
+CoreC Windows `_fullpath` does not resolve symlinks or junctions: distinct
+aliases to the same image are rejected, so callers must supply its image path.
+Strict host selection uses the runtime `host_os` owner, independent of scrubbed
+`OS`/`OSTYPE`; ordinary resolver host detection retains its previous behavior.
 No argv, repository binary or seed fallback is allowed for that binding. The
 ordinary tool resolver retains its previous behavior. No runtime ABI was added.
 
@@ -57,6 +61,8 @@ ordinary tool resolver retains its previous behavior. No runtime ABI was added.
   `test/fixtures/bootstrap/pure_native_build_source_entry.spl` and print its
   marker. Matching producer overrides must succeed; conflicting overrides must
   reject before inventory mutation or child spawning. These checks are pending.
+  Windows must additionally execute the strict probe and positive build with
+  `OS`/`OSTYPE` absent, confirming the reported kernel image remains available.
 - The first serialized cold tools build must produce a real full-scope inventory
   receipt before warm children run. No hand-written inventory or freshness stamp.
 - Caret, DevHub and MCP product/runtime checks remain pending until a refreshed
