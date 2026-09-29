@@ -1,4 +1,9 @@
-# Private `.spipe` overlay setup
+# Legacy project-local `.spipe` overlay setup
+
+For new home installations use core `{home}/.spipe`, private/local `{home}/spipe`, and
+`{home}/spipe/common -> {home}/.spipe`. Run `scripts/setup-spipe-local.shs` (or `.ps1`)
+from Simple after installing core. The scripts below retain the explicit legacy
+project-overlay workflow; they do not migrate or deploy the home layout.
 
 Installers for an org that wants to use this public project privately: a private
 `.spipe` overlay that holds an LLM wiki and a read-only copy of this project,

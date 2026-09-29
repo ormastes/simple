@@ -1,5 +1,14 @@
 # LLM Repository Wiki
 
+## SPipe home routing
+
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
+`.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
+runtime state out of core. Preserve existing reversed layouts and pinned legacy
+submodules until explicit migration; never overwrite an occupied route.
+See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownership.
+
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 

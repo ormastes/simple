@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+SCENARIOS=0
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../../../.." && pwd)"
+FIXTURE="$(mktemp -d)"
+trap 'rm -rf "$FIXTURE"' EXIT HUP INT TERM
+mkdir -p "$FIXTURE/home/.spipe/scripts" "$FIXTURE/project/scripts"
+printf '%s\n' '{"name":"@simple-lang/spipe"}' > "$FIXTURE/home/.spipe/package.json"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "$@" > "$HOME/delegated"' > "$FIXTURE/home/.spipe/scripts/setup-local-knowledge.sh"
+cp "$ROOT/scripts/setup-spipe-local.shs" "$FIXTURE/project/scripts/"
+git init -q "$FIXTURE/project"
+if [ "${1:-}" = --placeholder-only ]; then
+  # A space-containing home and shell-looking path component stay literal.
+  mv "$FIXTURE/home" "$FIXTURE/home with spaces"
+  HOME="$FIXTURE/home with spaces" SPIPE_HOME='{home}/.spipe' SPIPE_WORKSPACE='{home}/spipe' sh "$FIXTURE/project/scripts/setup-spipe-local.shs" --project placeholder --yes
+  test "$(readlink "$FIXTURE/home with spaces/spipe/common")" = "$FIXTURE/home with spaces/.spipe"
+  test "$(readlink "$FIXTURE/project/.spipe/common")" = "$FIXTURE/home with spaces/spipe/common"
+  grep -Fqx placeholder "$FIXTURE/home with spaces/delegated"
+  SCENARIOS=$((SCENARIOS + 1))
+  mkdir -p "$FIXTURE/literal-project/scripts"
+  cp "$ROOT/scripts/setup-spipe-local.shs" "$FIXTURE/literal-project/scripts/"
+  git init -q "$FIXTURE/literal-project"
+  literal_workspace='{home}/private $(touch SHOULD_NOT_EXIST)'
+  HOME="$FIXTURE/home with spaces" SPIPE_HOME='{home}/.spipe' SPIPE_WORKSPACE="$literal_workspace" sh "$FIXTURE/literal-project/scripts/setup-spipe-local.shs" --yes
+  test "$(readlink "$FIXTURE/home with spaces/private \$(touch SHOULD_NOT_EXIST)/common")" = "$FIXTURE/home with spaces/.spipe"
+  test ! -e SHOULD_NOT_EXIST
+  SCENARIOS=$((SCENARIOS + 1))
+  echo "placeholder_scenarios=$SCENARIOS"
+  echo "STATUS: PASS spipe-home-placeholders"
+  exit 0
+fi
+if [ "${1:-}" = --migration-only ]; then
+  reject_layout() {
+    if HOME="$FIXTURE/home" SPIPE_HOME="$FIXTURE/home/.spipe" SPIPE_WORKSPACE="$1" sh "$FIXTURE/project/scripts/setup-spipe-local.shs" --yes >"$FIXTURE/migration.log" 2>&1; then exit 1; fi
+    test ! -e "$FIXTURE/home/delegated"
+    test ! -e "$FIXTURE/project/.spipe/common"
+    SCENARIOS=$((SCENARIOS + 1))
+  }
+  mkdir "$FIXTURE/legacy core"
+  cp "$FIXTURE/home/.spipe/package.json" "$FIXTURE/legacy core/"
+  reject_layout "$FIXTURE/legacy core"
+  test ! -e "$FIXTURE/legacy core/common"
+  reject_layout "$FIXTURE/home/.spipe/nested/private"
+  test ! -e "$FIXTURE/home/.spipe/nested"
+  reject_layout "$FIXTURE/home"
+  test ! -e "$FIXTURE/home/common"
+  ln -s "$FIXTURE/home/.spipe" "$FIXTURE/core alias"
+  reject_layout "$FIXTURE/core alias/nested"
+  test ! -e "$FIXTURE/home/.spipe/nested"
+  echo "migration_scenarios=$SCENARIOS"
+  echo "STATUS: PASS spipe-home-migration-guards"
+  exit 0
+fi
+env -u SPIPE_HOME -u SPIPE_WORKSPACE HOME="$FIXTURE/home" sh "$FIXTURE/project/scripts/setup-spipe-local.shs" --project example --yes
+test "$(readlink "$FIXTURE/home/spipe/common")" = "$FIXTURE/home/.spipe"
+test "$(readlink "$FIXTURE/project/.spipe/common")" = "$FIXTURE/home/spipe/common"
+grep -Fqx example "$FIXTURE/home/delegated"
+SCENARIOS=$((SCENARIOS + 1))
+echo "PASS default-home-routes"
+# Idempotence preserves links and forwards arguments.
+env -u SPIPE_HOME -u SPIPE_WORKSPACE HOME="$FIXTURE/home" sh "$FIXTURE/project/scripts/setup-spipe-local.shs" --project second --yes
+grep -Fqx second "$FIXTURE/home/delegated"
+SCENARIOS=$((SCENARIOS + 1))
+echo "PASS repeat-setup"
+# A conflicting route preserves user data and fails before delegation.
+rm "$FIXTURE/home/spipe/common"
+mkdir "$FIXTURE/home/spipe/common"
+printf keep > "$FIXTURE/home/spipe/common/private.txt"
+if env -u SPIPE_HOME -u SPIPE_WORKSPACE HOME="$FIXTURE/home" sh "$FIXTURE/project/scripts/setup-spipe-local.shs" --yes >"$FIXTURE/conflict.log" 2>&1; then exit 1; fi
+test "$(cat "$FIXTURE/home/spipe/common/private.txt")" = keep
+grep -Fqx second "$FIXTURE/home/delegated"
+SCENARIOS=$((SCENARIOS + 1))
+echo "PASS preserve-conflict"
+# Explicit core/workspace paths, including spaces, remain supported.
+mkdir -p "$FIXTURE/custom core/scripts" "$FIXTURE/other/scripts"
+cp "$FIXTURE/home/.spipe/package.json" "$FIXTURE/custom core/"
+cp "$FIXTURE/home/.spipe/scripts/setup-local-knowledge.sh" "$FIXTURE/custom core/scripts/"
+cp "$ROOT/scripts/setup-spipe-local.shs" "$FIXTURE/other/scripts/"
+git init -q "$FIXTURE/other"
+HOME="$FIXTURE/home" SPIPE_HOME="$FIXTURE/custom core" SPIPE_WORKSPACE="$FIXTURE/private workspace" sh "$FIXTURE/other/scripts/setup-spipe-local.shs" --yes
+test "$(readlink "$FIXTURE/private workspace/common")" = "$FIXTURE/custom core"
+SCENARIOS=$((SCENARIOS + 1))
+echo "PASS explicit-roots-with-spaces"
+if HOME="$FIXTURE/home" SPIPE_HOME="$FIXTURE/custom core" SPIPE_WORKSPACE="$FIXTURE/custom core" sh "$FIXTURE/other/scripts/setup-spipe-local.shs" --yes >"$FIXTURE/alias.log" 2>&1; then exit 1; fi
+SCENARIOS=$((SCENARIOS + 1))
+echo "PASS reject-core-workspace-alias"
+echo "scenarios=$SCENARIOS"
+echo "STATUS: PASS spipe-home-routes"

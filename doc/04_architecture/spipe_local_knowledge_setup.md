@@ -11,7 +11,7 @@ and performance claims are historical input, not newly verified measurements.
 
 | ID | User-selected outcome |
 |---|---|
-| REQ-001 | Preserve the original `.spipe/.spipe` user layout; September 9 refines new global installs to `~/spipe` common and `~/.spipe` private workspace with `common` link. |
+| REQ-001 | Preserve the original `.spipe/.spipe` user layout; September 29 refines new global installs to `{home}/.spipe` common and `{home}/spipe` private workspace with `common` link. |
 | REQ-002 | Interactive setup supports first installation and use after cloning a project. |
 | REQ-003 | Common, company, organization, project, user, and host content retains independent ownership. |
 | REQ-004 | Shared configuration contains logical identities and revision pins; local configuration owns machine paths. |
@@ -25,10 +25,10 @@ and performance claims are historical input, not newly verified measurements.
 ## Ownership and physical layout
 
 The following September 8 layout remains a supported compatibility contract.
-The September 9 preferred layout below supersedes it for new global installs.
+The September 29 preferred layout below supersedes it for new global installs.
 
 ```text
-<user-root>/.spipe/                 user repository; ~/.spipe is a default
+<user-root>/.spipe/                 user repository; {home}/.spipe is a default
 ├── .spipe/                        pinned common SPipe Git submodule
 ├── organization/<organization>/   user-authorized organization content/registration
 ├── projects/<project>/            project content/registration
@@ -47,9 +47,9 @@ checkouts remain in place; registration does not copy their contents.
 Preferred global layout:
 
 ```text
-~/spipe/                                  independent common checkout
-~/.spipe/                                 private workspace
-├── common -> ~/spipe
+{home}/.spipe/                                 independent common checkout
+{home}/spipe/                                  private workspace
+├── common -> {home}/.spipe
 ├── companies/<company>/organizations/<organization>/
 ├── projects/<project>/                    registrations only
 ├── users/<user>/hosts/<host>/mounts.json   private account-specific mounts
@@ -125,14 +125,15 @@ An occupied project `.spipe` directory is a migration case, not an empty target.
 The installer must diagnose the legacy nested submodule and preserve it. Moving
 it requires a separately reviewed migration that accounts for state, registry
 files, Git metadata, and dirty content. Newly created installations use the
-requested direct `.spipe` submodule layout when that mode is explicitly chosen.
-New global installations use the September 9 preferred layout.
+canonical external core and `common` link; recorded nested submodules remain readable.
+New global installations use the September 29 preferred layout.
 
-The latest user refinement routes Simple `.spipe/common` to canonical `~/spipe`.
-The locator resolves explicit `SPIPE_HOME`, project `.spipe/common`,
-`~/spipe`, `~/.spipe/common`, direct current SPipe package, then verified legacy
-`.spipe/spipe`, `.spipe/spipe_project`, direct `.spipe` gitlink, or `~/.spipe`
-package. Legacy mounts are migration fallbacks rather than preferred locations.
+The latest user refinement routes Simple `.spipe/common` to canonical `{home}/.spipe`.
+The locator resolves explicit `SPIPE_HOME`, then project `.spipe/common`,
+`.spipe/spipe`, `.spipe/spipe_project`, and direct `.spipe` packages while
+walking ancestor projects. Home fallbacks are `{home}/.spipe`, `{home}/spipe/common`,
+legacy `{home}/spipe`, and legacy `{home}/.spipe/common`, followed by the current package.
+Project pins keep precedence over global installations.
 Explicit invalid selections fail; an existing project revision requirement
 must match the selected common or produce an incompatibility diagnostic until
 a reviewed migration changes it. No physical submodule relocation is part of
@@ -154,3 +155,7 @@ count on fixtures; exclude network transfer from a fabricated latency promise.
 Next: hosted research controller and exact context manifests, then Slang
 instrumentation/isolation and serial exact-prefix restore. No cache capability
 is claimed by completing this setup phase.
+
+The September 29 deployment uses `SPIPE_HOME` for core and `SPIPE_WORKSPACE`
+for private/local knowledge. Simple setup links project `.spipe/common` through
+`{home}/spipe/common`, rejects conflicting existing routes, and preserves legacy pins.
