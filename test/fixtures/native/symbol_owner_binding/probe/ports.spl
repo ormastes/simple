@@ -37,3 +37,75 @@ pub fn make_plain_closure() -> fn(i64) -> i64:
 
 pub fn float_sum(left: f64, right: f64) -> f64:
     left + right
+
+var global_callback: fn(i64, i64) -> i64 = rt_hal_unavailable_spawn
+
+pub fn callback_owner_controls() -> i64:
+    if global_callback(60, 4) != 64:
+        return 1
+    val capability: text = "emit-gpu"
+    val captured_text: fn(text) -> bool = \x: x == capability
+    if not captured_text("emit-gpu") or captured_text("emit-source"):
+        return 2
+    val enabled: bool = true
+    val captured_bool: fn(bool) -> bool = \x: enabled and x
+    if not captured_bool(true) or captured_bool(false):
+        return 3
+    return 0
+
+extern fn rt_pool_state_create_v1(capacity: i64) -> i64
+extern fn rt_pool_state_try_submit_i64_v1(state: i64, entry: Any, input: i64) -> i64
+extern fn rt_pool_task_join_i64_v1(task: i64) -> i64
+extern fn rt_pool_task_release_i64_v1(task: i64) -> i64
+extern fn rt_pool_state_close_v1(state: i64) -> i64
+extern fn rt_pool_state_destroy_v1(state: i64) -> i64
+
+fn scalar_increment(input: i64) -> i64: input + 1
+
+pub fn scalar_pool_controls() -> i64:
+    val state = rt_pool_state_create_v1(1)
+    if state <= 0:
+        return 1
+    val named: fn(i64) -> i64 = scalar_increment
+    val task = rt_pool_state_try_submit_i64_v1(state, named, 41)
+    if task <= 0:
+        return 2
+    if rt_pool_task_join_i64_v1(task) != 42:
+        return 3
+    if rt_pool_task_release_i64_v1(task) != 1:
+        return 4
+    val delta: i64 = 7
+    val captured: fn(i64) -> i64 = \x: x + delta
+    if rt_pool_state_try_submit_i64_v1(state, captured, 1) != -3:
+        return 5
+    val marker: i64 = 0x5344495245435446
+    val captured_marker: fn(i64) -> i64 = \x: marker + x
+    if rt_pool_state_try_submit_i64_v1(state, captured_marker, 1) != -3:
+        return 6
+    val empty: fn(i64) -> i64 = \x: x + 2
+    if rt_pool_state_try_submit_i64_v1(state, empty, 1) != -3:
+        return 7
+    if captured(3) != 10 or captured_marker(3) != marker + 3:
+        return 8
+    if rt_pool_state_close_v1(state) != 1:
+        return 9
+    if rt_pool_state_destroy_v1(state) != 1:
+        return 10
+    return 0
+
+var void_calls: i64 = 0
+
+fn bump_void(value: i64) -> ():
+    void_calls = void_calls + value
+
+pub fn void_controls() -> i64:
+    val named: fn(i64) -> () = bump_void
+    named(2)
+    val empty: fn(i64) -> () = \x: bump_void(x)
+    empty(4)
+    val delta: i64 = 3
+    val captured: fn(i64) -> () = \x: bump_void(x + delta)
+    captured(5)
+    if void_calls != 14:
+        return 1
+    return 0
