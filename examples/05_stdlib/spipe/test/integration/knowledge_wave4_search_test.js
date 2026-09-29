@@ -6,9 +6,9 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
-import { CONTRACTS, createUnicode17Analyzer, deriveScopedSearchDocument } from "../../src/index/index.js";
+import { CONTRACTS, LogicalLexicalIndex, createUnicode17Analyzer, deriveScopedSearchDocument } from "../../src/index/index.js";
 import { canonicalBytes } from "../../src/model/identity.js";
-import { InProcessSearchProviderAdapter, JsFixedPointSearchProvider } from "../../src/provider/index.js";
+import { InProcessSearchProviderAdapter, JsFixedPointSearchProvider, ReadOnlyJsFallbackSearchProvider } from "../../src/provider/index.js";
 import { ALPHABETIC_RANGES, DECIMAL_NUMBER_RANGES, MARK_RANGES, CASED_RANGES, CASE_IGNORABLE_RANGES, CANONICAL_COMBINING_CLASS, CANONICAL_DECOMPOSITIONS, CANONICAL_COMPOSITIONS, DEFAULT_LOWERCASE, HANGUL_NFC } from "../../src/search/generated/unicode_17_0_0.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +58,25 @@ function createJsProviderFixture() {
   return { adapter, analyzer, documents, opened, provider };
 }
 
+function initializeRequest(request_id = "readonly-init") {
+  return { request_id, operation: "initialize", protocol: { major: 1, minor: 0 }, client: "spipe", required: { provider: CONTRACTS.provider, analyzer: CONTRACTS.analyzer, score: CONTRACTS.score, explanation: CONTRACTS.explanation, logical_index: CONTRACTS.logical_index }, limits: { max_frame_bytes: 1_048_576 } };
+}
+
+function createReadOnlyJsFixture() {
+  const corpus = fixture("golden_corpus.json");
+  const analyzer = createUnicode17Analyzer(tables, { stop_words: ["and", "the"] });
+  const documents = corpus.documents.filter(({ visibility }) => visibility === "public").map((record) => deriveScopedSearchDocument({ document_id: record.id, revision: record.revision, fields: corpus.field_order.map((name) => ({ name, value: record.fields[name].normalize("NFC") })), facets: [{ name: "visibility", value: record.visibility }], visibility_digest: HASH1, scope_digest: HASH0 }));
+  const root = new LogicalLexicalIndex({ scope_digest: HASH0, analyzer, documents, cursor_key: Buffer.alloc(32, 1) }).logical_root;
+  const provider = new ReadOnlyJsFallbackSearchProvider({ analyzer, scope_digest: HASH0, logical_root: root, documents, cursor_key: Buffer.alloc(32, 1) });
+  provider.initialize(initializeRequest());
+  const opened = Object.freeze({ logical_root: root, document_count: documents.length, state: "opened" });
+  const adapter = Object.freeze({
+    search: (input) => provider.search({ scope_digest: HASH0, logical_root: root, ...input }),
+    stats: ({ logical_root }) => provider.stats({ scope_digest: HASH0, logical_root }),
+  });
+  return { adapter, analyzer, documents, opened, provider };
+}
+
 function assertGoldenQueries(context) {
   const expected = fixture("golden_results.json");
   assert.equal(context.opened.logical_root, expected.logical_root);
@@ -98,7 +117,7 @@ const jsChecks = new Map([
   ["W4-SRCH-03", assertGoldenQueries],
   ["W4-SRCH-04", (c) => assert.equal(c.opened.logical_root, fixture("golden_results.json").logical_root)],
   ["W4-SRCH-05", assertDeltaParity],
-  ["W4-SRCH-11", (c) => { assert.equal(c.documents.some(({ document_id }) => document_id === "A-private"), false); assertGoldenQueries(c); }],
+  ["W4-SRCH-11", (c) => { assert.equal(c.documents.some(({ document_id }) => document_id === "A-private"), false); assert.throws(() => c.provider.search({ scope_digest: HASH1, logical_root: c.opened.logical_root, query_text: "alpha", filters: [], limit: 10, cursor: null, explain: false }), (error) => error.code === "binding_mismatch"); assert.throws(() => c.provider.search({ scope_digest: HASH0, logical_root: HASH1, query_text: "alpha", filters: [], limit: 10, cursor: null, explain: false }), (error) => error.code === "binding_mismatch"); }],
   ["W4-SRCH-15", assertGoldenQueries],
   ["W4-SRCH-16", (c) => { for (const document of c.documents) assert.deepEqual(document.fields.map(({ name }) => name), ["identifier", "title", "heading", "classification", "body"]); }],
   ["W4-SRCH-21", (c) => { for (const document of c.documents) assert.equal(document.scoped_content_hash, objectHash({ document_id: document.document_id, revision: document.revision, fields: document.fields, facets: document.facets, visibility_digest: document.visibility_digest, scope_digest: document.scope_digest })); }],
@@ -111,10 +130,10 @@ function runProviderConformance() {
   for (let number = 1; number <= 27; number += 1) {
     const matrix_id = `W4-SRCH-${String(number).padStart(2, "0")}`;
     const check = jsChecks.get(matrix_id);
-    if (check) {
-      try { check(createJsProviderFixture()); results.push({ matrix_id, implementation: "javascript", applicability: "required", status: "pass", evidence_path: "test/integration/knowledge_wave4_search_test.js", reason: "executed against locked fixture" }); }
+    if (applicability.javascript.required.includes(number) && check) {
+      try { check(createReadOnlyJsFixture()); results.push({ matrix_id, implementation: "javascript", applicability: "required", status: "pass", evidence_path: "test/integration/knowledge_wave4_search_test.js", reason: "executed against locked read-only fixture" }); }
       catch (error) { results.push({ matrix_id, implementation: "javascript", applicability: "required", status: "fail", evidence_path: null, reason: error.message }); }
-    } else results.push({ matrix_id, implementation: "javascript", applicability: "required", status: "fail", evidence_path: null, reason: "matrix has no complete executable JavaScript oracle yet" });
+    } else results.push({ matrix_id, implementation: "javascript", applicability: "not_applicable", status: "not_evidence", evidence_path: null, reason: applicability.javascript.reason });
     for (const implementation of ["simple", "dbfs"]) {
       const required = applicability[implementation].required.includes(number);
       results.push({
@@ -214,7 +233,16 @@ test("actual JavaScript provider mixed delta equals clean incremental state", ()
 
 test("generated Unicode 17 tables produce exact locked analyzer outputs", () => { const analyzer = createUnicode17Analyzer(tables, { stop_words: ["and", "the"] }); for (const vector of fixture("unicode_golden_outputs.json").vectors) assert.deepEqual(analyzer.analyze(vector.input), { normalized: vector.normalized, tokens: vector.tokens }, vector.id); });
 
-test("conformance executes real JavaScript cells and maps provider applicability without false PASS", () => { const evidence = runProviderConformance(); assert.equal(evidence.length, 81); assert.ok(evidence.filter((item) => item.implementation === "javascript" && item.status === "pass").length >= 10); assert.equal(evidence.filter((item) => item.implementation !== "javascript" && item.status === "pass").length, 0); assert.ok(evidence.filter((item) => item.implementation === "simple").every((item) => item.applicability === "required" && item.status === "fail")); assert.equal(evidence.filter((item) => item.implementation === "dbfs" && item.applicability === "required").length, 13); assert.ok(evidence.filter((item) => item.implementation === "dbfs" && item.applicability === "not_applicable").every((item) => item.status === "not_evidence")); });
+test("conformance executes only admitted read-only JavaScript cells without false PASS", () => { const evidence = runProviderConformance(); assert.equal(evidence.length, 81); assert.equal(evidence.filter((item) => item.implementation === "javascript" && item.status === "pass").length, 8); assert.ok(evidence.filter((item) => item.implementation === "javascript" && item.applicability === "not_applicable").every((item) => item.status === "not_evidence")); assert.equal(evidence.filter((item) => item.implementation !== "javascript" && item.status === "pass").length, 0); assert.ok(evidence.filter((item) => item.implementation === "simple").every((item) => item.applicability === "required" && item.status === "fail")); assert.equal(evidence.filter((item) => item.implementation === "dbfs" && item.applicability === "required").length, 13); assert.ok(evidence.filter((item) => item.implementation === "dbfs" && item.applicability === "not_applicable").every((item) => item.status === "not_evidence")); });
+
+test("read-only JavaScript fallback has no canonical mutation surface", () => {
+  const { adapter, opened, provider } = createReadOnlyJsFixture();
+  const payload = { scope_digest: HASH0, logical_root: opened.logical_root, query_text: "alpha search", filters: [], limit: 10, cursor: null, explain: true };
+  assert.deepEqual(provider.search(payload), adapter.search({ query_text: payload.query_text, filters: payload.filters, limit: payload.limit, cursor: payload.cursor, explain: payload.explain }));
+  assert.throws(() => provider.search({ ...payload, extra: true }), (error) => error.code === "invalid_request");
+  for (const method of ["open", "apply", "publish", "stageApply", "publishCandidate"]) assert.equal(typeof provider[method], "undefined", method);
+  assert.equal(provider.health().mode, "read_only");
+});
 
 test("conformance evidence schema rejects unknown fields and ID-only cells", () => {
   const schema = fixture("conformance_evidence_schema.json");

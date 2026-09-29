@@ -1,4 +1,8 @@
 # RV64 SSH Live Handshake Boundary
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-06-30
 
@@ -226,3 +230,4 @@ Next fix: repair the boot TCP/QEMU host-forward reaccept path and restore a
 separate RV64 wrong-password probe. The passing single-connection gate proves
 the SSH transport and Simple filesystem launch path, but it does not yet prove
 multi-connection service reuse or bad-auth rejection on RV64.
+

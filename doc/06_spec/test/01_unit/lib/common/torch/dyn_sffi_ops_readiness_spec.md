@@ -27,7 +27,7 @@ dyn_sffi_ops_readiness_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -38,7 +38,7 @@ dyn_sffi_ops_readiness_spec -> std
 
 ### dynamic torch SFFI readiness surface
 
-#### delegates availability to the runtime facade instead of hardcoding false
+#### delegates availability to the canonical provider instead of hardcoding false
 
 <details>
 <summary>Executable SSpec</summary>
@@ -50,9 +50,48 @@ Reproduction: this block contains the complete executable scenario source.
 val body = dyn_available_body(source_text())
 
 expect(body).to_contain("fn dyn_torch_available() -> bool:")
-expect(body).to_contain("rt_torch_available()")
+expect(body).to_contain("torch_sffi_available()")
 expect(body.contains("\n    false")).to_equal(false)
 expect(body.contains("return false")).to_equal(false)
+```
+
+</details>
+
+#### keeps raw Torch ownership out of the common compatibility facade
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val source = source_text()
+val provider = provider_source()
+
+expect(source).to_contain("use std.nogc_sync_mut.torch.sffi.{")
+expect(source.contains("rt_torch_")).to_equal(false)
+expect(source.contains("extern fn")).to_equal(false)
+expect(provider).to_contain("single Simple owner of the libtorch")
+expect(provider).to_contain("extern fn rt_torch_available() -> bool")
+expect(provider).to_contain("fn torch_sffi_available() -> bool:")
+```
+
+</details>
+
+#### preserves operation and constructor parity through provider delegates
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val source = source_text()
+val provider = provider_source()
+
+expect(source).to_contain("torch_sffi_tensor_sum_dim(handle, dim, keepdim)")
+expect(source).to_contain("torch_sffi_tensor_slice(handle, dim, start, end, step)")
+expect(source).to_contain("torch_sffi_tensor_zeros(n, m, k, l, 4)")
+expect(source).to_contain("torch_sffi_tensor_full(n, m, k, l, 4, fill)")
+expect(provider).to_contain("rt_torch_tensor_zeros(dims)")
+expect(provider).to_contain("rt_torch_tensor_full(dims, fill)")
+expect(provider).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
 ```
 
 </details>
@@ -72,13 +111,14 @@ val result_body = dyn_linalg_solve_result_body(source)
 
 expect(body).to_contain("fn dyn_torch_tensor_linalg_solve(a: i64, b: i64) -> i64:")
 expect(body).to_contain("dyn_torch_tensor_linalg_solve_result(a, b).handle")
-expect(result_body).to_contain("if not rt_torch_available():")
+expect(result_body).to_contain("if not torch_sffi_available():")
 expect(result_body).to_contain("libtorch_unavailable")
 expect(result_body).to_contain("invalid_handle")
 expect(result_body).to_contain("runtime_returned_null_handle")
-expect(body).to_contain("rt_torch_torchtensor_linalg_solve(a, b)")
+expect(body).to_contain("torch_sffi_tensor_linalg_solve(a, b)")
 expect(body.contains("not yet implemented")).to_equal(false)
-expect(source).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
+expect(source.contains("extern fn rt_torch_torchtensor_linalg_solve")).to_equal(false)
+expect(provider_source()).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
 
 val runtime = rust_linalg_runtime_source()
 expect(runtime).to_contain("pub extern \"C\" fn rt_torch_linalg_solve")
@@ -151,7 +191,7 @@ expect(header).to_contain("rt_torch_torchtensor_linalg_solve(int64_t handle, int
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/torch/dyn_sffi_ops_readiness_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -163,8 +203,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

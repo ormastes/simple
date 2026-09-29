@@ -1,0 +1,40 @@
+# Regression: TMPDIR is literal data in both parent and process-group shells.
+# Bug: macos_live_process_tmpdir_shell_quoting_2026-09-21.md
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout_live}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+describe "live process TMPDIR shell expansion regression":
+    it "preserves variable syntax, command substitutions and a newline as directory data":
+        step("Create a temporary directory whose name resembles shell expressions")
+        val original_temp = env_get("TMPDIR")
+        val original_path = env_get("PATH")
+        val temp_root = if original_temp == "": "/tmp" else: original_temp
+        val process_temp = "{temp_root}/process-live-expansion-{getpid()} $HOME $(printf injected) `printf injected`\nnext-line"
+        val created = dir_create(process_temp, false)
+        expect(created).to_equal(true)
+        val changed = env_set("TMPDIR", process_temp)
+        val path_changed = env_set("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+
+        step("Require a group file in the literal directory before capturing the worker")
+        # Exit/output alone can pass the old bug while the group file is misplaced.
+        # The execed worker must have the exact identity recorded by its group leader.
+        val worker_script = "for group_file in \"$1\"/simple_pgid_*; do [ -s \"$group_file\" ] || exit 91; IFS= read -r group_id < \"$group_file\"; [ \"$group_id\" = \"$$\" ] || exit 92; done; printf '%s' \"$1\"; printf diagnostic >&2; exit 7"
+        val (out, err, code) = process_run_timeout_live("/bin/sh", ["-c", worker_script, "sh", process_temp], 10000)
+        val restored = env_set("TMPDIR", original_temp)
+        val path_restored = env_set("PATH", original_path)
+        # A nonrecursive removal fails if any capture or process-group file remains.
+        val cleaned = dir_remove(process_temp, false)
+
+        step("Verify exact streams, exit status, environment restoration and empty directory")
+        expect(changed).to_equal(true)
+        expect(path_changed).to_equal(true)
+        expect(restored).to_equal(true)
+        expect(path_restored).to_equal(true)
+        expect(out).to_equal(process_temp)
+        expect(err).to_equal("diagnostic")
+        expect(code).to_equal(7)
+        expect(cleaned).to_equal(true)

@@ -1,0 +1,184 @@
+# Cache gateway — SERVER-SIDE namespace authority.
+#
+# Design: doc/05_design/compiler/semantic_incremental_build_cache_aop_formal_2026-08-09.md §15.2, §15.4
+# Impl:   src/app/cache_gateway/
+#
+# The claim under test: a client cannot reach the main namespace by hand.
+# Every case drives the REAL gateway entry points rather than restating the
+# policy table.
+
+use compiler.driver.cache.remote.namespace_policy.{
+    namespace_policy_can_ever_write_main, namespace_policy_may_write,
+    NS_MAIN, NS_BRANCH, NS_WORKSPACE
+}
+use compiler.driver.cache.remote.remote_client.{remote_client_local_fake}
+use app.cache_gateway.gateway.{
+    GatewayPrincipal, GatewayWriteRequest,
+    gateway_principal_developer, gateway_authenticate, gateway_resolve_namespace,
+    gateway_put_action, gateway_kind_is_servable
+}
+use app.cache_gateway.quota.{
+    gateway_quota_default, gateway_quota_admit, gateway_quota_record,
+    gateway_quota_used, gateway_quota_expiry_for
+}
+use app.cache_gateway.metrics.{
+    gateway_metrics_new, metrics_record_read, metrics_record_promotion,
+    metrics_record_quarantine, tier_hit_rate_permille, metrics_tier_index
+}
+use std.common.crypto.sha256.{sha256_text}
+
+val DEV_SECRET = "dev-secret"
+val CI_SECRET = "ci-secret"
+val A_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val B_DIGEST = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val R_DIGEST = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
+fn dev_principal() -> GatewayPrincipal:
+    gateway_principal_developer("dev-token", sha256_text(DEV_SECRET), "alice", "repo1", "linux-x86_64", 2)
+
+# An enrolled main-CI credential: attestation present AND approved.
+fn ci_principal() -> GatewayPrincipal:
+    GatewayPrincipal(
+        token_id: "ci-token",
+        secret_digest: sha256_text(CI_SECRET),
+        display_name: "main-ci",
+        requested_role: "trusted_main_ci",
+        attested_builder_id: "builder-1",
+        attested_workflow_digest: "wf-1",
+        workflow_is_approved: true,
+        branch_namespace_enabled: false,
+        repository_id: "repo1",
+        target_profile: "linux-x86_64",
+        schema_version: 2,
+        branch_identity: ""
+    )
+
+fn all_principals() -> [GatewayPrincipal]:
+    var ps: [GatewayPrincipal] = []
+    ps.push(dev_principal())
+    ps.push(ci_principal())
+    ps
+
+fn write_req(token: text, secret: text, kind: text, receipt: text) -> GatewayWriteRequest:
+    GatewayWriteRequest(
+        token_id: token,
+        presented_secret: secret,
+        namespace_kind: kind,
+        action_digest: A_DIGEST,
+        result_manifest_digest: B_DIGEST,
+        receipt_digest: receipt,
+        payload_bytes: 128
+    )
+
+# Drives the real write endpoint end to end and returns whether it succeeded.
+fn attempt_write(token: text, secret: text, kind: text, receipt: text) -> bool:
+    val auth = gateway_authenticate(all_principals(), token, secret)
+    val client = remote_client_local_fake("/tmp/cache-gw-spec", auth.policy)
+    val quota = gateway_quota_default(1000000, 1000000, 1000000, 900000000, 1000000000)
+    val res = gateway_put_action(client, all_principals(), quota, gateway_metrics_new(), write_req(token, secret, kind, receipt), 100)
+    res.ok
+
+describe "gateway authentication fails closed":
+    it "rejects a missing credential and still yields a read-only policy":
+        val auth = gateway_authenticate(all_principals(), "", "")
+        assert_false(auth.ok)
+        # The failure mode is a DEVELOPER policy, never an absent policy.
+        assert_false(namespace_policy_can_ever_write_main(auth.policy))
+
+    it "rejects an unknown token":
+        val auth = gateway_authenticate(all_principals(), "nope", "x")
+        assert_false(auth.ok)
+        assert_eq(auth.reason, "unknown token")
+
+    it "rejects a wrong secret for a real token":
+        val auth = gateway_authenticate(all_principals(), "ci-token", "wrong")
+        assert_false(auth.ok)
+        assert_false(namespace_policy_can_ever_write_main(auth.policy))
+
+    it "accepts the enrolled CI credential and grants main authority":
+        val auth = gateway_authenticate(all_principals(), "ci-token", CI_SECRET)
+        assert_true(auth.ok)
+        assert_true(namespace_policy_can_ever_write_main(auth.policy))
+
+describe "developers are structurally read-only on main":
+    it "resolves an authenticated developer to a role with no main authority":
+        val auth = gateway_authenticate(all_principals(), "dev-token", DEV_SECRET)
+        assert_true(auth.ok)
+        assert_false(namespace_policy_may_write(auth.policy, NS_MAIN))
+        assert_false(namespace_policy_can_ever_write_main(auth.policy))
+
+    it "refuses a developer main write through the real endpoint":
+        assert_false(attempt_write("dev-token", DEV_SECRET, NS_MAIN, R_DIGEST))
+
+    it "refuses a developer branch write too":
+        assert_false(attempt_write("dev-token", DEV_SECRET, NS_BRANCH, ""))
+
+    it "refuses an unauthenticated write":
+        assert_false(attempt_write("", "", NS_MAIN, R_DIGEST))
+
+describe "a client cannot hand-build a path to main":
+    it "derives every namespace identity field from the credential":
+        val dev = gateway_authenticate(all_principals(), "dev-token", DEV_SECRET)
+        val ci = gateway_authenticate(all_principals(), "ci-token", CI_SECRET)
+        # Both asked for kind "main"; neither supplied any part of the path.
+        assert_eq(gateway_resolve_namespace(dev, NS_MAIN).repository_id, "repo1")
+        assert_eq(gateway_resolve_namespace(ci, NS_MAIN).repository_id, "repo1")
+        # And the developer still cannot write the namespace it resolved.
+        assert_false(namespace_policy_may_write(dev.policy, NS_MAIN))
+
+    it "does not serve local tiers over the wire at all":
+        assert_false(gateway_kind_is_servable(NS_WORKSPACE))
+        assert_true(gateway_kind_is_servable(NS_MAIN))
+        assert_true(gateway_kind_is_servable(NS_BRANCH))
+
+    it "rejects a write to an unservable namespace kind even from main CI":
+        assert_false(attempt_write("ci-token", CI_SECRET, NS_WORKSPACE, R_DIGEST))
+
+    it "refuses a main mapping carrying no promotion receipt":
+        # CAS digest verification does not substitute for provenance.
+        assert_false(attempt_write("ci-token", CI_SECRET, NS_MAIN, ""))
+
+describe "remote quota and TTL":
+    it "accepts a write that fits":
+        val q = gateway_quota_default(1000000, 100000, 500000, 900000000, 1000000000)
+        assert_true(gateway_quota_admit(q, "main", 1000, 100).accepted)
+
+    it "rejects a write past the hard limit and asks for GC":
+        val q = gateway_quota_default(1000, 1000, 1000, 900000000, 1000000000)
+        val d = gateway_quota_admit(q, "main", 100000, 100)
+        assert_false(d.accepted)
+        assert_true(d.run_gc)
+
+    it "accounts branch bytes against branch, never main":
+        val q = gateway_quota_record(gateway_quota_default(1000000, 100000, 500000, 900000000, 1000000000), "branch", 5000, 100)
+        assert_eq(gateway_quota_used(q, "branch"), 5000)
+        assert_eq(gateway_quota_used(q, "main"), 0)
+
+    it "gives branch a TTL and main none":
+        val q = gateway_quota_default(1000000, 100000, 500000, 900000000, 1000000000)
+        assert_eq(gateway_quota_expiry_for(q, "main", 1000), 0)
+        assert_true(gateway_quota_expiry_for(q, "branch", 1000) > 1000)
+
+    it "declines to cache a tier that has no configured budget":
+        val q = gateway_quota_default(1000000, 100000, 500000, 900000000, 1000000000)
+        assert_false(gateway_quota_admit(q, "nonexistent", 10, 100).accepted)
+
+describe "metrics and admin surface":
+    it "computes a hit rate per tier":
+        var m = gateway_metrics_new()
+        m = metrics_record_read(m, "main", true)
+        m = metrics_record_read(m, "main", true)
+        m = metrics_record_read(m, "main", false)
+        m = metrics_record_read(m, "branch", false)
+        assert_eq(tier_hit_rate_permille(m.tiers[metrics_tier_index(m, "main")]), 666)
+        assert_eq(tier_hit_rate_permille(m.tiers[metrics_tier_index(m, "branch")]), 0)
+
+    it "counts quarantine events and promotion accept/reject":
+        var m = gateway_metrics_new()
+        m = metrics_record_quarantine(m, "bad digest", 5)
+        m = metrics_record_promotion(m, true, "")
+        m = metrics_record_promotion(m, false, "stale fetch")
+        assert_eq(m.quarantine_count, 1)
+        assert_eq(m.promotion_accepts, 1)
+        assert_eq(m.promotion_rejects, 1)
+        assert_eq(m.promotion_reject_reasons[0], "stale fetch")

@@ -1,4 +1,8 @@
 # `X test <spec>` never runs the spec under X — child resolver falls back to stale `bin/simple`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** fixed (pending deploy) — `find_simple_binary()` in
 `src/app/test_runner_new/test_runner_single.spl` now resolves the invoking
@@ -83,3 +87,4 @@ the run header so evidence is self-describing.
 - `doc/08_tracking/bug/riscv_sidecar_contract_antiseed_guard_ineffective_2026-07-27.md`
 - `project_cli_self_exe_ppid_fork_bomb_2026-07-25` (why argv0 resolution must be in-process)
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`
+

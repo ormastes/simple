@@ -5,6 +5,11 @@
 and `rt_array_free_deep` are present. No double-restore needed; the "STILL
 MISSING" verdict for `6e2f613d302` is stale.
 # CLOSED 2026-08-17 — all 12 rows re-verified; 0 genuine deletions outstanding
+## Closed 2026-09-16 — CLOSED 2026-08-17; all 12 rows re-verified, 0 genuine deletions outstanding
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Nothing is missing. No restoration was required.** Every row was re-checked
 against both the working tree and a freshly-fetched `origin/main`
@@ -161,3 +166,4 @@ already restoring this one — do not act on it here.**
   post-commit line count matching the stated scope), 0 UNCLEAR.
 - No new, still-unaddressed silent deletions were found beyond the already-reported
   `6e2f613d302941d0733bf5907355e68de8e9f7f1`.
+

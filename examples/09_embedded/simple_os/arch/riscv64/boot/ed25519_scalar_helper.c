@@ -28,10 +28,6 @@ static spl_i64 rt_empty_bytes(void) {
     return rt_byte_array_new_len(rt_int(0));
 }
 
-static spl_i64 rt_nil(void) {
-    return 3;
-}
-
 static int rt_copy_64_bytes_in(spl_i64 array_value, spl_u8 out[64]) {
     if ((spl_u64)rt_array_len(array_value) != 64ULL) {
         return 0;
@@ -118,24 +114,6 @@ static void ed25519_clamp_scalar(spl_u8 a[32]) {
     a[31] |= 64u;
 }
 
-/* Keep this helper's embedded ring copy private. The RV64 boot image also
- * links curve25519_ring_helper.c; exporting two strong ring_core x25519/scalar
- * symbol sets leaves the final freestanding image at the mercy of link order. */
-#define ring_core_0_17_14__CRYPTO_memcmp ed25519_scalar_ring_CRYPTO_memcmp
-#define ring_core_0_17_14__x25519_fe_invert ed25519_scalar_ring_x25519_fe_invert
-#define ring_core_0_17_14__x25519_fe_isnegative ed25519_scalar_ring_x25519_fe_isnegative
-#define ring_core_0_17_14__x25519_fe_mul_ttt ed25519_scalar_ring_x25519_fe_mul_ttt
-#define ring_core_0_17_14__x25519_fe_neg ed25519_scalar_ring_x25519_fe_neg
-#define ring_core_0_17_14__x25519_fe_tobytes ed25519_scalar_ring_x25519_fe_tobytes
-#define ring_core_0_17_14__x25519_ge_double_scalarmult_vartime ed25519_scalar_ring_x25519_ge_double_scalarmult_vartime
-#define ring_core_0_17_14__x25519_ge_frombytes_vartime ed25519_scalar_ring_x25519_ge_frombytes_vartime
-#define ring_core_0_17_14__x25519_ge_scalarmult_base ed25519_scalar_ring_x25519_ge_scalarmult_base
-#define ring_core_0_17_14__x25519_public_from_private_generic_masked ed25519_scalar_ring_x25519_public_from_private_generic_masked
-#define ring_core_0_17_14__x25519_scalar_mult_generic_masked ed25519_scalar_ring_x25519_scalar_mult_generic_masked
-#define ring_core_0_17_14__x25519_sc_mask ed25519_scalar_ring_x25519_sc_mask
-#define ring_core_0_17_14__x25519_sc_muladd ed25519_scalar_ring_x25519_sc_muladd
-#define ring_core_0_17_14__x25519_sc_reduce ed25519_scalar_ring_x25519_sc_reduce
-
 #include "../../../../../../src/compiler_rust/vendor/ring/crypto/mem.c"
 #include "../../../../../../src/compiler_rust/vendor/ring/crypto/curve25519/curve25519.c"
 
@@ -182,12 +160,12 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
     spl_u8 r_enc[32];
     spl_u8 s_scalar[32];
     if (!rt_copy_32_bytes_in(seed_value, seed) || !rt_copy_32_bytes_in(public_key_value, public_key)) {
-        return rt_nil();
+        return rt_empty_bytes();
     }
 
     spl_i64 h_value = rt_tls13_sha512_full(seed_value);
     if (!rt_copy_64_bytes_in(h_value, h)) {
-        return rt_nil();
+        return rt_empty_bytes();
     }
     for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
         a[i] = h[i];
@@ -197,7 +175,7 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
     spl_i64 prefix_value = rt_byte_array_new_len(rt_int(32));
     spl_i64 *prefix_data = (spl_i64 *)(spl_u64)rt_array_data_ptr(prefix_value);
     if (!prefix_data) {
-        return rt_nil();
+        return rt_empty_bytes();
     }
     for (spl_u64 i = 0; i < 32ULL; i = i + 1ULL) {
         prefix_data[i] = rt_int((spl_i64)h[32ULL + i]);
@@ -207,7 +185,7 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
     spl_i64 r_hash_value = rt_tls13_sha512_full(prefix_msg_value);
     spl_i64 r_value = rt_ed25519_sc_reduce_64(r_hash_value);
     if (!rt_copy_32_bytes_in(r_value, r_scalar)) {
-        return rt_nil();
+        return rt_empty_bytes();
     }
 
     ge_p3 r_point;
@@ -220,7 +198,7 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
     spl_i64 k_value = rt_ed25519_sc_reduce_64(k_hash_value);
     spl_u8 k_scalar[32];
     if (!rt_copy_32_bytes_in(k_value, k_scalar)) {
-        return rt_nil();
+        return rt_empty_bytes();
     }
 
     x25519_sc_muladd(s_scalar, k_scalar, a, r_scalar);
@@ -230,13 +208,5 @@ spl_i64 rt_ed25519_sign_seed(spl_i64 seed_value, spl_i64 public_key_value, spl_i
         sig[i] = r_enc[i];
         sig[32ULL + i] = s_scalar[i];
     }
-    spl_i64 out = rt_byte_array_new_len(rt_int(64));
-    spl_i64 *out_data = (spl_i64 *)(spl_u64)rt_array_data_ptr(out);
-    if (!out_data) {
-        return rt_nil();
-    }
-    for (spl_u64 i = 0; i < 64ULL; i = i + 1ULL) {
-        out_data[i] = rt_int((spl_i64)sig[i]);
-    }
-    return out;
+    return rt_copy_64_bytes_out(sig);
 }

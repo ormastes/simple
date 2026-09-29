@@ -175,3 +175,28 @@ DEVICE_CFG accessor is E2 work and is tracked here.
 
 Until 1 and 2 hold on some machine, E1 cannot be proven live and WS-E stays
 parked. **For the board, no unblocking condition exists** — see §1.
+
+## 6. Evidence-integrity fix (2026-09-22)
+
+The protocol gap remains hardware/driver work and this bug stays OPEN, but the
+software-verifiable false-green path is now closed:
+
+- The new `simpleos_board_vulkan_admit` API classifies execution platform and transport
+  independently. `VenusVirtioGpu + PhysicalBoard` is always
+  `qemu-only:venus-has-no-physical-board-transport`; changing a producer label
+  cannot promote it. No live board runner calls this API yet; integration is
+  part of the still-open native board-driver lane.
+- Physical render-target validation rejects QEMU, QMP, virtio, Venus, and
+  vhost markers in board/model, boot, controller, driver, and capture identity.
+- Non-vacuous fixtures prove a valid QEMU/Venus row, rejection of the relabel,
+  a native-board row, QEMU-target substitution, and incomplete fence evidence.
+
+The gate is pure and startup-neutral: it performs no environment, filesystem,
+process, GPU, or network operation. Its work and temporary lowercase strings
+are O(total inspected provenance text); target receipts bound identity fields,
+while callers of the standalone Vulkan admission API must preserve the same
+bounded-input contract. A focused interpreter run measured 1.53 s wall and
+354,540 KiB max RSS for compiler/test-runner startup plus six examples; those figures
+are harness cost, not per-admission runtime cost. The available deployed binary
+identified itself as a Rust bootstrap seed, so this measurement is diagnostic
+only and must be repeated with the admitted pure-Simple runtime before release.

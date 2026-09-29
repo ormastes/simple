@@ -13,7 +13,13 @@ cache=
 publish=
 tool_id=
 entry_path=
-linker=cc
+# Clang-only policy (2026-09-24): never default to a bare `cc` (which can
+# resolve to gcc). `clang.exe` covers MINGW; other hosts resolve plain
+# `clang`.
+case "${OS:-}${MSYSTEM:-}" in
+  *MINGW*|*MSYS*|Windows_NT) linker=clang.exe ;;
+  *) linker=clang ;;
+esac
 
 for arg in "$@"; do
   case "$arg" in
@@ -27,6 +33,16 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+
+case "$linker" in
+  *gcc*|*g++*) die "clang-only policy: linker must be clang, not $linker" ;;
+esac
+linker_resolved=$(command -v "$linker" 2>/dev/null) || die "linker is unavailable: $linker"
+case "$linker_resolved" in
+  */gcc|*/gcc-*|*/g++|*/g++-*) die "clang-only policy: linker resolved to a GCC binary: $linker_resolved" ;;
+esac
+"$linker_resolved" --version 2>/dev/null | grep -qi 'clang version' \
+  || die "clang-only policy: linker is not Clang: $linker_resolved"
 
 [ -f "$manifest" ] || die "compiler manifest is required"
 [ -f "$journal" ] || die "tool compile journal is required"

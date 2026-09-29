@@ -4,8 +4,22 @@
 
 set -e
 
-GATE_DIR="/home/ormastes/dev/pub/simple/test/riscv_isa_gate"
-BUILD_DIR="/home/ormastes/dev/pub/simple/build/vhdl/rv32"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+REPO_ROOT=${RISCV_ISA_GATE_REPO_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd -P)}
+GATE_DIR=${RISCV_ISA_GATE_DIR:-"$REPO_ROOT/test/riscv_isa_gate"}
+BUILD_DIR=${RISCV_ISA_GATE_BUILD_DIR:-"$REPO_ROOT/build/vhdl/rv32"}
+
+case "$GATE_DIR" in
+    /*) ;;
+    *) GATE_DIR="$REPO_ROOT/$GATE_DIR" ;;
+esac
+case "$BUILD_DIR" in
+    /*) ;;
+    *) BUILD_DIR="$REPO_ROOT/$BUILD_DIR" ;;
+esac
+
+[ -d "$GATE_DIR" ] || { echo "ERROR: RISC-V ISA gate directory not found: $GATE_DIR" >&2; exit 2; }
+[ -d "$BUILD_DIR" ] || { echo "ERROR: RISC-V ISA build directory not found: $BUILD_DIR" >&2; exit 2; }
 cd "$BUILD_DIR"
 
 echo "==================================================================="

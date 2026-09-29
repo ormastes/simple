@@ -67,6 +67,40 @@ struct sockaddr_in6 {
 #define IPPROTO_UDP  17
 #define IPPROTO_IPV6 41
 
+/* Multicast socket options and their argument structs were missing while
+ * src/runtime/runtime_native.c:12250-12275 uses all of them — "use of undeclared
+ * identifier 'IP_MULTICAST_LOOP'", "variable has incomplete type 'struct
+ * ip_mreq'", and so on — blocking the SimpleOS runtime cross-compile.
+ *
+ * Values are the Linux ones, consistent with every other number in this header
+ * and with the kernel shim's AF_INET=2. SimpleOS has no multicast backend, so
+ * setsockopt with these will report unsupported; declaring them makes the tree
+ * compile and lets that refusal be explicit rather than an implicit-declaration
+ * guess. Do NOT read these as a claim that multicast works. */
+#define IP_MULTICAST_IF     32
+#define IP_MULTICAST_TTL    33
+#define IP_MULTICAST_LOOP   34
+#define IP_ADD_MEMBERSHIP   35
+#define IP_DROP_MEMBERSHIP  36
+
+#define IPV6_MULTICAST_IF   17
+#define IPV6_MULTICAST_HOPS 18
+#define IPV6_MULTICAST_LOOP 19
+#define IPV6_JOIN_GROUP     20
+#define IPV6_LEAVE_GROUP    21
+#define IPV6_ADD_MEMBERSHIP  IPV6_JOIN_GROUP
+#define IPV6_DROP_MEMBERSHIP IPV6_LEAVE_GROUP
+
+struct ip_mreq {
+    struct in_addr imr_multiaddr;   /* IP multicast address of group */
+    struct in_addr imr_interface;   /* local IP address of interface */
+};
+
+struct ipv6_mreq {
+    struct in6_addr ipv6mr_multiaddr;  /* IPv6 multicast address */
+    unsigned int    ipv6mr_interface;  /* interface index */
+};
+
 static inline uint16_t htons(uint16_t hostshort) {
     return (uint16_t)((hostshort << 8) | (hostshort >> 8));
 }

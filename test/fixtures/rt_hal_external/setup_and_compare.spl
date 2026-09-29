@@ -5,10 +5,7 @@
 use std.cli.cli_util.{get_cli_args}
 use std.common.env_access.model.*
 use std.common.rt_hal.model.{RtHalOperationKind}
-use app.io.mod.{
-    file_hash_sha256, process_pin_executable,
-    process_close_pinned_executable
-}
+use app.io.mod.{file_hash_sha256}
 use app.io.env_access_host.{execute_host_env_access_plan}
 use app.io.rt_hal_isolated_host.{rt_hal_install_isolated_exact_host_from_plan}
 use std.nogc_sync_mut.rt_hal.exact_boundary.{
@@ -49,11 +46,6 @@ fn build_blocker(plan: EnvAccessPlan) -> text:
         return "Rust toolchain cannot produce the required static non-PIE closure"
     ""
 
-fn admits_static_elf(path: text) -> bool:
-    val pinned = process_pin_executable(path)
-    if pinned < 3: return false
-    process_close_pinned_executable(pinned)
-
 fn emit_static_closure_blocked(reason: text):
     val blocked = env_scenario_skip(
         "rt-hal-external-static-closure", reason,
@@ -84,31 +76,33 @@ fn pure_receipts() -> [RtHalCanonicalReceipt]:
         rt_hal_external_expected_receipt(requests[1], digest(100))
     ]
 
-fn main():
-    val config = config_from_args(get_cli_args())
+fn main() -> i64:
+    val args = get_cli_args()
+    val config = config_from_args(args)
     val plan = rt_hal_external_build_plan(config)
     val plan_problem = env_access_plan_error(plan)
     if plan_problem != "": panic(plan_problem)
     val build_problem = build_blocker(plan)
     if build_problem != "":
         emit_static_closure_blocked(build_problem)
-        return
+        return 2
 
-    # The output identities are frozen immediately after the typed build and
-    # admitted by the same static-ELF descriptor gate used by the host. They
-    # are checked again while being pinned for each provider spawn.
-    if not admits_static_elf(config.c_output):
-        emit_static_closure_blocked("C output is not an admissible static non-PIE ELF executable")
-        return
-    if not admits_static_elf(config.rust_output):
-        emit_static_closure_blocked("Rust output is not an admissible static non-PIE ELF executable")
-        return
+    # Provider descriptor pinning and launch belong exclusively to the typed
+    # host owner. The leaf records the post-build file identities it supplies
+    # to that owner; the owner re-hashes each pinned descriptor before use.
     val c_hash = file_hash_sha256(config.c_output)
     val rust_hash = file_hash_sha256(config.rust_output)
     val providers = rt_hal_external_provider_plan(config, c_hash, rust_hash)
     val install_problem = rt_hal_install_isolated_exact_host_from_plan(
         providers, true, true, "rthal-c-v1", "rthal-rust-v1",
-        2, 4, 5000, 4096)
+        2, 4, 5000, 4096, 2)
+    # V2 intentionally cannot claim a Ready catalog: it has no complete V3
+    # operation mapping or compiler-owned exit-schema/controller seal. This
+    # legacy fixture remains an executable quarantine witness rather than
+    # silently treating an unready host as a successful differential run.
+    if install_problem == "RTHAL-E-LEGACY-V2-QUARANTINED":
+        print "RTHAL-FIXTURE-v1 status=quarantined reason={install_problem}"
+        return 0
     if install_problem != "": panic(install_problem)
     val controller_problem = rt_hal_process_controller_claim()
     if controller_problem != "": panic(controller_problem)
@@ -125,3 +119,4 @@ fn main():
         panic("RTHAL-FIXTURE-E-DIFFERENTIAL")
     if shutdown_problem != "": panic(shutdown_problem)
     print "RTHAL-FIXTURE-v1 c=sha256:{c_hash} rust=sha256:{rust_hash} cases=2 comparisons=4 status=ok"
+    0

@@ -1,4 +1,8 @@
 # native-build cannot resolve a class static method with trailing default params
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (P1). Re-run 2026-08-17: the fixture build still produces NO
 verdict — it fails as infrastructure before MIR lowering, so this row is neither
@@ -163,3 +167,18 @@ fixture asserts several call shapes — expect more than one to be affected.
   compared.
 - The guard's real PASS path has never been observed, since the fixture has not
   compiled; PASS currently rests on a selftest stub only.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Not re-attempted: the record's own evidence shows the fixture build needs an
+~8 GiB+ single allocation and previously required a 20 GB address-space cap
+and a 3000s+ budget just to reach MIR lowering, with prior runs still timing
+out at 7200s. This lane's host is shared and loaded (per the fan-out brief,
+"run at most one heavy job at a time"), and a multi-GB, multi-thousand-second
+native-build of the whole compiler graph is well outside this lane's per-bug
+budget and risks starving other concurrent lanes on the same host. The fix
+direction is also in `src/compiler/50.mir` MIR lowering (class constructor /
+static-method resolution) and cannot be demonstrated fixed without actually
+running that expensive build to completion. Left OPEN, no change made;
+recommend a dedicated lane with a private, generously-provisioned host.
+

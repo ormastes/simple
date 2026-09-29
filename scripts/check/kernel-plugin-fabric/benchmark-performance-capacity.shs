@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+BUILD=${TMPDIR:-/tmp}/simple-kpf-performance-$$
+OUT=${KPF_BENCHMARK_OUTPUT:-$BUILD/receipt.env}
+CC=${CC:-cc}
+mkdir -p "$BUILD" "$(dirname "$OUT")"
+trap 'rm -rf "$BUILD"' EXIT HUP INT TERM
+case "$(uname -s)" in Darwin) LIB="$BUILD/libkpf_benchmark.dylib"; SHARED='-dynamiclib' ;; *) LIB="$BUILD/libkpf_benchmark.so"; SHARED='-shared' ;; esac
+$CC -std=c11 -O3 -fPIC $SHARED "$ROOT/test/perf/kernel_plugin/benchmark_provider.c" -o "$LIB"
+$CC -std=c11 -O3 "$ROOT/test/perf/kernel_plugin/benchmark_kernel_plugin.c" -ldl -o "$BUILD/benchmark" 2>/dev/null || $CC -std=c11 -O3 "$ROOT/test/perf/kernel_plugin/benchmark_kernel_plugin.c" -o "$BUILD/benchmark"
+{
+  echo 'schema=simple.kpf.performance-capacity/v1'
+  echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "machine=$(uname -m)"
+  echo "os=$(uname -s)-$(uname -r)"
+  printf 'compiler='; $CC --version 2>/dev/null | sed -n '1p'
+  "$BUILD/benchmark" "$LIB"
+} > "$OUT"
+field() { sed -n "s/^$1=//p" "$OUT"; }
+static_ppm=$(field static_overhead_ppm); native_ppm=$(field native_overhead_ppm); scaling_ppm=$(field slot_scaling_ppm)
+static_limit=${KPF_STATIC_OVERHEAD_PPM_LIMIT:-10000}
+native_limit=${KPF_NATIVE_OVERHEAD_PPM_LIMIT:-50000}
+scaling_limit=${KPF_SLOT_SCALING_PPM_LIMIT:-2500000}
+[ "$static_ppm" -le "$static_limit" ] || { echo "KPF_PERFORMANCE: FAIL static_overhead_ppm=$static_ppm limit=$static_limit" >&2; exit 20; }
+[ "$native_ppm" -le "$native_limit" ] || { echo "KPF_PERFORMANCE: FAIL native_overhead_ppm=$native_ppm limit=$native_limit" >&2; exit 21; }
+[ "$scaling_ppm" -le "$scaling_limit" ] || { echo "KPF_PERFORMANCE: FAIL slot_scaling_ppm=$scaling_ppm limit=$scaling_limit" >&2; exit 22; }
+grep -q '^fixed_queue_bytes_1024=16384$' "$OUT" || { echo 'KPF_PERFORMANCE: FAIL fixed-memory' >&2; exit 23; }
+echo "KPF_PERFORMANCE: PASS receipt=$OUT static_ppm=$static_ppm native_ppm=$native_ppm scaling_ppm=$scaling_ppm"

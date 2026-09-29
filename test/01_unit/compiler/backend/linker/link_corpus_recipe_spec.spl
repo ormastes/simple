@@ -1,0 +1,129 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# plan: doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md (lane A5) ; research: doc/01_research/compiler/linker/mold_mdsocpp_linker_2026-09-15.md (§11)
+
+"""
+# Linker Corpus Recipes — Lane A5
+
+**Category:** Infrastructure
+**Status:** Implemented
+
+## Purpose and Audience
+
+Lane A5 owns `test/fixtures/linker/corpus/*.sdn` (recipes, never binaries) and
+`scripts/check/check-link-corpus-baseline.shs` (the census + recipe-validation
+tool). This spec is the RED-then-GREEN evidence for both: every corpus row
+must name how it is produced, what a successful run looks like, and whether it
+can actually be driven from this worktree today; and the census script must
+never report success without reaching a verdict.
+
+## Scope and Preconditions
+
+Reads fixture files and runs the guard script as a subprocess; no compiler
+build, no network.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.common.sdn.parser.{parse}
+use std.common.sdn.value.{SdnValue}
+
+val CORPUS_DIR = "test/fixtures/linker/corpus"
+val GUARD = "scripts/check/check-link-corpus-baseline.shs"
+
+val EXPECTED_ROWS = [
+    "small_cli", "full_compiler_release", "compiler_plus_providers",
+    "full_debug", "thinlto",
+    "simpleos_kernel_x86_32", "simpleos_kernel_x86_64",
+    "simpleos_kernel_arm32", "simpleos_kernel_arm64",
+    "simpleos_kernel_riscv32", "simpleos_kernel_riscv64",
+    "giant_object",
+]
+
+fn run_args(args: [text]) -> (text, i64):
+    val (out, _err, code) = process_run("sh", args)
+    (out, code)
+
+fn corpus_files() -> [text]:
+    dir_list(CORPUS_DIR)
+        .filter(fn(name: text): name.ends_with(".sdn"))
+        .map(fn(name: text): "{CORPUS_DIR}/{name}")
+
+fn field_str(doc: SdnValue, path: text) -> text:
+    (doc.get_path(path) ?? SdnValue.Null).as_str() ?? ""
+
+describe "Linker corpus recipes (lane A5)":
+    # @manual scenario evidence
+
+    it "declares one recipe file for every corpus row named in the plan":
+        # @req REQ-SSPEC-COMPILER
+        step("declares one recipe file for every corpus row named in the plan")
+        val files = corpus_files()
+        step("Every expected row name has a matching .sdn file")
+        for name in EXPECTED_ROWS:
+            val expected_path = "{CORPUS_DIR}/{name}.sdn"
+            expect(files.contains(expected_path)).to_be_true()
+        step("No unexpected extra rows sit alongside the required set")
+        expect(files.len()).to_equal(EXPECTED_ROWS.len())
+
+    it "gives every recipe non-empty inputs, expected_outcome and status":
+        # @req REQ-SSPEC-COMPILER
+        step("gives every recipe non-empty inputs, expected_outcome and status")
+        for path in corpus_files():
+            step("Parse {path} as SDN")
+            val source = file_read(path)
+            expect(source.len()).to_be_greater_than(0)
+            val parsed = parse(source)
+            match parsed:
+                case Ok(doc):
+                    step("{path}: inputs, expected_outcome and status are all present and non-empty")
+                    expect(field_str(doc, "corpus.inputs").len()).to_be_greater_than(0)
+                    expect(field_str(doc, "corpus.expected_outcome").len()).to_be_greater_than(0)
+                    expect(field_str(doc, "corpus.status").len()).to_be_greater_than(0)
+                    step("{path}: linker_script and target_triple are also present (task-required columns)")
+                    expect(field_str(doc, "corpus.linker_script").len()).to_be_greater_than(0)
+                    expect(field_str(doc, "corpus.target_triple").len()).to_be_greater_than(0)
+                case Err(e):
+                    step("{path} failed to parse as SDN: {e}")
+                    expect(true).to_be_false()
+
+    it "marks every non-runnable row's status as blocked:<reason> or not_applicable, never silently empty":
+        # @req REQ-SSPEC-COMPILER
+        step("marks every non-runnable row's status as blocked:<reason> or not_applicable, never silently empty")
+        for path in corpus_files():
+            val source = file_read(path)
+            match parse(source):
+                case Ok(doc):
+                    val status = field_str(doc, "corpus.status")
+                    val ok = status == "runnable-here" or status.starts_with("blocked:") or status == "not_applicable"
+                    step("{path}: status '{status}' is one of runnable-here / blocked:<reason> / not_applicable")
+                    expect(ok).to_be_true()
+                case Err(_e):
+                    expect(true).to_be_false()
+
+    it "passes the census script's own fixture selftest before it is trusted to gate anything":
+        # @req REQ-SSPEC-COMPILER
+        step("passes the census script's own fixture selftest before it is trusted to gate anything")
+        step("Run the guard's built-in fixtures")
+        val (out, code) = run_args([GUARD, "--selftest"])
+        step("The selftest emits a verdict line rather than exiting silently")
+        expect(out).to_contain("PASS")
+        expect(code).to_equal(0)
+
+    it "reports ERROR rather than a silent exit when census is given nothing to check":
+        # @req REQ-SSPEC-COMPILER
+        step("reports ERROR rather than a silent exit when census is given nothing to check")
+        val (out, code) = run_args([GUARD])
+        step("A run with no mode selected must never look like a clean run")
+        expect(out).to_contain("ERROR")
+        expect(code).to_equal(2)
+
+    it "validates the real corpus directory in --recipes mode":
+        # @req REQ-SSPEC-COMPILER
+        step("validates the real corpus directory in --recipes mode")
+        val (out, code) = run_args([GUARD, "--recipes", CORPUS_DIR])
+        step("The real, committed corpus passes its own required-key check")
+        expect(out).to_contain("PASS")
+        expect(code).to_equal(0)

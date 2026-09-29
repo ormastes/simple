@@ -1,0 +1,622 @@
+# Private opt-in admission boundary for upstream Skia Ganesh Vulkan.
+# The default embedded renderer never imports this module. This is a strict
+# subset of the shared DrawIrComposition contract, not a second public IR.
+
+use common.ui.draw_ir.{DrawIrComposition, DrawIrAffine2D,
+    DRAW_IR_BACKEND_GPU, DRAW_IR_SCHEMA_VERSION_V4,
+    DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA,
+    draw_ir_command_has_unsupported_v4_state}
+use common.ui.ui_ir.{UiIr, UI_IR_COMMAND_RECT, draw_ir_to_ui_ir}
+use common.numeric_round.{is_nan_f64, is_inf_f64}
+use common.renderdoc.final_output_pixels.{FinalOutputCapture,
+    FinalOutputMetadata, final_output_validate}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32,
+    raw_write_i64, spl_f64_to_bits}
+use std.nogc_sync_mut.gpu.provider.{GPU_PROVIDER_BACKEND_VULKAN,
+    gpu_provider_info, gpu_provider_open, gpu_provider_resource_alloc,
+    gpu_provider_submit_raw, gpu_provider_wait, gpu_provider_readback_raw,
+    gpu_provider_device_identity}
+
+pub val UPSTREAM_SKIA_GANESH_VULKAN_BACKEND_ID: text = "upstream-skia-ganesh-vulkan"
+pub val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1: i64 = 0x31564b53
+pub val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2: i64 = 0x32564b53
+pub val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3: i64 = 0x33564b53
+pub val UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY: i64 = 0x534b4941564b0001
+val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V1: i64 = 0x314b5355
+val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V2: i64 = 0x324b5355
+val UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V3: i64 = 0x334b5355
+
+struct UpstreamSkiaGaneshAdmission:
+    accepted: bool
+    reason: text
+    batch_index: i32
+    command_index: i32
+    width: i32
+    height: i32
+    rect_count: i32
+    draw_format: i64
+    draw_magic: i64
+    rect_stride: i64
+
+struct UpstreamSkiaGaneshFrame:
+    width: i32
+    height: i32
+    rgba_bytes: [i64]
+    provider_identity: i64
+    device_identity: i64
+    resource_id: i64
+    submission_token: i64
+    completion_token: i64
+    readback_checksum: i64
+    # Obtained from the authenticated native session before completion and
+    # session retirement. A caller-constructed frame is still not proof.
+    physical_device_uuid: text = ""
+    driver_uuid: text = ""
+    vendor_id: i64 = 0
+    device_id: i64 = 0
+    device_type: i64 = 0
+    api_version: i64 = 0
+    driver_version: i64 = 0
+    # Code-owned host observations for the one submitted, waited, read-back
+    # frame. These are never inferred by the artifact adapter from handles.
+    backend_handle: i64 = 0
+    device_submit_count: i64 = 0
+    device_wait_count: i64 = 0
+    device_readback_count: i64 = 0
+
+fn _upstream_skia_rejected(reason: text, batch_index: i32, command_index: i32) -> UpstreamSkiaGaneshAdmission:
+    UpstreamSkiaGaneshAdmission(accepted: false, reason: reason,
+        batch_index: batch_index, command_index: command_index,
+        width: 0, height: 0, rect_count: 0,
+        draw_format: 0, draw_magic: 0, rect_stride: 0)
+
+fn _upstream_skia_exact_scalar(value: f64) -> bool:
+    # Ganesh's SkScalar is f32. Reject values it would silently round.
+    val scalar = value as f32
+    (scalar as f64) == value
+
+fn _upstream_skia_exact_clip(clip_x: i64, clip_y: i64,
+    clip_width: i64, clip_height: i64) -> bool:
+    if clip_width < 0 or clip_height < 0:
+        return false
+    # x/y and right/bottom are computed in i64, then checked against the
+    # f32 SkRect edge representation. Zero width/height is valid empty coverage.
+    val right = clip_x + clip_width
+    val bottom = clip_y + clip_height
+    _upstream_skia_exact_scalar(clip_x.to_f64()) and
+        _upstream_skia_exact_scalar(clip_y.to_f64()) and
+        _upstream_skia_exact_scalar(clip_width.to_f64()) and
+        _upstream_skia_exact_scalar(clip_height.to_f64()) and
+        _upstream_skia_exact_scalar(right.to_f64()) and
+        _upstream_skia_exact_scalar(bottom.to_f64())
+
+fn _upstream_skia_rects_admitted(composition: DrawIrComposition,
+    ir: UiIr) -> UpstreamSkiaGaneshAdmission:
+    if not ir.accepted:
+        return _upstream_skia_rejected(ir.rejection_reason,
+            ir.rejected_batch_index, ir.rejected_command_index)
+    if ir.batches.len() != 1:
+        return _upstream_skia_rejected("exactly one offscreen batch is required", -1, -1)
+    val batch = ir.batches[0]
+    val embedding = batch.embedding
+    if ir.backend_target != DRAW_IR_BACKEND_GPU or
+        batch.backend_target != DRAW_IR_BACKEND_GPU:
+        return _upstream_skia_rejected("Vulkan batch target required", 0, -1)
+    if embedding.width <= 0 or embedding.height <= 0 or
+        embedding.width > 16384 or embedding.height > 16384 or
+        embedding.width.to_i64() * embedding.height.to_i64() > 16777216:
+        return _upstream_skia_rejected("invalid or oversized offscreen extent", 0, -1)
+    if embedding.x != 0 or embedding.y != 0 or embedding.layer != 0 or
+        embedding.opacity_milli != 1000 or embedding.clip:
+        return _upstream_skia_rejected("batch embedding is not an untransformed opaque surface", 0, -1)
+    if ir.commands.len() == 0 or ir.commands.len() > 65536:
+        return _upstream_skia_rejected("invalid rectangle count", 0, -1)
+    var index = 0
+    var has_clip = false
+    while index < ir.commands.len():
+        val command = ir.commands[index]
+        val source_command = composition.batches[0].commands[index]
+        if draw_ir_command_has_unsupported_v4_state(source_command):
+            return _upstream_skia_rejected("affine transform or raster policy unsupported by Skia wire v1/v2", 0, index)
+        if command.kind != UI_IR_COMMAND_RECT:
+            return _upstream_skia_rejected("unsupported command kind", 0, index)
+        if source_command.text_value != "" or source_command.advance_widths.len() != 0 or
+            source_command.edge != nil or source_command.image_uri != "" or
+            source_command.points.len() != 0 or source_command.glyph_run.valid or
+            source_command.glyph_run.glyph_ids.len() != 0 or
+            source_command.glyph_run.xs.len() != 0 or
+            source_command.glyph_run.ys.len() != 0 or
+            source_command.glyph_run.clusters.len() != 0:
+            return _upstream_skia_rejected("rectangle carries unsupported payload", 0, index)
+        if command.computed_style.len() != 0 or command.parent_id != "" or
+            command.border_rect.present or
+            command.content_rect.present or command.hit_rect.present:
+            return _upstream_skia_rejected("rectangle has unsupported style or state", 0, index)
+        if not _upstream_skia_exact_scalar(command.x) or
+            not _upstream_skia_exact_scalar(command.y) or
+            not _upstream_skia_exact_scalar(command.width) or
+            not _upstream_skia_exact_scalar(command.height):
+            return _upstream_skia_rejected("rectangle coordinate is not exact SkScalar", 0, index)
+        if command.width <= 0.0 or command.height <= 0.0:
+            return _upstream_skia_rejected("rectangle is empty or outside target", 0, index)
+        if command.clip_rect.present:
+            val clip = command.clip_rect
+            if not _upstream_skia_exact_clip(clip.x.to_i64(), clip.y.to_i64(),
+                clip.width.to_i64(), clip.height.to_i64()):
+                return _upstream_skia_rejected("clip edge is not exact SkScalar", 0, index)
+            if not _upstream_skia_exact_scalar(command.x + command.width) or
+                not _upstream_skia_exact_scalar(command.y + command.height):
+                return _upstream_skia_rejected("clipped rectangle edge is not exact SkScalar", 0, index)
+            has_clip = true
+        else:
+            if command.x < 0.0 or command.y < 0.0 or
+                command.x + command.width > embedding.width.to_f64() or
+                command.y + command.height > embedding.height.to_f64():
+                return _upstream_skia_rejected("rectangle is empty or outside target", 0, index)
+        if ((command.color >> 24) & 0xffu32) != 0xffu32:
+            return _upstream_skia_rejected("opaque rectangle required", 0, index)
+        if index == 0 and (source_command.fractional_geometry != nil or
+            command.clip_rect.present or
+            command.x != 0.0 or command.y != 0.0 or
+            command.width != embedding.width.to_f64() or
+            command.height != embedding.height.to_f64()):
+            return _upstream_skia_rejected("integer full-target clear required first", 0, index)
+        index = index + 1
+    UpstreamSkiaGaneshAdmission(accepted: true, reason: "",
+        batch_index: -1, command_index: -1,
+        width: embedding.width, height: embedding.height,
+        rect_count: ir.commands.len(),
+        draw_format: if has_clip: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2 else:
+            UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1,
+        draw_magic: if has_clip: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V2 else:
+            UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V1,
+        rect_stride: if has_clip: 64 else: 40)
+
+# Admit every command before any native object or queue submission is created.
+# This intentionally supports a small, exact subset; unsupported semantics are
+# a typed failure rather than a preview or CPU fallback.
+pub fn upstream_skia_ganesh_vulkan_preflight(composition: DrawIrComposition) -> UpstreamSkiaGaneshAdmission:
+    _upstream_skia_rects_admitted(composition, draw_ir_to_ui_ir(composition))
+
+fn _upstream_skia_v3_finite(value: f64) -> bool:
+    not is_nan_f64(value) and not is_inf_f64(value)
+
+fn _upstream_skia_v3_f32(value: f64) -> bool:
+    (_upstream_skia_v3_finite(value) and
+        _upstream_skia_v3_finite((value as f32) as f64))
+
+fn _upstream_skia_v3_abs(value: f64) -> f64:
+    if value < 0.0: -value else: value
+
+# Mirror draw_payload_v3_validate.h: the f32 matrix must remain invertible,
+# and a conservative float-operation guard is charged at every corner.
+fn _upstream_skia_v3_affine_admitted(x: f64, y: f64, width: f64,
+    height: f64, matrix: DrawIrAffine2D) -> bool:
+    if not (_upstream_skia_v3_f32(matrix.a) and _upstream_skia_v3_f32(matrix.b) and
+        _upstream_skia_v3_f32(matrix.c) and _upstream_skia_v3_f32(matrix.d) and
+        _upstream_skia_v3_f32(matrix.tx) and _upstream_skia_v3_f32(matrix.ty) and
+        _upstream_skia_v3_f32(x) and _upstream_skia_v3_f32(y) and
+        _upstream_skia_v3_f32(width) and _upstream_skia_v3_f32(height)):
+        return false
+    val a = matrix.a as f32
+    val b = matrix.b as f32
+    val c = matrix.c as f32
+    val d = matrix.d as f32
+    val tx = matrix.tx as f32
+    val ty = matrix.ty as f32
+    val determinant = a * d - b * c
+    if (not _upstream_skia_v3_finite(determinant as f64) or determinant == 0.0):
+        return false
+    val fx = x as f32
+    val fy = y as f32
+    val fw = width as f32
+    val fh = height as f32
+    val right = fx + fw
+    val bottom = fy + fh
+    if (not _upstream_skia_v3_finite(right as f64) or
+        not _upstream_skia_v3_finite(bottom as f64) or
+        fw <= 0.0 or fh <= 0.0):
+        return false
+    val original_x: [f64] = [x, x + width, x, x + width]
+    val original_y: [f64] = [y, y, y + height, y + height]
+    val submitted_x: [f64] = [fx as f64, right as f64, fx as f64, right as f64]
+    val submitted_y: [f64] = [fy as f64, fy as f64, bottom as f64, bottom as f64]
+    var i = 0
+    while i < 4:
+        val source_x = matrix.a * original_x[i] + matrix.c * original_y[i] + matrix.tx
+        val source_y = matrix.b * original_x[i] + matrix.d * original_y[i] + matrix.ty
+        val ax = (a as f64) * submitted_x[i]
+        val cy = (c as f64) * submitted_y[i]
+        val bx = (b as f64) * submitted_x[i]
+        val dy = (d as f64) * submitted_y[i]
+        val mapped_x = ax + cy + (tx as f64)
+        val mapped_y = bx + dy + (ty as f64)
+        val guard_x = 0.00000095367431640625 *
+            (_upstream_skia_v3_abs(mapped_x) + _upstream_skia_v3_abs(ax) +
+            _upstream_skia_v3_abs(cy) + _upstream_skia_v3_abs(tx as f64) + 1.0)
+        val guard_y = 0.00000095367431640625 *
+            (_upstream_skia_v3_abs(mapped_y) + _upstream_skia_v3_abs(bx) +
+            _upstream_skia_v3_abs(dy) + _upstream_skia_v3_abs(ty as f64) + 1.0)
+        if not (_upstream_skia_v3_finite(source_x) and
+            _upstream_skia_v3_finite(source_y) and
+            _upstream_skia_v3_finite(mapped_x) and
+            _upstream_skia_v3_finite(mapped_y) and
+            _upstream_skia_v3_finite(guard_x) and
+            _upstream_skia_v3_finite(guard_y)):
+            return false
+        if (_upstream_skia_v3_abs(source_x - mapped_x) + guard_x > 0.125 or
+            _upstream_skia_v3_abs(source_y - mapped_y) + guard_y > 0.125):
+            return false
+        i = i + 1
+    true
+
+fn _upstream_skia_v3_clip_admitted(x: i32, y: i32, width: i32,
+    height: i32, target_width: i32, target_height: i32) -> bool:
+    val right = x.to_i64() + width.to_i64()
+    val bottom = y.to_i64() + height.to_i64()
+    (x >= 0 and y >= 0 and width > 0 and height > 0 and
+        right <= target_width.to_i64() and bottom <= target_height.to_i64() and
+        _upstream_skia_exact_clip(x.to_i64(), y.to_i64(),
+            width.to_i64(), height.to_i64()))
+
+# Explicit candidate only: the normal v1/v2 entrypoint keeps rejecting v4
+# affine/coverage state. Native v3 execution remains disabled by default.
+fn _upstream_skia_affine_v3_admitted(composition: DrawIrComposition,
+    ir: UiIr) -> UpstreamSkiaGaneshAdmission:
+    if composition.schema != DRAW_IR_SCHEMA_VERSION_V4:
+        return _upstream_skia_rejected("Draw IR v4 required for affine v3 candidate", -1, -1)
+    if not ir.accepted:
+        return _upstream_skia_rejected(ir.rejection_reason,
+            ir.rejected_batch_index, ir.rejected_command_index)
+    if ir.batches.len() != 1:
+        return _upstream_skia_rejected("exactly one offscreen batch is required", -1, -1)
+    val batch = ir.batches[0]
+    val embedding = batch.embedding
+    if ir.backend_target != DRAW_IR_BACKEND_GPU or
+        batch.backend_target != DRAW_IR_BACKEND_GPU:
+        return _upstream_skia_rejected("Vulkan batch target required", 0, -1)
+    if embedding.width <= 0 or embedding.height <= 0 or
+        embedding.width > 16384 or embedding.height > 16384 or
+        embedding.width.to_i64() * embedding.height.to_i64() > 16777216:
+        return _upstream_skia_rejected("invalid or oversized offscreen extent", 0, -1)
+    if embedding.x != 0 or embedding.y != 0 or embedding.layer != 0 or
+        embedding.opacity_milli != 1000:
+        return _upstream_skia_rejected("batch embedding is not an opaque target surface", 0, -1)
+    if ir.commands.len() == 0 or ir.commands.len() > 65536:
+        return _upstream_skia_rejected("invalid rectangle count", 0, -1)
+    var index = 0
+    while index < ir.commands.len():
+        val command = ir.commands[index]
+        val source = composition.batches[0].commands[index]
+        if command.kind != UI_IR_COMMAND_RECT:
+            return _upstream_skia_rejected("unsupported command kind", 0, index)
+        if source.text_value != "" or source.advance_widths.len() != 0 or
+            source.edge != nil or source.image_uri != "" or
+            source.points.len() != 0 or source.glyph_run.valid or
+            source.glyph_run.glyph_ids.len() != 0 or
+            source.glyph_run.xs.len() != 0 or
+            source.glyph_run.ys.len() != 0 or
+            source.glyph_run.clusters.len() != 0:
+            return _upstream_skia_rejected("rectangle carries unsupported payload", 0, index)
+        if command.computed_style.len() != 0 or command.parent_id != "" or
+            command.border_rect.present or command.content_rect.present or
+            command.hit_rect.present:
+            return _upstream_skia_rejected("rectangle has unsupported style, parent, or hit state", 0, index)
+        if ((command.color >> 24) & 0xffu32) != 0xffu32:
+            return _upstream_skia_rejected("opaque rectangle required", 0, index)
+        if not (_upstream_skia_v3_finite(command.x) and
+            _upstream_skia_v3_finite(command.y) and
+            _upstream_skia_v3_finite(command.width) and
+            _upstream_skia_v3_finite(command.height)) or
+            command.width <= 0.0 or command.height <= 0.0:
+            return _upstream_skia_rejected("invalid rectangle geometry", 0, index)
+        if index == 0:
+            if source.fractional_geometry != nil or
+                command.affine_transform != nil or
+                command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER or
+                command.clip_rect.present or command.x != 0.0 or
+                command.y != 0.0 or
+                command.width != embedding.width.to_f64() or
+                command.height != embedding.height.to_f64():
+                return _upstream_skia_rejected("integer full-target clear required first", 0, index)
+        if command.clip_rect.present:
+            val clip = command.clip_rect
+            if not _upstream_skia_v3_clip_admitted(clip.x, clip.y,
+                clip.width, clip.height, embedding.width, embedding.height):
+                return _upstream_skia_rejected("invalid surface clip", 0, index)
+        if val matrix = command.affine_transform:
+            if index == 0 or source.fractional_geometry == nil or
+                command.x != 0.0 or command.y != 0.0 or
+                source.x != 0 or source.y != 0 or
+                source.width != 0 or source.height != 0:
+                return _upstream_skia_rejected("affine requires local fractional rectangle", 0, index)
+            if not _upstream_skia_v3_affine_admitted(command.x, command.y,
+                command.width, command.height, matrix):
+                return _upstream_skia_rejected("affine f32 corner error or determinant invalid", 0, index)
+        else:
+            if not (_upstream_skia_exact_scalar(command.x) and
+                _upstream_skia_exact_scalar(command.y) and
+                _upstream_skia_exact_scalar(command.width) and
+                _upstream_skia_exact_scalar(command.height)):
+                return _upstream_skia_rejected("rectangle coordinate is not exact SkScalar", 0, index)
+            if command.clip_rect.present:
+                if not _upstream_skia_exact_scalar(command.x + command.width) or
+                    not _upstream_skia_exact_scalar(command.y + command.height):
+                    return _upstream_skia_rejected("clipped rectangle edge is not exact SkScalar", 0, index)
+            elif command.x < 0.0 or command.y < 0.0 or
+                command.x + command.width > embedding.width.to_f64() or
+                command.y + command.height > embedding.height.to_f64():
+                return _upstream_skia_rejected("rectangle is outside target", 0, index)
+        index = index + 1
+    UpstreamSkiaGaneshAdmission(accepted: true, reason: "",
+        batch_index: -1, command_index: -1,
+        width: embedding.width, height: embedding.height,
+        rect_count: ir.commands.len(),
+        draw_format: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3,
+        draw_magic: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V3,
+        rect_stride: 128)
+
+pub fn upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+    composition: DrawIrComposition) -> UpstreamSkiaGaneshAdmission:
+    _upstream_skia_affine_v3_admitted(composition, draw_ir_to_ui_ir(composition))
+
+fn _upstream_skia_payload(ir: UiIr, admission: UpstreamSkiaGaneshAdmission) -> i64:
+    val size = 16 + admission.rect_count.to_i64() * admission.rect_stride
+    val ptr = raw_alloc(size)
+    if ptr == 0:
+        return 0
+    raw_write_i64(ptr, 0,
+        admission.draw_magic |
+        (admission.width.to_i64() << 32))
+    raw_write_i64(ptr, 8, admission.height.to_i64() |
+        (admission.rect_count.to_i64() << 32))
+    var index = 0
+    while index < admission.rect_count:
+        val rect = ir.commands[index]
+        val offset = 16 + index.to_i64() * admission.rect_stride
+        raw_write_i64(ptr, offset, spl_f64_to_bits(rect.x))
+        raw_write_i64(ptr, offset + 8, spl_f64_to_bits(rect.y))
+        raw_write_i64(ptr, offset + 16, spl_f64_to_bits(rect.width))
+        raw_write_i64(ptr, offset + 24, spl_f64_to_bits(rect.height))
+        raw_write_i64(ptr, offset + 32, rect.color.to_i64())
+        if admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2:
+            if rect.clip_rect.present:
+                val clip = rect.clip_rect
+                raw_write_i64(ptr, offset + 40,
+                    ((clip.x as u32).to_u64() |
+                    ((clip.y as u32).to_u64() << 32)) as i64)
+                raw_write_i64(ptr, offset + 48,
+                    ((clip.width as u32).to_u64() |
+                    ((clip.height as u32).to_u64() << 32)) as i64)
+                raw_write_i64(ptr, offset + 56, 1)
+            else:
+                raw_write_i64(ptr, offset + 40, 0)
+                raw_write_i64(ptr, offset + 48, 0)
+                raw_write_i64(ptr, offset + 56, 0)
+        elif admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3:
+            var flags: i64 = 0
+            if rect.clip_rect.present:
+                val clip = rect.clip_rect
+                raw_write_i64(ptr, offset + 40,
+                    ((clip.x as u32).to_u64() |
+                    ((clip.y as u32).to_u64() << 32)) as i64)
+                raw_write_i64(ptr, offset + 48,
+                    ((clip.width as u32).to_u64() |
+                    ((clip.height as u32).to_u64() << 32)) as i64)
+                flags = 1
+            else:
+                raw_write_i64(ptr, offset + 40, 0)
+                raw_write_i64(ptr, offset + 48, 0)
+            if val matrix = rect.affine_transform:
+                flags = flags | 2
+                raw_write_i64(ptr, offset + 64, spl_f64_to_bits(matrix.a))
+                raw_write_i64(ptr, offset + 72, spl_f64_to_bits(matrix.b))
+                raw_write_i64(ptr, offset + 80, spl_f64_to_bits(matrix.c))
+                raw_write_i64(ptr, offset + 88, spl_f64_to_bits(matrix.d))
+                raw_write_i64(ptr, offset + 96, spl_f64_to_bits(matrix.tx))
+                raw_write_i64(ptr, offset + 104, spl_f64_to_bits(matrix.ty))
+            else:
+                raw_write_i64(ptr, offset + 64, 0)
+                raw_write_i64(ptr, offset + 72, 0)
+                raw_write_i64(ptr, offset + 80, 0)
+                raw_write_i64(ptr, offset + 88, 0)
+                raw_write_i64(ptr, offset + 96, 0)
+                raw_write_i64(ptr, offset + 104, 0)
+            raw_write_i64(ptr, offset + 56, flags)
+            raw_write_i64(ptr, offset + 112,
+                if rect.raster_policy == DRAW_IR_RASTER_COVERAGE_AA: 1 else: 0)
+            raw_write_i64(ptr, offset + 120, 0)
+        index = index + 1
+    ptr
+
+fn _upstream_skia_copy_bytes(ptr: i64, length: i64) -> [i64]:
+    var out: [i64] = []
+    var offset: i64 = 0
+    while offset < length:
+        val word = raw_read_i32(ptr, offset) as u32
+        out.push((word & 0xffu32).to_i64())
+        out.push(((word >> 8) & 0xffu32).to_i64())
+        out.push(((word >> 16) & 0xffu32).to_i64())
+        out.push(((word >> 24) & 0xffu32).to_i64())
+        offset = offset + 4
+    out
+
+# Candidate wire inspection uses the same serializer as submit. It creates no
+# native provider session and never promotes V3 to the default render route.
+pub fn upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate(
+    composition: DrawIrComposition) -> Result<[i64], text>:
+    val ir = draw_ir_to_ui_ir(composition)
+    val admission = _upstream_skia_affine_v3_admitted(composition, ir)
+    if not admission.accepted:
+        return Err(admission.reason)
+    val length = 16 + admission.rect_count.to_i64() * admission.rect_stride
+    val ptr = _upstream_skia_payload(ir, admission)
+    if ptr == 0:
+        return Err("upstream Skia V3 payload allocation failed")
+    val bytes = _upstream_skia_copy_bytes(ptr, length)
+    raw_free(ptr, length)
+    Ok(bytes)
+
+# Both entrypoints use the same authenticated owner and readback path. The
+# candidate differs only in complete preflight and its private wire format.
+fn _upstream_skia_render_admitted(ir: UiIr,
+    admission: UpstreamSkiaGaneshAdmission, device_index: i64,
+    correlation_id: i64) -> Result<UpstreamSkiaGaneshFrame, text>:
+    if device_index < 0 or correlation_id <= 0:
+        return Err("invalid device or correlation identity")
+    val info = gpu_provider_info(GPU_PROVIDER_BACKEND_VULKAN)
+    if not info.loaded or info.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        (info.capability_bits & 1) != 1:
+        return Err("authenticated upstream Skia Ganesh Vulkan provider unavailable")
+    var session = gpu_provider_open(GPU_PROVIDER_BACKEND_VULKAN, device_index)
+    if not session.is_open():
+        return Err("Vulkan device or Ganesh context unavailable")
+    val byte_count = admission.width.to_i64() * admission.height.to_i64() * 4
+    val usage = (admission.width.to_i64() << 32) | admission.height.to_i64()
+    var resource = gpu_provider_resource_alloc(session, byte_count, 0, usage)
+    if not resource.is_live():
+        val closed = session.close()
+        if closed:
+            return Err("upstream Skia output allocation failed")
+        return Err("upstream Skia session retirement failed")
+    val payload_length = 16 + admission.rect_count.to_i64() * admission.rect_stride
+    val payload = _upstream_skia_payload(ir, admission)
+    if payload == 0:
+        val released = resource.release()
+        val closed = session.close()
+        if released and closed:
+            return Err("upstream Skia payload allocation failed")
+        return Err("upstream Skia resource retirement failed")
+    var completion = gpu_provider_submit_raw(session, resource,
+        admission.draw_format, payload,
+        payload_length, correlation_id)
+    raw_free(payload, payload_length)
+    if not completion.is_live():
+        val released = resource.release()
+        val closed = session.close()
+        if released and closed:
+            return Err("upstream Skia submission failed")
+        return Err("upstream Skia submission or retirement uncertain")
+    val receipt = gpu_provider_wait(session, completion, 5000000000)
+    if not receipt.valid or receipt.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        receipt.resource != resource.handle:
+        val completion_released = completion.release()
+        val resource_released = resource.release()
+        val closed = session.close()
+        if completion_released and resource_released and closed:
+            return Err("upstream Skia GPU completion failed")
+        return Err("upstream Skia GPU completion or retirement uncertain")
+    val pixels = raw_alloc(byte_count)
+    if pixels == 0:
+        val completion_released = completion.release()
+        val resource_released = resource.release()
+        val closed = session.close()
+        if completion_released and resource_released and closed:
+            return Err("upstream Skia readback allocation failed")
+        return Err("upstream Skia readback retirement uncertain")
+    val readback = gpu_provider_readback_raw(session, resource, pixels, byte_count)
+    var bytes: [i64] = []
+    if readback.valid and readback.length == byte_count:
+        bytes = _upstream_skia_copy_bytes(pixels, byte_count)
+    raw_free(pixels, byte_count)
+    # The optional native identity export is admissible only while the
+    # completed resource and its observed readback still belong to this
+    # session. Missing extension or stale completion fails closed.
+    val identity = gpu_provider_device_identity(session, completion)
+    val backend_handle = session.handle
+    val resource_id = resource.handle
+    val completion_id = completion.handle
+    val completion_released = completion.release()
+    val resource_released = resource.release()
+    val closed = session.close()
+    if bytes.len().to_i64() != byte_count or not identity.valid or
+        not completion_released or
+        not resource_released or not closed:
+        return Err("upstream Skia readback, native identity, or retirement incomplete")
+    Ok(UpstreamSkiaGaneshFrame(width: admission.width,
+        height: admission.height, rgba_bytes: bytes,
+        provider_identity: receipt.provider_identity,
+        device_identity: receipt.device_identity,
+        resource_id: resource_id, submission_token: correlation_id,
+        completion_token: correlation_id,
+        readback_checksum: receipt.checksum,
+        physical_device_uuid: identity.device_uuid,
+        driver_uuid: identity.driver_uuid,
+        vendor_id: identity.vendor_id, device_id: identity.device_id,
+        device_type: identity.device_type,
+        api_version: identity.api_version,
+        driver_version: identity.driver_version,
+        backend_handle: backend_handle,
+        device_submit_count: 1,
+        device_wait_count: 1,
+        device_readback_count: 1))
+
+# Default route continues to admit only the immutable v1/v2 wire subset.
+pub fn upstream_skia_ganesh_vulkan_render(composition: DrawIrComposition,
+    device_index: i64, correlation_id: i64) -> Result<UpstreamSkiaGaneshFrame, text>:
+    val ir = draw_ir_to_ui_ir(composition)
+    val admission = _upstream_skia_rects_admitted(composition, ir)
+    if not admission.accepted:
+        return Err(admission.reason)
+    _upstream_skia_render_admitted(ir, admission, device_index, correlation_id)
+
+# The native V3 execution flag is default-disabled. Even admitted compositions
+# return an error if the authenticated provider does not enable that flag.
+pub fn upstream_skia_ganesh_vulkan_render_affine_v3_candidate(
+    composition: DrawIrComposition, device_index: i64,
+    correlation_id: i64) -> Result<UpstreamSkiaGaneshFrame, text>:
+    val ir = draw_ir_to_ui_ir(composition)
+    val admission = _upstream_skia_affine_v3_admitted(composition, ir)
+    if not admission.accepted:
+        return Err(admission.reason)
+    _upstream_skia_render_admitted(ir, admission, device_index, correlation_id)
+
+# Package the completed Skia readback with the pixel-domain facts fixed by
+# render(): one offscreen RGBA8888 target, unpremultiplied sRGB readback at
+# origin (0, 0). This does not attest physical device properties or elevate a
+# caller-constructed frame to native evidence; the pair gate keeps it candidate.
+pub fn upstream_skia_ganesh_vulkan_final_capture(frame: UpstreamSkiaGaneshFrame,
+    fixture_id: text, fixture_digest: text,
+    frame_id: text) -> Result<FinalOutputCapture, text>:
+    if frame.provider_identity != UPSTREAM_SKIA_GANESH_VULKAN_PROVIDER_IDENTITY or
+        frame.device_identity < 0 or frame.resource_id <= 0 or
+        frame.submission_token <= 0 or
+        frame.completion_token != frame.submission_token:
+        return Err("upstream Skia frame receipt incomplete")
+    if frame.width <= 0 or frame.height <= 0 or
+        frame.width > 16384 or frame.height > 16384 or
+        frame.width.to_i64() * frame.height.to_i64() > 16777216:
+        return Err("upstream Skia frame extent invalid")
+    val byte_count = frame.width.to_i64() * frame.height.to_i64() * 4
+    if frame.rgba_bytes.len().to_i64() != byte_count:
+        return Err("upstream Skia readback length mismatch")
+    var checksum: u64 = 0xCBF29CE484222325u64
+    for byte in frame.rgba_bytes:
+        if byte < 0 or byte > 255:
+            return Err("upstream Skia readback contains a non-byte value")
+        checksum = (checksum ^ byte.to_u64()) * 0x100000001b3u64
+    if (checksum as i64) != frame.readback_checksum:
+        return Err("upstream Skia readback checksum mismatch")
+    val capture = FinalOutputCapture(
+        metadata: FinalOutputMetadata(
+            fixture_id: fixture_id, fixture_digest: fixture_digest,
+            frame_id: frame_id,
+            resource_id: "upstream-skia-resource-{frame.resource_id}",
+            selected_resource_count: 1, mip_level: 0, array_layer: 0,
+            submission_token: "{frame.submission_token}",
+            completion_token: "{frame.completion_token}",
+            frame_complete: true, readback_complete: true,
+            device_status: "ready", width: frame.width.to_i64(),
+            height: frame.height.to_i64(), stride: frame.width.to_i64() * 4,
+            pixel_format: "R8G8B8A8_UNORM", alpha_mode: "straight",
+            color_space: "srgb", color_primaries: "srgb",
+            transfer_function: "srgb", origin: "top-left",
+            crop_x: 0, crop_y: 0,
+            crop_width: frame.width.to_i64(),
+            crop_height: frame.height.to_i64()),
+        pixel_bytes: frame.rgba_bytes)
+    match final_output_validate(capture):
+        case Err(err): Err("upstream Skia capture invalid: " + err.code)
+        case Ok(_): Ok(capture)
+
+export UpstreamSkiaGaneshAdmission, UpstreamSkiaGaneshFrame

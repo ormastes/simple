@@ -1,4 +1,9 @@
 # BUG: all-zero static array initializers lower to N inline zero-stores (13.5 MB dead text in merged kernel)
+## Closed 2026-09-16 — ...xt in merged kernel) **Status:** RESOLVED (2026-07-11) **Severity:** medium (binary bloat:
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** RESOLVED (2026-07-11)
 **Severity:** medium (binary bloat: 13.5 MB of 22.6 MB merged-kernel text is dead init code; also slows boot-time module init where it runs)
@@ -36,3 +41,4 @@ Verified: merged-kernel .text 28,376,200 → 9,396,968 B (−18.98 MB;
 `__module_init_kernel__fd_table` 8,544,641 → 2,221 B, `pipe_compat`
 4,986,934 → 549 B); ssh_clang_hello_ring3.shs DEMO PASSES on the shrunk
 kernel; simple-compiler --lib zero net-new failures (2877/240 → 2881/237).
+

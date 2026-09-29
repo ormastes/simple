@@ -1,0 +1,69 @@
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.parser_types_expr.{parser_type_kind_named_name}
+
+@unsafe(reason: "exercise the production transient parser-scope ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_begin() -> bool
+@unsafe(reason: "exercise the production transient parser-scope ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_pause() -> bool
+@unsafe(reason: "exercise the production transient parser-scope ABI", capabilities: [ffi])
+extern fn rt_transient_array_scope_end() -> bool
+@unsafe(reason: "retain the parsed module across transient-scope teardown", capabilities: [ffi])
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+fn transient_scope_begin() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_begin()
+
+fn transient_scope_pause() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_pause()
+
+fn transient_scope_end() -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_end()
+
+fn transient_promote(value: Any) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(value)
+
+val source = (
+    "struct DriverProbe:\n" +
+    "    value: i64\n\n" +
+    "impl DriverProbe:\n" +
+    "    fn read(self) -> i64:\n" +
+    "        return self.value\n\n" +
+    "trait NamedProbe:\n" +
+    "    fn name(self) -> text\n\n" +
+    "impl NamedProbe for DriverProbe:\n" +
+    "    fn name(self) -> text:\n" +
+    "        return \"driver\"\n")
+
+if not transient_scope_begin():
+    panic("transient parser scope unavailable")
+
+val parsed: ParserModule = parse_and_build_module_scoped(
+    source, "impl_span_safepoint_probe.spl", false)
+if not transient_scope_pause():
+    panic("transient parser scope pause failed")
+if not transient_promote(parsed):
+    panic("parsed module promotion failed")
+if not transient_scope_end():
+    panic("transient parser scope end failed")
+
+if parsed.impls.len() != 2:
+    panic("expected inherent and trait impls")
+val inherent = parsed.impls[0]
+val trait_impl = parsed.impls[1]
+if inherent.has_trait_:
+    panic("inherent impl acquired a trait")
+if parser_type_kind_named_name(inherent.type_.kind) != "DriverProbe":
+    panic("inherent impl target type was corrupted")
+if not trait_impl.has_trait_:
+    panic("trait impl lost its trait")
+if parser_type_kind_named_name(trait_impl.type_.kind) != "DriverProbe":
+    panic("trait impl target type was corrupted")
+if parser_type_kind_named_name(trait_impl.trait_.kind) != "NamedProbe":
+    panic("trait impl trait type was corrupted")
+
+print "PASS impl spans survive flat bridge safepoints"

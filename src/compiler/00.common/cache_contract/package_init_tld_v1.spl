@@ -1,0 +1,135 @@
+#![allow(primitive_api)]
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_magic,
+    wire_put_envelope, wire_put_u64}
+use compiler.common.cache_contract.physical_tld_v1.{PhysicalTldObjectV1,
+    ThreePayloadContractReaderV1, TldPayloadRoleV1, physical_tld_object_valid_v1,
+    three_payload_contract_budget_v1,
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1,
+    three_payload_contract_max_payload_bytes_v1,
+    three_payload_contract_put_digest_v1, three_payload_contract_put_optional_digest_v1,
+    three_payload_contract_put_text_v1, three_payload_contract_put_texts_v1,
+    three_payload_contract_text_valid_v1}
+
+pub struct PackageInitTldV1:
+    package_id: text
+    parent_scope_digest: text?
+    membership_root_digest: text
+    ordered_member_ids: [text]
+    aspect_root_digest: text
+    trait_root_digest: text
+    macro_root_digest: text
+    extension_root_digest: text
+    template_root_digest: text
+    initializer_contract_digest: text
+    ordered_initializer_refs: [text]
+
+pub struct PackageInitTldDecodeV1:
+    ok: bool
+    value: PackageInitTldV1?
+    error: text
+
+fn _texts_valid_v1(values: [text]) -> bool:
+    if values.len() > three_payload_contract_max_items_v1(): return false
+    for value in values:
+        if not three_payload_contract_text_valid_v1(value, false): return false
+    true
+
+pub fn package_init_tld_valid_v1(value: PackageInitTldV1) -> bool:
+    if not three_payload_contract_text_valid_v1(value.package_id, false) or
+            not three_payload_contract_digest_valid_v1(value.membership_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.aspect_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.trait_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.macro_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.extension_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.template_root_digest) or
+            not three_payload_contract_digest_valid_v1(value.initializer_contract_digest) or
+            not _texts_valid_v1(value.ordered_member_ids) or
+            not _texts_valid_v1(value.ordered_initializer_refs):
+        return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8)
+    budget.add_text(value.package_id, false)
+    budget.add_optional_digest(value.parent_scope_digest)
+    budget.add_digest(value.membership_root_digest)
+    budget.add_bytes(4)
+    budget.add_items(value.ordered_member_ids.len())
+    for member in value.ordered_member_ids: budget.add_text(member, false)
+    for digest in [value.aspect_root_digest, value.trait_root_digest,
+            value.macro_root_digest, value.extension_root_digest,
+            value.template_root_digest, value.initializer_contract_digest]:
+        budget.add_digest(digest)
+    budget.add_bytes(4)
+    budget.add_items(value.ordered_initializer_refs.len())
+    for reference in value.ordered_initializer_refs: budget.add_text(reference, false)
+    if not budget.ok: return false
+    match value.parent_scope_digest:
+        case Some(digest): three_payload_contract_digest_valid_v1(digest)
+        case nil: true
+
+pub fn package_init_tld_encode_v1(value: PackageInitTldV1) -> [u8]:
+    if not package_init_tld_valid_v1(value): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("PIT1"), 1)
+    out = wire_put_u64(out, 1)
+    out = three_payload_contract_put_text_v1(out, value.package_id)
+    out = three_payload_contract_put_optional_digest_v1(out, value.parent_scope_digest)
+    out = three_payload_contract_put_digest_v1(out, value.membership_root_digest)
+    out = three_payload_contract_put_texts_v1(out, value.ordered_member_ids)
+    out = three_payload_contract_put_digest_v1(out, value.aspect_root_digest)
+    out = three_payload_contract_put_digest_v1(out, value.trait_root_digest)
+    out = three_payload_contract_put_digest_v1(out, value.macro_root_digest)
+    out = three_payload_contract_put_digest_v1(out, value.extension_root_digest)
+    out = three_payload_contract_put_digest_v1(out, value.template_root_digest)
+    out = three_payload_contract_put_digest_v1(out, value.initializer_contract_digest)
+    three_payload_contract_put_texts_v1(out, value.ordered_initializer_refs)
+
+fn _package_init_failure_v1(error: text) -> PackageInitTldDecodeV1:
+    PackageInitTldDecodeV1(ok: false, value: nil, error: error)
+
+pub fn package_init_tld_decode_v1(bytes: [u8]) -> PackageInitTldDecodeV1:
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _package_init_failure_v1("package_init_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("PIT1"), 1): return _package_init_failure_v1("package_init_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    val value = PackageInitTldV1(package_id: reader.read_text(false),
+        parent_scope_digest: reader.read_optional_digest(), membership_root_digest: reader.read_digest(),
+        ordered_member_ids: reader.read_texts(false), aspect_root_digest: reader.read_digest(),
+        trait_root_digest: reader.read_digest(), macro_root_digest: reader.read_digest(),
+        extension_root_digest: reader.read_digest(), template_root_digest: reader.read_digest(),
+        initializer_contract_digest: reader.read_digest(), ordered_initializer_refs: reader.read_texts(false))
+    if schema != 1: return _package_init_failure_v1("package_init_schema_mismatch")
+    if not reader.finished(): return _package_init_failure_v1(if reader.error == "": "trailing_package_init_bytes" else: reader.error)
+    if not package_init_tld_valid_v1(value): return _package_init_failure_v1("noncanonical_package_init")
+    PackageInitTldDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn package_init_tld_physical_binding_valid_v1(
+    object: PhysicalTldObjectV1,
+) -> bool:
+    if not physical_tld_object_valid_v1(object) or
+            object.header.role != TldPayloadRoleV1.PackageInitTld:
+        return false
+    var record_index: i64 = -1
+    for section in object.header.sections:
+        if section.kind == "package_init_v1":
+            if record_index >= 0 or
+                    section.role != TldPayloadRoleV1.PackageInitTld or
+                    section.encoding_profile != "raw-v1" or
+                    section.section_index < 0 or
+                    section.section_index >= object.canonical_sections.len():
+                return false
+            record_index = section.section_index
+    if record_index < 0: return false
+    val record_section = object.header.sections[record_index]
+    val record_bytes = object.canonical_sections[record_index]
+    val record_digest = sha256_u8_hex(record_bytes)
+    if (object.header.semantic_record_digest != record_digest or
+            record_section.semantic_object_digest != record_digest):
+        return false
+    val decoded = package_init_tld_decode_v1(record_bytes)
+    if not decoded.ok: return false
+    match decoded.value:
+        case Some(value): package_init_tld_encode_v1(value) == record_bytes
+        case nil: false

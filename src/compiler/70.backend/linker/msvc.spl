@@ -4,7 +4,7 @@
 # Auto-detects Visual Studio installation via vswhere.exe.
 
 use std.platform (is_windows, normalize_path, join_path)
-use std.io_runtime.{process_run, file_exists, env_get_opt}
+use std.io_runtime.{process_run, file_exists, env_get_opt, file_write}
 use compiler.backend.linker.link (LinkConfig, LinkError, LinkErrorKind, Linker)
 
 struct MsvcShellResult:
@@ -19,8 +19,32 @@ struct MsvcShellResult:
 # other on load ("last write wins") and previously also caused a bogus
 # `extern fn shell` declared here to shadow ANY same-named local function
 # in ANY module, anywhere in the program (see msvc_shell_naming bug).
+#
+# A quote in the `cmd` string used to be mangled here: the runtime's Windows
+# argv builder (win_cmd_build_line,
+# src/runtime/platform/windows_command_line_private.h) applied
+# CommandLineToArgvW quoting, escaping every embedded `"` as `\"`, which
+# cmd.exe does not honour -- cmd printed "The filename, directory name, or
+# volume label syntax is incorrect" and exited 1 without running anything.
+# FIXED 2026-09-06 at that shared boundary: a cmd.exe `/C <payload>` spawn
+# whose payload contains a quote is now emitted as `cmd /S /C "<payload>"`,
+# which cmd passes through verbatim. Verified on Windows 11 with the real
+# builder + real CreateProcessA; pinned by
+# test/01_unit/runtime/process_run_timeout_provider_source_spec.spl.
+# Still prefer msvc_run_argv below when invoking a tool directly -- no shell
+# means no cmd.exe parsing at all. Note the fix lives in the C runtime, so
+# the Rust bootstrap seed (its own std::process::Command spawn path) still
+# mangles such strings; see the bug record.
 fn msvc_shell(cmd: text) -> MsvcShellResult:
     val (stdout, stderr, code) = process_run("cmd", ["/C", cmd])
+    MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
+
+# Direct argv invocation of a native tool -- no shell, so no cmd.exe parsing
+# and no quoting ambiguity. CommandLineToArgvW quoting is exactly what
+# link.exe / lld-link (ordinary CRT programs) parse, so this is the correct
+# route for any path that may contain spaces.
+fn msvc_run_argv(exe: text, args: [text]) -> MsvcShellResult:
+    val (stdout, stderr, code) = process_run(exe, args)
     MsvcShellResult(stdout: stdout, stderr: stderr, exit_code: code)
 
 # ===========================================================================
@@ -29,6 +53,33 @@ fn msvc_shell(cmd: text) -> MsvcShellResult:
 
 fn default_windows_libs_with_suffix() -> [text]:
     ["kernel32.lib", "user32.lib", "ws2_32.lib", "bcrypt.lib", "advapi32.lib", "userenv.lib", "ntdll.lib", "msvcrt.lib"]
+
+pub fn msvc_strip_unix_rpath_args(extra_args: [text]) -> [text]:
+    """Drop Unix rpath options before they reach an MSVC/COFF linker argv.
+
+    `-rpath` is an ELF/Mach-O runtime-search-path mechanism; MSVC link.exe
+    and lld-link have no such concept. Passed through raw, a bare `-rpath
+    $ORIGIN` pair (two positional args) or `-Wl,-rpath,<dir>` (a single
+    unrecognized token) gets treated as an input file name -- `$ORIGIN` with
+    no extension is guessed as `$ORIGIN.obj`, which does not exist, and
+    link.exe fails LNK1181 ("cannot open input file '$ORIGIN.obj'"). Mirrors
+    native_linking.spl's `native_msvc_extra_args` (same shape, kept local to
+    this module rather than imported, since native_linking.spl imports FROM
+    msvc.spl and not the reverse)."""
+    var result: [text] = []
+    var index = 0
+    while index < extra_args.len():
+        val flag = extra_args[index]
+        if flag == "-rpath":
+            index = index + 1
+            if index < extra_args.len():
+                index = index + 1
+        elif flag.starts_with("-Wl,-rpath,"):
+            index = index + 1
+        else:
+            result.push(flag)
+            index = index + 1
+    result
 
 # ===========================================================================
 # MSVC Linker Configuration
@@ -96,8 +147,20 @@ impl MsvcConfig:
         # No logo
         args.push("/NOLOGO")
 
-        # Extra arguments
-        for arg in self.extra_args:
+        # Extra arguments. This is the single sink every MSVC-linking caller
+        # (link_from_config, _link_native_msvc, the shared-library DLL path)
+        # funnels its `extra_args`/`extra_flags` through before they become
+        # real link.exe/lld-link argv, so strip Unix `-rpath <dir>` /
+        # `-Wl,-rpath,<dir>` here too, defensively -- even though the known
+        # callers already filter their own inputs upstream. `-rpath` is
+        # meaningful only to ELF/Mach-O linkers; MSVC/COFF has no equivalent
+        # and, unrecognized, link.exe treats a bare `$ORIGIN` token as a
+        # positional input file and fails with LNK1181
+        # ("cannot open input file '$ORIGIN.obj'"). Same filter shape as
+        # native_linking.spl's `native_msvc_extra_args`, kept local here
+        # (import direction: native_linking.spl imports this module, not the
+        # reverse) so this boundary cannot be bypassed by a future caller.
+        for arg in msvc_strip_unix_rpath_args(self.extra_args):
             args.push(arg)
 
         args
@@ -123,18 +186,49 @@ impl MsvcLinker:
                 case Some(path):
                     link_exe = path
                 case nil:
-                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: "MSVC link.exe not found", symbol: nil, location: nil))
+                    return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
 
         # Build arguments
         val args = self.config.build_args(output, object_files)
-        val args_str = args.join(" ")
 
-        # Execute linker
-        val cmd = "\"{link_exe}\" {args_str}"
-        val result = msvc_shell(cmd)
+        # Invoke link.exe DIRECTLY through process_run -- never through
+        # cmd.exe. MEASURED 2026-09-02 (standalone CreateProcessA harness over
+        # the real win_cmd_build_line): the runtime's argv builder applies
+        # CommandLineToArgvW quoting, so a shell string containing quotes came
+        # out as
+        #   cmd /C "\"C:\Program Files\...\link.exe\" ... > \"D:\...\log\" 2>&1"
+        # and cmd.exe does NOT honour backslash-escaped quotes. cmd printed
+        # "The filename, directory name, or volume label syntax is incorrect",
+        # exited 1 WITHOUT running the linker, and never created the log --
+        # which is exactly the `[msvc-link] FAILED exit=1` plus
+        # `<link log unreadable>` this lane kept reporting. The previous
+        # comment here blamed corrupted captured handles; that was a
+        # misdiagnosis of the `{e}`-interpolates-a-struct defect, and process
+        # capture is demonstrably fine (see _cc_verify_compiles' stderr dump
+        # and the C-runtime compile path, both of which capture normally).
+        # CommandLineToArgvW quoting is precisely what link.exe/lld-link parse,
+        # so passing argv directly is the correct route, not a workaround; it
+        # also removes the unquoted args.join(" ") hazard for any object path
+        # containing a space. Windows-only module; Unix is unaffected.
+        val result = msvc_run_argv(link_exe, args)
+        val cmd = "\"{link_exe}\" {args.join(' ')}"
 
         if result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
+            # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
+            # reporting stderr alone throws half the diagnosis away: merge
+            # both. Persist them next to the output as well, so a failure is
+            # still diagnosable after the build log is rotated.
+            val log_body = "{result.stdout}{result.stderr}"
+            val link_log = "{output}.link.log"
+            file_write(link_log, log_body)
+            print "[msvc-link] FAILED exit={result.exit_code}"
+            print "[msvc-link] command: {cmd}"
+            print "[msvc-link] log: {link_log}"
+            print "[msvc-link] output-begin"
+            print log_body
+            print "[msvc-link] output-end"
+            val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
 
         Ok(())
 
@@ -168,9 +262,10 @@ impl MsvcLinker:
                 lib
             msvc_config.libs.push(lib_name)
 
-        # Add extra linker flags
+        # Add extra linker flags. Filtered at the source too, not only in
+        # build_args() below -- see msvc_strip_unix_rpath_args's docstring.
         if config.linker_flags.len() > 0:
-            msvc_config.extra_args = config.linker_flags
+            msvc_config.extra_args = msvc_strip_unix_rpath_args(config.linker_flags)
 
         # Create linker and link
         val linker = MsvcLinker.new(msvc_config)
@@ -183,11 +278,11 @@ impl MsvcLinker:
 # Find Visual Studio installation using vswhere.exe
 fn find_visual_studio() -> text?:
     # vswhere.exe location
-    val fixed_vswhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+    val fixed_vswhere = "C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
     var vswhere = if file_exists(fixed_vswhere): fixed_vswhere else: ""
     if vswhere == "":
         if val program_files = env_get_opt("ProgramFiles(x86)"):
-            val derived_vswhere = "{program_files}\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+            val derived_vswhere = "{program_files}/Microsoft Visual Studio/Installer/vswhere.exe"
             if file_exists(derived_vswhere):
                 vswhere = derived_vswhere
 
@@ -203,48 +298,58 @@ fn find_visual_studio() -> text?:
 
     Some(result.stdout.trim())
 
-# Find link.exe in Visual Studio installation
+# The Windows COFF linker. Toolchain policy (2026-09-24) is clang/LLD only:
+# never MSVC link.exe, and fail fast (no fallback) when lld-link is missing.
+val LLD_LINK_INSTALL_HINT = "lld-link not found on PATH (clang/LLD-only toolchain policy; MSVC link.exe is not used). Install LLVM with: sh scripts/setup/bootstrap-prereqs.shs install"
+
+fn is_lld_link_candidate(path: text) -> bool:
+    val normalized = path.trim().replace("\\", "/").lower()
+    normalized.ends_with("/lld-link.exe") or normalized == "lld-link.exe"
+
+fn msvc_native_tool_path(path: text) -> text:
+    if path.len() >= 3 and path.starts_with("/") and path.substring(2, 3) == "/":
+        val drive = path.substring(1, 2)
+        if drive != "/" and drive != "":
+            return "{drive}:{path.substring(2)}"
+    path
+
 fn find_link_exe() -> text?:
-    # Try to find Visual Studio
-    val vs_path_opt = find_visual_studio()
-    match vs_path_opt:
-        case Some(vs_path):
-            # Search for link.exe in VC\Tools\MSVC\*\bin\Hostx64\x64\
-            val pattern = "{vs_path}\\VC\\Tools\\MSVC\\*\\bin\\Hostx64\\x64\\link.exe"
-            val result = msvc_shell("dir /b /s \"{vs_path}\\VC\\Tools\\MSVC\" 2>nul | findstr link.exe")
-
-            if result.exit_code == 0:
-                val lines = result.stdout.split("\n")
-                for line in lines:
-                    val trimmed = line.trim()
-                    if trimmed.ends_with("link.exe") and file_exists(trimmed):
-                        return Some(trimmed)
-
-        case nil:
-            pass
-
-    # Try to find in PATH
-    val path_result = msvc_shell("where link.exe 2>nul")
-    if path_result.exit_code == 0:
-        val link_path = path_result.stdout.trim()
-        if link_path != "" and file_exists(link_path):
-            return Some(link_path)
-
+    if val prefix = env_get_opt("LLVM_SYS_231_PREFIX"):
+        val candidate = msvc_native_tool_path("{prefix}/bin/lld-link.exe")
+        if file_exists(candidate):
+            return Some(candidate)
+    # `where` prints one line per match; take the first existing lld-link.
+    val lld_result = msvc_shell("where lld-link.exe 2>nul")
+    if lld_result.exit_code == 0:
+        for lld_line in lld_result.stdout.split("\n"):
+            val candidate = lld_line.trim()
+            if is_lld_link_candidate(candidate) and file_exists(candidate):
+                return Some(candidate)
     nil
 
 # ===========================================================================
 # MSVC CRT Library Path Discovery
 # ===========================================================================
 
+fn msvc_lib_arch_dir(arch: text) -> text:
+    """MSVC/Windows SDK library subdirectory for a target architecture."""
+    val lowered = arch.lower()
+    if lowered == "aarch64" or lowered == "arm64": "arm64" else: "x64"
+
 fn find_msvc_crt_paths() -> [text]:
     """Discover MSVC CRT, UCRT, and Windows SDK library paths for x64."""
+    find_msvc_crt_paths_for_arch("x64")
+
+fn find_msvc_crt_paths_for_arch(lib_arch: text) -> [text]:
+    """Discover MSVC CRT, UCRT, and Windows SDK library paths for lib_arch
+    (the SDK subdirectory name: "x64" or "arm64")."""
     var paths: [text] = []
 
-    # 1. MSVC CRT: VC\Tools\MSVC\<ver>\lib\x64
+    # 1. MSVC CRT: VC\Tools\MSVC\<ver>\lib\<arch>
     val vs_opt = find_visual_studio()
     match vs_opt:
         case Some(vs_path):
-            val msvc_base = "{vs_path}\\VC\\Tools\\MSVC"
+            val msvc_base = "{vs_path}/VC/Tools/MSVC"
             val result = msvc_shell("dir /b \"{msvc_base}\" 2>nul")
             if result.exit_code == 0:
                 val versions = result.stdout.trim().split("\n")
@@ -252,24 +357,24 @@ fn find_msvc_crt_paths() -> [text]:
                     # Use the latest version (last in sorted list)
                     val ver = versions[versions.len() - 1].trim()
                     if ver != "":
-                        val lib_dir = "{msvc_base}\\{ver}\\lib\\x64"
+                        val lib_dir = "{msvc_base}/{ver}/lib/{lib_arch}"
                         if file_exists(lib_dir):
                             paths.push(lib_dir)
         case nil:
             pass
 
-    # 2. Windows SDK: Windows Kits\10\Lib\<ver>\ucrt\x64 and um\x64
-    val sdk_base = "C:\\Program Files (x86)\\Windows Kits\\10\\Lib"
+    # 2. Windows SDK: Windows Kits\10\Lib\<ver>\ucrt\<arch> and um\<arch>
+    val sdk_base = "C:/Program Files (x86)/Windows Kits/10/Lib"
     val sdk_result = msvc_shell("dir /b \"{sdk_base}\" 2>nul")
     if sdk_result.exit_code == 0:
         val sdk_versions = sdk_result.stdout.trim().split("\n")
         if sdk_versions.len() > 0:
             val sdk_ver = sdk_versions[sdk_versions.len() - 1].trim()
             if sdk_ver != "":
-                val ucrt_dir = "{sdk_base}\\{sdk_ver}\\ucrt\\x64"
+                val ucrt_dir = "{sdk_base}/{sdk_ver}/ucrt/{lib_arch}"
                 if file_exists(ucrt_dir):
                     paths.push(ucrt_dir)
-                val um_dir = "{sdk_base}\\{sdk_ver}\\um\\x64"
+                val um_dir = "{sdk_base}/{sdk_ver}/um/{lib_arch}"
                 if file_exists(um_dir):
                     paths.push(um_dir)
 
@@ -296,20 +401,36 @@ impl LldLinkLinker:
         # Find lld-link
         val lld_result = msvc_shell("where lld-link 2>nul")
         if lld_result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.InternalError, message: "lld-link not found", symbol: nil, location: nil))
+            return Err(LinkError(kind: LinkErrorKind.InternalError, message: LLD_LINK_INSTALL_HINT, symbol: nil, location: nil))
 
         val lld_link = lld_result.stdout.trim()
 
         # Build arguments (same as MSVC)
         val args = self.config.build_args(output, object_files)
-        val args_str = args.join(" ")
 
-        # Execute linker
-        val cmd = "\"{lld_link}\" {args_str}"
-        val result = msvc_shell(cmd)
+        # Direct argv invocation, same rationale as MsvcLinker.link above:
+        # routing a quoted command string through cmd.exe was mangled by the
+        # runtime's CommandLineToArgvW quoting and never ran the linker.
+        # Windows-only module; Unix is unaffected.
+        val result = msvc_run_argv(lld_link, args)
+        val cmd = "\"{lld_link}\" {args.join(' ')}"
 
         if result.exit_code != 0:
-            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: result.stderr, symbol: nil, location: nil))
+            # link.exe / lld-link report LNK errors on STDOUT, not stderr, so
+            # reporting stderr alone throws half the diagnosis away: merge
+            # both, and persist them next to the output so a failure stays
+            # diagnosable after the build log is rotated.
+            val log_body = "{result.stdout}{result.stderr}"
+            val link_log = "{output}.link.log"
+            file_write(link_log, log_body)
+            print "[msvc-link] FAILED exit={result.exit_code}"
+            print "[msvc-link] command: {cmd}"
+            print "[msvc-link] log: {link_log}"
+            print "[msvc-link] output-begin"
+            print log_body
+            print "[msvc-link] output-end"
+            val diag = "linker exited {result.exit_code} | command: {cmd} | log: {link_log} | output: {log_body}"
+            return Err(LinkError(kind: LinkErrorKind.OutputFailed, message: diag, symbol: nil, location: nil))
 
         Ok(())
 

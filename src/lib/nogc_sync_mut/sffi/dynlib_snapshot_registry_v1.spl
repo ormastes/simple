@@ -1,0 +1,37 @@
+# Linux dlopen may match an already loaded object by the pathname
+# /proc/self/fd/<number>. Reusing a descriptor number while that object is
+# still mapped can return the old object for different sealed bytes. A bounded
+# process-lifetime registry keeps every pathname offered to dlopen unique for
+# this process, including unsuccessful loads whose loader retention is unknown.
+# Callable/mapping retirement is owned separately by dynlib_lifetime_owner_v1
+# and native_callable_owner_v1. Exhaustion refuses new admission.
+
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
+
+const _DYNLIB_SNAPSHOT_CAPACITY_V1: i64 = 4096
+
+# Exclusion gate only; the descriptor list stays Simple-side (same fix as
+# dynlib_lifetime_owner_v1): a struct protected value comes back nil through
+# the interpreter's rt_mutex value bridge, the update faults with the real
+# lock held, and every later pin call blocks forever.
+var _dynlib_snapshot_registry_gate_v1: Mutex = mutex_new(0)
+var _dynlib_snapshot_registry_descriptors_v1: [i64] = []
+
+# The caller owns a newly opened sealed descriptor until this returns true.
+# Once accepted, the descriptor belongs to this process-lifetime registry and
+# must never be closed or reused before process exit. Reserve before dlopen.
+pub(package) fn dynlib_snapshot_pin_process_v1(fd: i64) -> bool:
+    if fd < 0 or fd > 2147483647:
+        return false
+    val _ = mutex_lock(_dynlib_snapshot_registry_gate_v1)
+    var accepted = false
+    if _dynlib_snapshot_registry_descriptors_v1.len() < _DYNLIB_SNAPSHOT_CAPACITY_V1:
+        var duplicate = false
+        for existing in _dynlib_snapshot_registry_descriptors_v1:
+            if existing == fd:
+                duplicate = true
+        if not duplicate:
+            _dynlib_snapshot_registry_descriptors_v1.push(fd)
+            accepted = true
+    val _ = mutex_unlock(_dynlib_snapshot_registry_gate_v1, 0)
+    accepted

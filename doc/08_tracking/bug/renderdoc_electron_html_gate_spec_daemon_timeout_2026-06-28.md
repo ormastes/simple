@@ -1,4 +1,13 @@
 # RenderDoc Electron HTML Gate SSpec Daemon Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
+- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
+- **inferred**: every runner-behaviour claim in this entry (example counts, PASS/FAIL bookkeeping, daemon timeouts) is therefore unverifiable here; a green or red from this host would be meaningless either way.
+- **inferred**: left OPEN, not stale — the referenced spec files all still exist.
 
 Date: 2026-06-28
 
@@ -41,32 +50,3 @@ without timing out. Until then, completion claims for the Electron RenderDoc
 gate must rely on direct gate evidence plus this bug note, not repeated SSpec
 reruns.
 
-## Re-triage 2026-08-17 (m9a_tests lane)
-
-**Verdict: the "daemon timeout" is explained by the specs own structure — it
-is a cost problem, not a hang, and not a silent-wrong-result bug.**
-
-`test/03_system/check/renderdoc_electron_html_gate_spec.spl` runs whole check
-scripts from inside its examples, via a locally-declared
-`extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)`
-(line 137):
-
-- line 149: `rt_process_run("/bin/cat", [path])`
-- lines 162-163: `rm -rf build/test-renderdoc-electron-html-gate && ... sh scripts/check/check-renderdoc-electron-html-gate.shs || true`
-- lines 229-230: a second, larger fixture-synthesising invocation of the same gate
-
-So each example forks a shell that re-runs the full gate script, on top of the
-~310s fixed session setup the daemon already pays. "The direct gate completes
-quickly" and "the spec times out under the daemon" are therefore consistent
-with each other and with no defect: the spec does strictly more work than the
-gate does.
-
-Two of the four claims in the original report are also independently suspect
-per the session brief: `SIMPLE_TIMEOUT_SECONDS` was parsed and discarded until
-`a034851236d` and still misbehaves, and a mis-thresholded
-`kill_simple_monitor.shs` was SIGTERMing healthy specs. This doc predates both.
-
-**Not re-measured to a `Results:` line from this lane.** Attempts under a host
-load average of 81-133 were SIGTERMed at rc=143 with no `Results:` line, which
-per the brief is UNVERIFIED rather than failed. Re-measure on a quiet host with
-an explicit `--timeout`, never `SIMPLE_TIMEOUT_SECONDS`, before closing.

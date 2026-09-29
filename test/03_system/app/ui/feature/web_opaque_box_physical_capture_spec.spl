@@ -1,0 +1,69 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, vulkan, fail_closed
+"""Web projection and native capture negative controls; no GPU PASS implied."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.renderdoc.physical_vulkan_2d_qualification.{PreparedRenderScene}
+use common.renderdoc.web_opaque_box_oracle.{
+    WEB_OPAQUE_BOX_FIXTURE_ID, WEB_OPAQUE_BOX_FIXTURE_PATH,
+    WEB_OPAQUE_BOX_FIXTURE_SHA256}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_opaque_box_gpu_scene_from_html}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UpstreamSkiaGaneshFrame}
+use std.skia.backend.upstream_ganesh_vulkan.web_opaque_box_capture_artifact.{
+    upstream_skia_web_opaque_box_artifact}
+
+fn _prepared() -> PreparedRenderScene:
+    PreparedRenderScene(fixture_id: WEB_OPAQUE_BOX_FIXTURE_ID,
+        source_path: WEB_OPAQUE_BOX_FIXTURE_PATH,
+        source_sha256: WEB_OPAQUE_BOX_FIXTURE_SHA256,
+        scene_scope: "web-opaque-box-only",
+        render_degraded: false, degrade_reason: "")
+
+fn _constructed_frame() -> UpstreamSkiaGaneshFrame:
+    UpstreamSkiaGaneshFrame(width: 16, height: 16, rgba_bytes: [],
+        provider_identity: 0x534b4941564b0001, device_identity: 0,
+        resource_id: 1, submission_token: 1, completion_token: 1,
+        readback_checksum: 0, backend_handle: 1)
+
+describe "Web opaque-box physical capture boundary":
+    it "retains original DrawIR identity and rejects an incomplete frame":
+        step("Admit the pinned real Web layout and inspect source mapping")
+        val html = read_file(WEB_OPAQUE_BOX_FIXTURE_PATH)
+        expect(sha256_text(html)).to_equal(WEB_OPAQUE_BOX_FIXTURE_SHA256)
+        match web_opaque_box_gpu_scene_from_html(html):
+            case Err(reason): fail_test("Web admission unavailable: {reason}")
+            case Ok(web):
+                expect(web.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(web.source_draw_ir)))
+                expect(web.gpu_command_count).to_equal(
+                    web.source_command_indexes.len().to_i64())
+                step("Reject identity before completed native readback")
+                match upstream_skia_web_opaque_box_artifact(
+                    _constructed_frame(), _prepared(), web):
+                    case Err(reason): expect(reason).to_equal(
+                        "upstream Skia Web completion missing")
+                    case Ok(_): fail_test("constructed frame became a physical artifact")
+
+    it "rejects degraded Web producer state before native receipt checks":
+        step("Keep an explicit degradation reason fail closed")
+        val html = read_file(WEB_OPAQUE_BOX_FIXTURE_PATH)
+        match web_opaque_box_gpu_scene_from_html(html):
+            case Err(reason): fail_test("Web admission unavailable: {reason}")
+            case Ok(web):
+                var degraded = _prepared()
+                degraded.render_degraded = true
+                degraded.degrade_reason = "budget"
+                match upstream_skia_web_opaque_box_artifact(
+                    _constructed_frame(), degraded, web):
+                    case Err(reason): expect(reason).to_equal(
+                        "upstream Skia Web source admission invalid")
+                    case Ok(_): fail_test("degraded Web scene became an artifact")

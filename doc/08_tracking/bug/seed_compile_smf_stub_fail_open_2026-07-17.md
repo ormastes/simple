@@ -1,4 +1,8 @@
 # `simple compile <x.spl> -o <x.smf>` emits a 219-byte stub and exits 0 (fail-open)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-17
 **Severity:** high (fail-open: silent no-op artifacts look like successful builds)
@@ -68,3 +72,4 @@ user code should not exit 0 silently.
 
 Tooling-surface smoke matrix during the 2026-07-17 test-runner hardening
 campaign (`hello.smf` stub matched the seven dynSMF stub artifacts).
+

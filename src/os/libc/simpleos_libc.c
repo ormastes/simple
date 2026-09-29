@@ -16,6 +16,8 @@
  *   result in rax
  */
 
+#include "include/errno.h"   /* ENOSYS/EINVAL/... were used undeclared: this file never compiled */
+
 /*
  * When cross-compiled (-target x86_64-unknown-none-elf -I include), our
  * freestanding headers provide all types. When analyzed by clangd on
@@ -43,9 +45,6 @@ typedef long off_t;
 #endif
 #ifndef ENOSYS
 #define ENOSYS 38
-#endif
-#ifndef EOPNOTSUPP
-#define EOPNOTSUPP 95
 #endif
 #ifndef EBADF
 #define EBADF  9
@@ -84,48 +83,10 @@ extern int simpleos_epoll_close_if_epoll(int fd);
 extern void simpleos_epoll_on_fd_close(int fd);
 extern void simpleos_epoll_on_fd_close_token(int fd, uint64_t ofd_token);
 extern int fcntl(int fd, int cmd, ...);
-extern void __cxa_finalize(void *);
 
 #ifndef F_SIMPLEOS_GET_OFD
 #define F_SIMPLEOS_GET_OFD 0x534F0001
 #endif
-
-static int running_on_linux_host(void) {
-    return simpleos_syscall(4, 0, 0, 0, 0, 0) < 0;
-}
-
-static int64_t linux_syscall3(int64_t id, int64_t a0, int64_t a1, int64_t a2) {
-#if defined(__x86_64__)
-    long ret;
-    __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "a"(id), "D"(a0), "S"(a1), "d"(a2)
-                     : "rcx", "r11", "memory");
-    return ret;
-#else
-    (void)id; (void)a0; (void)a1; (void)a2;
-    return -ENOSYS;
-#endif
-}
-
-static int64_t linux_syscall6(int64_t id, int64_t a0, int64_t a1, int64_t a2,
-                              int64_t a3, int64_t a4, int64_t a5) {
-#if defined(__x86_64__)
-    register int64_t r10 __asm__("r10") = a3;
-    register int64_t r8 __asm__("r8") = a4;
-    register int64_t r9 __asm__("r9") = a5;
-    long ret;
-    __asm__ volatile("syscall"
-                     : "=a"(ret)
-                     : "a"(id), "D"(a0), "S"(a1), "d"(a2),
-                       "r"(r10), "r"(r8), "r"(r9)
-                     : "rcx", "r11", "memory");
-    return ret;
-#else
-    (void)id; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -ENOSYS;
-#endif
-}
 
 /* ====================================================================
  * 2. Errno
@@ -148,63 +109,9 @@ static int set_errno(int64_t r) {
 #ifndef MAP_FAILED
 #define MAP_FAILED ((void *)-1)
 #endif
-#ifndef MAP_SHARED
-#define MAP_SHARED 0x01
-#endif
-#ifndef PROT_WRITE
-#define PROT_WRITE 0x2
-#endif
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall6(9, (int64_t)(uintptr_t)addr, (int64_t)length,
-                                   (int64_t)prot, (int64_t)flags, (int64_t)fd,
-                                   (int64_t)offset);
-        if (r < 0) {
-            errno = (int)(-r);
-            return MAP_FAILED;
-        }
-        return (void *)(uintptr_t)r;
-    }
-    /* SimpleOS L4 kernel path: syscall 10 only implements anonymous,
-     * per-process private mappings (see src/os/posix/mod.spl "What's NOT
-     * supported"). A writable MAP_SHARED request — the profile-C
-     * cross-process/writable-shared case, and any request naming a real
-     * fd for a file-backed mapping — cannot be honored HERE.
-     *
-     * Previously this function silently discarded `flags`/`fd`/`offset`
-     * and handed back an anonymous private mapping, so callers asking for
-     * shared or file-backed memory got what looked like success but was
-     * neither shared nor backed by the file. That downgrade is gone; do
-     * NOT reintroduce it.
-     *
-     * The kernel now has the shared page-cache object model and the fault
-     * path for writable shared file mappings —
-     * `src/os/kernel/memory/vmm_shared.spl` plus
-     * `vmm_handle_shared_file_fault` in
-     * `src/os/kernel/memory/vmm_vma.spl` (VMA kind VMM_VMA_SHARED_FILE).
-     * This C surface still cannot reach it, for three concrete reasons:
-     *   1. the call below hard-codes kind = VMA_ANON (arg3) and
-     *      backing = 0 (arg4), so no fd ever reaches the kernel;
-     *   2. `simpleos_syscall` carries only arg0..arg4, so `offset`
-     *      (kernel arg5, backing_offset) has no slot at all;
-     *   3. the shared object must first be registered with its file image
-     *      and its handle rights via `vmm_shared_register_backing`, which
-     *      happens in `src/os/kernel/ipc/syscall_spm.spl`
-     *      (`_handle_sys_mmap`) and is not wired for this kind yet.
-     * Until all three land, returning a mapping here would hand userspace a
-     * VMA the fault path cannot serve — i.e. a hard #PF dressed up as
-     * success. Keep failing closed. See .spipe/writable_shared_mmap/state.md
-     * for the exact remaining wiring and the QEMU gate. */
-    if ((flags & MAP_SHARED) != 0 && (prot & PROT_WRITE) != 0) {
-        errno = EOPNOTSUPP;
-        return MAP_FAILED;
-    }
-    if (fd >= 0) {
-        errno = EOPNOTSUPP;
-        return MAP_FAILED;
-    }
-    (void)offset;
+    (void)flags; (void)fd; (void)offset;
     int64_t r = simpleos_syscall(10, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   (int64_t)prot, 0, 0);
     if (r < 0) {
@@ -215,25 +122,19 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
 }
 
 int munmap(void *addr, size_t length) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(11, (int64_t)(uintptr_t)addr,
-                                   (int64_t)length, 0);
-        if (r < 0) return set_errno(r);
-        return 0;
-    }
     int64_t r = simpleos_syscall(11, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   0, 0, 0);
     if (r < 0) return set_errno(r);
     return 0;
 }
 
+/* SimpleOS syscall 12 == mprotect, implemented in the kernel by
+ * spl_handle_mprotect (src/os/kernel/abi/syscall_shim_process.spl:286), which
+ * routes to the VMM (src/os/kernel/ipc/syscall_memory.spl:105). The declaration
+ * was already in <sys/mman.h> with no definition anywhere, so every link that
+ * pulled runtime_memory.o (rt_alloc / rt_free guard pages) failed with an
+ * undefined reference. This is the wrapper, not a stub. */
 int mprotect(void *addr, size_t length, int prot) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(10, (int64_t)(uintptr_t)addr,
-                                   (int64_t)length, (int64_t)prot);
-        if (r < 0) return set_errno(r);
-        return 0;
-    }
     int64_t r = simpleos_syscall(12, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   (int64_t)prot, 0, 0);
     if (r < 0) return set_errno(r);
@@ -382,11 +283,6 @@ FILE *stderr = &_stderr_f;
  * object. Do not move it back here. */
 
 ssize_t write(int fd, const void *buf, size_t count) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(1, fd, (int64_t)(uintptr_t)buf, (int64_t)count);
-        if (r < 0) { set_errno(r); return -1; }
-        return (ssize_t)r;
-    }
     if (fd == 1 || fd == 2) {
         /* Route stdout/stderr through DebugWrite (syscall 60) for serial */
         const char *p = (const char *)buf;
@@ -401,29 +297,12 @@ ssize_t write(int fd, const void *buf, size_t count) {
 }
 
 ssize_t read(int fd, void *buf, size_t count) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(0, fd, (int64_t)(uintptr_t)buf, (int64_t)count);
-        if (r < 0) { set_errno(r); return -1; }
-        return (ssize_t)r;
-    }
     int64_t r = simpleos_syscall(31, fd, (int64_t)(uintptr_t)buf, (int64_t)count, 0, 0);
     if (r < 0) { set_errno(r); return -1; }
     return (ssize_t)r;
 }
 
 int open(const char *path, int flags, ...) {
-    int mode = 0666;
-    if (flags & O_CREAT) {
-        va_list ap;
-        va_start(ap, flags);
-        mode = va_arg(ap, int);
-        va_end(ap);
-    }
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(2, (int64_t)(uintptr_t)path, (int64_t)flags, (int64_t)mode);
-        if (r < 0) return set_errno(r);
-        return (int)r;
-    }
     size_t pathlen = strlen(path);
     int64_t r = simpleos_syscall(30, (int64_t)(uintptr_t)path, (int64_t)pathlen,
                                   (int64_t)flags, 0, 0);
@@ -432,11 +311,6 @@ int open(const char *path, int flags, ...) {
 }
 
 int close(int fd) {
-    if (running_on_linux_host()) {
-        int64_t r = linux_syscall3(3, fd, 0, 0);
-        if (r < 0) return set_errno(r);
-        return 0;
-    }
     if (simpleos_epoll_close_if_epoll(fd) == 0) {
         simpleos_epoll_on_fd_close(fd);
         return 0;
@@ -681,13 +555,6 @@ int fprintf(FILE *stream, const char *fmt, ...) {
     return n;
 }
 
-int vfprintf(FILE *stream, const char *fmt, va_list ap) {
-    char buf[1024];
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    if (n > 0) write(stream->fd, buf, (size_t)(n > 1024 ? 1024 : n));
-    return n;
-}
-
 int puts(const char *s) {
     size_t len = strlen(s);
     write(1, s, len);
@@ -712,12 +579,7 @@ int fputc(int c, FILE *stream) {
  * ==================================================================== */
 
 void exit(int status) {
-    __cxa_finalize(0);
-    if (running_on_linux_host()) {
-        linux_syscall3(60, (int64_t)status, 0, 0);
-    }
-    int64_t r = simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
-    (void)r;
+    simpleos_syscall(0, (int64_t)status, 0, 0, 0, 0);
     __builtin_unreachable();
 }
 

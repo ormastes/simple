@@ -4,7 +4,7 @@
 - **Severity:** P1 (reproducibility — lane green only from a stale artifact)
 - **Found:** 2026-06-14, during multiarch dedup verification (riscv dedup agent)
 - **Component:** compiler/cranelift backend → riscv64 freestanding kernel codegen
-- **Status:** OPEN
+- **Status:** OPEN (re-triaged 2026-09-13 — see the note at the end of this file)
 
 ## Symptom
 
@@ -70,6 +70,9 @@ env SIMPLE_BOOT_MINIMAL=1 src/compiler_rust/target/debug/simple native-build \
 - Multiarch lane status + dedup plan: `doc/03_plan/os/multiarch_qemu_systest/`
   and `doc/05_design/os/multiarch_qemu_systest/duplication_analysis.md`.
 
-## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+## Triage 2026-09-13 — LEFT OPEN (no riscv64 lane on this host)
 
-UNPROVEN by this lane. Every reproduction path for this row is a cross-target/freestanding `native-build` (riscv*-unknown-none / x86_64-unknown-none, LLVM or Cranelift, plus QEMU boot), and the fix sites fall in lanes claimed by concurrent sessions (`src/compiler/20.hir/hir_lowering/**`, `src/compiler/50.mir/**`, `src/compiler/70.backend/**`, `pipeline/native_project/**`). No content-level fix marker was found for it in current source, and no cheap hosted-engine proxy exists — the hosted engines do not exercise the failing path at all. Status left OPEN, unmodified; do not read this note as either a confirmation or a close.
+- **inferred**: reproducing this needs a riscv64 freestanding kernel build plus a QEMU boot to watch for the six markers after the OpenSBI handoff. This Windows host has neither, and `bin/simple native-build` fails here before producing any binary, so the ~164-171 KB vs 86 KB size comparison cannot be re-taken.
+- **inferred**: the entry's own 2026-06-14 update makes it worse, not stale — the last known-good 86 KB artifact was overwritten during dedup verification, so there is no green baseline left and the lane is RED from a fresh sweep on both cranelift and LLVM.
+- **measured**: one cited path, `test/duplication_analysis.md`, no longer exists; the kernel source and lane paths do. That single missing file is a scratch analysis note, not the subject code, so this is not stale by removal.
+- Verdict: OPEN — a real reproducibility regression awaiting a Linux riscv64 lane.

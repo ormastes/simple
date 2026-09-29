@@ -1,7 +1,8 @@
 # doc_coverage csv_exporter: undefined `NL` import + DocItem missing create_class/create_enum
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -110,3 +111,4 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 25 \
   still failing on root causes 2 and 3 above)
 - `test/01_unit/app/doc_coverage/json_export_spec.spl` (same import-path symptom,
   not in shard, untouched)
+

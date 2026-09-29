@@ -46,3 +46,40 @@ describe "DBFS device-backed remount persistence":
                 found_b = true
         expect(found_a).to_equal(true)
         expect(found_b).to_equal(true)
+
+    it "positioned binary write after remount preserves bytes around the patch":
+        val dev = RamBlockDevice.new_empty()
+        val first = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh = first.open_path(Path(raw: "/patch.bin"), OpenFlags.create_write()).unwrap()
+        first.write_bytes_handle(
+            fh, [0x10u8, 0x11u8, 0x12u8, 0x13u8, 0x14u8, 0x15u8, 0x16u8, 0x17u8]).unwrap()
+        first.close_handle(fh).unwrap()
+
+        val second = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh2 = second.open_path(Path(raw: "/patch.bin"), OpenFlags.read_write()).unwrap()
+        expect(second.pwrite_bytes_handle(fh2, 3, [0xaau8, 0xbbu8]).unwrap()).to_equal(2)
+        expect(second.pread_bytes_handle(fh2, 0, 16).unwrap()).to_equal(
+            [0x10u8, 0x11u8, 0x12u8, 0xaau8, 0xbbu8, 0x15u8, 0x16u8, 0x17u8])
+        expect(second.stat_path(Path(raw: "/patch.bin")).unwrap().size).to_equal(8)
+
+        val third = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh3 = third.open_path(Path(raw: "/patch.bin"), OpenFlags.read_only()).unwrap()
+        expect(third.pread_bytes_handle(fh3, 0, 16).unwrap()).to_equal(
+            [0x10u8, 0x11u8, 0x12u8, 0xaau8, 0xbbu8, 0x15u8, 0x16u8, 0x17u8])
+
+    it "text pwrite and ftruncate after remount keep the existing bytes":
+        val dev = RamBlockDevice.new_empty()
+        val first = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh = first.open_path(Path(raw: "/t.txt"), OpenFlags.create_write()).unwrap()
+        first.write_handle(fh, "abcdefgh").unwrap()
+        first.close_handle(fh).unwrap()
+
+        val second = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh2 = second.open_path(Path(raw: "/t.txt"), OpenFlags.read_write()).unwrap()
+        second.pwrite_handle(fh2, "XY", 2).unwrap()
+        expect(second.pread_handle(fh2, 0, 16).unwrap()).to_equal("abXYefgh")
+
+        val third = DbFsDriver.open_on_device(dev, 2048, 128).unwrap()
+        val fh3 = third.open_path(Path(raw: "/t.txt"), OpenFlags.read_write()).unwrap()
+        third.ftruncate_handle(fh3, 5).unwrap()
+        expect(third.pread_handle(fh3, 0, 16).unwrap()).to_equal("abXYe")

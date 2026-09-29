@@ -1,0 +1,75 @@
+#!/bin/sh
+# cache-preflight — decide whether this job may write a remote cache namespace.
+#
+# FAIL CLOSED. Nothing is assumed to be present. A missing secret is not an
+# error to be worked around; it downgrades the job to READ-ONLY and says so on
+# stdout. The verdict is the LAST line and is one of:
+#
+#   VERDICT: write-main   — attested trusted-main writer
+#   VERDICT: write-branch — attested trusted-branch writer, TTL namespace
+#   VERDICT: read-only    — anything else, including every missing secret
+#
+# Callers must read the verdict TEXT. This script exits 0 in all three cases on
+# purpose: a read-only cache lane is a normal outcome, never a build failure.
+#
+# Usage: sh scripts/ci/cache-preflight.shs <intended-role>
+#   intended-role: trusted_main_ci | trusted_branch_ci
+
+set -eu
+
+INTENT="${1:-trusted_branch_ci}"
+
+fail_closed() {
+    echo "cache-preflight: $1"
+    echo "VERDICT: read-only"
+    exit 0
+}
+
+# --- 1. The job must be running in CI at all -------------------------------
+[ "${CI:-}" = "true" ] || fail_closed "not running in CI (CI != true)"
+
+# --- 2. Fork / PR builds are never writers --------------------------------
+# A pull_request event from a fork cannot be trusted with any shared namespace,
+# and GitHub does not expose write secrets to it anyway. Checked explicitly so
+# the reason is recorded rather than inferred from a missing secret.
+case "${GITHUB_EVENT_NAME:-}" in
+    pull_request|pull_request_target)
+        fail_closed "pull-request event is read-only on every shared namespace"
+        ;;
+esac
+
+if [ -n "${GITHUB_REPOSITORY:-}" ] && [ -n "${GITHUB_HEAD_REPOSITORY:-}" ]; then
+    if [ "${GITHUB_REPOSITORY}" != "${GITHUB_HEAD_REPOSITORY}" ]; then
+        fail_closed "fork build is read-only on every shared namespace"
+    fi
+fi
+
+# --- 3. Secrets must actually be present ----------------------------------
+# Presence only; the values are never echoed.
+[ -n "${CACHE_GATEWAY_URL:-}" ]        || fail_closed "CACHE_GATEWAY_URL is not set"
+[ -n "${CACHE_GATEWAY_TOKEN_ID:-}" ]   || fail_closed "CACHE_GATEWAY_TOKEN_ID is not set"
+[ -n "${CACHE_GATEWAY_SECRET:-}" ]     || fail_closed "CACHE_GATEWAY_SECRET is not set (no secret access from this context)"
+[ -n "${PROMOTION_SIGNING_KEY:-}" ]    || fail_closed "PROMOTION_SIGNING_KEY is not set"
+
+# --- 4. Role-specific requirements ----------------------------------------
+case "$INTENT" in
+    trusted_main_ci)
+        [ "${GITHUB_REF:-}" = "refs/heads/main" ] || fail_closed "main writer requires refs/heads/main, got '${GITHUB_REF:-<unset>}'"
+        case "${GITHUB_EVENT_NAME:-}" in
+            push|workflow_dispatch) : ;;
+            *) fail_closed "main writer requires a push/dispatch event, got '${GITHUB_EVENT_NAME:-<unset>}'" ;;
+        esac
+        echo "cache-preflight: attested trusted-main writer on ${GITHUB_SHA:-<unknown sha>}"
+        echo "VERDICT: write-main"
+        ;;
+    trusted_branch_ci)
+        [ "${CACHE_BRANCH_NAMESPACE_ENABLED:-false}" = "true" ] || fail_closed "branch namespace is not enabled for this lane"
+        [ -n "${GITHUB_REF_NAME:-}" ] || fail_closed "branch writer requires GITHUB_REF_NAME"
+        [ "${GITHUB_REF:-}" != "refs/heads/main" ] || fail_closed "branch writer must not run on main"
+        echo "cache-preflight: attested trusted-branch writer on ${GITHUB_REF_NAME}"
+        echo "VERDICT: write-branch"
+        ;;
+    *)
+        fail_closed "unknown intended role '${INTENT}'"
+        ;;
+esac

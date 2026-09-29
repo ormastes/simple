@@ -38,12 +38,9 @@ and operator review remain blockers. Do not add executable specs below
 Continuation truth (2026-08-16): the working tree contains an unexecuted real
 loopback DB bind/OPEN/EOF/cleanup/rebind scenario and an adjacent UTF-8 parser
 oracle. It also contains unexecuted synchronous web fixes for rejecting every
-unsupported transfer coding, bounding complete response writes, and making the
-writer the sole response-framing authority. The REQ-002 response-framing
-coverage is future-executable and fail-closed, but its current status is
-`TEST_BLOCKED`: no adjacent receipt admits a pure-Simple Stage-4 CLI. None is a
-PASS until the exact focused commands below execute on such a CLI. Production
-TLS remains blocked independently by GAP-TLS-3.
+unsupported transfer coding and bounding complete response writes. None is a
+PASS until the exact focused commands below execute on an admitted Stage-4
+self-hosted CLI. Production TLS remains blocked independently by GAP-TLS-3.
 
 REQ-009..REQ-014 are verified by the evidence audit, not synthetic behavior
 tests: deliberate-red calibration; one `sspec-maintain scan` per changed spec;
@@ -87,9 +84,7 @@ Calibrate each new oracle deliberately red before crediting its green result.
 Verify each criterion once in this session and permit at most three fix cycles.
 Run focused specs before broader checks. The whole interpreter suite is a
 release-bound gate only after a healthy Stage-4 self-hosted CLI exists. Record
-TLS GAP-TLS-3 and unavailable CLI as WARN/blockers; neither may be called PASS.
-Until admission exists, do not run runtime checks, `sspec-maintain`, or docgen;
-record `TEST_BLOCKED` while retaining the fail-closed executable assertions.
+TLS GAP-TLS-3 and unhealthy CLI as WARN/blockers; neither may be called PASS.
 
 ## Exact deferred verification order
 

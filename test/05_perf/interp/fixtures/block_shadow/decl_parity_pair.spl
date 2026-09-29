@@ -1,0 +1,61 @@
+# Fixture for test/05_perf/interp/block_scope_shadow_parity_spec.spl.
+# Run standalone under SIMPLE_EXECUTION_MODE=interpreter; prints one
+# machine-readable RESULT line. Do not edit without updating that spec.
+
+# BOTH shapes are timed IN ONE PROCESS, interleaved, and the best round of each
+# is reported. That is deliberate: PERF-6 measured a 2.2x spread between two
+# whole-process wall-clock samples of the SAME binary on this host at load ~38,
+# so a ratio taken across two separate `simple run` invocations is noise, not a
+# measurement. Interleaving inside one process holds the machine state as close
+# to constant as a spec can.
+#
+#   hoisted   - three body statements, temporary declared OUTSIDE the loop, so
+#               the body declares nothing and exec_block's shadow capture and
+#               restore find no names.
+#   declaring - byte-for-byte the same three statements and arithmetic with the
+#               temporary declared INSIDE the body, so every iteration runs
+#               capture_node_scope_shadows + restore_block_scope_shadows for it.
+#
+# The modulo keeps both bodies off every inline-integer while matcher, so both
+# are the generic AST walk. The difference between them is exactly the
+# per-iteration block-scope shadow bookkeeping.
+extern fn rt_time_now_unix_micros() -> i64
+
+val PAIR_N = 1000000
+
+fn time_hoisted() -> i64:
+    var acc = 0
+    var i = 0
+    var t = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < PAIR_N:
+        t = i % 7
+        acc = acc + t
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn time_declaring() -> i64:
+    var acc = 0
+    var i = 0
+    val t0 = rt_time_now_unix_micros()
+    while i < PAIR_N:
+        val t = i % 7
+        acc = acc + t
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn main():
+    var best_hoisted = -1
+    var best_declaring = -1
+    var round = 0
+    var iters = 0
+    while round < 3:
+        val h = time_hoisted()
+        if best_hoisted < 0 or h < best_hoisted:
+            best_hoisted = h
+        val d = time_declaring()
+        if best_declaring < 0 or d < best_declaring:
+            best_declaring = d
+        iters = iters + PAIR_N
+        round = round + 1
+    print("RESULT elapsed_us={best_declaring} acc={best_hoisted} iters={iters}")

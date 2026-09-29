@@ -1,4 +1,8 @@
 # A spec file's pass/fail verdict is forgeable from an example's NAME
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — root cause understood and localised to a defect CLASS; two
 `.spl` parsers hardened here, but the LIVE producer on the seed path is NOT yet
@@ -132,3 +136,4 @@ is a signpost, not a test. **No spec pins this defect yet** — writing one
 requires first locating the live producer, since a spec asserting the correct
 count would simply be another RED against an unfixed bug rather than a guard.
 Left deliberately unpinned rather than pinned against the wrong parser.
+

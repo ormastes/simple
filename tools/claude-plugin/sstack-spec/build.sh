@@ -44,7 +44,7 @@ fi
 SKILLS_DIR="$SCRIPT_DIR/skills"
 AGENTS_DIR="$SCRIPT_DIR/agents"
 
-for f in "$SKILLS_DIR/spec.md" "$AGENTS_DIR/spec.md"; do
+for f in "$SKILLS_DIR/sstack-spec/SKILL.md" "$AGENTS_DIR/spec.md"; do
     if [ ! -f "$f" ]; then
         echo "ERROR: Referenced file not found: $f"
         exit 1
@@ -60,7 +60,7 @@ mkdir -p "$DIST_DIR"
 tar -czf "$DIST_DIR/$PACKAGE_NAME.tar.gz" \
     -C "$SCRIPT_DIR" \
     .claude-plugin/plugin.json \
-    skills/spec.md \
+    skills/sstack-spec/SKILL.md \
     agents/spec.md \
     build.sh
 

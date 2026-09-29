@@ -1,0 +1,109 @@
+# Admitted sprof collection evidence enters the advisory CollectionPlan selector.
+# This bridge never reads a file in the selection hot path.
+
+use app.optimize.sprof_collection_profile.{
+    SprofCollectionLoad, SprofCollectionSelection, SprofCollectionSetIndex,
+    SprofCollectionMetricIndex, sprof_indexed_collection_metric_stats,
+    sprof_build_collection_set_index, sprof_build_collection_metric_index,
+    sprof_prepared_collection_profile_for_site
+}
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanFacts, CollectionPlanDecision, collection_plan_select
+}
+use compiler.mir_opt.mir_opt.collection_plan_explain.{collection_plan_explain}
+
+fn _collection_plan_facts_with_selection(
+    facts: CollectionPlanFacts, selection: SprofCollectionSelection
+) -> CollectionPlanFacts:
+    var selected_facts = facts
+    selected_facts.profile_admitted = false
+    selected_facts.profile_size_p95 = -1
+    selected_facts.profile_lookups_p95 = -1
+    selected_facts.profile_hash_probes_p95 = -1
+    selected_facts.profile_hash_collisions_p95 = -1
+    if selection.found:
+        selected_facts.profile_admitted = true
+        selected_facts.profile_size_p95 = selection.profile.size_p95
+        selected_facts.profile_lookups_p95 = selection.profile.lookup_count_p95
+    selected_facts
+
+fn _collection_plan_select_with_selection(
+    facts: CollectionPlanFacts, selection: SprofCollectionSelection
+) -> CollectionPlanDecision:
+    collection_plan_select(_collection_plan_facts_with_selection(facts, selection))
+
+fn _collection_plan_facts_with_metrics(
+    facts: CollectionPlanFacts, selection: SprofCollectionSelection,
+    metrics: SprofCollectionMetricIndex, site_id: text, target_profile_id: text
+) -> CollectionPlanFacts:
+    var selected_facts = _collection_plan_facts_with_selection(facts, selection)
+    selected_facts.profile_hash_probes_p95 = -1
+    selected_facts.profile_hash_collisions_p95 = -1
+    if not selected_facts.profile_admitted or not metrics.admitted:
+        return selected_facts
+    val probes = sprof_indexed_collection_metric_stats(
+        metrics, site_id, target_profile_id, "hash_probe_count")
+    val collisions = sprof_indexed_collection_metric_stats(
+        metrics, site_id, target_profile_id, "hash_collision_count")
+    if probes.found:
+        selected_facts.profile_hash_probes_p95 = probes.p95
+    if collisions.found:
+        selected_facts.profile_hash_collisions_p95 = collisions.p95
+    if probes.found and collisions.found and probes.count != collisions.count:
+        selected_facts.profile_hash_probes_p95 = -2
+    selected_facts
+
+fn collection_plan_select_with_profile(
+    facts: CollectionPlanFacts, loaded: SprofCollectionLoad,
+    site_id: text, target_profile_id: text
+) -> CollectionPlanDecision:
+    """One-off selection from all admitted site and metric evidence."""
+    val sets = sprof_build_collection_set_index(loaded)
+    val metrics = sprof_build_collection_metric_index(loaded)
+    val selection = sprof_prepared_collection_profile_for_site(
+        sets, site_id, target_profile_id)
+    collection_plan_select(_collection_plan_facts_with_metrics(
+        facts, selection, metrics, site_id, target_profile_id))
+
+fn collection_plan_select_with_prepared_profile(
+    facts: CollectionPlanFacts, index: SprofCollectionSetIndex,
+    site_id: text, target_profile_id: text
+) -> CollectionPlanDecision:
+    """Hot selection from a precomputed exact-site p95 index."""
+    val selection = sprof_prepared_collection_profile_for_site(index, site_id, target_profile_id)
+    _collection_plan_select_with_selection(facts, selection)
+
+fn collection_plan_explain_with_prepared_profile(
+    facts: CollectionPlanFacts, index: SprofCollectionSetIndex,
+    site_id: text, target_profile_id: text
+) -> text:
+    """Explain the exact guarded decision made with precomputed site feedback."""
+    val selection = sprof_prepared_collection_profile_for_site(index, site_id, target_profile_id)
+    val selected_facts = _collection_plan_facts_with_selection(facts, selection)
+    val decision = collection_plan_select(selected_facts)
+    collection_plan_explain(site_id, target_profile_id, selected_facts, decision)
+
+fn collection_plan_select_with_prepared_metrics(
+    facts: CollectionPlanFacts, index: SprofCollectionSetIndex,
+    metrics: SprofCollectionMetricIndex, site_id: text, target_profile_id: text
+) -> CollectionPlanDecision:
+    """Select from precomputed exact-site workload and hash cost evidence."""
+    val selection = sprof_prepared_collection_profile_for_site(index, site_id, target_profile_id)
+    collection_plan_select(_collection_plan_facts_with_metrics(
+        facts, selection, metrics, site_id, target_profile_id))
+
+fn collection_plan_explain_with_prepared_metrics(
+    facts: CollectionPlanFacts, index: SprofCollectionSetIndex,
+    metrics: SprofCollectionMetricIndex, site_id: text, target_profile_id: text
+) -> text:
+    val selection = sprof_prepared_collection_profile_for_site(index, site_id, target_profile_id)
+    val selected_facts = _collection_plan_facts_with_metrics(
+        facts, selection, metrics, site_id, target_profile_id)
+    val decision = collection_plan_select(selected_facts)
+    collection_plan_explain(site_id, target_profile_id, selected_facts, decision)
+
+export collection_plan_select_with_profile
+export collection_plan_select_with_prepared_profile
+export collection_plan_explain_with_prepared_profile
+export collection_plan_select_with_prepared_metrics
+export collection_plan_explain_with_prepared_metrics

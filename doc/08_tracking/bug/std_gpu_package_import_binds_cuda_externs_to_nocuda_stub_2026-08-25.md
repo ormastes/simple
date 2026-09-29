@@ -1,4 +1,8 @@
 # `use std.gpu.*` binds `rt_cuda_*` to the no-CUDA stub (device_count 0, cc (0,-3)) while direct module imports see 2 GPUs (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (seed dispatch defect, `src/compiler_rust`). **Binary:** Rust seed. **Host:** 2 live CUDA devices.
 
@@ -68,3 +72,4 @@ being read and makes every resolution hypothesis moot.
 
 Re-verify this symptom only with a binary built from the tree under test, or after checking
 `strings -a <binary> | grep -c <other-worktree>`.
+

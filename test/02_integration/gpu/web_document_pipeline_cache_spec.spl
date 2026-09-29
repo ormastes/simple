@@ -1,0 +1,99 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d,
+    web_document_cache_drain,
+    web_document_cache_hit,
+    web_document_cache_hit_count,
+    web_document_cache_miss_count
+}
+
+# Parse, style, layout and Draw IR build re-ran on EVERY frame with no cache --
+# ~10 ms of an ~18 ms steady frame at 900x760 on the native-readback lane.
+# doc/08_tracking/bug/web_document_pipeline_rerun_every_frame_2026-09-12.md
+#
+# Every example below asserts an ABSOLUTE pixel oracle alongside the cache
+# counter, so a key that is wrong (a dropped viewport axis, say) fails on the
+# PIXELS, not merely on a hit/miss bookkeeping number.
+
+val BACKEND = "cpu_simd"
+
+# A right-anchored box: its painted column depends on the viewport width, so
+# two widths cannot produce the same pixel at a fixed sample point.
+val DOC_A = "<html><body style='margin:0;background:#102030'>" +
+    "<div style='position:absolute;right:0;top:0;width:40px;height:40px;" +
+    "background:#00ff00'></div></body></html>"
+val DOC_B = "<html><body style='margin:0;background:#301020'>" +
+    "<div style='position:absolute;right:0;top:0;width:40px;height:40px;" +
+    "background:#00ff00'></div></body></html>"
+
+fn render(html: text, w: i32, h: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d(html, w, h, BACKEND)
+
+fn sample(px: [u32], w: i32, x: i32, y: i32) -> u32:
+    if px.len() <= 0: return 0u32
+    val index = y * w + x
+    if index < 0 or index >= px.len(): return 0u32
+    px[index]
+
+describe "The composed document is reused when nothing it depends on changed":
+    it "same document twice -> second render is a cache hit with identical pixels":
+        web_document_cache_drain()
+        val first = render(DOC_A, 200, 120)
+        expect(web_document_cache_hit()).to_equal(false)
+        expect(first.len()).to_equal(200 * 120)
+        val second = render(DOC_A, 200, 120)
+        expect(web_document_cache_hit()).to_equal(true)
+        expect(second.len()).to_equal(first.len())
+        # Absolute pixel oracle: the reused composition must paint the same
+        # background and the same right-anchored box.
+        expect(sample(second, 200, 5, 5)).to_equal(sample(first, 200, 5, 5))
+        expect(sample(second, 200, 195, 5)).to_equal(sample(first, 200, 195, 5))
+        expect(web_document_cache_hit_count()).to_equal(1)
+
+    it "a viewport change is a miss, and moves the right-anchored box":
+        web_document_cache_drain()
+        val narrow = render(DOC_A, 200, 120)
+        expect(web_document_cache_hit()).to_equal(false)
+        val wide = render(DOC_A, 300, 120)
+        # Key completeness: width is IN the key, so this must not hit.
+        expect(web_document_cache_hit()).to_equal(false)
+        expect(wide.len()).to_equal(300 * 120)
+        # Absolute oracle for the same defect: at x=195 the narrow viewport is
+        # inside the right-anchored box and the wide one is not, so a cache that
+        # omitted width would republish the narrow pixels here.
+        expect(sample(wide, 300, 195, 5)).to_not_equal(sample(narrow, 200, 195, 5))
+        expect(sample(wide, 300, 295, 5)).to_equal(sample(narrow, 200, 195, 5))
+        # Oracle that needs no absolute positioning support: under the sabotage
+        # (width dropped from the key) the 300-wide surface reuses the 200-wide
+        # composition, whose canvas rect covers only columns 0..199, so columns
+        # 200..299 stay clear-colour instead of carrying the body background.
+        expect(sample(wide, 300, 250, 5)).to_equal(sample(wide, 300, 5, 5))
+        expect(web_document_cache_miss_count()).to_equal(2)
+
+    it "a height change is a miss":
+        web_document_cache_drain()
+        val short_frame = render(DOC_A, 200, 120)
+        expect(short_frame.len()).to_equal(200 * 120)
+        val tall_frame = render(DOC_A, 200, 200)
+        expect(web_document_cache_hit()).to_equal(false)
+        expect(tall_frame.len()).to_equal(200 * 200)
+
+    it "a changed document is a miss and changes a pixel":
+        web_document_cache_drain()
+        val a = render(DOC_A, 200, 120)
+        val b = render(DOC_B, 200, 120)
+        expect(web_document_cache_hit()).to_equal(false)
+        # Different body background at a point no box covers.
+        expect(sample(b, 200, 5, 5)).to_not_equal(sample(a, 200, 5, 5))
+
+    it "after a drain the same document misses again":
+        web_document_cache_drain()
+        val first = render(DOC_A, 200, 120)
+        val hit = render(DOC_A, 200, 120)
+        expect(web_document_cache_hit()).to_equal(true)
+        web_document_cache_drain()
+        val after = render(DOC_A, 200, 120)
+        expect(web_document_cache_hit()).to_equal(false)
+        # A drained cache recomputes the SAME document, so pixels are unchanged.
+        expect(sample(after, 200, 195, 5)).to_equal(sample(first, 200, 195, 5))
+        expect(sample(after, 200, 5, 5)).to_equal(sample(hit, 200, 5, 5))

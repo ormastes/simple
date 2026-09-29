@@ -56,9 +56,12 @@ class EnvironmentStack:
         if parent_id < -1 or parent_id >= id:
             return -1
         self.next_id = self.next_id + 1
-        var env_parent_ids: [i64] = self.env_parent_ids
-        env_parent_ids.push(parent_id)
-        self.env_parent_ids = env_parent_ids
+        # Push through the owning field. Taking the array into a local, pushing,
+        # and storing it back keeps the field and the local aliasing the same
+        # buffer across the write, so copy-on-write deep-copies the WHOLE table
+        # on every environment creation: O(n) per write, O(n^2) to build n
+        # environments. Detected by PERF-COW-001.
+        self.env_parent_ids.push(parent_id)
         id
 
     me _env_parent(env_id: i64) -> i64:
@@ -90,16 +93,13 @@ class EnvironmentStack:
             var j = self.var_names.len() - 1
             while j >= 0:
                 if self._stored_env_id_equals(self.var_env_ids.get(j), current_id) and self.var_names.get(j) == name:
-                    # Found in this scope — push update
-                    var var_names: [text] = self.var_names
-                    var var_values: [JsValue] = self.var_values
-                    var var_env_ids: [i64] = self.var_env_ids
-                    var_names.push(name)
-                    var_values.push(value)
-                    var_env_ids.push(current_id)
-                    self.var_names = var_names
-                    self.var_values = var_values
-                    self.var_env_ids = var_env_ids
+                    # Found in this scope — push update through the owning
+                    # fields. The former take/mutate/store-back round trip made
+                    # every single variable write deep-copy all three parallel
+                    # tables. Detected by PERF-COW-001.
+                    self.var_names.push(name)
+                    self.var_values.push(value)
+                    self.var_env_ids.push(current_id)
                     return
                 j = j - 1
             current_id = self._env_parent(current_id)
@@ -110,15 +110,11 @@ class EnvironmentStack:
     # Define a new variable in the given environment
     # Always appends — latest entry wins on read
     me define_var(env_id: i64, name: text, value: JsValue):
-        var var_names: [text] = self.var_names
-        var var_values: [JsValue] = self.var_values
-        var var_env_ids: [i64] = self.var_env_ids
-        var_names.push(name)
-        var_values.push(value)
-        var_env_ids.push(env_id)
-        self.var_names = var_names
-        self.var_values = var_values
-        self.var_env_ids = var_env_ids
+        # Push through the owning fields, not through locals — see set_var.
+        # Detected by PERF-COW-001.
+        self.var_names.push(name)
+        self.var_values.push(value)
+        self.var_env_ids.push(env_id)
 
 # ── Call frame ───────────────────────────────────────────────────────────
 

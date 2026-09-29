@@ -479,18 +479,16 @@ pub fn shr_i32x8(a: [i32; 8], n: i64) -> [i32; 8] {
 // ---------------------------------------------------------------------------
 // `pub extern "C"` symbols.
 //
-// These symbols back the `rt_simd_*_i32x{4,8}` extern declarations in
-// `src/lib/nogc_sync_mut/simd.spl`. The interpreter does NOT call these —
-// it dispatches through `compiler/src/interpreter_extern/simd.rs` which uses
-// the lane-level kernels above directly. The `extern "C"` symbols are required
-// for compiled-mode linkage; once a Vec4i marshalling layer lands they will
-// receive the actual lane data.
+// These Rust-callable wrappers exercise the lane kernels above. The interpreter
+// dispatches through `compiler/src/interpreter_extern/simd.rs`; compiled Simple
+// code uses the canonical tagged-value ABI exported by
+// `src/runtime/runtime_simd_dispatch.c`. They intentionally retain Rust symbol
+// mangling so the runtime cdylib has exactly one owner for each `rt_simd_*`
+// external name.
 //
-// Until then, we expose a stable, lane-array-shaped C ABI so the symbols are
-// resolvable and locally testable.
+// The lane-array-shaped signatures remain locally testable Rust helpers only.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
 pub extern "C" fn rt_simd_add_i32x4(
     a0: i32,
     a1: i32,
@@ -511,7 +509,6 @@ pub extern "C" fn rt_simd_add_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_sub_i32x4(
     a0: i32,
     a1: i32,
@@ -532,7 +529,6 @@ pub extern "C" fn rt_simd_sub_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_mul_i32x4(
     a0: i32,
     a1: i32,
@@ -553,7 +549,6 @@ pub extern "C" fn rt_simd_mul_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_xor_i32x4(
     a0: i32,
     a1: i32,
@@ -574,7 +569,6 @@ pub extern "C" fn rt_simd_xor_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_and_i32x4(
     a0: i32,
     a1: i32,
@@ -595,7 +589,6 @@ pub extern "C" fn rt_simd_and_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_or_i32x4(
     a0: i32,
     a1: i32,
@@ -616,7 +609,6 @@ pub extern "C" fn rt_simd_or_i32x4(
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_shl_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, out: *mut i32) {
     let r = shl_i32x4([a0, a1, a2, a3], n);
     unsafe {
@@ -627,7 +619,6 @@ pub extern "C" fn rt_simd_shl_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, 
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_shr_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, out: *mut i32) {
     let r = shr_i32x4([a0, a1, a2, a3], n);
     unsafe {
@@ -638,7 +629,6 @@ pub extern "C" fn rt_simd_shr_i32x4(a0: i32, a1: i32, a2: i32, a3: i32, n: i64, 
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
@@ -668,7 +658,6 @@ pub extern "C" fn rt_simd_add_i32x8(a: *const i32, b: *const i32, out: *mut i32)
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
@@ -698,7 +687,6 @@ pub extern "C" fn rt_simd_sub_i32x8(a: *const i32, b: *const i32, out: *mut i32)
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         // NOTE: `a`/`b`/`out` are raw i32 pointers marshalled in from the
@@ -739,7 +727,6 @@ pub extern "C" fn rt_simd_mul_i32x8(a: *const i32, b: *const i32, out: *mut i32)
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
@@ -769,7 +756,6 @@ pub extern "C" fn rt_simd_xor_i32x8(a: *const i32, b: *const i32, out: *mut i32)
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
@@ -799,7 +785,6 @@ pub extern "C" fn rt_simd_and_i32x8(a: *const i32, b: *const i32, out: *mut i32)
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) {
     unsafe {
         let av = [
@@ -829,7 +814,6 @@ pub extern "C" fn rt_simd_or_i32x8(a: *const i32, b: *const i32, out: *mut i32) 
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [
@@ -849,7 +833,6 @@ pub extern "C" fn rt_simd_shl_i32x8(a: *const i32, n: i64, out: *mut i32) {
     }
 }
 
-#[no_mangle]
 pub extern "C" fn rt_simd_shr_i32x8(a: *const i32, n: i64, out: *mut i32) {
     unsafe {
         let av = [

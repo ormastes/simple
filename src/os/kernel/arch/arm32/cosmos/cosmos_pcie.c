@@ -1,5 +1,6 @@
 /* Cosmos+ OpenSSD NVMeHostController endpoint readiness gate. */
 #include "cosmos_hal.h"
+#include "cosmos_pcie_residual_policy.h"
 #include "cosmos_pcie_regs.h"
 #include "cosmos_profile_openssd2_8ch8way_v300.h"
 #include "cosmos_zynq_regs.h"
@@ -42,58 +43,6 @@ int cosmos_platform_irq_handle(unsigned int interrupt_id) {
         : COSMOS_UNAVAILABLE;
 }
 
-static int cosmos_pcie_snapshot_status(unsigned int status,
-                                       unsigned int function,
-                                       unsigned int nvme,
-                                       unsigned int admin) {
-    unsigned int admin_valid =
-        admin & (COSMOS_PCIE_ADMIN_CQ_VALID | COSMOS_PCIE_ADMIN_SQ_VALID);
-
-    if ((status & ~COSMOS_PCIE_STATUS_DEFINED_MASK) != 0U ||
-        (function & ~COSMOS_PCIE_FUNCTION_DEFINED_MASK) != 0U ||
-        (nvme & ~COSMOS_PCIE_NVME_STATUS_DEFINED_MASK) != 0U ||
-        (admin & ~COSMOS_PCIE_ADMIN_DEFINED_MASK) != 0U) {
-        return COSMOS_HW_ERROR;
-    }
-    if ((status & COSMOS_PCIE_STATUS_LINK_UP) == 0U ||
-        (status & COSMOS_PCIE_STATUS_LTSSM_MASK) != COSMOS_PCIE_LTSSM_L0 ||
-        (function & COSMOS_PCIE_FUNCTION_BUS_MASTER) == 0U ||
-        (function & COSMOS_PCIE_FUNCTION_MSI_ENABLE) == 0U) {
-        return COSMOS_UNAVAILABLE;
-    }
-    if ((function & COSMOS_PCIE_FUNCTION_MSIX_ENABLE) != 0U ||
-        ((function & COSMOS_PCIE_FUNCTION_MME_MASK) >>
-         COSMOS_PCIE_FUNCTION_MME_SHIFT) > COSMOS_PCIE_FUNCTION_MME_MAX) {
-        return COSMOS_HW_ERROR;
-    }
-    if (admin_valid != 0U &&
-        admin_valid !=
-            (COSMOS_PCIE_ADMIN_CQ_VALID | COSMOS_PCIE_ADMIN_SQ_VALID)) {
-        return COSMOS_HW_ERROR;
-    }
-    if ((admin & COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE) != 0U &&
-        (admin & COSMOS_PCIE_ADMIN_CQ_VALID) == 0U) {
-        return COSMOS_HW_ERROR;
-    }
-    if ((nvme & COSMOS_PCIE_NVME_CC_ENABLE) == 0U &&
-        ((nvme & (COSMOS_PCIE_NVME_CC_SHN_MASK |
-                  COSMOS_PCIE_NVME_CSTS_READY |
-                  COSMOS_PCIE_NVME_CSTS_SHST_MASK)) != 0U ||
-         admin != 0U)) {
-        return COSMOS_HW_ERROR;
-    }
-    if ((nvme & COSMOS_PCIE_NVME_CSTS_READY) != 0U &&
-        (admin & (COSMOS_PCIE_ADMIN_CQ_VALID |
-                  COSMOS_PCIE_ADMIN_SQ_VALID |
-                  COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE)) !=
-            (COSMOS_PCIE_ADMIN_CQ_VALID |
-             COSMOS_PCIE_ADMIN_SQ_VALID |
-             COSMOS_PCIE_ADMIN_CQ_IRQ_ENABLE)) {
-        return COSMOS_HW_ERROR;
-    }
-    return COSMOS_OK;
-}
-
 #if !COSMOS_IS_QEMU && COSMOS_PCIE_CONTRACT_BOUND
 static unsigned int cosmos_pcie_read(unsigned int offset) {
     return cosmos_mmio_read32(COSMOS_PCIE_HOST_BASE + offset);
@@ -110,15 +59,6 @@ static void cosmos_pcie_read_snapshot(struct cosmos_pcie_snapshot *snapshot) {
     snapshot->admin = cosmos_pcie_read(COSMOS_PCIE_ADMIN_QUEUE_OFFSET);
 }
 
-static int cosmos_pcie_snapshots_equal(
-    const struct cosmos_pcie_snapshot *left,
-    const struct cosmos_pcie_snapshot *right) {
-    return left->status == right->status &&
-        left->function == right->function &&
-        left->nvme == right->nvme &&
-        left->admin == right->admin;
-}
-
 static int cosmos_pcie_poll_snapshot(struct cosmos_pcie_snapshot *snapshot,
                                       int wait_until_ready) {
     unsigned int poll;
@@ -131,10 +71,12 @@ static int cosmos_pcie_poll_snapshot(struct cosmos_pcie_snapshot *snapshot,
         cosmos_pcie_read_snapshot(&first);
         cosmos_data_sync_barrier();
         cosmos_pcie_read_snapshot(&second);
-        if (!cosmos_pcie_snapshots_equal(&first, &second)) {
+        if (!cosmos_pcie_residual_policy_snapshots_equal(
+                first.status, first.function, first.nvme, first.admin,
+                second.status, second.function, second.nvme, second.admin)) {
             continue;
         }
-        result = cosmos_pcie_snapshot_status(
+        result = cosmos_pcie_residual_policy_snapshot_status(
             second.status, second.function, second.nvme, second.admin);
         if (wait_until_ready && result == COSMOS_UNAVAILABLE) {
             continue;
@@ -161,39 +103,14 @@ static int cosmos_pcie_require_transport_ready(void) {
     return result;
 }
 
-static int cosmos_pcie_nvme_cmd_word_valid(unsigned int word) {
-    unsigned int queue_id;
-    unsigned int slot_tag;
-
-    if ((word & COSMOS_PCIE_NVME_CMD_VALID) == 0U) {
-        return COSMOS_UNAVAILABLE;
-    }
-    if ((word & COSMOS_PCIE_NVME_CMD_RESERVED_MASK) != 0U) {
-        return COSMOS_HW_ERROR;
-    }
-    queue_id = word & COSMOS_PCIE_NVME_CMD_QUEUE_MASK;
-    slot_tag = (word & COSMOS_PCIE_NVME_CMD_SLOT_MASK) >>
-        COSMOS_PCIE_NVME_CMD_SLOT_SHIFT;
-    if (queue_id > COSMOS_PCIE_NVME_MAX_QUEUE_ID ||
-        slot_tag >= COSMOS_PCIE_NVME_CMD_SLOT_COUNT) {
-        return COSMOS_HW_ERROR;
-    }
-    return COSMOS_OK;
-}
-
 static int cosmos_pcie_nvme_completion_valid(
     const struct cosmos_pcie_nvme_completion *completion) {
-    if (completion == 0 ||
-        completion->queue_id > COSMOS_PCIE_NVME_MAX_QUEUE_ID ||
-        completion->slot_tag >= COSMOS_PCIE_NVME_CMD_SLOT_COUNT ||
-        completion->sequence > 0xFFU ||
-        completion->cid > 0xFFFFU ||
-        completion->status_word > 0xFFFFU ||
-        (completion->status_word &
-         COSMOS_PCIE_NVME_CPL_STATUS_RESERVED_MASK) != 0U) {
+    if (completion == 0) {
         return 0;
     }
-    return 1;
+    return cosmos_pcie_residual_policy_nvme_completion_fields_valid(
+        completion->queue_id, completion->slot_tag, completion->sequence,
+        completion->cid, completion->status_word);
 }
 
 static void cosmos_pcie_quiesce(void) {
@@ -265,57 +182,6 @@ static int cosmos_pcie_probe(void) {
     return result;
 }
 
-static int cosmos_pcie_host_dma_device_buffer_valid(
-    unsigned int device_address, unsigned int length) {
-    if ((device_address & (COSMOS_PCIE_HOST_DMA_DEVICE_ALIGNMENT - 1U)) !=
-            0U ||
-        length == 0U || length > COSMOS_PCIE_HOST_DMA_MAX_BYTES ||
-        (length & (COSMOS_PCIE_HOST_DMA_DEVICE_ALIGNMENT - 1U)) != 0U ||
-        device_address < COSMOS_NFC_DATA_POOL_BASE ||
-        device_address > COSMOS_NFC_DATA_POOL_END ||
-        length - 1U > COSMOS_NFC_DATA_POOL_END - device_address) {
-        return COSMOS_INVALID;
-    }
-    return COSMOS_OK;
-}
-
-static int cosmos_pcie_host_dma_direct_valid(
-    unsigned int device_address, unsigned int host_address_high,
-    unsigned int host_address_low, unsigned int length) {
-    unsigned int last_host_address_low;
-
-    if (cosmos_pcie_host_dma_device_buffer_valid(device_address, length) !=
-            COSMOS_OK ||
-        (host_address_low & (COSMOS_PCIE_HOST_DMA_HOST_ALIGNMENT - 1U)) !=
-            0U ||
-        host_address_high > COSMOS_PCIE_HOST_DMA_HOST_HIGH_MASK) {
-        return COSMOS_INVALID;
-    }
-    last_host_address_low = host_address_low + length - 1U;
-    if (last_host_address_low < host_address_low &&
-        host_address_high == COSMOS_PCIE_HOST_DMA_HOST_HIGH_MASK) {
-        return COSMOS_INVALID;
-    }
-    return COSMOS_OK;
-}
-
-static unsigned int cosmos_pcie_host_dma_counter_shift(
-    unsigned int direct, enum cosmos_pcie_host_dma_direction direction) {
-    if (direct != 0U) {
-        return direction == COSMOS_PCIE_HOST_TO_DEVICE
-            ? COSMOS_PCIE_HOST_DMA_DIRECT_RX_COUNT_SHIFT
-            : COSMOS_PCIE_HOST_DMA_DIRECT_TX_COUNT_SHIFT;
-    }
-    return direction == COSMOS_PCIE_HOST_TO_DEVICE
-        ? COSMOS_PCIE_HOST_DMA_AUTO_RX_COUNT_SHIFT
-        : COSMOS_PCIE_HOST_DMA_AUTO_TX_COUNT_SHIFT;
-}
-
-static unsigned int cosmos_pcie_host_dma_counter_index(
-    unsigned int direct, enum cosmos_pcie_host_dma_direction direction) {
-    return cosmos_pcie_host_dma_counter_shift(direct, direction) / 8U;
-}
-
 static unsigned int cosmos_pcie_host_dma_count(unsigned int counter_shift) {
     unsigned int count = cosmos_pcie_read(COSMOS_PCIE_HOST_DMA_FIFO_COUNT_OFFSET);
 
@@ -369,8 +235,8 @@ static int cosmos_pcie_host_dma_submit_direct(
     unsigned int word3;
     int result;
 
-    if (cosmos_pcie_host_dma_direct_valid(device_address, host_address_high,
-                                          host_address_low, length) !=
+    if (cosmos_pcie_residual_policy_host_dma_direct_status(
+            device_address, host_address_high, host_address_low, length) !=
         COSMOS_OK) {
         return COSMOS_INVALID;
     }
@@ -378,16 +244,15 @@ static int cosmos_pcie_host_dma_submit_direct(
     if (result != COSMOS_OK) {
         return result;
     }
-    counter_shift = cosmos_pcie_host_dma_counter_shift(1U, direction);
+    counter_shift = cosmos_pcie_residual_policy_host_dma_counter_shift(
+        1U, (unsigned int)direction);
     result = cosmos_pcie_host_dma_before_submit(counter_shift, &completed);
     if (result != COSMOS_OK) {
         return result;
     }
 
-    word3 = (COSMOS_PCIE_HOST_DMA_TYPE_DIRECT <<
-             COSMOS_PCIE_HOST_DMA_TYPE_SHIFT) |
-        ((unsigned int)direction << COSMOS_PCIE_HOST_DMA_DIRECTION_SHIFT) |
-        length;
+    word3 = cosmos_pcie_residual_policy_host_dma_direct_word3(
+        (unsigned int)direction, length);
     result = cosmos_pcie_host_dma_write_word(
         COSMOS_PCIE_HOST_DMA_WORD0_OFFSET, device_address);
     if (result != COSMOS_OK) {
@@ -421,26 +286,24 @@ static int cosmos_pcie_host_dma_submit_auto(
     unsigned int word3;
     int result;
 
-    if (command_slot_tag > COSMOS_PCIE_HOST_DMA_SLOT_MASK ||
-        command_4k_offset > COSMOS_PCIE_HOST_DMA_AUTO_OFFSET_MAX ||
-        cosmos_pcie_host_dma_device_buffer_valid(
-            device_address, COSMOS_PCIE_HOST_DMA_MAX_BYTES) != COSMOS_OK) {
+    if (cosmos_pcie_residual_policy_host_dma_auto_status(
+            command_slot_tag, command_4k_offset, device_address) !=
+        COSMOS_OK) {
         return COSMOS_INVALID;
     }
     result = cosmos_pcie_require_transport_ready();
     if (result != COSMOS_OK) {
         return result;
     }
-    counter_shift = cosmos_pcie_host_dma_counter_shift(0U, direction);
+    counter_shift = cosmos_pcie_residual_policy_host_dma_counter_shift(
+        0U, (unsigned int)direction);
     result = cosmos_pcie_host_dma_before_submit(counter_shift, &completed);
     if (result != COSMOS_OK) {
         return result;
     }
 
-    word3 = ((unsigned int)direction <<
-             COSMOS_PCIE_HOST_DMA_DIRECTION_SHIFT) |
-        (command_slot_tag << COSMOS_PCIE_HOST_DMA_SLOT_SHIFT) |
-        (command_4k_offset << COSMOS_PCIE_HOST_DMA_AUTO_OFFSET_SHIFT);
+    word3 = cosmos_pcie_residual_policy_host_dma_auto_word3(
+        (unsigned int)direction, command_slot_tag, command_4k_offset);
     result = cosmos_pcie_host_dma_write_word(
         COSMOS_PCIE_HOST_DMA_WORD0_OFFSET, device_address);
     if (result != COSMOS_OK) {
@@ -462,8 +325,10 @@ static int cosmos_pcie_host_dma_poll(unsigned int direct,
     unsigned int bit;
     unsigned int poll;
 
-    counter_shift = cosmos_pcie_host_dma_counter_shift(direct, direction);
-    index = cosmos_pcie_host_dma_counter_index(direct, direction);
+    counter_shift = cosmos_pcie_residual_policy_host_dma_counter_shift(
+        direct, (unsigned int)direction);
+    index = cosmos_pcie_residual_policy_host_dma_counter_index(
+        direct, (unsigned int)direction);
     bit = 1U << index;
     if ((cosmos_pcie_host_dma_pending & bit) == 0U) {
         return COSMOS_INVALID;
@@ -484,19 +349,6 @@ static int cosmos_pcie_host_dma_poll(unsigned int direct,
     return COSMOS_TIMEOUT;
 }
 #endif
-
-int cosmos_pcie_nvme_status_word(unsigned int sct, unsigned int sc,
-                                 unsigned int dnr,
-                                 unsigned int *status_word) {
-    if (status_word == 0 || sct > 7U || sc > 0xFFU || dnr > 1U) {
-        return COSMOS_INVALID;
-    }
-    *status_word =
-        (sc << COSMOS_PCIE_NVME_CPL_STATUS_SC_SHIFT) |
-        (sct << COSMOS_PCIE_NVME_CPL_STATUS_SCT_SHIFT) |
-        (dnr ? COSMOS_PCIE_NVME_CPL_STATUS_DNR : 0U);
-    return COSMOS_OK;
-}
 
 int cosmos_pcie_host_dma_submit_host_to_device(
     unsigned int device_address, unsigned int host_address_high,
@@ -605,7 +457,7 @@ int cosmos_pcie_nvme_fetch_command(struct cosmos_pcie_nvme_command *command) {
 
     word = cosmos_pcie_read(COSMOS_PCIE_NVME_CMD_FIFO_OFFSET);
     cosmos_data_sync_barrier();
-    result = cosmos_pcie_nvme_cmd_word_valid(word);
+    result = cosmos_pcie_residual_policy_nvme_cmd_word_status(word);
     if (result != COSMOS_OK) {
         if (result == COSMOS_HW_ERROR) {
             cosmos_pcie_quiesce();
@@ -640,63 +492,6 @@ int cosmos_pcie_nvme_fetch_command(struct cosmos_pcie_nvme_command *command) {
     *command = local;
     return COSMOS_OK;
 #endif
-}
-
-static int cosmos_pcie_nvme_queue_base_valid(
-    unsigned int valid, unsigned int entries,
-    unsigned int address_low, unsigned int address_high) {
-    if (valid > 1U) {
-        return 0;
-    }
-    if (valid == 0U) {
-        return entries == 0U && address_low == 0U && address_high == 0U;
-    }
-    return entries != 0U && entries <= 256U &&
-        (address_low & 0xFFFU) == 0U && address_high <= 0xFU &&
-        (address_low != 0U || address_high != 0U);
-}
-
-int cosmos_pcie_nvme_io_sq_words(
-    unsigned int queue_id, unsigned int valid,
-    unsigned int completion_queue_id, unsigned int entries,
-    unsigned int address_low, unsigned int address_high,
-    unsigned int *word0, unsigned int *word1) {
-    if (word0 == 0 || word1 == 0 || queue_id == 0U ||
-        queue_id > COSMOS_PCIE_IO_QUEUE_COUNT ||
-        !cosmos_pcie_nvme_queue_base_valid(
-            valid, entries, address_low, address_high) ||
-        (valid != 0U &&
-         (completion_queue_id == 0U ||
-          completion_queue_id > COSMOS_PCIE_IO_QUEUE_COUNT)) ||
-        (valid == 0U && completion_queue_id != 0U)) {
-        return COSMOS_INVALID;
-    }
-    *word0 = address_low;
-    *word1 = address_high | (valid << 15U) |
-        (completion_queue_id << 16U) |
-        ((entries == 0U ? 0U : entries - 1U) << 24U);
-    return COSMOS_OK;
-}
-
-int cosmos_pcie_nvme_io_cq_words(
-    unsigned int queue_id, unsigned int valid,
-    unsigned int irq_enable, unsigned int irq_vector,
-    unsigned int entries, unsigned int address_low,
-    unsigned int address_high, unsigned int *word0,
-    unsigned int *word1) {
-    if (word0 == 0 || word1 == 0 || queue_id == 0U ||
-        queue_id > COSMOS_PCIE_IO_QUEUE_COUNT ||
-        !cosmos_pcie_nvme_queue_base_valid(
-            valid, entries, address_low, address_high) ||
-        irq_enable > 1U || irq_vector > 7U ||
-        (valid == 0U && (irq_enable != 0U || irq_vector != 0U))) {
-        return COSMOS_INVALID;
-    }
-    *word0 = address_low;
-    *word1 = address_high | (valid << 15U) |
-        (irq_vector << 16U) | (irq_enable << 19U) |
-        ((entries == 0U ? 0U : entries - 1U) << 24U);
-    return COSMOS_OK;
 }
 
 int cosmos_pcie_nvme_configure_io_sq(
@@ -781,9 +576,8 @@ enum cosmos_pcie_nvme_completion_result cosmos_pcie_nvme_post_completion(
     }
 
     word1 = completion->specific;
-    word2 = ((completion->status_word & 0xFFFFU) << 16U) |
-        (COSMOS_PCIE_NVME_CPL_TYPE_AUTO << 14U) |
-        (completion->slot_tag & 0x7FU);
+    word2 = cosmos_pcie_residual_policy_nvme_completion_word2(
+        completion->slot_tag, completion->status_word);
 
     /*
      * AUTO completion uses the captured slot's SQID/CID and releases that
@@ -933,35 +727,39 @@ int cosmos_pcie_selftest(void) {
         COSMOS_PCIE_CLASS_CODE != 0x010802U) {
         return COSMOS_INVALID;
     }
-    if (cosmos_pcie_snapshot_status(0U, function, 0U, 0U) !=
+    if (cosmos_pcie_residual_policy_snapshot_status(
+            0U, function, 0U, 0U) !=
             COSMOS_UNAVAILABLE ||
-        cosmos_pcie_snapshot_status(
+        cosmos_pcie_residual_policy_snapshot_status(
             COSMOS_PCIE_STATUS_LINK_UP | (COSMOS_PCIE_LTSSM_L0 - 1U),
             function, 0U, 0U) != COSMOS_UNAVAILABLE ||
-        cosmos_pcie_snapshot_status(
+        cosmos_pcie_residual_policy_snapshot_status(
             link, function & ~COSMOS_PCIE_FUNCTION_BUS_MASTER, 0U, 0U) !=
             COSMOS_UNAVAILABLE ||
-        cosmos_pcie_snapshot_status(
+        cosmos_pcie_residual_policy_snapshot_status(
             link, function & ~COSMOS_PCIE_FUNCTION_MSI_ENABLE, 0U, 0U) !=
             COSMOS_UNAVAILABLE) {
         return COSMOS_INVALID;
     }
-    if (cosmos_pcie_snapshot_status(link, function, 0U, 0U) != COSMOS_OK ||
-        cosmos_pcie_snapshot_status(link,
+    if (cosmos_pcie_residual_policy_snapshot_status(
+            link, function, 0U, 0U) != COSMOS_OK ||
+        cosmos_pcie_residual_policy_snapshot_status(link,
             function | COSMOS_PCIE_FUNCTION_MSIX_ENABLE, 0U, 0U) !=
             COSMOS_HW_ERROR ||
-        cosmos_pcie_snapshot_status(link,
+        cosmos_pcie_residual_policy_snapshot_status(link,
             (function & ~COSMOS_PCIE_FUNCTION_MME_MASK) |
                 ((COSMOS_PCIE_FUNCTION_MME_MAX + 1U) <<
                  COSMOS_PCIE_FUNCTION_MME_SHIFT),
             0U, 0U) != COSMOS_HW_ERROR ||
-        cosmos_pcie_snapshot_status(link, function, 0U,
+        cosmos_pcie_residual_policy_snapshot_status(link, function, 0U,
             COSMOS_PCIE_ADMIN_SQ_VALID) != COSMOS_HW_ERROR ||
-        cosmos_pcie_snapshot_status(link, function, ready_nvme,
+        cosmos_pcie_residual_policy_snapshot_status(link, function, ready_nvme,
             ready_admin) != COSMOS_OK ||
-        cosmos_pcie_snapshot_status(link, function, ready_nvme, 0U) !=
+        cosmos_pcie_residual_policy_snapshot_status(
+            link, function, ready_nvme, 0U) !=
             COSMOS_HW_ERROR ||
-        cosmos_pcie_snapshot_status(link | (1U << 31), function, 0U, 0U) !=
+        cosmos_pcie_residual_policy_snapshot_status(
+            link | (1U << 31), function, 0U, 0U) !=
             COSMOS_HW_ERROR) {
         return COSMOS_INVALID;
     }

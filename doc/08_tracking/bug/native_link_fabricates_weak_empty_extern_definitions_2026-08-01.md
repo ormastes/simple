@@ -288,3 +288,102 @@ small, contained change:
    zero/near-zero-size defined symbols matching known `@extern` declarations
    with no implementation) into `link_llvm_native`'s hosted branch, gated the
    same way the SimpleOS one is by `SIMPLE_NO_STUB_FALLBACK`/`SIMPLE_SAFETY_PROFILE`.
+
+## 2026-09-18 update: pure-Simple hosted-lane fence landed (fix option 2, seed-contract mirror)
+
+**Root cause restated.** The pure-Simple self-hosted host link path entered
+`link_llvm_native` with no fabrication guard of any kind: the SimpleOS
+`simpleos_check_no_fabricated_rt_stubs` ratchet is wired only into the four
+freestanding branches, and the generic hosted-C-runtime branch (the one a
+hosted `native-build`/`compile --native` entry takes) ran `link_to_native`
+with nothing inspecting the user objects. Any object carrying the fabrication
+shape — a weak, empty (zero-size or size-column-absent) definition for an
+`@extern fn` nothing implements — linked clean and silently returned garbage
+on every call. (Whether today's pure-Simple codegen still emits that shape is
+unconfirmed — the reproductions in this file are seed-lane — which is exactly
+why the fence belongs at the link layer: it is fabricator-independent.)
+
+**Fix (in scope: `src/compiler/70.backend/backend/llvm_native_link.spl` only).**
+The facade now owns the fence and wraps the orchestrator entry point; every
+real caller imports the facade, so the wrapper intercepts all of them:
+
+- `hosted_nm_fabricated_extern_names(nm_output, sizes_meaningful)` — pure,
+  spec-testable classifier of one `nm --defined-only -S` output. Fabricated
+  iff the type letter is a weak definition class (`W`/`w`/`V`/`v`) AND the
+  size column is absent (the seed's `!has_size`) or present-but-all-hex-zero
+  on a size-reporting platform. This is the seed predicate; per the seed's own
+  argument it cannot false-positive on a real function, which always carries
+  a non-zero size where sizes are reported.
+- `hosted_check_no_fabricated_extern_definitions(user_objects, entry_label)`
+  — the port of `check_no_fabricated_extern_definitions`: runs pre-link over
+  the user objects (same observation point as the seed guard). Skips
+  SimpleOS/freestanding routes (own ratchet) and MSVC (misparsing), fails
+  OPEN when nm is missing/fails/empty per object (seed policy), and returns a
+  loud `Err` naming every offending symbol and its object otherwise. No env
+  hatch, no allowlist — per this record's "by design".
+- `link_llvm_native` (facade) — calls the guard first; on `Err` the link
+  fails CLOSED before any runtime compilation or linker invocation; on `Ok`
+  delegates to `llvm_native_link_orchestrator.link_llvm_native` unchanged.
+
+**Platform blindness, measured on this host (macOS):** Mach-O `nm -S` prints
+"sizes with --print-size for Mach-O files are always zero" — every size is 0,
+so `sizes_meaningful = not is_macos()` encodes that a zero size accuses nobody
+on Darwin; only an absent size column does, making the Darwin guard
+inert-but-harmless exactly like the seed's on a platform whose nm cannot
+answer. (Also measured: in a LINKED Mach-O executable a `__attribute__((weak))`
+function reports class `T`, not `W` — the reason the existing ELF-oriented
+gate's selftest fails on this host; the fence deliberately inspects OBJECTS
+pre-link, where the weak class survives on every platform.)
+
+**Boundary (deliberate, pinned by the spec):** the STRONG, non-empty (`T`,
+size-3) fabrication variant confirmed live on the SEED lane (2026-08-08
+update) is NOT covered by this fence. At the link layer a strong tiny body is
+indistinguishable from a real tiny constant-return function without front-end
+extern-declaration metadata the link interface does not carry; this record's
+own fix option 2 scoped it as "matching known `@extern` declarations". That
+variant stays fenced by `scripts/check/check-native-extern-fabrication.shs`
+on the seed lane, and the long-term fix remains codegen leaving an
+unimplemented `@extern` symbol undefined (the driver's FIX A undefined-symbol
+diagnostic, `driver_native_link_undefined_symbols` et al. in
+`driver_aot_native_output.spl`, then names the declaration site).
+
+**Executable spec (new):**
+`test/01_unit/compiler/linker/hosted_extern_fabrication_fence_spec.spl`.
+Pins: weak+zero-size and weak+size-column-absent and `rt_`-prefixed and
+`w`/`V` classes are accused (synthetic nm text, all hosts); weak WITH a real
+size, strong functions/data, and the correct `U` undefined state are not; a
+strong `T` 3-byte symbol is not claimed (boundary pin); Darwin all-zero sizes
+accuse nobody; empty/garbage nm output fails open; the real cc-built probe
+object with a weak sizeless definition is rejected by the guard AND through
+the public `link_llvm_native` (pre-link: the error is the fence's message,
+not a linker failure, and no binary is produced) on ELF hosts; the real weak
+WITH body control is never accused. Verdict under
+`SIMPLE_LIB=src bin/simple test ... --mode=interpreter` on this macOS host
+(the two ELF-only rejection examples report `pending` here — Mach-O nm cannot
+exhibit a sizeless weak symbol — and execute on ELF CI):
+
+```
+Results: 16 total, 16 passed, 0 failed, 2 skipped
+```
+
+**Gate verdict (`scripts/check/check-native-extern-fabrication.shs`):** FAIL,
+exit 1, ENVIRONMENTAL — all three builds (control included) stop at
+`SCV-E-ADMISSION: compile-event-journal-missing (first build in this checkout:
+rerun with SIMPLE_SCV_INVENTORY_COLD_INIT=1)` before any compile/link step.
+The script classifies this itself as an UNRELATED build failure, not the
+expected extern-fabrication refusal. Not rerun with
+`SIMPLE_SCV_INVENTORY_COLD_INIT=1`: that journal init mutates shared-worktree
+verification state and was out of this lane's ownership. The gate drives the
+deployed SEED binary's `native-build`, a lane this pure-Simple source fence
+does not touch; its KNOWN-OPEN status for the seed lane is unchanged by this
+fix. Note also its `--selftest` fails on this host for the Mach-O `T`-for-weak
+reason above.
+
+**Regression sweep around the owned file:** three neighbouring specs fail
+identically (same example names, same counts) with the pre-change HEAD facade
+and with the new one — all pre-existing at origin/main, none caused by this
+change: `native_link_libraries_env_spec.spl` (2/2: imports
+`llvm_configured_link_libraries`, which exists nowhere in src/ anymore),
+`native_link_hardening_spec.spl` (10/30: source-text landmarks that moved
+into `llvm_native_link_orchestrator.spl`/other split modules),
+`hosted_c_target_guard_spec.spl` (3/20: same moved-landmark cause).

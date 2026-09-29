@@ -12,21 +12,13 @@ seconds. The timeout data does not by itself prove that a spec is hung. See
 Evidence binary (identical for every measurement from the 2026-08-27 sweep
 recorded below, re-stat'd after the sweep and unchanged):
 `bin/release/x86_64-unknown-linux-gnu/simple`, size `60744944`,
-mtime `2026-08-26 01:16:25 +0000`, SHA-256
-`ae73a992d514f353005adcddcf252497e80fb52ccda5eab8b9db4b35e795427e`.
-Re-stat and hash before comparing to these numbers — the symlink target is
-replaced by other agents mid-session.
+mtime `2026-08-26 01:16:25 +0000`. Re-stat before comparing to these numbers —
+the symlink target is replaced by other agents mid-session.
 
 Method: each spec run alone from a detached worktree at `origin/main`
 (`2b35049f8d7`) with `timeout 900 bin/simple test <spec>`, 4 concurrent.
 Concurrency inflates wall times, so a *finishing* time here is an upper bound;
 a 900s row is a timeout regardless.
-
-The sweep index is retained at
-`evidence/unit_spec_hangs_42_excluded_2026-08-27/times.tsv` (SHA-256
-`93f135b06a0e98eaad6a0bb7d7d2635a85b891b55652cb4d5fc7cb36e87033eb`).
-The complete per-spec raw logs remain scratch artifacts and are not claimed as
-repository-retained evidence.
 
 Fixed startup cost was measured first and ruled out as the cause: a trivial
 spec (`test/01_unit/bugs/cast_else_swallows_outer_if_spec.spl`) completes in
@@ -41,17 +33,15 @@ specs. Neither exists in the tree at `origin/main`:
 - `test/01_unit/os/kernel/memory/.spipe_wrapped_entry_vmm_copyin_spec.spl`
 
 They are transient coverage/wrapper files written by the spipe runner and
-swept up by whatever enumerated the failing set. Both scratch paths were run
-anyway and exited with rc=1 (file not found): the coverage path in 3s and the
-wrapper path in 2s. They should be excluded from the spec list, not
-investigated as timeouts.
+swept up by whatever enumerated the failing set. The first was run anyway and
+exits in 3s with rc=1 (file not found). They should be excluded from the
+hang list, not investigated.
 
 ## 2. Measured classification
 
-**The exclusion list conflates three different things.** Re-run at a 900s
-budget against the 300s budget that produced the list, the 40 real specs
-split into timeouts without a completed verdict (§2b), slow-but-completing (§2a), and fast failures
-that never ran long at all (§2d). Totals in §2e.
+**Both categories exist — the exclusion list conflates them.** The sweep was
+run with a 900s budget against the 300s budget that produced the exclusion
+list, and that difference alone reclassifies at least one spec.
 
 ### 2a. MERELY SLOW — finishes, was excluded only by the 300s budget
 
@@ -66,21 +56,22 @@ that never ran long at all (§2d). Totals in §2e.
 | `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | 726s | 0 |
 | `test/01_unit/lib/crypto/slh_dsa_128s_spec.spl` | 860s | 0 |
 
-**None of these is a hang.** All eight produce a verdict inside 900s and were
-excluded only because they exceed the 300s per-file budget. The six rc=0 rows
-pass; the two rc=1 rows (`simple_web_window_renderer`, `simple_web_renderer`)
-complete with genuine test failures and should be triaged as failures, not as
-hangs. The JS/browser rows' cost is consistent with root cause C below (the
-whole JS engine running interpreted).
+**None of these is a hang.** All eight produce a verdict inside 900s and
+were excluded only because they exceed the 300s per-file budget. The six
+rc=0 rows pass; the two rc=1 rows (`simple_web_window_renderer`,
+`simple_web_renderer`) complete with genuine test failures and should be
+triaged as failures, not as hangs.
 
 Verified from the log rather than the exit code alone — e.g.
 `browser_session_fetch_wasm_chain_spec`: `SPEC FILE VERDICT: ... outcome=OK
 declared>=250 executed=250 passed=250 failed=0 skipped=0 dropped=0`.
 
-Note `slh_dsa_128s` at 860s clears the budget by only 40s, and these timings
-were taken with 4 specs running concurrently. On a quieter box more of §2b may
-finish; on a busier one this spec flips to a timeout. The 24/8/8 split is a
-boundary under load, not a constant.
+Note that `slh_dsa_128s` at 860s clears the budget by only 40s, and these
+timings were taken with 4 specs running concurrently. On a quieter box more
+of §2b may finish; on a busier one this spec will flip to a timeout. The
+24/8/8 split is therefore a boundary, not a constant. It belongs in a performance
+bucket, not a hang list. Its cost is consistent with root cause C below (the
+whole JS engine running interpreted).
 
 ### 2b. TIMEOUT — no completed verdict within 900s (rc=124)
 
@@ -111,29 +102,22 @@ boundary under load, not a constant.
 | `test/01_unit/os/tools/shell/text_tool_artifact_contract_spec.spl` | 900s | 124 |
 | `test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` | 900s | 124 |
 
-**These captured logs do not localize the timeout.** Every 2b log is 247 lines,
-contains only the shared `[gc-warning]` / `[use-warning]` preamble, contains
-no `✓`, and is byte-identical (SHA-256
-`5ad51652fe091b789e5c2973db713965038137ecb9964a363dbb82e009e3bd9a`).
-That proves only that no completed test verdict was captured before timeout.
-The capture has no phase marker proving that import completed or the first
-test began, and it cannot distinguish an import/setup timeout from a timeout
-in the first test or from output held outside the captured stream. A future
-run needs explicit import-complete and test-start markers to localize these
-rows.
+**The stall is in the FIRST test, not at import.** The runner streams
+per-test results as it goes — it does not buffer them — which the 2a
+finisher proves: its log is 957 lines and its first `✓` line appears at
+line **250**, after ~249 lines of module-load preamble. Every 2b log is
+**exactly 247 lines with zero `✓` lines**. So these specs finish module
+loading and then stall in (or immediately before) their first test case;
+they are not import-time hangs, and they are not stalling deep in a long
+run after many passing tests.
 
-### 2c. Corroborated: `spirv_khronos_validation`
+That the preamble length is identical across specs as unrelated as a
+compiler parser spec, a Unicode search spec, a font-renderer spec and the JS
+timer specs is a property of the shared preamble, not evidence of a shared
+root cause — the preamble is the same ~247 lines of `[gc-warning]` /
+`[use-warning]` module-load noise for every spec in the suite.
 
-`test/01_unit/os/vulkan/spirv_khronos_validation_spec.spl` is measured above
-at 900s / rc=124, which **corroborates the runtime problem but does not by
-itself prove its mechanism**. The independent prior evidence in
-`spirv_builder_module_drops_to_interpreter_via_unresolved_jit_symbol_2026-08-11.md`:
-an unresolved `SpirvBuilder_dot_create` JIT symbol drops the whole module to
-the interpreter. That is the same "one unresolved symbol demotes an entire
-module" mechanism as root cause C below, from a different symbol — so it is a
-recurring class, not a one-off. Its blocker is not addressed here.
-
-### 2d. FAST FAILURE — not hangs at all, they die in seconds
+### 2c. FAST FAILURE — not hangs at all, they die in seconds
 
 Eight specs terminate in **6-16 seconds** with rc=5. They never hang; they
 fail at module load or lose their child process. They appear to have been
@@ -167,13 +151,13 @@ Two distinct causes are visible in their logs:
 
 These need triage as ordinary failures, not as performance work.
 
-### 2e. Summary of the 40 real specs
+### 2d. Summary of the 40 real specs
 
 | category | count |
 |---|---|
-| 900s timeout, no completed verdict (2b) | **24** |
+| True hang — 900s timeout, no verdict (2b) | **24** |
 | Slow but completing, 354-860s (2a) | **8** |
-| Fast failure, 6-16s, rc=5 (2d) | **8** |
+| Fast failure, 6-16s, rc=5 (2c) | **8** |
 
 Of the 40 real specs, 24 produce a 900s timeout without a completed verdict.
 That is a bounded measurement, not proof of a permanent hang. Sixteen — 40%

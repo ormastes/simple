@@ -1,0 +1,294 @@
+#!/bin/sh
+# check-nvme-spec-coverage.shs
+#
+# Fences the NVMe mandatory-feature coverage ledger produced by
+# src/app/nvme_spec_import against the tree it describes.
+#
+# The failure this guard exists to catch is a ledger that has drifted from
+# reality in either direction:
+#
+#   * a feature that claims a generated scenario which is not there;
+#   * a COVERED obligation cell whose bound evidence program is missing, or
+#     which names a verdict token that program does not contain (a binding that
+#     can never fire is a silent green);
+#   * a PENDING cell with no blocker text, which is exactly the vacuous
+#     "pending" this whole pipeline is built to make impossible;
+#   * a BLOCKER THAT HAS ROTTED: the ledger still says the firmware has no
+#     controller register file, but the firmware has since grown one. A stale
+#     blocker is how an admitted gap quietly becomes a false claim.
+#
+# What this guard is NOT: it does not run the scenarios and it does not prove
+# any NVMe behaviour. It checks that the ledger, the generated scenarios, and
+# the firmware tree agree about what is and is not tested. Behaviour evidence
+# comes from `bin/simple test` on the generated specs.
+#
+# Verdict is the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> obligation cell(s) checked, ...     exit 0
+#   FAIL  — ...                                     exit 1
+#   ERROR — nothing was checked (<reason>)          exit 2
+# A run that checked 0 cells is ERROR, never PASS.
+#
+# Usage:
+#   sh scripts/check/check-nvme-spec-coverage.shs
+#   sh scripts/check/check-nvme-spec-coverage.shs --ledger P --gen-dir D --fw-dir F
+#   sh scripts/check/check-nvme-spec-coverage.shs --selftest
+
+set -u
+
+LEDGER="spec/nvme/coverage.sdn"
+GEN_DIR="test/03_system/app/nvme_firmware/generated"
+FW_DIR="examples/09_embedded/simpleos_nvme_fw/fw"
+SELFTEST_ONLY=0
+INTERNAL=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ledger)  LEDGER="$2";  shift 2 ;;
+        --gen-dir) GEN_DIR="$2"; shift 2 ;;
+        --fw-dir)  FW_DIR="$2";  shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --internal-scan) INTERNAL=1; shift ;;
+        *) printf 'ERROR — nothing was checked (unknown argument: %s)\n' "$1"; exit 2 ;;
+    esac
+done
+
+if [ "$INTERNAL" -eq 0 ]; then
+    ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+    cd "$ROOT" || { printf 'ERROR — nothing was checked (cannot cd to repo root)\n'; exit 2; }
+fi
+
+# ---------------------------------------------------------------------------
+# scan: the whole check, factored out so --selftest can run it over fixtures
+# ---------------------------------------------------------------------------
+scan() {
+    L="$1"; G="$2"; F="$3"
+
+    [ -f "$L" ] || { printf 'ERROR — nothing was checked (no ledger at %s)\n' "$L"; return 2; }
+
+    FEATURES=0; SCENARIOS=0; MISSING_SCENARIO=""
+    CELLS=0; COVERED=0; PENDING=0
+    UNMAPPED=0; UNMAPPED_NAMES=""
+    BAD=""
+
+    CUR=""; STATE=""; PROG=""; TOKEN=""; BLOCKER=""; SCEN=""
+
+    # A tiny state machine over the SDN. Every `- id:` opens a feature; every
+    # `- kind:` opens an obligation cell, whose fields follow it.
+    while IFS= read -r line; do
+        case "$line" in
+            "  - id: "*)
+                # Close the previous feature's LAST cell before CUR advances,
+                # otherwise a failure in that cell would be attributed to the
+                # next feature. Counts were always right; the name was not.
+                if [ -n "$STATE" ]; then
+                    close_cell || return 1
+                    STATE=""
+                fi
+                CUR=$(printf '%s' "$line" | sed 's/^  - id: "//; s/"$//')
+                FEATURES=$((FEATURES + 1))
+                SCEN=""
+                ;;
+            "    mapped_clauses: 0")
+                UNMAPPED=$((UNMAPPED + 1))
+                UNMAPPED_NAMES="$UNMAPPED_NAMES $CUR"
+                ;;
+            "    scenario: "*)
+                SCEN=$(printf '%s' "$line" | sed 's/^    scenario: "//; s/"$//')
+                BASE=$(basename "$SCEN")
+                if [ -f "$G/$BASE" ]; then
+                    SCENARIOS=$((SCENARIOS + 1))
+                else
+                    MISSING_SCENARIO="$MISSING_SCENARIO $CUR"
+                fi
+                ;;
+            "      - kind: "*)
+                # Close the previous cell before opening a new one.
+                if [ -n "$STATE" ]; then
+                    close_cell || return 1
+                fi
+                KIND=$(printf '%s' "$line" | sed 's/^      - kind: "//; s/"$//')
+                STATE=""; PROG=""; TOKEN=""; BLOCKER=""
+                CELLS=$((CELLS + 1))
+                ;;
+            '        state: "covered"') STATE="covered" ;;
+            '        state: "pending"') STATE="pending" ;;
+            "        program: "*) PROG=$(printf '%s' "$line" | sed 's/^        program: "//; s/"$//') ;;
+            "        token: "*)   TOKEN=$(printf '%s' "$line" | sed 's/^        token: "//; s/"$//') ;;
+            "        blocker: "*) BLOCKER=$(printf '%s' "$line" | sed 's/^        blocker: "//; s/"$//') ;;
+        esac
+    done < "$L"
+    [ -n "$STATE" ] && { close_cell || return 1; }
+
+    if [ "$CELLS" -eq 0 ]; then
+        printf 'ERROR — nothing was checked (ledger %s declared 0 obligation cells)\n' "$L"
+        return 2
+    fi
+
+    # ---- blocker rot: the ledger says there is no controller register file --
+    # Positive control first: a scan that finds nothing may have scanned
+    # nothing (.claude/rules/testing.md). `doorbell_base` MUST be present.
+    ROT=""
+    if grep -q "no controller register file" "$L" 2>/dev/null; then
+        if [ ! -d "$F" ]; then
+            printf 'ERROR — nothing was checked (firmware dir %s absent, blocker rot cannot be evaluated)\n' "$F"
+            return 2
+        fi
+        if ! grep -rq "doorbell_base" "$F" 2>/dev/null; then
+            printf 'ERROR — nothing was checked (positive control failed: doorbell_base not found under %s, so the blocker-rot scan is broken, not clean)\n' "$F"
+            return 2
+        fi
+        if grep -rlE '\b(CSTS|AQA|ASQ_LOW|CC_EN|CAP_MQES)\b' "$F"/*.spl >/dev/null 2>&1; then
+            ROT=$(grep -rlE '\b(CSTS|AQA|ASQ_LOW|CC_EN|CAP_MQES)\b' "$F"/*.spl 2>/dev/null | tr '\n' ' ')
+            BAD="$BAD; blocker has ROTTED: the ledger still claims no controller register file, but register symbols now appear in: $ROT — regenerate the ledger"
+        fi
+    fi
+
+    [ -n "$MISSING_SCENARIO" ] && BAD="$BAD; feature(s) with no generated scenario file:$MISSING_SCENARIO"
+
+    if [ -n "$BAD" ]; then
+        printf 'FAIL — %d obligation cell(s) checked across %d feature(s)%s\n' "$CELLS" "$FEATURES" "$BAD"
+        return 1
+    fi
+
+    printf 'PASS — %d obligation cell(s) checked across %d feature(s), %d scenario file(s) present, %d covered, %d pending-with-named-blocker, %d feature(s) with no mapped clause:%s\n' \
+        "$CELLS" "$FEATURES" "$SCENARIOS" "$COVERED" "$PENDING" "$UNMAPPED" "${UNMAPPED_NAMES:- none}"
+    return 0
+}
+
+# Validate the cell that has just been fully read.
+close_cell() {
+    if [ "$STATE" = "covered" ]; then
+        COVERED=$((COVERED + 1))
+        if [ -z "$PROG" ] || [ ! -f "$PROG" ]; then
+            BAD="$BAD; $CUR/$KIND is covered but its evidence program is missing: ${PROG:-<none>}"
+            return 0
+        fi
+        if [ -z "$TOKEN" ]; then
+            BAD="$BAD; $CUR/$KIND is covered but names no verdict token"
+            return 0
+        fi
+        if ! grep -Fq "$TOKEN" "$PROG" 2>/dev/null; then
+            BAD="$BAD; $CUR/$KIND binds a token its program never prints: [$TOKEN] not in $PROG"
+        fi
+    elif [ "$STATE" = "pending" ]; then
+        PENDING=$((PENDING + 1))
+        if [ -z "$BLOCKER" ]; then
+            BAD="$BAD; $CUR/$KIND is pending with NO blocker text — a vacuous pending"
+        fi
+    else
+        BAD="$BAD; $CUR/$KIND declares neither covered nor pending"
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# selftest — runs first, unconditionally, and is fatal.
+# Must-PASS and must-FAIL fixtures both, so a green cannot be vacuous.
+# ---------------------------------------------------------------------------
+selftest() {
+    W=$(mktemp -d) || { printf 'ERROR — nothing was checked (mktemp failed)\n'; return 2; }
+    mkdir -p "$W/gen" "$W/fw"
+    printf 'val x = 1\n' > "$W/fw/prog.spl"
+    printf 'print "TOKEN OK"\ndoorbell_base\n' >> "$W/fw/prog.spl"
+    printf '# spec\n' > "$W/gen/nvme_gen_demo_spec.spl"
+
+    good="$W/good.sdn"
+    cat > "$good" <<SDN
+features:
+  - id: "demo"
+    mapped_clauses: 3
+    scenario: "test/03_system/app/nvme_firmware/generated/nvme_gen_demo_spec.spl"
+    obligations:
+      - kind: "positive"
+        state: "covered"
+        program: "$W/fw/prog.spl"
+        token: "TOKEN OK"
+      - kind: "negative"
+        state: "pending"
+        blocker: "no in-tree program drives this yet"
+SDN
+
+    out=$(scan "$good" "$W/gen" "$W/fw"); rc=$?
+    case "$out" in
+        PASS*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 1 should PASS, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    # 2. vacuous pending: blocker text removed -> must FAIL
+    sed 's/        blocker: .*/        blocker: ""/' "$good" > "$W/vacuous.sdn"
+    out=$(scan "$W/vacuous.sdn" "$W/gen" "$W/fw"); rc=$?
+    case "$out" in
+        FAIL*vacuous*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 2 should FAIL on a vacuous pending, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    # 3. a covered cell binding a token its program never prints -> must FAIL
+    sed 's/        token: "TOKEN OK"/        token: "TOKEN NEVER PRINTED"/' "$good" > "$W/badtoken.sdn"
+    out=$(scan "$W/badtoken.sdn" "$W/gen" "$W/fw"); rc=$?
+    case "$out" in
+        FAIL*never\ prints*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 3 should FAIL on an unfireable binding, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    # 4. missing generated scenario file -> must FAIL
+    out=$(scan "$good" "$W/empty_gen" "$W/fw"); rc=$?
+    case "$out" in
+        FAIL*no\ generated\ scenario*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 4 should FAIL on a missing scenario, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    # 5. a ledger with no obligation cells -> must ERROR, never PASS
+    printf 'features:\n' > "$W/empty.sdn"
+    out=$(scan "$W/empty.sdn" "$W/gen" "$W/fw"); rc=$?
+    if [ "$rc" -ne 2 ]; then
+        printf 'ERROR — nothing was checked (selftest fixture 5: an empty ledger must ERROR, got rc=%d: %s)\n' "$rc" "$out"
+        rm -rf "$W"; return 2
+    fi
+
+    # 6. blocker rot: ledger claims no register file while the fw tree has one
+    sed 's/        blocker: .*/        blocker: "no controller register file in fw"/' "$good" > "$W/rot.sdn"
+    printf 'val CSTS: i64 = 0\n' > "$W/fw/regs.spl"
+    out=$(scan "$W/rot.sdn" "$W/gen" "$W/fw"); rc=$?
+    rm -f "$W/fw/regs.spl"
+    case "$out" in
+        FAIL*ROTTED*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 6 should FAIL on a rotted blocker, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    # 7. attribution across a feature boundary: a bad LAST cell of the FIRST
+    #    feature must be named against that feature, not against the next one.
+    cat > "$W/two.sdn" <<SDN
+features:
+  - id: "alpha"
+    mapped_clauses: 1
+    scenario: "x/nvme_gen_demo_spec.spl"
+    obligations:
+      - kind: "positive"
+        state: "pending"
+        blocker: ""
+  - id: "beta"
+    mapped_clauses: 1
+    scenario: "x/nvme_gen_demo_spec.spl"
+    obligations:
+      - kind: "positive"
+        state: "pending"
+        blocker: "a real blocker"
+SDN
+    out=$(scan "$W/two.sdn" "$W/gen" "$W/fw"); rc=$?
+    case "$out" in
+        FAIL*alpha/positive*vacuous*) : ;;
+        *) printf 'ERROR — nothing was checked (selftest fixture 7: a vacuous pending in the first feature must be named against alpha, got rc=%d: %s)\n' "$rc" "$out"; rm -rf "$W"; return 2 ;;
+    esac
+
+    rm -rf "$W"
+    return 0
+}
+
+selftest || exit 2
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    printf 'PASS — 7 selftest fixture(s) checked, all classified as expected\n'
+    exit 0
+fi
+
+scan "$LEDGER" "$GEN_DIR" "$FW_DIR"
+exit $?

@@ -10,6 +10,17 @@ code examples directly in docstrings. It verifies that documentation examples
 remain accurate as code evolves, providing a way to keep examples and code
 synchronized without manual effort.
 
+### Release-wide discovery
+
+- `simple test test --whole` shall execute both maintained documentation lanes.
+- Its positional `test` path shall scope spec discovery only; it shall not
+  replace configured Markdown sources or production source-comment roots.
+- Markdown provenance shall come from `config/sdoctest.sdn`.
+- Comment-doctest provenance shall come from `src/lib`, `src/compiler`, and
+  `src/app`; focused non-whole commands shall retain explicit-path scoping.
+- `--all` shall not silently acquire the repository-wide documentation scope
+  reserved for `--whole`.
+
 
 ## Usage
 
@@ -111,5 +122,4 @@ Verifies helper functions and setup blocks for doctests that establish
 ### When multiple examples
 
 - executes related examples
-
 

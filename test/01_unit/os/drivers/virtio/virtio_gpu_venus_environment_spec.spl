@@ -1,0 +1,161 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_venus_environment.spl 80%
+# @tag: unit, simpleos, virtio-gpu, venus, environment-discovery
+
+"""Typed, device-free discovery contract for a fail-closed Venus environment."""
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_venus_protocol.*
+use os.drivers.virtio.virtio_gpu_venus_environment.*
+
+fn venus_row() -> VenusCapsetInfo:
+    VenusCapsetInfo(id: VIRTIO_GPU_CAPSET_VENUS, max_version: 1, max_size: 4096)
+
+fn host_visible_row() -> VenusPciShmRegion:
+    VenusPciShmRegion(shm_id: VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
+        base: 0x10000000u64, size: 0x200000u64)
+
+fn query_fix_row(enabled: bool) -> VenusRendererProperty:
+    VenusRendererProperty(property_id: VENUS_RENDERER_PROPERTY_CAPSET_QUERY_FIX,
+        enabled: enabled)
+
+fn observation(host_mask: u64, negotiated_mask: u64, num_capsets: i64,
+        capsets: [VenusCapsetInfo], regions: [VenusPciShmRegion],
+        properties: [VenusRendererProperty]) -> VenusEnvironmentObservation:
+    VenusEnvironmentObservation(host_feature_mask: host_mask,
+        negotiated_feature_mask: negotiated_mask, num_capsets: num_capsets,
+        capsets: capsets, pci_shm_regions: regions,
+        renderer_properties: properties)
+
+fn ready_observation() -> VenusEnvironmentObservation:
+    observation(0x79u64, 0x39u64, 1, [venus_row()],
+        [host_visible_row()], [query_fix_row(true)])
+
+describe "VirtIO-GPU Venus typed environment discovery":
+    it "fails closed when host or negotiated feature provenance is invalid":
+        # @covers VN_ENV_HOST_FEATURES:false
+        # @covers VN_ENV_NEGOTIATED_FEATURES:false
+        # @covers VN_ENV_NEGOTIATED_SUBSET:false
+        step("Reject a host mask missing a required feature")
+        val host_missing = observation(0x18u64, 0x19u64, 1, [venus_row()],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(host_missing).reason).to_equal(
+            "blocked:host-features-missing")
+
+        step("Reject a negotiated mask missing a required feature")
+        val negotiated_missing = observation(0x19u64, 0x11u64, 1,
+            [venus_row()], [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(negotiated_missing).reason).to_equal(
+            "blocked:negotiated-features-missing")
+
+        step("Reject a negotiated extra feature that the host did not offer")
+        val not_offered = observation(0x19u64, 0x39u64, 1, [venus_row()],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(not_offered).reason).to_equal(
+            "blocked:negotiated-features-not-offered")
+
+    it "requires a positive capset count matching the typed rows":
+        # @covers VN_ENV_HOST_FEATURES:true
+        # @covers VN_ENV_NEGOTIATED_FEATURES:true
+        # @covers VN_ENV_NEGOTIATED_SUBSET:true
+        # @covers VN_ENV_CAPSET_COUNT:false
+        step("Reject an empty advertised capset table")
+        val empty = observation(0x19u64, 0x19u64, 0, [],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(empty).reason).to_equal(
+            "blocked:num-capsets-invalid")
+
+        step("Reject a capset count that disagrees with the returned rows")
+        val mismatch = observation(0x19u64, 0x19u64, 2, [venus_row()],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(mismatch).reason).to_equal(
+            "blocked:num-capsets-invalid")
+
+    it "finds exactly a valid Venus capset row and rejects missing or malformed rows":
+        # @covers VN_ENV_CAPSET_COUNT:true
+        # @covers VN_ENV_CAPSET_ROW:false
+        # @covers VN_ENV_CAPSET_VALID:false
+        step("Reject a table containing only a different capset")
+        val missing = observation(0x19u64, 0x19u64, 1,
+            [VenusCapsetInfo(id: 1, max_version: 1, max_size: 4096)],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(missing).reason).to_equal(
+            "blocked:venus-capset-row-missing")
+
+        step("Reject a selected Venus row with no supported version")
+        val bad_version = observation(0x19u64, 0x19u64, 1,
+            [VenusCapsetInfo(id: VIRTIO_GPU_CAPSET_VENUS,
+                max_version: 0, max_size: 4096)],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(bad_version).reason).to_equal(
+            "blocked:venus-capset-row-invalid")
+
+        step("Reject a selected Venus row with no bounded payload size")
+        val bad_size = observation(0x19u64, 0x19u64, 1,
+            [VenusCapsetInfo(id: VIRTIO_GPU_CAPSET_VENUS,
+                max_version: 1, max_size: 0)],
+            [host_visible_row()], [query_fix_row(true)])
+        expect(venus_discover_environment(bad_size).reason).to_equal(
+            "blocked:venus-capset-row-invalid")
+
+    it "requires a valid PCI host-visible shared-memory row":
+        # @covers VN_ENV_CAPSET_ROW:true
+        # @covers VN_ENV_CAPSET_VALID:true
+        # @covers VN_ENV_SHM_ROW:false
+        # @covers VN_ENV_SHM_VALID:false
+        step("Reject a shared-memory table without the host-visible region id")
+        val missing = observation(0x19u64, 0x19u64, 1, [venus_row()],
+            [VenusPciShmRegion(shm_id: 2, base: 0x10000000u64,
+                size: 0x200000u64)], [query_fix_row(true)])
+        expect(venus_discover_environment(missing).reason).to_equal(
+            "blocked:host-visible-shm-row-missing")
+
+        step("Reject a selected host-visible region with a zero base")
+        val zero_base = observation(0x19u64, 0x19u64, 1, [venus_row()],
+            [VenusPciShmRegion(shm_id: VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
+                base: 0u64, size: 0x200000u64)], [query_fix_row(true)])
+        expect(venus_discover_environment(zero_base).reason).to_equal(
+            "blocked:host-visible-shm-row-invalid")
+
+        step("Reject a selected host-visible region with a zero size")
+        val zero_size = observation(0x19u64, 0x19u64, 1, [venus_row()],
+            [VenusPciShmRegion(shm_id: VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
+                base: 0x10000000u64, size: 0u64)], [query_fix_row(true)])
+        expect(venus_discover_environment(zero_size).reason).to_equal(
+            "blocked:host-visible-shm-row-invalid")
+
+    it "requires the renderer capset-query-fix property to be present and enabled":
+        # @covers VN_ENV_SHM_ROW:true
+        # @covers VN_ENV_SHM_VALID:true
+        # @covers VN_ENV_QUERY_FIX_ROW:false
+        # @covers VN_ENV_QUERY_FIX_ENABLED:false
+        step("Reject renderer properties containing only a different property id")
+        val missing = observation(0x19u64, 0x19u64, 1, [venus_row()],
+            [host_visible_row()],
+            [VenusRendererProperty(property_id: 2, enabled: true)])
+        expect(venus_discover_environment(missing).reason).to_equal(
+            "blocked:capset-query-fix-property-missing")
+
+        step("Reject an explicitly disabled capset-query-fix property")
+        val disabled = observation(0x19u64, 0x19u64, 1, [venus_row()],
+            [host_visible_row()], [query_fix_row(false)])
+        expect(venus_discover_environment(disabled).reason).to_equal(
+            "blocked:capset-query-fix-disabled")
+
+    it "normalizes a complete observation without dropping evidence provenance":
+        # @covers VN_ENV_QUERY_FIX_ROW:true
+        # @covers VN_ENV_QUERY_FIX_ENABLED:true
+        step("Discover Venus with required features plus negotiated extras")
+        val result = venus_discover_environment(ready_observation())
+        expect(result.admitted).to_be(true)
+        expect(result.reason).to_equal("ready:venus-environment")
+        expect(result.features.virgl).to_be(true)
+        expect(result.features.resource_blob).to_be(true)
+        expect(result.features.context_init).to_be(true)
+        expect(result.features.capset_query_fix).to_be(true)
+        expect(result.features.host_visible).to_be(true)
+        expect(result.capset.id).to_equal(VIRTIO_GPU_CAPSET_VENUS)
+        expect(result.capset.max_version).to_equal(1)
+        expect(result.capset.max_size).to_equal(4096)
+        expect(result.host_visible_base).to_equal(0x10000000u64)
+        expect(result.host_visible_size).to_equal(0x200000u64)

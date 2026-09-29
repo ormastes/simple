@@ -1,0 +1,112 @@
+# Purpose: the alias oracle is the gate on making AutoVectorize an Active pass.
+# `out[i] = a[i] + b[i]` where `out` and `a` are one buffer at two offsets is a
+# MISCOMPILATION if vectorized, not a missed optimization, so every verdict path
+# and the runtime predicate are pinned here.
+# @req REQ-SIMD-002
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use compiler.mir_opt.mir_opt.auto_vectorize_alias.{
+    AliasVerdict, AliasBase, alias_base, alias_pair_decision, decide_recipe_aliasing,
+    alias_decision_permits_vectorization, alias_decision_requires_guard,
+    alias_guard_safe_at_runtime
+}
+
+# origin -1 means "allocation unproven", which is what every MIR local reports
+# today. A non-negative origin is a proven allocation identity.
+fn unproven(local_id: i64) -> AliasBase:
+    alias_base(local_id, -1, true)
+
+fn from_alloc(local_id: i64, origin: i64) -> AliasBase:
+    alias_base(local_id, origin, false)
+
+describe "alias oracle — pairwise verdicts":
+    it "calls the same local an exact alias, which is safe":
+        step("every access is at the induction index, so both sides touch the same element")
+        assert_equal(alias_pair_decision(unproven(7), unproven(7)) == AliasVerdict.ExactAliasOnly, true)
+
+    it "proves disjointness only from two DIFFERENT known allocations":
+        step("distinct allocations cannot overlap however they are indexed")
+        assert_equal(alias_pair_decision(from_alloc(1, 10), from_alloc(2, 11)) == AliasVerdict.ProvenDisjoint, true)
+
+    it "refuses two different locals that share one proven allocation":
+        step("this is the hazard: one buffer reached at two unknown offsets")
+        assert_equal(alias_pair_decision(from_alloc(1, 10), from_alloc(2, 10)) == AliasVerdict.Unsafe, true)
+
+    it "asks for a runtime guard when either origin is unproven":
+        step("undecidable is NOT unsafe — refusing it outright would reject almost every real loop")
+        assert_equal(alias_pair_decision(unproven(1), unproven(2)) == AliasVerdict.NeedsRuntimeGuard, true)
+        assert_equal(alias_pair_decision(from_alloc(1, 10), unproven(2)) == AliasVerdict.NeedsRuntimeGuard, true)
+        assert_equal(alias_pair_decision(unproven(1), from_alloc(2, 10)) == AliasVerdict.NeedsRuntimeGuard, true)
+
+describe "alias oracle — folding a whole recipe":
+    it "treats a loop with no inputs as trivially disjoint":
+        step("nothing to alias the output against")
+        val d = decide_recipe_aliasing(unproven(1), [])
+        assert_equal(d.verdict == AliasVerdict.ProvenDisjoint, true)
+        assert_equal(alias_decision_permits_vectorization(d), true)
+        assert_equal(alias_decision_requires_guard(d), false)
+
+    it "lets the WEAKEST pair decide, not the strongest":
+        step("one undecidable pair among proven-disjoint ones must still force the guard")
+        val d = decide_recipe_aliasing(from_alloc(1, 10), [from_alloc(2, 11), unproven(3)])
+        assert_equal(d.verdict == AliasVerdict.NeedsRuntimeGuard, true)
+
+    it "refuses the whole recipe when any single pair is unsafe":
+        step("one aliasing input poisons the loop even if the others are clean")
+        val d = decide_recipe_aliasing(from_alloc(1, 10), [from_alloc(2, 11), from_alloc(3, 10)])
+        assert_equal(d.verdict == AliasVerdict.Unsafe, true)
+        assert_equal(alias_decision_permits_vectorization(d), false)
+
+    it "reports all-disjoint and all-exact recipes as directly vectorizable":
+        step("neither needs a runtime check")
+        val disjoint = decide_recipe_aliasing(from_alloc(1, 10), [from_alloc(2, 11), from_alloc(3, 12)])
+        assert_equal(disjoint.verdict == AliasVerdict.ProvenDisjoint, true)
+        assert_equal(alias_decision_requires_guard(disjoint), false)
+        val exact = decide_recipe_aliasing(unproven(5), [unproven(5), unproven(5)])
+        assert_equal(exact.verdict == AliasVerdict.ExactAliasOnly, true)
+        assert_equal(alias_decision_requires_guard(exact), false)
+
+    it "carries a reason, so a declined loop is not silently indistinguishable from an unmatched one":
+        step("@must(simd) failures must not send the reader hunting a pattern bug")
+        assert_equal(decide_recipe_aliasing(unproven(1), [unproven(2)]).reason.len() > 0, true)
+        assert_equal(decide_recipe_aliasing(from_alloc(1, 10), [from_alloc(2, 10)]).reason.len() > 0, true)
+
+describe "alias oracle — the runtime predicate the guard computes":
+    it "admits an exact alias at zero offset":
+        step("same base, same element each iteration — vector order equals scalar order")
+        assert_equal(alias_guard_safe_at_runtime(1000, 1000, 64), true)
+
+    it "admits fully disjoint spans in both directions":
+        step("no overlap means no ordering constraint at all")
+        assert_equal(alias_guard_safe_at_runtime(1000, 2000, 64), true)
+        assert_equal(alias_guard_safe_at_runtime(2000, 1000, 64), true)
+
+    it "admits spans that touch exactly end-to-start":
+        step("adjacency is not overlap; the boundary must be inclusive-safe")
+        assert_equal(alias_guard_safe_at_runtime(1064, 1000, 64), true)
+        assert_equal(alias_guard_safe_at_runtime(1000, 1064, 64), true)
+
+    it "REFUSES a partial overlap at a non-zero offset, in both directions":
+        step("this is the exact arrangement where vectorizing changes results")
+        assert_equal(alias_guard_safe_at_runtime(1001, 1000, 64), false)
+        assert_equal(alias_guard_safe_at_runtime(1000, 1001, 64), false)
+        assert_equal(alias_guard_safe_at_runtime(1063, 1000, 64), false)
+        assert_equal(alias_guard_safe_at_runtime(1000, 1063, 64), false)
+
+    it "sweeps every offset and refuses exactly the open window (0, span)":
+        step("the predicate must be exact, not merely conservative-looking")
+        val span: i64 = 32
+        var wrong = 0
+        var d: i64 = -64
+        while d <= 64:
+            val expect_safe = d == 0 or d >= span or d <= (0 - span)
+            if alias_guard_safe_at_runtime(1000 + d, 1000, span) != expect_safe:
+                wrong = wrong + 1
+            d = d + 1
+        assert_equal(wrong, 0)
+
+    it "treats a zero or negative span as vacuously safe":
+        step("an empty vector body imposes no ordering constraint")
+        assert_equal(alias_guard_safe_at_runtime(1001, 1000, 0), true)
+        assert_equal(alias_guard_safe_at_runtime(1001, 1000, -8), true)

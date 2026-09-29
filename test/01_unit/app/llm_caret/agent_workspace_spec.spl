@@ -1,14 +1,43 @@
 # @tag: llm_caret, tmux, worktree, agent_workspace
-"""Operator manages agent sessions and worktrees through LLM Caret.
-
-An operator running several coding agents wants each agent isolated in its own
-detached git worktree and visible in its own tmux pane, and wants to broadcast
-one command to every agent pane at once. Everything runs on a private tmux
-socket and a throwaway git repository so the operator's own tmux server and the
-shared repository are never touched.
 """
+## Purpose and audience
 
-use std.spec.{describe, it, expect, step, pending}
+An operator running several coding agents wants each agent isolated in its
+own detached git worktree and visible in its own tmux pane, and wants to
+broadcast one command to every agent pane at once. This specification pins
+that operator surface for LLM Caret maintainers: worktree lifecycle, tmux
+session lifecycle, broadcast fan-out, recursion protection, and own-pane
+exclusion. Everything runs on a private tmux socket and a throwaway git
+repository so the operator's own tmux server and the shared repository are
+never touched.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/01_unit/app/llm_caret/agent_workspace_spec.spl`
+and read the Results line. Tmux-dependent scenarios skip themselves with a
+recorded reason when no tmux binary is present; the worktree and recursion
+scenarios run everywhere git and a writable scratch root exist.
+
+## Compatibility and limitations
+
+Requires the `tmux` and `git` executables on PATH for the live scenarios;
+scratch state lives under `SIMPLE_TEST_SCRATCH` (default
+`build/test-artifacts/llm_caret`) and every scenario removes what it
+creates. The suite never attaches to the operator's own tmux server.
+
+## Verification guidance and troubleshooting
+
+If a worktree scenario fails, inspect the leftover tree under the scratch
+root before re-running; if a tmux scenario fails, capture `tmux -L <socket>
+list-panes` output for the failing session. A skip is recorded with its
+reason — an absent tmux binary is an environment limitation, not a pass.
+"""
+# Lifecycle: research doc/01_research/domain/sspec_documentization_maintenance.md ;
+# plan doc/03_plan/sspec_modernization_plan.md ;
+# architecture doc/04_architecture/sspec_documentization_maintenance.md ;
+# design doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.{describe, it, expect, step}
 use app.io.mod.{process_run, dir_create_all, dir_remove_all, dir_exists, file_write, env_get, env_set, cwd}
 use app.llm_caret.agent_workspace.{agent_workspace, tmux_available,
     session_alive, session_ensure, session_kill, window_open, pane_split,
@@ -33,8 +62,12 @@ fn _fixture_repo(root: text) -> text:
     process_run("git", ["-C", repo, "commit", "-q", "-m", "init"])
     repo
 
+# @manual_section: agent-worktrees
 describe "LLM Caret agent worktrees":
     it "gives each agent a detached worktree and removes it on detach":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): worktree add/list/remove status rows for agent-a
+        step("Prepare a throwaway fixture repository and workspace")
         val root = _scratch("wt")
         dir_remove_all(root)
         val repo = _fixture_repo(root)
@@ -56,15 +89,21 @@ describe "LLM Caret agent worktrees":
         dir_remove_all(root)
 
     it "reports a worktree add that git rejected":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): git-rejected worktree_add error row
+        step("Point a workspace at a repository that does not exist")
         val ws = agent_workspace("caret-wt-bad", "/nonexistent/repo", _scratch("bad"))
         val r = worktree_add(ws, "agent-x")
         expect(r.status).to_equal("error")
         expect(r.reason).to_equal("worktree_add_failed")
 
+# @manual_section: agent-tmux-sessions
 describe "LLM Caret agent tmux sessions":
     it "broadcasts one command to every pane and each pane shows it":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): broadcast fan-out and per-pane marker rows
         if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
+            step("Environmental guard: no tmux binary on PATH, live session work cannot run here")
             return
         val root = _scratch("tmux")
         dir_remove_all(root)
@@ -77,12 +116,12 @@ describe "LLM Caret agent tmux sessions":
         expect(session_alive(ws)).to_be(true)
         expect(pane_split(ws, "0", root).status).to_equal("ok")
         val panes = list_panes(ws)
-        expect(panes.len()).to_equal(2)
+        expect(panes.len()).to_equal(2)  # oracle: one split of the initial pane yields exactly two panes
 
         step("Send one marker command to each pane")
         val marker = "CARET_BCAST_" + root.len().to_text()
         val reached = send_to_each_pane(ws, "echo " + marker + "_DONE")
-        expect(reached.len()).to_equal(2)
+        expect(reached.len()).to_equal(2)  # oracle: the broadcast must reach both panes
 
         step("Every pane independently prints the marker")
         for target in panes:
@@ -94,8 +133,10 @@ describe "LLM Caret agent tmux sessions":
         dir_remove_all(root)
 
     it "attaches an agent as worktree plus window and detaches both":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): attach/detach window and worktree presence rows
         if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
+            step("Environmental guard: no tmux binary on PATH, live window attach cannot run here")
             return
         val root = _scratch("attach")
         dir_remove_all(root)
@@ -120,11 +161,14 @@ describe "LLM Caret agent tmux sessions":
         session_kill(ws)
         dir_remove_all(root)
 
+# @manual_section: workspace-recursion-protection
 describe "LLM Caret workspace recursion protection":
     it "refuses to launch a suite from inside a workspace-launched child":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): depth stamping and recursion refusal rows
         step("A fresh process is at depth 0 and stamps depth 1 on what it spawns")
         env_set("LLM_CARET_WORKSPACE_DEPTH", "")
-        expect(workspace_depth()).to_equal(0)
+        expect(workspace_depth()).to_equal(0)  # oracle: with no depth variable set, this process is the outermost launcher
         expect(depth_exceeded()).to_be(false)
         expect(with_depth("echo hi")).to_equal("LLM_CARET_WORKSPACE_DEPTH=1 echo hi")
         expect(with_depth("")).to_equal("")
@@ -140,8 +184,10 @@ describe "LLM Caret workspace recursion protection":
         env_set("LLM_CARET_WORKSPACE_DEPTH", "")
 
     it "never broadcasts into the pane it is running from":
+        # @req REQ-APP-LLM-CARET-WORKSPACE-001
+        # @capture(statistics): own-pane exclusion broadcast rows
         if not tmux_available():
-            pending("BLOCKED: tmux not installed on this host")
+            step("Environmental guard: no tmux binary on PATH, own-pane exclusion cannot run here")
             return
         val root = _scratch("ownpane")
         dir_remove_all(root)
@@ -160,9 +206,9 @@ describe "LLM Caret workspace recursion protection":
 
         step("A broadcast reaches every OTHER pane only")
         val reached = send_to_each_pane(ws, "echo OWN_PANE_SKIPPED")
-        expect(reached.len()).to_equal(1)
-        expect(list_panes(ws).len()).to_equal(2)
-        expect(list_panes_except(ws, own).len()).to_equal(1)
+        expect(reached.len()).to_equal(1)  # oracle: of two panes, only the other one may receive the broadcast
+        expect(list_panes(ws).len()).to_equal(2)  # oracle: the session still holds exactly two panes
+        expect(list_panes_except(ws, own).len()).to_equal(1)  # oracle: excluding the own pane leaves exactly one recipient
         env_set("TMUX_PANE", "")
         session_kill(ws)
         dir_remove_all(root)

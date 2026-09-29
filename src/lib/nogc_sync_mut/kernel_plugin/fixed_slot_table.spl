@@ -1,0 +1,78 @@
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+
+pub struct KpfSlotHandle:
+    index: u32
+    epoch: u64
+
+pub struct KpfSlotResult:
+    status: KpfSyncStatus
+    handle: KpfSlotHandle
+
+pub struct KpfSlotValueResult:
+    status: KpfSyncStatus
+    value: u64
+
+class _KpfFixedSlot:
+    var occupied: bool
+    var epoch: u64
+    var value: u64
+
+class KpfFixedSlotTable:
+    var slots: [_KpfFixedSlot]
+    capacity: u32
+    var occupied_count: u32
+    var search_cursor: u32
+
+    static fn create(capacity: u32) -> KpfFixedSlotTable:
+        var slots: [_KpfFixedSlot] = []
+        var index = 0u32
+        while index < capacity:
+            slots.push(_KpfFixedSlot(occupied: false, epoch: 1, value: 0))
+            index = index + 1
+        KpfFixedSlotTable(slots: slots, capacity: capacity, occupied_count: 0, search_cursor: 0)
+
+    me reserve(value: u64) -> KpfSlotResult:
+        if self.occupied_count >= self.capacity:
+            return KpfSlotResult(status: KpfSyncStatus.CapacityExceeded, handle: KpfSlotHandle(index: 0, epoch: 0))
+        var scanned = 0u32
+        while scanned < self.capacity:
+            val index = (self.search_cursor + scanned) % self.capacity
+            if not self.slots[index].occupied:
+                self.slots[index].occupied = true
+                self.slots[index].value = value
+                self.occupied_count = self.occupied_count + 1
+                self.search_cursor = (index + 1) % self.capacity
+                return KpfSlotResult(status: KpfSyncStatus.Ok, handle: KpfSlotHandle(index: index, epoch: self.slots[index].epoch))
+            scanned = scanned + 1
+        KpfSlotResult(status: KpfSyncStatus.CapacityExceeded, handle: KpfSlotHandle(index: 0, epoch: 0))
+
+    fn read(handle: KpfSlotHandle) -> KpfSlotValueResult:
+        if handle.index >= self.capacity:
+            return KpfSlotValueResult(status: KpfSyncStatus.StaleHandle, value: 0)
+        val slot = self.slots[handle.index]
+        if handle.epoch != slot.epoch:
+            return KpfSlotValueResult(status: KpfSyncStatus.StaleHandle, value: 0)
+        if not slot.occupied:
+            return KpfSlotValueResult(status: KpfSyncStatus.SlotVacant, value: 0)
+        KpfSlotValueResult(status: KpfSyncStatus.Ok, value: slot.value)
+
+    me write(handle: KpfSlotHandle, value: u64) -> KpfSyncStatus:
+        val current = self.read(handle)
+        if not current.status.accepted(): return current.status
+        self.slots[handle.index].value = value
+        KpfSyncStatus.Ok
+
+    me release(handle: KpfSlotHandle) -> KpfSyncStatus:
+        val current = self.read(handle)
+        if not current.status.accepted(): return current.status
+        self.slots[handle.index].occupied = false
+        self.slots[handle.index].value = 0
+        self.slots[handle.index].epoch = self.slots[handle.index].epoch + 1
+        if self.slots[handle.index].epoch == 0: self.slots[handle.index].epoch = 1
+        self.occupied_count = self.occupied_count - 1
+        self.search_cursor = handle.index
+        KpfSyncStatus.Ok
+
+    fn size() -> u32: self.occupied_count
+
+    fn storage_capacity() -> u32: self.capacity

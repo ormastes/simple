@@ -1,6 +1,8 @@
 #!/bin/sh
 # Fail closed before QEMU sees a malformed or incompletely linked x86-64 kernel.
 set -eu
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+STUB_SOURCE="$ROOT_DIR/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
 
 fail() {
     echo "[x86-kernel-elf] ERROR: $*" >&2
@@ -75,26 +77,28 @@ END { exit found ? 0 : 1 }
 
 validate_symbols() {
     symbols=$1
-    # A defined-weak-symbol final binding is the expected shape of a freestanding
-    # kernel build's boot-side fallback shims (see
-    # examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c "Wave
-    # 10B: spl_handle_* weak shims"): entry-closure builds that don't pull in
-    # the full src/os/kernel/abi/syscall_shim*.spl family legitimately keep
-    # those __attribute__((weak)) C fallbacks (and their Simple-side qualified
-    # aliases created by the bare<->qualified defsym bridge in
-    # native_project/linker.rs) as the only definition. That is the SAME
-    # deliberately-incomplete-build contract SIMPLE_ALLOW_FREESTANDING_STUBS=1
-    # already signals for FABRICATED-NEW symbols, so honor it here too instead
-    # of unconditionally rejecting every freestanding kernel that hasn't linked
-    # in every syscall handler yet. The strong-undefined-symbol check below is
-    # NOT relaxed by this flag — a truly missing symbol is still a hard link
-    # defect, not a documented incompleteness.
-    if [ "${SIMPLE_ALLOW_FREESTANDING_STUBS:-0}" != "1" ]; then
-        printf '%s\n' "$symbols" | awk '
-$5 == "WEAK" && $7 != "UND" { bad = 1 }
+    # The opt-in permits only the syscall fallback functions in
+    # baremetal_stubs.c and their qualified linker aliases. It must not hide
+    # unrelated weak definitions, including nil-returning generated stubs.
+    [ -f "$STUB_SOURCE" ] || fail "syscall fallback source is missing: $STUB_SOURCE"
+    printf '%s\n' "$symbols" | awk -v allow="${SIMPLE_ALLOW_FREESTANDING_STUBS:-0}" -v source="$STUB_SOURCE" '
+FILENAME == source {
+    if ($0 ~ /^__attribute__\(\(weak\)\) int64_t spl_handle_[A-Za-z0-9_]+\(/) {
+        match($0, /spl_handle_[A-Za-z0-9_]+/)
+        fallback[substr($0, RSTART, RLENGTH)] = 1
+    }
+    next
+}
+$5 == "WEAK" && $7 != "UND" {
+    name = $8
+    qualified = name ~ /^(src__os__)?kernel__abi__syscall_shim[A-Za-z0-9_]*__spl_handle_[A-Za-z0-9_]+$/
+    if (name !~ /^spl_handle_[A-Za-z0-9_]+$/ && !qualified) bad = 1
+    sub(/^.*__/, "", name)
+    if (allow != "1" || $4 != "FUNC" ||
+        !fallback[name]) bad = 1
+}
 END { exit bad ? 1 : 0 }
-' || fail "kernel contains a defined weak symbol"
-    fi
+' "$STUB_SOURCE" - || fail "kernel contains an unapproved defined weak symbol"
     printf '%s\n' "$symbols" | awk '
 $5 == "GLOBAL" && $7 == "UND" { bad = 1 }
 END { exit bad ? 1 : 0 }
@@ -139,8 +143,16 @@ run_self_test() {
     if (SIMPLE_ALLOW_FREESTANDING_STUBS=0 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
         fail "self-test accepted a defined weak symbol"
     fi
-    if ! (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
-        fail "self-test rejected a defined weak symbol under SIMPLE_ALLOW_FREESTANDING_STUBS=1"
+    if (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 weak_fn') >/dev/null 2>&1; then
+        fail "self-test accepted an unrelated defined weak symbol under the opt-in"
+    fi
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 spl_handle_mmap
+     2: 0000000008000020 0 FUNC WEAK DEFAULT 1 src__os__kernel__abi__syscall_shim_memory__spl_handle_mmap'
+    if (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 spl_handle_fake__other') >/dev/null 2>&1; then
+        fail "self-test accepted a weak symbol outside the syscall fallback suffix"
+    fi
+    if (SIMPLE_ALLOW_FREESTANDING_STUBS=1 validate_symbols '     1: 000000000800001c 0 FUNC WEAK DEFAULT 1 unrelated__spl_handle_mmap') >/dev/null 2>&1; then
+        fail "self-test accepted a weak alias outside the syscall shim namespace"
     fi
     if (validate_symbols '     1: 0000000000000000 0 NOTYPE GLOBAL DEFAULT UND missing_fn') >/dev/null 2>&1; then
         fail "self-test accepted a strong undefined symbol"

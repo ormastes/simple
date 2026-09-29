@@ -266,6 +266,53 @@ impl TargetCpu {
         }
     }
 
+    /// Host-aware default CPU for a target that will actually be BUILT.
+    ///
+    /// `builtin_default_for_arch` returns `X86_64V3` (AVX2) and is a `const fn`,
+    /// so it cannot consult the host. Every native-build path seeded `self.cpu`
+    /// from it, which made the v4 widening in
+    /// `backend_core.rs:default_x86_64_cpu_name` DEAD CODE: `llvm_cpu_name`
+    /// answered `Some("x86-64-v3")` and the `unwrap_or(..)` arm never ran. So
+    /// LLVM's loop and SLP vectorizers -- both enabled -- were still capped at
+    /// 256 bits for every DB, HTTP and renderer binary.
+    ///
+    /// Widening requires the target to be the SAME EXECUTION DOMAIN as the
+    /// builder, which is stricter than the triple-prefix test it replaces:
+    ///
+    ///   * same arch AND same OS as the host. An x86_64-linux binary built on
+    ///     x86_64-windows is a cross build; the builder's CPUID says nothing
+    ///     about the machine that runs it.
+    ///   * never freestanding. A SimpleOS or bare-metal kernel does not set
+    ///     XCR0 (no `xsetbv` outside the userland probes), so a ZMM instruction
+    ///     there faults with #UD rather than running slowly.
+    ///   * AVX-512 F, VL and BW all present on the host.
+    ///
+    /// Anything short of that returns the builtin default, so this can only
+    /// widen, never narrow.
+    pub fn host_aware_default_for(target: Target) -> Self {
+        let builtin = Self::builtin_default_for_arch(target.arch);
+        if target.arch != TargetArch::X86_64 {
+            return builtin;
+        }
+        if matches!(target.os, TargetOS::SimpleOS | TargetOS::None | TargetOS::Any) {
+            return builtin;
+        }
+        let host = Target::host();
+        if target.arch != host.arch || target.os != host.os {
+            return builtin;
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512vl")
+                && std::is_x86_feature_detected!("avx512bw")
+            {
+                return Self::X86_64V4;
+            }
+        }
+        builtin
+    }
+
     pub const fn is_x86_64_level(&self) -> bool {
         matches!(
             self,
@@ -539,6 +586,8 @@ impl fmt::Display for WasmRuntime {
 pub struct Target {
     pub arch: TargetArch,
     pub os: TargetOS,
+    /// Explicit object/link ABI carried by a parsed target triple.
+    pub linker_flavor_hint: Option<LinkerFlavor>,
     /// WebAssembly runtime environment (only applicable for WASM targets)
     pub wasm_runtime: Option<WasmRuntime>,
 }
@@ -549,6 +598,7 @@ impl Target {
         Self {
             arch,
             os,
+            linker_flavor_hint: None,
             wasm_runtime: None,
         }
     }
@@ -558,6 +608,7 @@ impl Target {
         Self {
             arch,
             os: TargetOS::None,
+            linker_flavor_hint: None,
             wasm_runtime: Some(runtime),
         }
     }
@@ -567,6 +618,7 @@ impl Target {
         Self {
             arch: TargetArch::host(),
             os: TargetOS::host(),
+            linker_flavor_hint: None,
             wasm_runtime: None,
         }
     }
@@ -653,7 +705,24 @@ impl Target {
             }
         };
 
-        Ok(Self { arch, os, wasm_runtime })
+        let linker_flavor_hint = if os == TargetOS::Windows {
+            if os_joined.ends_with("-gnu") {
+                Some(LinkerFlavor::Gnu)
+            } else if os_joined.ends_with("-msvc") {
+                Some(LinkerFlavor::Msvc)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(Self {
+            arch,
+            os,
+            linker_flavor_hint,
+            wasm_runtime,
+        })
     }
 
     /// Get the triple string for Cranelift.
@@ -688,11 +757,17 @@ impl Target {
             (TargetArch::Arm, TargetOS::SimpleOS) => "armv7a-unknown-none-eabihf",
             // OS-aware targets
             (TargetArch::X86_64, TargetOS::Linux) => "x86_64-unknown-linux-gnu",
-            (TargetArch::X86_64, TargetOS::Windows) => "x86_64-pc-windows-msvc",
+            (TargetArch::X86_64, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "x86_64-pc-windows-gnu",
+                _ => "x86_64-pc-windows-msvc",
+            },
             (TargetArch::X86_64, TargetOS::MacOS) => "x86_64-apple-darwin",
             (TargetArch::X86_64, TargetOS::FreeBSD) => "x86_64-unknown-freebsd",
             (TargetArch::Aarch64, TargetOS::Linux) => "aarch64-unknown-linux-gnu",
-            (TargetArch::Aarch64, TargetOS::Windows) => "aarch64-pc-windows-msvc",
+            (TargetArch::Aarch64, TargetOS::Windows) => match self.linker_flavor_hint {
+                Some(LinkerFlavor::Gnu) => "aarch64-pc-windows-gnu",
+                _ => "aarch64-pc-windows-msvc",
+            },
             (TargetArch::Aarch64, TargetOS::MacOS) => "aarch64-apple-darwin",
             (TargetArch::Aarch64, TargetOS::FreeBSD) => "aarch64-unknown-freebsd",
             (TargetArch::Riscv64, TargetOS::Linux) => "riscv64gc-unknown-linux-gnu",
@@ -703,6 +778,52 @@ impl Target {
     /// Check if this is a baremetal target (no OS or SimpleOS which uses baremetal compilation).
     pub const fn is_baremetal(&self) -> bool {
         matches!(self.os, TargetOS::None | TargetOS::SimpleOS) && self.wasm_runtime.is_none()
+    }
+
+    /// True when the freestanding C runtime for this target lays `RuntimeArray`
+    /// out as a header plus a flexible array member — `{HeapHeader(8),
+    /// u32 len@8, u32 cap@12, RuntimeValue items@16}` — with every element
+    /// (including bytes) stored as one tagged `RuntimeValue` slot, instead of
+    /// the hosted layout `{u64 len@8, u64 cap@16, RuntimeValue *data@24}` with
+    /// elements in a separate allocation.
+    ///
+    /// This is a property of the per-arch freestanding C runtimes under
+    /// `examples/09_embedded/simple_os/arch/`: aarch64, arm32 and x86_32 use
+    /// the FAM layout (see their `baremetal_stubs.c` / `baremetal_runtime.h`);
+    /// riscv64 and x86_64 freestanding use the hosted layout, as does the
+    /// hosted Rust runtime (`runtime/src/value/collections.rs`). The seed
+    /// compiler's inline array fast paths must emit loads/stores for the
+    /// target's actual layout or `.len()` reads `len | cap<<32` and indexing
+    /// dereferences an element slot as a pointer
+    /// (doc/08_tracking/aarch64_in_guest_clang_compile_lane_status_2026-09-25.md,
+    /// Blocker 2).
+    pub const fn uses_fam_array_abi(&self) -> bool {
+        self.is_baremetal()
+            && matches!(
+                self.arch,
+                TargetArch::Aarch64 | TargetArch::Arm | TargetArch::X86
+            )
+    }
+
+    /// True when this target's freestanding C runtime implements
+    /// `rt_array_push` (and the typed `rt_typed_*_push` family) as
+    /// grow-by-`realloc` of the whole FAM block, RETURNING the possibly
+    /// relocated array header: `RuntimeValue rt_array_push(RuntimeValue arr,
+    /// RuntimeValue val)`. The canonical hosted ABI instead returns `bool`
+    /// and keeps the header in a stable allocation
+    /// (`runtime/src/value/collections.rs::rt_array_push_grow`).
+    ///
+    /// On a bump-allocator freestanding heap the realloc ALWAYS moves, so a
+    /// compiled push loop that discards the return keeps re-growing the stale
+    /// pre-grow block — a per-element leak that OOMs the heap
+    /// (doc/08_tracking/bug/array_push_stale_receiver_store_arm64_2026-09-25.md).
+    /// The compiler must therefore thread the post-grow return as the array
+    /// value at every push emission on these targets. Currently coincides
+    /// with the FAM-layout baremetal set (aarch64/arm32/x86_32
+    /// `baremetal_stubs.c`); kept as a separate predicate so a runtime
+    /// migration to stable headers flips only this bit.
+    pub const fn array_push_returns_header(&self) -> bool {
+        self.uses_fam_array_abi()
     }
 
     /// Check if this is a WASM target.
@@ -742,6 +863,9 @@ impl Target {
     /// Supports `SIMPLE_LINKER_FLAVOR` env var override (`gnu`/`mingw` or `msvc`)
     /// to force a specific toolchain without depending on auto-detection.
     pub fn linker_flavor(&self) -> LinkerFlavor {
+        if let Some(flavor) = self.linker_flavor_hint {
+            return flavor;
+        }
         // Allow explicit override via environment variable
         if let Ok(flavor) = std::env::var("SIMPLE_LINKER_FLAVOR") {
             match flavor.to_lowercase().as_str() {
@@ -781,7 +905,7 @@ impl Target {
 }
 
 /// Linker flavor determines which linker/link conventions to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkerFlavor {
     /// GNU-style linker (ld, lld) - Linux, macOS, FreeBSD
     Gnu,
@@ -1013,6 +1137,43 @@ mod tests {
     }
 
     #[test]
+    fn test_uses_fam_array_abi() {
+        // Freestanding C runtimes with the FAM RuntimeArray layout
+        // (`u32 len@8; u32 cap@12; RuntimeValue items@16`): aarch64, arm32, x86_32.
+        for os in [TargetOS::None, TargetOS::SimpleOS] {
+            assert!(Target::new(TargetArch::Aarch64, os).uses_fam_array_abi());
+            assert!(Target::new(TargetArch::Arm, os).uses_fam_array_abi());
+            assert!(Target::new(TargetArch::X86, os).uses_fam_array_abi());
+            // riscv64/x86_64 freestanding C runtimes mirror the hosted layout
+            // (`u64 len@8; u64 cap@16; RuntimeValue *data@24`).
+            assert!(!Target::new(TargetArch::Riscv64, os).uses_fam_array_abi());
+            assert!(!Target::new(TargetArch::X86_64, os).uses_fam_array_abi());
+        }
+        // Hosted targets never use the FAM layout.
+        assert!(!Target::new(TargetArch::Aarch64, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::new(TargetArch::Arm, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::new(TargetArch::X86, TargetOS::Linux).uses_fam_array_abi());
+        assert!(!Target::host().uses_fam_array_abi());
+    }
+
+    #[test]
+    fn test_array_push_returns_header() {
+        // The moving-header push ABI (rt_array_push returns the possibly
+        // realloc-moved FAM header) ships with the FAM-layout freestanding C
+        // runtimes: aarch64/arm32/x86_32 baremetal. Everything else keeps the
+        // canonical hosted bool-return, stable-header push ABI.
+        for os in [TargetOS::None, TargetOS::SimpleOS] {
+            assert!(Target::new(TargetArch::Aarch64, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::Arm, os).array_push_returns_header());
+            assert!(Target::new(TargetArch::X86, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::Riscv64, os).array_push_returns_header());
+            assert!(!Target::new(TargetArch::X86_64, os).array_push_returns_header());
+        }
+        assert!(!Target::new(TargetArch::Aarch64, TargetOS::Linux).array_push_returns_header());
+        assert!(!Target::host().array_push_returns_header());
+    }
+
+    #[test]
     fn test_parse_simpleos_target() {
         // Short form
         let target = Target::parse("x86_64-simpleos").unwrap();
@@ -1067,5 +1228,89 @@ mod tests {
     fn test_simpleos_display() {
         let target = Target::new(TargetArch::X86_64, TargetOS::SimpleOS);
         assert_eq!(format!("{}", target), "x86_64-simpleos");
+    }
+}
+
+#[cfg(test)]
+mod host_aware_default_tests {
+    use super::*;
+
+    fn t(arch: TargetArch, os: TargetOS) -> Target {
+        let mut x = Target::host();
+        x.arch = arch;
+        x.os = os;
+        x
+    }
+
+    #[test]
+    fn freestanding_x86_64_is_never_widened() {
+        // A SimpleOS or bare-metal kernel does not set XCR0, so a ZMM
+        // instruction there is #UD, not merely slow.
+        for os in [TargetOS::SimpleOS, TargetOS::None, TargetOS::Any] {
+            assert_eq!(
+                TargetCpu::host_aware_default_for(t(TargetArch::X86_64, os)),
+                TargetCpu::X86_64V3,
+                "freestanding os {os:?} was widened"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_os_on_the_same_arch_is_a_cross_build() {
+        // x86_64-linux built on x86_64-windows: the triple still starts with
+        // x86_64, but the builder's CPUID says nothing about the target host.
+        let host = Target::host();
+        let other = if host.os == TargetOS::Linux { TargetOS::Windows } else { TargetOS::Linux };
+        assert_eq!(
+            TargetCpu::host_aware_default_for(t(TargetArch::X86_64, other)),
+            TargetCpu::X86_64V3
+        );
+    }
+
+    #[test]
+    fn non_x86_targets_keep_their_builtin_default() {
+        for arch in [TargetArch::Aarch64, TargetArch::Riscv64, TargetArch::Wasm32] {
+            assert_eq!(
+                TargetCpu::host_aware_default_for(t(arch, TargetOS::Linux)),
+                TargetCpu::builtin_default_for_arch(arch)
+            );
+        }
+    }
+
+    #[test]
+    fn never_narrows_below_the_builtin_default() {
+        let host = Target::host();
+        let got = TargetCpu::host_aware_default_for(host);
+        assert!(
+            got == TargetCpu::X86_64V3 || got == TargetCpu::X86_64V4 || got == TargetCpu::Default,
+            "host default resolved to {got:?}, below the builtin baseline"
+        );
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_host_target_widens_exactly_when_the_host_admits_avx512() {
+        // The whole point: this must track the real probe, and it must be
+        // REACHABLE -- the previous widening sat behind llvm_cpu_name() and
+        // was dead code.
+        let host = Target::host();
+        if host.arch != TargetArch::X86_64 {
+            return;
+        }
+        let expected_wide = std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512vl")
+            && std::is_x86_feature_detected!("avx512bw");
+        let got = TargetCpu::host_aware_default_for(host);
+        assert_eq!(got == TargetCpu::X86_64V4, expected_wide, "got {got:?}");
+    }
+
+    #[test]
+    fn a_widened_default_still_maps_to_a_real_llvm_cpu_name() {
+        // Regression on the actual failure: llvm_cpu_name must RESOLVE the
+        // widened value, not fall through to the unwrap_or default.
+        assert_eq!(
+            TargetCpu::X86_64V4.llvm_cpu_name(TargetArch::X86_64),
+            Some("x86-64-v4")
+        );
     }
 }

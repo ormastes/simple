@@ -1,4 +1,8 @@
 # TLS facade cannot upgrade an existing fd — STARTTLS (SMTP 587 / IMAP 143) is unimplementable
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-25
 - Area: runtime / src/lib/nogc_sync_mut/io/tls_sffi.spl / app llm_caret mail
@@ -55,3 +59,4 @@ third live row to scripts/check/check-llm-caret-infra-live.shs.
 infra_mail refuses before connecting:
 "mail_send: smtp_port 587 needs STARTTLS: mail: port 587 needs STARTTLS, and
 the runtime has no in-place TLS upgrade (missing rt_tls_client_from_fd; ...)".
+

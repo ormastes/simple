@@ -15,7 +15,7 @@ and [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code).
 
 | Credential source | Claude/Anthropic endpoint | Claude model | Native/OpenAI endpoint | Native model |
 |---|---|---|---|---|
-| Kimi Code Console / subscription | `https://api.kimi.com/coding/` | `k3[1m]` | `https://api.kimi.com/coding/v1` | `k3` |
+| Kimi Code Console / subscription | `https://api.kimi.com/coding/` (global login: `https://api.kimi.ai/coding/`) | `k3[1m]` | `https://api.kimi.com/coding/v1` (global: `https://api.kimi.ai/coding/v1`) | `k3` |
 | `platform.kimi.ai` Open Platform | `https://api.moonshot.ai/anthropic` | `kimi-k3[1m]` | `https://api.moonshot.ai/v1` | `kimi-k3` |
 
 The bracketed `[1m]` spelling is a Claude Code environment-variable convention.
@@ -34,9 +34,9 @@ chmod 600 ~/.config/kimi/token
 ```
 
 Because that token file does not identify its issuing platform, a launcher must
-still select the matching endpoint explicitly. Repo `bin/k3` is the Moonshot
-Open Platform launcher; a Kimi Code Console key must use the subscription
-mapping below instead.
+still select the matching endpoint explicitly, which is why `bin/k3` treats that
+file as an Open Platform key. A Kimi Code Console *key* must use the
+subscription mapping below. A Kimi Code *login* needs no key file: see `bin/k3`.
 
 ## Claude Code harness
 
@@ -57,10 +57,20 @@ export CLAUDE_CODE_EFFORT_LEVEL=max
 claude
 ```
 
-For a `platform.kimi.ai` key, export `MOONSHOT_API_KEY` or use the private token
-file and run `bin/k3`. It maps every Claude tier and subagent to
-`kimi-k3[1m]`, sets the 1M compaction window, and uses max effort. In `/status`,
-the base URL and model must match the selected row above.
+`bin/k3` maps every Claude tier and subagent to K3, sets the 1M compaction
+window, and uses max effort. It picks the first credential it finds:
+
+1. `MOONSHOT_API_KEY`: Open Platform, `kimi-k3[1m]`.
+2. A Kimi Code login in `~/.kimi-code` (run `kimi` once and log in):
+   subscription endpoint, `k3[1m]`. Region follows the login (`oauth_host`
+   `auth.kimi.ai` means `api.kimi.ai`, otherwise `api.kimi.com`). The OAuth access
+   token lives only 900s, so `k3` passes `bin/kimi-code-token` to Claude Code as
+   `apiKeyHelper` (re-run every 10 min). The helper does the same
+   `refresh_token` grant as the `kimi` CLI and writes the rotated tokens back
+   to the same credentials file, so `kimi` stays logged in.
+3. `~/.config/kimi/token`: Open Platform, `kimi-k3[1m]`.
+
+In `/status`, the base URL and model must match the selected row above.
 
 ## Native Kimi Code harness
 

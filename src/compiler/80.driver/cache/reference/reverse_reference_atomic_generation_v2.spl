@@ -1,0 +1,434 @@
+#![allow(primitive_api)]
+
+# codex-impl
+# Atomic reverse-reference generation planning.  This module deliberately does
+# not publish a live generation: the real publisher authority adapter is not
+# available yet, so the production gate at the bottom remains closed.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1,
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{PortableObjectRefV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    SemanticCoverageV1, SemanticQueryKeyV1, SemanticQueryReadManifestV1,
+    semantic_query_read_manifest_encode_v1, semantic_query_read_manifest_valid_v1,
+}
+use compiler.common.cache_contract.reverse_reference_shard_v1.{
+    ReverseReferenceDeltaV1, ReverseReferenceEdgeV1, ReverseReferenceShardV1,
+    reverse_reference_delta_valid_v1, reverse_reference_edge_key_v1,
+    reverse_reference_shard_encode_v1, reverse_reference_shard_valid_v1,
+}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_digest_v1,
+    generation_manifest_valid_v1,
+}
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{
+    seed_reverse_shards_v1, stage_reverse_delta_v1, stage_reverse_shards_v1,
+    L78AffectedDomainPortV4, L78RrPlanV4,
+}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    L78BoundaryErrorV4, L78OwnedResultV4, L78OwnerTokenV4,
+}
+
+pub struct RrOldOutgoingAuthorityV2:
+    schema: i64
+    owner_id: text
+    generation_digest: text
+    outgoing_manifest_digest: text
+    read_count: i64
+    coverage: SemanticCoverageV1
+    owner_receipt_digest: text
+
+pub struct RrAtomicGenerationInputV2:
+    generation: i64
+    snapshot_digest: text
+    catalog_digest: text
+    summary_refs: [text]
+    scope_refs: [text]
+    portable_refs: [PortableObjectRefV1]
+    target_refs: [text]
+    diagnostic_refs: [text]
+    producer_semantic_digest: text
+    reevaluation_succeeded: bool
+
+pub struct RrAtomicGenerationV2:
+    generation: i64
+    manifest: GenerationManifestV1
+    manifest_digest: text
+    shards: [ReverseReferenceShardV1]
+    producer_semantic_digest: text
+
+pub struct RrAtomicGenerationStageV2:
+    accepted: bool
+    rejection_reason: text
+    expected_prior_generation: i64?
+    expected_prior_manifest_digest: text?
+    candidate: RrAtomicGenerationV2?
+    delta: ReverseReferenceDeltaV1?
+
+pub enum RrAtomicCrashPointV2:
+    NoCrash
+    BeforePrepare
+    AfterPrepare
+    BeforeActiveRootSwap
+    AfterActiveRootSwap
+
+pub struct RrAtomicRecoveryV2:
+    active: RrAtomicGenerationV2?
+    prepared: RrAtomicGenerationV2?
+    recovery_reason: text
+
+fn _query_key_v2(value: SemanticQueryKeyV1) -> text:
+    value.kind + "\u0000" + value.stable_entity_id + "\u0000" +
+        value.semantic_profile_digest + "\u0000" + value.parameter_digest
+
+fn _query_equal_v2(left: SemanticQueryKeyV1, right: SemanticQueryKeyV1) -> bool:
+    _query_key_v2(left) == _query_key_v2(right)
+
+fn _manifest_digest_v2(value: SemanticQueryReadManifestV1) -> text:
+    val bytes = semantic_query_read_manifest_encode_v1(value)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)
+
+fn _authority_material_v2(owner_id: text, generation_digest: text,
+        outgoing_manifest_digest: text, read_count: i64) -> text:
+    "simple.rr-old-outgoing-authority.v2\u0000owner=" + owner_id +
+        "\u0000generation=" + generation_digest + "\u0000manifest=" +
+        outgoing_manifest_digest + "\u0000read_count=" + read_count.to_string() +
+        "\u0000coverage=complete"
+
+# Deterministic diagnostic projection used by the transition model.  It binds
+# all authority claims, but it is not an issuer capability: the production
+# preparation boundary never trusts this caller-reproducible value.
+pub fn rr_old_outgoing_authority_receipt_v2(owner_id: text,
+        generation_digest: text, manifest: SemanticQueryReadManifestV1) -> text:
+    if owner_id == "" or not three_payload_contract_digest_valid_v1(generation_digest) or
+            not semantic_query_read_manifest_valid_v1(manifest): return ""
+    val manifest_digest = _manifest_digest_v2(manifest)
+    sha256_text(_authority_material_v2(owner_id, generation_digest,
+        manifest_digest, manifest.ordered_reads.len()))
+
+fn _edge_identity_v2(value: ReverseReferenceEdgeV1) -> text:
+    reverse_reference_edge_key_v1(value) + "\u0000" + value.partition_id
+
+fn _edge_exact_equal_v2(left: ReverseReferenceEdgeV1,
+        right: ReverseReferenceEdgeV1) -> bool:
+    _edge_identity_v2(left) == _edge_identity_v2(right) and
+        left.consumed_fingerprint == right.consumed_fingerprint and
+        left.forward_manifest_digest == right.forward_manifest_digest
+
+fn _consumer_edges_v2(shards: [ReverseReferenceShardV1],
+        consumer: SemanticQueryKeyV1) -> [ReverseReferenceEdgeV1]:
+    var out: [ReverseReferenceEdgeV1] = []
+    for shard in shards:
+        for edge in shard.sorted_edges:
+            if _query_equal_v2(edge.consumer, consumer): out.push(edge)
+    out
+
+fn _edges_exact_set_equal_v2(left: [ReverseReferenceEdgeV1],
+        right: [ReverseReferenceEdgeV1]) -> bool:
+    if left.len() != right.len(): return false
+    for edge in left:
+        var found = false
+        for candidate in right:
+            if _edge_exact_equal_v2(edge, candidate):
+                found = true
+                break
+        if not found: return false
+    true
+
+fn _sort_digests_unique_v2(values: [text]) -> [text]:
+    var sorted = values
+    sorted = array_sort(sorted)
+    var out: [text] = []
+    for value in sorted:
+        if out.len() == 0 or out[out.len() - 1] != value: out.push(value)
+    out
+
+fn _remove_digest_v2(values: [text], removed: text?) -> [text]:
+    var out: [text] = []
+    for value in values:
+        match removed:
+            case Some(digest):
+                if value != digest: out.push(value)
+            case nil: out.push(value)
+    out
+
+fn _shard_refs_v2(shards: [ReverseReferenceShardV1]) -> [text]:
+    var refs: [text] = []
+    for shard in shards:
+        if not reverse_reference_shard_valid_v1(shard): return []
+        val bytes = reverse_reference_shard_encode_v1(shard)
+        if bytes.len() == 0: return []
+        refs.push(sha256_u8_hex(bytes))
+    _sort_digests_unique_v2(refs)
+
+fn _shards_valid_v2(shards: [ReverseReferenceShardV1]) -> bool:
+    for shard in shards:
+        if not reverse_reference_shard_valid_v1(shard): return false
+    true
+
+fn _generation_valid_v2(value: RrAtomicGenerationV2) -> bool:
+    if value.generation < 0 or
+            not three_payload_contract_digest_valid_v1(value.producer_semantic_digest) or
+            not generation_manifest_valid_v1(value.manifest) or
+            value.manifest_digest != generation_manifest_digest_v1(value.manifest):
+        return false
+    if not value.manifest.summary_refs.contains(value.producer_semantic_digest) or
+            not _shards_valid_v2(value.shards): return false
+    val refs = _shard_refs_v2(value.shards)
+    if (value.shards.len() > 0 and refs.len() == 0) or
+            refs != value.manifest.rr_shard_refs: return false
+    for refs_group in [value.manifest.summary_refs, value.manifest.scope_refs,
+            value.manifest.rr_shard_refs, value.manifest.forward_manifest_refs,
+            value.manifest.target_refs, value.manifest.diagnostic_refs]:
+        if refs_group.contains(value.manifest_digest): return false
+    true
+
+fn _reject_v2(reason: text) -> RrAtomicGenerationStageV2:
+    RrAtomicGenerationStageV2(accepted: false, rejection_reason: reason,
+        expected_prior_generation: nil, expected_prior_manifest_digest: nil,
+        candidate: nil, delta: nil)
+
+fn _reject_bound_v2(reason: text, prior: RrAtomicGenerationV2?
+    ) -> RrAtomicGenerationStageV2:
+    match prior:
+        case Some(generation):
+            RrAtomicGenerationStageV2(accepted: false, rejection_reason: reason,
+                expected_prior_generation: Some(generation.generation),
+                expected_prior_manifest_digest: Some(generation.manifest_digest),
+                candidate: nil, delta: nil)
+        case nil: _reject_v2(reason)
+
+fn _old_authority_rejection_v2(prior: RrAtomicGenerationV2,
+        authority: RrOldOutgoingAuthorityV2,
+        old_reads: SemanticQueryReadManifestV1) -> text:
+    if authority.coverage != SemanticCoverageV1.Complete:
+        return "old_history_partial"
+    if (authority.schema != 2 or authority.owner_id == "" or
+            authority.read_count != old_reads.ordered_reads.len()):
+        return "old_history_authority_invalid"
+    val old_digest = _manifest_digest_v2(old_reads)
+    if (old_digest == "" or authority.generation_digest != prior.manifest_digest or
+            authority.outgoing_manifest_digest != old_digest):
+        return "old_history_manifest_mismatch"
+    # A complete empty manifest is the model's explicit authenticated absence
+    # witness for a new consumer.  Nonempty history must already be bound by the
+    # prior generation manifest.
+    if old_reads.ordered_reads.len() > 0 and
+            not prior.manifest.forward_manifest_refs.contains(old_digest):
+        return "old_history_manifest_mismatch"
+    val expected = rr_old_outgoing_authority_receipt_v2(authority.owner_id,
+        authority.generation_digest, old_reads)
+    if expected == "" or authority.owner_receipt_digest != expected:
+        return "old_history_authority_invalid"
+    ""
+
+fn _old_edges_complete_v2(prior: RrAtomicGenerationV2,
+        old_reads: SemanticQueryReadManifestV1) -> bool:
+    val empty = SemanticQueryReadManifestV1(schema: 1, consumer: old_reads.consumer,
+        ordered_reads: [])
+    val removal = stage_reverse_delta_v1(Some(old_reads), empty)
+    if not reverse_reference_delta_valid_v1(removal): return false
+    _edges_exact_set_equal_v2(_consumer_edges_v2(prior.shards, old_reads.consumer),
+        removal.removed)
+
+fn _forward_refs_v2(prior: RrAtomicGenerationV2?, old_digest: text?,
+        new_digest: text) -> [text]:
+    var refs: [text] = []
+    match prior:
+        case Some(generation): refs = _remove_digest_v2(
+            generation.manifest.forward_manifest_refs, old_digest)
+        case nil: pass
+    refs.push(new_digest)
+    _sort_digests_unique_v2(refs)
+
+fn _non_rr_payload_unchanged_v2(prior: RrAtomicGenerationV2,
+        input: RrAtomicGenerationInputV2) -> bool:
+    input.snapshot_digest == prior.manifest.snapshot_digest and
+        input.catalog_digest == prior.manifest.catalog_digest and
+        input.summary_refs == prior.manifest.summary_refs and
+        input.scope_refs == prior.manifest.scope_refs and
+        input.portable_refs == prior.manifest.portable_refs and
+        input.target_refs == prior.manifest.target_refs and
+        input.diagnostic_refs == prior.manifest.diagnostic_refs
+
+# Plan insertion/removal shards and the single acyclic generation manifest in
+# memory.  Nothing becomes live through this function.
+pub fn prepare_rr_atomic_generation_transition_model_v2(
+        prior: RrAtomicGenerationV2?,
+        old_authority: RrOldOutgoingAuthorityV2?,
+        old_reads: SemanticQueryReadManifestV1?,
+        new_reads: SemanticQueryReadManifestV1,
+        input: RrAtomicGenerationInputV2) -> RrAtomicGenerationStageV2:
+    if not semantic_query_read_manifest_valid_v1(new_reads):
+        return _reject_v2("new_manifest_invalid")
+    if not input.reevaluation_succeeded: return _reject_v2("reevaluation_failed")
+    if input.generation < 0 or
+            not three_payload_contract_digest_valid_v1(input.producer_semantic_digest) or
+            not input.summary_refs.contains(input.producer_semantic_digest):
+        return _reject_v2("generation_input_invalid")
+
+    var prior_shards: [ReverseReferenceShardV1] = []
+    match prior:
+        case Some(generation):
+            if not _generation_valid_v2(generation) or
+                    input.generation <= generation.generation:
+                return _reject_v2("prior_generation_invalid")
+            if input.producer_semantic_digest != generation.producer_semantic_digest:
+                return _reject_v2("producer_digest_changed_by_consumer_update")
+            if not _non_rr_payload_unchanged_v2(generation, input):
+                return _reject_v2("non_rr_payload_changed_by_consumer_update")
+            prior_shards = generation.shards
+        case nil: pass
+
+    if prior != nil and (old_reads == nil or old_authority == nil):
+        return _reject_bound_v2("old_history_missing", prior)
+    if (old_reads == nil) != (old_authority == nil):
+        return _reject_v2("old_history_authority_invalid")
+
+    var old_digest: text? = nil
+    match old_reads:
+        case Some(manifest):
+            if not semantic_query_read_manifest_valid_v1(manifest) or
+                    not _query_equal_v2(manifest.consumer, new_reads.consumer):
+                return _reject_v2("old_history_partial")
+            val admitted = match prior:
+                case Some(generation): generation
+                case nil: return _reject_v2("old_history_manifest_mismatch")
+            val authority = match old_authority:
+                case Some(value): value
+                case nil: return _reject_v2("old_history_missing")
+            val rejection = _old_authority_rejection_v2(admitted, authority, manifest)
+            if rejection != "": return _reject_v2(rejection)
+            if not _old_edges_complete_v2(admitted, manifest):
+                return _reject_v2("old_history_edges_mismatch")
+            old_digest = Some(_manifest_digest_v2(manifest))
+        case nil: pass
+
+    val delta = stage_reverse_delta_v1(old_reads, new_reads)
+    if not reverse_reference_delta_valid_v1(delta):
+        return _reject_v2("rr_delta_invalid")
+    val staged = match prior:
+        case Some(_): stage_reverse_shards_v1(prior_shards, old_reads, new_reads, true)
+        case nil: seed_reverse_shards_v1(new_reads)
+    if not staged.accepted: return _reject_v2("rr_stage_rejected")
+
+    val shard_refs = _shard_refs_v2(staged.shards)
+    if staged.shards.len() > 0 and shard_refs.len() == 0:
+        return _reject_v2("rr_stage_rejected")
+    val new_digest = _manifest_digest_v2(new_reads)
+    val manifest = GenerationManifestV1(schema: 1,
+        snapshot_digest: input.snapshot_digest, catalog_digest: input.catalog_digest,
+        summary_refs: input.summary_refs, scope_refs: input.scope_refs,
+        rr_shard_refs: shard_refs,
+        forward_manifest_refs: _forward_refs_v2(prior, old_digest, new_digest),
+        portable_refs: input.portable_refs, target_refs: input.target_refs,
+        diagnostic_refs: input.diagnostic_refs)
+    if not generation_manifest_valid_v1(manifest):
+        return _reject_v2("generation_manifest_invalid")
+    val manifest_digest = generation_manifest_digest_v1(manifest)
+    for refs_group in [manifest.summary_refs, manifest.scope_refs,
+            manifest.rr_shard_refs, manifest.forward_manifest_refs,
+            manifest.target_refs, manifest.diagnostic_refs]:
+        if refs_group.contains(manifest_digest):
+            return _reject_v2("generation_manifest_digest_cycle")
+    val candidate = RrAtomicGenerationV2(generation: input.generation,
+        manifest: manifest, manifest_digest: manifest_digest, shards: staged.shards,
+        producer_semantic_digest: input.producer_semantic_digest)
+    if not _generation_valid_v2(candidate):
+        return _reject_v2("generation_manifest_invalid")
+    RrAtomicGenerationStageV2(accepted: true, rejection_reason: "",
+        expected_prior_generation: prior.map(_.generation),
+        expected_prior_manifest_digest: prior.map(_.manifest_digest),
+        candidate: Some(candidate), delta: Some(delta))
+
+# Production preparation remains closed for every non-genesis transition until
+# a retained, opaque old-read issuer is wired from the live publisher owner.
+pub fn prepare_rr_atomic_generation_v2(prior: RrAtomicGenerationV2?,
+        old_authority: RrOldOutgoingAuthorityV2?,
+        old_reads: SemanticQueryReadManifestV1?,
+        new_reads: SemanticQueryReadManifestV1,
+        input: RrAtomicGenerationInputV2) -> RrAtomicGenerationStageV2:
+    if prior != nil:
+        return _reject_bound_v2("old_history_authority_unavailable", prior)
+    prepare_rr_atomic_generation_transition_model_v2(prior, old_authority,
+        old_reads, new_reads, input)
+
+# Pure crash model for the future publisher.  Prepared bytes never become the
+# active root until the one root-swap transition; recovery ignores any staged
+# candidate when the old root is still active.
+pub fn rr_atomic_generation_transition_model_v2(prior: RrAtomicGenerationV2?,
+        staged: RrAtomicGenerationStageV2,
+        crash_point: RrAtomicCrashPointV2) -> RrAtomicRecoveryV2:
+    val candidate = match staged.candidate:
+        case Some(value): value
+        case nil: return RrAtomicRecoveryV2(active: prior, prepared: nil,
+            recovery_reason: "stage_rejected")
+    if not staged.accepted or not _generation_valid_v2(candidate):
+        return RrAtomicRecoveryV2(active: prior, prepared: nil,
+            recovery_reason: "stage_rejected")
+    match prior:
+        case Some(generation):
+            if (staged.expected_prior_generation != Some(generation.generation) or
+                    staged.expected_prior_manifest_digest !=
+                        Some(generation.manifest_digest)):
+                return RrAtomicRecoveryV2(active: prior, prepared: nil,
+                    recovery_reason: "stale_prior_generation")
+        case nil:
+            if staged.expected_prior_generation != nil or
+                    staged.expected_prior_manifest_digest != nil:
+                return RrAtomicRecoveryV2(active: prior, prepared: nil,
+                    recovery_reason: "stale_prior_generation")
+    match crash_point:
+        case RrAtomicCrashPointV2.BeforePrepare:
+            RrAtomicRecoveryV2(active: prior, prepared: nil,
+                recovery_reason: "recovered_prior_generation")
+        case RrAtomicCrashPointV2.AfterPrepare:
+            RrAtomicRecoveryV2(active: prior, prepared: Some(candidate),
+                recovery_reason: "recovered_prior_generation")
+        case RrAtomicCrashPointV2.BeforeActiveRootSwap:
+            RrAtomicRecoveryV2(active: prior, prepared: Some(candidate),
+                recovery_reason: "recovered_prior_generation")
+        case RrAtomicCrashPointV2.AfterActiveRootSwap:
+            RrAtomicRecoveryV2(active: Some(candidate), prepared: nil,
+                recovery_reason: "recovered_candidate_generation")
+        case RrAtomicCrashPointV2.NoCrash:
+            RrAtomicRecoveryV2(active: Some(candidate), prepared: nil,
+                recovery_reason: "committed_candidate_generation")
+
+pub fn recover_rr_atomic_generation_v2(state: RrAtomicRecoveryV2
+    ) -> RrAtomicGenerationV2?:
+    match state.active:
+        case Some(active):
+            if _generation_valid_v2(active): return Some(active)
+        case nil: pass
+    nil
+
+pub fn rr_atomic_generation_publisher_authority_available_v2() -> bool:
+    # Closed until the live generation publisher issues an unforgeable owner
+    # capability and validates this exact staged candidate at commit time.
+    false
+
+pub fn rr_old_outgoing_authority_available_v2() -> bool:
+    # The public hash projection above is test/model evidence, not authority.
+    false
+
+# Validation and cleanup are separate owner-returning steps because a valid
+# affected-domain child must remain active through downstream publication.
+# Only the child token returned by P05 is closed; the P03 scope stays owned by
+# the caller.
+pub fn l78_validate_affected_with_port_v4<P: L78AffectedDomainPortV4>(owner: P,
+    result: L78RrPlanV4, scope: L78OwnerTokenV4,
+) -> L78OwnedResultV4<P, L78RrPlanV4>:
+    val outcome = match owner.validate(result, scope):
+        case Ok(_): Ok(result)
+        case Err(error): Err(error)
+    L78OwnedResultV4<P, L78RrPlanV4>(owner: owner, outcome: outcome)
+
+pub fn l78_close_affected_with_port_v4<P: L78AffectedDomainPortV4>(owner: P,
+    result: L78RrPlanV4,
+) -> L78OwnedResultV4<P, ()>:
+    val outcome = owner.close(result.token)
+    L78OwnedResultV4<P, ()>(owner: owner, outcome: outcome)

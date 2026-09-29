@@ -1,4 +1,5 @@
 # Linker Wrapper Helpers - Self-Contained Linking + Binary Utilities
+use compiler.hir.hir_types.{Effect}
 #
 # Contains SMF linking, self-contained binary creation, runtime binary
 # discovery, trailer building, hash functions, and binary/file I/O helpers.
@@ -360,26 +361,23 @@ fn write_elf_bytes_to_file(path: text, bytes: [u8]) -> Result<(), text>:
         val is_macho_32_be = bytes[0] == 0xfe and bytes[1] == 0xed and bytes[2] == 0xfa and bytes[3] == 0xce
         val is_macho_fat = bytes[0] == 0xca and bytes[1] == 0xfe and bytes[2] == 0xba and bytes[3] == 0xbe
         val is_pe_coff = bytes[0] == 0x4d and bytes[1] == 0x5a  # "MZ"
-        if not (is_elf or is_macho_64_le or is_macho_32_le or is_macho_64_be or is_macho_32_be or is_macho_fat or is_pe_coff):
+        # COFF OBJECT files (what llc --filetype=obj emits on Windows) have no
+        # "MZ" header: they start directly with the IMAGE_FILE_HEADER machine
+        # field. 0x8664 = x86-64 (bytes 64 86), 0x014c = i386, 0xaa64 = arm64.
+        val is_coff_obj_amd64 = bytes[0] == 0x64 and bytes[1] == 0x86
+        val is_coff_obj_i386 = bytes[0] == 0x4c and bytes[1] == 0x01
+        val is_coff_obj_arm64 = bytes[0] == 0x64 and bytes[1] == 0xaa
+        if not (is_elf or is_macho_64_le or is_macho_32_le or is_macho_64_be or is_macho_32_be or is_macho_fat or is_pe_coff or is_coff_obj_amd64 or is_coff_obj_i386 or is_coff_obj_arm64):
             return Err("Invalid object-file magic in {path} (bytes: {bytes[0]} {bytes[1]} {bytes[2]} {bytes[3]})")
 
     Ok(())
 
 fn write_bytes_to_file(path: text, data: [u8]) -> bool:
-    if data.len() == 0:
-        val touch_result = shell("touch '{path}'")
-        return touch_result.exit_code == 0
-
-    var hex_parts: [text] = []
-    for byte in data:
-        val b = (byte as i64) & 0xFF
-        val hi = "0123456789abcdef"[(((b) >> 4)):((((b) >> 4)) + 1)]
-        val lo = "0123456789abcdef"[(b & 0xF):((b & 0xF) + 1)]
-        hex_parts.push(hi + lo)
-    val hex_str = hex_parts.join("")
-
-    val write_result = shell("echo '{hex_str}' | xxd -r -p > '{path}'")
-    write_result.exit_code == 0
+    # Direct runtime write. The former `echo <hex> | xxd -r -p > '<path>'`
+    # needs a POSIX shell and xxd; under cmd.exe it wrote nothing, yet the
+    # pipeline's status was 0, so `compile x.spl -o x.smf` reported success
+    # with no output file on Windows.
+    rt_file_write_bytes(path, data)
 
 fn append_bytes_to_file(path: text, data: [u8]) -> bool:
     if data.len() == 0:

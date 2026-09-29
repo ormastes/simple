@@ -1,0 +1,147 @@
+# Trusted producer for the mold-linker completion aggregate.
+#
+# Each input is itself a canonical receipt which binds a command transcript and
+# a result artifact.  This producer verifies both referenced files before it
+# publishes the digest-only aggregate consumed by mold_compatibility.spl.
+
+use app.io.mod.{dir_create_all, file_atomic_write, file_hash_sha256,
+    file_is_regular_no_follow}
+use std.cli.cli_util.{get_cli_args}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+
+val MOLD_EVIDENCE_SCHEMA = "mold-linker-evidence-v1"
+val MOLD_AGGREGATE_SCHEMA = "mold-linker-completion-v2"
+val MOLD_AGGREGATE_PATH = "build/linker/mold_completion_receipt.v2"
+val MOLD_EVIDENCE_MAX_BYTES: i64 = 16384
+
+val MOLD_EVIDENCE_KEYS = [
+    "linux_x86_64_internal",
+    "linux_aarch64_internal",
+    "windows_x86_64_internal",
+    "windows_arm64_internal",
+    "full_compiler_corpus",
+    "fast_bounded_digest_parity",
+    "simpleos_x86_64_boot",
+    "simpleos_arm64_boot",
+    "platform_receipts",
+    "performance_gate"
+]
+
+struct MoldEvidenceReceipt:
+    evidence: text
+    command_path: text
+    command_sha256: text
+    artifact_path: text
+    artifact_sha256: text
+
+fn _mold_hex64(value: text) -> bool:
+    if value.len() != 64: return false
+    var index: i64 = 0
+    while index < value.len():
+        val ch = value[index:index + 1]
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        index = index + 1
+    true
+
+fn mold_parse_evidence_receipt(content: text, expected_key: text) -> Result<MoldEvidenceReceipt, text>:
+    val rows = content.trim().split("\n")
+    if rows.len() != 7:
+        return Err("evidence-receipt-row-count-invalid")
+    if rows[0].trim() != "schema=" + MOLD_EVIDENCE_SCHEMA:
+        return Err("evidence-receipt-schema-invalid")
+    if rows[1].trim() != "evidence=" + expected_key:
+        return Err("evidence-receipt-key-invalid")
+    if rows[2].trim() != "status=pass":
+        return Err("evidence-receipt-status-not-pass")
+    val command_path_row = rows[3].trim()
+    val command_sha_row = rows[4].trim()
+    val artifact_path_row = rows[5].trim()
+    val artifact_sha_row = rows[6].trim()
+    if not command_path_row.starts_with("command_path=") or
+            not command_sha_row.starts_with("command_sha256=") or
+            not artifact_path_row.starts_with("artifact_path=") or
+            not artifact_sha_row.starts_with("artifact_sha256="):
+        return Err("evidence-receipt-field-order-invalid")
+    val command_path = command_path_row.substring("command_path=".len())
+    val command_sha256 = command_sha_row.substring("command_sha256=".len())
+    val artifact_path = artifact_path_row.substring("artifact_path=".len())
+    val artifact_sha256 = artifact_sha_row.substring("artifact_sha256=".len())
+    if command_path == "" or artifact_path == "" or
+            command_path.contains("\r") or artifact_path.contains("\r"):
+        return Err("evidence-receipt-path-invalid")
+    if not _mold_hex64(command_sha256) or not _mold_hex64(artifact_sha256):
+        return Err("evidence-receipt-digest-invalid")
+    Ok(MoldEvidenceReceipt(
+        evidence: expected_key,
+        command_path: command_path,
+        command_sha256: command_sha256,
+        artifact_path: artifact_path,
+        artifact_sha256: artifact_sha256))
+
+fn mold_render_completion_aggregate(digests: [text]) -> Result<text, text>:
+    if digests.len() != MOLD_EVIDENCE_KEYS.len():
+        return Err("aggregate-digest-count-invalid")
+    var output = "schema=" + MOLD_AGGREGATE_SCHEMA + "\n"
+    var index: i64 = 0
+    while index < digests.len():
+        if not _mold_hex64(digests[index]):
+            return Err("aggregate-digest-invalid")
+        output = output + MOLD_EVIDENCE_KEYS[index] + "=sha256:" +
+            digests[index] + "\n"
+        index = index + 1
+    Ok(output)
+
+fn _mold_verify_bound_file(path: text, expected_sha256: text) -> bool:
+    file_is_regular_no_follow(path) and file_hash_sha256(path) == expected_sha256
+
+fn mold_publish_completion_receipt(paths: [text]) -> Result<text, text>:
+    if paths.len() != MOLD_EVIDENCE_KEYS.len():
+        return Err("completion-cli-requires-ten-receipts")
+    var digests: [text] = []
+    var index: i64 = 0
+    while index < paths.len():
+        if not file_is_regular_no_follow(paths[index]):
+            return Err("evidence-receipt-not-regular-" + MOLD_EVIDENCE_KEYS[index])
+        val content_result = file_read_regular_no_follow_bounded(
+            paths[index], MOLD_EVIDENCE_MAX_BYTES)
+        if content_result.is_err():
+            return Err("evidence-receipt-read-failed-" + MOLD_EVIDENCE_KEYS[index])
+        val content = content_result.unwrap()
+        val receipt_result = mold_parse_evidence_receipt(
+            content, MOLD_EVIDENCE_KEYS[index])
+        if receipt_result.is_err():
+            return Err(MOLD_EVIDENCE_KEYS[index] + "-" + receipt_result.unwrap_err())
+        val receipt = receipt_result.unwrap()
+        if not _mold_verify_bound_file(receipt.command_path, receipt.command_sha256):
+            return Err("evidence-command-mismatch-" + MOLD_EVIDENCE_KEYS[index])
+        if not _mold_verify_bound_file(receipt.artifact_path, receipt.artifact_sha256):
+            return Err("evidence-artifact-mismatch-" + MOLD_EVIDENCE_KEYS[index])
+        digests.push(sha256_text(content))
+        index = index + 1
+    val aggregate = mold_render_completion_aggregate(digests)?
+    if not dir_create_all("build/linker"):
+        return Err("aggregate-directory-create-failed")
+    if not file_atomic_write(MOLD_AGGREGATE_PATH, aggregate):
+        return Err("aggregate-atomic-write-failed")
+    Ok(file_hash_sha256(MOLD_AGGREGATE_PATH))
+
+fn main() -> i64:
+    match mold_publish_completion_receipt(get_cli_args()):
+        case Ok(digest):
+            print "schema=" + MOLD_AGGREGATE_SCHEMA
+            print "status=pass"
+            print "receipt_path=" + MOLD_AGGREGATE_PATH
+            print "receipt_sha256=" + digest
+            0
+        case Err(reason):
+            print "schema=" + MOLD_AGGREGATE_SCHEMA
+            print "status=fail"
+            print "reason=" + reason
+            1
+
+export MOLD_EVIDENCE_SCHEMA, MOLD_AGGREGATE_SCHEMA, MOLD_AGGREGATE_PATH
+export MOLD_EVIDENCE_KEYS, MoldEvidenceReceipt
+export mold_parse_evidence_receipt, mold_render_completion_aggregate
+export mold_publish_completion_receipt

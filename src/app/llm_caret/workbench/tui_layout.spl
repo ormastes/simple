@@ -1,0 +1,153 @@
+# Caret TUI workbench — pure layout geometry (lane A6).
+#
+# Computes terminal-cell regions for the requested composition (doc §4.3,
+# §4.2): a left column (roster / selected-agent details / composer) and a
+# right area (one large selected session + a strip of read-only inactive
+# previews), with one status row pinned to the bottom. Below the full-layout
+# minimums it falls back to a single-view compact mode (`Session` / `Agents`
+# / `Compose`) instead of rendering unreadable slivers.
+#
+# Deliberately pure: no rendering, no I/O, no CaretIo. `tui_view.spl` turns
+# this geometry plus session state into actual grid text so both halves can
+# be probed independently.
+
+# ============================================================================
+# Rects
+# ============================================================================
+
+struct Rect:
+    x: i64
+    y: i64
+    w: i64
+    h: i64
+
+fn rect(x: i64, y: i64, w: i64, h: i64) -> Rect:
+    Rect(x: x, y: y, w: w, h: h)
+
+fn _min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+fn _max_i64(a: i64, b: i64) -> i64:
+    if a > b:
+        a
+    else:
+        b
+
+fn _clamp_i64(v: i64, lo: i64, hi: i64) -> i64:
+    _max_i64(lo, _min_i64(hi, v))
+
+# ============================================================================
+# Compact single-view fallback (doc §4.2: "At 80x24 ... Session / Agents /
+# Compose instead of microscopic previews")
+# ============================================================================
+
+enum CompactView:
+    Session
+    Agents
+    Compose
+
+pub fn compact_view_name(view: CompactView) -> text:
+    match view:
+        case CompactView.Session: "Session"
+        case CompactView.Agents: "Agents"
+        case CompactView.Compose: "Compose"
+
+# ============================================================================
+# Geometry thresholds (doc §4.2 defaults)
+# ============================================================================
+
+val FULL_MIN_WIDTH: i64 = 100
+val FULL_MIN_HEIGHT: i64 = 24
+val LEFT_COL_MIN: i64 = 34
+val LEFT_COL_MAX: i64 = 40
+val COMPOSER_MIN_ROWS: i64 = 3
+val COMPOSER_MAX_ROWS: i64 = 6
+val DETAILS_MIN_ROWS: i64 = 5
+val DETAILS_MAX_ROWS: i64 = 8
+val ROSTER_MIN_ROWS: i64 = 6
+val PREVIEW_MIN_ROWS: i64 = 6
+val PREVIEW_MAX_ROWS: i64 = 9
+val PREVIEW_MIN_COLS: i64 = 20
+val PREVIEW_MAX_COUNT: i64 = 3
+
+struct WorkbenchLayout:
+    width: i64
+    height: i64
+    is_full: bool
+    # Full-mode regions. Zero rect (w=0, h=0) when is_full is false.
+    roster: Rect
+    details: Rect
+    composer: Rect
+    active: Rect
+    previews: [Rect]
+    # Compact-mode region. Zero rect when is_full is true.
+    compact_view_rect: Rect
+    compact_selected: CompactView
+    # Always present: one status row at the very bottom, full width.
+    status: Rect
+
+pub fn compute_layout(width: i64, height: i64, compact_selected: CompactView, preview_count_hint: i64) -> WorkbenchLayout:
+    val status = rect(0, _max_i64(0, height - 1), width, 1)
+    val body_h = _max_i64(1, height - 1)
+    val is_full = width >= FULL_MIN_WIDTH and height >= FULL_MIN_HEIGHT
+
+    if not is_full:
+        return WorkbenchLayout(
+            width: width, height: height, is_full: false,
+            roster: rect(0, 0, 0, 0), details: rect(0, 0, 0, 0),
+            composer: rect(0, 0, 0, 0), active: rect(0, 0, 0, 0),
+            previews: [],
+            compact_view_rect: rect(0, 0, width, body_h),
+            compact_selected: compact_selected,
+            status: status)
+
+    val left_w = _clamp_i64(width / 3, LEFT_COL_MIN, LEFT_COL_MAX)
+    val right_x = left_w
+    val right_w = width - left_w
+
+    # Left column: composer anchored at the bottom, details above it, roster
+    # takes whatever remains (never below its own floor).
+    val composer_h = _clamp_i64(body_h / 6, COMPOSER_MIN_ROWS, COMPOSER_MAX_ROWS)
+    val details_h = _clamp_i64(body_h / 6, DETAILS_MIN_ROWS, DETAILS_MAX_ROWS)
+    var roster_h = body_h - composer_h - details_h
+    if roster_h < ROSTER_MIN_ROWS:
+        roster_h = ROSTER_MIN_ROWS
+    val roster = rect(0, 0, left_w, roster_h)
+    val details = rect(0, roster_h, left_w, details_h)
+    val composer_y = roster_h + details_h
+    val composer = rect(0, composer_y, left_w, _max_i64(COMPOSER_MIN_ROWS, body_h - composer_y))
+
+    # Right area: one large active session + a bottom preview strip.
+    val preview_h = _clamp_i64(body_h / 5, PREVIEW_MIN_ROWS, PREVIEW_MAX_ROWS)
+    val active_h = _max_i64(5, body_h - preview_h)
+    val active = rect(right_x, 0, right_w, active_h)
+
+    var preview_count = _clamp_i64(preview_count_hint, 0, PREVIEW_MAX_COUNT)
+    if preview_count > 0 and right_w / preview_count < PREVIEW_MIN_COLS:
+        preview_count = _clamp_i64(right_w / PREVIEW_MIN_COLS, 0, PREVIEW_MAX_COUNT)
+
+    var previews: [Rect] = []
+    if preview_count > 0:
+        val each_w = right_w / preview_count
+        var i = 0
+        while i < preview_count:
+            val px = right_x + i * each_w
+            var pw = each_w
+            if i == preview_count - 1:
+                pw = right_w - each_w * (preview_count - 1)
+            previews.push(rect(px, active_h, pw, preview_h))
+            i = i + 1
+
+    WorkbenchLayout(
+        width: width, height: height, is_full: true,
+        roster: roster, details: details, composer: composer, active: active,
+        previews: previews,
+        compact_view_rect: rect(0, 0, 0, 0),
+        compact_selected: compact_selected,
+        status: status)
+
+export Rect, rect, CompactView, compact_view_name, WorkbenchLayout, compute_layout,
+    FULL_MIN_WIDTH, FULL_MIN_HEIGHT

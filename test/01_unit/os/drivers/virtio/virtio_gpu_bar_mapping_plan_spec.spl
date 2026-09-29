@@ -1,0 +1,54 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_bar_mapping_plan.spl 80%
+# @tag: unit, simpleos, virtio, gpu, pci, bar, vulkan, venus
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_bar_mapping_plan.*
+
+fn cap(kind: u8, bar: u8, offset: u64,
+        len: u64) -> VirtioGpuPciCapabilityWindow:
+    VirtioGpuPciCapabilityWindow(cfg_type: kind, bar: bar,
+        offset: offset, len: len, config_ptr: 0x40u8)
+
+describe "VirtIO-GPU modern BAR mapping plan":
+    it "groups overlapping same-BAR capabilities into one envelope":
+        val plan = virtio_gpu_plan_bar_windows([
+            cap(1u8, 4u8, 0x100u64, 0x100u64),
+            cap(2u8, 4u8, 0x180u64, 0x200u64)])
+        expect(plan.ok).to_be(true)
+        expect(plan.windows.len()).to_equal(1)
+        expect(plan.windows[0].bar).to_equal(4u8)
+        expect(plan.windows[0].offset).to_equal(0x100u64)
+        expect(plan.windows[0].len).to_equal(0x280u64)
+
+    it "orders distinct BAR envelopes by BAR index":
+        val plan = virtio_gpu_plan_bar_windows([
+            cap(1u8, 4u8, 0x20u64, 0x10u64),
+            cap(3u8, 0u8, 0x80u64, 0x20u64)])
+        expect(plan.windows.len()).to_equal(2)
+        expect(plan.windows[0].bar).to_equal(0u8)
+        expect(plan.windows[1].bar).to_equal(4u8)
+
+    it "rejects empty malformed and overflowing capability sets":
+        expect(virtio_gpu_plan_bar_windows([]).reason).to_equal(
+            "blocked:no-modern-capabilities")
+        expect(virtio_gpu_plan_bar_windows([
+            cap(1u8, 6u8, 0u64, 1u64)]).reason).to_equal(
+                "blocked:capability-bar-invalid")
+        expect(virtio_gpu_plan_bar_windows([
+            cap(1u8, 0u8, 0u64, 0u64)]).reason).to_equal(
+                "blocked:capability-window-invalid")
+        expect(virtio_gpu_plan_bar_windows([
+            cap(1u8, 0u8, 0x100000000u64, 0x20u64)]).reason).to_equal(
+                "blocked:capability-window-invalid")
+
+    it "derives capability VAs only from a containing mapped envelope":
+        val capability = cap(2u8, 4u8, 0x180u64, 0x20u64)
+        val windows = [VirtioGpuBarMappingWindow(bar: 4u8,
+            offset: 0x100u64, len: 0x200u64)]
+        expect(virtio_gpu_capability_user_addr(capability, windows,
+            [0x800000u64])).to_equal(0x800080u64)
+        expect(virtio_gpu_capability_user_addr(capability, windows,
+            [])).to_equal(0u64)
+        expect(virtio_gpu_capability_user_addr(cap(2u8, 3u8, 0u64, 1u64),
+            windows, [0x800000u64])).to_equal(0u64)

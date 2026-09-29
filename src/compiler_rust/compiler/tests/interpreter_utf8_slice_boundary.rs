@@ -81,6 +81,20 @@ fn adjacent_split_slices_reassemble_the_original() {
     assert_eq!(run(&code), 0, "adjacent byte slices must reassemble the original text");
 }
 
+/// A raw fragment is still a language-level string. A subsequent stepped
+/// slice must operate on its bytes rather than rejecting the internal
+/// `StrBytes` representation as an unsupported value.
+#[test]
+fn stepped_slice_of_split_fragment_preserves_bytes_for_reassembly() {
+    let code = format!(
+        "fn main() -> i64:\n{PROBE}    \\
+         val first = s[0:2]\n    \\
+         if first[::1] + s[2:11] == s:\n        \\
+         return 0\n    1\n\nmain = main()"
+    );
+    assert_eq!(run(&code), 0, "a stepped slice of a raw fragment must remain sliceable");
+}
+
 /// Aligned ranges are the non-vacuity control: they were ALREADY correct, so a
 /// change that broke them would be a regression rather than the fix.
 #[test]

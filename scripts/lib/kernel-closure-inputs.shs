@@ -1,0 +1,136 @@
+#!/bin/sh
+set -eu
+
+root=${KERNEL_CLOSURE_ROOT:-.}
+manifest=${KERNEL_CLOSURE_MANIFEST:-doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn}
+
+die() {
+  echo "kernel-inputs-error: $*" >&2
+  exit 2
+}
+
+[ -f "$root/$manifest" ] || die "missing closure manifest: $manifest"
+[ -d "$root/src/compiler" ] || die "missing compiler tree"
+
+authority_value() {
+  key=$1
+  awk -v key="$key" '
+    $1 == key ":" { count++; value=$2 }
+    END { if (count != 1 || value == "") exit 1; print value }
+  ' "$root/$manifest"
+}
+k1_policy=$(authority_value k1_policy) || die "invalid K1 authority"
+abi_policy=$(authority_value simple_abi_policy) || die "invalid ABI authority"
+plugin_manifest_policy=$(authority_value plugin_manifest_policy) || die "invalid manifest authority"
+coverage_policy=$(authority_value coverage_cutover_policy) || die "invalid coverage authority"
+coverage_implementation=$(authority_value coverage_implementation) || die "invalid coverage implementation authority"
+performance_mode=$(authority_value performance_threshold_mode) || die "invalid performance threshold mode"
+performance_status=$(authority_value performance_threshold_status) || die "invalid performance threshold status"
+performance_baseline_scope=$(authority_value performance_baseline_scope) || die "invalid performance baseline scope"
+performance_steady_percent=$(authority_value performance_steady_rss_percent) || die "invalid steady RSS percentage"
+performance_growth_percent=$(authority_value performance_growth_percent) || die "invalid RSS growth percentage"
+performance_warm_requests=$(authority_value performance_warm_request_count) || die "invalid warm request count"
+[ "$k1_policy" = llvm-cranelift ] && [ "$abi_policy" = v1 ] &&
+  [ "$plugin_manifest_policy" = simple-sdn ] &&
+  [ "$coverage_policy" = atomic-apk-only ] && [ "$coverage_implementation" = apk-only ] &&
+  [ "$performance_mode" = baseline-relative-10-percent ] &&
+  [ "$performance_status" = selected ] &&
+  [ "$performance_baseline_scope" = admitted-per-architecture-receipt ] &&
+  [ "$performance_steady_percent" = 110 ] &&
+  [ "$performance_growth_percent" = 10 ] &&
+  [ "$performance_warm_requests" = 20 ] || die "canonical policy authority drifted"
+[ "${SIMPLE_KERNEL_K1_POLICY:-$k1_policy}" = "$k1_policy" ] || die "SIMPLE_KERNEL_K1_POLICY drifted"
+[ "${SIMPLE_ABI_POLICY:-$abi_policy}" = "$abi_policy" ] || die "SIMPLE_ABI_POLICY drifted"
+[ "${SIMPLE_PLUGIN_MANIFEST_POLICY:-$plugin_manifest_policy}" = "$plugin_manifest_policy" ] || die "SIMPLE_PLUGIN_MANIFEST_POLICY drifted"
+[ "${SIMPLE_COVERAGE_CUTOVER_STATE:-$coverage_policy}" = "$coverage_policy" ] || die "SIMPLE_COVERAGE_CUTOVER_STATE drifted"
+
+if [ -d "$root/src/plugins" ]; then
+  for plugin_dir in "$root"/src/plugins/*; do
+    [ -d "$plugin_dir" ] || continue
+    [ -f "$plugin_dir/simple.sdn" ] ||
+      die "missing selected plugin manifest: ${plugin_dir#"$root"/}/simple.sdn"
+    [ ! -e "$plugin_dir/plugin.sdn" ] &&
+      [ ! -e "$plugin_dir/simple.sdn.candidate" ] &&
+      [ ! -e "$plugin_dir/plugin.sdn.candidate" ] ||
+      die "unselected plugin manifest remains: ${plugin_dir#"$root"/}"
+  done
+fi
+
+workspace=$(mktemp -d) || die "cannot create workspace"
+trap 'rm -rf "$workspace"' EXIT HUP INT TERM
+rules="$workspace/rules"
+selected="$workspace/selected"
+interfaces="$workspace/interfaces"
+files="$workspace/files"
+
+awk '/^[[:space:]]*- class:/ { class_name=$3 }
+     /^[[:space:]]*path:/ { print class_name "\t" $2 }' \
+  "$root/$manifest" > "$rules"
+[ -s "$rules" ] || die "closure manifest has no rules"
+
+classify() {
+  target=$1
+  while IFS="	" read -r class_name pattern; do
+    [ -n "$class_name" ] || continue
+    case "$target" in $pattern) printf '%s\n' "$class_name"; return 0 ;; esac
+  done < "$rules"
+  return 1
+}
+
+: > "$selected"
+{
+  find "$root/src/compiler" -type f \( -name '*.spl' -o -name '*.sdn' -o -name '*.md' \) -print
+  if [ -d "$root/src/plugins" ]; then
+    find "$root/src/plugins" -type f \( -name '*.spl' -o -name '*.sdn' -o -name '*.md' \) -print
+  fi
+} | LC_ALL=C sort > "$files"
+[ -s "$files" ] || die "compiler tree has no classified inputs"
+while IFS= read -r absolute; do
+  relative=${absolute#"$root"/}
+  class_name=$(classify "$relative" || true)
+  [ -n "$class_name" ] || die "unclassified compiler input: $relative"
+  case "$class_name" in
+    K0|K1|P-static|P-dyn) printf '%s\t%s\n' "$class_name" "$relative" >> "$selected" ;;
+    *) die "unknown closure class '$class_name' for $relative" ;;
+  esac
+done < "$files"
+
+[ -s "$selected" ] || die "closure selected no K0/K1 inputs"
+
+: > "$interfaces"
+while IFS="	" read -r class_name relative; do
+  awk -v path="$relative" '
+    /^[[:space:]]*(abi_digest|iface_digest|interface_digest)[[:space:]]*[:=]/ {
+      line=$0; sub(/^[[:space:]]*/, "", line); print path "\t" line
+    }
+    /^[[:space:]]*provides[[:space:]]*:/ { in_provides=1; next }
+    in_provides && /^[[:space:]]*-[[:space:]]+/ {
+      line=$0; sub(/^[[:space:]]*/, "", line); print path "\tprovides " line; next
+    }
+    in_provides && !/^[[:space:]]/ { in_provides=0 }
+  ' "$root/$relative" >> "$interfaces"
+done < "$selected"
+
+printf 'kernel-closure-schema=v1\n'
+printf 'kernel-k1-policy=%s\n' "$k1_policy"
+printf 'simple-abi-policy=%s\n' "$abi_policy"
+printf 'plugin-manifest-policy=%s\n' "$plugin_manifest_policy"
+printf 'coverage-cutover-policy=%s\n' "$coverage_policy"
+composition_dir="$root/src/compositions/kernel_llvm_cranelift"
+[ -d "$composition_dir" ] || die "missing selected K1 composition root: $composition_dir"
+find "$composition_dir" -type f \( -name '*.spl' -o -name '*.sdn' \) -print |
+  LC_ALL=C sort | while IFS= read -r composition_file; do
+    printf 'composition\t%s\t' "${composition_file#"$root"/}"
+    cksum "$composition_file" | awk '{print $1 ":" $2}'
+  done
+printf 'manifest\t%s\t' "$manifest"
+cksum "$root/$manifest" | awk '{print $1 ":" $2}'
+while IFS="	" read -r class_name relative; do
+  case "$class_name" in
+    K0|K1)
+      printf 'source\t%s\t%s\t' "$class_name" "$relative"
+      cksum "$root/$relative" | awk '{print $1 ":" $2}'
+      ;;
+  esac
+done < "$selected"
+LC_ALL=C sort -u "$interfaces" | sed 's/^/interface\t/'

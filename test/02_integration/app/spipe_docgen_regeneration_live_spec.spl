@@ -35,6 +35,7 @@ val out_dir_a = "{work_dir}/out_a"
 val out_dir_b = "{work_dir}/out_b"
 val out_dir_c = "{work_dir}/out_c"
 val out_dir_d = "{work_dir}/out_d"
+val receipt_path = "{work_dir}/docgen-provenance.env"
 
 fn tiny_spec_content() -> text:
     "# Tiny Feature\n" +
@@ -142,3 +143,46 @@ describe "spipe_docgen live regeneration determinism":
 
         step("Verify the no-sidecar manual does not contain the evidence marker")
         expect(output_c.contains("LIVE_REGEN_EVIDENCE_MARKER")).to_equal(false)
+
+    # @prev("is unaffected by sidecar absence, byte-for-byte across two runs")
+    it "atomically emits the exact binary-bound provenance-v2 shape":
+        step("Remove any prior focused receipt")
+        if native_fs_exists(receipt_path):
+            file_delete(receipt_path)
+
+        val binary_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val spec_sha = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val manual_sha = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        val written = write_docgen_provenance_receipt(
+            receipt_path,
+            "/admitted/simple",
+            binary_sha,
+            "test/03_system/example_spec.spl",
+            spec_sha,
+            "doc/06_spec/03_system/example_spec.md",
+            manual_sha,
+            "doc/06_spec",
+            true
+        )
+        expect(written).to_equal(true)
+        val receipt = native_fs_read_string(receipt_path)
+        expect(receipt.starts_with("schema=mci-spipe-docgen-provenance-v2\ntool_version=")).to_equal(true)
+        expect(receipt).to_contain("\ncommand=simple spipe-docgen test/03_system/example_spec.spl --output doc/06_spec --no-index\n")
+        expect(receipt).to_contain("\nbinary_path=/admitted/simple\nbinary_sha256={binary_sha}\n")
+        expect(receipt).to_contain("\nspec_sha256={spec_sha}\nmanual_path=doc/06_spec/03_system/example_spec.md\nmanual_sha256={manual_sha}\n")
+        expect(receipt.ends_with("\nexit_code=0\nstub_count=0\nmanual_quality=pass\nresult=PASS\n")).to_equal(true)
+
+        step("Reject malformed hashes without changing the published receipt")
+        val rejected = write_docgen_provenance_receipt(
+            receipt_path,
+            "/admitted/simple",
+            "bad-hash",
+            "test/03_system/example_spec.spl",
+            spec_sha,
+            "doc/06_spec/03_system/example_spec.md",
+            manual_sha,
+            "doc/06_spec",
+            true
+        )
+        expect(rejected).to_equal(false)
+        expect(native_fs_read_string(receipt_path)).to_equal(receipt)

@@ -1,3 +1,8 @@
+---
+name: implement
+description: "Engineer agent that makes failing specs pass using Superpowers TDD pattern"
+---
+
 # SStack Phase 5: Implement — Engineer Agent
 
 ## Role

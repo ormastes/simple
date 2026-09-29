@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-kpf-generated-sdk.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+cat >"$build_dir/example_echo_test.rs" <<EOF
+#![allow(dead_code)]
+#[path = "$repo_root/test/fixtures/kernel_plugin_schema/generated/example_echo.rs"]
+mod generated;
+
+#[test]
+fn shared_malformed_abi_layout_vectors_match() {
+    assert_eq!(generated::KPF_ABI_LAYOUT_VECTORS_V1.len(), 9);
+    for vector in generated::KPF_ABI_LAYOUT_VECTORS_V1 {
+        assert_eq!(
+            generated::kpf_validate_abi_layout_vector_v1(&vector),
+            vector.expected_valid,
+            "{}",
+            vector.name,
+        );
+    }
+}
+EOF
+rustc --edition=2021 --test --deny warnings \
+    "$build_dir/example_echo_test.rs" -o "$build_dir/example_echo_test"
+"$build_dir/example_echo_test"
+
+cat >"$build_dir/example_echo.cpp" <<'CPP'
+#include "example_echo.hpp"
+#include "kpf_v1.hpp"
+
+#include <cstddef>
+#include <string_view>
+
+static_assert(simple::kpf::generated::abi_v1 == SIMPLE_KPF_ABI_V1);
+static_assert(simple::kpf::generated::interface_Admin::major == 2);
+static_assert(simple::kpf::generated::interface_Query::required_operation_mask == 2);
+static_assert(simple::kpf::generated::interface_Query::operation_poll_slot == 0);
+static_assert(simple::kpf::generated::interface_Query::operation_submit_slot == 1);
+static_assert(sizeof(simple_kpf_id128_v1) == 16);
+static_assert(offsetof(simple_kpf_call_header_v1, generation) == 8);
+static_assert(std::string_view(simple::kpf::generated::schema_digest).size() == 64);
+static_assert(simple::kpf::generated::abi_layout_vectors_v1.size() == 9);
+
+int main() {
+    for (const auto &vector : simple::kpf::generated::abi_layout_vectors_v1) {
+        if (simple::kpf::generated::validate_abi_layout_vector_v1(vector) !=
+            vector.expected_valid) {
+            return 1;
+        }
+    }
+    return 0;
+}
+CPP
+
+c++ -std=c++17 -Wall -Wextra -Werror \
+    -I"$repo_root/test/fixtures/kernel_plugin_schema/generated" \
+    -I"$repo_root/sdk/kernel_plugin/cpp" \
+    "$build_dir/example_echo.cpp" -o "$build_dir/example_echo"
+"$build_dir/example_echo"
+
+printf '%s\n' "KPF_GENERATED_SDK_CONFORMANCE: PASS"

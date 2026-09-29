@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.cold_package_scc_v1.{
+    ColdPackageEdgeV1, cold_package_scc_v1
+}
+use compiler.driver.cache.package_scc_scheduler.{package_scc_identity_v1}
+
+describe "linear cold package SCC projection":
+    it "groups a cross-package cycle and leaves a dependent separate":
+        val variant = sha256_text("variant")
+        val result = cold_package_scc_v1(
+            ["c", "a", "b"],
+            [ColdPackageEdgeV1("a", "b"),
+             ColdPackageEdgeV1("b", "a"),
+             ColdPackageEdgeV1("c", "a")], variant)
+        match result:
+            case Err(reason): fail("SCC projection failed: {reason}")
+            case Ok(groups):
+                expect(groups.len()).to_equal(2)
+                var cycle_found = false
+                var single_found = false
+                for group in groups:
+                    if group.packages == ["a", "b"]:
+                        cycle_found = true
+                        expect(group.identity).to_equal(
+                            package_scc_identity_v1(["a", "b"], variant))
+                    if group.packages == ["c"]:
+                        single_found = true
+                expect(cycle_found).to_equal(true)
+                expect(single_found).to_equal(true)
+
+    it "handles a long acyclic chain without recursive stack growth":
+        var packages: [text] = []
+        var edges: [ColdPackageEdgeV1] = []
+        var index = 0
+        while index < 128:
+            packages.push("p{index}")
+            if index > 0:
+                edges.push(ColdPackageEdgeV1("p{index - 1}", "p{index}"))
+            index = index + 1
+        val result = cold_package_scc_v1(
+            packages, edges, sha256_text("variant"))
+        match result:
+            case Err(reason): fail("long chain failed: {reason}")
+            case Ok(groups):
+                expect(groups.len()).to_equal(128)
+                for group in groups:
+                    expect(group.packages.len()).to_equal(1)
+
+    it "rejects edges outside the frozen package set":
+        val result = cold_package_scc_v1(
+            ["a"], [ColdPackageEdgeV1("a", "missing")],
+            sha256_text("variant"))
+        match result:
+            case Ok(_): fail("unknown package edge was admitted")
+            case Err(reason):
+                expect(reason).to_equal("cold-scc-edge-unknown:a:missing")

@@ -1,6 +1,14 @@
 # Bug: Native List Indexing with Loop Variables
 
-Status: resolved (2026-06-14)
+## Closed 2026-09-13 — Resolved 2026-06-14 in HIR `Node::For` lowering; interpreter parity re-confirmed
+
+- **inferred** The entry records the root cause and fix: `rt_range` reported element type `ANY` for the loop var, so `stmt_lowering.rs` now infers the concrete integer element type from the range start argument.
+- **measured** The interpreter reference behaviour the fix had to match is correct on the current seed: the entry's exact repro printed `items[0] = 10 / items[1] = 20 / items[2] = 30 / items[3] = 40`, with none of the `items[<value:0x1>]` corruption.
+- **measured** The native half could not be re-run: `bin/simple compile --native` fails on this host with `ld: cannot find -lsimple_runtime` / `ld: cannot find -lc`, so no native lane exists here.
+- **inferred** Closing on the recorded seed fix plus interpreter parity; re-open with a native transcript if the corruption is ever seen again.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Date:** 2026-06-05
 **Severity:** High

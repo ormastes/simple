@@ -24,7 +24,7 @@ Finance reporting and period control over the SAME journal the goods-sale vertic
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/finance_vertical_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -78,6 +78,11 @@ Lane: .spipe/simple_enterprise_suite (W6-C, finance vertical).
 
 #### matches hand-computed per-account totals and balances
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- matches hand-computed per-account totals and balances
 - Seed a sale (2500c x 2) placed and paid
 - Trial balance totals are the hand-computed 10000/10000
    - Expected: tb.debit_total equals `10000`
@@ -96,10 +101,12 @@ Lane: .spipe/simple_enterprise_suite (W6-C, finance vertical).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches hand-computed per-account totals and balances")
 step("Seed a sale (2500c x 2) placed and paid")
 val store = fresh_store("tb")
 seed_sale(store, tenant_a())
@@ -132,6 +139,7 @@ store_close(store)
 
 #### shows the unpaid order in AR and clears it after payment
 
+- shows the unpaid order in AR and clears it after payment
 - Place an order without paying
 - AR lists the unpaid order with the 5000c open amount
    - Expected: open_before.len() equals `1`
@@ -146,10 +154,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("shows the unpaid order in AR and clears it after payment")
 step("Place an order without paying")
 val store = fresh_store("ar")
 val t = tenant_a()
@@ -182,6 +192,7 @@ store_close(store)
 
 #### lists a real procurement payable with the hand-computed total
 
+- lists a real procurement payable with the hand-computed total
 - Seed two purchase-to-stock flows (oracle 3x700 + 2x250 = 2600c)
 - The journal really holds the payable (independent oracle side)
    - Expected: proc_payable_total(store, "tenant-a") equals `2600`
@@ -202,10 +213,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("lists a real procurement payable with the hand-computed total")
 step("Seed two purchase-to-stock flows (oracle 3x700 + 2x250 = 2600c)")
 val store = fresh_store("ap")
 proc_setup(store)
@@ -248,6 +261,7 @@ store_close(store)
 
 #### keeps one tenant's payables out of another's AP report
 
+- keeps one tenant's payables out of another's AP report
 - Only tenant A has procurement activity
    - Expected: fin_ap_open(store, "tenant-a").len() equals `1`
    - Expected: fin_ap_open(store, "tenant-b").len() equals `0`
@@ -256,10 +270,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("keeps one tenant's payables out of another's AP report")
 step("Only tenant A has procurement activity")
 val store = fresh_store("ap_tenants")
 proc_setup(store)
@@ -275,6 +291,7 @@ store_close(store)
 
 #### denies a backdated goods_sale refund after close (the money case)
 
+- denies a backdated goods_sale refund after close (the money case)
 - Seed a paid sale, verify refund would otherwise be legal
    - Expected: sale_order_status(store, "tenant-a", "order-100") equals `paid`
    - Expected: fin_period_status(store, "tenant-a") equals `0`
@@ -294,10 +311,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 37 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies a backdated goods_sale refund after close (the money case)")
 step("Seed a paid sale, verify refund would otherwise be legal")
 val store = fresh_store("close")
 val t = tenant_a()
@@ -339,6 +358,7 @@ store_close(store)
 
 #### captures the close snapshot and replays idempotently
 
+- captures the close snapshot and replays idempotently
 - Seed and close with the oracle totals on the books
    - Expected: closed.reason equals `accepted`
 - The close report snapshot equals the hand-computed totals
@@ -356,10 +376,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("captures the close snapshot and replays idempotently")
 step("Seed and close with the oracle totals on the books")
 val store = fresh_store("snapshot")
 val t = tenant_a()
@@ -399,6 +421,7 @@ store_close(store)
 
 #### tenant A's close never locks or leaks into tenant B
 
+- tenant A's close never locks or leaks into tenant B
 - Seed and close tenant A
    - Expected: fin_period_status(store, "tenant-a") equals `far_future()`
 - Tenant B's ledger is untouched and still open for posting
@@ -412,10 +435,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tenant A's close never locks or leaks into tenant B")
 step("Seed and close tenant A")
 val store = fresh_store("tenants")
 val ta = tenant_a()
@@ -444,6 +469,7 @@ store_close(store)
 
 #### reopens with the lock, snapshot, and lock enforcement intact
 
+- reopens with the lock, snapshot, and lock enforcement intact
 - Seed, close, and close the store handle
 - Reopen the same database
 - Lock and snapshot survived
@@ -457,10 +483,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reopens with the lock, snapshot, and lock enforcement intact")
 step("Seed, close, and close the store handle")
 val store = fresh_store("restart")
 val t = tenant_a()
@@ -509,3 +537,54 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `afe6e4f84f06daab4600806761c667d08a19eeaf9062337af26d63574b6d60bd`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `afe6e4f84f06daab4600806761c667d08a19eeaf9062337af26d63574b6d60bd`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `afe6e4f84f06daab4600806761c667d08a19eeaf9062337af26d63574b6d60bd`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/finance_vertical_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/finance_vertical_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/finance_vertical_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/finance_vertical_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: audience, scope, assumptions/preconditions, primary workflow
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/finance_vertical_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 33 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/finance_vertical_spec.spl:163:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'matches hand-computed per-account totals and balances' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/finance_vertical_spec.spl:192:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'shows the unpaid order in AR and clears it after payment' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/finance_vertical_spec.spl:221:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'lists a real procurement payable with the hand-computed total' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

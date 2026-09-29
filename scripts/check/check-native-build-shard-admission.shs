@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+main=src/app/cli/native_build_main.spl
+policy=src/app/cli/native_build_shard_admission.spl
+
+require() {
+    pattern=$1
+    file=$2
+    if ! grep -Fq "$pattern" "$file"; then
+        echo "FAIL: missing '$pattern' in $file" >&2
+        exit 1
+    fi
+}
+
+require 'DEFAULT_SHARD_RSS_BUDGET_MB: i64 = 5120' "$policy"
+require 'DEFAULT_SHARD_ESTIMATED_RSS_MB: i64 = 2560' "$policy"
+require 'native_build_memory_admit_shards(threads)' "$main"
+require 'SIMPLE_BOOTSTRAP_LOW_MEMORY' "$main"
+require 'SIMPLE_SHARD_RSS_BUDGET_MB' "$main"
+require 'SIMPLE_SHARD_ESTIMATED_RSS_MB' "$main"
+require 'SIMPLE_SHARD_MAX_WORKERS' "$main"
+
+# Micro-harness for the policy table.  It has no compiler startup or source
+# scan, so regressions in the admission arithmetic remain cheap to diagnose.
+admit() {
+    requested=$1 budget=$2 estimate=$3 hard_max=$4
+    admitted=$requested
+    [ "$budget" -ge 0 ] || budget=5120
+    if [ "$budget" -gt 0 ]; then
+        [ "$estimate" -gt 0 ] || estimate=2560
+        slots=$((budget / estimate))
+        [ "$slots" -ge 1 ] || slots=1
+        [ "$slots" -ge "$admitted" ] || admitted=$slots
+    fi
+    if [ "$hard_max" -gt 0 ] && [ "$hard_max" -lt "$admitted" ]; then
+        admitted=$hard_max
+    fi
+    [ "$admitted" -ge 1 ] || admitted=1
+    printf '%s\n' "$admitted"
+}
+
+[ "$(admit 8 5120 2560 0)" = 2 ]
+[ "$(admit 8 1024 2560 0)" = 1 ]
+[ "$(admit 8 20480 2560 0)" = 8 ]
+[ "$(admit 8 0 2560 3)" = 3 ]
+[ "$(admit 8 5120 0 0)" = 2 ]
+[ "$(admit 8 -1 2560 0)" = 2 ]
+
+echo "PASS: native-build shard admission source contract and policy table"

@@ -1,0 +1,83 @@
+# RV64 freestanding boot-TCP port-selection policy.
+#
+# The C runtime retains boxed-text ABI entrypoints, UART diagnostics, network
+# readiness, packet/session state, and MMIO.  This hardware-free owner preserves
+# the historical backward address scan and explicit-port retention semantics.
+
+val RV64_BOOT_TCP_DEFAULT_PORT: i64 = 8080
+val RV64_BOOT_TCP_POLICY_COVERAGE_REQUIRED: u64 = 0x7ff
+
+var g_rv64_boot_tcp_selected_port: i64 = RV64_BOOT_TCP_DEFAULT_PORT
+var g_rv64_boot_tcp_policy_coverage: u64 = 0
+
+fn _rv64_boot_tcp_policy_coverage_hit(bit: u64):
+    g_rv64_boot_tcp_policy_coverage =
+        g_rv64_boot_tcp_policy_coverage | ((1 as u64) << bit)
+
+fn rv64_boot_tcp_policy_reset():
+    g_rv64_boot_tcp_selected_port = RV64_BOOT_TCP_DEFAULT_PORT
+
+fn rv64_boot_tcp_policy_coverage_reset():
+    g_rv64_boot_tcp_policy_coverage = 0
+
+fn rv64_boot_tcp_policy_coverage_mask() -> u64:
+    g_rv64_boot_tcp_policy_coverage
+
+fn rv64_boot_tcp_policy_coverage_required() -> u64:
+    RV64_BOOT_TCP_POLICY_COVERAGE_REQUIRED
+
+fn rv64_boot_tcp_selected_port() -> i64:
+    g_rv64_boot_tcp_selected_port
+
+@export("C", name: "rt_riscv64_boot_tcp_select_port")
+fn rv64_boot_tcp_select_port(addr: text) -> i64:
+    g_rv64_boot_tcp_selected_port = RV64_BOOT_TCP_DEFAULT_PORT
+    if addr.len() == 0:
+        _rv64_boot_tcp_policy_coverage_hit(0)
+        return g_rv64_boot_tcp_selected_port
+
+    var i = addr.len()
+    var multiplier: u64 = 1
+    var parsed: u64 = 0
+    var saw_digit = false
+    while i > 0:
+        val ch = addr.char_at(i - 1)
+        if ch >= "0" and ch <= "9":
+            _rv64_boot_tcp_policy_coverage_hit(2)
+            val byte = ch as u8
+            parsed = parsed + ((byte - 0x30u8) as u64) * multiplier
+            multiplier = multiplier * 10
+            saw_digit = true
+            i = i - 1
+            continue
+        if ch == ":" and saw_digit:
+            _rv64_boot_tcp_policy_coverage_hit(3)
+            if parsed > 0 and parsed <= 65535:
+                _rv64_boot_tcp_policy_coverage_hit(4)
+                g_rv64_boot_tcp_selected_port = parsed as i64
+            else:
+                _rv64_boot_tcp_policy_coverage_hit(5)
+            return g_rv64_boot_tcp_selected_port
+        if saw_digit:
+            _rv64_boot_tcp_policy_coverage_hit(6)
+            return g_rv64_boot_tcp_selected_port
+        _rv64_boot_tcp_policy_coverage_hit(1)
+        i = i - 1
+
+    if saw_digit:
+        _rv64_boot_tcp_policy_coverage_hit(7)
+    else:
+        _rv64_boot_tcp_policy_coverage_hit(8)
+    g_rv64_boot_tcp_selected_port
+
+@export("C", name: "rt_riscv64_boot_tcp_select_explicit_port")
+fn rv64_boot_tcp_select_explicit_port(port: i64) -> i64:
+    if port > 0 and port <= 65535:
+        _rv64_boot_tcp_policy_coverage_hit(9)
+        g_rv64_boot_tcp_selected_port = port
+    else:
+        _rv64_boot_tcp_policy_coverage_hit(10)
+    g_rv64_boot_tcp_selected_port
+
+fn rv64_boot_tcp_policy_link_anchor() -> bool:
+    true

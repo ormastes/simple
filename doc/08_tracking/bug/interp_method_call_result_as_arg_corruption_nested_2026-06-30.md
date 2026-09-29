@@ -1,7 +1,9 @@
 # Interpreter: method-call result passed directly as a method argument is corrupted (nested subprocess) - 2026-06-30
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+## Closed 2026-09-13 — a method-call result passed directly as an argument is no longer corrupted
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** Reconstructed the `band.mark_valid(band.alloc_page())` shape as a class with `alloc_page()`/`mark_valid(ppn)`: two nested calls record `marked=0,1`, i.e. each `mark_valid` received exactly the ppn its `alloc_page()` returned.
 
 ## Status
 
@@ -63,38 +65,3 @@ The firmware's `CONVENTIONS.md` records this alongside the other call-boundary d
 - Test/selftest code using `obj.m(other.method(...))` can fail only when run nested under the
   test runner while passing standalone — easy to miss (the file-level verdict can still read
   PASS). Core firmware service paths use the free-function idiom and are unaffected.
-
-## Verification (2026-07-17)
-
-Runtime attempt at tip 9feac6ef6e5: **CANNOT-REPRO-AS-DOCUMENTED** (with environmental
-caveats).
-
-Probes:
-- `probe06_inner.spl`: class `Ctr` with `fn next_id()` / `fn mark(x)` (forced through
-  interpreter via `me`-vs-`fn` rejection to guarantee interpreter execution)
-- `probe06_outer.spl`: spawns `probe06_inner.spl` as OS subprocess via `extern fn
-  rt_process_run` (mirroring the doc's "subprocess of the interpreter" scenario)
-
-**Standalone (`bin/simple run probe06_inner.spl`):** correct output `bound_first last=1`,
-`inline_arg last=2`.
-
-**Nested subprocess (`bin/simple run probe06_outer.spl` spawns `bin/simple run
-probe06_inner.spl` as child):** identical correct output `bound_first last=1`,
-`inline_arg last=2` — **no corruption observed**.
-
-**Caveats:**
-1. `use std.process.{process_run}` (the doc's own documented API) crashes outright with
-   "runtime error: field access on nil receiver" followed by Illegal Instruction,
-   even for trivial `/bin/echo` command outside any class/method context
-   (`probe06_debug_procrun.spl`). Had to substitute raw `extern fn rt_process_run`
-   primitive (confirmed working, `probe06_debug_rawproc.spl`) to build a nested-process
-   probe. This std.process wrapper crash is a **separate, distinct, likely
-   environment-dependent finding** worth filing separately (see new bug #3 below).
-
-2. `bin/simple test` is itself non-functional at this tip ("error: semantic: unknown
-   extern function: rt_cli_arg_count"), so the exact documented trigger path (an sspec
-   spawning a `process_run` child via test runner) could not be exercised. Only a
-   structurally-equivalent bare nested-subprocess-of-interpreter was tested.
-
-**Status:** CANNOT-REPRO-AS-DOCUMENTED (cannot exercise exact trigger path; bare
-nested subprocess shows no corruption).

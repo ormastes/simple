@@ -1,4 +1,9 @@
 # `test/unit/` is a rotting legacy mirror of `test/01_unit/` — and BOTH run
+## Closed 2026-09-16 — ...enuinely ahead.** ## 5. What was resolved here The only content `test/unit` holds that `te
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Date: 2026-08-04
 Base measured: origin `main` @ `44bf140626b313d9b51f647c493ad0336133d45d`
@@ -165,3 +170,4 @@ A smaller interim step, if deletion is too aggressive: add `test/unit/` to the
 discovery skip list in `test_runner_files.spl:360-395` (which already excludes
 `/fuzz/`, `/deploy/`, `/security/`, etc.). That stops the false verdicts and
 halves unit-tier runtime without deleting anything.
+

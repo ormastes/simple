@@ -1,7 +1,25 @@
 # Bootstrap Stage 4 AST/HIR overlap exhausts the no-GC heap registry
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## 2026-09-22 current-source ownership audit
+
+Still open. Baseline `e0dd873da1b` already contains the streaming AST/HIR
+architecture. Existing [PR #1282](https://github.com/ormastes/simple/pull/1282)
+owns the missing phase-memo promotion on both streaming and retained-parser
+HIR paths; [PR #1203](https://github.com/ormastes/simple/pull/1203) owns a
+separate allocation-registry churn repair. Neither is full Stage 4 admission.
+
+The baseline Linux x86_64 GCC core-C capsule passed 65 checks, including
+transient ownership and thread-affinity controls. Capsule build/check wall
+time was 87.56 seconds and GNU time maximum RSS was 144,624 KiB; these are
+runtime-capsule measurements, not compiler or aggregate process-tree RSS.
+The bounded compiler gate rejected the installed Windows seed's missing
+candidate provenance before compilation. No compiler before/after memory
+comparison, native cross-host parity, or bug closure is claimed.
+See the [audit and retained receipts](../../09_report/stage4_ast_hir_memory_audit_2026-09-22.md).
 
 ## Status
 
@@ -370,61 +388,3 @@ shadow relay regressions bring the serialized suite to 25/25. This is focused
 evidence only; method/lambda lifecycle review and a
 new bounded Retry 12 remain required for Stage 4 admission.
 
----
-
-## 2026-08-17 (W2 driver lane) — FAMILY COLLAPSED; ROOT IS NOT IN 80.driver
-
-These three rows were re-examined together as instructed, on the hypothesis that
-one cause spans them (AST and HIR arenas live simultaneously):
-
-- `bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20`
-- `stage3_current_source_hir_rss_termination_2026-08-14`
-- `bootstrap_stage4_ast_hir_overlap_memory_2026-07-27`
-
-**The hypothesis is right, and the root cause is already written down in source,
-with probe numbers — in `src/compiler/80.driver/driver_types.spl:1080-1100`:**
-
-> The three evictions below drop references only. With no GC and no refcounting
-> that reclaims NOTHING -- measured at 0 of 2001 allocations by
-> `src/runtime/test/rt_driver_eviction_reclaim_selfcheck.c` (probe P0).
-> ... Unblocking this needs class instances to be identifiable at runtime, a
-> codegen/representation change, **NOT a driver change**.
-
-So `evict_sources()` / `evict_ast()` / `evict_hir()` / `evict_mir()` are all
-no-ops on the bootstrap lane, which is exactly why "clears the AST dictionary
-after HIR" never reduced the peak, and why moving the eviction earlier in the
-loop cannot help either. The overlap described in the 07-27 row is not a
-sequencing defect in the driver; it is that nothing the driver can call frees
-anything. The two obvious driver-level "fixes" were both already tried and both
-measured HARMFUL: `rt_dict_free_deep` frees key strings aliased from outside the
-dict by HIR/AST/SymbolTable (use-after-free, probes P2/P3), and per-module
-lowerer reconstruction is the retained-aggregate boundary the 08-14 row fixed.
-
-### Verdict per row
-- **08-14** — source fix CONFIRMED PRESENT and now guarded by a spec (single
-  lowerer hoisted out of the loop, one reused diagnostics buffer, no
-  surface/trait copies through per-iteration locals). Executable RSS evidence
-  still requires one canonical Stage-3 transaction; not run (a user bootstrap
-  was live and `build/bootstrap/**` was off-limits).
-- **07-20 / 07-27** — **BLOCKED-CROSS-OWNER.** The remaining fix is a runtime
-  representation change so that a class instance carries a tag/header the heap
-  registry can identify, in `src/runtime/runtime_native.c` (heap registry /
-  `rt_alloc` class-instance representation) plus the native class-layout emitter.
-  Those files are outside the 80.driver ownership boundary, so nothing was
-  edited there. No driver-side change can close these two rows.
-
-### What was NOT measured, stated plainly
-No RSS number was produced for the pure-Simple lane in this session. The only
-figure obtained was **3,050,124 KiB peak RSS** (`/usr/bin/time -v`) for the
-**Rust seed** `bin/release/x86_64-unknown-linux-gnu/simple` interpreting
-`src/compiler/80.driver/main.spl --check <one tiny file>` — a different memory
-model entirely, and therefore evidence for nothing on these rows. It is recorded
-only so it is not mistaken later for a lane measurement. Per the 08-14 row's own
-warning: on this host a status-143 exit is indistinguishable from an earlyoom or
-watchdog kill, so **143 without a monotonic RSS trace is not a reproduction.**
-
-### Family guard
-`test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` —
-`Results: 5 total, 5 passed, 0 failed`. It fails if a deep-free call is
-reintroduced into the driver context, if the measured hazard rationale is
-deleted, or if the HIR loop goes back to constructing a lowerer per source.

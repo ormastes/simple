@@ -1,0 +1,62 @@
+# Focused regressions for URL/structured-header redaction audit.
+# @cover src/app/devhub/redaction.spl 30%
+
+use std.spec.step
+use app.devhub.redaction.redact_devhub_diagnostic
+use app.devhub.adapter_bitbucket_protocol.{bb_map_http_error, BB_OP_GENERAL, BB_OP_MERGE}
+
+
+describe "DevHub redaction follow-up":
+
+    it "redacts URL secrets without skipping a later body assignment":
+        step("Continue masking outside the URL after URL credentials are removed")
+        val raw = "callback=https://alice:pw@example.com/?token=url-secret, password=body-secret"
+        val safe = "callback=https://***@example.com/?token=***, password= ***"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+    it "masks complete Cookie and Set-Cookie values including commas":
+        step("Never expose a second cookie after a comma")
+        expect(redact_devhub_diagnostic("Cookie: sid=one, refresh=two")).to_equal("Cookie: ***")
+        expect(redact_devhub_diagnostic("Set-Cookie: sid=one, refresh=two")).to_equal("Set-Cookie: ***")
+
+    it "masks prefixed assignments on every line":
+        step("Recognize the final assignment name after diagnostic labels and newlines")
+        val raw = "response body: token=first-secret\n    password: second-secret"
+        val safe = "response body: token= ***\n    password: ***"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+    it "masks userinfo in every URL":
+        step("Continue scanning after credentialed and credential-free URLs")
+        val raw = "mirrors: https://alice:first@one.example/a https://public.example/b https://bob:second@two.example/c"
+        val safe = "mirrors: https://***@one.example/a https://public.example/b https://***@two.example/c"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+    it "masks userinfo containing RFC 3986 punctuation":
+        step("Treat comma, semicolon, parentheses, and apostrophe as valid userinfo")
+        val raw = "remote=https://user,name;tag(test)'s:password@example.com/path"
+        val safe = "remote=https://***@example.com/path"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+    it "masks query secrets containing commas and preserves diagnostic suffixes":
+        step("Keep commas inside query values unless comma-space starts diagnostic text")
+        val raw = "remote=https://example.com/api?token=alpha,beta&space=ENG, password=body-secret"
+        val safe = "remote=https://example.com/api?token=***&space=ENG, password= ***"
+        expect(redact_devhub_diagnostic(raw)).to_equal(safe)
+
+        val multiple = "first=https://one.example/api?mode=read, second=https://two.example/api?token=alpha,beta, status=failed"
+        val multiple_safe = "first=https://one.example/api?mode=read, second=https://two.example/api?token=***, status=failed"
+        expect(redact_devhub_diagnostic(multiple)).to_equal(multiple_safe)
+
+
+describe "Bitbucket protocol error redaction":
+
+    it "redacts provider bodies included in mapped errors":
+        step("Apply the shared diagnostic policy before returning raw provider text")
+        val merge = bb_map_http_error(403, "token=merge-secret", BB_OP_MERGE)
+        expect(merge.message).to_equal("blocked: branch policy or merge restriction (HTTP 403): token= ***")
+        val forbidden = bb_map_http_error(403, "authorization: Bearer forbidden-secret", BB_OP_GENERAL)
+        expect(forbidden.message).to_equal("blocked-auth: forbidden (HTTP 403): authorization: ***")
+        val conflict = bb_map_http_error(409, "remote=https://alice:conflict-secret@example.com/pr/1", BB_OP_GENERAL)
+        expect(conflict.message).to_equal("blocked-conflict: PR is not mergeable (HTTP 409): remote=https://***@example.com/pr/1")
+        val fallback = bb_map_http_error(500, "provider body: password=fallback-secret", BB_OP_GENERAL)
+        expect(fallback.message).to_equal("provider body: password= ***")

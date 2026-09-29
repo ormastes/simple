@@ -1,4 +1,8 @@
 # CudaExec cannot back `jit(remote(cuda(...)))` cells yet — no per-cell PTX compile path
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-08-08
 Found by: Task K5 (`CudaExec` notebook lane)
@@ -57,3 +61,4 @@ correctness defect. Only `KERNEL_PTX_PATH` (line 60), a checked-in fixed kernel
 artifact, ever executes.
 
 Not proven: no `Results:` line — CUDA hardware lanes were not exercised.
+

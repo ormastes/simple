@@ -1,4 +1,8 @@
 # V-lane suite: `compositor_occlusion_spec.spl` times out under shared-WC contention at the plan's 600s floor
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Status**: OPEN (RED-by-design — the timeout is real load contention, not a
   code defect; the plan explicitly bounds the fix's headroom, so this is not
@@ -79,3 +83,19 @@ Either of:
   29.07, 22.51`.
 - Binary provenance: `readlink -f bin/simple` (self-hosted binary per repo
   default tooling policy).
+
+## Triage 2026-09-13
+Reconfirmed: RED-by-design per this record (real load contention vs the
+plan's bounded timeout, not a code defect). Not re-run (host load makes a
+timeout-sensitive re-run unreliable evidence either way). Left as-is, no
+code change attempted.
+## Re-check 2026-09-13 (BUGFIX-12 shard 22)
+
+`uptime` at this shard's start: `load average: 28.82, 31.59, 29.21` — still
+well above the "roughly <= 10" unblock threshold, consistent with the
+documented environmental cause. Per the doc's own guidance this is not fixed
+by widening the timeout; a real fix (splitting the pixel-content examples out
+of the timed critical path, or a reserved/serialized slot) is a perf-suite
+architecture change out of scope for a shard triage pass. Did not re-run the
+suite (would reproduce the same contention-driven timeout). Leaving OPEN.
+

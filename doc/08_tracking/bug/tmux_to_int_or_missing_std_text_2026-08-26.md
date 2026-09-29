@@ -1,4 +1,8 @@
 # tmux: `to_int_or` imported from `std.text`, which never defined it (2026-08-26)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Symptom.** `bin/simple test test/01_unit/lib/std/tmux/tmux_api_spec.spl` failed
 at load with `semantic: function `to_int_or` not found` (three times, one per
@@ -18,3 +22,4 @@ so no new spec). **Verification.** Same command now prints
 `total_failed:0` but also `total_passed:0` / `success:false` both before and
 after the fix — a pre-existing aggregation quirk of the seed `--json` path, not
 caused by this change and not touched here.
+

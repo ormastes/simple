@@ -98,6 +98,36 @@ pub extern "C" fn rt_random_hex(len: i64) -> crate::value::RuntimeValue {
     value
 }
 
+/// Second lane (rt-dual-implementation ratchet) of the C `rt_random_bytes_c` in
+/// `src/runtime/runtime_native.c`: fill a packed byte array with OS entropy.
+/// Entropy failure is reported as nil, never a zero-filled buffer that looks
+/// random, matching the C lane's contract.
+#[no_mangle]
+pub extern "C" fn rt_random_bytes_c(count: u64) -> crate::value::RuntimeValue {
+    let len = match usize::try_from(count) {
+        Ok(len) => len,
+        Err(_) => return crate::value::RuntimeValue::NIL,
+    };
+    let array = crate::value::collections::rt_byte_array_new_len(count);
+    if array.is_nil() {
+        return crate::value::RuntimeValue::NIL;
+    }
+    if len == 0 {
+        return array;
+    }
+    let mut bytes = vec![0u8; len];
+    if fill_random_bytes(&mut bytes).is_err() {
+        secure_wipe(&mut bytes);
+        return crate::value::RuntimeValue::NIL;
+    }
+    let wrote = crate::value::byte_array_write(array, &bytes);
+    secure_wipe(&mut bytes);
+    if !wrote {
+        return crate::value::RuntimeValue::NIL;
+    }
+    array
+}
+
 #[cfg(test)]
 fn secure_random_hex_exact_with<F, E>(len: i64, fill: F) -> Option<Vec<u8>>
 where

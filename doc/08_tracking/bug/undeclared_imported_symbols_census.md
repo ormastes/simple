@@ -1,4 +1,8 @@
 # Census: imported symbols that are declared nowhere in the repo
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — enumerated, triaged, not fixed (confirmed still accurate,
 re-verified 2026-08-10)
@@ -897,3 +901,4 @@ Completed 2026-08-10 in commit `f6a6145ad4d5002731d019f3b0cc13b19c4c8b54 / b5119
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+

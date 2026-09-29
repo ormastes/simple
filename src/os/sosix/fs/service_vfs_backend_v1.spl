@@ -3,8 +3,7 @@
 use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
 use os.sosix.fs.service_adapter_v1.{
     SosixFsServicePrepareResultV1,
-    SOSIX_FS_SERVICE_STATUS_INVALID_V1,
-    SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1
+    SOSIX_FS_SERVICE_STATUS_INVALID_V1
 }
 
 pub val SOSIX_FS_VFS_STATUS_IO_V1: i32 = -5
@@ -14,25 +13,7 @@ pub trait SosixPositionedVfsBackendV1:
     """Lower-layer contract: operations must never mutate an OFD cursor."""
     fn positioned_io_available() -> bool
     fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>
-    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>
-
-pub class SosixUnavailablePositionedVfsBackendV1:
-    """Production fail-closed backend until a real VFS owner supplies both
-    cursor-independent read-at and write-at primitives.
-
-    This type is deliberately not implemented in terms of seek/read/write or
-    seek/write/restore.  The live syscall shim may retain it while no honest
-    backend is installed without weakening the positioned-I/O contract.
-    """
-
-impl SosixPositionedVfsBackendV1 for SosixUnavailablePositionedVfsBackendV1:
-    fn positioned_io_available() -> bool: false
-
-    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>:
-        Err("backend-positioned-io-unavailable")
-
-    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>:
-        Err("backend-positioned-io-unavailable")
+    fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>
 
 pub struct SosixFsVfsDispatchResultV1:
     accepted: bool
@@ -42,8 +23,7 @@ pub struct SosixFsVfsDispatchResultV1:
     buffer: [u8]
 
 export SOSIX_FS_VFS_STATUS_IO_V1, SOSIX_FS_VFS_STATUS_UNAVAILABLE_V1
-export SosixPositionedVfsBackendV1, SosixUnavailablePositionedVfsBackendV1
-export SosixFsVfsDispatchResultV1
+export SosixPositionedVfsBackendV1, SosixFsVfsDispatchResultV1
 
 fn _reject(reason: text, buffer: [u8]) -> SosixFsVfsDispatchResultV1:
     SosixFsVfsDispatchResultV1(
@@ -80,11 +60,6 @@ pub fn sosix_fs_service_dispatch_vfs_v1(
     val plan = prepared.plan
     if registered_buffer_id == 0 or registered_buffer_id != plan.buffer_registration_id:
         return _reject("buffer-registration-mismatch", registered_buffer)
-    # Plans are public value types and the kernel syscall provider constructs
-    # them directly, so enforce the per-request ceiling again before slicing,
-    # allocating backend read storage, or converting array indices to i32.
-    if plan.length > SOSIX_FS_SERVICE_MAX_TRANSFER_BYTES_V1:
-        return _reject("transfer-too-large", registered_buffer)
     if (plan.buffer_offset > registered_buffer.len().to_u64() or
         plan.length > registered_buffer.len().to_u64() - plan.buffer_offset):
         return _reject("registered-buffer-range-out-of-bounds", registered_buffer)

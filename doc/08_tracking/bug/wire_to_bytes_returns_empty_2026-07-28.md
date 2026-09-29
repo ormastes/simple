@@ -1,9 +1,39 @@
 # `wire_to_bytes()` returns an empty array on both engines
+## Closed 2026-09-16 — ...w-up until that one is separately resolved. ## Symptom ``` fn wire_to_bytes(wire: text) ->
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-28
-**Status:** Open
+**Status:** FIXED (confirmed 2026-09-05) — see verification note below
 **Severity:** High — silently corrupts every TLS 1.2 length field
 **Area:** `src/lib/nogc_async_mut/io/tls_common.spl`, stdlib `to_bytes`
+
+## Verification (2026-09-05, debug-ladder exercise)
+
+This defect is **fixed** — commit `3c302ed3f19a` (2026-08-17,
+"fix(http): three of six 'stale spec' reds were real defects, one a security
+bug") replaced the `to_bytes(wire)` delegation with a direct
+`wire.char_code_at(i) & 255` loop (see current source,
+`tls_common.spl:68-90`). Re-verified today by running the exact repro table
+below through
+`/Users/ormastes/simple/src/compiler_rust/target/bootstrap/simple run`: every
+row now returns the expected value, and `wire_to_bytes("h2")[0] == 104`
+compares as a real integer (`true`), not the reported
+"type mismatch: comparing string with integer".
+
+Reproduction spec (GREEN, 4/4):
+`test/01_unit/lib/nogc_async_mut/io/tls_common_wire_to_bytes_repro_spec.spl`.
+
+Generalizing the same `bytes_to_wire`/`wire_to_bytes` pair to the untested
+byte range 128-255 (adjacent code path, same functions) found a **different,
+still-open** defect — see
+`doc/08_tracking/bug/wire_to_bytes_high_byte_utf8_roundtrip_corruption_2026-09-05.md`
+and
+`test/01_unit/lib/nogc_async_mut/io/tls_common_wire_to_bytes_high_byte_generalization_spec.spl`
+(RED, 3/4 failures). Do not close this file's linked follow-up until that
+one is separately resolved.
 
 ## Symptom
 
@@ -59,3 +89,4 @@ exactly this reason; the comment there points back at this file.
 Root-cause `to_bytes` on `text` (builtin resolution or wire-text decoding), add
 a `wire_to_bytes` case to `tls_common_wire_guard_spec.spl` covering the
 text -> bytes direction, then sweep the ~20 call sites above.
+

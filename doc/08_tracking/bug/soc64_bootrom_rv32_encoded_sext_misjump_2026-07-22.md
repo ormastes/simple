@@ -1,4 +1,8 @@
 # soc_rtl bootrom is RV32-encoded — RV64 boot-to-DRAM handoff misjumps
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-07-22 (lane W2-D bonus finding)
 **Status:** FIXED (2026-07-22) — `bootrom_read64` landed and `soc_top_64`
@@ -27,3 +31,4 @@ directly instead of booting through the ROM (noted in the spec comments).
 **Evidence:** W2-D probe case3 executes the real bootrom `lui` at 0x1000 on the
 wired RV64 datapath and observes the sign-extended value in the register
 (sp == sext(0x80100000) for the stack-setup lui at 0x1004).
+

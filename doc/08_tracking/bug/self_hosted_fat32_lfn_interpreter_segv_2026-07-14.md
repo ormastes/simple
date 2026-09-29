@@ -1,4 +1,8 @@
 # BUG: self-hosted runner segfaults on focused FAT32 LFN interpreter spec
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Severity:** high (blocks pure-Simple verification)
@@ -30,3 +34,4 @@ Rust bootstrap seed was not used as fallback.
 Reproduce with a current pure-Simple self-hosted build, retain a crash trace,
 and fix the runner/runtime fault before accepting this spec as executed release
 evidence.
+

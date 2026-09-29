@@ -114,3 +114,43 @@ fn test() -> text:
         .expect("test function should exist");
     assert_eq!(test_fn.return_type, TypeId::STRING);
 }
+
+#[test]
+fn selective_reexport_alias_preserves_optional_array_return_type() {
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("src");
+    let leaf = src.join("lib").join("leaf");
+    let facade = src.join("lib").join("facade");
+    let app = src.join("app");
+    fs::create_dir_all(&leaf).unwrap();
+    fs::create_dir_all(&facade).unwrap();
+    fs::create_dir_all(&app).unwrap();
+    fs::write(leaf.join("snapshot.spl"), "extern fn snapshot() -> [(text, text)]?\n").unwrap();
+    fs::write(
+        facade.join("mod.spl"),
+        "export use lib.leaf.snapshot (snapshot as snapshot_nilable)\n",
+    )
+    .unwrap();
+    let main_path = app.join("main.spl");
+    fs::write(
+        &main_path,
+        r#"
+use lib.facade.mod (snapshot_nilable as imported_snapshot)
+
+fn count() -> i64:
+    val entries = imported_snapshot() ?? []
+    var seen = 0
+    for pair in entries:
+        val (key, value) = pair
+        seen = seen + key.len() + value.len()
+    entries.len() + seen
+"#,
+    )
+    .unwrap();
+    let source = fs::read_to_string(&main_path).unwrap();
+    let ast = Parser::new(&source).parse().expect("parse failed");
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+    Lowerer::with_module_resolver(resolver, main_path)
+        .lower_module(&ast)
+        .expect("nested selective aliases must preserve the declared extern return type");
+}

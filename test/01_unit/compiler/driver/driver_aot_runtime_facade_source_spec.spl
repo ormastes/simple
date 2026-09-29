@@ -1,8 +1,40 @@
+"""
+## Purpose and audience
+Pins the driver AOT native-output facade ownership: the native-output pass
+uses the exact one-call compiler-safe env/process facades, keeps positive
+call-site cardinalities for the build controls, and never reaches the raw
+SFFI transport or the collapsed env_get_opt alias. Audience: engineers
+changing driver_aot_native_output or the io_runtime facade surface.
+
+## Operator workflow
+Run the spec and read the verdict line:
+./src/compiler_rust/target/bootstrap/simple run
+test/01_unit/compiler/driver/driver_aot_runtime_facade_source_spec.spl
+
+## Compatibility and limitations
+The facade shape is asserted as a source contract because these call sites
+have no separate runtime API; an intentional call-site count change fails the
+scenario until the reviewed cardinalities here are re-derived.
+
+## Verification guidance and troubleshooting
+A failing expectation names the exact token or cardinality to re-check in
+driver_aot_native_output.spl; a forbidden-token hit means a raw transport or
+legacy alias call site reappeared and must be removed before landing.
+"""
+# Lifecycle: doc/01_research/compiler/compiler_internals/compiler_import_alias_resolution.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/compiler/00_compiler_architecture.md ;
+# doc/05_design/sspec_capture_extension.md
+# @manual_section: driver AOT facade ownership
+
 use std.spec.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 describe "driver AOT environment and process facade ownership":
     it "uses exact one-call compiler-safe facades without hidden aliases":
+        # @req REQ-DRIVER-AOT-FACADE-001
+        # @capture(statistics): facade call-site cardinalities and forbidden-token absences
+        step("Read the AOT native-output source")
         val source = file_read(
             "src/compiler/80.driver/driver_aot_native_output.spl")
 
@@ -11,9 +43,9 @@ describe "driver AOT environment and process facade ownership":
 
         # Positive cardinalities prevent this contract passing after the native
         # build controls or linker invocations are accidentally deleted.
-        expect(source.split("env_get_nullable(").len() - 1).to_equal(15)
-        expect(source.split("env_set(").len() - 1).to_equal(1)
-        expect(source.split("process_run(").len() - 1).to_equal(3)
+        expect(source.split("env_get_nullable(").len() - 1).to_equal(15)  # oracle: reviewed count of nullable env reads across the thread/clean/linker controls
+        expect(source.split("env_set(").len() - 1).to_equal(1)  # oracle: the single CLEAN env reset is the only permitted env_set call site
+        expect(source.split("process_run(").len() - 1).to_equal(3)  # oracle: exactly linker, archiver, and cc invocations remain
 
         # Nullable lookup preserves the raw transport contract, including an
         # explicitly empty value. env_get_opt would intentionally collapse it.
@@ -32,10 +64,17 @@ describe "driver AOT environment and process facade ownership":
         expect(source).to_contain(
             "val (_cc_out, cc_err, cc_code) = process_run(\"cc\", [\"-c\", c_path, \"-o\", obj_path])")
 
-        expect(source.contains("_sffi_env_get")).to_equal(false)
-        expect(source.contains("_sffi_env_set")).to_equal(false)
-        expect(source.contains("_sffi_process_run")).to_equal(false)
-        expect(source.contains("rt_env_get")).to_equal(false)
-        expect(source.contains("rt_env_set")).to_equal(false)
-        expect(source.contains("rt_process_run")).to_equal(false)
-        expect(source.contains("env_get_opt(")).to_equal(false)
+        val keeps_no_sffi_env_get = source.contains("_sffi_env_get")
+        expect(keeps_no_sffi_env_get).to_equal(false)
+        val keeps_no_sffi_env_set = source.contains("_sffi_env_set")
+        expect(keeps_no_sffi_env_set).to_equal(false)
+        val keeps_no_sffi_process_run = source.contains("_sffi_process_run")
+        expect(keeps_no_sffi_process_run).to_equal(false)
+        val keeps_no_raw_rt_env_get = source.contains("rt_env_get")
+        expect(keeps_no_raw_rt_env_get).to_equal(false)
+        val keeps_no_raw_rt_env_set = source.contains("rt_env_set")
+        expect(keeps_no_raw_rt_env_set).to_equal(false)
+        val keeps_no_raw_rt_process_run = source.contains("rt_process_run")
+        expect(keeps_no_raw_rt_process_run).to_equal(false)
+        val keeps_no_collapsing_env_opt = source.contains("env_get_opt(")
+        expect(keeps_no_collapsing_env_opt).to_equal(false)

@@ -1,4 +1,9 @@
 # `file_read` has 23 definitions across two incompatible return types
+## Closed 2026-09-16 — Return-type spread closed 2026-08-16 with measured counts + guard spec
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **RETURN-TYPE SPREAD CLOSED 2026-08-16.** The three `-> text?` definitions were
 > module-local and non-exported; they are renamed to **`file_read_opt`**
@@ -122,3 +127,4 @@ Mirror the `file_read_bytes` resolution:
 
 - `doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md`
   — sibling defect, byte family, signatures unified 2026-08-16, full convergence still open.
+

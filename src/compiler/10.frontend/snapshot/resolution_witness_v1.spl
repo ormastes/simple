@@ -1,0 +1,144 @@
+# codex-impl: construction and validation for the frozen resolution witness DTOs.
+
+use compiler.common.cache_contract.snapshot_contract_v1 (
+    ResolutionCandidateV1, ResolutionWitnessV1
+)
+use std.common.crypto.sha256.{sha256_text}
+use std.common.cache_path_policy_v1.{cache_path_policy_v1}
+
+fn _rw_field(name: text, value: text) -> text:
+    "{name.len()}:{name}{value.len()}:{value}"
+
+fn _rw_bool(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _rw_digest_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val digits = "0123456789abcdef"
+    var index = 0
+    while index < value.len():
+        if not digits.contains(value.substring(index, index + 1)):
+            return false
+        index = index + 1
+    true
+
+fn _rw_candidate_material(candidate: ResolutionCandidateV1) -> text:
+    _rw_field("order", "{candidate.order}") +
+        _rw_field("logical_path", candidate.logical_path) +
+        _rw_field("normalization_key", candidate.normalization_key) +
+        _rw_field("physical_identity", candidate.physical_identity_digest) +
+        _rw_field("parent_generation", candidate.parent_directory_generation_digest) +
+        _rw_field("entry_kind", candidate.entry_kind) +
+        _rw_field("exists", _rw_bool(candidate.exists)) +
+        _rw_field("selected", _rw_bool(candidate.selected)) +
+        _rw_field("content", candidate.content_digest) +
+        _rw_field("symlink_chain", candidate.symlink_chain_digest)
+
+fn _rw_generated_material(values: [text]) -> text:
+    var material = ""
+    for value in values:
+        material = material + _rw_field("generated", value)
+    material
+
+pub fn resolution_witness_digest_v1(
+    resolver_policy_digest: text,
+    root_trust_digest: text,
+    candidates: [ResolutionCandidateV1],
+    selected_index: i64,
+    generated_input_digests: [text]
+) -> text:
+    var material = _rw_field("domain", "simple.resolution.witness.v1") +
+        _rw_field("resolver_policy", resolver_policy_digest) +
+        _rw_field("root_trust", root_trust_digest) +
+        _rw_field("selected_index", "{selected_index}")
+    for candidate in candidates:
+        material = material + _rw_field("candidate", _rw_candidate_material(candidate))
+    material = material + _rw_generated_material(generated_input_digests)
+    sha256_text(material)
+
+fn _rw_relative_path_valid(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.ends_with("/"):
+        return false
+    if path.contains("\\") or path.contains("\u0000") or path.contains("//"):
+        return false
+    for segment in path.split("/"):
+        if segment == "" or segment == "." or segment == "..":
+            return false
+    true
+
+fn _rw_candidate_valid(candidate: ResolutionCandidateV1, index: i64) -> bool:
+    if candidate.order != index or not _rw_relative_path_valid(candidate.logical_path):
+        return false
+    val path_policy = cache_path_policy_v1(candidate.logical_path)
+    if not path_policy.accepted or path_policy.logical_relative != candidate.logical_path:
+        return false
+    if (candidate.normalization_key == "" or candidate.entry_kind == "" or
+            not _rw_digest_valid(candidate.parent_directory_generation_digest) or
+            not _rw_digest_valid(candidate.physical_identity_digest) or
+            not _rw_digest_valid(candidate.content_digest) or
+            not _rw_digest_valid(candidate.symlink_chain_digest)):
+        return false
+    if candidate.exists:
+        candidate.entry_kind != "absent"
+    else:
+        candidate.entry_kind == "absent" and not candidate.selected
+
+pub fn resolution_witness_valid_v1(witness: ResolutionWitnessV1) -> bool:
+    if (not _rw_digest_valid(witness.resolver_policy_digest) or
+            not _rw_digest_valid(witness.root_trust_digest) or
+            not _rw_digest_valid(witness.witness_digest)):
+        return false
+    if witness.selected_index < -1 or witness.selected_index >= witness.candidates.len():
+        return false
+    var selected_count = 0
+    var normalization_keys: [text] = []
+    var index = 0
+    for candidate in witness.candidates:
+        if not _rw_candidate_valid(candidate, index):
+            return false
+        if normalization_keys.contains(candidate.normalization_key):
+            return false
+        normalization_keys.push(candidate.normalization_key)
+        if candidate.selected:
+            selected_count = selected_count + 1
+            if witness.selected_index != index:
+                return false
+        index = index + 1
+    if witness.selected_index == -1:
+        if selected_count != 0:
+            return false
+    else:
+        if selected_count != 1 or not witness.candidates[witness.selected_index].exists:
+            return false
+    var generated_seen: [text] = []
+    for digest in witness.generated_input_digests:
+        if not _rw_digest_valid(digest) or generated_seen.contains(digest):
+            return false
+        generated_seen.push(digest)
+    witness.witness_digest == resolution_witness_digest_v1(
+        witness.resolver_policy_digest,
+        witness.root_trust_digest,
+        witness.candidates,
+        witness.selected_index,
+        witness.generated_input_digests
+    )
+
+pub fn make_resolution_witness_v1(
+    resolver_policy_digest: text,
+    root_trust_digest: text,
+    candidates: [ResolutionCandidateV1],
+    selected_index: i64,
+    generated_input_digests: [text]
+) -> ResolutionWitnessV1:
+    val digest = resolution_witness_digest_v1(
+        resolver_policy_digest, root_trust_digest, candidates,
+        selected_index, generated_input_digests)
+    ResolutionWitnessV1(
+        resolver_policy_digest: resolver_policy_digest,
+        root_trust_digest: root_trust_digest,
+        candidates: candidates,
+        selected_index: selected_index,
+        generated_input_digests: generated_input_digests,
+        witness_digest: digest
+    )

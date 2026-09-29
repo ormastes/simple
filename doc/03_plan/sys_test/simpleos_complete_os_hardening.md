@@ -4,6 +4,87 @@
 
 Prove REQ-001–REQ-020 and NFR-001–NFR-014 through live, fail-closed, nonce-bound evidence. A missing prerequisite produces a `BLOCKED` row with a resume plan and fails the umbrella; no scenario calls `skip()` or converts staging/source presence into PASS.
 
+## Implementation status and linked subplans
+
+This is the umbrella owner, not a replacement for the implementation plans
+below.  A source change or static contract is **not** acceptance evidence; all
+rows stay blocked until their named QEMU/native producer publishes a fresh,
+target-bound receipt.
+
+| Subplan | Owns |
+|---|---|
+| [Boot service authority](simpleos_boot_service_authority_v1.md) | signed admission, finite root capability pouch, scheduler/IPC publication, and launch lease |
+| [Filesystem toolchain and servers](simpleos_filesystem_toolchain_servers.md) | filesystem-launched Simple/LLVM tools and web/database services |
+| [Server capability manifest](simpleos_server_capability_manifest.md) | exact server child grants, protected data, and parent-only spawn authority |
+| [Server execution matrix](simpleos_server_execution_matrix.md) | HTTP, database, lifecycle, and confinement evidence |
+| [Three-architecture QEMU evidence](simpleos_three_arch_qemu_evidence_admission.md) | x86_64, ARM64, and RV64 target-bound receipt admission |
+| [QEMU system tests](../os/simpleos/qemu_system_tests_multiarch_2026-06-13.md) | canonical multi-architecture guest execution workflow |
+| [Window-manager evidence](simpleos_qemu_wm_real_screen.md) | production WM screen/readback evidence |
+
+### Completed implementation slices (unverified)
+
+- The loader has a sealed boot-service receipt/root-publication transaction,
+  and server recipe policy gives the parent the required parent-only
+  `ProcessSpawn` authority while keeping child grants finite.
+- DBFS boot now has a validated root-mount transaction with staged publication
+  and rollback.
+- NVFS now has a three-architecture receipt-shape campaign and a production
+  root-mount transaction; the latest corrective implementation keeps staging
+  private, rejects corrupt/conflicting NVFS metadata instead of falling back to
+  DBFS, and tears down by exact sealed identity on failure.  It still requires
+  independent review and live evidence.
+- Simple web transport preserves zero-progress writes and rejects truncated
+  sendfile bodies; SSHD rejects malformed version lines.
+- FAT32/NVFS read-only hydration and mount-handle isolation fixes are present.
+
+### Remaining implementation and evidence
+
+1. Accept the repaired boot receipt after independent review, compose the
+   canonical `/SERVERS.ELF` catalog record into boot media, and wire the shared
+   transaction into x86_64, ARM64, and RV64 entries with canonical arguments.
+2. Finish the shared positioned-filesystem OFD route, then use it for managed
+   DBFS/NVFS syscalls.  It must preserve generation pins, shared offsets,
+   dup/fork last-alias close, rollback, and backend-selected dispatch; do not
+   add an ad-hoc `FD_TYPE_NVFS`/raw DBFS descriptor.
+3. Add a backend-owned FAT32 executable-identity receipt under the FAT mutation
+   owner.  Current loader observations are insufficient for TOCTOU-safe
+   dirent/LFN identity validation.
+4. Supply a current admitted Pure-Simple compiler or all three verified
+   architecture auth-contract producers, then run the canonical x86_64/ARM64/
+   RV64 QEMU rows.  The historical admitted compiler embeds a removed runtime
+   C source and must not be used as current-source evidence.
+5. Produce the required live receipts for filesystem toolchain/Clang hello,
+   primary tools, server protocols, SSHD, DBFS/NVFS persistence, WM behavior,
+   performance, and duplication.  CI/PR checks do not replace these receipts.
+
+## Current implementation blocker: boot capability handoff
+
+The x86_64, ARM64, and RV64 authenticated media fixtures now require a real,
+caller-owned `CapabilitySet`; their legacy cap-less routes revoke admission and
+fail closed. The architecture boot entries currently have only scalar root
+identity (`caller=0`), not a root TCB with finite, concrete capabilities.
+Scheduler snapshot leases intentionally reject task zero and ambient/unpledged
+sets. Do not repair this by calling `CapabilitySet.full()`,
+`spawn_recipe_seed_parent_caps`, or an architecture-local synthetic issuer.
+
+The missing production owner is a signed-manifest-bound boot-capability service
+that creates a nonzero root/service TCB, retains provenance-bearing finite
+tokens, and hands a one-shot pinned capability set (or equivalent scheduler
+lease) to the authenticated x86_64/ARM64/RV64 media launch entrypoints. Until
+that interface exists, all corresponding live filesystem-launch rows remain
+`BLOCKED`; source presence and legacy compatibility wrappers are not evidence.
+
+The server/DBFS path has a separate prerequisite: scheduler adoption and the
+DBD startup syscall reference `server_data_launch_grant_registry`, but that
+owner is absent. Its historical design requires a sealed executable image to
+carry canonical source path and protected server role; the current
+`ExecutableImageHandleV1` intentionally carries neither field. Recreating the
+registry from pathname input or a second DBD token would split authority. The
+required implementation is one atomic contract migration: bind canonical path
+and server role to the execute-open image handle at admission, restore the
+bounded scheduler registry over those sealed coordinates, then pass only its
+one-shot task/lifecycle/exec-generation grant to the namespace/DBD owner.
+
 ## Executable specifications
 
 | Spec | Scope |
@@ -14,15 +95,6 @@ Prove REQ-001–REQ-020 and NFR-001–NFR-014 through live, fail-closed, nonce-b
 | `test/03_system/os/simpleos/feature/simpleos_complete_os_hardening_wm_perf_campaign_spec.spl` | WM interactions/readback, performance, fuzz, 24-hour soak, 1,000-cycle lifecycle |
 | `test/03_system/os/wm/simpleos_wm_behavior_evidence_spec.spl` | REQ-017 production-owner host behavior plus fail-closed canonical QEMU visual capture binding |
 | `test/03_system/os/simpleos/feature/simpleos_complete_os_hardening_evidence_manual_spec.spl` | ledger, ownership/duplication, freshness, traceability, manual-quality gates |
-
-REQ-008 is discharged by
-`test/03_system/os/qemu/simpleos_multiarch_fs_acceptance_spec.spl`.  Its common
-x86_64/ARM64/RV64 profile requires an ordered filesystem lookup, open-handle
-authentication, scheduler adoption, exit 37, exact-once reap, address-space
-reclamation, source-handle close, and an unchanged bounded resource snapshot.
-QEMU rows reject performance promotion.  Native/physical rows additionally
-require canonical admitted filesystem metadata, sequential-throughput, and
-Simple compile/run receipts with raw timing and RSS samples.
 
 Mirrors live under `doc/06_spec/03_system/os/...` after removing the leading `test/`. No executable `.spl` belongs under `doc/06_spec`.
 
@@ -61,47 +133,8 @@ fixed responder, tautological assertion, or todo-pass helper is allowed.
 The binding source of truth is
 `test/helpers/simpleos_complete_os_hardening_steps.spl`. Expected evidence is
 always the exact file
-`build/test-artifacts/simpleos_complete_os_hardening/<ID>/<case>/receipt.v1.bin`;
+`build/test-artifacts/simpleos_complete_os_hardening/<ID>/<case>.receipt.sdn`;
 `<case>` is `happy`, `boundary`, or `rejection`.
-
-The canonical non-bootstrap runner creates a nonce-scoped capture root, captures
-every preceding live gate itself, executes 102 repository-bound case commands,
-and constructs its 102-row case manifest internally. Production accepts no
-caller-supplied manifest. The runner then invokes the admitted receipt producer
-once for every one of the 34 IDs × 3 cases. Every row names a unique
-case descriptor and case output, its relevant producer gate, expected semantics
-(`accepted`, `boundary-observed`, or `rejection-observed`), successful oracle
-exit, exact argv, and case-specific source, image, binary, and configuration
-snapshots.  A boundary or rejection proof is therefore the successful output
-of that specific negative/boundary oracle, never a relabelled happy-path run.
-Each descriptor also binds the current acceptance run ID, capture timestamp,
-runner-owned capture-ledger hash, exact stdout/stderr bundle, exit code, and
-relevant preceding-gate capture hash;
-the producer rejects future evidence or evidence older than the umbrella's
-15-minute freshness bound instead of refreshing an old capture by re-signing it.
-The producer receives those immutable snapshots plus the case-output artifact and
-must atomically publish `receipt.v1.bin`, `source.snapshot`, `image.snapshot`,
-`binary.snapshot`, `config.snapshot`, `artifact-0.snapshot` (case output), and
-`artifact-1.snapshot` (case descriptor), and `artifact-2.snapshot`
-(runner-owned capture ledger). Receipt
-publication precedes umbrella admission in the dependency graph.  Existing
-output directories, symlinks, signer/trust substitution, a mutated trust
-configuration, and any bootstrap/seed receipt producer fail closed.
-
-`sh scripts/check/check-simpleos-nonbootstrap-acceptance.shs --dry-run` prints
-the exact 102 receipt destinations without creating evidence.  `--self-test`
-checks count, uniqueness, distinct case hashes and snapshot paths, outcome
-semantics, producer-gate mapping, graph order, and consumer filename agreement.
-Live publication additionally requires
-`SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER`, `SIMPLEOS_EVIDENCE_SIGNING_KEY`,
-`SIMPLEOS_EVIDENCE_TRUST_CONFIG`, immutable platform snapshot inputs, plus
-reviewer and target identity variables;
-none may be inferred from source presence. The producer checks the descriptor's
-requirement, case, semantics, gate, exit status, and hashes against the exact
-supplied bytes, then signs both the case artifact and descriptor. The producer source is
-`src/app/simpleos_evidence_receipt_producer/main.spl`; provisioning compiles it
-with the admitted self-hosted runtime and supplies that cached executable via
-`SIMPLEOS_EVIDENCE_RECEIPT_PRODUCER`.
 
 | IDs | Executable acceptance owner |
 |---|---|

@@ -1,0 +1,142 @@
+# Option-neutral validation for candidate target identity mappings. This module
+# assigns no numeric IDs and issues no registry/trust authority.
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_ARCH_X86_64_V1, ENV_ARCH_AARCH64_V1, ENV_ARCH_RISCV64_V1,
+    ENV_ARCH_WASM32_V1}
+
+pub const ENV_TARGET_MAPPING_MAX_ROWS_V1: i64 = 1024
+
+pub enum EnvironmentTargetMappingCandidateErrorV1:
+    EmptyMapping
+    CapacityExceeded
+    InvalidGeneration
+    InvalidIdentity
+    InvalidTargetText
+    ArchitectureMismatch
+    DuplicateProfileId
+    DuplicateTargetTriple
+    DuplicateNumericTuple
+    DuplicateTextTuple
+    InconsistentComponentMapping
+    NoncanonicalOrder
+
+pub struct EnvironmentTargetIdentityMappingRowV1:
+    target_profile_id: u32
+    target_triple: text
+    architecture_id: u16
+    architecture: text
+    vendor: text
+    os_id: u32
+    os: text
+    abi_id: u32
+    abi: text
+    object_format_id: u32
+    object_format: text
+    endian_id: u16
+    pointer_width_bits: u16
+
+pub struct EnvironmentTargetIdentityMappingCandidateV1:
+    mapping_generation: u64
+    registry_identity: text
+    rows: [EnvironmentTargetIdentityMappingRowV1]
+    mapping_digest: text
+
+fn _token_valid_tim(value: text) -> bool:
+    if value.len() == 0 or value.len() > 64: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '_'):
+            return false
+    true
+
+fn _identity_valid_tim(value: text) -> bool:
+    if value.len() == 0 or value.len() > 128: return false
+    for i in 0..value.len():
+        val c = value.char_at(i)
+        if not ((c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or
+                c == '_' or c == '-' or c == '.' or c == '/'):
+            return false
+    true
+
+fn _architecture_matches_tim(id: u16, name: text) -> bool:
+    (id == ENV_ARCH_X86_64_V1 and name == "x86_64") or
+    (id == ENV_ARCH_AARCH64_V1 and name == "aarch64") or
+    (id == ENV_ARCH_RISCV64_V1 and name == "riscv64") or
+    (id == ENV_ARCH_WASM32_V1 and name == "wasm32")
+
+fn _numeric_tuple_tim(row: EnvironmentTargetIdentityMappingRowV1) -> text:
+    row.architecture_id.to_text() + ":" + row.os_id.to_text() + ":" +
+    row.abi_id.to_text() + ":" + row.object_format_id.to_text() + ":" +
+    row.endian_id.to_text() + ":" + row.pointer_width_bits.to_text()
+
+fn _text_tuple_tim(row: EnvironmentTargetIdentityMappingRowV1) -> text:
+    row.architecture + ":" + row.vendor + ":" + row.os + ":" + row.abi +
+    ":" + row.object_format
+
+pub fn environment_target_identity_mapping_candidate_v1(mapping_generation: u64,
+    registry_identity: text, rows: [EnvironmentTargetIdentityMappingRowV1]
+) -> Result<EnvironmentTargetIdentityMappingCandidateV1,
+            EnvironmentTargetMappingCandidateErrorV1>:
+    if rows.len() == 0: return Err(EnvironmentTargetMappingCandidateErrorV1.EmptyMapping)
+    if rows.len() > ENV_TARGET_MAPPING_MAX_ROWS_V1:
+        return Err(EnvironmentTargetMappingCandidateErrorV1.CapacityExceeded)
+    if mapping_generation == 0u64:
+        return Err(EnvironmentTargetMappingCandidateErrorV1.InvalidGeneration)
+    if not _identity_valid_tim(registry_identity):
+        return Err(EnvironmentTargetMappingCandidateErrorV1.InvalidIdentity)
+    var profile_ids: [u32] = []
+    var triples: [text] = []
+    var numeric_tuples: [text] = []
+    var text_tuples: [text] = []
+    var digest_rows: [text] = [registry_identity, mapping_generation.to_text()]
+    var prior_profile_id = 0u32
+    for row in rows:
+        if (row.target_profile_id == 0u32 or row.os_id == 0u32 or row.abi_id == 0u32 or
+            row.object_format_id == 0u32 or
+            (row.endian_id != 1u16 and row.endian_id != 2u16) or
+            (row.pointer_width_bits != 32u16 and row.pointer_width_bits != 64u16)):
+            return Err(EnvironmentTargetMappingCandidateErrorV1.InvalidTargetText)
+        if row.target_profile_id == prior_profile_id:
+            return Err(EnvironmentTargetMappingCandidateErrorV1.DuplicateProfileId)
+        if row.target_profile_id < prior_profile_id:
+            return Err(EnvironmentTargetMappingCandidateErrorV1.NoncanonicalOrder)
+        if (not _token_valid_tim(row.architecture) or not _token_valid_tim(row.vendor) or
+            not _token_valid_tim(row.os) or not _token_valid_tim(row.abi) or
+            not _token_valid_tim(row.object_format)):
+            return Err(EnvironmentTargetMappingCandidateErrorV1.InvalidTargetText)
+        val canonical_triple = row.architecture + "-" + row.vendor + "-" + row.os + "-" + row.abi
+        if row.target_triple != canonical_triple:
+            return Err(EnvironmentTargetMappingCandidateErrorV1.InvalidTargetText)
+        if not _architecture_matches_tim(row.architecture_id, row.architecture):
+            return Err(EnvironmentTargetMappingCandidateErrorV1.ArchitectureMismatch)
+        for prior in rows:
+            if prior.target_profile_id == row.target_profile_id: pass
+            elif ((prior.os_id == row.os_id) != (prior.os == row.os) or
+                  (prior.abi_id == row.abi_id) != (prior.abi == row.abi) or
+                  (prior.object_format_id == row.object_format_id) !=
+                    (prior.object_format == row.object_format)):
+                return Err(EnvironmentTargetMappingCandidateErrorV1.InconsistentComponentMapping)
+        val numeric_tuple = _numeric_tuple_tim(row)
+        val text_tuple = _text_tuple_tim(row)
+        for id in profile_ids:
+            if id == row.target_profile_id:
+                return Err(EnvironmentTargetMappingCandidateErrorV1.DuplicateProfileId)
+        for triple in triples:
+            if triple == row.target_triple:
+                return Err(EnvironmentTargetMappingCandidateErrorV1.DuplicateTargetTriple)
+        for tuple in numeric_tuples:
+            if tuple == numeric_tuple:
+                return Err(EnvironmentTargetMappingCandidateErrorV1.DuplicateNumericTuple)
+        for tuple in text_tuples:
+            if tuple == text_tuple:
+                return Err(EnvironmentTargetMappingCandidateErrorV1.DuplicateTextTuple)
+        profile_ids.push(row.target_profile_id); triples.push(row.target_triple)
+        numeric_tuples.push(numeric_tuple); text_tuples.push(text_tuple)
+        digest_rows.push(row.target_profile_id.to_text() + ":" + row.target_triple.len().to_text() +
+            ":" + row.target_triple + ":" + numeric_tuple + ":" + text_tuple)
+        prior_profile_id = row.target_profile_id
+    Ok(EnvironmentTargetIdentityMappingCandidateV1(mapping_generation: mapping_generation,
+        registry_identity: registry_identity, rows: rows,
+        mapping_digest: sha256_text("simple/environment-target-mapping-candidate/v1\n" +
+            digest_rows.join("\n"))))

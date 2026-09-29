@@ -1,4 +1,9 @@
 # `lab_http_api_spec.spl` never completes under `bin/simple test` (test-daemon client times out)
+## Closed 2026-09-16 — non-completion FIXED (loop typo); spec completes ~40s; follow-up defect filed separately
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (non-completion) — root cause pinned and corrected; spec
 now completes in ~40s. A separate, previously-masked assertion failure in
@@ -276,3 +281,4 @@ least some array-typed class fields) is fixed and verified with the same
 repro shape used here (flat `.push()`-only array field on a class instance,
 mutated inside a router-dispatched handler across two real, sequential
 `TcpListener.accept()`-served connections in one process).
+

@@ -1,6 +1,8 @@
 # codex-impl: host-independent packed Draw IR generation storage and handoff.
 
-use std.common.crypto.sha256.{sha256_text}
+const DRAW_IR_PACKED_FNV_OFFSET_BASIS: u64 = 0xCBF29CE484222325u64
+const DRAW_IR_PACKED_FNV_PRIME: u64 = 1099511628211u64
+const DRAW_IR_PACKED_HEX_DIGITS: text = "0123456789abcdef"
 
 const DRAW_IR_PACKED_SLOT_FREE: u16 = 0u16
 const DRAW_IR_PACKED_SLOT_ENCODING: u16 = 1u16
@@ -39,13 +41,45 @@ enum DrawIrPackedHandoffV3:
     Ready(DrawIrPackedSubmissionV3)
     Refused(u16)
 
+fn _draw_ir_packed_fnv_byte(h: u64, byte: u64) -> u64:
+    (h ^ (byte & 0xFFu64)) * DRAW_IR_PACKED_FNV_PRIME
+
+fn _draw_ir_packed_fnv_u64(h: u64, value: u64) -> u64:
+    var x: u64 = h
+    var shift: u64 = 0u64
+    while shift < 64u64:
+        x = _draw_ir_packed_fnv_byte(x, (value >> shift) & 0xFFu64)
+        shift = shift + 8u64
+    x
+
+fn _draw_ir_packed_hex_u64(value: u64) -> text:
+    var out = ""
+    var shift: u64 = 60u64
+    while true:
+        val nibble = ((value >> shift) & 0xFu64) as i64
+        out = "{out}{DRAW_IR_PACKED_HEX_DIGITS[nibble]}"
+        if shift == 0u64:
+            break
+        shift = shift - 4u64
+    out
+
+# Incremental binary digest for the sealing hot path.  The previous
+# implementation formatted every row into one growing canonical text and hashed
+# it with SHA-256, which allocates O(rows) text per seal and disqualified this
+# store from being a static-pool hot path.  FNV-1a folds each u64 in place: no
+# per-row allocation, no growing buffer, and the same "same rows => same hash"
+# contract that publish()/matches() rely on.  Rendered as 16 lowercase hex
+# digits so `content_hash: text` keeps its type and comparison semantics.
 fn _draw_ir_packed_hash_v3(arena_id: u64, generation: u64, rows: [u64]) -> text:
-    var canonical = "draw-ir-packed-v3|arena={arena_id}|generation={generation}|rows={rows.len()}|"
+    var h: u64 = DRAW_IR_PACKED_FNV_OFFSET_BASIS
+    h = _draw_ir_packed_fnv_u64(h, arena_id)
+    h = _draw_ir_packed_fnv_u64(h, generation)
+    h = _draw_ir_packed_fnv_u64(h, rows.len().to_u64())
     var i = 0
     while i < rows.len():
-        canonical = canonical + "{rows[i]};"
+        h = _draw_ir_packed_fnv_u64(h, rows[i])
         i = i + 1
-    sha256_text(canonical)
+    _draw_ir_packed_hex_u64(h)
 
 class DrawIrPackedGenerationStoreV3:
     arena_id: u64

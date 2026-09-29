@@ -1,4 +1,9 @@
 # `only-compiled` is a dead tag; a `tag:` named argument silently DELETES the describe body
+## Closed 2026-09-16 — Status FIXED 2026-08-10 (Q36); patch applied to bdd.rs, check now PASSes
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-10 (Q36) — patch applied to `bdd.rs`; check now PASSes and the
 `--expect-fail` negative control correctly FAILs. See "Fix applied".
@@ -174,3 +179,4 @@ is complete and the check below proves whether it worked.
 `sh scripts/check/check-bdd-tagged-block-drop.shs` exits 0 with
 `PASS -- all 4 declared example(s) accounted for`, and `--expect-fail` then
 correctly FAILs. Then re-run the census: the 443 figure must go to 0.
+

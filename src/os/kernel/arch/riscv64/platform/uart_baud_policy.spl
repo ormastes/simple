@@ -1,0 +1,125 @@
+# Pure 16550 baud-divisor policy for the RISC-V FPGA HAL.
+#
+# This module owns only scalar validation and divisor selection. Hardware
+# register access remains in uart_mmio.spl behind the existing MMIO boundary.
+
+enum UartBaudStatus:
+    Ready
+    ZeroClock
+    ZeroBaud
+    BaudTooFast
+    DivisorTooLarge
+
+struct UartBaudPlan:
+    status: UartBaudStatus
+    divisor: u64
+    dll: u8
+    dlh: u8
+
+val _UART_IER: u64 = 0x01u64
+val _UART_LCR: u64 = 0x03u64
+val _UART_DLL: u64 = 0x00u64
+val _UART_DLH: u64 = 0x01u64
+val _UART_FCR: u64 = 0x02u64
+val _UART_MCR: u64 = 0x04u64
+
+val _UART_LCR_DLAB: u8 = 0x80u8
+val _UART_LCR_8N1: u8 = 0x03u8
+val _UART_FCR_RESET: u8 = 0xC7u8
+val _UART_MCR_DTR: u8 = 0x0Bu8
+
+# Compact scalar form used by hot policy scans.  The low three bits hold the
+# status code and the remaining bits hold the validated divisor.  Keeping the
+# scalar core separate avoids allocating a UartBaudPlan for callers that only
+# need the decision and divisor; uart_baud_plan remains the public MMIO plan.
+fn uart_baud_policy_word(input_clock_hz: u64, baud: u64) -> u64:
+    if input_clock_hz == 0u64:
+        return 1u64
+    if baud == 0u64:
+        return 2u64
+    val clock_per_sample = input_clock_hz / 16u64
+    if baud > clock_per_sample:
+        return 3u64
+    val divisor = clock_per_sample / baud
+    if divisor > 65535u64:
+        return 4u64
+    divisor << 3u64
+
+fn uart_baud_policy_word_divisor(word: u64) -> u64:
+    word >> 3u64
+
+fn uart_baud_policy_word_status_code(word: u64) -> u64:
+    word & 7u64
+
+fn uart_baud_plan(input_clock_hz: u64, baud: u64) -> UartBaudPlan:
+    val word = uart_baud_policy_word(input_clock_hz, baud)
+    val status_code = uart_baud_policy_word_status_code(word)
+    if status_code == 1u64:
+        return UartBaudPlan(
+            status: UartBaudStatus.ZeroClock,
+            divisor: 0u64,
+            dll: 0u8,
+            dlh: 0u8
+        )
+    if status_code == 2u64:
+        return UartBaudPlan(
+            status: UartBaudStatus.ZeroBaud,
+            divisor: 0u64,
+            dll: 0u8,
+            dlh: 0u8
+        )
+
+    if status_code == 3u64:
+        return UartBaudPlan(
+            status: UartBaudStatus.BaudTooFast,
+            divisor: 0u64,
+            dll: 0u8,
+            dlh: 0u8
+        )
+
+    if status_code == 4u64:
+        return UartBaudPlan(
+            status: UartBaudStatus.DivisorTooLarge,
+            divisor: 0u64,
+            dll: 0u8,
+            dlh: 0u8
+        )
+
+    val divisor = uart_baud_policy_word_divisor(word)
+    UartBaudPlan(
+        status: UartBaudStatus.Ready,
+        divisor: divisor,
+        dll: (divisor & 0xFFu64) as u8,
+        dlh: ((divisor >> 8u64) & 0xFFu64) as u8
+    )
+
+fn uart_baud_plan_valid(plan: UartBaudPlan) -> bool:
+    plan.status == UartBaudStatus.Ready
+
+fn uart_baud_apply_plan_with(
+    base: u64,
+    plan: UartBaudPlan,
+    write_register: fn(u64, u8)
+) -> i64:
+    """Apply one validated plan. Invalid plans produce zero MMIO writes."""
+    if not uart_baud_plan_valid(plan):
+        return 0
+    write_register(base + _UART_IER, 0x00u8)
+    write_register(base + _UART_LCR, _UART_LCR_DLAB)
+    write_register(base + _UART_DLL, plan.dll)
+    write_register(base + _UART_DLH, plan.dlh)
+    write_register(base + _UART_LCR, _UART_LCR_8N1)
+    write_register(base + _UART_FCR, _UART_FCR_RESET)
+    write_register(base + _UART_MCR, _UART_MCR_DTR)
+    7
+
+fn uart_baud_status_code(status: UartBaudStatus) -> i64:
+    if status == UartBaudStatus.Ready:
+        return 0
+    if status == UartBaudStatus.ZeroClock:
+        return 1
+    if status == UartBaudStatus.ZeroBaud:
+        return 2
+    if status == UartBaudStatus.BaudTooFast:
+        return 3
+    4

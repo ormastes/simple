@@ -1,0 +1,75 @@
+# @req REQ-SIMD-001 REQ-SIMD-004
+# @cover src/lib/common/simd_fallback.spl 90%
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use std.spec.step
+use std.common.binary_io.{f32_from_bits}
+use std.common.simd_fallback.*
+
+fn sixteen(value: i64) -> [i64]:
+    var out: [i64] = []
+    for _ in 0..16: out.push(value)
+    out
+
+describe "portable SIMD scalar fallback":
+    it "wraps i32x16 arithmetic independently at the first and last lanes":
+        step("wraps i32x16 arithmetic independently at the first and last lanes")
+        var left = sixteen(0)
+        var right = sixteen(0)
+        left[0] = 2147483647
+        right[0] = 1
+        left[15] = -2147483648
+        right[15] = -1
+        val result = simd_i32x16_binop_pure(left, right, "Add")
+        assert_equal(result.len(), 16)
+        assert_equal(result[0], -2147483648)
+        assert_equal(result[15], 2147483647)
+
+    it "implements integer logical operations without cross-lane carry":
+        step("implements integer logical operations without cross-lane carry")
+        val left = [0x0F0F0F0F, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        val right = [0x33333333, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16]
+        assert_equal(simd_i32x16_binop_pure(left, right, "And")[0], 0x03030303)
+        assert_equal(simd_i32x16_binop_pure(left, right, "Or")[15], 31)
+        assert_equal(simd_i32x16_binop_pure(left, right, "Xor")[1], 17)
+
+    it "keeps f32x16 and f64x8 lane boundaries exact":
+        step("keeps f32x16 and f64x8 lane boundaries exact")
+        val a32: [f32] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]
+        val b32: [f32] = [16.0, 15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+        val sum32 = simd_f32x16_binop_pure(a32, b32, "Add")
+        assert_equal(sum32[0], 17.0)
+        assert_equal(sum32[15], 17.0)
+        val a64: [f64] = [1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0]
+        val b64: [f64] = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        assert_equal(simd_f64x8_binop_pure(a64, b64, "Mul"), [2.0, -6.0, 12.0, -20.0, 30.0, -42.0, 56.0, -72.0])
+
+    it "uses ordered comparison semantics for NaN masks":
+        step("uses ordered comparison semantics for NaN masks")
+        val nan = f32_from_bits(0x7FC00001u32)
+        val left: [f32] = [nan, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+        val right: [f32] = [0.0, 1.0, 1.0, 4.0, 4.0, 4.0, 7.0, 7.0, 9.0, 9.0, 9.0, 12.0, 12.0, 12.0, 15.0, 15.0]
+        assert_equal(simd_f32x16_cmp_pure(left, right, "Eq")[0], 0)
+        assert_equal(simd_f32x16_cmp_pure(left, right, "Ne")[0], 1)
+        assert_equal(simd_f32x16_cmp_pure(left, right, "Gt")[2], 1)
+
+    it "normalizes mask bits and selects boundary lanes":
+        step("normalizes mask bits and selects boundary lanes")
+        val mask = [9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -2]
+        val inverse = simd_mask_op_pure(mask, [], "Not")
+        assert_equal(inverse[0], 0)
+        assert_equal(inverse[1], 1)
+        assert_equal(inverse[15], 0)
+        val selected = simd_select_i64_pure(mask, sixteen(7), sixteen(3))
+        assert_equal(selected[0], 7)
+        assert_equal(selected[1], 3)
+        assert_equal(selected[15], 7)
+
+    it "fails closed on invalid shapes and reports scalable minimum lanes":
+        step("fails closed on invalid shapes and reports scalable minimum lanes")
+        assert_equal(simd_i32x16_binop_pure([1], [2], "Add"), [])
+        assert_equal(simd_i32x16_binop_pure(sixteen(1), sixteen(2), "Unknown"), [])
+        assert_equal(simd_scalable_min_lanes_pure(8), 16)
+        assert_equal(simd_scalable_min_lanes_pure(32), 4)
+        assert_equal(simd_scalable_min_lanes_pure(64), 2)
+        assert_equal(simd_scalable_min_lanes_pure(0), 0)

@@ -1,0 +1,24 @@
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.common.perf.execution_metrics.{ResourceEvidenceQuality}
+use std.spec.{describe, it, expect}
+
+# The test runner's child path: _run_scoped_child (test_runner_execute.spl)
+# builds a Unit-class scope from standard_resource_budget and calls
+# run_in_execution_resource_scope. On Windows every spec child used to come
+# back exit -1 with empty output ("child produced no exit status",
+# bootstrap32/33, 2026-09-25); Windows now takes the bounded
+# rt_process_run_bounded facade. See
+# doc/08_tracking/todo/windows_owned_process_capsule_seed_abi_2026-09-25.md.
+describe "execution resource scope child spawn":
+    it "returns the child's exit code and stdout through the runner's scope path":
+        val windows = host_is_windows_host()
+        val cmd = if windows: "C:/WINDOWS/system32/cmd.exe" else: "/bin/sh"
+        val args: [text] = if windows: ["/c", "echo scope-child& exit 7"] else: ["-c", "echo scope-child; exit 7"]
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit, standard_resource_budget(ExecutionResourceClass.Unit), 65_536)
+        val result = run_in_execution_resource_scope(scope, cmd, args)
+        expect(result.process.usage.exit_code).to_equal(7)
+        expect(result.process.stdout.trim()).to_equal("scope-child")
+        if windows:
+            # Routed through the bounded facade: evidence is honestly Unavailable.
+            expect(result.process.usage.evidence_quality == ResourceEvidenceQuality.Unavailable).to_be(true)

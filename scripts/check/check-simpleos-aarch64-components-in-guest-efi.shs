@@ -1,0 +1,377 @@
+#!/bin/sh
+# check-simpleos-aarch64-components-in-guest-efi.shs
+#
+# Proves that TOOLCHAIN COMPONENTS — a dev tool (the real linter), caret, the
+# test runner, and the MCP tool dispatcher — actually RUN INSIDE SimpleOS on
+# aarch64 and complete a real functional ROUND-TRIP each, printing their own
+# results to the PL011 serial console.
+#
+# A PROCESS THAT STARTS AND PRINTS A BANNER IS NOT SANITY. Every row below is
+# rung on the CONTENT of a response that real product code produced from an
+# input this gate chose — never on a startup line, never on a bare "OK". The
+# must-FAIL selftest fixtures are built by stripping exactly those content
+# lines, so a banner-only serial log fails this gate.
+#
+# Boot chain: EDK2/AAVMF pflash -> vendor/limine/BOOTAA64.EFI (a real EFI
+# application on a FAT ESP) -> the component kernel ELF. NEVER QEMU `-kernel`,
+# NEVER isa-debug-exit (.claude/rules/board-runnable.md) — the same artifact
+# must be able to boot on hardware. The assembled QEMU argv is self-checked for
+# both forbidden flags before any VM is started. Boot machinery is the same as
+# check-simpleos-aarch64-hello-world-in-guest-efi.shs, whose green hello-world
+# row is this lane's precondition.
+#
+# ONE VM PER COMPONENT. The components are built and booted as SEPARATE
+# kernels, never one combined image: on the riscv64 sibling lane the combined
+# --entry-closure union left ~500 rt_* symbols undefined while the per-component
+# bills were far smaller, so one component's missing closure must not hold the
+# others hostage.
+#
+# COMPILER: the RUST SEED. The pure-Simple self-hosted compiler cannot compile
+# anything in this tree yet, so every artifact here is seed-built and the
+# verdict says so rather than implying self-hosting.
+#
+# HONEST SCOPE, stated rather than papered over:
+#   * Component code runs in EL1 (kernel mode), linked into the guest image —
+#     not as EL0 processes loaded off the guest's own filesystem. There is no
+#     aarch64 user-entry path in src/os today; reaching that needs the full
+#     scheduler + ELF-loader closure and is a separate, larger artifact.
+#   * MCP is exercised at the tool-DISPATCH layer, not as a stdio JSON-RPC
+#     server loop: the freestanding aarch64 runtime has no stdin. What is proven
+#     is request -> real privilege + output-gate code -> real response envelope.
+#   * The test-runner row runs the runner's result-evaluation core over a real
+#     spec transcript; the guest does not fork a child `simple test` process,
+#     because a freestanding EL1 image has no process model.
+#   These are limits of scope, not of evidence: within that scope every row is
+#   a real round-trip through unmodified product source.
+#
+# ROWS (per-component serial log). Boot rungs B1-B2 are preconditions; each
+# component row needs BOTH its evidence line(s) and its OK marker.
+#   B1  "[components] SimpleOS aarch64 in-guest toolchain"  firmware handed off
+#   B2  "[components] serial up, exercising real product"    PL011 console up
+#
+#   devtool   "[devtool] finding:" (the real lint rule produced a real finding)
+#             AND COMPONENT_DEVTOOL_SIMPLEOS_AARCH64_OK
+#   caret     "[caret] extracted content=CARET_RTT_CONTENT"
+#             AND "[caret] redacted:" NOT carrying AKIAIOSFODNN7EXAMPLE
+#             AND "[caret] redacted:" carrying CARET_KEEPME
+#             AND COMPONENT_CARET_SIMPLEOS_AARCH64_OK
+#   testrun   "[testrun] parser reported passed=2"
+#             AND "[testrun] parser reported failed=1"
+#             AND COMPONENT_TESTRUN_SIMPLEOS_AARCH64_OK
+#   mcp       "[mcp] response" carrying MCP_RTT_PAYLOAD
+#             AND "[mcp] response" carrying "unregistered_tool"
+#             AND COMPONENT_MCP_SIMPLEOS_AARCH64_OK
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> component(s) checked, ...   exit 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked: ...        exit 2
+# 0 components EVALUATED is an ERROR, never a PASS. A component whose kernel
+# does not link is a FAIL for that component with the literal undefined-symbol
+# bill quoted — never a skip, and never patched with a stub
+# (SIMPLE_ALLOW_STUB_FALLBACK is never set here).
+#
+# `--selftest` (also run, fatally, before every real scan) proves the serial
+# evaluator and the argv guard on fixtures, including a BANNER-ONLY must-FAIL.
+#
+# Env: SIMPLE_BIN (fresh seed), SKIP_KERNEL=1, BOOT_WAIT (90), COMPONENTS,
+#      AAVMF_CODE, AAVMF_VARS.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+OUT=${OUT:-$ROOT/build/os/aarch64_components}
+BOOT_WAIT=${BOOT_WAIT:-90}
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/src/compiler_rust/target/release/simple}
+COMPONENTS=${COMPONENTS:-devtool caret testrun mcp}
+
+fail()    { printf 'FAIL — %s\n' "$1"; exit 1; }
+nothing() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# scan_boot <log> — 0 when the guest reached the component entry at all.
+# ---------------------------------------------------------------------------
+scan_boot() {
+    sl=$1
+    [ -s "$sl" ] || return 1
+    grep -aqF '[components] SimpleOS aarch64 in-guest toolchain' "$sl" || return 1
+    grep -aqF '[components] serial up, exercising real product' "$sl" || return 1
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# scan_component <component> <log> — 0 when THIS component's round-trip
+# evidence is present. Anchored on response CONTENT, never on a banner.
+# ---------------------------------------------------------------------------
+scan_component() {
+    c=$1; sl=$2
+    [ -s "$sl" ] || return 1
+    case "$c" in
+        devtool)
+            grep -aqF '[devtool] finding:' "$sl" || return 1
+            grep -aqF 'COMPONENT_DEVTOOL_SIMPLEOS_AARCH64_OK' "$sl" || return 1
+            ;;
+        caret)
+            grep -aqF '[caret] extracted content=CARET_RTT_CONTENT' "$sl" || return 1
+            grep -aF '[caret] redacted:' "$sl" | grep -aqF 'CARET_KEEPME' || return 1
+            # The secret must NOT survive: a redactor that passed input through
+            # unchanged would otherwise satisfy every other condition.
+            grep -aF '[caret] redacted:' "$sl" | grep -aqF 'AKIAIOSFODNN7EXAMPLE' && return 1
+            grep -aqF 'COMPONENT_CARET_SIMPLEOS_AARCH64_OK' "$sl" || return 1
+            ;;
+        testrun)
+            grep -aqF '[testrun] parser reported passed=2' "$sl" || return 1
+            grep -aqF '[testrun] parser reported failed=1' "$sl" || return 1
+            grep -aqF 'COMPONENT_TESTRUN_SIMPLEOS_AARCH64_OK' "$sl" || return 1
+            ;;
+        mcp)
+            grep -aF '[mcp] response' "$sl" | grep -aqF 'MCP_RTT_PAYLOAD' || return 1
+            grep -aF '[mcp] response' "$sl" | grep -aqF 'unregistered_tool' || return 1
+            grep -aqF 'COMPONENT_MCP_SIMPLEOS_AARCH64_OK' "$sl" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# argv self-check: this gate's own boot rule applied to the exact bytes to run.
+# Needles are assembled from fragments so the check can neither be defeated by,
+# nor accidentally fire on, the surrounding prose that must name the flags.
+assert_real_firmware_argv() {
+    k_flag="-kern""el"
+    d_dev="isa-debug""-exit"
+    case " $1 " in
+        *" $k_flag "*) echo "argv uses QEMU $k_flag pass semantics"; return 1 ;;
+    esac
+    case "$1" in
+        *"$d_dev"*) echo "argv uses $d_dev"; return 1 ;;
+    esac
+    case "$1" in
+        *"if=pflash"*) ;;
+        *) echo "argv has no pflash firmware"; return 1 ;;
+    esac
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# --selftest — fatal, runs before any real work.
+# ---------------------------------------------------------------------------
+selftest() {
+    st=$(mktemp -d "${TMPDIR:-/tmp}/components-aarch64-selftest.XXXXXX")
+    st_fail=0
+    n=0
+
+    banner_lines() {
+        echo '[components] SimpleOS aarch64 in-guest toolchain components (EDK2/AAVMF -> BOOTAA64.EFI)'
+        echo '[components] serial up, exercising real product modules'
+    }
+
+    # ---- BANNER-ONLY must-FAIL: the guest booted, no component ever spoke.
+    #      This is the exact vacuous-green this gate exists to prevent.
+    banner_lines > "$st/banner.log"
+    echo '[components] parking' >> "$st/banner.log"
+    n=$((n+1))
+    scan_boot "$st/banner.log" || { echo "selftest: banner fixture failed the boot rungs" >&2; st_fail=1; }
+    for c in devtool caret testrun mcp; do
+        n=$((n+1))
+        if scan_component "$c" "$st/banner.log"; then
+            echo "selftest: banner-only fixture wrongly passed component $c" >&2; st_fail=1
+        fi
+    done
+
+    # ---- devtool must-PASS / must-FAIL (rule went inert -> no finding line).
+    { banner_lines
+      echo '[devtool] lint src/os/probe_clean.spl  (expect no findings)'
+      echo '[devtool] lint src/os/probe_dirty.spl  (expect a finding)'
+      echo '[devtool] finding: global initializer calls a function'
+      echo 'COMPONENT_DEVTOOL_SIMPLEOS_AARCH64_OK real lint rule ran in-guest, clean snippet silent and dirty snippet flagged'
+    } > "$st/devtool.log"
+    n=$((n+1))
+    scan_component devtool "$st/devtool.log" || { echo "selftest: devtool must-PASS failed" >&2; st_fail=1; }
+    grep -av 'finding:' "$st/devtool.log" > "$st/devtool_inert.log"
+    n=$((n+1))
+    if scan_component devtool "$st/devtool_inert.log"; then
+        echo "selftest: inert-rule devtool fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # ---- caret must-PASS / must-FAIL (secret survived redaction).
+    { banner_lines
+      echo '[caret] built message: {"role":"user","content":"CARET_RTT_CONTENT"}'
+      echo '[caret] extracted role=user'
+      echo '[caret] extracted content=CARET_RTT_CONTENT'
+      echo '[caret] redacted: key [REDACTED] trails CARET_KEEPME'
+      echo 'COMPONENT_CARET_SIMPLEOS_AARCH64_OK message round-tripped through the real helpers and the real redactor removed the secret'
+    } > "$st/caret.log"
+    n=$((n+1))
+    scan_component caret "$st/caret.log" || { echo "selftest: caret must-PASS failed" >&2; st_fail=1; }
+    sed 's/\[REDACTED\]/AKIAIOSFODNN7EXAMPLE/' "$st/caret.log" > "$st/caret_leak.log"
+    n=$((n+1))
+    if scan_component caret "$st/caret_leak.log"; then
+        echo "selftest: leaked-secret caret fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # ---- testrun must-PASS / must-FAIL (wrong counts).
+    { banner_lines
+      echo '[testrun] feeding a 3-example spec transcript to the real parser'
+      echo '[testrun] parser reported passed=2'
+      echo '[testrun] parser reported failed=1'
+      echo 'COMPONENT_TESTRUN_SIMPLEOS_AARCH64_OK real runner parser summarised the spec as 2 passed / 1 failed'
+    } > "$st/testrun.log"
+    n=$((n+1))
+    scan_component testrun "$st/testrun.log" || { echo "selftest: testrun must-PASS failed" >&2; st_fail=1; }
+    grep -av 'failed=1' "$st/testrun.log" > "$st/testrun_bad.log"
+    n=$((n+1))
+    if scan_component testrun "$st/testrun_bad.log"; then
+        echo "selftest: missing-failed-count testrun fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # ---- mcp must-PASS / must-FAIL (unknown tool was NOT refused).
+    { banner_lines
+      echo '[mcp] request  tool=echo args=[MCP_RTT_PAYLOAD]'
+      echo '[mcp] response {"status":"ok","result":"MCP_RTT_PAYLOAD"}'
+      echo '[mcp] request  tool=no_such_tool_xyz (must be refused)'
+      echo '[mcp] response {"status":"error","error":"unregistered_tool"}'
+      echo 'COMPONENT_MCP_SIMPLEOS_AARCH64_OK dispatch round-trip echoed the payload and refused the unknown tool'
+    } > "$st/mcp.log"
+    n=$((n+1))
+    scan_component mcp "$st/mcp.log" || { echo "selftest: mcp must-PASS failed" >&2; st_fail=1; }
+    grep -av 'unregistered_tool' "$st/mcp.log" > "$st/mcp_bad.log"
+    n=$((n+1))
+    if scan_component mcp "$st/mcp_bad.log"; then
+        echo "selftest: unrefused-tool mcp fixture wrongly passed" >&2; st_fail=1
+    fi
+
+    # ---- empty log: nothing executed at all.
+    : > "$st/empty.log"
+    n=$((n+1))
+    if scan_boot "$st/empty.log"; then
+        echo "selftest: empty fixture wrongly passed the boot rungs" >&2; st_fail=1
+    fi
+
+    # ---- argv guard.
+    n=$((n+1))
+    assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -serial file:x" >/dev/null \
+        || { echo "selftest: clean argv wrongly rejected" >&2; st_fail=1; }
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -kern""el k.elf" >/dev/null 2>&1; then
+        echo "selftest: -kernel argv wrongly accepted" >&2; st_fail=1
+    fi
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -drive if=pflash,file=CODE.fd -device isa-debug""-exit" >/dev/null 2>&1; then
+        echo "selftest: isa-debug-exit argv wrongly accepted" >&2; st_fail=1
+    fi
+    n=$((n+1))
+    if assert_real_firmware_argv "-M virt -serial file:x" >/dev/null 2>&1; then
+        echo "selftest: firmware-less argv wrongly accepted" >&2; st_fail=1
+    fi
+
+    rm -rf "$st"
+    [ "$st_fail" -eq 0 ] || return 1
+    SELFTEST_N=$n
+    printf '[components-aarch64] selftest OK (%s fixtures)\n' "$n"
+    return 0
+}
+
+SELFTEST_N=0
+selftest || nothing "selftest failed — the serial evaluator cannot be trusted"
+if [ "${1:-}" = "--selftest" ]; then
+    printf 'PASS — %s selftest fixture(s) checked, serial evaluator and argv guard discriminate (banner-only fixture correctly rejected)\n' "$SELFTEST_N"
+    exit 0
+fi
+
+# --- firmware ---------------------------------------------------------------
+command -v qemu-system-aarch64 >/dev/null 2>&1 || nothing "missing qemu-system-aarch64"
+find_fw() { for c in "$@"; do [ -s "$c" ] && { echo "$c"; return 0; }; done; return 1; }
+if [ -z "${AAVMF_CODE:-}" ]; then
+    AAVMF_CODE=$(find_fw /usr/share/AAVMF/AAVMF_CODE.fd \
+                         /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd \
+                         /usr/share/qemu-efi-aarch64/QEMU_EFI.fd) || AAVMF_CODE=
+fi
+[ -n "${AAVMF_CODE:-}" ] || nothing "no EDK2/AAVMF aarch64 firmware found (install qemu-efi-aarch64, or set AAVMF_CODE)"
+
+n_ok=0
+n_eval=0
+offenders=''
+notes=''
+
+for c in $COMPONENTS; do
+    cdir=$OUT/$c
+    kernel=$cdir/kernel.elf
+    espdir=$cdir/esp
+    work=$cdir/run
+    log=$work/serial.log
+    mkdir -p "$cdir" "$work"
+
+    # --- build (Simple source -> AArch64 ELF, by the Rust seed) -------------
+    if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+        SIMPLE_BIN="$SIMPLE_BIN" sh "$ROOT/scripts/os/build-simpleos-aarch64-components-kernel.shs" "$c" \
+            >"$cdir/gate-kernel.log" 2>&1 || true
+    fi
+    if [ ! -s "$kernel" ]; then
+        n_eval=$((n_eval+1))
+        why=$(grep -aoE "undefined symbol: [A-Za-z0-9_]+" "$cdir/kernel-build.log" 2>/dev/null | sort -u | head -6 | tr '\n' ' ')
+        [ -n "$why" ] || why=$(tail -1 "$cdir/gate-kernel.log" 2>/dev/null)
+        offenders="$offenders $c(link: ${why:-no kernel produced})"
+        continue
+    fi
+
+    # --- ESP ----------------------------------------------------------------
+    KERNEL_ELF="$kernel" OUT_DIR="$espdir" sh "$ROOT/scripts/os/build-simpleos-aarch64-efi-esp.shs" \
+        >"$cdir/gate-esp.log" 2>&1 || true
+    if [ ! -s "$espdir/esp.img" ]; then
+        n_eval=$((n_eval+1))
+        offenders="$offenders $c(esp: $(tail -1 "$cdir/gate-esp.log" 2>/dev/null))"
+        continue
+    fi
+
+    vars=${AAVMF_VARS:-}
+    if [ -z "$vars" ]; then
+        vars=$(find_fw "$espdir/AAVMF_VARS.fd" /usr/share/AAVMF/AAVMF_VARS.fd) || vars=
+    fi
+    [ -n "$vars" ] || nothing "no AAVMF_VARS.fd found (set AAVMF_VARS)"
+    cp "$vars" "$work/VARS.fd"
+    chmod u+w "$work/VARS.fd"
+    rm -f "$log"
+
+    # --- assemble the argv FIRST, self-check it, then boot ------------------
+    QEMU_ARGS="-M virt -cpu cortex-a72 -m 512M"
+    QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$AAVMF_CODE,readonly=on"
+    QEMU_ARGS="$QEMU_ARGS -drive if=pflash,format=raw,file=$work/VARS.fd"
+    QEMU_ARGS="$QEMU_ARGS -drive if=none,file=$espdir/esp.img,format=raw,id=esp"
+    QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=esp"
+    QEMU_ARGS="$QEMU_ARGS -device ramfb -display none -serial file:$log"
+
+    why=$(assert_real_firmware_argv "$QEMU_ARGS") \
+        || fail "$why (script bug, not an environment gap)"
+
+    # The entry parks in a WFE spin by design, so QEMU never exits on its own
+    # and `timeout` killing it is the NORMAL path. The serial transcript is the
+    # artifact; every conclusion below is drawn from the log.
+    # shellcheck disable=SC2086
+    timeout "$BOOT_WAIT" qemu-system-aarch64 $QEMU_ARGS >/dev/null 2>&1 || true
+
+    if ! scan_boot "$log"; then
+        # The guest never reached the entry: this component was not evaluated.
+        offenders="$offenders $c(boot: guest never reached the component entry; log $log)"
+        continue
+    fi
+    n_eval=$((n_eval+1))
+    if scan_component "$c" "$log"; then
+        n_ok=$((n_ok+1))
+    else
+        last=$(grep -aE "^\[$c\]" "$log" 2>/dev/null | tail -1)
+        offenders="$offenders $c(ran but round-trip incomplete; last own line: ${last:-none}; log $log)"
+    fi
+done
+
+[ "$n_eval" -gt 0 ] || nothing "no component was evaluated in-guest (nothing booted to the component entry)"
+
+if [ -n "$offenders" ]; then
+    printf 'FAIL — %s component(s) evaluated in-guest on SimpleOS aarch64 under EDK2/AAVMF pflash -> BOOTAA64.EFI (no -kernel, no isa-debug-exit), %s completed a real round-trip; offenders:%s; artifacts built by the RUST SEED (%s)\n' \
+        "$n_eval" "$n_ok" "$offenders" "$SIMPLE_BIN"
+    exit 1
+fi
+
+printf 'PASS — %s component(s) checked, all completed a real functional round-trip in-guest on SimpleOS aarch64 under EDK2/AAVMF pflash -> BOOTAA64.EFI (no -kernel, no isa-debug-exit); artifacts built by the RUST SEED (%s); firmware %s\n' \
+    "$n_eval" "$SIMPLE_BIN" "$AAVMF_CODE"

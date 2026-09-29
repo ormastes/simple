@@ -1,7 +1,9 @@
 # Metal `newFunctionWithName` cannot find a genuinely-new kernel appended to `_engine2d_msl()`
+## Closed 2026-09-16 — ...o `_engine2d_msl()` > **STATUS: RESOLVED — NON-REPRODUCING (transient) — 2026-07-07.** > >
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 > **STATUS: RESOLVED — NON-REPRODUCING (transient) — 2026-07-07.**
 >
@@ -137,24 +139,3 @@ kernel_xyz(...)` to `_engine2d_msl()`'s embedded MSL string and observe
 `metal_last_error()` after `create_compute_pipeline(device, lib,
 "kernel_xyz")`.
 
-## Recurrence audit — 2026-07-26
-
-The current macOS 4K/300-DPI live harness now fails earlier than the historical
-pipeline lookup:
-
-- current source and trusted self-hosted manifest rebuild: PASS;
-- real app launch: `Engine2D.create_with_backend_fast(..., "metal")` falls
-  back to CPU;
-- a newly added direct `MetalBackend` probe identifies
-  `MetalSession.last_error == 6`, i.e. **`Metal shader compilation failed`**;
-- no framebuffer or input evidence is claimed.
-
-Attempting to preserve the underlying runtime diagnostic exposed a separate
-native text-return ABI defect: `metal_last_error()` produced
-`<value:0x823018501>` rather than readable Metal compiler text. That diagnostic
-plumbing was not retained because it would publish a misleading error string.
-The durable evidence is
-`doc/09_report/wm_current_metal_live_probe_2026-07-26.md`; the direct-probe
-improvement remains in the shared harness. Before another live retry, first
-fix or isolate the `metal_last_error()` native text ABI and compile the exact
-`_engine2d_msl()` source through `xcrun metal` as a syntax discriminator.

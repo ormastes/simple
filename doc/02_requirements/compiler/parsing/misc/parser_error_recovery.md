@@ -12,7 +12,7 @@ programming languages and provide helpful suggestions.
 
 ## Common Mistakes Detected
 
-- Python: `def`, `None`, `True`, `False`
+- Python: `def`, `None`, `True`, `False`, `self.`
 - Rust: `let mut`, `.<T>` turbofish, `!` macros
 - TypeScript: `const`, `function`, `let`, `=>`
 - Java: `public class`
@@ -95,16 +95,16 @@ val suggestion = mistake.suggestion()
 
 | # | Example | Status |
 |---|---------|--------|
-| 1 | accepts explicit self field access | pass |
-| 2 | keeps explicit self for unambiguous mutation | pass |
+| 1 | detects explicit self parameter | pass |
+| 2 | suggests implicit self | pass |
 
-**Example:** accepts explicit self field access
-    Given `self.value = 42` in a method body
-    Then no Python-style recovery hint is emitted
+**Example:** detects explicit self parameter
+    Given var parser = Parser.new("self.value = 42")
+    Then  expect true  # Parser handles this
 
-**Example:** keeps explicit self for unambiguous mutation
-    Given a method parameter shadows a field name
-    Then `self.value = value` mutates the field explicitly
+**Example:** suggests implicit self
+    Given val msg = CommonMistake.PythonSelf.message()
+    Then  expect msg.contains("implicit")
 
 ## Feature: Rust Syntax Detection
 
@@ -358,4 +358,5 @@ val suggestion = mistake.suggestion()
 **Example:** TsConst suggests val
     Given val suggestion = CommonMistake.TsConst.suggestion()
     Then  expect suggestion.contains("val")
+
 

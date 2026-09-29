@@ -1,4 +1,8 @@
 # Pure-Simple Field Type Identity Can Misdispatch `keys`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -25,3 +29,4 @@ Erased receivers must not select user methods by global bare-name uniqueness.
 The current async-desugar call sites use `std.alloc.sffi.rt_dict_keys` because
 their receiver declarations are statically `Dict`; this does not change custom
 `Map.keys` or `List.keys` dispatch.
+

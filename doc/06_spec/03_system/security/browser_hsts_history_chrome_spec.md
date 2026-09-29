@@ -1,130 +1,129 @@
 # HSTS-safe hosted history chrome
 
-Status: **DRAFT / EVIDENCE-BLOCKED**
+> Back and Forward bind the HSTS-upgraded traversal ledger to the SBR2 command
 
-Executable source:
-`test/03_system/security/browser_hsts_history_chrome_spec.spl`.
-No runtime result is claimed until an admitted current pure-Simple runner
-executes the scenario.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
-## Scope
+<details>
+<summary>Full Scenario Manual</summary>
 
-Back and Forward must bind the HSTS-upgraded traversal ledger to the SBR2
-command capability. The parent keeps the committed ledger unchanged while the
-command is pending and publishes the off-side ledger only after accepting the
-final capability-bound renderer proposal.
+# HSTS-safe hosted history chrome
 
-The exercised host route is
-`HostedBrowserRendererRegistry.dispatch_chrome_pointer` press/release into
-`HostedBrowserRendererProcess.begin_go_back`, `begin_go_forward`,
-`begin_stop`, and `begin_go_home`. No synthetic BrowserSession-only shortcut is
-used.
+Back and Forward bind the HSTS-upgraded traversal ledger to the SBR2 command
 
-## Scenario: bind upgraded traversal history to hosted chrome
+## At a Glance
 
-### 1. Commit HTTP history before learning HSTS
+| Field | Value |
+|-------|-------|
+| Category | Security |
+| Status | Active |
+| Source | `test/03_system/security/browser_hsts_history_chrome_spec.spl` |
+| Updated | 2026-08-26 |
+| Generator | `simple spipe-docgen` (Simple) |
 
-`setup_hsts_history_chrome_fixture` creates window `901` with an active parent
-renderer, canonical CSP state, and committed ledger:
+Back and Forward bind the HSTS-upgraded traversal ledger to the SBR2 command
+capability. The parent publishes that off-side ledger only after validating
+the final renderer proposal; Stop, replacement, and rejection preserve the
+previously committed ledger.
 
-```text
-index 0: http://secure.test/legacy
-index 1: https://current.test/page  (current)
+## Scenarios
+
+### Hosted HSTS history chrome
+
+#### should bind upgraded traversal history to hosted chrome
+
+- should bind upgraded traversal history to hosted chrome
+   - Protocol capture: after_step
+- Commit HTTP history before learning HSTS
+   - Protocol capture: after_step
+- Learn HSTS and activate Back through hosted chrome
+   - Protocol capture: after_step
+- Commit one upgraded traversal ledger atomically
+   - Protocol capture: after_step
+- Preserve Stop retry and Forward projections
+   - Protocol capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("should bind upgraded traversal history to hosted chrome")
+step("Commit HTTP history before learning HSTS")
+var fixture = setup_hsts_history_chrome_fixture()
+
+step("Learn HSTS and activate Back through hosted chrome")
+activate_back_through_hosted_chrome(fixture)
+
+step("Commit one upgraded traversal ledger atomically")
+check_upgraded_history_commit(fixture)
+
+step("Preserve Stop retry and Forward projections")
+check_stop_retry_forward_projection(fixture)
 ```
 
-It commits `Strict-Transport-Security: max-age=600` from authenticated
-`https://secure.test/policy`, synchronizes Back/Forward projections, installs
-the renderer in a ready `HostedBrowserRendererRegistry` entry, and retains the
-real software Engine2D raster owner used by that registry entry.
+</details>
 
-### 2. Learn HSTS and activate Back through hosted chrome
+## Scenario Summary
 
-`activate_back_through_hosted_chrome` sends Back down/up through
-`dispatch_chrome_pointer`.
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
 
-Exact receipt and protocol oracles:
 
-- down: reason `chrome-pressed`, callback count `0`;
-- up: empty reason, callback count `1`;
-- the pending wire decodes as an SBR2 capability message;
-- action is `back`;
-- command URL is `https://secure.test/legacy`;
-- nested history snapshot action is `N`, current index is `1`, and URLs are
-  exactly `[https://secure.test/legacy, https://current.test/page]`;
-- snapshot capability equals the renderer's active command capability;
-- permit and pending traversal target are the same upgraded HTTPS URL;
-- pending traversal index is `0`;
-- committed history is still the original HTTP ledger at index `1`.
+</details>
 
-### 3. Commit one upgraded traversal ledger atomically
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-`check_upgraded_history_commit` stages the final HTTPS document URL/CSP and an
-admitted history authority using the exact active command capability. It
-submits a traversal proposal with index `0` and the exact upgraded two-entry
-ledger.
+Requirements covered by the scenarios in this manual:
 
-Exact validator and publication oracles:
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
 
-- candidate is accepted;
-- candidate document URL is `https://secure.test/legacy`;
-- candidate URLs are exactly the upgraded ledger;
-- one `_commit_history_candidate` publishes it;
-- document/current URL becomes the upgraded HTTPS URL;
-- Back is empty and Forward is `https://current.test/page`;
-- committed index becomes `0`;
-- pending traversal index/URL are cleared.
+<!-- sspec-maintain:provenance:start -->
+## Generation history
 
-`_assert_committed_history` is the shared exact ledger/index checker.
+- Canonical SPipe generation for source `e6f66f97088914f9232440c8a415d0b6c605299343ec5cdb8692db24921d1c45`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-### 4. Preserve Stop retry and Forward projections
+Source SHA-256: `e6f66f97088914f9232440c8a415d0b6c605299343ec5cdb8692db24921d1c45`.
+<!-- sspec-maintain:provenance:end -->
 
-`check_stop_retry_forward_projection` activates Forward through registry
-press/release. The pending target/index become
-`https://current.test/page`/`1`, while the committed upgraded ledger remains at
-index `0`. `_assert_forward_pending_wire` decodes the actual pending SBR2 wire
-and requires action `forward`, HTTPS URL `https://current.test/page`, nested
-snapshot action `N`, current index `0`, and exact URLs
-`[https://secure.test/legacy, https://current.test/page]`. The outer issued
-command capability, nested snapshot authority capability, and renderer active
-command capability must all be equal.
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
 
-Stop then clears the pending traversal but preserves that committed ledger and
-its truthful Forward projection. A second Forward press/release stages the
-same exact target/index without changing committed history; the same full wire
-and capability oracle runs again, proving the stopped traversal is retryable.
-A final Stop clears that retry.
+Source SHA-256: `e6f66f97088914f9232440c8a415d0b6c605299343ec5cdb8692db24921d1c45`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **94/100**; effective score: **94/100**; blockers: **0**.
 
-Two independent controls run in the same visible step:
-
-- `_check_replacement_preserves_commit` stages upgraded Back, then activates
-  Home through registry press/release. The Home permit becomes
-  `https://home.test/`, traversal pending state clears, and the original
-  committed HTTP ledger/index remain unchanged.
-- `_check_rejected_candidate_preserves_commit` stages upgraded Back, then
-  presents a capability-bound traversal proposal containing the stale HTTP
-  slot. The candidate is rejected with exact reason
-  `history-ledger-mismatch`, and the original committed ledger/index remain
-  unchanged.
-
-Every registry raster is shut down after its final oracle.
-
-## Helper parity
-
-The executable helper vocabulary is frozen:
-
-- `setup_hsts_history_chrome_fixture`
-- `activate_back_through_hosted_chrome`
-- `check_upgraded_history_commit`
-- `check_stop_retry_forward_projection`
-- `_assert_committed_history`
-- `_shutdown_history_registry`
-- `_assert_forward_pending_wire`
-- `_check_replacement_preserves_commit`
-- `_check_rejected_candidate_preserves_commit`
-
-The four visible steps are exactly:
-
-1. `Commit HTTP history before learning HSTS`
-2. `Learn HSTS and activate Back through hosted chrome`
-3. `Commit one upgraded traversal ledger atomically`
-4. `Preserve Stop retry and Forward projections`
+SSpec documentization score: 94/100
+source: test/03_system/security/browser_hsts_history_chrome_spec.spl
+mirror: doc/06_spec/03_system/security/browser_hsts_history_chrome_spec.md (current)
+findings: 4 blockers: 0
+  narrative=100 structure=95 oracle=100
+  traceability=100 evidence=90 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/security/browser_hsts_history_chrome_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/security/browser_hsts_history_chrome_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/security/browser_hsts_history_chrome_spec.spl:332:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should bind upgraded traversal history to hosted chrome' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/security/browser_hsts_history_chrome_spec.spl:332:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should bind upgraded traversal history to hosted chrome' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

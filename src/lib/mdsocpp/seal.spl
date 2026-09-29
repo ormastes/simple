@@ -1,0 +1,160 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal, kpf_id128_is_zero}
+use common.kernel_plugin.contracts.{
+    kpf_validate_memory_contract_v1, kpf_validate_concurrency_contract_v1,
+}
+use std.mdsocpp.model.*
+
+fn empty_receipt() -> MdsocppGenerationReceiptV1:
+    MdsocppGenerationReceiptV1(
+        generation: 0, composition_digest: KpfDigest256(w0: 0, w1: 0, w2: 0, w3: 0),
+        capsule_count: 0, binding_count: 0, total_memory_bytes: 0,
+        startup_slots: [], shutdown_slots: [], bindings: [],
+    )
+
+fn rejected(status: MdsocppSealStatus, slot: u32) -> MdsocppSealResultV1:
+    MdsocppSealResultV1(status: status, subject_slot: slot, receipt: empty_receipt())
+
+fn id_less(left: KpfId128, right: KpfId128) -> bool:
+    left.hi < right.hi or (left.hi == right.hi and left.lo < right.lo)
+
+fn migration_valid(value: MdsocppStateMigrationV1) -> bool:
+    if kpf_id128_is_zero(value.state_schema_id): return false
+    if value.to_major < value.from_major: return false
+    if value.to_major == value.from_major and value.to_minor < value.from_minor: return false
+    if value.kind == MdsocppMigrationKind.Exact:
+        return value.to_major == value.from_major and value.to_minor == value.from_minor
+    if value.kind == MdsocppMigrationKind.Additive:
+        return value.to_major == value.from_major and value.to_minor >= value.from_minor
+    not kpf_id128_is_zero(value.migration_operation_id)
+
+struct MemoryFit:
+    fits: bool
+    used: u64
+
+fn capsule_memory_within(value: CapsuleDescriptorV1, available: u64) -> MemoryFit:
+    var remaining = available
+    if value.memory.initialization_bytes > remaining: return MemoryFit(fits: false, used: 0)
+    remaining = remaining - value.memory.initialization_bytes
+    if value.memory.persistent_bytes_per_instance > remaining: return MemoryFit(fits: false, used: 0)
+    remaining = remaining - value.memory.persistent_bytes_per_instance
+    val sessions = value.memory.maximum_sessions as u64
+    if value.memory.bytes_per_session > remaining / sessions: return MemoryFit(fits: false, used: 0)
+    remaining = remaining - value.memory.bytes_per_session * sessions
+    val inflight = value.memory.maximum_inflight_per_session as u64
+    if value.memory.bytes_per_inflight_request > remaining / sessions / inflight: return MemoryFit(fits: false, used: 0)
+    remaining = remaining - value.memory.bytes_per_inflight_request * sessions * inflight
+    MemoryFit(fits: true, used: available - remaining)
+
+pub fn mdsocpp_seal_v1(capsules: [CapsuleDescriptorV1], policy: MdsocppSealPolicyV1) -> MdsocppSealResultV1:
+    if capsules.len() == 0: return rejected(MdsocppSealStatus.EmptyComposition, 0)
+    var index = 0u32
+    var total_memory = 0u64
+    while index < capsules.len().to_u32():
+        val capsule = capsules[index]
+        if kpf_id128_is_zero(capsule.capsule_id): return rejected(MdsocppSealStatus.IdentityMissing, index)
+        val sealed_critical = policy.critical or policy.profile == MdsocppProfile.MissionCritical or policy.profile == MdsocppProfile.Kernel or policy.profile == MdsocppProfile.Driver
+        if sealed_critical and capsule.closure == MdsocppClosure.Dyn:
+            return rejected(MdsocppSealStatus.DynamicCriticalRejected, index)
+        if capsule.uses_ecs and (policy.profile == MdsocppProfile.Kernel or policy.profile == MdsocppProfile.Driver):
+            return rejected(MdsocppSealStatus.EcsProfileRejected, index)
+        if (capsule.required_capability_bits & policy.granted_capability_bits) != capsule.required_capability_bits:
+            return rejected(MdsocppSealStatus.CapabilityDenied, index)
+        if not kpf_validate_memory_contract_v1(capsule.memory).accepted():
+            return rejected(MdsocppSealStatus.MemoryBudgetExceeded, index)
+        if not kpf_validate_concurrency_contract_v1(capsule.concurrency).accepted() or capsule.concurrency.maximum_concurrent_calls > policy.maximum_concurrent_calls:
+            return rejected(MdsocppSealStatus.ConcurrencyRejected, index)
+        var migration_index = 0u32
+        while migration_index < capsule.state_migrations.len().to_u32():
+            if not migration_valid(capsule.state_migrations[migration_index]):
+                return rejected(MdsocppSealStatus.MigrationIncompatible, index)
+            migration_index = migration_index + 1
+        var prior = 0u32
+        while prior < index:
+            if kpf_id128_equal(capsules[prior].capsule_id, capsule.capsule_id):
+                return rejected(MdsocppSealStatus.DuplicateCapsule, index)
+            prior = prior + 1
+        val memory_fit = capsule_memory_within(capsule, policy.memory_budget_bytes - total_memory)
+        if not memory_fit.fits: return rejected(MdsocppSealStatus.MemoryBudgetExceeded, index)
+        total_memory = total_memory + memory_fit.used
+        index = index + 1
+
+    var bindings: [MdsocppFacetBindingV1] = []
+    var indegree: [u32] = []
+    index = 0
+    while index < capsules.len().to_u32():
+        indegree.push(0)
+        var offer_index = 0u32
+        while offer_index < capsules[index].provided_facets.len().to_u32():
+            val offered = capsules[index].provided_facets[offer_index].facet_id
+            if kpf_id128_is_zero(offered): return rejected(MdsocppSealStatus.IdentityMissing, index)
+            var other_slot = 0u32
+            var matches = 0u32
+            while other_slot < capsules.len().to_u32():
+                var other_offer = 0u32
+                while other_offer < capsules[other_slot].provided_facets.len().to_u32():
+                    if kpf_id128_equal(offered, capsules[other_slot].provided_facets[other_offer].facet_id): matches = matches + 1
+                    other_offer = other_offer + 1
+                other_slot = other_slot + 1
+            if matches > 1: return rejected(MdsocppSealStatus.DuplicateFacet, index)
+            offer_index = offer_index + 1
+        index = index + 1
+
+    var consumer = 0u32
+    while consumer < capsules.len().to_u32():
+        var requirement_index = 0u32
+        while requirement_index < capsules[consumer].required_facets.len().to_u32():
+            val requirement = capsules[consumer].required_facets[requirement_index]
+            var provider = 0u32
+            var provider_slot = 0u32
+            var matches = 0u32
+            while provider < capsules.len().to_u32():
+                var offer_index = 0u32
+                while offer_index < capsules[provider].provided_facets.len().to_u32():
+                    if kpf_id128_equal(requirement.facet_id, capsules[provider].provided_facets[offer_index].facet_id):
+                        provider_slot = provider
+                        matches = matches + 1
+                    offer_index = offer_index + 1
+                provider = provider + 1
+            if matches == 0 and not requirement.optional: return rejected(MdsocppSealStatus.MissingFacet, consumer)
+            if matches > 1: return rejected(MdsocppSealStatus.AmbiguousFacet, consumer)
+            if matches == 1:
+                bindings.push(MdsocppFacetBindingV1(consumer_slot: consumer, provider_slot: provider_slot, facet_id: requirement.facet_id))
+                if provider_slot != consumer: indegree[consumer] = indegree[consumer] + 1
+            requirement_index = requirement_index + 1
+        consumer = consumer + 1
+
+    var startup: [u32] = []
+    var emitted: [bool] = []
+    index = 0
+    while index < capsules.len().to_u32(): emitted.push(false); index = index + 1
+    while startup.len() < capsules.len():
+        var candidate = capsules.len().to_u32()
+        index = 0
+        while index < capsules.len().to_u32():
+            if not emitted[index] and indegree[index] == 0:
+                if candidate == capsules.len().to_u32() or id_less(capsules[index].capsule_id, capsules[candidate].capsule_id): candidate = index
+            index = index + 1
+        if candidate == capsules.len().to_u32(): return rejected(MdsocppSealStatus.DependencyCycle, 0)
+        emitted[candidate] = true
+        startup.push(candidate)
+        var binding_index = 0u32
+        while binding_index < bindings.len().to_u32():
+            val binding = bindings[binding_index]
+            if binding.provider_slot == candidate and binding.consumer_slot != candidate:
+                indegree[binding.consumer_slot] = indegree[binding.consumer_slot] - 1
+            binding_index = binding_index + 1
+
+    var shutdown: [u32] = []
+    index = startup.len().to_u32()
+    while index > 0:
+        index = index - 1
+        shutdown.push(startup[index])
+    MdsocppSealResultV1(
+        status: MdsocppSealStatus.Ok, subject_slot: 0,
+        receipt: MdsocppGenerationReceiptV1(
+            generation: policy.generation, composition_digest: policy.composition_digest,
+            capsule_count: capsules.len().to_u32(), binding_count: bindings.len().to_u32(),
+            total_memory_bytes: total_memory, startup_slots: startup,
+            shutdown_slots: shutdown, bindings: bindings,
+        ),
+    )

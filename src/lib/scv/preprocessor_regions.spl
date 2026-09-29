@@ -1,0 +1,262 @@
+# SCV — C preprocessor conditional-region model for the merger.
+#
+# Fixes `doc/08_tracking/bug/scv_merge_silently_merges_across_divergent_preprocessor_branches_2026-08-26.md`.
+#
+# The line/syntax-node merge rungs in merge.spl compute disjointness over RAW
+# TEXT line indices, so a `#ifdef` line and the statements it governs look like
+# two independent units. Two sides editing "different lines" can therefore be
+# merged clean while being semantically mutually exclusive — a MISSED REAL
+# CONFLICT, the dangerous class.
+#
+# This module gives the merger the minimum structural notion needed to see it:
+# every line is tagged with the conditional CONSTRUCT stack it sits in and, per
+# construct, which ARM (0 = the `#if*` arm, 1 = the first `#elif`/`#else` arm,
+# ...). Two rules then classify a divergent pair as a preprocessor-region
+# conflict:
+#
+#   R1 CONDITION-vs-BODY  one side edited a construct's directive line (its
+#                         `#if*`/`#elif`/`#else`/`#endif`) while the other side
+#                         edited any line that construct governs (or another of
+#                         its own directive lines). Retargeting a guard while
+#                         the guarded body changes underneath yields code for a
+#                         configuration neither side authored.
+#
+#   R2 SIBLING-ARM        both sides edited body lines that live in DIFFERENT
+#                         arms of the SAME construct. The arms are mutually
+#                         exclusive, so the two edits were never co-validated
+#                         under any single macro configuration.
+#
+# HONEST CEILING — stated rather than papered over. This is a *lexical* region
+# model, not a preprocessor. It does not evaluate macros, does not know that
+# `FEATURE_A` and `FEATURE_B` are unrelated, does not expand `#include`, and
+# does not track `#define`. It therefore cannot decide semantic questions such
+# as "are these two arms actually reachable together". It answers only the
+# structural question the merger was getting wrong: do these two edits land in,
+# or on the condition of, the same conditional construct. Cases where the two
+# sides have DIFFERENT LINE COUNTS are deliberately out of scope here — the
+# merge rungs already conflict those via their shape-mismatch path, and this
+# module returns "no divergence" rather than duplicating that decision.
+#
+# Directive recognition is deliberately STRICT: the `#` must be immediately
+# followed by the directive keyword, and the keyword must end at a word
+# boundary. Simple uses `#` as its comment character, so a loose matcher would
+# read `# if you want` as a conditional and manufacture spurious conflicts in
+# `.spl` files. Callers additionally skip `.spl` entirely (Simple has no
+# preprocessor); the strict form is the second line of defence.
+
+fn scv_pp_version() -> text:
+    "scv/preprocessor-regions/v1"
+
+fn scv_pp_is_word_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+# "open" for #if/#ifdef/#ifndef, "alt" for #elif/#else, "close" for #endif,
+# "" for everything else (including any Simple `#` comment).
+fn scv_pp_kind(line: text) -> text:
+    val t = line.trim()
+    if not t.starts_with("#"):
+        return ""
+    val rest = t[1:]
+    for kw in ["ifdef", "ifndef", "elif", "endif", "else", "if"]:
+        if rest.starts_with(kw):
+            val after = rest[kw.len():]
+            if after != "" and scv_pp_is_word_char(after[0:1]):
+                continue
+            if kw == "endif":
+                return "close"
+            if kw == "elif" or kw == "else":
+                return "alt"
+            return "open"
+    ""
+
+# The trimmed text of every conditional directive line, in order.
+fn scv_pp_directive_lines(content: text) -> [text]:
+    var out: [text] = []
+    for line in content.split("\n"):
+        if scv_pp_kind(line) != "":
+            out.push(line.trim())
+    out
+
+# True when the text carries at least one WELL FORMED conditional construct:
+# an `#if*` that is eventually closed by a matching `#endif`, never closing
+# below depth zero. A lone stray directive is not a construct.
+fn scv_pp_has_construct(content: text) -> bool:
+    var depth = 0
+    var closed = 0
+    for line in content.split("\n"):
+        val k = scv_pp_kind(line)
+        if k == "open":
+            depth = depth + 1
+        elif k == "close":
+            if depth == 0:
+                return false
+            depth = depth - 1
+            closed = closed + 1
+    depth == 0 and closed > 0
+
+fn scv_pp_stack_path(ids: [i64], arms: [i64], depth: i64) -> text:
+    var rows: [text] = []
+    var i = 0
+    while i < depth:
+        rows.push("c{ids[i]}:a{arms[i]}")
+        i = i + 1
+    rows.join(",")
+
+# One tag per line, parallel to content.split("\n"):
+#   "D<cid>|<enclosing-path>"  a directive line OF construct <cid>
+#   "B|<path>"                 a body line, governed by every construct in path
+# <path> is a comma-joined "c<id>:a<arm>" stack, outermost first.
+fn scv_pp_line_tags(content: text) -> [text]:
+    var tags: [text] = []
+    var ids: [i64] = []
+    var arms: [i64] = []
+    var depth = 0
+    var next_id = 0
+    for line in content.split("\n"):
+        val k = scv_pp_kind(line)
+        if k == "open":
+            val cid = next_id
+            next_id = next_id + 1
+            tags.push("D{cid}|{scv_pp_stack_path(ids, arms, depth)}")
+            if depth < ids.len():
+                ids[depth] = cid
+                arms[depth] = 0
+            else:
+                ids.push(cid)
+                arms.push(0)
+            depth = depth + 1
+        elif k == "alt":
+            if depth == 0:
+                tags.push("B|{scv_pp_stack_path(ids, arms, depth)}")
+            else:
+                val cid = ids[depth - 1]
+                arms[depth - 1] = arms[depth - 1] + 1
+                tags.push("D{cid}|{scv_pp_stack_path(ids, arms, depth - 1)}")
+        elif k == "close":
+            if depth == 0:
+                tags.push("B|{scv_pp_stack_path(ids, arms, depth)}")
+            else:
+                val cid = ids[depth - 1]
+                depth = depth - 1
+                tags.push("D{cid}|{scv_pp_stack_path(ids, arms, depth)}")
+        else:
+            tags.push("B|{scv_pp_stack_path(ids, arms, depth)}")
+    tags
+
+fn scv_pp_tag_is_directive(tag: text) -> bool:
+    tag.starts_with("D")
+
+# "" for a body tag.
+fn scv_pp_tag_construct(tag: text) -> text:
+    if not scv_pp_tag_is_directive(tag):
+        return ""
+    val parts = tag.split("|")
+    parts[0][1:]
+
+fn scv_pp_tag_path(tag: text) -> text:
+    val parts = tag.split("|")
+    if parts.len() >= 2:
+        parts[1]
+    else:
+        ""
+
+# The arm this path sits in for construct cid, or "" when cid does not govern it.
+fn scv_pp_path_arm(path: text, cid: text) -> text:
+    if path == "":
+        return ""
+    for entry in path.split(","):
+        val kv = entry.split(":")
+        if kv.len() == 2 and kv[0] == "c{cid}":
+            return kv[1]
+    ""
+
+# R1: `dtag` is a directive of construct C; does `otag` belong to C — either a
+# line C governs, or another directive line of C itself?
+fn scv_pp_tag_in_construct(dtag: text, otag: text) -> bool:
+    val cid = scv_pp_tag_construct(dtag)
+    if cid == "":
+        return false
+    if scv_pp_tag_construct(otag) == cid:
+        return true
+    scv_pp_path_arm(scv_pp_tag_path(otag), cid) != ""
+
+# R2: the id of a construct that governs BOTH tags but in DIFFERENT arms, or "".
+fn scv_pp_sibling_arm_construct(a: text, b: text) -> text:
+    val pa = scv_pp_tag_path(a)
+    val pb = scv_pp_tag_path(b)
+    if pa == "" or pb == "":
+        return ""
+    for entry in pa.split(","):
+        val kv = entry.split(":")
+        if kv.len() != 2:
+            continue
+        val cid = kv[0][1:]
+        val arm_b = scv_pp_path_arm(pb, cid)
+        if arm_b != "" and arm_b != kv[1]:
+            return cid
+    ""
+
+fn scv_pp_changed_indices(base_lines: [text], side_lines: [text]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < base_lines.len():
+        if base_lines[i] != side_lines[i]:
+            out.push(i)
+        i = i + 1
+    out
+
+# The core detector. Returns "" when the two sides' edits are NOT in conflict
+# under the region model, otherwise a human-readable diagnostic naming the rule
+# and the construct. Returns "" for non-preprocessor text and for shapes the
+# merge rungs already conflict on their own.
+fn scv_pp_divergence(base_text: text, left_text: text, right_text: text) -> text:
+    if not scv_pp_has_construct(base_text):
+        return ""
+    val bl = base_text.split("\n")
+    val ll = left_text.split("\n")
+    val rl = right_text.split("\n")
+    if bl.len() != ll.len() or bl.len() != rl.len():
+        return ""
+    val tags = scv_pp_line_tags(base_text)
+    val left_changed = scv_pp_changed_indices(bl, ll)
+    val right_changed = scv_pp_changed_indices(bl, rl)
+    if left_changed.len() == 0 or right_changed.len() == 0:
+        return ""
+    for i in left_changed:
+        for j in right_changed:
+            val ti = tags[i]
+            val tj = tags[j]
+            if scv_pp_tag_is_directive(ti) and scv_pp_tag_in_construct(ti, tj):
+                return "left changed the condition of preprocessor construct c{scv_pp_tag_construct(ti)} (line {i + 1}) while right changed line {j + 1} inside it"
+            if scv_pp_tag_is_directive(tj) and scv_pp_tag_in_construct(tj, ti):
+                return "right changed the condition of preprocessor construct c{scv_pp_tag_construct(tj)} (line {j + 1}) while left changed line {i + 1} inside it"
+            val sib = scv_pp_sibling_arm_construct(ti, tj)
+            if sib != "":
+                return "left line {i + 1} and right line {j + 1} are in mutually exclusive arms of preprocessor construct c{sib}"
+    ""
+
+# Rename companion: a rename on one side is not independently mergeable with a
+# GUARD REWRITE on the other, because the rewritten condition rides onto the new
+# path and silently changes which build configuration compiles the file. True
+# when `side_text` changed the set of conditional directive lines `base_text`
+# had. Deliberately narrow: a body-only edit on the other side is NOT flagged
+# (that is ordinary rename+edit, which cases 07/12 pin as clean).
+fn scv_pp_guard_rewritten(base_text: text, side_text: text) -> bool:
+    if not scv_pp_has_construct(base_text) and not scv_pp_has_construct(side_text):
+        return false
+    val b = scv_pp_directive_lines(base_text)
+    val s = scv_pp_directive_lines(side_text)
+    if b.len() != s.len():
+        return true
+    var i = 0
+    while i < b.len():
+        if b[i] != s[i]:
+            return true
+        i = i + 1
+    false
+
+export scv_pp_version, scv_pp_kind, scv_pp_is_word_char, scv_pp_directive_lines
+export scv_pp_has_construct, scv_pp_line_tags, scv_pp_stack_path
+export scv_pp_tag_is_directive, scv_pp_tag_construct, scv_pp_tag_path, scv_pp_path_arm
+export scv_pp_tag_in_construct, scv_pp_sibling_arm_construct, scv_pp_changed_indices
+export scv_pp_divergence, scv_pp_guard_rewritten

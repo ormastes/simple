@@ -1,0 +1,59 @@
+# @req KPM-REQ-009 KPM-REQ-011 KPM-REQ-012 KPM-REQ-014
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn run_phase8_system_fixture(script_body: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/simple-phase8-system.XXXXXX)\ntrap 'rm -rf \"$TMP\"' EXIT\ncd \"$TMP\"\n" + script_body])
+
+val PHASE8_SYSTEM_MANIFEST = "cat > simple.sdn <<'SDN'\nproject:\n  name: phase8-system\n  dependencies:\n    - package: backend-old\n      provides:\n        - simple.codegen.BackendPort@1.1.0\n      requires: []\n      link: static\n    - package: backend-current\n      provides:\n        - simple.codegen.BackendPort@1.4.0\n      requires: []\n      link: static\n    - package: compiler\n      provides: []\n      requires:\n        - simple.codegen.BackendPort@^1.2.0\n      link: static\nSDN\n"
+
+describe "Phase 8 package range locking":
+    it "runs lock and update through the production CLI with deterministic policy-bound output":
+        print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=deterministic-lock state=BEGIN expected=stable")
+        step("Generate and check the lock through the root simple command")
+        val script = PHASE8_SYSTEM_MANIFEST +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "grep -q 'provider: \"backend-current\"' simple.lock\n" +
+            "grep -q 'plugin_manifest_policy: \"simple-sdn\"' simple.lock\n" +
+            "grep -q 'plugin_manifest_location: \"simple.sdn\"' simple.lock\n" +
+            "grep -q 'simple_abi_policy: \"v1\"' simple.lock\n" +
+            "cp simple.lock simple.lock.first\n" +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force\n" +
+            "cmp simple.lock.first simple.lock\n" +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock check\n" +
+            "env -u SIMPLE_PLUGIN_MANIFEST_POLICY -u SIMPLE_ABI_POLICY SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" update --dry-run\n" +
+            "printf 'phase8-system-product-ok\\n'\n"
+        val (stdout, stderr, status) = run_phase8_system_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-system-product-ok")
+        print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=deterministic-lock state=PASS expected=stable")
+
+    it "preserves the admitted lock when resolution or policy validation fails":
+        print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=refusal-preserves-lock state=BEGIN expected=unchanged")
+        step("Mutate the manifest and policy, then require attributed failures without publication")
+        val script = PHASE8_SYSTEM_MANIFEST +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate\n" +
+            "cp simple.lock simple.lock.before\n" +
+            "cp simple.sdn simple.sdn.good\n" +
+            "sed 's/@\\^1.2.0/@^2.0.0/' simple.sdn > simple.sdn.bad\n" +
+            "mv simple.sdn.bad simple.sdn\n" +
+            "set +e\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=simple-sdn SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > range.out 2>&1\n" +
+            "RANGE_STATUS=$?\n" +
+            "cmp simple.lock.before simple.lock\n" +
+            "cp simple.sdn.good simple.sdn\n" +
+            "SIMPLE_PLUGIN_MANIFEST_POLICY=auto SIMPLE_ABI_POLICY=v1 SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" lock generate --force > policy.out 2>&1\n" +
+            "POLICY_STATUS=$?\n" +
+            "cmp simple.lock.before simple.lock\n" +
+            "set -e\n" +
+            "test \"$RANGE_STATUS\" -ne 0\n" +
+            "test \"$POLICY_STATUS\" -ne 0\n" +
+            "grep -q 'no provider satisfies' range.out\n" +
+            "grep -q 'selected plugin manifest policy' policy.out\n" +
+            "printf 'phase8-system-fail-closed-ok\\n'\n"
+        val (stdout, stderr, status) = run_phase8_system_fixture(script)
+        expect(status).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("phase8-system-fail-closed-ok")
+        print("KPM_PHASE8_LOCK_ASSERTION_RECEIPT case=refusal-preserves-lock state=PASS expected=unchanged")

@@ -1,0 +1,112 @@
+"""
+## Purpose and audience
+Purpose: Prove the shared WM create/focus contract remains byte-exact and fail-closed.
+Audience: SimpleOS WM service and Window userlib maintainers.
+"""
+# @req: REQ-WM-WIRE-001
+# @cover src/lib/common/window_protocol/window_protocol.spl
+# @tag: unit, simpleos, wm, wire
+
+use std.spec.*
+use common.window_protocol.window_protocol.*
+use common.window_protocol.geometry.{WindowId, Point, KeyCode, WmEventType}
+
+fn _expect_create_error(bytes: [u8]):
+    match wm_create_response_decode(bytes):
+        Ok(response):
+            fail("malformed create response decoded as status={response.status.value} window={response.window_id.value}")
+        Err(reason):
+            expect(reason == "").to_equal(false)
+
+fn _expect_focus_error(bytes: [u8]):
+    match wm_focus_event_decode(bytes):
+        Ok(event):
+            fail("malformed focus event decoded as window={event.window_id.value}")
+        Err(reason):
+            expect(reason == "").to_equal(false)
+
+describe "shared WM wire and compatibility API":
+    it "encodes the client create reply as exact little-endian status and window id":
+        step("Encode the byte contract already consumed by WindowClient")
+        val wire = wm_create_response_encode(WmCreateResponse(
+            status: WM_STATUS_OK,
+            window_id: WindowId(value: 0x0102030405060708u64)
+        ))
+        expect(wire.len()).to_equal(WM_CREATE_RESPONSE_WIRE_BYTES)
+        expect(wire).to_equal([0u8, 0u8, 0u8, 0u8, 8u8, 7u8, 6u8, 5u8, 4u8, 3u8, 2u8, 1u8])
+
+        match wm_create_response_decode(wire):
+            Err(reason):
+                fail("valid create response rejected: {reason}")
+            Ok(response):
+                expect(response.status.value).to_equal(WM_STATUS_OK.value)
+                expect(response.window_id.value).to_equal(0x0102030405060708u64)
+
+    it "round-trips canonical failed create replies and rejects client ambiguity":
+        step("Keep failure status paired with the canonical zero window id")
+        val no_space = wm_create_response_encode(WmCreateResponse(
+            status: WM_STATUS_NO_SPACE,
+            window_id: WindowId(value: 0u64)
+        ))
+        match wm_create_response_decode(no_space):
+            Err(reason):
+                fail("valid no-space response rejected: {reason}")
+            Ok(response):
+                expect(response.status.value).to_equal(WM_STATUS_NO_SPACE.value)
+                expect(response.window_id.value).to_equal(0u64)
+
+        val generic_error = wm_create_response_encode(WmCreateResponse(
+            status: WM_STATUS_ERROR,
+            window_id: WindowId(value: 0u64)
+        ))
+        match wm_create_response_decode(generic_error):
+            Err(reason):
+                fail("valid generic-error response rejected: {reason}")
+            Ok(response):
+                expect(response.status.value).to_equal(WM_STATUS_ERROR.value)
+                expect(response.window_id.value).to_equal(0u64)
+
+        step("Reject truncated, trailing, unknown, and contradictory replies")
+        _expect_create_error([])
+        _expect_create_error([0u8; 11])
+        _expect_create_error([0u8; 13])
+        _expect_create_error([99u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+        _expect_create_error([0u8; 12])
+        _expect_create_error([255u8, 255u8, 255u8, 255u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+
+    it "encodes and decodes the exact bounded focus payload":
+        step("Preserve window_id(u64 LE) followed by one canonical bool byte")
+        val focused = wm_focus_event(WindowId(value: 0x0102030405060708u64), true)
+        val wire = wm_focus_event_encode(focused)
+        expect(wire.len()).to_equal(WM_FOCUS_EVENT_WIRE_BYTES)
+        expect(wire).to_equal([8u8, 7u8, 6u8, 5u8, 4u8, 3u8, 2u8, 1u8, 1u8])
+        match wm_focus_event_decode(wire):
+            Err(reason):
+                fail("valid focus event rejected: {reason}")
+            Ok(event):
+                expect(event.window_id.value).to_equal(0x0102030405060708u64)
+                expect(event.focused).to_equal(true)
+
+        val blurred_wire = wm_focus_event_encode(wm_focus_event(WindowId(value: 9u64), false))
+        expect(blurred_wire).to_equal([9u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+        match wm_focus_event_decode(blurred_wire):
+            Err(reason):
+                fail("valid unfocused event rejected: {reason}")
+            Ok(event):
+                expect(event.window_id.value).to_equal(9u64)
+                expect(event.focused).to_equal(false)
+
+        step("Reject truncated, trailing, zero-id, and non-boolean focus payloads")
+        _expect_focus_error([0u8; 8])
+        _expect_focus_error([0u8; 10])
+        _expect_focus_error([0u8; 9])
+        _expect_focus_error([1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8])
+
+    it "keeps legacy event constructor names mapped to typed events":
+        step("Construct close, focus, and resize events through the userlib API")
+        val window_id = WindowId(value: 7u64)
+        val key = KeyCode(code: 1u32, name: "")
+        val point = Point.xy(20, 30)
+        expect(wm_input_event(window_id, WM_EVENT_CLOSE, key, point).event_type).to_equal(WmEventType.Close)
+        expect(wm_input_event(window_id, WM_EVENT_FOCUS, key, point).event_type).to_equal(WmEventType.Focus)
+        expect(wm_input_event(window_id, WM_EVENT_RESIZE, key, point).event_type).to_equal(WmEventType.Resize)

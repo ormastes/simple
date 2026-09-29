@@ -1,0 +1,107 @@
+# @cover src/lib/nogc_async_mut/database/postgres_mimic/scalar_control.spl 80%
+"""Pure DB control owner model with scalar fields.
+
+This spec exercises the parent-owned generation registry only.  It intentionally
+does not import a listener, worker, or runtime registry. The request/result
+aggregates stay inside the owner model and are not cross-thread evidence.
+"""
+
+use std.spec
+use std.database.postgres_mimic.scalar_control.{
+    PgDbControlOpRequest, pg_db_control_registry, pg_db_control_create,
+    pg_db_control_admit, pg_db_control_begin_drain, pg_db_control_started,
+    pg_db_control_completed, pg_db_control_started_count,
+    pg_db_control_completed_count, pg_db_control_release,
+    pg_db_control_apply, PG_DB_CONTROL_OP_IS_DRAINING,
+    PG_DB_CONTROL_STATUS_INVALID_HANDLE, PG_DB_CONTROL_STATUS_REJECTED,
+    PG_DB_CONTROL_STATUS_UNKNOWN_OPERATION, PG_DB_CONTROL_STATUS_INVALID_ARGUMENT
+}
+
+describe "pure scalar database control owner":
+
+    it "admits bounded connections and tracks completion counters":
+        var registry = pg_db_control_registry(31, 2)
+        val control = pg_db_control_create(registry, 2)
+        expect(control).to_be_greater_than(0)
+
+        val first = pg_db_control_admit(registry, control)
+        expect(first.ok).to_equal(true)
+        expect(first.value).to_equal(1)
+        val second = pg_db_control_admit(registry, control)
+        expect(second.ok).to_equal(true)
+        expect(second.value).to_equal(2)
+        val full = pg_db_control_admit(registry, control)
+        expect(full.ok).to_equal(false)
+        expect(full.status).to_equal(PG_DB_CONTROL_STATUS_REJECTED)
+        expect(full.active_count).to_equal(2)
+
+        val started = pg_db_control_started(registry, control)
+        expect(started.value).to_equal(1)
+        val completed = pg_db_control_completed(registry, control)
+        expect(completed.value).to_equal(1)
+        expect(completed.active_count).to_equal(1)
+        val admitted_after_completion = pg_db_control_admit(registry, control)
+        expect(admitted_after_completion.ok).to_equal(true)
+        expect(admitted_after_completion.value).to_equal(3)
+
+    it "begins drain and rejects admission while preserving counters":
+        var registry = pg_db_control_registry(32, 1)
+        val control = pg_db_control_create(registry, 4)
+        val admitted = pg_db_control_admit(registry, control)
+        expect(admitted.ok).to_equal(true)
+        val drain = pg_db_control_begin_drain(registry, control)
+        expect(drain.ok).to_equal(true)
+        expect(drain.value).to_equal(1)
+        expect(drain.draining).to_equal(true)
+        val rejected = pg_db_control_admit(registry, control)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.status).to_equal(PG_DB_CONTROL_STATUS_REJECTED)
+        expect(rejected.active_count).to_equal(1)
+        val query = pg_db_control_apply(registry, PgDbControlOpRequest(
+            handle: control, operation: PG_DB_CONTROL_OP_IS_DRAINING, argument: 0))
+        expect(query.ok).to_equal(true)
+        expect(query.value).to_equal(1)
+
+    it "reports started and completed counters through scalar results":
+        var registry = pg_db_control_registry(33, 1)
+        val control = pg_db_control_create(registry, 2)
+        val admitted = pg_db_control_admit(registry, control)
+        expect(admitted.ok).to_equal(true)
+        val started = pg_db_control_started(registry, control)
+        expect(started.value).to_equal(1)
+        val completed = pg_db_control_completed(registry, control)
+        expect(completed.value).to_equal(1)
+        val started_count = pg_db_control_started_count(registry, control)
+        val completed_count = pg_db_control_completed_count(registry, control)
+        expect(started_count.value).to_equal(1)
+        expect(completed_count.value).to_equal(1)
+        expect(completed_count.active_count).to_equal(0)
+
+    it "rejects wrong-owner and stale handles without mutating state":
+        var first_registry = pg_db_control_registry(41, 1)
+        var second_registry = pg_db_control_registry(42, 1)
+        val first_control = pg_db_control_create(first_registry, 1)
+        val second_control = pg_db_control_create(second_registry, 1)
+        val wrong_owner = pg_db_control_admit(second_registry, first_control)
+        expect(wrong_owner.ok).to_equal(false)
+        expect(wrong_owner.status).to_equal(PG_DB_CONTROL_STATUS_INVALID_HANDLE)
+        val valid_second = pg_db_control_admit(second_registry, second_control)
+        expect(valid_second.ok).to_equal(true)
+        expect(pg_db_control_release(first_registry, first_control)).to_equal(true)
+        val stale = pg_db_control_started(first_registry, first_control)
+        expect(stale.ok).to_equal(false)
+        expect(stale.status).to_equal(PG_DB_CONTROL_STATUS_INVALID_HANDLE)
+        val malformed = pg_db_control_completed(first_registry, -1)
+        expect(malformed.ok).to_equal(false)
+        expect(malformed.status).to_equal(PG_DB_CONTROL_STATUS_INVALID_HANDLE)
+
+    it "rejects unknown operations and completion without an admitted connection":
+        var registry = pg_db_control_registry(51, 1)
+        val control = pg_db_control_create(registry, 1)
+        val unknown = pg_db_control_apply(registry, PgDbControlOpRequest(
+            handle: control, operation: 99, argument: 0))
+        expect(unknown.ok).to_equal(false)
+        expect(unknown.status).to_equal(PG_DB_CONTROL_STATUS_UNKNOWN_OPERATION)
+        val no_connection = pg_db_control_completed(registry, control)
+        expect(no_connection.ok).to_equal(false)
+        expect(no_connection.status).to_equal(PG_DB_CONTROL_STATUS_INVALID_ARGUMENT)

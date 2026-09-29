@@ -62,3 +62,11 @@ table lists 14 suites with 4 FAIL rows (`mir_lowering_new_spec.spl`,
 `web_css_text_layout_spec.spl`) and 10 PASS rows. The headline has been
 corrected to "10 suites clean ... 4 pre-existing-known failures of 14 total"
 and now points at this doc for the `mir_lowering_new_spec.spl` classification.
+
+## Re-check 2026-09-13 (BUGFIX-7 lane)
+
+`bin/simple test test/01_unit/compiler/mir/mir_lowering_new_spec.spl` ->
+`Results: 36 total, 12 passed, 24 failed` (drifted worse from the documented
+34 total/15 passed/19 failed — 2 more examples, 5 more failures). Still
+reproduces and is still large-scope pre-existing MIR-lowering compiler work,
+well beyond this lane's per-bug budget. No change made.

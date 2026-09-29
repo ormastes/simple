@@ -1,4 +1,9 @@
 # native (bootstrap): any function writing a module `var` produces invalid SSA (llc "multiple definition of local")
+## Closed 2026-09-16 — ...eached llc as a double definition. ## Fix (four helper edits, all in var_reassign_ssa.spl)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Date:** 2026-07-23  **Status:** FIXED
 - **Severity:** high — any entry-closure native function that BOTH writes a
@@ -35,3 +40,4 @@ CallIndirect exemption (#135).
 ## Verification
 `_mcp_init_tool_set` and every other module-var-writing closure function now
 lower cleanly (rMCP24). General fix — not MCP-specific.
+

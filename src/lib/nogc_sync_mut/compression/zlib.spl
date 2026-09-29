@@ -4,6 +4,58 @@
 # LZ77 Token: (offset, length, next_char)
 # Example: (5, 3, 'x') means "copy 3 chars from 5 positions back, then add 'x'"
 
+use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress_eof}
+
+fn _zlib_adler32(data: [u8]) -> u32:
+    var a: u32 = 1u32
+    var b: u32 = 0u32
+    var i = 0
+    while i < data.len():
+        a = (a + data[i].to_u32()) % 65521u32
+        b = (b + a) % 65521u32
+        i = i + 1
+    (b << 16u32) | a
+
+fn zlib_compress(data: [u8]) -> [u8]:
+    val raw = deflate_compress_sync_flush(data)
+    if raw.is_err():
+        return []
+    var out: [u8] = [0x78u8, 0x01u8]
+    for byte in raw.unwrap():
+        out.push(byte)
+    val checksum = _zlib_adler32(data)
+    out.push(((checksum >> 24u32) & 0xFFu32).to_u8())
+    out.push(((checksum >> 16u32) & 0xFFu32).to_u8())
+    out.push(((checksum >> 8u32) & 0xFFu32).to_u8())
+    out.push((checksum & 0xFFu32).to_u8())
+    out
+
+fn zlib_decompress(data: [u8]) -> [u8]?:
+    if data.len() < 6:
+        return nil
+    val cmf = data[0].to_u32()
+    val flg = data[1].to_u32()
+    if (cmf & 0x0Fu32) != 8u32 or ((cmf << 8u32) + flg) % 31u32 != 0u32:
+        return nil
+    if (flg & 0x20u32) != 0u32:
+        return nil
+    var raw: [u8] = []
+    var i = 2
+    while i < data.len() - 4:
+        raw.push(data[i])
+        i = i + 1
+    val decoded_result = deflate_decompress_eof(raw)
+    if decoded_result.is_err():
+        return nil
+    val decoded = decoded_result.unwrap()
+    val expected = (data[data.len() - 4].to_u32() << 24u32) |
+        (data[data.len() - 3].to_u32() << 16u32) |
+        (data[data.len() - 2].to_u32() << 8u32) |
+        data[data.len() - 1].to_u32()
+    if _zlib_adler32(decoded) != expected:
+        return nil
+    Some(decoded)
+
 # Find longest match in sliding window
 fn lz77_find_match(text, pos, window_size, lookahead_size):
     if text == nil:

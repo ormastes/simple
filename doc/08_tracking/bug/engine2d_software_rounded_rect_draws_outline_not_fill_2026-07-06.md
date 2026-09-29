@@ -1,7 +1,9 @@
 # SoftwareBackend.draw_rounded_rect draws an OUTLINE where it must FILL
+## Closed 2026-09-16 — ...the entire interior is unpainted. ## Fix `SoftwareBackend.draw_rounded_rect` now delegates
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 Fixed (2026-07-06).
@@ -48,3 +50,4 @@ persists) and is byte-identical to the canonical algorithm by construction.
 `cmp_rounded_rect()` now returns 0 (was 604). The harness assertion for
 `draw_rounded_rect` was flipped from `> 0` (pinned divergence) to `== 0`
 (byte-exact) and stays green.
+

@@ -1,0 +1,7 @@
+# Cranelift fingerprint requires a symlinked LLVM tool
+
+Status: open, 2026-09-27. Owner: bootstrap authority shell layer. Exact repro: WSL Linux main `edfa0daab038472319196313594265412f2b2f07`, `--full-bootstrap --backend=cranelift --stop-after-stage2`, with distro `/usr/bin/llvm-config -> ../lib/llvm-14/bin/llvm-config`. The seed fingerprint fails at `native-llvm-selected` with `cannot canonicalize llvm-config '/usr/bin/llvm-config'`.
+
+At [authority.shs](../../../scripts/check/lib/bootstrap-stage3/authority.shs), `bootstrap_stage3_resolve_llvm_build_authority` returns disabled for Cranelift, yet the seed fingerprint still canonicalizes any visible `llvm-config` at about line 5525. Explicitly binding the physical `LLVM_CONFIG=/usr/lib/llvm-14/bin/llvm-config` lets fingerprinting pass, proving the failure is in that optional tool identity path; the next stage then fails independently on Cargo 1.75 versus lockfile v4. The pure-Simple compiler has not started, so this is a shell authority boundary issue, not a proven .spl defect.
+
+Unblock condition: preserve fail-closed compiler authority while handling an unused, symlinked LLVM tool consistently. Add the exact Cranelift symlink regression and an adjacent real LLVM-backend or changed-target regression, then rerun only the failed fingerprint shard with its cache before restarting the host bootstrap. Do not substitute a seed or a guessed hash.

@@ -9,7 +9,7 @@ HTTP route
   -> Simple UI state
   -> UiAccessSnapshot + UIPatch
   -> ui.web WebSocket
-  -> browser/Electron/SimpleWeb adapter   # SimpleWeb (web server ui) is default; Electron is non-default
+  -> browser/Electron/SimpleWeb adapter
 ```
 
 Test and compatibility boundary:

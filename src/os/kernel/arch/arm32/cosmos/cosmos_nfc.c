@@ -1,5 +1,6 @@
 /* Bounded Cosmos+ Tiger4NSC/V2F NAND HAL. */
 #include "cosmos_hal.h"
+#include "cosmos_nfc_policy.h"
 #include "cosmos_nfc_regs.h"
 #include "cosmos_zynq_regs.h"
 
@@ -24,100 +25,62 @@ static struct cosmos_nfc_dma_range
                     [COSMOS_NFC_MAX_OWNED_RANGES];
 
 static unsigned int cosmos_nfc_channel_base(unsigned int channel) {
-    return COSMOS_NFC_CHANNEL0_BASE + channel * COSMOS_NFC_CHANNEL_STRIDE;
+    return cosmos_nfc_policy_channel_base(channel);
 }
 
 static int cosmos_nfc_row_valid(unsigned int row_address) {
-    return row_address < COSMOS_NFC_LUN0_BASE_ROW +
-            COSMOS_NFC_ROWS_PER_LUN ||
-        (row_address >= COSMOS_NFC_LUN1_BASE_ROW &&
-         row_address < COSMOS_NFC_LUN1_BASE_ROW +
-            COSMOS_NFC_ROWS_PER_LUN);
+    return cosmos_nfc_policy_row_valid(row_address);
 }
 
 static int cosmos_nfc_target_valid(unsigned int channel, unsigned int way,
                                    unsigned int row_address) {
-    return channel < COSMOS_NFC_CHANNEL_COUNT &&
-        way < COSMOS_NFC_WAY_COUNT && cosmos_nfc_row_valid(row_address);
+    return cosmos_nfc_policy_target_valid(channel, way, row_address);
 }
 
 static int cosmos_nfc_erase_row_valid(unsigned int row_address) {
-    unsigned int lun_row;
-    if (!cosmos_nfc_row_valid(row_address)) {
-        return 0;
-    }
-    lun_row = row_address >= COSMOS_NFC_LUN1_BASE_ROW ?
-        row_address - COSMOS_NFC_LUN1_BASE_ROW : row_address;
-    return (lun_row % COSMOS_NFC_ROWS_PER_BLOCK) == 0U;
-}
-
-static int cosmos_nfc_dma_range_valid(unsigned int address,
-                                      unsigned int size,
-                                      unsigned int base,
-                                      unsigned int end,
-                                      unsigned int stride) {
-    if (!COSMOS_NFC_IO_CONTRACT_BOUND || size == 0U || stride == 0U ||
-        address < base || address > end ||
-        ((address - base) % stride) != 0U) {
-        return 0;
-    }
-    return size - 1U <= end - address;
+    return cosmos_nfc_policy_erase_row_valid(row_address);
 }
 
 static int cosmos_nfc_data_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, COSMOS_NFC_PAGE_DATA_BYTES,
-        COSMOS_NFC_DATA_POOL_BASE, COSMOS_NFC_DATA_POOL_END,
-        COSMOS_NFC_PAGE_DATA_BYTES);
+    return cosmos_nfc_policy_data_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_raw_data_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, COSMOS_NFC_RAW_ROW_BYTES,
-        COSMOS_NFC_DATA_POOL_BASE, COSMOS_NFC_DATA_POOL_END,
-        COSMOS_NFC_PAGE_DATA_BYTES);
+    return cosmos_nfc_policy_raw_data_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_spare_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, COSMOS_NFC_PAGE_SPARE_BYTES,
-        COSMOS_NFC_SPARE_POOL_BASE, COSMOS_NFC_SPARE_POOL_END,
-        COSMOS_NFC_PAGE_SPARE_BYTES);
+    return cosmos_nfc_policy_spare_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_completion_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, sizeof(unsigned int),
-        COSMOS_NFC_COMPLETION_POOL_BASE, COSMOS_NFC_COMPLETION_POOL_END,
-        sizeof(unsigned int));
+    return cosmos_nfc_policy_completion_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_status_report_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, sizeof(unsigned int),
-        COSMOS_NFC_STATUS_POOL_BASE, COSMOS_NFC_STATUS_POOL_END,
-        sizeof(unsigned int));
+    return cosmos_nfc_policy_status_report_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_error_info_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, COSMOS_NFC_ERROR_INFO_BYTES,
-        COSMOS_NFC_ERROR_POOL_BASE, COSMOS_NFC_ERROR_POOL_END,
-        COSMOS_NFC_ERROR_INFO_BYTES);
+    return cosmos_nfc_policy_error_info_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_toggle_valid(unsigned int address) {
-    return cosmos_nfc_dma_range_valid(
-        address, 3U * sizeof(unsigned int),
-        COSMOS_NFC_TOGGLE_POOL_BASE, COSMOS_NFC_TOGGLE_POOL_END,
-        sizeof(unsigned int));
+    return cosmos_nfc_policy_toggle_valid(
+        address, COSMOS_NFC_IO_CONTRACT_BOUND);
 }
 
 static int cosmos_nfc_ranges_overlap(unsigned int first, unsigned int first_size,
                                      unsigned int second,
                                      unsigned int second_size) {
-    return first < second ? second - first < first_size :
-        first - second < second_size;
+    return cosmos_nfc_policy_ranges_overlap(
+        first, first_size, second, second_size);
 }
 
 static int cosmos_nfc_ownership_lock_acquire(void) {
@@ -143,8 +106,8 @@ static int cosmos_nfc_dma_reserve(
     unsigned int index;
     int status;
 
-    if (channel >= COSMOS_NFC_CHANNEL_COUNT || ranges == 0 ||
-        count == 0U || count > COSMOS_NFC_MAX_OWNED_RANGES) {
+    if (!cosmos_nfc_policy_dma_reserve_args_valid(
+            channel, ranges != 0, count)) {
         return COSMOS_INVALID;
     }
     status = cosmos_nfc_ownership_lock_acquire();
@@ -177,7 +140,7 @@ static int cosmos_nfc_dma_reserve(
 
 static int cosmos_nfc_dma_finish(unsigned int channel, int status) {
     int lock_status;
-    if (status == COSMOS_TIMEOUT) {
+    if (!cosmos_nfc_policy_dma_finish_releases(status)) {
         return status;
     }
     lock_status = cosmos_nfc_ownership_lock_acquire();
@@ -217,16 +180,35 @@ static void cosmos_nfc_channel_unlock(unsigned int channel) {
 }
 
 static int cosmos_nfc_channel_is_faulted(unsigned int channel) {
-    return __atomic_load_n(&cosmos_nfc_channel_faulted[channel],
-                           __ATOMIC_ACQUIRE) != 0U;
+    return (int)__atomic_load_n(&cosmos_nfc_channel_faulted[channel],
+                                __ATOMIC_ACQUIRE);
 }
 
 static int cosmos_nfc_channel_result(unsigned int channel, int status) {
-    if (status == COSMOS_TIMEOUT) {
+    if (cosmos_nfc_policy_channel_result_faults(status)) {
         __atomic_store_n(&cosmos_nfc_channel_faulted[channel], 1U,
                          __ATOMIC_RELEASE);
     }
     return status;
+}
+
+static int cosmos_nfc_operation_ready(void) {
+    int status = cosmos_nfc_policy_initialized_status(
+        __atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE));
+    if (status != COSMOS_OK) {
+        return status;
+    }
+    return cosmos_nfc_policy_contract_status(cosmos_nfc_contract_ready());
+}
+
+static int cosmos_nfc_locked_ready(unsigned int channel) {
+    int status = cosmos_nfc_policy_locked_channel_status(
+        (unsigned int)cosmos_nfc_channel_is_faulted(channel), COSMOS_OK);
+    if (status != COSMOS_OK) {
+        return status;
+    }
+    return cosmos_nfc_policy_locked_channel_status(
+        0U, cosmos_nfc_contract_ready());
 }
 
 static int cosmos_nfc_wait_channel_accept(unsigned int base) {
@@ -271,19 +253,16 @@ static int cosmos_nfc_issue(unsigned int base, unsigned int way,
 
 static int cosmos_nfc_decode_status(unsigned int raw_report,
                                     unsigned int *nand_status) {
-    unsigned int status;
-    if ((raw_report & COSMOS_NFC_STATUS_REPORT_DONE) == 0U ||
-        nand_status == 0) {
+    int status;
+    if (nand_status == 0) {
         return COSMOS_INVALID;
     }
-    status = raw_report >> 1U;
-    *nand_status = status;
-    if ((status & COSMOS_NFC_STATUS_COMPLETE_MASK) !=
-        COSMOS_NFC_STATUS_COMPLETE_MASK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_policy_decode_status(raw_report);
+    if (status == COSMOS_INVALID) {
+        return status;
     }
-    return (status & COSMOS_NFC_STATUS_FAIL_MASK) == 0U ?
-        COSMOS_OK : COSMOS_HW_ERROR;
+    *nand_status = cosmos_nfc_policy_nand_status(raw_report);
+    return status;
 }
 
 static int cosmos_nfc_status_locked(unsigned int channel, unsigned int way,
@@ -339,9 +318,9 @@ int cosmos_nfc_status(unsigned int channel, unsigned int way,
         {status_report_address, sizeof(unsigned int)}
     };
     int status;
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) == 0U ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_operation_ready();
+    if (status != COSMOS_OK) {
+        return status;
     }
     if (!cosmos_nfc_target_valid(channel, way, 0U) ||
         !cosmos_nfc_status_report_valid(status_report_address) ||
@@ -352,10 +331,10 @@ int cosmos_nfc_status(unsigned int channel, unsigned int way,
     if (status != COSMOS_OK) {
         return status;
     }
-    if (cosmos_nfc_channel_is_faulted(channel) ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
+    status = cosmos_nfc_locked_ready(channel);
+    if (status != COSMOS_OK) {
         cosmos_nfc_channel_unlock(channel);
-        return COSMOS_HW_ERROR;
+        return status;
     }
     status = cosmos_nfc_dma_reserve(channel, ranges, 1U);
     if (status != COSMOS_OK) {
@@ -370,35 +349,17 @@ int cosmos_nfc_status(unsigned int channel, unsigned int way,
     return status;
 }
 
-int cosmos_nfc_decode_ecc(const volatile unsigned int *error_info,
-                          struct cosmos_nfc_ecc *ecc) {
-    unsigned int first;
-    if (error_info == 0 || ecc == 0) {
-        return COSMOS_INVALID;
-    }
-    first = error_info[0];
-    ecc->crc_valid = (first & COSMOS_NFC_ECC_CRC_VALID) != 0U;
-    ecc->spare_valid = (first & COSMOS_NFC_ECC_SPARE_VALID) != 0U;
-    ecc->page_valid = error_info[1] == 0xFFFFFFFFU;
-    ecc->worst_chunk_errors =
-        (first & COSMOS_NFC_ECC_WORST_MASK) >> COSMOS_NFC_ECC_WORST_SHIFT;
-    ecc->needs_refresh =
-        ecc->worst_chunk_errors > COSMOS_NFC_ECC_WARNING_THRESHOLD;
-    return ecc->crc_valid && ecc->spare_valid && ecc->page_valid ?
-        COSMOS_OK : COSMOS_HW_ERROR;
-}
-
 static int cosmos_nfc_io_valid(const struct cosmos_nfc_io *io, int read) {
-    if (io == 0 ||
-        !cosmos_nfc_target_valid(io->channel, io->way, io->row_address) ||
-        !cosmos_nfc_data_valid(io->data_address) ||
-        !cosmos_nfc_spare_valid(io->spare_address) ||
-        !cosmos_nfc_status_report_valid(io->status_report_address)) {
+    if (io == 0) {
         return 0;
     }
-    return !read ||
-        (cosmos_nfc_error_info_valid(io->error_info_address) &&
-         cosmos_nfc_completion_valid(io->completion_address));
+    return cosmos_nfc_policy_io_valid(
+        cosmos_nfc_target_valid(io->channel, io->way, io->row_address),
+        cosmos_nfc_data_valid(io->data_address),
+        cosmos_nfc_spare_valid(io->spare_address),
+        cosmos_nfc_status_report_valid(io->status_report_address), read,
+        cosmos_nfc_error_info_valid(io->error_info_address),
+        cosmos_nfc_completion_valid(io->completion_address));
 }
 
 int cosmos_nfc_read_page(const struct cosmos_nfc_io *io,
@@ -411,9 +372,9 @@ int cosmos_nfc_read_page(const struct cosmos_nfc_io *io,
     unsigned int nand_status;
     int status;
 
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) == 0U ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_operation_ready();
+    if (status != COSMOS_OK) {
+        return status;
     }
     if (!cosmos_nfc_io_valid(io, 1) || ecc == 0) {
         return COSMOS_INVALID;
@@ -432,10 +393,10 @@ int cosmos_nfc_read_page(const struct cosmos_nfc_io *io,
     if (status != COSMOS_OK) {
         return status;
     }
-    if (cosmos_nfc_channel_is_faulted(io->channel) ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
+    status = cosmos_nfc_locked_ready(io->channel);
+    if (status != COSMOS_OK) {
         cosmos_nfc_channel_unlock(io->channel);
-        return COSMOS_HW_ERROR;
+        return status;
     }
     status = cosmos_nfc_dma_reserve(
         io->channel, ranges, COSMOS_NFC_MAX_OWNED_RANGES);
@@ -494,11 +455,14 @@ done:
 }
 
 static int cosmos_nfc_raw_io_valid(const struct cosmos_nfc_io *io) {
-    return io != 0 &&
-        cosmos_nfc_target_valid(io->channel, io->way, io->row_address) &&
-        cosmos_nfc_raw_data_valid(io->data_address) &&
-        cosmos_nfc_completion_valid(io->completion_address) &&
-        cosmos_nfc_status_report_valid(io->status_report_address);
+    if (io == 0) {
+        return 0;
+    }
+    return cosmos_nfc_policy_raw_io_valid(
+        cosmos_nfc_target_valid(io->channel, io->way, io->row_address),
+        cosmos_nfc_raw_data_valid(io->data_address),
+        cosmos_nfc_completion_valid(io->completion_address),
+        cosmos_nfc_status_report_valid(io->status_report_address));
 }
 
 int cosmos_nfc_read_page_raw(const struct cosmos_nfc_io *io) {
@@ -510,9 +474,9 @@ int cosmos_nfc_read_page_raw(const struct cosmos_nfc_io *io) {
     unsigned int completion_word;
     int status;
 
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) == 0U ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_operation_ready();
+    if (status != COSMOS_OK) {
+        return status;
     }
     if (!cosmos_nfc_raw_io_valid(io)) {
         return COSMOS_INVALID;
@@ -527,10 +491,10 @@ int cosmos_nfc_read_page_raw(const struct cosmos_nfc_io *io) {
     if (status != COSMOS_OK) {
         return status;
     }
-    if (cosmos_nfc_channel_is_faulted(io->channel) ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
+    status = cosmos_nfc_locked_ready(io->channel);
+    if (status != COSMOS_OK) {
         cosmos_nfc_channel_unlock(io->channel);
-        return COSMOS_HW_ERROR;
+        return status;
     }
     status = cosmos_nfc_dma_reserve(io->channel, ranges, 3U);
     if (status != COSMOS_OK) {
@@ -566,16 +530,17 @@ int cosmos_nfc_read_page_raw(const struct cosmos_nfc_io *io) {
     status = COSMOS_TIMEOUT;
     for (index = COSMOS_NFC_POLL_LIMIT; index != 0U; index--) {
         completion_word = *completion;
-        if (completion_word == COSMOS_NFC_TRANSFER_COMPLETE) {
+        if (completion_word == 0U) {
+            continue;
+        }
+        status = cosmos_nfc_policy_raw_completion_status(completion_word);
+        if (status == COSMOS_OK) {
             cosmos_data_sync_barrier();
             status = cosmos_nfc_wait_controller_idle(base);
             break;
         }
-        if (completion_word != 0U) {
-            cosmos_data_sync_barrier();
-            status = COSMOS_HW_ERROR;
-            break;
-        }
+        cosmos_data_sync_barrier();
+        break;
     }
 done:
     status = cosmos_nfc_dma_finish(io->channel, status);
@@ -590,9 +555,9 @@ int cosmos_nfc_program_page(const struct cosmos_nfc_io *io) {
     unsigned int nand_status;
     int status;
 
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) == 0U ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_operation_ready();
+    if (status != COSMOS_OK) {
+        return status;
     }
     if (!cosmos_nfc_io_valid(io, 0)) {
         return COSMOS_INVALID;
@@ -607,10 +572,10 @@ int cosmos_nfc_program_page(const struct cosmos_nfc_io *io) {
     if (status != COSMOS_OK) {
         return status;
     }
-    if (cosmos_nfc_channel_is_faulted(io->channel) ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
+    status = cosmos_nfc_locked_ready(io->channel);
+    if (status != COSMOS_OK) {
         cosmos_nfc_channel_unlock(io->channel);
-        return COSMOS_HW_ERROR;
+        return status;
     }
     status = cosmos_nfc_dma_reserve(io->channel, ranges, 3U);
     if (status != COSMOS_OK) {
@@ -644,9 +609,9 @@ int cosmos_nfc_erase_block(unsigned int channel, unsigned int way,
     unsigned int nand_status;
     int status;
 
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) == 0U ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
-        return COSMOS_UNAVAILABLE;
+    status = cosmos_nfc_operation_ready();
+    if (status != COSMOS_OK) {
+        return status;
     }
     if (!cosmos_nfc_target_valid(channel, way, row_address) ||
         !cosmos_nfc_erase_row_valid(row_address) ||
@@ -657,10 +622,10 @@ int cosmos_nfc_erase_block(unsigned int channel, unsigned int way,
     if (status != COSMOS_OK) {
         return status;
     }
-    if (cosmos_nfc_channel_is_faulted(channel) ||
-        cosmos_nfc_contract_ready() != COSMOS_OK) {
+    status = cosmos_nfc_locked_ready(channel);
+    if (status != COSMOS_OK) {
         cosmos_nfc_channel_unlock(channel);
-        return COSMOS_HW_ERROR;
+        return status;
     }
     status = cosmos_nfc_dma_reserve(channel, ranges, 1U);
     if (status != COSMOS_OK) {
@@ -698,10 +663,10 @@ static int cosmos_nfc_reset_way(unsigned int base, unsigned int way,
         return status;
     }
 
-    /* GreedyFTL V2FEnterToggleMode payload: features 02h, 10h, then 01h. */
-    payload[0] = 0x00000006U;
-    payload[1] = 0x00000008U;
-    payload[2] = 0x00000020U;
+    /* Pure policy owns the GreedyFTL V2FEnterToggleMode payload. */
+    payload[0] = cosmos_nfc_policy_toggle_payload_word(0U);
+    payload[1] = cosmos_nfc_policy_toggle_payload_word(1U);
+    payload[2] = cosmos_nfc_policy_toggle_payload_word(2U);
     cosmos_data_sync_barrier();
     cosmos_mmio_write32(base + COSMOS_NFC_USER_DATA, payload_address);
     status = cosmos_nfc_issue(base, way, COSMOS_NFC_CMD_SET_FEATURES);
@@ -719,16 +684,18 @@ int cosmos_nfc_init(void) {
     unsigned int way;
     int status;
 
-    if (__atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE) != 0U) {
-        return COSMOS_OK;
+    status = cosmos_nfc_policy_init_state_status(
+        __atomic_load_n(&cosmos_nfc_initialized, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&cosmos_nfc_init_failed, __ATOMIC_ACQUIRE));
+    if (status != COSMOS_RETRY) {
+        return status;
     }
-    if (__atomic_load_n(&cosmos_nfc_init_failed, __ATOMIC_ACQUIRE) != 0U) {
-        return COSMOS_HW_ERROR;
+    status = cosmos_nfc_policy_init_selftest_status(cosmos_nfc_selftest());
+    if (status != COSMOS_OK) {
+        return status;
     }
-    if (cosmos_nfc_selftest() != COSMOS_OK) {
-        return COSMOS_INVALID;
-    }
-    status = cosmos_nfc_contract_ready();
+    status = cosmos_nfc_policy_init_contract_status(
+        cosmos_nfc_contract_ready());
     if (status != COSMOS_OK) {
         return status;
     }

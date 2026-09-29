@@ -1,0 +1,565 @@
+#!/bin/sh
+# check-ui-slim-pack-inventory.shs — A10 (doc/03_plan/ui/slim_kernel_plugin/plan.md):
+# classify every file in a product entry's real import closure into a named
+# "pack" by path prefix, and report an inventory table + SDN. This is a
+# REPORT, not an enforcement gate on pack membership itself — no pack loader
+# exists yet (static composition per the design, doc/05_design/ui/slim_kernel_plugin/design.md
+# §"Composition recipes"). It DOES fail closed on two things that would make
+# the report meaningless: a configured pack prefix that does not exist on
+# disk (stale config) and a closure that yields nothing to classify.
+#
+# Reuses the `deps fast` extraction and unresolved-import-edge detection
+# approach of scripts/check/check-ui-slim-closure.shs (same awk-based
+# src/-token extraction, same dotted_candidates/find_unresolved_imports
+# logic) so a dropped import edge cannot silently under-count a pack the way
+# it could silently hide a forbidden path in that gate.
+#
+# Verdict is ALWAYS the LAST stdout line:
+#   PASS  — <n> entries inventoried, 0 violations                    exit 0
+#   FAIL  — <n> entries inventoried, <k> violations: <details>        exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+#
+# Usage:
+#   sh scripts/check/check-ui-slim-pack-inventory.shs [--seed PATH] [--config PATH] ENTRY.spl...
+#   sh scripts/check/check-ui-slim-pack-inventory.shs --selftest
+#
+# POSIX sh only. No `awk -v`, no `grep -P`, no `readlink -f` — BSD-portable.
+
+set -u
+
+SEED="${SIMPLE_SEED:-src/compiler_rust/target/bootstrap/simple}"
+CONFIG="config/ui/pack_prefixes.sdn"
+SELFTEST=0
+ARGS=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --seed) SEED="$2"; shift 2 ;;
+        --config) CONFIG="$2"; shift 2 ;;
+        --selftest) SELFTEST=1; shift ;;
+        --) shift; break ;;
+        *) ARGS="$ARGS $1"; shift ;;
+    esac
+done
+for a in "$@"; do
+    ARGS="$ARGS $a"
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd to repo root)"; exit 2; }
+
+TS=$(date +%Y%m%d%H%M%S 2>/dev/null || echo 0)
+OUT_SDN="build/ui_slim/pack_inventory_${TS}.sdn"
+
+# ---- dotted_candidates / find_unresolved_imports: same as check-ui-slim-closure.shs ----
+dotted_candidates() {
+    dc_root="$1"
+    dc_mod="$2"
+    printf '%s\n' "$dc_mod" | awk -v root="$dc_root" '
+        {
+            n = split($0, seg, ".")
+            if (n < 1) next
+            path = root
+            for (i = 1; i < n; i++) path = path "/" seg[i]
+            print path "/" seg[n] ".spl"
+            print path "/" seg[n] "/__init__.spl"
+            for (k = 1; k < n; k++) {
+                prefix = root
+                for (i = 1; i <= k; i++) prefix = prefix "/" seg[i]
+                dir = ""
+                for (i = k + 1; i < n; i++) dir = (dir == "" ? seg[i] : dir "." seg[i])
+                if (dir != "") print prefix "/" dir "/" seg[n] ".spl"
+                pkg = ""
+                for (i = k + 1; i <= n; i++) pkg = (pkg == "" ? seg[i] : pkg "." seg[i])
+                if (pkg != "" && pkg != seg[n]) {
+                    print prefix "/" pkg "/__init__.spl"
+                    print prefix "/" pkg "/mod.spl"
+                }
+            }
+        }
+    '
+}
+
+find_unresolved_imports() {
+    fu_base="$1"
+    fu_entry="$2"
+    fu_paths="$3"
+
+    if [ -n "${IMPORT_ENTRY_OVERRIDE:-}" ]; then
+        fu_entry_path="$IMPORT_ENTRY_OVERRIDE"
+    else
+        fu_entry_path="$fu_entry"
+    fi
+
+    [ -f "$fu_entry_path" ] || { printf '%s' ""; return; }
+
+    fu_modules=$(awk '
+        BEGIN { indoc = 0 }
+        {
+            raw = $0
+            cnt = gsub(/"""/, "\"\"\"", raw)
+            if (indoc) { if (cnt % 2 == 1) indoc = 0; next }
+            if (cnt % 2 == 1) { indoc = 1; next }
+            line = $0
+            hashpos = index(line, "#")
+            if (hashpos > 0) line = substr(line, 1, hashpos - 1)
+            gsub(/^[[:space:]]+/, "", line)
+            gsub(/[[:space:]]+$/, "", line)
+            if (substr(line, 1, 4) == "use ") print line
+        }
+    ' "$fu_entry_path" | sed \
+        -e 's/^use //' \
+        -e 's/\.{.*//' \
+        -e 's/\.\*.*//' \
+        -e 's/ as .*//' \
+        -e 's/ (.*//' \
+        -e 's/[[:space:]]*$//')
+
+    fu_unresolved=""
+    for mod in $fu_modules; do
+        [ -n "$mod" ] || continue
+        case "$mod" in
+            std.*|lib.*)
+                fu_rest=$(printf '%s' "$mod" | sed -e 's/^std\.//' -e 's/^lib\.//')
+                fu_cands=$(dotted_candidates "src/lib" "$fu_rest")
+                ;;
+            *)
+                fu_cands="$(dotted_candidates "src" "$mod") $(dotted_candidates "src/lib" "$mod")"
+                ;;
+        esac
+        fu_any_exists=0
+        fu_any_in_closure=0
+        for c in $fu_cands; do
+            if [ -e "$fu_base/$c" ]; then
+                fu_any_exists=1
+                for p in $fu_paths; do
+                    [ "$p" = "$c" ] && fu_any_in_closure=1
+                done
+            fi
+        done
+        if [ "$fu_any_exists" -eq 1 ] && [ "$fu_any_in_closure" -eq 0 ]; then
+            if [ -z "$fu_unresolved" ]; then fu_unresolved="$mod"; else fu_unresolved="$fu_unresolved, $mod"; fi
+        fi
+    done
+    printf '%s' "$fu_unresolved"
+}
+
+# ---- pack config loading ----
+# load_packs CONFIG_PATH -> prints "name|prefix" lines (prefix empty for "other")
+# Returns rc 2 (via caller check) if a non-"other" prefix does not exist on disk.
+PACK_ERR=""
+load_packs() {
+    lp_path="$1"
+    lp_base="${PACK_BASE_ROOT:-$ROOT}"
+    [ -f "$lp_path" ] || { PACK_ERR="pack config not found: $lp_path"; return; }
+    lp_rows=$(grep -v '^[[:space:]]*#' "$lp_path" | grep -v '^[[:space:]]*$')
+    printf '%s\n' "$lp_rows" | while IFS=',' read -r lp_name lp_prefix; do
+        lp_name=$(printf '%s' "$lp_name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        lp_prefix=$(printf '%s' "$lp_prefix" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        printf '%s|%s\n' "$lp_name" "$lp_prefix"
+    done
+    # existence check done separately (subshell above can't set outer PACK_ERR)
+    printf '%s\n' "$lp_rows" | while IFS=',' read -r lp_name lp_prefix; do
+        lp_prefix=$(printf '%s' "$lp_prefix" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        lp_name=$(printf '%s' "$lp_name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        [ "$lp_name" = "other" ] && continue
+        [ -n "$lp_prefix" ] || continue
+        if [ ! -e "$lp_base/$lp_prefix" ] && [ ! -e "$lp_base/$lp_prefix.spl" ]; then
+            echo "STALE:$lp_name:$lp_prefix"
+        fi
+    done > "${lp_path}.stale.$$"
+}
+
+# ---- classify one closure against loaded packs ----
+# classify_closure PACK_ROWS_FILE CLOSURE_PATHS_FILE -> prints "packname count"
+# lines in config order, "other" absorbing anything unmatched.
+classify_closure() {
+    cc_packs="$1"
+    cc_paths="$2"
+    awk -F'|' '
+        NR == FNR { pname[++np] = $1; pprefix[np] = $2; next }
+        { fpath[++nf] = $0 }
+        END {
+            for (i = 1; i <= np; i++) cnt[i] = 0
+            for (j = 1; j <= nf; j++) {
+                matched = 0
+                for (i = 1; i <= np; i++) {
+                    if (pname[i] == "other") continue
+                    if (pprefix[i] == "") continue
+                    plen = length(pprefix[i])
+                    if (substr(fpath[j], 1, plen) == pprefix[i]) {
+                        cnt[i]++
+                        matched = 1
+                        break
+                    }
+                }
+                if (matched == 0) {
+                    for (i = 1; i <= np; i++) if (pname[i] == "other") cnt[i]++
+                }
+            }
+            for (i = 1; i <= np; i++) printf "%s %d\n", pname[i], cnt[i]
+        }
+    ' "$cc_packs" "$cc_paths"
+}
+
+# ---- inventory one entry ----
+# run_entry_inventory SEED ENTRY PACK_ROWS_FILE -> writes result lines to
+# stdout in the form "ROW pack count state" then a trailer "ENTRY_OK n_files"
+# or "ENTRY_ERR reason...". Also honours IMPORT_BASE_ROOT/IMPORT_ENTRY_OVERRIDE
+# for selftest fixtures, exactly like check-ui-slim-closure.shs.
+run_entry_inventory() {
+    ei_seed="$1"; ei_entry="$2"; ei_packs="$3"
+
+    ei_out=$("$ei_seed" deps fast "$ei_entry" 2>/dev/null)
+    ei_rc=$?
+    if [ "$ei_rc" -ne 0 ]; then
+        echo "ENTRY_ERR deps fast exited $ei_rc for '$ei_entry'"
+        return
+    fi
+
+    ei_paths=$(printf '%s\n' "$ei_out" | awk '
+        { for (i = 1; i <= NF; i++) if (substr($i, 1, 4) == "src/") print $i }
+    ' | sort -u)
+
+    if [ -z "$ei_paths" ]; then
+        echo "ENTRY_ERR 0 src/ paths extracted from deps fast output for '$ei_entry'"
+        return
+    fi
+
+    ei_entry_found=0
+    for p in $ei_paths; do [ "$p" = "$ei_entry" ] && ei_entry_found=1; done
+    if [ "$ei_entry_found" -eq 0 ]; then
+        echo "ENTRY_ERR entry '$ei_entry' does not appear in its own closure"
+        return
+    fi
+
+    ei_import_base="${IMPORT_BASE_ROOT:-$ROOT}"
+    ei_unresolved=$(find_unresolved_imports "$ei_import_base" "$ei_entry" "$ei_paths")
+    if [ -n "$ei_unresolved" ]; then
+        echo "ENTRY_ERR unresolved import edge(s) in $ei_entry: $ei_unresolved"
+        return
+    fi
+
+    ei_n=$(printf '%s\n' "$ei_paths" | grep -c .)
+    ei_pathfile=$(mktemp "${TMPDIR:-/tmp}/pack-paths.XXXXXX")
+    printf '%s\n' "$ei_paths" > "$ei_pathfile"
+    classify_closure "$ei_packs" "$ei_pathfile" | while read -r ei_pname ei_cnt; do
+        if [ "$ei_cnt" -gt 0 ]; then
+            echo "ROW $ei_pname $ei_cnt required"
+        else
+            echo "ROW $ei_pname $ei_cnt absent"
+        fi
+    done
+    rm -f "$ei_pathfile"
+    echo "ENTRY_OK $ei_n"
+}
+
+# ---- core scan: run over all entries, print table, apply recipe checks ----
+# run_pack_scan SEED CONFIG ENTRY...
+run_pack_scan() {
+    rs_seed="$1"; shift
+    rs_config="$1"; shift
+
+    if [ -z "$rs_seed" ] || [ ! -x "$rs_seed" ]; then
+        echo "ERROR — nothing was checked (no executable seed at '$rs_seed')"
+        return 2
+    fi
+    if [ "$#" -eq 0 ]; then
+        echo "ERROR — nothing was checked (no ENTRY given)"
+        return 2
+    fi
+    if [ ! -f "$rs_config" ]; then
+        echo "ERROR — nothing was checked (pack config not found: $rs_config)"
+        return 2
+    fi
+
+    rs_rowsfile=$(mktemp "${TMPDIR:-/tmp}/pack-rows.XXXXXX")
+    grep -v '^[[:space:]]*#' "$rs_config" | grep -v '^[[:space:]]*$' | while IFS=',' read -r rn rp; do
+        rn=$(printf '%s' "$rn" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        rp=$(printf '%s' "$rp" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        printf '%s|%s\n' "$rn" "$rp"
+    done > "$rs_rowsfile"
+
+    if [ ! -s "$rs_rowsfile" ]; then
+        rm -f "$rs_rowsfile"
+        echo "ERROR — nothing was checked (0 pack rows parsed from $rs_config)"
+        return 2
+    fi
+
+    rs_base="${PACK_BASE_ROOT:-$ROOT}"
+    rs_stale=""
+    while IFS='|' read -r rn rp; do
+        [ "$rn" = "other" ] && continue
+        [ -n "$rp" ] || continue
+        if [ ! -e "$rs_base/$rp" ] && [ ! -e "$rs_base/$rp.spl" ]; then
+            if [ -z "$rs_stale" ]; then rs_stale="$rn ($rp)"; else rs_stale="$rs_stale, $rn ($rp)"; fi
+        fi
+    done < "$rs_rowsfile"
+
+    if [ -n "$rs_stale" ]; then
+        rm -f "$rs_rowsfile"
+        echo "ERROR — nothing was checked (stale pack prefix(es) not on disk: $rs_stale)"
+        return 2
+    fi
+
+    rs_entries_checked=0
+    rs_violations=0
+    rs_violation_list=""
+    rs_table=""
+
+    for entry in "$@"; do
+        rs_exist_check="${IMPORT_BASE_ROOT:-$rs_base}/$entry"
+        if [ ! -f "$rs_exist_check" ] && [ ! -f "$entry" ]; then
+            rs_table="$rs_table
+### $entry
+unsupported (file not found)
+"
+            continue
+        fi
+
+        rs_res=$(run_entry_inventory "$rs_seed" "$entry" "$rs_rowsfile")
+        rs_err=$(printf '%s\n' "$rs_res" | grep '^ENTRY_ERR' | head -1)
+        if [ -n "$rs_err" ]; then
+            rm -f "$rs_rowsfile"
+            echo "ERROR — nothing was checked (${rs_err#ENTRY_ERR })"
+            return 2
+        fi
+
+        rs_entries_checked=$((rs_entries_checked + 1))
+        rs_n=$(printf '%s\n' "$rs_res" | grep '^ENTRY_OK' | sed -e 's/^ENTRY_OK //')
+        rs_table="$rs_table
+### $entry  ($rs_n files in closure)
+pack          files  state
+"
+        rs_compositor=0; rs_drivers=0; rs_kernel=0; rs_skia=0; rs_gpu=0; rs_parser=0
+
+        rs_rows_only=$(printf '%s\n' "$rs_res" | grep '^ROW ')
+        while read -r _ rrname rrcnt rrstate; do
+            [ -n "$rrname" ] || continue
+            rs_table="$rs_table$(printf '%-13s %-6s %s\n' "$rrname" "$rrcnt" "$rrstate")"
+            case "$rrname" in
+                compositor) rs_compositor=$rrcnt ;;
+                drivers) rs_drivers=$rrcnt ;;
+                kernel) rs_kernel=$rrcnt ;;
+                skia) rs_skia=$rrcnt ;;
+                gpu) rs_gpu=$rrcnt ;;
+                parser) rs_parser=$rrcnt ;;
+            esac
+        done <<EOF_ROWS
+$rs_rows_only
+EOF_ROWS
+
+        rs_table="$rs_table
+## Recipe check ($entry)
+"
+        case "$entry" in
+            *shared_wm*|*backend_entry_web*|*backend_entry_browser*|*backend_entry_electron*|*backend_entry_tauri*)
+                rs_table="$rs_table full product (ui-full-static): no absence rule — compositor=$rs_compositor drivers=$rs_drivers kernel=$rs_kernel skia=$rs_skia gpu=$rs_gpu (classification only)
+"
+                ;;
+            *ui.tui*|*backend_entry_tui*|*cli_entry*)
+                for pn in compositor:$rs_compositor drivers:$rs_drivers kernel:$rs_kernel skia:$rs_skia gpu:$rs_gpu; do
+                    pname=${pn%%:*}; pcnt=${pn##*:}
+                    if [ "$pcnt" -gt 0 ]; then
+                        rs_table="$rs_table$pname absent (tui-hello-static): VIOLATION ($pcnt files)
+"
+                        rs_violations=$((rs_violations + 1))
+                        if [ -z "$rs_violation_list" ]; then rs_violation_list="$entry:$pname"; else rs_violation_list="$rs_violation_list, $entry:$pname"; fi
+                    else
+                        rs_table="$rs_table$pname absent (tui-hello-static): OK
+"
+                    fi
+                done
+                rs_table="$rs_table parser required-only-if-file-driven: informational, not enforced (parser files=$rs_parser)
+"
+                ;;
+            *host_gui*)
+                if [ "$rs_compositor" -gt 0 ]; then
+                    rs_table="$rs_table compositor absent (gui-hello-static): VIOLATION ($rs_compositor files)
+"
+                    rs_violations=$((rs_violations + 1))
+                    if [ -z "$rs_violation_list" ]; then rs_violation_list="$entry:compositor"; else rs_violation_list="$rs_violation_list, $entry:compositor"; fi
+                else
+                    rs_table="$rs_table compositor absent (gui-hello-static): OK
+"
+                fi
+                rs_renderers=0
+                [ "$rs_skia" -gt 0 ] && rs_renderers=$((rs_renderers + 1))
+                [ "$rs_gpu" -gt 0 ] && rs_renderers=$((rs_renderers + 1))
+                if [ "$rs_renderers" -gt 1 ]; then
+                    rs_table="$rs_table one renderer (gui-hello-static): VIOLATION ($rs_renderers renderer packs present)
+"
+                    rs_violations=$((rs_violations + 1))
+                    if [ -z "$rs_violation_list" ]; then rs_violation_list="$entry:renderer_count"; else rs_violation_list="$rs_violation_list, $entry:renderer_count"; fi
+                else
+                    rs_table="$rs_table one renderer (gui-hello-static): OK ($rs_renderers renderer pack(s))
+"
+                fi
+                ;;
+            *)
+                rs_table="$rs_table no recipe defined for this entry; classification only
+"
+                ;;
+        esac
+    done
+
+    rm -f "$rs_rowsfile"
+
+    printf '%s\n' "$rs_table"
+
+    if [ "$rs_entries_checked" -eq 0 ]; then
+        echo "ERROR — nothing was checked (0 entries resolvable)"
+        return 2
+    fi
+
+    if [ "$rs_violations" -gt 0 ]; then
+        echo "FAIL — $rs_entries_checked entries inventoried, $rs_violations violations: $rs_violation_list"
+        return 1
+    fi
+
+    echo "PASS — $rs_entries_checked entries inventoried, 0 violations"
+    return 0
+}
+
+# ---- selftest ----
+if [ "$SELFTEST" -eq 1 ]; then
+    ST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ui-slim-pack-inventory-selftest.XXXXXX") || {
+        echo "ERROR — nothing was checked (mktemp failed)"; exit 2;
+    }
+    trap 'rm -rf "$ST_DIR"' EXIT
+    st_pass=0; st_total=4
+
+    # Common fixture tree + config
+    mkdir -p "$ST_DIR/src/lib/common/ui/parse" "$ST_DIR/src/os/compositor"
+    : > "$ST_DIR/src/lib/common/ui/parse/p.spl"
+    : > "$ST_DIR/src/os/compositor/c.spl"
+    cat > "$ST_DIR/config_ok.sdn" <<EOF
+parser, src/lib/common/ui/parse
+compositor, src/os/compositor
+other,
+EOF
+    cat > "$ST_DIR/config_stale.sdn" <<EOF
+parser, src/lib/common/ui/parse
+ghost, src/lib/common/ui/does_not_exist
+other,
+EOF
+
+    # Fixture 1: clean TUI closure (no compositor) -> PASS
+    cat > "$ST_DIR/src/backend_entry_tui_fixture.spl" <<'EOF'
+fn main():
+    pass
+EOF
+    ST_SEED1="$ST_DIR/seed1.sh"
+    cat > "$ST_SEED1" <<EOF
+#!/bin/sh
+cat <<OUT
+=== deps fast: src/backend_entry_tui_fixture.spl ===
+Direct imports: 1
+
+  src/lib/common/ui/parse/p.spl  (1 transitive files)
+    src/lib/common/ui/parse/p.spl
+  src/backend_entry_tui_fixture.spl
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED1"
+    PACK_BASE_ROOT="$ST_DIR" IMPORT_BASE_ROOT="$ST_DIR"
+    export PACK_BASE_ROOT IMPORT_BASE_ROOT
+    st_out1=$(cd "$ST_DIR" && "$OLDPWD/scripts/check/check-ui-slim-pack-inventory.shs" --seed "$ST_SEED1" --config "$ST_DIR/config_ok.sdn" "src/backend_entry_tui_fixture.spl" 2>&1)
+    st_rc1=$?
+    case "$st_out1" in
+        *"PASS — 1 entries inventoried, 0 violations"*) [ "$st_rc1" -eq 0 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc1" -eq 0 ] || echo "selftest fixture 1 (clean tui -> PASS) FAILED: rc=$st_rc1"
+
+    # Fixture 2: TUI entry whose closure includes compositor -> VIOLATION/FAIL
+    ST_SEED2="$ST_DIR/seed2.sh"
+    cat > "$ST_SEED2" <<EOF
+#!/bin/sh
+cat <<OUT
+=== deps fast: src/backend_entry_tui_fixture.spl ===
+Direct imports: 2
+
+  src/lib/common/ui/parse/p.spl  (1 transitive files)
+    src/lib/common/ui/parse/p.spl
+  src/os/compositor/c.spl  (1 transitive files)
+    src/os/compositor/c.spl
+  src/backend_entry_tui_fixture.spl
+OUT
+exit 0
+EOF
+    chmod +x "$ST_SEED2"
+    st_out2=$(cd "$ST_DIR" && "$OLDPWD/scripts/check/check-ui-slim-pack-inventory.shs" --seed "$ST_SEED2" --config "$ST_DIR/config_ok.sdn" "src/backend_entry_tui_fixture.spl" 2>&1)
+    st_rc2=$?
+    case "$st_out2" in
+        *"FAIL — "*"violations"*"compositor"*) [ "$st_rc2" -eq 1 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc2" -eq 1 ] || echo "selftest fixture 2 (compositor in tui closure -> FAIL) FAILED: rc=$st_rc2"
+
+    # Fixture 3: stale prefix in config -> ERROR
+    st_out3=$(cd "$ST_DIR" && "$OLDPWD/scripts/check/check-ui-slim-pack-inventory.shs" --seed "$ST_SEED1" --config "$ST_DIR/config_stale.sdn" "src/backend_entry_tui_fixture.spl" 2>&1)
+    st_rc3=$?
+    case "$st_out3" in
+        *"ERROR — nothing was checked (stale pack prefix"*"ghost"*) [ "$st_rc3" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc3" -eq 2 ] || echo "selftest fixture 3 (stale prefix -> ERROR) FAILED: rc=$st_rc3 out=$st_out3"
+
+    # Fixture 4: empty closure output -> ERROR
+    ST_SEED4="$ST_DIR/seed4.sh"
+    cat > "$ST_SEED4" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$ST_SEED4"
+    st_out4=$(cd "$ST_DIR" && "$OLDPWD/scripts/check/check-ui-slim-pack-inventory.shs" --seed "$ST_SEED4" --config "$ST_DIR/config_ok.sdn" "src/backend_entry_tui_fixture.spl" 2>&1)
+    st_rc4=$?
+    case "$st_out4" in
+        *"ERROR — nothing was checked"*) [ "$st_rc4" -eq 2 ] && st_pass=$((st_pass + 1)) ;;
+    esac
+    [ "$st_rc4" -eq 2 ] || echo "selftest fixture 4 (empty closure -> ERROR) FAILED: rc=$st_rc4 out=$st_out4"
+
+    unset PACK_BASE_ROOT IMPORT_BASE_ROOT
+    rm -rf "$ST_DIR"
+    trap - EXIT
+
+    if [ "$st_pass" -ne "$st_total" ]; then
+        echo "ERROR — nothing was checked (selftest: $st_pass/$st_total passed)"
+        exit 2
+    fi
+    echo "selftest: $st_pass/$st_total passed"
+    [ "$#" -eq 0 ] && [ -z "$ARGS" ] && exit 0
+fi
+
+# ---- real run ----
+# shellcheck disable=SC2086
+set -- $ARGS
+if [ "$#" -eq 0 ]; then
+    if [ "$SELFTEST" -eq 1 ]; then
+        exit 0
+    fi
+    echo "ERROR — nothing was checked (no ENTRY.spl given)"
+    exit 2
+fi
+
+if [ ! -x "$SEED" ]; then
+    echo "ERROR — nothing was checked (no executable seed at '$SEED')"
+    exit 2
+fi
+
+mkdir -p "$(dirname "$OUT_SDN")" 2>/dev/null || true
+
+RUN_OUT=$(run_pack_scan "$SEED" "$CONFIG" "$@")
+RUN_RC=$?
+
+{
+    echo "# generated by scripts/check/check-ui-slim-pack-inventory.shs"
+    echo "# timestamp: $TS"
+    echo "# seed: $SEED"
+    echo "# config: $CONFIG"
+    echo "$RUN_OUT" | sed 's/^/# /'
+} > "$OUT_SDN" 2>/dev/null || true
+
+echo "sdn: $OUT_SDN"
+printf '%s\n' "$RUN_OUT"
+exit "$RUN_RC"

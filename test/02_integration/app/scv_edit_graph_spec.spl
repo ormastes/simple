@@ -6,7 +6,24 @@ refactoring operations (I-04 rows), built from the SAME status-index vs
 working-copy comparison the D-02 views render, and exposed as
 `scv diff --view graph`.
 Audience: Maintainers of the SCV diff layer.
+## Operator workflow
+Run: ./src/compiler_rust/target/bootstrap/simple run test/02_integration/app/scv_edit_graph_spec.spl
+Each scenario drives real scv edit-graph calls over fixture texts (and, for
+the CLI-view scenario, a real /tmp scv repository) and pins the rendered
+graph report.
+## Compatibility and limitations
+The repository scenario writes under /tmp and needs the scv store + file
+history modules; the hunk/entity/op scenarios are pure and host-independent.
+## Verification guidance and troubleshooting
+A failure prints the graph report fragment that drifted; diff the fragment
+against `src/lib/*/scv/edit_graph` renderers before editing an assertion —
+the pinned fragments are the product's user-visible output contract.
 """
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: scv-edit-graph
 # @req: REQ-SCV-EDIT-GRAPH-001
 use std.spec.{describe, it, expect, step}
 use app.io.mod (dir_create, file_write)
@@ -27,22 +44,27 @@ fn _no_hints() -> [text]:
 
 describe "scv refactoring-aware edit graph (D-03)":
     it "splits a change into anchored hunks with old/new ranges":
-        step("common suffix trimmed, unique line anchors the middle")
+        # @req REQ-SCV-EDIT-GRAPH-001
+        # @capture(statistics): hunk table with old/new ranges for the fixture diff
+        step("Diff a rename whose common suffix is trimmed and a unique line anchors the middle")
         val hunks = scv_eg_hunks("a.spl", "fn alpha():\n    x = 1\n", "fn beta():\n    x = 1\n    y = 2\n")
-        expect(hunks.len()).to_equal(2)
-        expect(hunks[0].old_start).to_equal(1)
-        expect(hunks[0].old_len).to_equal(1)
-        expect(hunks[0].new_start).to_equal(1)
-        expect(hunks[0].new_len).to_equal(1)
-        expect(hunks[1].old_len).to_equal(0)
-        expect(hunks[1].new_start).to_equal(3)
-        expect(hunks[1].new_len).to_equal(1)
-        step("identical texts yield no hunk; bounds are named constants")
-        expect(scv_eg_hunks("a.spl", "same\n", "same\n").len()).to_equal(0)
+        expect(hunks.len()).to_equal(2)  # oracle: one removed-header hunk plus one added-body hunk for the fixture
+        expect(hunks[0].old_start).to_equal(1)  # oracle: the removed header is the first old line
+        expect(hunks[0].old_len).to_equal(1)  # oracle: only the renamed header line was removed
+        expect(hunks[0].new_start).to_equal(1)  # oracle: the replacement header starts at the first new line
+        expect(hunks[0].new_len).to_equal(1)  # oracle: the replacement header is one line
+        expect(hunks[1].old_len).to_equal(0)  # oracle: the shared `x = 1` line is common, so the added hunk removes nothing
+        expect(hunks[1].new_start).to_equal(3)  # oracle: the added `y = 2` line lands after the two common leading lines
+        expect(hunks[1].new_len).to_equal(1)  # oracle: exactly one line was added
+        step("Diff identical texts and check the anchor bounds are named constants")
+        expect(scv_eg_hunks("a.spl", "same\n", "same\n").len()).to_equal(0)  # oracle: identical inputs must produce zero hunks
         expect(SCV_EDIT_GRAPH_MAX_ANCHORS > 0).to_be(true)
         expect(SCV_EDIT_GRAPH_MAX_LINES > 0).to_be(true)
 
     it "links hunks to entities and entities to the inferred refactoring op":
+        # @req REQ-SCV-EDIT-GRAPH-001
+        # @capture(protocol_json): rendered graph report for the rename fixture
+        step("Build the edit graph for a one-file fn rename and render its report")
         val out = scv_edit_graph_from_files([EditGraphFile(old_rel: "a.spl", new_rel: "a.spl", old_text: "fn alpha():\n    x = 1\n", new_text: "fn beta():\n    x = 1\n    y = 2\n")])
         expect(out).to_contain("edit-graph files=1 hunks=2 entities=2 ops=1\n")
         expect(out).to_contain("file a.spl modified\n")
@@ -58,6 +80,9 @@ describe "scv refactoring-aware edit graph (D-03)":
         expect(out).to_contain("link entity e2 -> op r1\n")
 
     it "carries a cross-file move as a many-to-many op over both files":
+        # @req REQ-SCV-EDIT-GRAPH-001
+        # @capture(protocol_json): rendered graph report for the cross-file move
+        step("Move a fn from a.spl to b.spl across two EditGraphFile entries")
         var files: [EditGraphFile] = []
         files.push(EditGraphFile(old_rel: "a.spl", new_rel: "a.spl", old_text: "fn alpha():\n    x = 1\n    y = 2\nfn keep():\n    pass\n", new_text: "fn keep():\n    pass\n"))
         files.push(EditGraphFile(old_rel: "", new_rel: "b.spl", old_text: "", new_text: "fn alpha():\n    x = 1\n    y = 2\n"))
@@ -68,6 +93,9 @@ describe "scv refactoring-aware edit graph (D-03)":
         expect(out).to_contain("link entity e3 -> op r1\n")
 
     it "is exposed as `diff --view graph` over the repository comparison":
+        # @req REQ-SCV-EDIT-GRAPH-001
+        # @capture(protocol_json): rendered diff --view graph report over a real repo
+        step("Snapshot a real repository, then rename the fn in the working copy")
         val root = _repo("view")
         file_write("{root}/a.spl", "fn alpha():\n    x = 1\n")
         scv_snapshot_with_identity(root, _no_hints())

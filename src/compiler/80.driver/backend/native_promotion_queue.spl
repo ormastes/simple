@@ -1,0 +1,129 @@
+use compiler.driver.backend.demand_backend_plan.{DemandBackendIdentityV1, demand_backend_identity_digest_v1}
+
+enum NativePromotionStateV1:
+    Queued
+    Running
+    Published
+    Failed
+    Cancelled
+    Rejected
+
+struct NativePromotionRequestV1:
+    action_digest: text
+    identity: DemandBackendIdentityV1
+    identity_digest: text
+    requested_build_ordinal: i64
+    foreground_priority: i64
+    memory_budget_bytes: i64
+    cancelled: bool
+
+struct NativePromotionResultV1:
+    action_digest: text
+    identity_digest: text
+    artifact_digest: text
+    completed_build_ordinal: i64
+    success: bool
+
+struct NativePromotionEntryV1:
+    request: NativePromotionRequestV1
+    state: NativePromotionStateV1
+    reason: text
+    artifact_digest: text
+    visible_after_build_ordinal: i64
+
+struct NativePromotionQueueV1:
+    entries: [NativePromotionEntryV1]
+
+fn native_promotion_enqueue_v1(
+    queue: NativePromotionQueueV1, request: NativePromotionRequestV1
+) -> NativePromotionQueueV1:
+    val expected_identity = demand_backend_identity_digest_v1(request.identity)
+    var entries = queue.entries
+    var state = NativePromotionStateV1.Queued
+    var reason = "queued"
+    if request.action_digest == "" or expected_identity == "" or
+            request.identity_digest != expected_identity or
+            request.requested_build_ordinal < 0 or
+            request.foreground_priority < 0 or request.memory_budget_bytes <= 0:
+        state = NativePromotionStateV1.Rejected
+        reason = "promotion-authority-invalid"
+    elif request.cancelled:
+        state = NativePromotionStateV1.Cancelled
+        reason = "promotion-cancelled"
+    for existing in entries:
+        if existing.request.action_digest == request.action_digest:
+            return queue
+    entries = entries.push(NativePromotionEntryV1(
+        request, state, reason, "", -1))
+    NativePromotionQueueV1(entries)
+
+fn native_promotion_claim_v1(
+    queue: NativePromotionQueueV1, available_memory_bytes: i64,
+    highest_foreground_priority: i64, cancel_background: bool
+) -> NativePromotionQueueV1:
+    var entries: [NativePromotionEntryV1] = []
+    var claimed = false
+    for entry in queue.entries:
+        var updated = entry
+        if entry.state == NativePromotionStateV1.Queued:
+            if cancel_background:
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Cancelled,
+                    "foreground-cancelled-background", "", -1)
+            elif highest_foreground_priority >= entry.request.foreground_priority:
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Queued,
+                    "foreground-priority", "", -1)
+            elif not claimed and
+                    available_memory_bytes >= entry.request.memory_budget_bytes:
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Running,
+                    "promotion-running", "", -1)
+                claimed = true
+        entries = entries.push(updated)
+    NativePromotionQueueV1(entries)
+
+fn native_promotion_complete_v1(
+    queue: NativePromotionQueueV1, result: NativePromotionResultV1
+) -> NativePromotionQueueV1:
+    var entries: [NativePromotionEntryV1] = []
+    for entry in queue.entries:
+        var updated = entry
+        if entry.request.action_digest == result.action_digest and
+                entry.state == NativePromotionStateV1.Running:
+            if not result.success:
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Failed,
+                    "background-failed", "", -1)
+            elif result.identity_digest != entry.request.identity_digest:
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Rejected,
+                    "background-identity-mismatch", "", -1)
+            elif result.artifact_digest == "":
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Rejected,
+                    "background-artifact-invalid", "", -1)
+            else:
+                val completed_ordinal = if result.completed_build_ordinal > entry.request.requested_build_ordinal: result.completed_build_ordinal else: entry.request.requested_build_ordinal
+                updated = NativePromotionEntryV1(
+                    entry.request, NativePromotionStateV1.Published,
+                    "next-build-only", result.artifact_digest,
+                    completed_ordinal + 1)
+        entries = entries.push(updated)
+    NativePromotionQueueV1(entries)
+
+fn native_promotion_artifact_for_build_v1(
+    queue: NativePromotionQueueV1, identity_digest: text,
+    build_ordinal: i64
+) -> text?:
+    for entry in queue.entries:
+        if entry.state == NativePromotionStateV1.Published and
+                entry.request.identity_digest == identity_digest and
+                build_ordinal >= entry.visible_after_build_ordinal:
+            return Some(entry.artifact_digest)
+    nil
+
+export NativePromotionStateV1, NativePromotionRequestV1
+export NativePromotionResultV1, NativePromotionEntryV1, NativePromotionQueueV1
+export native_promotion_enqueue_v1, native_promotion_claim_v1
+export native_promotion_complete_v1, native_promotion_artifact_for_build_v1

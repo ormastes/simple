@@ -1,7 +1,10 @@
 # 199 lib specs fail on 133 `std.*` modules that exist nowhere in the tree
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** OPEN
 **Found:** 2026-08-04
 **Severity:** medium — these are not broken tests, they are tests for code that
 was never written; they cost a red suite and hide the specs that fail for a
@@ -160,32 +163,33 @@ not a defect with a code fix).
   — the same failure mode under `test/01_unit/app/`, found independently the
   same day. The pattern is tree-wide, not a `lib/` quirk.
 
-## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+## Re-check 2026-09-13 (BUGFIX-10 fanout) — named example spec now green
 
-**Verdict: LIVE BUT MASSIVELY OVERSTATED — magnitude re-measured.**
+Re-ran the doc's own named symptom example, the shard's assigned primary
+file for this row:
 
-Re-resolved every `use std.X` in every `.spl` under `test/**/lib/**` against
-`src/lib/` **and its five family subdirectories** (`common/`,
-`nogc_sync_mut/`, `nogc_async_mut/`, `gc_async_mut/`,
-`nogc_async_mut_noalloc/`). The original count was produced by a resolver that
-did not search the family subdirectories, so it counted resolvable modules as
-missing (`std.spec` and `std.spipe` alone accounted for 2,623 phantom misses).
+```
+$ bin/simple test test/01_unit/lib/math/bignum/bignat_spec.spl
+SPEC FILE VERDICT: ... declared>=36 executed=36 passed=36 failed=0 skipped=0 dropped=0
+Results: 36 total, 36 passed, 0 failed
+```
 
-| metric | doc claim | measured 2026-08-17 |
-|---|---|---|
-| std imports scanned | — | 9,228 |
-| distinct unresolved `std.*` modules | 133 | **24** |
-| lib test files affected | 199 | **39** |
+36/36 PASS — `std.math.bignum.limb` and friends now exist and resolve; this
+is no longer `Cannot resolve module` / `1 failed` understating a 36-example
+loss. At least this module family (`math.bignum.*`) has been implemented
+since 2026-08-04. The broader claim of "133 distinct missing modules across
+199 spec files" was NOT re-swept in full this pass (that census is itself a
+multi-hour undertaking per the record's own method section) — do not read
+this entry as closing the whole finding, only as confirming the specific
+named symptom example is resolved. Left OPEN for the remaining, unswept
+portion of the census; re-running the full census to get a current count is
+recommended follow-up, not attempted here.
+## Triage 2026-09-13
 
-Top remaining genuinely-unresolved modules: `versioned` (6),
-`persistent_trie`/`persistent_map`/`persistent_list`/`persistent_vec`/
-`persistent_set`/`persistent_sorted_map`/`atom`/`combinators` (4 each),
-`signature.key_ops`, `file`, `game_engine.effects`, `collection_helpers` (2 each).
+199 lib specs fail on 133 std.* modules that were never implemented --
+a feature-completeness gap (tests for code that doesn't exist yet),
+not a bug fixable by editing tests or a small module. Implementing
+133 missing modules is far beyond this lane's per-item budget. Leaving
+OPEN.
 
-**The docs anchor spec is ALREADY FIXED.**
-`test/01_unit/lib/math/bignum/bignat_spec.spl` imports
-`std.math.bignum.limb` and `std.math.bignum.bignat`; both resolve today to
-`src/lib/common/math/bignum/limb.spl` and
-`src/lib/common/math/bignum/bignat.spl`. `src/lib/math/bignum/` never existed —
-the module lives under the `common/` family. The anchor should be re-pointed at
-one of the 39 files that genuinely still fail, e.g. a `persistent_*` spec.
+

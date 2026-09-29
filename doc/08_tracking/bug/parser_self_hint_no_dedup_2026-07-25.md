@@ -1,4 +1,8 @@
 # Bug: parser "self." info hint has no de-dup — 158 blocks in one compile
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25  
 **Lane:** L5 (parser diagnostics)  
@@ -21,3 +25,4 @@ Emit the full multi-line explainer **once per compile** (or once per file), then
 ## Status
 
 High-priority unblock for examples lane and general usability. Fix is simple rate-limiting / context tracking; estimated low effort.
+

@@ -1,7 +1,6 @@
 # 364 of 413 check scripts are invoked by nothing
 
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+- **Status:** open
 - **Severity:** high (verification is decorative at scale)
 - **Measured at:** `a8da64469b41c084e78d1b2e509e72d925652159` (tree 109,569)
 - **Date:** 2026-08-01
@@ -108,12 +107,7 @@ and nothing reports the drift. The shared repo's hook was hand-replaced with a
 symlink after the incident, but **the installer that created the hazard was not
 fixed**, so the next `setup.shs` run re-creates it.
 
-**Hooks must resolve to tracked, current sources.** The linked-worktree-safe
-installer added after this incident intentionally deploys an exact copy of
-`scripts/hooks/pre-push-worktree-launcher`, because a shared-gitdir symlink
-cannot select the worktree that initiated the push. The guard accepts only that
-tracked launcher with byte-for-byte identity; stale or foreign copies remain a
-failure.
+**Hooks must be symlinks, never copies.**
 
 ## What full enforcement would cost
 
@@ -140,10 +134,8 @@ Ratchet, matching the existing `ui_backend_isolation_baseline.txt` /
   invoked nor listed in `scripts/check/guard_wiring_optout.txt` with a reason.
 - The opt-out file is seeded with today's 364 orphans — an honest baseline, not
   an amnesty. Shrinking it is the follow-up program.
-- The same script asserts every locally installed Git hook resolves to a tracked
-  source. Symlinks must target a tracked file; the one canonical regular-file
-  launcher must byte-match its tracked source (axis 3). Ephemeral GitHub runner
-  hooks are not treated as repository installation state.
+- The same script asserts every installed `.git/hooks/*` is a **symlink** into
+  the tree (axis 3) and that its target is tracked.
 
 Adding a guard now wires it automatically; *skipping* one becomes the deliberate
 act that needs a written justification.
@@ -493,9 +485,3 @@ rename to chase or a missing implementation to write, and several sit in
 subsystems (`os/compositor`, `os/services/netstack`, `ui.*`, `app.dashboard`)
 that other lanes are live in. Filed here with exact counts so the next pass
 starts from a number rather than a re-scan.
-
-## Lane J re-verification 2026-08-17 (classified by CONTENT, not SHA ancestry)
-
-**Verdict: STILL-OPEN (census).** Duplicate-family with
-`check_guard_wiring_48_unwired_triage_2026-08-08.md`. The optout list landed but the orphan
-count itself was never reduced. Not reduced by this lane either.

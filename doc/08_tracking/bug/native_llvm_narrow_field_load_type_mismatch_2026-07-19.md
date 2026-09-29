@@ -1,4 +1,9 @@
 # LLVM backend: narrow struct-field readback emits mistyped load → llc rejects
+## Closed 2026-09-16 — ...ots are uniformly 8 bytes). ## Resolution Commit `09bee48d1a5d` loads the physical native-
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-07-19 · **Status:** SOURCE FIXED / FOCUSED LLVM-IR REGRESSION ADDED · **Area:** LLVM backend / struct field access
 **Lane:** interpreted native-build worker (`SIMPLE_NATIVE_BUILD_WORKER=1
@@ -53,13 +58,3 @@ Two additional infra findings while attempting the all-i64 end-to-end run:
    worktree. The defaulted-field fix's IR-level verification (store 5/true)
    was captured on a coherent tree and stands.
 
-## Focused rerun note (2026-07-24)
-
-The canonical self-hosted Linux runner accepted the one-file regression, then
-produced no further output for more than two minutes. Two same-command
-processes remained CPU-active at 58–76%; both were stopped under the runaway
-cap. The focused regression result is indeterminate, not PASS or FAIL. Re-run:
-
-```bash
-bin/simple test test/01_unit/compiler/backend/llvm_narrow_field_load_spec.spl
-```

@@ -31,19 +31,19 @@ Argument: $ARGUMENTS
 ### Route
 
 **setup:**
-Read tools/claude-plugin/repo-and-pull-req/skills/minio/minio_setup.md and follow.
+Read tools/claude-plugin/repo-and-pull-req/skills/minio_setup/SKILL.md and follow.
 
 **ls [bucket [--prefix P]]:**
-Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_ls.md.
+Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio_ls/SKILL.md.
 
 **get <bucket> <key> [--out PATH]:**
-Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_get.md.
+Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio_get/SKILL.md.
 
 **put <bucket> <key> --file PATH:**
-Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_put.md.
+Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio_put/SKILL.md.
 
 **share (→ `presign <bucket> <key> [--expires N]`):**
-Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio/minio_share.md.
+Read and follow tools/claude-plugin/repo-and-pull-req/skills/minio_share/SKILL.md.
 
 **stat <path>:**
 Run `bin/itf minio stat <bucket> <key>` (SigV4 HEAD via `adapter_minio.spl::_minio_stat` — returns size/etag/last-modified).

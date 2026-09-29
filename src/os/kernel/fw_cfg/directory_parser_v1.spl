@@ -1,0 +1,94 @@
+# Pure, bounded parser for the QEMU fw_cfg file directory.
+
+pub class FwCfgDirectoryMatchV1:
+    ok: bool
+    selector: u16
+    size: u32
+    reason: text
+
+pub fn fw_cfg_max_directory_entries_v1() -> u32: 4096u32
+pub fn fw_cfg_max_payload_bytes_v1() -> u64: 268435456u64
+
+pub fn fw_cfg_valid_exact_name_v1(name: text) -> bool:
+    # The fixed directory field is 56 bytes. Reserve one byte for the NUL
+    # terminator and reject non-ASCII input before narrowing character codes.
+    if name.len() == 0 or name.len() >= 56:
+        return false
+    var index: i64 = 0
+    while index < name.len():
+        val code = name.char_code_at(index)
+        if code <= 0 or code > 127:
+            return false
+        index = index + 1
+    true
+
+fn _reject(reason: text) -> FwCfgDirectoryMatchV1:
+    FwCfgDirectoryMatchV1(
+        ok: false, selector: 0u16, size: 0u32, reason: reason
+    )
+
+fn _be16(data: [u8], offset: i64) -> u16:
+    (data[offset].to_u16() << 8) | data[offset + 1].to_u16()
+
+fn _be32(data: [u8], offset: i64) -> u32:
+    (data[offset].to_u32() << 24) |
+        (data[offset + 1].to_u32() << 16) |
+        (data[offset + 2].to_u32() << 8) |
+        data[offset + 3].to_u32()
+
+fn _name_equals(data: [u8], offset: i64, wanted: text) -> bool:
+    var index: i64 = 0
+    while index < wanted.len():
+        if data[offset + index] != wanted.char_code_at(index).to_u8():
+            return false
+        index = index + 1
+    data[offset + index] == 0u8
+
+pub fn fw_cfg_parse_directory_v1(
+    directory: [u8], exact_name: text, max_bytes: u64
+) -> FwCfgDirectoryMatchV1:
+    """Parse a count-prefixed fw_cfg directory with no hardware access."""
+    if not fw_cfg_valid_exact_name_v1(exact_name):
+        return _reject("invalid-name")
+    if max_bytes > fw_cfg_max_payload_bytes_v1():
+        return _reject("invalid-max-bytes")
+    if directory.len() < 4:
+        return _reject("truncated-directory-header")
+
+    val count = _be32(directory, 0)
+    if count > fw_cfg_max_directory_entries_v1():
+        return _reject("entry-count-exceeds-limit")
+    val required = 4 + count.to_i64() * 64
+    if directory.len() != required:
+        return _reject("malformed-directory-size")
+
+    var found = false
+    var found_selector: u16 = 0u16
+    var found_size: u32 = 0u32
+    var entry: u32 = 0u32
+    while entry < count:
+        val offset = 4 + entry.to_i64() * 64
+        if _name_equals(directory, offset + 8, exact_name):
+            if found:
+                return _reject("duplicate-name")
+            found = true
+            found_selector = _be16(directory, offset + 4)
+            found_size = _be32(directory, offset)
+        entry = entry + 1u32
+
+    if not found:
+        return _reject("file-not-found")
+    if found_size.to_u64() > max_bytes:
+        return FwCfgDirectoryMatchV1(
+            ok: false, selector: found_selector, size: found_size,
+            reason: "file-exceeds-limit"
+        )
+    FwCfgDirectoryMatchV1(
+        ok: true, selector: found_selector, size: found_size, reason: "ok"
+    )
+
+export FwCfgDirectoryMatchV1
+export fw_cfg_max_directory_entries_v1
+export fw_cfg_max_payload_bytes_v1
+export fw_cfg_valid_exact_name_v1
+export fw_cfg_parse_directory_v1

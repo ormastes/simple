@@ -1,4 +1,9 @@
 # `origin/main` is not test-runnable: `unknown decorator @always_inline` on a startup-path stdlib file (2026-08-26)
+## Closed 2026-09-16 — Status FIXED 2026-08-26; decorators registered in seed, verified, guard re-promoted
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-26. Was RED on `origin/main`. Found by
 `scripts/check/check-main-test-runnable-push.shs`, the guard landed for the *previous* instance of
@@ -113,3 +118,4 @@ decorates.
 The deployed `bin/release/x86_64-unknown-linux-gnu/simple` was replaced with this build
 (previous binary kept as `simple.pre-alwaysinline-20260826`), and `push-main-test-runnable` is
 **promoted back to `push_blocking: true`** in the same change, as its advisory note required.
+

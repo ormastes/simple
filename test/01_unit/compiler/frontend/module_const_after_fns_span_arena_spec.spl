@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Reproduce for the `decl_get_span` nil-contract fault that blocked
+# native-build of src/app/mcp/main.spl (main_lazy_ctx_tools.spl shape:
+# consts, then many fns, then another module-level const).
+#
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/_Ast/decl_nodes.spl
+#
+# The module-body loop frame in enum_module_body.spl held a local named
+# `decl_span` -- the same bare name as the decl-span arena global in
+# compiler.core.ast. Under the seed interpreter that frame's copy of the
+# arena was refreshed at the first const and published back over the live
+# arena at the next const, truncating decl_span while decl_tag kept growing,
+# so every later decl read a nil span. Exercised in-process through the
+# self-hosted frontend, the same method as layer_module_tag_spec.spl.
+
+use std.spec.step
+
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.parser.{parser_has_errors}
+
+
+describe "module-level const after fn decls keeps the decl span arena intact":
+    # @manual scenario evidence
+    it "every fn declared after a second const still carries its real source line":
+        # @req REQ-SSPEC-UNIT
+        step("every fn declared after a second const still carries its real source line")
+        var source = "const A: i64 = 1\nconst B: i64 = 2\n\n"
+        # lines 4..13: fn f0 .. f4 (2 lines each)
+        var i = 0
+        while i < 5:
+            source = source + "fn f{i}() -> i64:\n    {i}\n"
+            i = i + 1
+        # line 14: the const that used to publish the stale arena copy
+        source = source + "const C: [text] = [\n    \"x\",\n    \"y\",\n]\n"
+        # lines 18 and 20: fns whose decl spans were read back as nil
+        source = source + "fn g0() -> i64:\n    0\n"
+        source = source + "fn g1() -> i64:\n    1\n"
+        val module = parse_and_build_module(source, "const_after_fns_span_arena.spl")
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.functions.contains("g0")).to_equal(true)
+        expect(module.functions.contains("g1")).to_equal(true)
+        expect(module.functions["f0"].span.line).to_equal(4)
+        expect(module.functions["f4"].span.line).to_equal(12)
+        expect(module.functions["g0"].span.line).to_equal(18)
+        expect(module.functions["g1"].span.line).to_equal(20)

@@ -35,7 +35,7 @@
 use std::sync::{Arc, LazyLock};
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
 use std::collections::HashMap;
 
 /// Function pointer type for extern dispatches.
@@ -103,6 +103,7 @@ pub mod sandbox;
 pub mod mock_policy;
 pub mod sffi_value;
 pub mod sffi_array;
+pub mod arm_loader;
 pub mod sffi_db;
 pub mod sffi_dict;
 pub mod signatures;
@@ -235,14 +236,19 @@ fn rt_hosted_safe_artifact_bundle_identity_unavailable(_args: &[Value]) -> Resul
 }
 
 fn rt_cli_command_v1_call_interpreter(args: &[Value]) -> Result<Value, CompileError> {
-    let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context),
-        Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr),
-        Value::Int(result_capacity)] = args else {
+    let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context), Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr), Value::Int(result_capacity)] =
+        args
+    else {
         return Ok(Value::Int(-1));
     };
     Ok(Value::Int(simple_runtime::value::sffi::rt_cli_command_v1_call(
-        *fn_ptr, *interface_handle, *provider_context, *request_ptr, *request_len,
-        *result_ptr, *result_capacity,
+        *fn_ptr,
+        *interface_handle,
+        *provider_context,
+        *request_ptr,
+        *request_len,
+        *result_ptr,
+        *result_capacity,
     ) as i64))
 }
 
@@ -290,16 +296,37 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_screenshot_is_enabled", screenshot_sffi::rt_screenshot_is_enabled);
     insert_simple!("rt_screenshot_set_refresh", screenshot_sffi::rt_screenshot_set_refresh);
     insert_simple!("rt_screenshot_is_refresh", screenshot_sffi::rt_screenshot_is_refresh);
-    insert_simple!("rt_screenshot_set_output_dir", screenshot_sffi::rt_screenshot_set_output_dir);
-    insert_simple!("rt_screenshot_get_output_dir", screenshot_sffi::rt_screenshot_get_output_dir);
+    insert_simple!(
+        "rt_screenshot_set_output_dir",
+        screenshot_sffi::rt_screenshot_set_output_dir
+    );
+    insert_simple!(
+        "rt_screenshot_get_output_dir",
+        screenshot_sffi::rt_screenshot_get_output_dir
+    );
     insert_simple!("rt_screenshot_set_context", screenshot_sffi::rt_screenshot_set_context);
-    insert_simple!("rt_screenshot_clear_context", screenshot_sffi::rt_screenshot_clear_context);
-    insert_simple!("rt_screenshot_clear_captures", screenshot_sffi::rt_screenshot_clear_captures);
-    insert_simple!("rt_screenshot_capture_before_terminal", screenshot_sffi::rt_screenshot_capture_before_terminal);
-    insert_simple!("rt_screenshot_capture_after_terminal", screenshot_sffi::rt_screenshot_capture_after_terminal);
+    insert_simple!(
+        "rt_screenshot_clear_context",
+        screenshot_sffi::rt_screenshot_clear_context
+    );
+    insert_simple!(
+        "rt_screenshot_clear_captures",
+        screenshot_sffi::rt_screenshot_clear_captures
+    );
+    insert_simple!(
+        "rt_screenshot_capture_before_terminal",
+        screenshot_sffi::rt_screenshot_capture_before_terminal
+    );
+    insert_simple!(
+        "rt_screenshot_capture_after_terminal",
+        screenshot_sffi::rt_screenshot_capture_after_terminal
+    );
     insert_simple!("rt_screenshot_exists", screenshot_sffi::rt_screenshot_exists);
     insert_simple!("rt_screenshot_get_path", screenshot_sffi::rt_screenshot_get_path);
-    insert_simple!("rt_screenshot_capture_count", screenshot_sffi::rt_screenshot_capture_count);
+    insert_simple!(
+        "rt_screenshot_capture_count",
+        screenshot_sffi::rt_screenshot_capture_count
+    );
     insert_simple!("rt_screenshot_free_string", screenshot_sffi::rt_screenshot_free_string);
     insert_simple!("bytes_to_u16_be", conversion::bytes_to_u16_be_fn);
     insert_simple!("bytes_to_u16_le", conversion::bytes_to_u16_le_fn);
@@ -362,6 +389,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("memory_usage_percent", memory::memory_usage_percent);
     insert_simple!("rt_heap_registry_count", memory::rt_heap_registry_count);
     insert_simple!("rt_heap_live_bytes", memory::rt_heap_live_bytes);
+    insert_simple!("rt_heap_peak_bytes", memory::rt_heap_peak_bytes);
+    insert_simple!("rt_heap_alloc_count", memory::rt_heap_alloc_count);
+    insert_simple!("rt_heap_free_count", memory::rt_heap_free_count);
     insert_simple!("rt_heap_aux_live_bytes", memory::rt_heap_aux_live_bytes);
     insert_simple!("rt_heap_array_capacity_bytes", memory::rt_heap_array_capacity_bytes);
     insert_simple!("rt_heap_live_bytes_by_kind", memory::rt_heap_live_bytes_by_kind);
@@ -385,22 +415,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // Resolves doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md.
     insert_simple!("rt_mem_harden_check_native", memory::rt_mem_harden_check);
     insert_simple!("rt_mem_guard_stats", memory::rt_mem_guard_stats);
-    insert_simple!(
-        "rt_transient_array_scope_begin",
-        memory::rt_transient_array_scope_begin
-    );
-    insert_simple!(
-        "rt_transient_array_scope_pause",
-        memory::rt_transient_array_scope_pause
-    );
-    insert_simple!(
-        "rt_transient_array_scope_end",
-        memory::rt_transient_array_scope_end
-    );
-    insert_simple!(
-        "rt_transient_heap_promote",
-        memory::rt_transient_heap_promote
-    );
+    insert_simple!("rt_transient_array_scope_begin", memory::rt_transient_array_scope_begin);
+    insert_simple!("rt_transient_array_scope_pause", memory::rt_transient_array_scope_pause);
+    insert_simple!("rt_transient_array_scope_end", memory::rt_transient_array_scope_end);
+    insert_simple!("rt_transient_heap_promote", memory::rt_transient_heap_promote);
     insert_simple!("min", math::min);
     insert_simple!("__mock_policy_check", mock_policy::mock_policy_check);
     insert_simple!("__mock_policy_disable", mock_policy::mock_policy_disable);
@@ -441,6 +459,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_terminal_is_tty", terminal::rt_terminal_is_tty);
     insert_simple!("rt_terminal_stdout_is_tty", terminal::rt_terminal_stdout_is_tty);
     insert_simple!("rt_terminal_get_size", terminal::rt_terminal_get_size);
+    // See doc/08_tracking/bug/caret_tui_mode_dies_rt_atexit_install_unregistered_2026-09-06.md —
+    // `rt_atexit_install` was the one extern in terminal.spl never bridged here;
+    // `rt_signal_install`/`rt_signal_check` (used by the very next line in
+    // `terminal_install_recovery`) were found missing during the same fix.
+    insert_simple!("rt_atexit_install", terminal::rt_atexit_install);
+    insert_simple!("rt_signal_install", terminal::rt_signal_install);
+    insert_simple!("rt_signal_check", terminal::rt_signal_check);
     insert_simple!("native_http_send", network::native_http_send);
     insert_simple!("rt_http_request", network::rt_http_request);
     insert_simple!("rt_http_request_v2", network::rt_http_request_v2);
@@ -560,20 +585,62 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("native_udp_set_read_timeout", network::native_udp_set_read_timeout);
     insert_simple!("native_udp_set_ttl", network::native_udp_set_ttl);
     insert_simple!("native_udp_set_write_timeout", network::native_udp_set_write_timeout);
-    insert_simple!("rt_io_udp_bind", crate::interpreter::interpreter_native_net::rt_io_udp_bind_interp);
-    insert_simple!("rt_io_udp_close", crate::interpreter::interpreter_native_net::rt_io_udp_close_interp);
-    insert_simple!("rt_io_udp_connect", crate::interpreter::interpreter_native_net::rt_io_udp_connect_interp);
-    insert_simple!("rt_io_udp_local_addr", crate::interpreter::interpreter_native_net::rt_io_udp_local_addr_interp);
-    insert_simple!("rt_io_udp_join_multicast", crate::interpreter::interpreter_native_net::rt_io_udp_join_multicast_interp);
-    insert_simple!("rt_io_udp_leave_multicast", crate::interpreter::interpreter_native_net::rt_io_udp_leave_multicast_interp);
-    insert_simple!("rt_io_udp_recv", crate::interpreter::interpreter_native_net::rt_io_udp_recv_interp);
-    insert_simple!("rt_io_udp_recv_from", crate::interpreter::interpreter_native_net::rt_io_udp_recv_from_interp);
-    insert_simple!("rt_io_udp_send", crate::interpreter::interpreter_native_net::rt_io_udp_send_interp);
-    insert_simple!("rt_io_udp_send_to", crate::interpreter::interpreter_native_net::rt_io_udp_send_to_interp);
-    insert_simple!("rt_io_udp_set_broadcast", crate::interpreter::interpreter_native_net::rt_io_udp_set_broadcast_interp);
-    insert_simple!("rt_io_udp_set_multicast_loop", crate::interpreter::interpreter_native_net::rt_io_udp_set_multicast_loop_interp);
-    insert_simple!("rt_io_udp_set_nonblocking", crate::interpreter::interpreter_native_net::rt_io_udp_set_nonblocking_interp);
-    insert_simple!("rt_io_udp_set_read_timeout", crate::interpreter::interpreter_native_net::rt_io_udp_set_read_timeout_interp);
+    insert_simple!(
+        "rt_io_udp_bind",
+        crate::interpreter::interpreter_native_net::rt_io_udp_bind_interp
+    );
+    insert_simple!(
+        "rt_io_udp_close",
+        crate::interpreter::interpreter_native_net::rt_io_udp_close_interp
+    );
+    insert_simple!(
+        "rt_io_udp_connect",
+        crate::interpreter::interpreter_native_net::rt_io_udp_connect_interp
+    );
+    insert_simple!(
+        "rt_io_udp_local_addr",
+        crate::interpreter::interpreter_native_net::rt_io_udp_local_addr_interp
+    );
+    insert_simple!(
+        "rt_io_udp_join_multicast",
+        crate::interpreter::interpreter_native_net::rt_io_udp_join_multicast_interp
+    );
+    insert_simple!(
+        "rt_io_udp_leave_multicast",
+        crate::interpreter::interpreter_native_net::rt_io_udp_leave_multicast_interp
+    );
+    insert_simple!(
+        "rt_io_udp_recv",
+        crate::interpreter::interpreter_native_net::rt_io_udp_recv_interp
+    );
+    insert_simple!(
+        "rt_io_udp_recv_from",
+        crate::interpreter::interpreter_native_net::rt_io_udp_recv_from_interp
+    );
+    insert_simple!(
+        "rt_io_udp_send",
+        crate::interpreter::interpreter_native_net::rt_io_udp_send_interp
+    );
+    insert_simple!(
+        "rt_io_udp_send_to",
+        crate::interpreter::interpreter_native_net::rt_io_udp_send_to_interp
+    );
+    insert_simple!(
+        "rt_io_udp_set_broadcast",
+        crate::interpreter::interpreter_native_net::rt_io_udp_set_broadcast_interp
+    );
+    insert_simple!(
+        "rt_io_udp_set_multicast_loop",
+        crate::interpreter::interpreter_native_net::rt_io_udp_set_multicast_loop_interp
+    );
+    insert_simple!(
+        "rt_io_udp_set_nonblocking",
+        crate::interpreter::interpreter_native_net::rt_io_udp_set_nonblocking_interp
+    );
+    insert_simple!(
+        "rt_io_udp_set_read_timeout",
+        crate::interpreter::interpreter_native_net::rt_io_udp_set_read_timeout_interp
+    );
     insert_simple!("panic", process::panic);
     insert_simple!("parse_memory_size", memory::parse_memory_size);
     insert_simple!("pow", math::pow);
@@ -655,7 +722,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_async_ws_read_raw", network::rt_async_ws_read_raw);
     insert_simple!("rt_async_ws_write_raw", network::rt_async_ws_write_raw);
     insert_simple!("rt_atomic_bool_free", atomic::rt_atomic_bool_free);
-    insert_simple!("rt_atomic_bool_compare_exchange", atomic::rt_atomic_bool_compare_exchange);
+    insert_simple!(
+        "rt_atomic_bool_compare_exchange",
+        atomic::rt_atomic_bool_compare_exchange
+    );
     insert_simple!("rt_atomic_bool_load", atomic::rt_atomic_bool_load);
     insert_simple!("rt_atomic_bool_new", atomic::rt_atomic_bool_new);
     insert_simple!("rt_atomic_bool_store", atomic::rt_atomic_bool_store);
@@ -741,7 +811,22 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn);
+    insert_simple!("rt_arm_array_len_u32", sffi_array::rt_arm_array_len_u32_fn);
+    insert_simple!("rt_arm_array_get_byte_u32", sffi_array::rt_arm_array_get_byte_u32_fn);
     insert_simple!("rt_bytes_u8_set", sffi_array::rt_bytes_u8_set_fn);
+    // @cfg(arm64) loader byte helpers: the interpreter selects @cfg by host arch,
+    // so an aarch64 host reaches these from os/kernel/loader. See arm_loader.rs.
+    insert_simple!("rt_arm_array_clone_bytes", arm_loader::rt_arm_array_clone_bytes_fn);
+    insert_simple!("rt_arm_array_slice_bytes", arm_loader::rt_arm_array_slice_bytes_fn);
+    insert_simple!("rt_arm_elf64_pt_load_count", arm_loader::rt_arm_elf64_pt_load_count_fn);
+    insert_simple!("rt_arm_elf64_entry", arm_loader::rt_arm_elf64_entry_fn);
+    insert_simple!("rt_arm_elf64_pt_load_offset", arm_loader::rt_arm_elf64_pt_load_offset_fn);
+    insert_simple!("rt_arm_elf64_pt_load_vaddr", arm_loader::rt_arm_elf64_pt_load_vaddr_fn);
+    insert_simple!("rt_arm_elf64_pt_load_filesz", arm_loader::rt_arm_elf64_pt_load_filesz_fn);
+    insert_simple!("rt_arm_elf64_pt_load_memsz", arm_loader::rt_arm_elf64_pt_load_memsz_fn);
+    insert_simple!("rt_arm_elf64_pt_load_flags", arm_loader::rt_arm_elf64_pt_load_flags_fn);
+    insert_simple!("rt_arm_elf64_pt_load_align", arm_loader::rt_arm_elf64_pt_load_align_fn);
+    insert_simple!("rt_arm_smf_elf_stub_size", arm_loader::rt_arm_smf_elf_stub_size_fn);
     insert_simple!("rt_f64_array_alloc", file_io::rt_f64_array_alloc);
     insert_simple!("rt_f32_array_alloc", file_io::rt_f32_array_alloc);
     insert_simple!("rt_i64_array_alloc", file_io::rt_i64_array_alloc);
@@ -754,6 +839,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cpu_is_aarch64", simd::rt_cpu_is_aarch64);
     insert_simple!("rt_cpu_is_riscv64", simd::rt_cpu_is_riscv64);
     insert_simple!("rt_cpuid", simd::rt_cpuid);
+    insert_simple!("rt_xgetbv", simd::rt_xgetbv);
     insert_simple!("rt_cargo_build", cargo::rt_cargo_build);
     insert_simple!("rt_cargo_check", cargo::rt_cargo_check);
     insert_simple!("rt_cargo_clean", cargo::rt_cargo_clean);
@@ -781,13 +867,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_pool_uses_work_stealing", concurrency::rt_pool_uses_work_stealing);
     insert_simple!("rt_pool_safepoint", concurrency::rt_pool_safepoint);
     insert_simple!("rt_pool_state_create_v1", concurrency::rt_pool_state_v1_unavailable);
-    insert_simple!("rt_pool_state_try_submit_i64_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!(
+        "rt_pool_state_try_submit_i64_v1",
+        concurrency::rt_pool_state_v1_unavailable
+    );
     insert_simple!("rt_pool_task_status_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_task_join_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_task_release_i64_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_close_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_join_idle_v1", concurrency::rt_pool_state_v1_unavailable);
-    insert_simple!("rt_pool_state_outstanding_v1", concurrency::rt_pool_state_v1_unavailable);
+    insert_simple!(
+        "rt_pool_state_outstanding_v1",
+        concurrency::rt_pool_state_v1_unavailable
+    );
     insert_simple!("rt_pool_state_pending_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_running_v1", concurrency::rt_pool_state_v1_unavailable);
     insert_simple!("rt_pool_state_completed_v1", concurrency::rt_pool_state_v1_unavailable);
@@ -799,6 +891,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_native_neq", sffi_value::rt_native_neq_fn);
     insert_simple!("rt_cli_exit", cli::rt_cli_exit);
     insert_simple!("rt_cli_file_exists", cli::rt_cli_file_exists);
+    insert_simple!("rt_cli_read_file", cli::rt_cli_read_file);
+    insert_simple!("rt_cli_dispatch_rust", cli::rt_cli_dispatch_rust);
     insert_simple!("rt_cli_arg_at", cli::rt_cli_arg_at);
     insert_simple!("rt_cli_arg_count", cli::rt_cli_arg_count);
     insert_simple!("rt_cli_get_args", cli::rt_cli_get_args);
@@ -950,6 +1044,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_cranelift_new_aot_module_triple",
         cranelift::rt_cranelift_new_aot_module_triple
     );
+    insert_simple!(
+        "spl_cranelift_new_aot_module_config_v2",
+        cranelift::spl_cranelift_new_aot_module_config_v2
+    );
+    insert_simple!("spl_cranelift_aot_isa_feature_v2", cranelift::spl_cranelift_aot_isa_feature_v2);
+    insert_simple!("spl_cranelift_aot_opt_level_v2", cranelift::spl_cranelift_aot_opt_level_v2);
     insert_simple!("rt_cranelift_new_module", cranelift::rt_cranelift_new_module);
     insert_simple!("rt_cranelift_new_signature", cranelift::rt_cranelift_new_signature);
     insert_simple!("rt_cranelift_null", cranelift::rt_cranelift_null);
@@ -985,7 +1085,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_event_elapsed_ns", gpu::rt_cuda_event_elapsed_ns_fn);
     insert_simple!("rt_cuda_event_destroy", gpu::rt_cuda_event_destroy_fn);
     insert_simple!("rt_vulkan_timestamp_supported", gpu::rt_vulkan_timestamp_supported_fn);
-    insert_simple!("rt_vulkan_timestamp_period_fnum", gpu::rt_vulkan_timestamp_period_fnum_fn);
+    insert_simple!(
+        "rt_vulkan_timestamp_period_fnum",
+        gpu::rt_vulkan_timestamp_period_fnum_fn
+    );
     insert_simple!("rt_vulkan_query_elapsed_ns", gpu::rt_vulkan_query_elapsed_ns_fn);
     insert_simple!(
         "rt_cuda_device_compute_capability",
@@ -1018,7 +1121,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
     insert_simple!("rt_cuda_module_load_data_array", gpu::rt_cuda_module_load_data_array_fn);
     insert_simple!("rt_cuda_module_load_data_bytes", gpu::rt_cuda_module_load_data_bytes_fn);
-    insert_simple!("rt_cuda_launch_kernel_name_array", gpu::rt_cuda_launch_kernel_name_array_fn);
+    insert_simple!(
+        "rt_cuda_launch_kernel_name_array",
+        gpu::rt_cuda_launch_kernel_name_array_fn
+    );
     insert_simple!("rt_cuda_module_load", gpu::rt_cuda_module_load_fn);
     insert_simple!("rt_cuda_module_unload", gpu::rt_cuda_module_unload_fn);
     insert_simple!("rt_cuda_sync", gpu::rt_cuda_sync_fn);
@@ -1039,7 +1145,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_alloc_buffer", gpu::rt_metal_alloc_buffer_fn);
     insert_simple!("rt_metal_begin_render_pass", gpu::rt_metal_begin_render_pass_fn);
     insert_simple!("rt_metal_buffer_download", gpu::rt_metal_buffer_download_fn);
+    insert_simple!("rt_metal_buffer_download_raw", gpu::rt_metal_buffer_download_raw_fn);
     insert_simple!("rt_metal_buffer_upload", gpu::rt_metal_buffer_upload_fn);
+    insert_simple!("rt_metal_buffer_upload_raw", gpu::rt_metal_buffer_upload_raw_fn);
     insert_simple!("rt_metal_commit_command_buffer", gpu::rt_metal_commit_command_buffer_fn);
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
     insert_simple!("rt_metal_load_library_array", gpu::rt_metal_load_library_array_fn);
@@ -1098,6 +1206,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_run_compute_frame", gpu::rt_metal_run_compute_frame_fn);
     insert_simple!("rt_metal_set_buffer", gpu::rt_metal_set_buffer_fn);
     insert_simple!("rt_metal_set_bytes", gpu::rt_metal_set_bytes_fn);
+    insert_simple!("rt_metal_set_bytes_raw", gpu::rt_metal_set_bytes_raw_fn);
     insert_simple!("rt_metal_set_scissor", gpu::rt_metal_set_scissor_fn);
     insert_simple!("rt_metal_set_viewport", gpu::rt_metal_set_viewport_fn);
     insert_simple!("rt_metal_wait_completed", gpu::rt_metal_wait_completed_fn);
@@ -1238,6 +1347,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ed25519_verify_checked", signatures::rt_ed25519_verify_checked);
     insert_simple!("rt_entropy_hardware_ready", random::rt_entropy_hardware_ready_fn);
     insert_simple!("rt_env_all", system::rt_env_all);
+    insert_simple!("rt_env_vars", system::rt_env_all);
     insert_simple!("rt_env_cwd", system::rt_env_cwd);
     insert_simple!("rt_env_define_var", env_sffi::rt_env_define);
     insert_simple!("rt_env_exists", system::rt_env_exists);
@@ -1350,14 +1460,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_win32_dib_read_pixel", win32_hosted::rt_win32_dib_read_pixel);
     insert_simple!("rt_win32_message_pump", win32_hosted::rt_win32_message_pump);
     insert_simple!("rt_file_append_text", file_io::rt_file_append_text);
+    insert_simple!("rt_secure_temp_dir", file_io::rt_secure_temp_dir);
     insert_simple!("rt_file_atomic_write", file_io::rt_file_atomic_write);
     insert_simple!("rt_file_atomic_write_mode", file_io::rt_file_atomic_write_mode);
     insert_simple!("rt_file_mode", file_io::rt_file_mode);
     insert_simple!("rt_file_canonicalize", file_io::rt_file_canonicalize);
     insert_simple!("rt_file_close", file_io::rt_file_close);
+    insert_simple!("rt_fd_pread", file_io::rt_fd_pread);
+    insert_simple!("rt_fd_pwrite", file_io::rt_fd_pwrite);
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
+    insert_simple!("rt_file_publish_noreplace", file_io::rt_file_publish_noreplace);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);
@@ -1366,7 +1480,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_exists_probe_begin", file_io::rt_file_exists_probe_begin);
     insert_simple!("rt_file_exists_probe_end", file_io::rt_file_exists_probe_end);
     insert_simple!("rt_file_is_regular_no_follow", file_io::rt_file_is_regular_no_follow);
-    insert_simple!("rt_file_read_regular_no_follow_bounded", file_io::rt_file_read_regular_no_follow_bounded);
+    insert_simple!(
+        "rt_file_read_regular_no_follow_bounded",
+        file_io::rt_file_read_regular_no_follow_bounded
+    );
+    insert_simple!(
+        "rt_file_read_regular_no_follow_bounded_bytes",
+        file_io::rt_file_read_regular_no_follow_bounded_bytes
+    );
+    insert_simple!(
+        "rt_file_read_regular_no_follow_last_failure",
+        file_io::rt_file_read_regular_no_follow_last_failure
+    );
     insert_simple!("rt_file_is_char_device", file_io::rt_file_is_char_device);
     insert_simple!("rt_file_exists_str", file_io::rt_file_exists);
     insert_simple!("rt_file_find", file_io::rt_file_find);
@@ -1415,11 +1540,26 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
     insert_simple!("rt_file_write_text", file_io::rt_file_write_text);
-    insert_simple!("rt_hosted_safe_artifact_bundle_begin_v1", rt_hosted_safe_artifact_bundle_unavailable);
-    insert_simple!("rt_hosted_safe_artifact_bundle_read_stage_v1", rt_hosted_safe_artifact_bundle_unavailable);
-    insert_simple!("rt_hosted_safe_artifact_bundle_identity_v1", rt_hosted_safe_artifact_bundle_identity_unavailable);
-    insert_simple!("rt_hosted_safe_artifact_bundle_stage_scr1_v1", rt_hosted_safe_artifact_bundle_unavailable);
-    insert_simple!("rt_hosted_safe_artifact_bundle_finish_v1", rt_hosted_safe_artifact_bundle_unavailable);
+    insert_simple!(
+        "rt_hosted_safe_artifact_bundle_begin_v1",
+        rt_hosted_safe_artifact_bundle_unavailable
+    );
+    insert_simple!(
+        "rt_hosted_safe_artifact_bundle_read_stage_v1",
+        rt_hosted_safe_artifact_bundle_unavailable
+    );
+    insert_simple!(
+        "rt_hosted_safe_artifact_bundle_identity_v1",
+        rt_hosted_safe_artifact_bundle_identity_unavailable
+    );
+    insert_simple!(
+        "rt_hosted_safe_artifact_bundle_stage_scr1_v1",
+        rt_hosted_safe_artifact_bundle_unavailable
+    );
+    insert_simple!(
+        "rt_hosted_safe_artifact_bundle_finish_v1",
+        rt_hosted_safe_artifact_bundle_unavailable
+    );
     // rt_io_file_* backs std.nogc_sync_mut.io.file (FileHandle/File) -- a
     // separate family from rt_file_* above with its own fd-based, real-OS-fd
     // semantics (see io_file.rs module doc). Previously unregistered here,
@@ -1594,6 +1734,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_is_interpreter_runtime", system::rt_is_interpreter_runtime);
     insert_simple!("rt_is_jit_runtime", system::rt_is_jit_runtime);
     insert_simple!("rt_is_error", sffi_value::rt_is_error_fn);
+    insert_simple!("rt_heap_ref_wellformed", sffi_value::rt_heap_ref_wellformed_fn);
     insert_simple!("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled);
     #[cfg(not(doctest))]
     {
@@ -1617,6 +1758,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_math_cos", math::rt_math_cos_fn);
     insert_simple!("rt_math_exp", math::rt_math_exp_fn);
     insert_simple!("rt_math_floor", math::rt_math_floor_fn);
+    insert_simple!("rt_math_fma", math::rt_math_fma_fn);
     insert_simple!("rt_math_inf", math::rt_math_inf_fn);
     insert_simple!("rt_math_is_finite", math::rt_math_is_finite_fn);
     insert_simple!("rt_math_is_inf", math::rt_math_is_inf_fn);
@@ -1652,15 +1794,42 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_package_mkdir_all", package::mkdir_all);
     insert_simple!("rt_package_remove_dir_all", package::remove_dir_all);
     insert_simple!("rt_package_sha256", package::sha256);
-    insert_simple!("rt_packed_span_v1_resolve_base", packed_span::rt_packed_span_v1_resolve_base_fn);
-    insert_simple!("rt_packed_span_v1_probe_verdict", packed_span::rt_packed_span_v1_probe_verdict_fn);
-    insert_simple!("rt_packed_span_v1_flags_bits", packed_span::rt_packed_span_v1_flags_bits_fn);
-    insert_simple!("rt_packed_span_v1_last_verdict", packed_span::rt_packed_span_v1_last_verdict_fn);
-    insert_simple!("rt_packed_span_v1_last_rejection", packed_span::rt_packed_span_v1_last_rejection_fn);
-    insert_simple!("rt_packed_span_v1_rejected_count", packed_span::rt_packed_span_v1_rejected_count_fn);
-    insert_simple!("rt_packed_span_v1_resolve_count", packed_span::rt_packed_span_v1_resolve_count_fn);
-    insert_simple!("rt_packed_span_v1_admitted_element_count", packed_span::rt_packed_span_v1_admitted_element_count_fn);
-    insert_simple!("rt_packed_span_v1_struct_size", packed_span::rt_packed_span_v1_struct_size_fn);
+    insert_simple!(
+        "rt_packed_span_v1_resolve_base",
+        packed_span::rt_packed_span_v1_resolve_base_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_probe_verdict",
+        packed_span::rt_packed_span_v1_probe_verdict_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_flags_bits",
+        packed_span::rt_packed_span_v1_flags_bits_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_last_verdict",
+        packed_span::rt_packed_span_v1_last_verdict_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_last_rejection",
+        packed_span::rt_packed_span_v1_last_rejection_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_rejected_count",
+        packed_span::rt_packed_span_v1_rejected_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_resolve_count",
+        packed_span::rt_packed_span_v1_resolve_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_admitted_element_count",
+        packed_span::rt_packed_span_v1_admitted_element_count_fn
+    );
+    insert_simple!(
+        "rt_packed_span_v1_struct_size",
+        packed_span::rt_packed_span_v1_struct_size_fn
+    );
     insert_simple!("rt_path_absolute", file_io::rt_path_absolute);
     insert_simple!("rt_path_basename", file_io::rt_path_basename);
     insert_simple!("rt_path_dirname", file_io::rt_path_dirname);
@@ -1677,6 +1846,86 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_run", system::rt_process_run);
     insert_simple!("rt_process_run_bounded", system::rt_process_run_bounded);
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
+    // Declared by src/lib/nogc_sync_mut/io/resource_scope.spl and reached by
+    // every directory-mode `simple test` run via _run_scoped_child; the C
+    // definition is compiled into the runtime crate but had no interpreter
+    // dispatch entry, so directory mode died with `unknown extern function`.
+    insert_simple!(
+        "rt_process_run_owned_observed_bounded_value",
+        system::rt_process_run_owned_observed_bounded_value
+    );
+    // The native V3 adapter keeps RtOwnedProcessTokenV2 private.  Register
+    // every name for deterministic interpreter resolution, but fail closed
+    // instead of fabricating an opaque lease or receipt projection.
+    insert_simple!(
+        "rt_process_owned_v3_start_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_poll_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_input_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_cancel_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_result_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_collect_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_release_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_capabilities_value",
+        system::rt_process_owned_v3_capabilities_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_set_capture_limits_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_observation_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pin_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_close_pinned_executable_owned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_pinned_executable_sha256_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_owned_v3_start_pinned_value",
+        system::rt_process_owned_v3_adapter_unavailable
+    );
+    insert_simple!(
+        "rt_process_observation_v4_capabilities_value",
+        system::rt_process_observation_v4_capabilities_unavailable
+    );
+    insert_simple!("rt_process_observation_v4_pin_cwd_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_cwd_digest_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_close_cwd_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_start_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_start_pinned_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_poll_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_cancel_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_collect_value", system::rt_process_observation_v4_provider_unavailable);
+    insert_simple!("rt_process_observation_v4_ack_collect_value", system::rt_process_observation_v4_provider_unavailable);
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
     // Piped-process family -- present in the C runtime and declared by real
@@ -1684,6 +1933,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
+    // Implemented in system.rs and declared by process_ops.spl, but never
+    // registered here (found by the same extern census as the entry above).
+    insert_simple!("rt_process_write_stdin_some", system::rt_process_write_stdin_some);
     insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
     insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
     insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
@@ -1699,7 +1951,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_progress_tls_clear", time::rt_progress_tls_clear);
     insert_simple!("rt_progress_tls_is_initialized", time::rt_progress_tls_is_initialized);
     insert_simple!("rt_progress_tls_start_nanos", time::rt_progress_tls_start_nanos);
-    insert_simple!("rt_progress_tls_store_start_nanos", time::rt_progress_tls_store_start_nanos);
+    insert_simple!(
+        "rt_progress_tls_store_start_nanos",
+        time::rt_progress_tls_store_start_nanos
+    );
     insert_simple!(
         "rt_ps_torch_tensor_from_bits_1d",
         torch::rt_ps_torch_tensor_from_bits_1d
@@ -1710,9 +1965,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ptr_read_i32", memory::rt_ptr_read_i32);
     insert_simple!("rt_ptr_read_i64", memory::rt_ptr_read_i64);
     insert_simple!("rt_ptr_read_u8", memory::rt_ptr_read_u8);
+    insert_simple!("unsafe_addr_of", memory::unsafe_addr_of);
+    insert_simple!("rt_x86_syscall", memory::rt_x86_syscall);
     insert_simple!("rt_mmap_raw", memory::rt_mmap_raw);
     insert_simple!("rt_munmap_raw", memory::rt_munmap_raw);
     insert_simple!("rt_mprotect", memory::rt_mprotect);
+    insert_simple!("rt_page_size", memory::rt_page_size);
     insert_simple!("rt_madvise_raw", memory::rt_madvise_raw);
     insert_simple!("rt_msync_flags", memory::rt_msync_flags);
     insert_simple!("rt_mlock", memory::rt_mlock);
@@ -1770,11 +2028,20 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_readdir_free", file_io::rt_readdir_free);
     insert_simple!("rt_remove", file_io::rt_remove);
     insert_simple!("rt_rsa_pss_sha256_verify", signatures::rt_rsa_pss_sha256_verify);
-    insert_simple!("rt_rsa_pss_sha256_verify_checked", signatures::rt_rsa_pss_sha256_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha256_verify_checked",
+        signatures::rt_rsa_pss_sha256_verify_checked
+    );
     insert_simple!("rt_rsa_pss_sha384_verify", signatures::rt_rsa_pss_sha384_verify);
-    insert_simple!("rt_rsa_pss_sha384_verify_checked", signatures::rt_rsa_pss_sha384_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha384_verify_checked",
+        signatures::rt_rsa_pss_sha384_verify_checked
+    );
     insert_simple!("rt_rsa_pss_sha512_verify", signatures::rt_rsa_pss_sha512_verify);
-    insert_simple!("rt_rsa_pss_sha512_verify_checked", signatures::rt_rsa_pss_sha512_verify_checked);
+    insert_simple!(
+        "rt_rsa_pss_sha512_verify_checked",
+        signatures::rt_rsa_pss_sha512_verify_checked
+    );
     insert_simple!("rt_rsa_sha256_sign", signatures::rt_rsa_sha256_sign);
     insert_simple!("rt_rsa_sha256_sign_checked", signatures::rt_rsa_sha256_sign_checked);
     insert_simple!("rt_rsa_sha256_verify", signatures::rt_rsa_sha256_verify);
@@ -1883,7 +2150,21 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_engine2d_simd_fill_span_u32", simd::rt_engine2d_simd_fill_span_u32);
     insert_simple!("rt_engine2d_simd_copy_span_u32", simd::rt_engine2d_simd_copy_span_u32);
     insert_simple!("rt_engine2d_simd_blend_span_u32", simd::rt_engine2d_simd_blend_span_u32);
-    insert_simple!("rt_engine2d_simd_blend_const_span_u32", simd::rt_engine2d_simd_blend_const_span_u32);
+    insert_simple!(
+        "rt_engine2d_simd_blend_const_span_u32",
+        simd::rt_engine2d_simd_blend_const_span_u32
+    );
+    insert_simple!(
+        "rt_engine2d_blend_const_span_pct_u32",
+        simd::rt_engine2d_blend_const_span_pct_u32
+    );
+    insert_simple!("rt_engine2d_blend_mask_span_u32", simd::rt_engine2d_blend_mask_span_u32);
+    insert_simple!("rt_engine2d_blend_cov_span_u32", simd::rt_engine2d_blend_cov_span_u32);
+    insert_simple!("rt_simd_find_byte_span", simd::rt_simd_find_byte_span);
+    insert_simple!("rt_simd_bytes_equal_span", simd::rt_simd_bytes_equal_span);
+    insert_simple!("rt_db_bitmap_and_u32", simd::rt_db_bitmap_and_u32);
+    insert_simple!("rt_db_bitmap_or_u32", simd::rt_db_bitmap_or_u32);
+    insert_simple!("rt_db_bitmap_andnot_u32", simd::rt_db_bitmap_andnot_u32);
     insert_simple!("rt_engine2d_simd_copy_row_u32", simd::rt_engine2d_simd_copy_row_u32);
     insert_simple!("rt_engine2d_simd_blend_row_u32", simd::rt_engine2d_simd_blend_row_u32);
     insert_simple!("rt_simd_aes_round_last_u8x16", simd::rt_simd_aes_round_last_u8x16);
@@ -2021,6 +2302,46 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_thread_join", concurrency::rt_thread_join);
     insert_simple!("spl_thread_detach", concurrency::rt_thread_free);
     insert_simple!("spl_thread_current_id", concurrency::rt_thread_id);
+    insert_simple!(
+        "rt_cpu_affinity_avx2_acquire",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_generation",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_thread_id",
+        concurrency::rt_cpu_affinity_avx2_unavailable_i64
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_cpu",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_validate",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_release",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_call_enter",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_cpu_affinity_avx2_call_exit",
+        concurrency::rt_cpu_affinity_avx2_unavailable_bool
+    );
+    insert_simple!(
+        "rt_parser_mask_call_u8x32",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
+    insert_simple!(
+        "rt_parser_lexical_mask_call_u8x32",
+        concurrency::rt_cpu_affinity_avx2_unavailable_cpu
+    );
     insert_simple!("spl_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("spl_thread_yield", concurrency::rt_thread_yield);
     insert_simple!("spl_mutex_create", concurrency::spl_mutex_create);
@@ -2034,10 +2355,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_thread_join", concurrency::rt_thread_join);
     insert_simple!("rt_thread_local_free", concurrency::rt_thread_local_free);
     insert_simple!("rt_thread_local_get", concurrency::rt_thread_local_get);
+    insert_simple!("rt_thread_local_get_i64", concurrency::rt_thread_local_get_i64);
     insert_simple!("rt_thread_local_new", concurrency::rt_thread_local_new);
     insert_simple!("rt_thread_local_set", concurrency::rt_thread_local_set);
+    insert_simple!("rt_thread_local_set_i64", concurrency::rt_thread_local_set_i64);
     insert_simple!("rt_thread_sleep", concurrency::rt_thread_sleep);
     insert_simple!("rt_thread_yield", concurrency::rt_thread_yield);
+    insert_simple!("rt_time_format", time::rt_time_format);
     insert_simple!("rt_time_monotonic_ns", time::rt_time_monotonic_ns);
     insert_simple!("rt_time_ms", time::rt_time_ms_fn);
     insert_simple!("rt_time_now_micros", time::rt_time_now_micros);
@@ -2045,6 +2369,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_time_now_ms", time::rt_time_now_ms);
     insert_simple!("rt_time_now_nanos", time::rt_time_now_nanos);
     insert_simple!("rt_time_now_seconds", time::rt_time_now_seconds);
+    insert_simple!("rt_time_now_seconds_f64", time::rt_time_now_seconds_f64);
     insert_simple!("rt_time_now", time::rt_time_now);
     insert_simple!("rt_time_now_unix_micros", time::rt_time_now_unix_micros);
     insert_simple!("rt_timestamp_add_days", time::rt_timestamp_add_days);
@@ -2059,10 +2384,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_timestamp_get_year", time::rt_timestamp_get_year);
     insert_simple!("rt_timestamp_oracle_add_days", time::rt_timestamp_oracle_add_days);
     insert_simple!("rt_timestamp_oracle_diff_days", time::rt_timestamp_oracle_diff_days);
-    insert_simple!("rt_timestamp_oracle_from_components", time::rt_timestamp_oracle_from_components);
+    insert_simple!(
+        "rt_timestamp_oracle_from_components",
+        time::rt_timestamp_oracle_from_components
+    );
     insert_simple!("rt_timestamp_oracle_get_day", time::rt_timestamp_get_day);
     insert_simple!("rt_timestamp_oracle_get_hour", time::rt_timestamp_get_hour);
-    insert_simple!("rt_timestamp_oracle_get_microsecond", time::rt_timestamp_get_microsecond);
+    insert_simple!(
+        "rt_timestamp_oracle_get_microsecond",
+        time::rt_timestamp_get_microsecond
+    );
     insert_simple!("rt_timestamp_oracle_get_minute", time::rt_timestamp_get_minute);
     insert_simple!("rt_timestamp_oracle_get_month", time::rt_timestamp_get_month);
     insert_simple!("rt_timestamp_oracle_get_second", time::rt_timestamp_get_second);
@@ -2073,12 +2404,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls13_aes256_gcm_decrypt", simd::rt_tls13_aes256_gcm_decrypt);
     insert_simple!("rt_tls13_aes256_gcm_encrypt", simd::rt_tls13_aes256_gcm_encrypt);
     insert_simple!(
-        "rt_ssh_aes256_gcm_decrypt_packet",
-        simd::rt_ssh_aes256_gcm_decrypt_packet
-    );
-    insert_simple!(
-        "rt_ssh_aes256_gcm_decrypt_packet_payload_len",
-        simd::rt_ssh_aes256_gcm_decrypt_packet_payload_len
+        "rt_ssh_aes256_gcm_decrypt_packet_v2",
+        simd::rt_ssh_aes256_gcm_decrypt_packet_v2
     );
     insert_simple!("rt_tls13_ed25519_verify", signatures::rt_ed25519_verify);
     insert_simple!("rt_torch_available", torch::rt_torch_available);
@@ -2119,14 +2446,38 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_torch_torchtensor_shape", torch::rt_torch_torchtensor_shape);
     insert_simple!("rt_torch_torchtensor_sub", torch::rt_torch_torchtensor_sub);
     insert_simple!("rt_torch_torchtensor_sum", torch::rt_torch_torchtensor_sum);
-    insert_simple!("rt_torch_torchtensor_sum_checked", torch::rt_torch_torchtensor_sum_checked);
-    insert_simple!("rt_torch_torchtensor_mean_checked", torch::rt_torch_torchtensor_mean_checked);
-    insert_simple!("rt_torch_torchtensor_min_checked", torch::rt_torch_torchtensor_min_checked);
-    insert_simple!("rt_torch_torchtensor_max_checked", torch::rt_torch_torchtensor_max_checked);
-    insert_simple!("rt_torch_torchtensor_norm_checked", torch::rt_torch_torchtensor_norm_checked);
-    insert_simple!("rt_torch_torchtensor_det_checked", torch::rt_torch_torchtensor_det_checked);
-    insert_simple!("rt_torch_torchtensor_std_checked", torch::rt_torch_torchtensor_std_checked);
-    insert_simple!("rt_torch_torchtensor_var_checked", torch::rt_torch_torchtensor_var_checked);
+    insert_simple!(
+        "rt_torch_torchtensor_sum_checked",
+        torch::rt_torch_torchtensor_sum_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_mean_checked",
+        torch::rt_torch_torchtensor_mean_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_min_checked",
+        torch::rt_torch_torchtensor_min_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_max_checked",
+        torch::rt_torch_torchtensor_max_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_norm_checked",
+        torch::rt_torch_torchtensor_norm_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_det_checked",
+        torch::rt_torch_torchtensor_det_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_std_checked",
+        torch::rt_torch_torchtensor_std_checked
+    );
+    insert_simple!(
+        "rt_torch_torchtensor_var_checked",
+        torch::rt_torch_torchtensor_var_checked
+    );
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
@@ -2194,6 +2545,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
     insert_simple!("rt_vulkan_copy_to_buffer", gpu::rt_vulkan_copy_to_buffer_fn);
+    insert_simple!("rt_vulkan_copy_to_buffer_u32", gpu::rt_vulkan_copy_to_buffer_u32_fn);
     insert_simple!("rt_vulkan_copy_to_buffer_array", gpu::rt_vulkan_copy_to_buffer_array_fn);
     // Vulkan readback mutates its destination array. The interpreter extern
     // ABI receives cloned Values and cannot write that mutation back to the
@@ -2243,6 +2595,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
     insert_simple!("rt_vulkan_compile_spirv_array", gpu::rt_vulkan_compile_spirv_array_fn);
     insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
+    insert_simple!("rt_vulkan_readback_u32_array", gpu::rt_vulkan_readback_u32_array_fn);
+    insert_simple!(
+        "rt_vulkan_readback_u32_array_checksum",
+        gpu::rt_vulkan_readback_u32_array_checksum_fn
+    );
     insert_simple!(
         "rt_vulkan_fence_submission_supported",
         gpu::rt_vulkan_fence_submission_supported_fn
@@ -2341,7 +2698,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
     insert_simple!("rt_vulkan_push_constants_array", gpu::rt_vulkan_push_constants_array_fn);
-    insert_simple!("rt_vulkan_present_buffer_regions", gpu::rt_vulkan_present_buffer_regions_fn);
+    insert_simple!(
+        "rt_vulkan_present_buffer_regions",
+        gpu::rt_vulkan_present_buffer_regions_fn
+    );
     insert_simple!("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn);
     insert_simple!("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn);
     insert_simple!("rt_vulkan_submit_and_wait", gpu::rt_vulkan_submit_and_wait_fn);
@@ -2454,10 +2814,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_bits_to_f64", wsffi::spl_bits_to_f64);
     insert_simple!("spl_dlclose", wsffi::spl_dlclose);
     insert_simple!("spl_dlopen", wsffi::spl_dlopen);
+    insert_simple!("spl_backend_plugin_run_v1", wsffi::spl_backend_plugin_run_v1);
     insert_simple!("spl_dlopen_checked", wsffi::spl_dlopen_checked);
     insert_simple!("spl_dlsym", wsffi::spl_dlsym);
     insert_simple!("spl_dlsym_checked", wsffi::spl_dlsym_checked);
     insert_simple!("spl_dlsym_process_checked", wsffi::spl_dlsym_process_checked);
+    insert_simple!("spl_dynlib_snapshot_linux", wsffi::spl_dynlib_snapshot_linux);
     insert_simple!("spl_f64_to_bits", wsffi::spl_f64_to_bits);
     insert_simple!("spl_i64_is_zero", memory::spl_i64_is_zero);
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
@@ -2466,16 +2828,27 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
     insert_simple!("spl_wffi_call_f64_checked", wsffi::spl_wffi_call_f64_checked);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
+    insert_simple!("spl_wffi_call_i32_i64_u32_u32_f64_bits", wsffi::spl_wffi_call_i32_i64_u32_u32_f64_bits);
     insert_simple!("spl_wffi_call_i64_checked", wsffi::spl_wffi_call_i64_checked);
     insert_simple!("spl_wffi_try_call_i64_out", wsffi::spl_wffi_try_call_i64_out);
-    insert_simple!("spl_wffi_call_i64_with_bytes", dynamic_sffi::spl_wffi_call_i64_with_bytes_fn);
+    insert_simple!(
+        "spl_wffi_call_i64_into_bytes",
+        dynamic_sffi::spl_wffi_call_i64_into_bytes_fn
+    );
+    insert_simple!(
+        "spl_wffi_call_i64_with_bytes",
+        dynamic_sffi::spl_wffi_call_i64_with_bytes_fn
+    );
     insert_simple!(
         "spl_wffi_call_i64_with_bytes_checked",
         dynamic_sffi::spl_wffi_call_i64_with_bytes_checked_fn
     );
     insert_simple!("spl_fonts_call_init_blob", dynamic_sffi::spl_fonts_call_init_blob_fn);
     insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
-    insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
+    insert_simple!(
+        "spl_fonts_call_layout_text",
+        dynamic_sffi::spl_fonts_call_layout_text_fn
+    );
     insert_simple!("rt_provider_query_v1_call", dynamic_sffi::rt_provider_query_v1_call_fn);
     insert_simple!("rt_cli_command_v1_call", rt_cli_command_v1_call_interpreter);
     insert_simple!("sqrt", math::sqrt);
@@ -2610,15 +2983,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_browser_http_job_take_response",
         rt_browser_http_job_take_response_stub
     );
-    insert_simple!(
-        "rt_browser_http_job_take_error",
-        rt_browser_http_job_take_error_stub
-    );
+    insert_simple!("rt_browser_http_job_take_error", rt_browser_http_job_take_error_stub);
     insert_simple!("rt_browser_http_job_cancel", rt_browser_http_job_bool_stub);
     insert_simple!("rt_browser_http_job_free", rt_browser_http_job_bool_stub);
     // PTY (pseudo-terminal) operations
     insert_simple!("rt_pty_open", pty::rt_pty_open);
     insert_simple!("rt_pty_spawn", pty::rt_pty_spawn);
+    insert_simple!("rt_pty_read", pty::rt_pty_read);
+    insert_simple!("rt_pty_write", pty::rt_pty_write);
+    insert_simple!("rt_pty_close", pty::rt_pty_close);
     // I/O wrappers that pass empty slice or alias another function
     insert_simple!("rt_stdin_read_line", rt_stdin_read_line_stub);
     insert_simple!("rt_stdout_flush", io::stdout_flush);
@@ -2688,6 +3061,29 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
             let resolved = resolve_fmt_for_print(evaluated, env, functions, classes, enums, impl_methods);
             io::print::print(&resolved)
         }) as ExternHandler,
+    );
+    // `rt_print` is the raw runtime primitive `print`/`print_raw` desugar to
+    // (see codegen/instr/calls.rs:3111 `"rt_print" => Some("rt_print_value")`
+    // and runtime/src/value/sffi/io_print.rs `#[export_name = "rt_print"]`,
+    // a no-newline alias for `rt_print_value`). It was never registered in
+    // this interpreter dispatch table -- only the builtin names `print` /
+    // `print_raw` were -- because ordinary Simple source calls `print_raw`,
+    // never `rt_print` directly. That stopped being true once
+    // `src/lib/nogc_sync_mut/sffi/diag.spl` started wrapping it
+    // (`fn print_raw(msg): unsafe: rt_print(msg)`) as one of the rt_*
+    // migration aliases: that wrapper globally SHADOWS the builtin
+    // `print_raw` (Simple's interpreter function table is name-keyed and
+    // program-wide), so as soon as any transitively-imported module pulls in
+    // diag.spl, every call to `print_raw` anywhere in the program routes to
+    // this wrapper, which calls the still-unregistered `rt_print` and dies
+    // with "unknown extern function: rt_print" -- observed breaking
+    // `src/app/mcp/main.spl` (JSON-RPC response) and the interpreted test
+    // runner. See
+    // doc/08_tracking/bug/interpreter_rt_print_unregistered_diag_shadow_2026-08-31.md.
+    m.insert(
+        "rt_print",
+        (|evaluated, _env, _functions, _classes, _enums, _impl_methods| io::print::print_raw(evaluated))
+            as ExternHandler,
     );
     m.insert(
         "print_raw",
@@ -2816,7 +3212,42 @@ pub(crate) fn call_extern_function(
         .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
         .collect::<Result<Vec<_>, _>>()?;
 
-    call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods)
+    let result = call_extern_function_with_values(name, &evaluated, env, functions, classes, enums, impl_methods);
+    // `&mut x` on an extern argument must actually write back to `x`.
+    //
+    // `UnaryOp::RefMut` evaluates its operand to a COPY and wraps that copy
+    // (`interpreter/expr/ops.rs:1575,1660`), so an extern that fills a
+    // caller-owned out slot -- `spl_wffi_try_call_i64_out`'s `*mut i64`, and
+    // the bounded out-byte-buffer call -- wrote into a value nothing could
+    // observe, and the caller silently saw its variable unchanged. The native
+    // lane has no such gap: there `&mut` is a real pointer and `[u8]` is a
+    // heap object mutated in place, so leaving this unwired made the two lanes
+    // disagree on the same source.
+    //
+    // The borrow is shared through an `Arc`, so the callee's writes are already
+    // in `evaluated`; all that is missing is publishing them back to the named
+    // variable. Only `&mut <identifier>` is written back -- a borrow of a
+    // temporary has no slot to write to, and nothing else is touched.
+    for (argument, value) in args.iter().zip(evaluated.iter()) {
+        let Expr::Unary {
+            op: UnaryOp::RefMut,
+            operand,
+        } = &argument.value
+        else {
+            continue;
+        };
+        let Value::BorrowMut(borrow) = value else {
+            continue;
+        };
+        let Expr::Identifier(target) = operand.as_ref() else {
+            continue;
+        };
+        let updated = borrow.inner().clone();
+        if let Some(slot) = env.get_mut(target) {
+            *slot = updated;
+        }
+    }
+    result
 }
 
 /// Dispatch an extern function with pre-evaluated argument values.
@@ -2903,8 +3334,6 @@ pub(crate) fn call_extern_function_with_values(
         return sdl3::dispatch(name, &evaluated);
     }
 
-
-
     // The rt_audio_* family (31 names) is implemented once, in C, at
     // src/runtime/runtime_audio.c (a real miniaudio-backed engine). It was
     // absent from every interpreter path -- not a registration gap alone,
@@ -2942,9 +3371,7 @@ pub(crate) fn call_extern_function_with_values(
     }
     // Pure Simple owns rt_socket_set_nonblocking; only its scalar syscall
     // shims are interpreter externs.
-    if name == "rt_socket_nonblock_prepare"
-        || name == "rt_socket_nonblock_commit"
-        || name == "rt_socket_nonblock_mask"
+    if name == "rt_socket_nonblock_prepare" || name == "rt_socket_nonblock_commit" || name == "rt_socket_nonblock_mask"
     {
         return socket_nonblock::dispatch(name, &evaluated);
     }
@@ -3047,6 +3474,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn env_snapshot_aliases_have_identical_typed_results_and_arity() {
+        let all = EXTERN_DISPATCH.get("rt_env_all").expect("registered rt_env_all");
+        let vars = EXTERN_DISPATCH.get("rt_env_vars").expect("registered rt_env_vars");
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let all_value =
+            all(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).expect("rt_env_all snapshot");
+        let vars_value =
+            vars(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).expect("rt_env_vars snapshot");
+        assert_eq!(format!("{all_value:?}"), format!("{vars_value:?}"));
+
+        for handler in [all, vars] {
+            assert!(handler(
+                &[Value::Int(1)],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn loader_memory_extern_family_includes_page_size_alignment_query() {
+        for symbol in ["rt_mmap_raw", "rt_munmap_raw", "rt_mprotect", "rt_page_size"] {
+            assert!(EXTERN_DISPATCH.contains_key(symbol), "missing {symbol}");
+        }
+    }
+
+    #[test]
+    fn dispatches_lexer_shallow_free_without_reclaiming_managed_array() {
+        let handler = EXTERN_DISPATCH
+            .get("rt_array_free")
+            .expect("lexer snapshot cleanup requires rt_array_free registration");
+        let managed = Value::array(vec![Value::Int(11), Value::Int(22)]);
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let result = handler(
+            &[managed.clone()],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("managed array shallow-free dispatch should succeed");
+
+        assert_eq!(result, Value::Nil);
+        // `Value` has never exposed `as_array` -- the call that made 398665ef526
+        // delete this test instead of fixing it. Assert the same property
+        // directly: the managed array must still carry both original elements.
+        assert_eq!(managed, Value::array(vec![Value::Int(11), Value::Int(22)]));
+    }
+
+    #[test]
     fn dispatch_registers_cranelift_emit_object_raw() {
         assert!(EXTERN_DISPATCH.contains_key("rt_cranelift_emit_object_raw"));
     }
@@ -3058,18 +3550,20 @@ mod tests {
 
     #[test]
     fn dispatch_registers_host_dynlib_family() {
-        for name in [
-            "rt_host_dynlib_open",
-            "rt_host_dynlib_symbol",
-            "rt_host_dynlib_close",
-        ] {
+        for name in ["rt_host_dynlib_open", "rt_host_dynlib_symbol", "rt_host_dynlib_close"] {
             assert!(EXTERN_DISPATCH.contains_key(name), "{name} not registered");
         }
     }
 
     #[test]
     fn actor_hosted_symbols_keep_dynamic_fallback() {
-        for name in ["rt_actor_spawn", "rt_actor_send", "rt_actor_stop", "rt_actor_try_send", "rt_actor_recv"] {
+        for name in [
+            "rt_actor_spawn",
+            "rt_actor_send",
+            "rt_actor_stop",
+            "rt_actor_try_send",
+            "rt_actor_recv",
+        ] {
             assert!(simple_common::RUNTIME_SYMBOL_NAMES.contains(&name));
             assert!(!EXTERN_DISPATCH.contains_key(name));
         }
@@ -3312,9 +3806,7 @@ mod tests {
             EXTERN_DISPATCH.contains_key("rt_string_ends_with"),
             "missing rt_string_ends_with"
         );
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_ends_with")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_ends_with").expect("registered handler");
 
         let cases: &[(&str, &str, bool)] = &[
             ("notes.md", ".md", true),
@@ -3326,7 +3818,7 @@ mod tests {
             // multi-byte suffix: byte-wise tail compare must not split a
             // codepoint or report a false hit
             ("héllo…", "…", true),
-            ("héllo…", "o…", false),
+            ("héllo…", "o…", true),
         ];
 
         for &(subject, suffix, expected) in cases {
@@ -3361,9 +3853,7 @@ mod tests {
             EXTERN_DISPATCH.contains_key("rt_string_rfind"),
             "missing rt_string_rfind"
         );
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_rfind")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_rfind").expect("registered handler");
 
         let cases: &[(&str, &str, i64)] = &[
             ("a/b/c", "/", 3),
@@ -3391,11 +3881,7 @@ mod tests {
                 &impl_methods,
             )
             .expect("rt_string_rfind should not error on two text arguments");
-            assert_eq!(
-                result,
-                Value::Int(expected),
-                "rt_string_rfind({subject:?}, {needle:?})"
-            );
+            assert_eq!(result, Value::Int(expected), "rt_string_rfind({subject:?}, {needle:?})");
         }
     }
 
@@ -3403,9 +3889,7 @@ mod tests {
     /// must be an error, not `false`.
     #[test]
     fn rt_string_ends_with_rejects_missing_second_argument() {
-        let handler = EXTERN_DISPATCH
-            .get("rt_string_ends_with")
-            .expect("registered handler");
+        let handler = EXTERN_DISPATCH.get("rt_string_ends_with").expect("registered handler");
         let mut env = Env::new();
         let mut functions = HashMap::new();
         let mut classes = HashMap::new();

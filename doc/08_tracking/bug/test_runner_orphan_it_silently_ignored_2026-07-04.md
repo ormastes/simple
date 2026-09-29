@@ -1,4 +1,9 @@
 # Test runner: top-level `it` block outside any `describe` is silently ignored
+## Closed 2026-09-16 — ...it` blocks silently tests nothing. ## Fix direction Runner should either execute top-level
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** medium (greenwash vector — a test that never runs still reports file PASS)
@@ -75,3 +80,4 @@ exit 0 PASS pre-fix). A lone passing orphan `it` (no `describe` at all)
 still correctly exits 0. A regression shape covering this is added to
 `test/03_system/check/test_runner_single_example_failure_contract_spec.spl`
 ("fails the wrapper when a top-level `it` outside any describe fails").
+

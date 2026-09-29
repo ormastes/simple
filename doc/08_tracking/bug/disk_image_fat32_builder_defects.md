@@ -1,7 +1,10 @@
 # BUG: disk_image.spl FAT32 builder — 4 defects (payload iteration, silent truncate, dirent 8.3, FAT overflow)
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open (all pre-existing; found while producing a >4 MiB streaming-loader test image)
 **Severity:** medium-high (each silently produces an unusable/invalid image or blocks builds)
 **Component:** `src/os/port/disk_image.spl` (+ one interpreter extern)
 **Found:** 2026-07-11 (streaming PT_LOAD loader lane)
@@ -34,3 +37,4 @@ FAT is fixed at 128 sectors = 16,384 entries ≈ 8.39 MB at 512 B/cluster. A lar
 cluster chain silently overruns FAT1→FAT2→root dir (root dir shifted 104 bytes, volume
 unreadable). Repro: `build()` a payload >8,387,072 bytes and check bytes at 0x24000 are FAT
 values, not dirents. Fix: size FAT sectors from `size_mb` (or error out).
+

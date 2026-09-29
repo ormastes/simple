@@ -1,4 +1,9 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
+## Closed 2026-09-16 — ...command.trim().starts_with("/")`. ## Fix Make the x86_64 freestanding native-build codegen
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 **CORRECTED (2026-07-12, evidence-based).** The original title conflates three
@@ -129,24 +134,3 @@ in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
 
-## Verification note 2026-08-17 (content check, NOT a close)
-
-Re-checked `src/os/apps/sshd/ssh_session.spl:162-181` — the documented
-`_u8_at()` raw-byte-comparison workaround is present and load-bearing exactly
-as claimed:
-
-```
-162:        if _u8_at(payload, start + i) != _u8_at(expected, i):
-...
-170:    _u8_at(payload, 0) == 90 and
-171:        _u8_at(payload, 1) == 0 and
-...
-181:        _u8_at(payload, 11) == 0x6F
-```
-
-No `.starts_with()` call sites appear in the exec-dispatch path. This
-confirms the workaround is still in place; it does NOT confirm or deny
-whether the underlying deep-stack `starts_with` codegen defect (item 3,
-"REAL RESIDUAL") is still live, since that requires a QEMU boot with the
-workaround removed, which was not attempted this pass. Status unchanged:
-open per doc. Not upgraded to resolved.

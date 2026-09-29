@@ -1,6 +1,8 @@
 # SFFI - I/O Operations
 # Centralized file, directory, and path SFFI wrappers
 
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
+
 # ============================================================================
 # File Operations
 # ============================================================================
@@ -44,15 +46,25 @@ fn file_modified_time(path: text) -> i64:
 @unsafe(reason: "raw filesystem path and runtime-owned text ABI; empty text is ambiguous", capabilities: [ffi])
 extern fn rt_file_read_text_rv(path: text) -> text
 
+@unsafe(reason: "raw nullable text-read ABI; nil means read failure, distinct from an empty file", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text
+
+@always_inline
+fn file_read_text_nilable(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path)
+
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn file_read_text(path: text) -> text:
-    rt_file_read_text_rv(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text_rv(path)
 
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn file_read(path: text) -> text:
-    rt_file_read_text_rv(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text_rv(path)
 
 # file_read_bytes is defined once in std.io_runtime; re-exported here so the
 # four historical copies cannot drift apart again.
@@ -152,7 +164,8 @@ extern fn rt_file_hash(path: text) -> text
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn file_hash(path: text) -> text:
-    rt_file_hash(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_hash(path)
 
 @unsafe(reason: "raw filesystem path and runtime-owned SHA-256 text ABI; empty text is ambiguous", capabilities: [ffi])
 extern fn rt_file_hash_sha256(path: text) -> text
@@ -160,7 +173,8 @@ extern fn rt_file_hash_sha256(path: text) -> text
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn file_hash_sha256(path: text) -> text:
-    rt_file_hash_sha256(path)
+    unsafe(capabilities: [ffi]):
+        rt_file_hash_sha256(path)
 
 # --- File Locking ---
 
@@ -330,7 +344,17 @@ extern fn rt_path_join(a: text, b: text) -> text
 @unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
 @always_inline
 fn path_join2(a: text, b: text) -> text:
-    rt_path_join(a, b)
+    # rt_path_join wraps Rust's Path::join, which emits the PLATFORM-NATIVE
+    # separator (backslash on Windows). Every other path helper in this tree
+    # documents forward-slash as the sole canonical INTERNAL form, with native
+    # conversion reserved for the spawn/argv boundary (see
+    # std.platform.to_native_path's docstring and
+    # std.nogc_sync_mut.fs.host_path's file header). Route the raw result
+    # through host_path_canonical so path_join2 honours that same contract
+    # instead of leaking a mixed "/…\…" path on Windows. Identity off
+    # Windows -- a backslash is a legal POSIX filename byte, so it must not
+    # be rewritten there.
+    host_path_canonical(rt_path_join(a, b))
 
 @unsafe(reason: "raw path text and runtime-owned absolute-path ABI", capabilities: [ffi])
 extern fn rt_path_absolute(path: text) -> text
@@ -339,6 +363,14 @@ extern fn rt_path_absolute(path: text) -> text
 @always_inline
 fn path_absolute(path: text) -> text:
     rt_path_absolute(path)
+
+@unsafe(reason: "raw path text and runtime-owned basename ABI", capabilities: [ffi])
+extern fn rt_path_basename(path: text) -> text
+
+@unsafe(reason: "raw runtime-owned text or array result has no represented failure/ownership state", capabilities: [ffi])
+@always_inline
+fn path_basename(path: text) -> text:
+    rt_path_basename(path)
 
 @unsafe(reason: "raw path text and runtime-owned parent-path ABI", capabilities: [ffi])
 extern fn rt_path_parent(path: text) -> text

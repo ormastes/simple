@@ -1,5 +1,13 @@
 # Bug: struct constructor Type(field: var) fails "unknown argument" in cross-module spec context
 
+## Closed 2026-09-13 — does not reproduce: `Type(field: var)` resolves cross-module
+- **measured** — module `modA.spl` defines `struct Pt` and `fn mk(v: i64) -> Pt` returning
+  `Pt(a: v, b: v * 2)`; the importer calls `mk(5)` then builds `Pt(a: p.a, b: 9)`. Under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) it prints `10` then `9` — no
+  "unknown argument" semantic error.
+- **inferred** — the filed driver was the Linux seed (`simple_seed`); same Rust seed lane,
+  different host.
+
 **ID:** struct_ctor_field_var_cross_module_2026-06-15
 **Filed:** 2026-06-15
 **Severity:** P1 — semantic analysis rejects valid constructor syntax when var is a parameter

@@ -1,16 +1,25 @@
-#[llvm_versions(..=16)]
-use llvm_sys::core::LLVMConstSelect;
 #[llvm_versions(..=17)]
 use llvm_sys::core::{
     LLVMConstAShr, LLVMConstAnd, LLVMConstIntCast, LLVMConstLShr, LLVMConstOr, LLVMConstSExt, LLVMConstSExtOrBitCast,
     LLVMConstSIToFP, LLVMConstUIToFP, LLVMConstZExt, LLVMConstZExtOrBitCast,
 };
 use llvm_sys::core::{
-    LLVMConstAdd, LLVMConstBitCast, LLVMConstICmp, LLVMConstIntGetSExtValue, LLVMConstIntGetZExtValue,
-    LLVMConstIntToPtr, LLVMConstMul, LLVMConstNSWAdd, LLVMConstNSWMul, LLVMConstNSWNeg, LLVMConstNSWSub,
-    LLVMConstNUWAdd, LLVMConstNUWMul, LLVMConstNUWNeg, LLVMConstNUWSub, LLVMConstNeg, LLVMConstNot, LLVMConstShl,
+    LLVMConstAdd, LLVMConstBitCast, LLVMConstIntGetSExtValue, LLVMConstIntGetZExtValue, LLVMConstIntToPtr,
+    LLVMConstNSWAdd, LLVMConstNSWNeg, LLVMConstNSWSub, LLVMConstNUWAdd, LLVMConstNUWSub, LLVMConstNeg, LLVMConstNot,
     LLVMConstSub, LLVMConstTrunc, LLVMConstTruncOrBitCast, LLVMConstXor, LLVMIsAConstantInt,
 };
+#[llvm_versions(..=16)]
+use llvm_sys::core::{LLVMConstNUWNeg, LLVMConstSelect};
+
+#[llvm_versions(17..)]
+use llvm_sys::core::LLVMSetNUW;
+
+#[llvm_versions(..=18)]
+use llvm_sys::core::{LLVMConstICmp, LLVMConstShl};
+
+#[llvm_versions(..21)]
+use llvm_sys::core::{LLVMConstMul, LLVMConstNSWMul, LLVMConstNUWMul};
+
 use llvm_sys::prelude::LLVMValueRef;
 
 use std::convert::TryFrom;
@@ -20,12 +29,14 @@ use std::fmt::{self, Display};
 #[llvm_versions(..=17)]
 use crate::types::FloatType;
 use crate::types::{AsTypeRef, IntType, PointerType};
-use crate::values::traits::AsValueRef;
 #[llvm_versions(..=17)]
 use crate::values::FloatValue;
+use crate::values::traits::AsValueRef;
 #[llvm_versions(..=16)]
 use crate::values::{BasicValue, BasicValueEnum};
 use crate::values::{InstructionValue, PointerValue, Value};
+
+#[llvm_versions(..=18)]
 use crate::IntPredicate;
 
 use super::AnyValue;
@@ -42,10 +53,12 @@ impl<'ctx> IntValue<'ctx> {
     ///
     /// The ref must be valid and of type int.
     pub unsafe fn new(value: LLVMValueRef) -> Self {
-        assert!(!value.is_null());
+        unsafe {
+            assert!(!value.is_null());
 
-        IntValue {
-            int_value: Value::new(value),
+            IntValue {
+                int_value: Value::new(value),
+            }
         }
     }
 
@@ -93,8 +106,18 @@ impl<'ctx> IntValue<'ctx> {
         unsafe { IntValue::new(LLVMConstNSWNeg(self.as_value_ref())) }
     }
 
+    #[llvm_versions(..17)]
     pub fn const_nuw_neg(self) -> Self {
         unsafe { IntValue::new(LLVMConstNUWNeg(self.as_value_ref())) }
+    }
+
+    #[llvm_versions(17..)]
+    pub fn const_nuw_neg(self) -> Self {
+        let value = unsafe { LLVMConstNeg(self.as_value_ref()) };
+        unsafe {
+            LLVMSetNUW(value, true.into());
+        }
+        unsafe { IntValue::new(value) }
     }
 
     pub fn const_add(self, rhs: IntValue<'ctx>) -> Self {
@@ -121,14 +144,17 @@ impl<'ctx> IntValue<'ctx> {
         unsafe { IntValue::new(LLVMConstNUWSub(self.as_value_ref(), rhs.as_value_ref())) }
     }
 
+    #[llvm_versions(..21)]
     pub fn const_mul(self, rhs: IntValue<'ctx>) -> Self {
         unsafe { IntValue::new(LLVMConstMul(self.as_value_ref(), rhs.as_value_ref())) }
     }
 
+    #[llvm_versions(..21)]
     pub fn const_nsw_mul(self, rhs: IntValue<'ctx>) -> Self {
         unsafe { IntValue::new(LLVMConstNSWMul(self.as_value_ref(), rhs.as_value_ref())) }
     }
 
+    #[llvm_versions(..21)]
     pub fn const_nuw_mul(self, rhs: IntValue<'ctx>) -> Self {
         unsafe { IntValue::new(LLVMConstNUWMul(self.as_value_ref(), rhs.as_value_ref())) }
     }
@@ -202,6 +228,7 @@ impl<'ctx> IntValue<'ctx> {
     }
 
     // TODO: Give shift methods more descriptive names
+    #[llvm_versions(..=18)]
     pub fn const_shl(self, rhs: IntValue<'ctx>) -> Self {
         unsafe { IntValue::new(LLVMConstShl(self.as_value_ref(), rhs.as_value_ref())) }
     }
@@ -269,6 +296,7 @@ impl<'ctx> IntValue<'ctx> {
     }
 
     // SubType: rhs same as lhs; return IntValue<bool>
+    #[llvm_versions(..=18)]
     pub fn const_int_compare(self, op: IntPredicate, rhs: IntValue<'ctx>) -> IntValue<'ctx> {
         unsafe { IntValue::new(LLVMConstICmp(op.into(), self.as_value_ref(), rhs.as_value_ref())) }
     }

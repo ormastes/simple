@@ -1,0 +1,164 @@
+#!/bin/sh
+# Canonical red/green contract for Phase-3 library/tool discovery and accounting.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper=${PHASE3_TEST_INVENTORY:-$root/scripts/bootstrap/phase3-test-inventory.shs}
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/phase3-test-inventory-test.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+fixture=$scratch/source
+mkdir -p \
+  "$fixture/src/lib/core/test" \
+  "$fixture/test/01_unit/lib" \
+  "$fixture/test/unit/lib" \
+  "$fixture/test/02_integration/tools" \
+  "$fixture/test/03_system/tools" \
+  "$fixture/test/feature/lib" \
+  "$fixture/tools/jupyter/labextension/tests" \
+  "$fixture/tools/jupyter/labextension/node_modules/dependency/tests" \
+  "$fixture/scripts/check" "$fixture/scripts/bootstrap"
+
+cat >"$fixture/src/lib/core/test/embedded_spec.spl" <<'EOF'
+describe("embedded"):
+    it "runs":
+        expect(1).to_equal(1)
+EOF
+printf '%s\n' 'fn support_value() -> i64: 1' >"$fixture/src/lib/core/test/support.spl"
+printf '%s\n' 'fn semantic_spec_value() -> i64: 2' >"$fixture/src/lib/core/semantic_spec.spl"
+cat >"$fixture/src/lib/core/production_owner.spl" <<'EOF'
+describe("production-named embedded owner"):
+    it "runs":
+        expect(2).to_equal(2)
+EOF
+printf '%s\n' 'export use std.gc_async_mut.package.smoke_test.*' \
+  >"$fixture/src/lib/core/compatibility_test.spl"
+cat >"$fixture/test/01_unit/lib/canonical_spec.spl" <<'EOF'
+describe "canonical unit":
+    it "runs":
+        expect(1).to_equal(1)
+EOF
+printf '%s\n' 'describe "legacy mirror must not run"' >"$fixture/test/unit/lib/canonical_spec.spl"
+printf '%s\n' 'describe "tool integration"' >"$fixture/test/02_integration/tools/cli_spec.spl"
+printf '%s\n' 'describe "tool system"' >"$fixture/test/03_system/tools/system_spec.spl"
+printf '%s\n' 'describe "library feature"' >"$fixture/test/feature/lib/feature_test.spl"
+cat >"$fixture/tools/jupyter/labextension/package.json" <<'EOF'
+{"scripts":{"test":"jest"}}
+EOF
+printf '%s\n' 'test("export", () => expect(1).toBe(1));' >"$fixture/tools/jupyter/labextension/tests/export.test.ts"
+printf '%s\n' 'test("grammar", () => expect(1).toBe(1));' >"$fixture/tools/jupyter/labextension/tests/grammar.spec.ts"
+printf '%s\n' 'test("dependency", () => expect(1).toBe(1));' \
+  >"$fixture/tools/jupyter/labextension/node_modules/dependency/tests/internal.test.js"
+cp "$root/scripts/check/check-sdoctest-bootstrap.shs" \
+  "$fixture/scripts/check/check-sdoctest-bootstrap.shs"
+cp "$root/scripts/bootstrap/phase3-nested-test-inventory.shs" \
+  "$fixture/scripts/bootstrap/"
+printf 'category\tpath\treason\n' \
+  >"$fixture/scripts/bootstrap/phase3-nested-test-policy.tsv"
+git -C "$fixture" init -q
+
+# RED: the previous test/-only suffix walk is exactly five rows and misses both
+# source-embedded tests and package-owned tool tests.
+find "$fixture/test" -type f \( -name '*_spec.spl' -o -name '*_test.spl' \) \
+  | LC_ALL=C sort >"$scratch/legacy.paths"
+[ "$(wc -l <"$scratch/legacy.paths" | tr -d ' ')" -eq 5 ] \
+  || fail 'legacy red fixture count changed'
+! grep -Fq '/src/lib/' "$scratch/legacy.paths" || fail 'legacy walk unexpectedly found src/lib tests'
+! grep -Fq '/tools/jupyter/' "$scratch/legacy.paths" || fail 'legacy walk unexpectedly found npm tests'
+
+# GREEN: exact canonical logical inventory. The test/unit mirror is absent.
+"$helper" discover "$fixture" >"$scratch/inventory.tsv"
+cat >"$scratch/expected.tsv" <<'EOF'
+surface	category	runner	disposition	path	reason
+docs	markdown-doctest	doctest-bootstrap	execute	scripts/check/check-sdoctest-bootstrap.shs	-
+docs	spl-comment-doctest	doctest-bootstrap	execute	scripts/check/check-sdoctest-bootstrap.shs	-
+library	embedded	simple-spec	execute	src/lib/core/production_owner.spl	-
+library	embedded	simple-spec	execute	src/lib/core/test/embedded_spec.spl	-
+library	unit	simple-spec	execute	test/01_unit/lib/canonical_spec.spl	-
+tool	integration	simple-spec	execute	test/02_integration/tools/cli_spec.spl	-
+tool	system	simple-spec	execute	test/03_system/tools/system_spec.spl	-
+library	feature	simple-spec	execute	test/feature/lib/feature_test.spl	-
+tool	jupyter-labextension	npm-test	execute	tools/jupyter/labextension/tests/export.test.ts	-
+tool	jupyter-labextension	npm-test	execute	tools/jupyter/labextension/tests/grammar.spec.ts	-
+EOF
+cmp -s "$scratch/expected.tsv" "$scratch/inventory.tsv" \
+  || { diff -u "$scratch/expected.tsv" "$scratch/inventory.tsv" >&2 || :; fail 'green inventory differs'; }
+! grep -Fq 'test/unit/' "$scratch/inventory.tsv" || fail 'legacy alias duplicated a canonical row'
+! grep -Fq 'compatibility_test.spl' "$scratch/inventory.tsv" || fail 'compatibility facade became a test'
+! grep -Fq 'semantic_spec.spl' "$scratch/inventory.tsv" || fail 'semantic suffix became a test'
+! grep -Fq 'node_modules/' "$scratch/inventory.tsv" || fail 'installed dependency became a tool test'
+grep -Fq 'src/lib/core/production_owner.spl' "$scratch/inventory.tsv" \
+  || fail 'production-named embedded BDD owner was missed'
+
+"$helper" summarize "$scratch/inventory.tsv" >"$scratch/summary.tsv"
+cat >"$scratch/expected-summary.tsv" <<'EOF'
+surface	category_count	execute_rows	skip_rows	owner_count
+docs	2	2	0	1
+library	3	4	0	4
+tool	3	4	0	4
+EOF
+cmp -s "$scratch/expected-summary.tsv" "$scratch/summary.tsv" \
+  || fail 'per-surface discovery counts differ'
+
+cat >"$scratch/results.tsv" <<'EOF'
+runner	path	result	executed	skipped
+doctest-bootstrap	scripts/check/check-sdoctest-bootstrap.shs	PASS	2	0
+simple-spec	src/lib/core/production_owner.spl	PASS	1	0
+simple-spec	src/lib/core/test/embedded_spec.spl	PASS	1	0
+simple-spec	test/01_unit/lib/canonical_spec.spl	PASS	2	0
+simple-spec	test/02_integration/tools/cli_spec.spl	PASS	1	0
+simple-spec	test/03_system/tools/system_spec.spl	PASS	1	0
+simple-spec	test/feature/lib/feature_test.spl	PASS	1	0
+npm-test	tools/jupyter/labextension/tests/export.test.ts	PASS	1	0
+npm-test	tools/jupyter/labextension/tests/grammar.spec.ts	PASS	1	0
+EOF
+"$helper" check-results "$scratch/inventory.tsv" "$scratch/results.tsv" >"$scratch/accounting.tsv"
+cat >"$scratch/expected-accounting.tsv" <<'EOF'
+surface	category_count	execute_rows	policy_skip_rows	executed	skipped
+docs	2	2	0	2	0
+library	3	4	0	5	0
+tool	3	4	0	4	0
+EOF
+cmp -s "$scratch/expected-accounting.tsv" "$scratch/accounting.tsv" \
+  || { cat "$scratch/accounting.tsv" >&2; fail 'terminal execution accounting differs'; }
+
+# Missing terminal evidence, a duplicate row, discovery failure, and an empty
+# dynamic predicate must all remain red.
+sed '$d' "$scratch/results.tsv" >"$scratch/missing-result.tsv"
+if "$helper" check-results "$scratch/inventory.tsv" "$scratch/missing-result.tsv" >/dev/null 2>&1; then
+  fail 'missing terminal result was accepted'
+fi
+cat "$scratch/inventory.tsv" >"$scratch/duplicate.tsv"
+sed -n '2p' "$scratch/inventory.tsv" >>"$scratch/duplicate.tsv"
+if "$helper" validate "$scratch/duplicate.tsv" >/dev/null 2>&1; then
+  fail 'duplicate logical row was accepted'
+fi
+cat >"$scratch/find-fails" <<'EOF'
+#!/bin/sh
+exit 73
+EOF
+chmod +x "$scratch/find-fails"
+if PHASE3_FIND="$scratch/find-fails" "$helper" discover "$fixture" >/dev/null 2>&1; then
+  fail 'discovery error was accepted'
+fi
+mkdir -p "$fixture/tools/orphan/tests"
+printf '%s\n' 'test("orphan", () => expect(1).toBe(1));' \
+  >"$fixture/tools/orphan/tests/orphan.test.ts"
+if "$helper" discover "$fixture" >/dev/null 2>&1; then
+  fail 'tool test without an executable package owner was skipped'
+fi
+rm -rf "$fixture/tools/orphan"
+empty=$scratch/empty
+mkdir -p "$empty/src/lib" "$empty/tools" "$empty/scripts/check" "$empty/scripts/bootstrap"
+cp "$root/scripts/check/check-sdoctest-bootstrap.shs" "$empty/scripts/check/check-sdoctest-bootstrap.shs"
+cp "$root/scripts/bootstrap/phase3-nested-test-inventory.shs" \
+  "$empty/scripts/bootstrap/"
+printf 'category\tpath\treason\n' \
+  >"$empty/scripts/bootstrap/phase3-nested-test-policy.tsv"
+git -C "$empty" init -q
+if "$helper" discover "$empty" >/dev/null 2>&1; then
+  fail 'docs owner hid an empty dynamic inventory'
+fi
+
+printf 'PASS: Phase-3 inventory closes test-only false negatives and accounts 3 surfaces\n'

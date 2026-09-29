@@ -17,16 +17,41 @@ unsafe extern "C" {
 
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
-pub struct RawStat { pub st_mode: u32, pub st_size: i64, pub st_mtime: i64 }
+pub struct RawStat {
+    pub st_dev: u64,
+    pub st_ino: u64,
+    pub st_mode: u32,
+    pub st_nlink: u64,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    pub st_atime: i64,
+    pub st_mtime: i64,
+    pub st_ctime: i64,
+}
+
+// Keep this adapter layout locked to src/os/libc/include/sys/stat.h.  A
+// shortened "view" is not ABI-safe: stat(2) writes the complete C object.
+const _: () = {
+    assert!(crate::mem::size_of::<RawStat>() == 96);
+    assert!(crate::mem::align_of::<RawStat>() == 8);
+    assert!(crate::mem::offset_of!(RawStat, st_mode) == 16);
+    assert!(crate::mem::offset_of!(RawStat, st_size) == 48);
+    assert!(crate::mem::offset_of!(RawStat, st_mtime) == 80);
+};
 
 // <fcntl.h> constants from libsimpleos_c.
 const O_RDONLY: i32 = 0; const O_WRONLY: i32 = 1; const O_RDWR: i32 = 2;
-const O_CREAT: i32 = 0o100; const O_TRUNC: i32 = 0o1000; const O_APPEND: i32 = 0o2000;
+const O_CREAT: i32 = 0o100; const O_EXCL: i32 = 0o200;
+const O_TRUNC: i32 = 0o1000; const O_APPEND: i32 = 0o2000;
 const SEEK_SET: i32 = 0; const SEEK_CUR: i32 = 1; const SEEK_END: i32 = 2;
 
 pub struct File(i32);
 #[derive(Clone, Default)]
-pub struct OpenOptions { read: bool, write: bool, append: bool, truncate: bool, create: bool, mode: i32 }
+pub struct OpenOptions { read: bool, write: bool, append: bool, truncate: bool, create: bool, create_new: bool, mode: i32 }
 #[derive(Clone, Copy)] pub struct FilePermissions(u32);
 #[derive(Clone)] pub struct FileAttr(RawStat);
 #[derive(Clone, Copy)] pub struct FileType(u32);
@@ -47,15 +72,16 @@ impl OpenOptions {
     pub fn append(&mut self, v: bool)     { self.append = v; }
     pub fn truncate(&mut self, v: bool)   { self.truncate = v; }
     pub fn create(&mut self, v: bool)     { self.create = v; }
-    pub fn create_new(&mut self, v: bool) { self.create = v; }
+    pub fn create_new(&mut self, v: bool) { self.create_new = v; }
     pub fn mode(&mut self, m: u32)        { self.mode = m as i32; }
 
     fn as_flags(&self) -> i32 {
         let mut f = match (self.read, self.write | self.append) {
             (true,  true) => O_RDWR, (false, true) => O_WRONLY, _ => O_RDONLY,
         };
-        if self.create   { f |= O_CREAT; }
-        if self.truncate { f |= O_TRUNC; }
+        if self.create_new { f |= O_CREAT | O_EXCL; }
+        else if self.create { f |= O_CREAT; }
+        if self.truncate && !self.create_new { f |= O_TRUNC; }
         if self.append   { f |= O_APPEND; }
         f
     }

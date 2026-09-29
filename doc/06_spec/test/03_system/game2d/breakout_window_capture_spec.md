@@ -129,7 +129,7 @@ else:
     print "window_frames_presented={i} score={app.score} state={app.state}"
 
     # Hold the window open so an external xwd/import capture can run.
-    thread_sleep(10000)
+    rt_sleep_ms(10000)
 
     backend.gb_shutdown()
     assert_true(true)

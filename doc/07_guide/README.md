@@ -46,7 +46,6 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/mcp.md](tooling/mcp.md) | MCP server setup and usage |
 | [tooling/lint.md](tooling/lint.md) | Linter configuration and usage |
 | [tooling/logging.md](tooling/logging.md) | Production logging, debug logging, and script print policy |
-| [infra/debugging/easy_debug_infra.md](infra/debugging/easy_debug_infra.md) | `std.diag` debug primitives -- stage tracer, cooperative watchdog, aggregating timers/counters, event-chain tracer, provenance assert |
 | [app/ui/ui_access.md](app/ui/ui_access.md) | Canonical UI snapshot, act, and history workflow |
 | [app/ui/engine2d_backend_order.md](app/ui/engine2d_backend_order.md) | Engine2D GUI backend preference order and font offload lanes |
 | [app/ui/ui_render.md](app/ui/ui_render.md) | UI rendering pipeline, shared web render contract, HTML/CSS cache planning |
@@ -57,8 +56,8 @@ User-facing guides for the Simple programming language. For specifications see `
 | [tooling/duplicate_check.md](tooling/duplicate_check.md) | Code duplication detection |
 | [app/ui/wm_compare.md](app/ui/wm_compare.md) | WM screenshot capture and compare harness |
 | [app/ui/wm_ui_snapshot.md](app/ui/wm_ui_snapshot.md) | WM/UI HTML snapshot export, PNG generation, Stitch handoff |
-| [app/devhub.md](app/devhub.md) | devhub CLI -- gh/mc/Gmail-shaped UX over Jira, GitHub, Bitbucket, Confluence, MinIO/S3, and email backends |
 | [tooling/script_layout_policy.md](tooling/script_layout_policy.md) | `scripts/` vs `bin/` policy, `.shs` rule, ignore list |
+| [tooling/must_check_tiering.md](tooling/must_check_tiering.md) | Fast push checks, bootstrap-owned evidence, and cross-platform hook installation |
 | [tooling/ai_cli_registration.md](tooling/ai_cli_registration.md) | AI CLI plugin registration |
 | [tooling/ai_command_parity.md](tooling/ai_command_parity.md) | AI command parity across providers |
 | [tooling/ai_plugin_status.md](tooling/ai_plugin_status.md) | AI plugin status dashboard |
@@ -125,7 +124,6 @@ User-facing guides for the Simple programming language. For specifications see `
 | [platform/packaging.md](platform/packaging.md) | Packages, deployment, GitHub |
 | [platform/simpleos/simpleos_dev_guide.md](platform/simpleos/simpleos_dev_guide.md) | SimpleOS tooling, bootstrap, native build and run workflow |
 | [platform/simpleos/simpleos_arm64_wm_qemu.md](platform/simpleos/simpleos_arm64_wm_qemu.md) | ARM64 SimpleOS WM QEMU ramfb verification |
-| [platform/simpleos/simpleos_x86_64_wm_qemu.md](platform/simpleos/simpleos_x86_64_wm_qemu.md) | x86_64 SimpleOS WM QEMU verification — OVMF/GRUB board-runnable lane |
 | [platform/misc/sosix_process_scheduler.md](platform/misc/sosix_process_scheduler.md) | SOSIX process APIs, immutable sharing, scheduler classes, and current kernel limits |
 | [platform/simpleos/simpleos_web_wm.md](platform/simpleos/simpleos_web_wm.md) | Browser-hosted SimpleOS Web WM runtime |
 
@@ -171,7 +169,6 @@ User-facing guides for the Simple programming language. For specifications see `
 | [library/library_smf.md](library/library_smf.md) | Library SMF creation and usage |
 | [library/engine3d.md](library/engine3d.md) | 3D engine library |
 | [lib/shared_multilingual_gpu_fonts.md](lib/shared_multilingual_gpu_fonts.md) | Pinned multilingual fonts, shared rendering, and GPU emission |
-| [lib/lifecycle_persistence.md](lib/lifecycle_persistence.md) | Lifecycle persistence metadata using ordinary Simple structs, enums, functions, and SDN |
 
 ## Theme
 
@@ -207,7 +204,6 @@ User-facing guides for the Simple programming language. For specifications see `
 | [dynlib_api.md](dynlib_api.md) | Dynamic library API |
 | [execve_syscall.md](execve_syscall.md) | Execve syscall guide |
 | [lean_verification_workflow.md](lean_verification_workflow.md) | Lean verification workflow |
-| [tooling/pure_simple_tooling.md](tooling/pure_simple_tooling.md) | Pure Simple tool dispatch, test-daemon, and completion gate |
 | [ssh_serial_transport.md](ssh_serial_transport.md) | SSH serial transport |
 | [wine_dll_loading.md](wine_dll_loading.md) | Wine DLL loading |
 

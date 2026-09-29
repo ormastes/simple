@@ -1,4 +1,8 @@
 # BUG: freestanding native-build silently corrupts a module-level `val: u32` read inside `spl_start()` (desktop GUI entry)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Severity:** medium (silent corruption, not a crash -- easy to miss; blocks refactoring magic-number literals into named constants for baremetal entry files)
@@ -86,20 +90,3 @@ scope here (no rebuild, no QEMU/board boot per this pass's constraints).
 Left open; do not close this doc from the module-init link-stage fix landed
 in the other two docs.
 
-## Verification note 2026-08-17 (content check, NOT a close)
-
-Re-checked current source. `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:304-306`:
-
-```
-304:    val framebuffer_width: u32 = 3840
-305:    val framebuffer_height: u32 = 2160
-306:    val framebuffer_bpp: u32 = 32
-```
-
-with a comment at line 300-303 explicitly citing this doc's path and explaining
-the module-level workaround. The defective pattern this doc describes (module-level
-`val: u32` referenced from `spl_start()`) is NOT present — these are the local
-literals from the reverted/workaround form. No regression, no fix either; the
-underlying freestanding codegen defect for module-level `u32` consts was never
-re-tested against a QEMU boot in this pass. Status unchanged: open, workaround
-intact, root cause still unconfirmed. Not upgraded to resolved.

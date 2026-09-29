@@ -1,0 +1,35 @@
+# @tag: unit, contract, stage4, memory, parse
+
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "Stage4 Phase2 parse profile contract":
+    it "writes durable lifecycle records only through the explicit profile sink":
+        val helpers = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+        val parsing = file_read(
+            "src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        expect(helpers).to_contain("SIMPLE_COMPILER_PHASE_PROFILE_FILE")
+        expect(helpers).to_contain("file_append(sink, line")
+        expect(helpers).to_contain("phase2:surface:release")
+        expect(parsing).to_contain("log_module_surface_released(source.path, release_seq)")
+
+    it "keeps module-surface release receipts durable when stderr is unavailable":
+        val helpers = file_read("src/compiler/80.driver/driver_log_helpers.spl")
+        val start = helpers.find(
+            "pub fn log_module_surface_released(path: text, seq: i64):")
+        val end = helpers.find("# --- Stage-4 memory snapshot", start)
+        expect(start).to_be_greater_than(-1)
+        expect(end).to_be_greater_than(start)
+        val release_body = helpers[start:end]
+
+        # This receipt is emitted from the streaming parser after each module
+        # is promoted.  Its explicit sink write must not inherit log_phase's
+        # trace gate: worker stderr can disappear while the sink remains.
+        expect(release_body).to_contain(
+            "val sink = rt_env_get(\"SIMPLE_COMPILER_PHASE_PROFILE_FILE\") ?? \"\"")
+        expect(release_body).to_contain("if sink != \"\":")
+        expect(release_body).to_contain(
+            "file_append(sink, line)")
+        expect(release_body).to_contain(
+            r"phase2:surface:release path={path} seq={seq} heap_registry={rt_heap_registry_count()}\n")
+        expect(release_body).to_not_contain("driver_phase_trace_enabled()")

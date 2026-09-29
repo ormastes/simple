@@ -1,4 +1,8 @@
 # Obsolete-spec classification — decision package (2026-08-11)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status: EVIDENCE ONLY. Nothing in this repo was deleted while producing this
 doc.** All deletion decisions below are recommendations for the user to act
@@ -184,3 +188,4 @@ WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it a
 Build and use the pure-Simple bin/simple instead.
 Simple Language v1.0.0-beta
 ```
+

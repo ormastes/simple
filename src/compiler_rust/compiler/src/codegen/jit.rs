@@ -8,10 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::Module;
 
-use crate::mir::MirModule;
+use crate::mir::{MirInst, MirModule};
 
-use super::common_backend::{create_isa_and_flags, BackendError, BackendResult, BackendSettings, CodegenBackend};
+use super::common_backend::{
+    create_isa_and_flags, referenced_call_names, BackendError, BackendResult, BackendSettings, CodegenBackend,
+};
 
 // Re-export error types for backwards compatibility
 pub use super::common_backend::BackendError as JitError;
@@ -28,10 +31,13 @@ pub struct JitCompiler {
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
     /// Runtime symbol provider (kept alive for the lifetime of the compiler;
-    /// also queried by `first_unresolved_import` to detect NULL-jump imports).
+    /// also queried by `first_unresolved_import_called` to detect NULL-jump imports).
     provider: Arc<dyn RuntimeSymbolProvider>,
     /// Heap-backed global initialization runs once before the first JIT entry call.
     module_init_ran: AtomicBool,
+    /// Number of globals in the most recently compiled module, retained only
+    /// for the opt-in module-initializer stage trace.
+    module_global_count: usize,
 }
 
 // Safety: The compiled function pointers are only valid while JitCompiler is alive
@@ -62,6 +68,7 @@ impl JitCompiler {
 
         // Register runtime SFFI symbols from the provider
         register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
+        register_compiler_owned_symbols(&mut builder);
 
         let module = JITModule::new(builder);
         let backend = CodegenBackend::with_module(module)?;
@@ -71,6 +78,7 @@ impl JitCompiler {
             compiled_funcs: HashMap::new(),
             provider,
             module_init_ran: AtomicBool::new(false),
+            module_global_count: 0,
         })
     }
 
@@ -83,8 +91,8 @@ impl JitCompiler {
 
     /// Compile a MIR module and return function pointers.
     pub fn compile_module(&mut self, mir: &MirModule) -> JitResult<()> {
-        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE")
-            .is_some_and(|value| value != "0");
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
+        self.module_global_count = mir.globals.len();
         // Pre-compile guard against the broken JIT lambda/closure ABI.
         //
         // `compile_closure_create` builds a closure as a bare `rt_alloc` block
@@ -168,7 +176,7 @@ impl JitCompiler {
         // reports these as a clean "undefined symbol" relocation error, but
         // JIT would crash. Detect them here and fail the JIT compile so the
         // driver's interpreter fallback runs instead (matching AOT behaviour).
-        if let Some(name) = self.first_unresolved_import() {
+        if let Some(name) = self.first_unresolved_import_called(mir) {
             // Make the de-JIT LOUD. A silent whole-module drop to the
             // interpreter is a proven catastrophic-cost defect class here: one
             // unresolvable name cost ~1000x (parse_html 3.56s -> 19.4ms,
@@ -184,7 +192,8 @@ impl JitCompiler {
             // Opt-in hard failure for lanes that must never silently de-JIT.
             // Off by default so legitimate fallbacks (cross-module Simple
             // method symbols) keep working.
-            if std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|v| v != "0") {
+            if jit_fallback_is_strict() {
+                self.emit_unresolved_symbol_trace(mir, &name);
                 return Err(BackendError::ModuleError(format!(
                     "SIMPLE_JIT_STRICT: unresolved external symbol '{name}' would NULL-jump in JIT; \
                      refusing to fall back to the interpreter"
@@ -425,24 +434,114 @@ impl JitCompiler {
     }
 
     /// Return the name of a declared `Linkage::Import` function that will not
-    /// resolve to a real address at finalize time, if any.
+    /// resolve to a real address at finalize time AND is directly called from
+    /// compiled code, if any.
     ///
     /// Mirrors cranelift-jit's own `lookup_symbol` (registered runtime symbols
-    /// plus a `dlsym(RTLD_DEFAULT)` fallback). Any import for which both miss
+    /// plus a `dlsym(RTLD_DEFAULT)` fallback). An import that neither resolves
     /// would be bound to a NULL GOT slot; see `compile_module`.
-    fn first_unresolved_import(&self) -> Option<String> {
+    ///
+    /// The guard is deliberately scoped to imports that are DIRECTLY called
+    /// from compiled code (`MirInst::Call`). The hybrid transform
+    /// (mir/hybrid.rs) rewrites calls to unresolvable externs into InterpCall
+    /// bridges resolved by name through the interpreter's extern table at
+    /// runtime — a bridged name still appears as a declared import, but its
+    /// NULL slot is never jumped to, so rejecting it dropped whole modules to
+    /// the interpreter for no safety gain (measured: every GPU/showcase run
+    /// de-JITed on spl_thread_current_id even though the call bridged fine).
+    fn first_unresolved_import_called(&self, mir: &MirModule) -> Option<String> {
         use cranelift_module::{Linkage, Module};
+        let mut directly_called: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for func in &mir.functions {
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    if let crate::mir::MirInst::Call { target, .. } = inst {
+                        let raw = target.name();
+                        directly_called.insert(raw);
+                        // Mirror the alias expansion in referenced_call_names
+                        // (common_backend.rs): a Call to `rt_file_delete` also
+                        // needs `rt_file_remove` declared/resolved.
+                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
+                        if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
+                            directly_called.insert(alias);
+                        }
+                    }
+                }
+            }
+        }
         for (_id, decl) in self.backend.module.declarations().get_functions() {
             if decl.linkage != Linkage::Import {
                 continue;
             }
             if let Some(name) = decl.name.as_deref() {
-                if !jit_import_resolves(self.provider.as_ref(), name) {
+                if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
                     return Some(name.to_string());
                 }
             }
         }
         None
+    }
+
+    /// Emit bounded ownership evidence for a strict unresolved JIT import.
+    ///
+    /// This is intentionally diagnostic-only: it runs only after codegen has
+    /// already found an unresolved `Linkage::Import`, only when both strict
+    /// failure and `SIMPLE_JIT_SYMBOL_TRACE=1` are enabled, and never changes
+    /// symbol lookup, declaration, or fallback policy.
+    fn emit_unresolved_symbol_trace(&self, mir: &MirModule, requested: &str) {
+        if !jit_symbol_trace_enabled() {
+            return;
+        }
+
+        let raw_calls: Vec<String> = mir
+            .functions
+            .iter()
+            .flat_map(|function| {
+                function.blocks.iter().flat_map(move |block| {
+                    block
+                        .instructions
+                        .iter()
+                        .filter_map(move |instruction| match instruction {
+                            MirInst::Call { target, .. } if jit_symbol_trace_matches(requested, target.name()) => {
+                                Some(format!("{} -> {}", function.name, target.name()))
+                            }
+                            _ => None,
+                        })
+                })
+            })
+            .collect();
+        let referenced: Vec<String> = referenced_call_names(&mir.functions)
+            .into_iter()
+            .filter(|name| jit_symbol_trace_matches(requested, name))
+            .collect();
+        let mir_functions: Vec<String> = mir
+            .functions
+            .iter()
+            .filter(|function| jit_symbol_trace_matches(requested, &function.name))
+            .map(|function| format!("{} body={}", function.name, !function.blocks.is_empty()))
+            .collect();
+        let mir_externs: Vec<String> = mir
+            .extern_fn_names
+            .iter()
+            .filter(|name| jit_symbol_trace_matches(requested, name))
+            .cloned()
+            .collect();
+        let declarations: Vec<String> = self
+            .backend
+            .module
+            .declarations()
+            .get_functions()
+            .filter_map(|(_, declaration)| {
+                let name = declaration.name.as_deref()?;
+                jit_symbol_trace_matches(requested, name).then(|| format!("{} linkage={:?}", name, declaration.linkage))
+            })
+            .collect();
+
+        eprintln!(
+            "[jit-symbol] unresolved requested={requested} raw_calls={raw_calls:?} \
+             mir_references={referenced:?} mir_functions={mir_functions:?} \
+             mir_externs={mir_externs:?} declared_near={declarations:?}"
+        );
     }
 
     /// Get the native function pointer for a compiled function.
@@ -466,8 +565,15 @@ impl JitCompiler {
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
+            let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
+            if stage_trace {
+                eprintln!("[jit-stage] module_init:start globals={}", self.module_global_count);
+            }
             let init: fn() = std::mem::transmute(ptr);
             init();
+            if stage_trace {
+                eprintln!("[jit-stage] module_init:done globals={}", self.module_global_count);
+            }
         }
         Ok(())
     }
@@ -484,8 +590,16 @@ impl JitCompiler {
             .get_function_ptr(name)
             .ok_or_else(|| BackendError::UnknownFunction(name.to_string()))?;
 
+        let stage_trace = std::env::var_os("SIMPLE_JIT_STAGE_TRACE").is_some_and(|value| value != "0");
+        if stage_trace {
+            eprintln!("[jit-stage] entry_call:start name={name}");
+        }
         let func: fn() -> i64 = std::mem::transmute(ptr);
-        Ok(func())
+        let result = func();
+        if stage_trace {
+            eprintln!("[jit-stage] entry_call:done name={name} result={result}");
+        }
+        Ok(result)
     }
 
     /// Call a compiled function that takes one i64 argument and returns i64.
@@ -517,6 +631,23 @@ impl JitCompiler {
     }
 }
 
+fn jit_symbol_trace_enabled() -> bool {
+    std::env::var_os("SIMPLE_JIT_SYMBOL_TRACE").is_some_and(|value| value != "0")
+}
+
+/// Match an exact symbol, its ABI-leading-underscore variant, or a normal
+/// `prefix__name` declaration.  This is presentation-only trace grouping;
+/// actual JIT resolution always uses the exact requested declaration name.
+fn jit_symbol_trace_matches(requested: &str, candidate: &str) -> bool {
+    fn bare(name: &str) -> &str {
+        name.rsplit_once("__").map(|(_, suffix)| suffix).unwrap_or(name)
+    }
+
+    let requested = bare(requested).trim_start_matches('_');
+    let candidate = bare(candidate).trim_start_matches('_');
+    requested == candidate
+}
+
 impl Default for JitCompiler {
     fn default() -> Self {
         Self::new().expect("Failed to create JIT compiler")
@@ -540,6 +671,48 @@ fn register_runtime_symbols_from_provider(builder: &mut JITBuilder, provider: &d
     }
 }
 
+/// Runtime-ABI symbols whose bodies live in THIS crate rather than in
+/// `simple-runtime`, and which therefore never appear in `RUNTIME_SYMBOL_NAMES`
+/// (that list is generated from the runtime crate plus the C runtime sources).
+///
+/// Without this table the JIT has no way to reach them: the static provider does
+/// not know them, and `dlsym(RTLD_DEFAULT)` misses because a Rust `bin` does not
+/// put its `#[no_mangle]` symbols in the dynamic symbol table. The import would
+/// be bound to a NULL GOT slot, so `first_unresolved_import` correctly refuses
+/// and de-JITs the whole module — which is exactly what happened to stage1 on
+/// `rt_native_build`.
+///
+/// Every entry here is a REAL function address. This is a registration of an
+/// existing definition, never a stub: a stub that returned nil would be the
+/// unbacked-extern defect class (see
+/// `doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md`).
+fn compiler_owned_symbol(name: &str) -> Option<*const u8> {
+    match name {
+        "rt_native_build" => Some(crate::native_build_sffi::rt_native_build as *const u8),
+        _ => None,
+    }
+}
+
+/// The names `compiler_owned_symbol` answers for. Kept beside it so a test can
+/// assert the two agree and neither can silently empty out.
+pub const COMPILER_OWNED_RUNTIME_SYMBOLS: &[&str] = &["rt_native_build"];
+
+/// Publish [`COMPILER_OWNED_RUNTIME_SYMBOLS`] to a `JITBuilder`, mirroring what
+/// `register_runtime_symbols_from_provider` does for the runtime-owned set.
+fn register_compiler_owned_symbols(builder: &mut JITBuilder) {
+    for &name in COMPILER_OWNED_RUNTIME_SYMBOLS {
+        if let Some(ptr) = compiler_owned_symbol(name) {
+            builder.symbol(name, ptr);
+        }
+    }
+}
+
+/// True if `name` is resolvable purely through the compiler-owned table.
+/// Exposed so the regression gate can check the same predicate the JIT uses.
+pub fn compiler_owned_symbol_resolves(name: &str) -> bool {
+    compiler_owned_symbol(name).is_some()
+}
+
 /// True if a `Linkage::Import` symbol named `name` will resolve to a real
 /// address at JIT finalize time — i.e. it is a registered runtime symbol or is
 /// `dlsym`-resolvable in the current process. This is exactly the resolution
@@ -550,10 +723,27 @@ fn jit_import_resolves(provider: &dyn RuntimeSymbolProvider, name: &str) -> bool
     if provider.get_symbol(name).is_some() {
         return true;
     }
+    if compiler_owned_symbol(name).is_some() {
+        return true;
+    }
     if crate::elf_utils::resolve_runtime_symbol(name).is_some() {
         return true;
     }
     dlsym_resolves(name)
+}
+
+/// Whether a JIT fallback must fail the current process. `STRICT_ALL` is the
+/// diagnostic superset used by contained bootstrap workers; it must apply at
+/// this lower boundary too, before the driver has a chance to interpret.
+fn jit_fallback_is_strict() -> bool {
+    jit_fallback_is_strict_for(
+        std::env::var_os("SIMPLE_JIT_STRICT").is_some_and(|value| value != "0"),
+        std::env::var_os("SIMPLE_JIT_STRICT_ALL").is_some_and(|value| value != "0"),
+    )
+}
+
+fn jit_fallback_is_strict_for(strict: bool, strict_all: bool) -> bool {
+    strict || strict_all
 }
 
 #[cfg(not(windows))]
@@ -568,12 +758,43 @@ fn dlsym_resolves(name: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn dlsym_resolves(_name: &str) -> bool {
-    // Conservative on Windows: assume resolvable so the guard never forces an
-    // unnecessary interpreter fallback. The cross-module NULL-jump this guards
-    // is observed on the System V/ELF JIT path; Windows uses a different
-    // (GetProcAddress-based) resolver and is out of scope for this guard.
-    true
+fn dlsym_resolves(name: &str) -> bool {
+    // Mirror cranelift-jit's own Windows fallback resolver exactly
+    // (vendor `cranelift-jit-0.116.1/src/backend.rs::lookup_with_dlsym`):
+    // `GetProcAddress` against the running executable image, then against
+    // `ucrtbase.dll`. Blindly returning `true` here (the previous behaviour)
+    // meant `first_unresolved_import_called` could never detect an
+    // unresolvable cross-module Simple symbol on Windows: cranelift-jit
+    // itself would fail the SAME lookup, bind the GOT slot to NULL, and the
+    // first call through it SIGSEGVs with nothing on stderr — this is the
+    // root cause of `seed_jit_app_module_function_call_segfaults_windows_2026-09-13.md`
+    // and `seed_jit_function_local_use_segfaults_2026-09-13.md`: both
+    // repros reach a cross-module Simple function symbol that resolves to
+    // neither a registered runtime symbol nor a process/CRT export, so the
+    // guard must say `false` and let `compile_module` de-JIT to the
+    // interpreter instead of finalizing a NULL import.
+    use windows_sys::Win32::Foundation::HMODULE;
+    use windows_sys::Win32::System::LibraryLoader;
+
+    let Ok(c_name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    let c_name_ptr = c_name.as_ptr();
+
+    unsafe {
+        let handles: [*mut core::ffi::c_void; 2] = [
+            // The running executable image itself.
+            std::ptr::null_mut(),
+            // The local C runtime, exactly as cranelift-jit tries it.
+            LibraryLoader::GetModuleHandleA(b"ucrtbase.dll\0".as_ptr()) as *mut core::ffi::c_void,
+        ];
+        for handle in &handles {
+            if LibraryLoader::GetProcAddress(*handle as HMODULE, c_name_ptr.cast()).is_some() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(all(test, target_arch = "x86_64"))]

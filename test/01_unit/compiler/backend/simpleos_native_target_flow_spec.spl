@@ -1,14 +1,16 @@
-use test.helpers.compiler_native_link_source.{compiler_native_link_source}
 use std.spec.*
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.backend_helpers.{backend_helper_native_target_for}
-use compiler.backend.backend.llvm_native_link.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs}
+use compiler.backend.backend.llvm_native_link.{is_simpleos_x86_64_target, is_simpleos_arm64_target, is_simpleos_riscv64_target, is_simpleos_riscv32_target, is_simpleos_riscv32_link_for_target, simpleos_x86_64_user_link_inputs, prefer_module_init_aggregator, merge_module_init_symbol_groups}
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.backend.llvm_cross_target.{toolchain_for_target}
-use std.io_runtime.{read_file_text}
+use std.io_runtime.{file_read_raw}
 
 describe "SimpleOS native target flow":
+    # @manual scenario evidence
     it "keeps the logical SimpleOS target through codegen and sysroot linking":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the logical SimpleOS target through codegen and sysroot linking")
         expect(backend_helper_native_target_for("simpleos-x86_64")).to_equal(CodegenTarget.SimpleOS_X86_64)
         expect(is_simpleos_x86_64_target("simpleos-x86_64")).to_be(true)
         expect(backend_helper_native_target_for("x86_64-unknown-simpleos")).to_equal(CodegenTarget.SimpleOS_X86_64)
@@ -21,10 +23,12 @@ describe "SimpleOS native target flow":
         expect(link_inputs[0]).to_equal("build/os/sysroot/lib/crt0.o")
         expect(link_inputs[1]).to_end_with("libsimple_runtime.a")
         expect(link_inputs[2]).to_equal("build/os/sysroot/lib/libsimpleos_c.a")
-        val link_source = compiler_native_link_source()
+        val link_source = file_read_raw("src/compiler/70.backend/backend/llvm_native_link.spl") ?? ""
         expect(link_source).to_contain("if target == \"simpleos\" or target == \"simpleos-x86_64\"")
 
     it "routes every canonical multi-architecture SimpleOS selector before hosted linking":
+        # @req REQ-SSPEC-UNIT
+        step("routes every canonical multi-architecture SimpleOS selector before hosted linking")
         expect(is_simpleos_x86_64_target("x86_64-unknown-simpleos-elf")).to_be(true)
         expect(is_simpleos_arm64_target("aarch64-simpleos")).to_be(true)
         expect(is_simpleos_arm64_target("aarch64-unknown-simpleos")).to_be(true)
@@ -36,22 +40,28 @@ describe "SimpleOS native target flow":
         expect(is_simpleos_riscv32_target("riscv32imac-unknown-none-elf")).to_be(true)
 
     it "keeps the RV64 desktop on the explicit hard-float profile":
-        val targets = read_file_text("src/os/_QemuRunner/scenario_disks.spl") ?? ""
-        val llvm_target = read_file_text("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
+        val targets = file_read_raw("src/os/_QemuRunner/scenario_disks.spl") ?? ""
+        val llvm_target = file_read_raw("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
         expect(targets).to_contain("target_triple: \"riscv64gc-unknown-none\"")
         expect(llvm_target).to_contain("fn llvm_riscv64_hard_float_requested() -> bool")
         expect(llvm_target).to_contain("riscv_linux_target_contract_portable_numeric(target)")
 
     it "does not infer SimpleOS from an RV32 filename when a hosted target is explicit":
+        # @req REQ-SSPEC-UNIT
+        step("does not infer SimpleOS from an RV32 filename when a hosted target is explicit")
         expect(is_simpleos_riscv32_link_for_target("riscv32-unknown-linux-gnu", [], "build/rv32-app")).to_be(false)
         expect(is_simpleos_riscv32_link_for_target("riscv32-unknown-none-elf", [], "build/app")).to_be(true)
         expect(is_simpleos_riscv32_link_for_target("", [], "build/rv32-app")).to_be(true)
 
     it "keeps the legacy bare-metal x86 target on the SimpleOS kernel lane":
+        # @req REQ-SSPEC-UNIT
+        step("keeps the legacy bare-metal x86 target on the SimpleOS kernel lane")
         expect(backend_helper_native_target_for("x86_64-unknown-none-elf")).to_equal(CodegenTarget.X86_64)
         expect(is_simpleos_x86_64_target("x86_64-unknown-none-elf")).to_be(true)
 
     it "recognizes x86, ARM, and RISC-V architecture aliases before host fallback":
+        # @req REQ-SSPEC-UNIT
+        step("recognizes x86, ARM, and RISC-V architecture aliases before host fallback")
         expect(backend_helper_native_target_for("amd64")).to_equal(CodegenTarget.X86_64)
         expect(backend_helper_native_target_for("amd64-unknown-linux-gnu")).to_equal(CodegenTarget.X86_64)
         expect(backend_helper_native_target_for("x64")).to_equal(CodegenTarget.X86_64)
@@ -67,9 +77,9 @@ describe "SimpleOS native target flow":
         expect(backend_helper_native_target_for("rv64")).to_equal(CodegenTarget.Riscv64)
 
     it "resolves an explicit SimpleOS target before probing the compiler host":
-        val source = read_file_text("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
-        val simpleos_guard = source.index_of("if is_simpleos:")
-        val simpleos_return = source.index_of("return LlvmTargetTriple(arch: \"x86_64\", vendor: \"unknown\", os: \"simpleos\", env: nil)")
+        val source = file_read_raw("src/compiler/70.backend/backend/llvm_target.spl") ?? ""
+        val simpleos_guard = source.index_of("if target == CodegenTarget.SimpleOS_X86_64:")
+        val simpleos_return = source.index_of("return simpleos_triple")
         val hosted_probe = source.index_of("val host_os = get_host_os()")
         expect(simpleos_guard).to_be_greater_than(-1)
         expect(simpleos_return).to_be_greater_than(simpleos_guard)

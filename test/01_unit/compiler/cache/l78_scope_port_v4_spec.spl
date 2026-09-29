@@ -1,0 +1,140 @@
+# @req: REQ-CSM-003, REQ-CSM-005
+
+use std.spec.*
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.{
+    l78_acquire_scope_with_port_v4}
+use .fixtures.l78_scope_rr_ports_v4.{l78_fake_scope_port_v4,
+    l78_expect_scope_events_v4}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn l78_digest_v4(value: text) -> text: value.repeat(64)
+
+fn l78_attempt_v4() -> L78AttemptKeyV4:
+    L78AttemptKeyV4(root_digest: l78_digest_v4("a"), generation: 7,
+        manifest_digest: l78_digest_v4("b"), profile_digest: l78_digest_v4("c"),
+        operation_digest: l78_digest_v4("d"))
+
+fn l78_limits_v4() -> L78LimitsV4:
+    L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 3)
+
+fn l78_scope_request_v4() -> SemanticScopeAttemptLiveRequestV1:
+    val identity = SemanticScopeLiveIdentityV1(writer_instance_digest: l78_digest_v4("e"),
+        generation: 7, manifest_digest: l78_digest_v4("b"),
+        pin_snapshot_digest: l78_digest_v4("1"), generation_closure_digest: l78_digest_v4("2"),
+        binding_digest: l78_digest_v4("3"), query_domain_digest: l78_digest_v4("4"),
+        semantic_rules_digest: l78_digest_v4("c"), cancellation_epoch: 1)
+    SemanticScopeAttemptLiveRequestV1(identity: identity,
+        attempt_seal_digest: l78_digest_v4("6"), source_content_digest: l78_digest_v4("7"),
+        snapshot_semantic_digest: l78_digest_v4("8"))
+
+describe "L78 scope port V4 test double [importance=critical; importance_weight=3]":
+    it "should script a bounded TestDouble acquire validate close lifecycle [importance=critical; importance_weight=3]":
+        val port = l78_fake_scope_port_v4("scope_ok", 41, l78_attempt_v4(), l78_limits_v4())
+        val request = l78_scope_request_v4()
+        val token = port.acquire(request).unwrap()
+        expect(token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        expect(token.kind).to_equal(L78_KIND_SCOPE_V4)
+        expect(port.validate(token, request).is_ok()).to_be(true)
+        expect(port.close(token).is_ok()).to_be(true)
+        l78_expect_scope_events_v4(port.events,
+            ["scope.acquire", "scope.validate", "scope.close"])
+        expect(port.revoked_slots).to_equal([token.slot])
+
+    it "should reject the scripted unavailable scope operation [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val unavailable = l78_fake_scope_port_v4("scope_unavailable", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        expect(unavailable.acquire(request)).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+
+    it "should expose only the scripted stale foreign expired and unknown-close failures [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val stale = l78_fake_scope_port_v4("scope_stale", 41, l78_attempt_v4(), l78_limits_v4())
+        val stale_token = stale.acquire(request).unwrap()
+        expect(stale.validate(stale_token, request)).to_equal(Err(L78BoundaryErrorV4.StaleToken))
+
+        val foreign = l78_fake_scope_port_v4("scope_foreign", 41, l78_attempt_v4(), l78_limits_v4())
+        val foreign_token = foreign.acquire(request).unwrap()
+        expect(foreign.validate(foreign_token, request)).to_equal(Err(L78BoundaryErrorV4.ForeignToken))
+
+        val expired = l78_fake_scope_port_v4("scope_expired", 41, l78_attempt_v4(), l78_limits_v4())
+        val expired_token = expired.acquire(request).unwrap()
+        expect(expired.validate(expired_token, request)).to_equal(Err(L78BoundaryErrorV4.ExpiredToken))
+
+        val close_unknown = l78_fake_scope_port_v4("scope_close_unknown", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        val close_unknown_token = close_unknown.acquire(request).unwrap()
+        expect(close_unknown.validate(close_unknown_token, request).is_ok()).to_be(true)
+        expect(close_unknown.close(close_unknown_token)).to_equal(Err(L78BoundaryErrorV4.Unknown))
+
+    it "should reject a revoked token and a foreign owner [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val limits = L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 4)
+        val owner = l78_fake_scope_port_v4("scope_ok", 41, l78_attempt_v4(), limits)
+        val token = owner.acquire(request).unwrap()
+        expect(owner.validate(token, request).is_ok()).to_be(true)
+        expect(owner.close(token).is_ok()).to_be(true)
+        expect(owner.validate(token, request)).to_equal(Err(L78BoundaryErrorV4.StaleToken))
+        val other_owner = l78_fake_scope_port_v4("scope_ok", 42, l78_attempt_v4(), limits)
+        val other_token = other_owner.acquire(request).unwrap()
+        expect(other_owner.validate(token, request)).to_equal(Err(L78BoundaryErrorV4.ForeignToken))
+        expect(other_token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+
+    it "should return the mutated concrete owner from acquisition [importance=critical; importance_weight=3]":
+        val carried = l78_acquire_scope_with_port_v4(
+            l78_fake_scope_port_v4("scope_ok", 41, l78_attempt_v4(), l78_limits_v4()),
+            l78_scope_request_v4())
+        expect(carried.outcome.is_ok()).to_be(true)
+        expect(carried.owner.events).to_equal(["scope.acquire"])
+        expect(carried.owner.active_slots.len()).to_equal(1)
+
+    it "should reject malformed and wrong-profile requests without consuming a step [importance=critical; importance_weight=3]":
+        var malformed = l78_scope_request_v4()
+        malformed.source_content_digest = "not-a-digest"
+        val malformed_port = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        expect(malformed_port.acquire(malformed)).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(malformed_port.events).to_equal([])
+
+        var wrong_profile = l78_scope_request_v4()
+        wrong_profile.identity.semantic_rules_digest = l78_digest_v4("9")
+        val profile_port = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        expect(profile_port.acquire(wrong_profile)).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(profile_port.events).to_equal([])
+
+    it "should report bounded exhaustion and reject unexpected call ordering [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val one_step = L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 1)
+        val exhausted = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), one_step)
+        val token = exhausted.acquire(request).unwrap()
+        expect(exhausted.validate(token, request)).to_equal(Err(L78BoundaryErrorV4.Bounds))
+
+        val too_small = L78LimitsV4(max_items: 8, max_bytes: 639, max_steps: 3)
+        val byte_exhausted = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), too_small)
+        expect(byte_exhausted.acquire(request)).to_equal(Err(L78BoundaryErrorV4.Bounds))
+
+        val out_of_order = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        expect(out_of_order.close(token)).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(out_of_order.validate(token, request)).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(out_of_order.events).to_equal([])
+
+    it "should reject malformed scope tokens [importance=critical; importance_weight=3]":
+        val request = l78_scope_request_v4()
+        val malformed_port = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        var malformed = malformed_port.acquire(request).unwrap()
+        malformed.slot = 0
+        expect(malformed_port.validate(malformed, request)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        val wrong_attempt_port = l78_fake_scope_port_v4("scope_ok", 41,
+            l78_attempt_v4(), l78_limits_v4())
+        var wrong_attempt = wrong_attempt_port.acquire(request).unwrap()
+        wrong_attempt.attempt_digest = l78_digest_v4("0")
+        expect(wrong_attempt_port.validate(wrong_attempt, request)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))

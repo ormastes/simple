@@ -1,0 +1,293 @@
+#!/bin/sh
+# deploy-local-temp-mcp.shs
+#
+# Deploy the bootstrap phase-1 (Rust seed) compiler plus the `simple-mcp` and
+# `spipe` MCP servers into a THROWAWAY local temp root, and emit TWO configs
+# there: `.mcp.json` (absolute launcher paths, the deliverable real clients
+# use) and `.mcp.verify.json` (repo-root-relative launcher paths, shaped for
+# the existing guard, which always resolves commands against the REPO root —
+# see the TWO configs comment near where they are written, below). Verify
+# with:
+#
+#     sh scripts/check/check-mcp-config-launchable.shs <root>/.mcp.verify.json
+#
+# Why a temp root
+# ---------------
+# This deploys nothing into `bin/release/**`.  A phase-1 artifact is the Rust
+# SEED, not a self-hosted compiler, and `.claude/rules/bootstrap.md` is explicit
+# that copying a seed over the deployed `bin/simple` is the exact anti-pattern
+# that makes the next lane believe a self-host succeeded.  A temp root gives a
+# runnable local deployment with no way to be mistaken for one.
+#
+# Why the launchers are `.cmd` on Windows / `.sh` on POSIX
+# -------------------------------------------------------
+# `check-mcp-config-launchable.shs` SKIPS any server whose `command` has no
+# path separator (a PATH-resolved external launcher such as bare `node`), and
+# a skipped server is not evidence.  Both servers are therefore deployed as
+# path-form launcher files inside the root so both are really probed with an
+# `initialize` handshake.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> artifact(s) deployed to <root>     exit 0
+#   FAIL  — ... naming what is missing              exit 1
+#   ERROR — nothing was deployed (<reason>)         exit 2
+# A run that deployed 0 artifacts is ERROR, never a pass.
+#
+# Usage:
+#   sh scripts/setup/deploy-local-temp-mcp.shs [--root DIR] [--seed PATH]
+
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+# Host-specific values (e.g. this host's temp_deploy_root) come from
+# scripts/setup/host-env.shs, keyed on config/host/<hostname>.sdn. A host
+# with no such file is a no-op here -- SIMPLE_HOST_TEMP_DEPLOY_ROOT simply
+# stays unset and the generic default below applies.
+# shellcheck disable=SC1091
+. "${repo_root}/scripts/setup/host-env.shs" || true
+
+deploy_root=""
+seed_override=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --root) deploy_root=${2:-}; shift 2 ;;
+        --root=*) deploy_root=${1#--root=}; shift ;;
+        --seed) seed_override=${2:-}; shift 2 ;;
+        --seed=*) seed_override=${1#--seed=}; shift ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        *) printf 'unknown argument: %s\n' "$1" >&2; exit 2 ;;
+    esac
+done
+
+is_windows_host() {
+    case "$(uname -s 2>/dev/null || printf 'unknown')" in
+        MINGW*|MSYS*|CYGWIN*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if is_windows_host; then
+    exe_suffix=".exe"
+    launcher_suffix=".cmd"
+else
+    exe_suffix=""
+    launcher_suffix=".sh"
+fi
+
+[ -n "${deploy_root}" ] || \
+    deploy_root="${SIMPLE_HOST_TEMP_DEPLOY_ROOT:-${TMPDIR:-/tmp}/simple-local-temp-deploy}"
+
+# ---------------------------------------------------------------------------
+# Locate the phase-1 seed.  Never fall back to a binary this script did not
+# identify: an unlocatable seed is ERROR, not a pass.
+# ---------------------------------------------------------------------------
+if [ -n "${seed_override}" ]; then
+    seed="${seed_override}"
+else
+    seed="${repo_root}/src/compiler_rust/target/bootstrap/simple${exe_suffix}"
+fi
+
+if [ ! -f "${seed}" ]; then
+    printf 'phase-1 seed not found: %s\n' "${seed}" >&2
+    printf 'Run the phase-1 bootstrap first:\n' >&2
+    printf '  sh scripts/bootstrap/bootstrap-windows.sh --full-bootstrap --stop-after-stage2\n' >&2
+    printf 'ERROR — nothing was deployed (no phase-1 seed)\n'
+    exit 2
+fi
+
+seed_identity=$("${seed}" --version 2>&1) || seed_identity=""
+if [ -z "${seed_identity}" ]; then
+    printf 'ERROR — nothing was deployed (seed returned an empty identity: %s)\n' "${seed}"
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Materialize the temp root.
+# ---------------------------------------------------------------------------
+rm -rf "${deploy_root}" 2>/dev/null || true
+mkdir -p "${deploy_root}/bin" || {
+    printf 'ERROR — nothing was deployed (could not create %s)\n' "${deploy_root}"
+    exit 2
+}
+
+deployed=0
+
+cp "${seed}" "${deploy_root}/bin/simple${exe_suffix}" || {
+    printf 'ERROR — nothing was deployed (could not copy the seed)\n'
+    exit 2
+}
+chmod +x "${deploy_root}/bin/simple${exe_suffix}" 2>/dev/null || true
+deployed=$((deployed + 1))
+
+spipe_server="${repo_root}/examples/05_stdlib/spipe/mcp/server.js"
+simple_mcp_entry="${repo_root}/src/app/mcp/main.spl"
+
+if is_windows_host; then
+    win_repo=$(cygpath -w "${repo_root}" 2>/dev/null || printf '%s' "${repo_root}")
+    win_spipe=$(cygpath -w "${spipe_server}" 2>/dev/null || printf '%s' "${spipe_server}")
+    win_entry=$(cygpath -w "${simple_mcp_entry}" 2>/dev/null || printf '%s' "${simple_mcp_entry}")
+
+    cat >"${deploy_root}/bin/simple-mcp${launcher_suffix}" <<EOF
+@echo off
+setlocal
+set "SIMPLE_LIB=${win_repo}\\src"
+if "%SIMPLE_LOG%"=="" set "SIMPLE_LOG=error"
+if "%RUST_LOG%"=="" set "RUST_LOG=error"
+"%~dp0simple.exe" run "${win_entry}" %*
+exit /b %ERRORLEVEL%
+EOF
+
+    cat >"${deploy_root}/bin/spipe-mcp${launcher_suffix}" <<EOF
+@echo off
+setlocal
+node "${win_spipe}" %*
+exit /b %ERRORLEVEL%
+EOF
+else
+    cat >"${deploy_root}/bin/simple-mcp${launcher_suffix}" <<EOF
+#!/bin/sh
+export SIMPLE_LIB="${repo_root}/src"
+export SIMPLE_LOG="\${SIMPLE_LOG:-error}"
+export RUST_LOG="\${RUST_LOG:-error}"
+exec "\$(dirname -- "\$0")/simple" run "${simple_mcp_entry}" "\$@"
+EOF
+
+    cat >"${deploy_root}/bin/spipe-mcp${launcher_suffix}" <<EOF
+#!/bin/sh
+exec node "${spipe_server}" "\$@"
+EOF
+fi
+
+chmod +x "${deploy_root}/bin/simple-mcp${launcher_suffix}" \
+         "${deploy_root}/bin/spipe-mcp${launcher_suffix}" 2>/dev/null || true
+deployed=$((deployed + 2))
+
+# ---------------------------------------------------------------------------
+# TWO configs are emitted, deliberately, because a real client and the
+# launchability guard resolve a declared "command" differently:
+#
+#   .mcp.json         the DELIVERABLE. Absolute native launcher paths, which
+#                     every MCP client resolves unambiguously regardless of the
+#                     cwd it happens to spawn in.
+#   .mcp.verify.json  the guard-shaped copy, used ONLY by
+#                     check-mcp-config-launchable.shs.
+#
+# The guard's `main()` hardcodes `root="$(dirname "$0")/../.."` — the REPO root
+# — unconditionally, even when an external config path is passed as an
+# argument, and joins every declared command onto THAT root. So a bare
+# `bin/simple-mcp.cmd` resolves only when deploy_root == repo_root, and an
+# absolute command never resolves at all. The one string that satisfies the
+# guard's own `${repo_root}/${cmd}` join for a temp root elsewhere on disk is a
+# repo-root-relative path that walks back out to deploy_root. Never edit the
+# guard to accommodate this deployment (CLAUDE.md) — shape a probe config for
+# it instead, and keep that contortion out of the config people actually use.
+# ---------------------------------------------------------------------------
+if is_windows_host; then
+    simple_mcp_abs=$(cygpath -w "${deploy_root}/bin/simple-mcp${launcher_suffix}" 2>/dev/null |
+        sed 's/\\/\\\\/g')
+    spipe_mcp_abs=$(cygpath -w "${deploy_root}/bin/spipe-mcp${launcher_suffix}" 2>/dev/null |
+        sed 's/\\/\\\\/g')
+    deploy_root_abs=$(cygpath -w "${deploy_root}" 2>/dev/null | sed 's/\\/\\\\/g')
+else
+    simple_mcp_abs="${deploy_root}/bin/simple-mcp${launcher_suffix}"
+    spipe_mcp_abs="${deploy_root}/bin/spipe-mcp${launcher_suffix}"
+    deploy_root_abs="${deploy_root}"
+fi
+
+simple_mcp_rel=$(realpath --relative-to="${repo_root}" \
+    "${deploy_root}/bin/simple-mcp${launcher_suffix}" 2>/dev/null)
+spipe_mcp_rel=$(realpath --relative-to="${repo_root}" \
+    "${deploy_root}/bin/spipe-mcp${launcher_suffix}" 2>/dev/null)
+if [ -z "${simple_mcp_rel}" ] || [ -z "${spipe_mcp_rel}" ]; then
+    printf 'ERROR — nothing was deployed (could not compute a repo-root-relative launcher path via realpath; check-mcp-config-launchable.shs could not verify this deploy_root)\n'
+    exit 2
+fi
+simple_mcp_rel=$(printf '%s' "${simple_mcp_rel}" | tr '\\' '/')
+spipe_mcp_rel=$(printf '%s' "${spipe_mcp_rel}" | tr '\\' '/')
+
+cat >"${deploy_root}/.mcp.json" <<EOF
+{
+  "_comment": "Throwaway local temp deployment emitted by scripts/setup/deploy-local-temp-mcp.shs. Absolute launcher paths so any client resolves them from any cwd. Verify with: sh scripts/check/check-mcp-config-launchable.shs ${deploy_root_abs}\\\\.mcp.verify.json",
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "${simple_mcp_abs}",
+      "args": [],
+      "cwd": "${deploy_root_abs}",
+      "env": { "SIMPLE_LOG": "error", "RUST_LOG": "error" }
+    },
+    "spipe": {
+      "command": "${spipe_mcp_abs}",
+      "args": [],
+      "cwd": "${deploy_root_abs}"
+    }
+  }
+}
+EOF
+deployed=$((deployed + 1))
+
+# Guard-shaped copy: repo-root-relative, path-form commands only. A bare-name
+# command is SKIPped by the launchable guard, and a skip is not evidence.
+cat >"${deploy_root}/.mcp.verify.json" <<EOF
+{
+  "_comment": "Probe config for scripts/check/check-mcp-config-launchable.shs ONLY. Its commands are repo-root-relative because that guard joins every command onto the REPO root, not onto this file's directory. Use .mcp.json for real clients.",
+  "mcpServers": {
+    "simple-mcp": {
+      "command": "${simple_mcp_rel}",
+      "args": [],
+      "cwd": ".",
+      "env": { "SIMPLE_LOG": "error", "RUST_LOG": "error" }
+    },
+    "spipe": {
+      "command": "${spipe_mcp_rel}",
+      "args": [],
+      "cwd": "."
+    }
+  }
+}
+EOF
+deployed=$((deployed + 1))
+
+cat >"${deploy_root}/RECEIPT.env" <<EOF
+schema=simple-local-temp-deploy-v1
+repo_root=${repo_root}
+deploy_root=${deploy_root}
+seed_source=${seed}
+seed_sha256=$(sha256sum "${seed}" 2>/dev/null | awk '{print $1}')
+seed_identity=${seed_identity}
+deployed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+EOF
+deployed=$((deployed + 1))
+
+missing=""
+for required in \
+    "bin/simple${exe_suffix}" \
+    "bin/simple-mcp${launcher_suffix}" \
+    "bin/spipe-mcp${launcher_suffix}" \
+    ".mcp.json" \
+    ".mcp.verify.json" \
+    "RECEIPT.env"
+do
+    [ -f "${deploy_root}/${required}" ] || missing="${missing} ${required}"
+done
+
+printf 'root      %s\n' "${deploy_root}"
+printf 'seed      %s\n' "${seed}"
+printf 'identity  %s\n' "$(printf '%s' "${seed_identity}" | tr '\n' ' ')"
+printf 'client    %s/.mcp.json\n' "${deploy_root}"
+printf 'verify    sh scripts/check/check-mcp-config-launchable.shs %s/.mcp.verify.json\n' "${deploy_root}"
+
+if [ -n "${missing}" ]; then
+    printf 'FAIL — %d artifact(s) deployed to %s, missing:%s\n' \
+        "${deployed}" "${deploy_root}" "${missing}"
+    exit 1
+fi
+
+if [ "${deployed}" -eq 0 ]; then
+    printf 'ERROR — nothing was deployed (0 artifacts)\n'
+    exit 2
+fi
+
+printf 'PASS — %d artifact(s) deployed to %s\n' "${deployed}" "${deploy_root}"
+exit 0

@@ -1,4 +1,9 @@
 # Rust seed fails to LINK from a clean target dir: duplicate `rt_heap_*` symbols
+## Closed 2026-09-16 — Status: FIXED in 93e0b028ffb, independently reproduced and verified (BUILD_RC=0)
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED 2026-08-16 in `93e0b028ffb` (another session) — independently
 reproduced and verified here
@@ -80,3 +85,4 @@ No guard would catch a recurrence:
 All three are green on a tree that cannot produce a binary. The cheapest honest
 gate is an INTERSECTION check between the two exported-symbol sets — exactly the
 axis the separate-sets design leaves uncovered. Not implemented here.
+

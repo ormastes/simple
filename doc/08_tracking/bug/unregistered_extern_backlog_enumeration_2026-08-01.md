@@ -1,4 +1,9 @@
 # Unregistered `extern` backlog — real enumeration after the extractor fix
+## Closed 2026-09-16 — ...invisible to it. The extractor was fixed in `61ad6b7f53b`; this file records the real popu
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Companion to `unregistered_extern_silent_nil_2026-08-01.md`. That document's
 counts (385 declarations, 75 actionable) were produced by an extractor that
@@ -116,3 +121,4 @@ real unregistered symbols — they were simply a ~3% sample of the family.
 
 Full machine-readable enumeration: `extern_backlog_enumeration.tsv`
 (`symbol<TAB>file:line`, 2377 rows).
+

@@ -1,4 +1,9 @@
 # origin/main unbuildable: E0308 CowEnv at interpreter_eval.rs:1777 (2026-08-25)
+## Closed 2026-09-16 — one-line fix landed; verified by full cargo build --release in clean worktree
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Symptom
 
@@ -39,3 +44,4 @@ would have caught this — the pushing lane evidently did not run it (hook
 bypass, same failure mode as the 2026-08-11 incident). No new guard needed;
 the existing guard's marker store simply has no green entry for this content,
 so the next guarded push would have FAILed.
+

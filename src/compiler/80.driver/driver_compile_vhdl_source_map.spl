@@ -7,6 +7,8 @@
 # - Text utility helpers (_text_to_i64, _decimal_digit_value, _json_escape, _file_contains_vhdl_design)
 
 use compiler.common.driver_core_types.{CompileResult}
+use std.io_runtime.{file_read_nullable, file_delete}
+use std.file_system.{file_write_text}
 use compiler.driver.driver_compile_vhdl_codegen.{_simple_vhdl_source_to_text}
 use compiler.driver.driver_compile_vhdl_lowering.{_simple_is_labeled_tuple_type, _simple_labeled_tuple_labels, _simple_labeled_tuple_types}
 use compiler.driver.driver_compile_vhdl_util.{
@@ -16,10 +18,6 @@ use compiler.driver.driver_compile_vhdl_util.{
     _simple_enum_block_has_payload, _simple_skip_enum_block,
     _text_list_contains, _text_list_index, _text_list_index_from
 }
-
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
 
 fn _simple_join_text(items: [text], sep: text) -> text:
     var out = ""
@@ -32,13 +30,13 @@ fn _simple_join_text(items: [text], sep: text) -> text:
     out
 
 fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_nullable(path) ?? ""
     val vhdl_result = _simple_vhdl_source_to_text(source)
     if vhdl_result.is_err():
         _delete_simple_vhdl_outputs(output)
         return CompileResult.RuntimeError(vhdl_result.unwrap_err())
     val vhdl = vhdl_result.unwrap()
-    if rt_file_write_text(output, vhdl):
+    if file_write_text(output, vhdl):
         _write_simple_vhdl_source_map(path, output, source, vhdl)
         CompileResult.Success(output)
     else:
@@ -46,8 +44,8 @@ fn _compile_simple_vhdl_subset(path: text, output: text) -> CompileResult:
         CompileResult.RuntimeError("failed to write VHDL output: {output}")
 
 fn _delete_simple_vhdl_outputs(output: text):
-    rt_file_delete(output)
-    rt_file_delete(output + ".map.json")
+    file_delete(output)
+    file_delete(output + ".map.json")
 
 fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: text):
     val map_path = output + ".map.json"
@@ -65,7 +63,7 @@ fn _write_simple_vhdl_source_map(path: text, output: text, source: text, vhdl: t
     json = json + "  \"entities\": [" + entities + "],\n"
     json = json + "  \"ports\": [" + ports + "]\n"
     json = json + "}\n"
-    rt_file_write_text(map_path, json)
+    file_write_text(map_path, json)
 
 fn _simple_vhdl_entities_for_source_map(vhdl: text, source: text) -> text:
     var entries: [text] = []
@@ -559,7 +557,7 @@ fn _simple_anonymous_tuple_types_alias(type_text: text, alias_names: [text], ali
     out
 
 fn _file_contains_vhdl_design(path: text) -> bool:
-    val content = rt_file_read_text(path) ?? ""
+    val content = file_read_nullable(path) ?? ""
     val trimmed = content.trim()
     val has_design_unit = trimmed.starts_with("library ") or trimmed.starts_with("use ") or trimmed.starts_with("package ") or trimmed.starts_with("entity ") or trimmed.contains("\nentity ")
     has_design_unit and trimmed.contains("<=")

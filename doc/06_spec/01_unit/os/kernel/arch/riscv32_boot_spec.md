@@ -28,7 +28,7 @@ riscv32_boot_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -110,8 +110,8 @@ expect(boot_output.memory_map.len()).to_equal(2)
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/kernel/arch/riscv32_boot_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-08-24 |
+| Generator | Authored sync; regeneration blocked by missing deployed self-hosted runtime |
 
 ## Overview
 
@@ -122,8 +122,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

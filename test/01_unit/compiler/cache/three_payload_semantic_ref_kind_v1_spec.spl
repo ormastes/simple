@@ -1,0 +1,336 @@
+# Purpose: frozen semantic-reference kind/tag contract for the three-payload
+# closure.  This is test-first coverage for the L7 portable-body extension.
+# @req REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use compiler.common.cache_contract.physical_tld_v1.{TldPayloadRoleV1,
+    TldSectionRefV1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{
+    ThreePayloadSemanticRefKindV1,
+    ThreePayloadSemanticRefLocationV1,
+    ThreePayloadSemanticRefV1,
+    ThreePayloadClosureSealV1,
+    ThreePayloadWorkerReadCountersV1,
+    ThreePayloadAdmissionErrorV1,
+    three_payload_semantic_ref_valid_v1,
+    three_payload_worker_admit_v1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1,
+    ThreePayloadClosureSealV2,
+    ThreePayloadSemanticRefV2,
+    three_payload_semantic_ref_valid_v2,
+    closure_coverage_dimension_v1,
+    three_payload_closure_seal_decode_v2,
+    three_payload_closure_seal_encode_v2}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    three_payload_closure_seal_digest_v2}
+
+fn d(ch: text) -> text:
+    ch.repeat(64)
+
+fn section(index: i64, digest: text) -> TldSectionRefV1:
+    TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+        section_index: index, kind: "semantic-body",
+        semantic_object_digest: digest, offset: index * 16,
+        stored_bytes: 16, decoded_bytes: 16, encoding_profile: "raw-v1")
+
+fn kind_name(kind: ThreePayloadSemanticRefKindV1) -> text:
+    match kind:
+        case MacroExpansion: "macro"
+        case GenericBody: "generic"
+        case TraitDefaultBody: "trait-default"
+        case TraitCallable: "trait-callable"
+        case AspectCallable: "aspect-callable"
+        case ConcreteFunction: "concrete-function"
+        case CtfeBody: "ctfe-body"
+
+fn v2_ref(kind: ThreePayloadSemanticRefKindV1,
+        name: text, embedded: TldSectionRefV1?) -> ThreePayloadSemanticRefV2:
+    v2_ref_with_digest(kind, name, d("c"), embedded)
+
+fn v2_ref_with_digest(kind: ThreePayloadSemanticRefKindV1,
+        name: text, body_digest: text,
+        embedded: TldSectionRefV1?) -> ThreePayloadSemanticRefV2:
+    ThreePayloadSemanticRefV2(kind: kind, stable_entity_id: name,
+        callable_signature_digest: d("a"), effect_digest: d("b"),
+        body_or_object_digest: body_digest, embedded: embedded,
+        selection_contract_digest: d("d"))
+
+fn v1_embedded(kind: ThreePayloadSemanticRefKindV1,
+        name: text) -> ThreePayloadSemanticRefV1:
+    ThreePayloadSemanticRefV1(kind: kind, stable_entity_id: name,
+        callable_signature_digest: d("a"), effect_digest: d("b"),
+        body_or_object_digest: d("c"),
+        location: ThreePayloadSemanticRefLocationV1.EmbeddedTldSection,
+        embedded_section_index: Some(0))
+
+fn v1_symbolic(kind: ThreePayloadSemanticRefKindV1,
+        name: text) -> ThreePayloadSemanticRefV1:
+    ThreePayloadSemanticRefV1(kind: kind, stable_entity_id: name,
+        callable_signature_digest: d("a"), effect_digest: d("b"),
+        body_or_object_digest: d("c"),
+        location: ThreePayloadSemanticRefLocationV1.SymbolicObject,
+        embedded_section_index: nil)
+
+fn coverage_roots() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(index), root_digest: d("e"),
+            coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+fn seal(refs: [ThreePayloadSemanticRefV2]) -> ThreePayloadClosureSealV2:
+    ThreePayloadClosureSealV2(schema: 2, input_generation_digest: d("1"),
+        snapshot_digest: d("2"), source_digest: d("3"), prior_tld_digest: nil,
+        init_tld_digest: d("4"), compiler_semantics_digest: d("5"),
+        consumed_inputs_digest: d("6"), semantic_refs: refs,
+        coverage_roots: coverage_roots(), section_count: 2, payload_bytes: 64,
+        max_decode_bytes: 32)
+
+fn v1_seal(refs: [ThreePayloadSemanticRefV1]) -> ThreePayloadClosureSealV1:
+    ThreePayloadClosureSealV1(generation_digest: d("1"),
+        source_payload_digest: d("2"), prior_tld_payload_digest: nil,
+        package_init_tld_payload_digest: d("3"), membership_root_digest: d("4"),
+        absence_witness_root_digest: d("5"), semantic_refs: refs,
+        section_count: 2, packed_bytes: 64, max_decode_bytes: 32)
+
+fn reads() -> ThreePayloadWorkerReadCountersV1:
+    ThreePayloadWorkerReadCountersV1(source_payload_reads: 1,
+        prior_tld_payload_reads: 0, package_init_tld_payload_reads: 1,
+        imported_summary_reads: 0, exceptional_body_reads: 0, rr_reads: 0)
+
+fn worker_error(refs: [ThreePayloadSemanticRefV1],
+        counters: ThreePayloadWorkerReadCountersV1) -> text:
+    match three_payload_worker_admit_v1(v1_seal(refs), counters):
+        case Ok(_): "ok"
+        case Err(error):
+            match error:
+                case InvalidWorkerReads(reason): reason
+                case InvalidSeal(reason): "seal:" + reason
+                case InvalidSemanticReference(entity): "semantic:" + entity
+
+describe "Three-payload semantic reference kind/tag contract admission":
+    it "should preserve tags one through five and assign six and seven":
+        step("Encode and decode every semantic reference kind")
+        val kinds = [
+            ThreePayloadSemanticRefKindV1.MacroExpansion,
+            ThreePayloadSemanticRefKindV1.GenericBody,
+            ThreePayloadSemanticRefKindV1.TraitDefaultBody,
+            ThreePayloadSemanticRefKindV1.TraitCallable,
+            ThreePayloadSemanticRefKindV1.AspectCallable,
+            ThreePayloadSemanticRefKindV1.ConcreteFunction,
+            ThreePayloadSemanticRefKindV1.CtfeBody]
+        val tags = [1, 2, 3, 4, 5, 6, 7]
+        var index: i64 = 0
+        while index < kinds.len():
+            val kind = kinds[index]
+            val embedded = if index < 3 or index >= 5:
+                # Section identity is independent of semantic-kind tag.  Keep
+                # the fixture within the seal's two-section bound so a future
+                # failure isolates kind/tag handling rather than bounds.
+                Some(section(0, d("c")))
+            else:
+                nil
+            val encoded = three_payload_closure_seal_encode_v2(
+                seal([v2_ref(kind, "entity." + index.to_string(), embedded)]))
+            expect(encoded.len()).to_be_greater_than(0)
+            # With one ref and no prior digest, the frozen TPV2 layout puts the
+            # first semantic-kind discriminant at byte 213.
+            expect(encoded[213]).to_equal(tags[index])
+            val decoded = three_payload_closure_seal_decode_v2(encoded)
+            expect(decoded.ok).to_equal(true)
+            val decoded_name = match decoded.value:
+                case Some(value): kind_name(value.semantic_refs[0].kind)
+                case nil: "missing"
+            expect(decoded_name).to_equal(kind_name(kind))
+            index = index + 1
+
+    it "should require embedded TLD sections for concrete functions and CTFE bodies":
+        step("Validate portable body references through the V2 admission validator")
+        val concrete = ThreePayloadSemanticRefKindV1.ConcreteFunction
+        val ctfe = ThreePayloadSemanticRefKindV1.CtfeBody
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(concrete, "fn.body", Some(section(0, d("c")))), 2, 32)).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(ctfe, "ctfe.body", Some(section(1, d("c")))), 2, 32)).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(concrete, "fn.symbolic", nil), 2, 32)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(ctfe, "ctfe.symbolic", nil), 2, 32)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_embedded(concrete, "fn.body"))).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_embedded(ctfe, "ctfe.body"))).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_symbolic(concrete, "fn.symbolic"))).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_symbolic(ctfe, "ctfe.symbolic"))).to_equal(false)
+
+    it "should independently encode and decode a ConcreteFunction embedded body":
+        step("Exercise the ConcreteFunction encoder and decoder branch")
+        val reference = v2_ref(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+            "fn.concrete", Some(section(0, d("c"))))
+        val encoded = three_payload_closure_seal_encode_v2(seal([reference]))
+        expect(encoded.len()).to_be_greater_than(0)
+        val decoded = three_payload_closure_seal_decode_v2(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.unwrap().semantic_refs[0].kind).to_equal(
+            ThreePayloadSemanticRefKindV1.ConcreteFunction)
+        expect(decoded.value.unwrap().semantic_refs[0].embedded).to_equal(
+            Some(section(0, d("c"))))
+
+    it "should independently encode and decode a CtfeBody embedded body":
+        step("Exercise the CtfeBody encoder and decoder branch")
+        val reference = v2_ref(ThreePayloadSemanticRefKindV1.CtfeBody,
+            "body.ctfe", Some(section(1, d("c"))))
+        val encoded = three_payload_closure_seal_encode_v2(seal([reference]))
+        expect(encoded.len()).to_be_greater_than(0)
+        val decoded = three_payload_closure_seal_decode_v2(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.unwrap().semantic_refs[0].kind).to_equal(
+            ThreePayloadSemanticRefKindV1.CtfeBody)
+        expect(decoded.value.unwrap().semantic_refs[0].embedded).to_equal(
+            Some(section(1, d("c"))))
+
+    it "should reject hostile unknown tags for both new kinds":
+        step("Mutate ConcreteFunction and CtfeBody tags to unknown values")
+        val concrete = three_payload_closure_seal_encode_v2(seal([
+            v2_ref(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                "fn.unknown", Some(section(0, d("c"))))]))
+        var concrete_unknown = concrete.copy()
+        concrete_unknown[213] = 88.to_u8()
+        val concrete_result = three_payload_closure_seal_decode_v2(concrete_unknown)
+        expect(concrete_result.ok).to_equal(false)
+        expect(concrete_result.error).to_equal("unknown_v2_semantic_ref_kind")
+        val ctfe = three_payload_closure_seal_encode_v2(seal([
+            v2_ref(ThreePayloadSemanticRefKindV1.CtfeBody,
+                "body.unknown", Some(section(1, d("c"))))]))
+        expect(ctfe.len()).to_be_greater_than(213)
+        expect(three_payload_closure_seal_decode_v2(ctfe).ok).to_equal(true)
+        var ctfe_unknown = ctfe.copy()
+        ctfe_unknown[213] = 89.to_u8()
+        val ctfe_result = three_payload_closure_seal_decode_v2(ctfe_unknown)
+        expect(ctfe_result.ok).to_equal(false)
+        expect(ctfe_result.error).to_equal("unknown_v2_semantic_ref_kind")
+
+    it "should reject hostile bounds and embedded digest mutations":
+        step("Mutate section index, decoded bytes, and semantic digest")
+        val concrete = ThreePayloadSemanticRefKindV1.ConcreteFunction
+        val base = v2_ref(concrete, "fn.bounds", Some(section(0, d("c"))))
+        expect(three_payload_semantic_ref_valid_v2(base, 1, 16)).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(concrete, "fn.oob", Some(section(1, d("c")))), 1, 16)).to_equal(false)
+        val too_large = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 0, kind: "semantic-body", semantic_object_digest: d("c"),
+            offset: 0, stored_bytes: 16, decoded_bytes: 17, encoding_profile: "raw-v1")
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(concrete, "fn.large", Some(too_large)), 1, 16)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(concrete, "fn.digest", Some(section(0, d("e")))), 1, 16)).to_equal(false)
+        val ctfe = ThreePayloadSemanticRefKindV1.CtfeBody
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(ctfe, "ctfe.oob", Some(section(2, d("c")))), 2, 16)).to_equal(false)
+        val ctfe_large = TldSectionRefV1(role: TldPayloadRoleV1.PackageInitTld,
+            section_index: 1, kind: "semantic-body", semantic_object_digest: d("c"),
+            offset: 16, stored_bytes: 16, decoded_bytes: 33, encoding_profile: "raw-v1")
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(ctfe, "ctfe.large", Some(ctfe_large)), 2, 32)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(ctfe, "ctfe.digest", Some(section(1, d("e")))), 2, 32)).to_equal(false)
+
+    it "should reject missing and negative V1 embedded indices for both new kinds":
+        step("Mutate V1 ConcreteFunction and CtfeBody section indices")
+        val concrete = ThreePayloadSemanticRefKindV1.ConcreteFunction
+        val ctfe = ThreePayloadSemanticRefKindV1.CtfeBody
+        var concrete_missing = v1_embedded(concrete, "fn.missing")
+        concrete_missing.embedded_section_index = nil
+        expect(three_payload_semantic_ref_valid_v1(concrete_missing)).to_equal(false)
+        var ctfe_missing = v1_embedded(ctfe, "ctfe.missing")
+        ctfe_missing.embedded_section_index = nil
+        expect(three_payload_semantic_ref_valid_v1(ctfe_missing)).to_equal(false)
+        var concrete_negative = v1_embedded(concrete, "fn.negative")
+        concrete_negative.embedded_section_index = Some(-1)
+        expect(three_payload_semantic_ref_valid_v1(concrete_negative)).to_equal(false)
+        var ctfe_negative = v1_embedded(ctfe, "ctfe.negative")
+        ctfe_negative.embedded_section_index = Some(-1)
+        expect(three_payload_semantic_ref_valid_v1(ctfe_negative)).to_equal(false)
+
+    it "should provide stable digest evidence and change it after a body mutation":
+        step("Compare canonical seal digests before and after mutation")
+        val original = seal([v2_ref(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+            "fn.digest", Some(section(0, d("c"))))])
+        val original_digest = three_payload_closure_seal_digest_v2(original)
+        expect(original_digest.len()).to_equal(64)
+        val changed = seal([v2_ref_with_digest(
+            ThreePayloadSemanticRefKindV1.ConcreteFunction, "fn.digest", d("d"),
+            Some(section(0, d("d"))))])
+        val changed_digest = three_payload_closure_seal_digest_v2(changed)
+        expect(changed_digest.len()).to_equal(64)
+        expect(changed_digest == original_digest).to_equal(false)
+
+    it "should keep trait and aspect calls symbolic-only":
+        step("Preserve the existing symbolic trait and aspect contract")
+        val trait = ThreePayloadSemanticRefKindV1.TraitCallable
+        val aspect = ThreePayloadSemanticRefKindV1.AspectCallable
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(trait, "Trait.call", nil), 2, 32)).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(aspect, "Aspect.before", nil), 2, 32)).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(trait, "Trait.body", Some(section(0, d("c")))), 2, 32)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v2(
+            v2_ref(aspect, "Aspect.body", Some(section(0, d("c")))), 2, 32)).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_symbolic(trait, "Trait.call"))).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_symbolic(aspect, "Aspect.before"))).to_equal(true)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_embedded(trait, "Trait.body"))).to_equal(false)
+        expect(three_payload_semantic_ref_valid_v1(
+            v1_embedded(aspect, "Aspect.body"))).to_equal(false)
+
+    it "should reject an unknown semantic kind tag instead of defaulting":
+        step("Corrupt the first semantic-kind discriminant")
+        val encoded = three_payload_closure_seal_encode_v2(seal([
+            v2_ref(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+                "fn.body", Some(section(0, d("c"))))]))
+        expect(encoded.len()).to_be_greater_than(213)
+        expect(three_payload_closure_seal_decode_v2(encoded).ok).to_equal(true)
+        var unknown = encoded.copy()
+        unknown[213] = 99.to_u8()
+        val decoded = three_payload_closure_seal_decode_v2(unknown)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.error).to_equal("unknown_v2_semantic_ref_kind")
+
+    it "should admit concrete and CTFE bodies without changing worker IO rules":
+        step("Run V1 worker admission with both new embedded body kinds")
+        val refs = [v1_embedded(ThreePayloadSemanticRefKindV1.ConcreteFunction,
+            "fn.body"), v1_embedded(ThreePayloadSemanticRefKindV1.CtfeBody,
+            "ctfe.body"), v1_symbolic(ThreePayloadSemanticRefKindV1.TraitCallable,
+            "Trait.call"), v1_symbolic(ThreePayloadSemanticRefKindV1.AspectCallable,
+            "Aspect.before")]
+        val admission = match three_payload_worker_admit_v1(v1_seal(refs), reads()):
+            case Ok(_): "admitted"
+            case Err(_): "rejected"
+        expect(admission).to_equal("admitted")
+
+    it "should reject external summaries, exceptional bodies, RR, and wrong cardinality":
+        step("Exercise the worker admission-only IO and cardinality contract")
+        val refs: [ThreePayloadSemanticRefV1] = []
+        var imported = reads()
+        imported.imported_summary_reads = 1
+        expect(worker_error(refs, imported)).to_equal("external_payload")
+        var exceptional = reads()
+        exceptional.exceptional_body_reads = 1
+        expect(worker_error(refs, exceptional)).to_equal("external_payload")
+        var rr = reads()
+        rr.rr_reads = 1
+        expect(worker_error(refs, rr)).to_equal("rr_is_coordinator_only")
+        var wrong_source = reads()
+        wrong_source.source_payload_reads = 0
+        expect(worker_error(refs, wrong_source)).to_equal("payload_cardinality")

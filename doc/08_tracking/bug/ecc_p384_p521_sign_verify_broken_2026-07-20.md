@@ -1,14 +1,11 @@
 # ECDSA P-384/P-521: sign returns 0-byte signature, NIST CAVP verify fails on both curves
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 - **Date:** 2026-07-20
 - **Area:** ECDSA-P384/P521 implementation exercised via
   `test/unit/lib/crypto/ecc_p384_p521_kat_spec.spl`
 - **Severity:** high (sign is non-functional for P-384; verify fails NIST
   CAVP vectors for both curves).
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN. **Do not touch the NIST CAVP vectors.**
 
 ## Symptom
 

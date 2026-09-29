@@ -1,0 +1,36 @@
+"""SOSIX typed errors classify kernel status codes without allocating text on the hot path."""
+
+use std.spec.*
+use std.common.contracts.sosix.error_v1.*
+
+describe "SOSIX typed error vocabulary":
+    it "maps the three typed kernel statuses and keeps the rest native":
+        # @req REQ-SOSIX-ERR
+        step("Map EAGAIN-shaped slot exhaustion to queue-full")
+        val full = sosix_error_from_status(SOSIX_STATUS_QUEUE_FULL, SOSIX_NATIVE_DOMAIN_SIMPLEOS, 0)
+        expect(full.kind).to_equal(SOSIX_ERROR_QUEUE_FULL)
+        expect(full.native_code).to_equal(-11)
+        step("Map timeout and cancellation statuses")
+        expect(sosix_error_from_status(SOSIX_STATUS_TIMED_OUT, SOSIX_NATIVE_DOMAIN_SIMPLEOS, 3).kind).to_equal(SOSIX_ERROR_TIMED_OUT)
+        expect(sosix_error_from_status(SOSIX_STATUS_CANCELED, SOSIX_NATIVE_DOMAIN_SIMPLEOS, 0).kind).to_equal(SOSIX_ERROR_CANCELED)
+        step("Keep an unmapped VFS failure native and carry its code and progress")
+        val io = sosix_error_from_status(-5, SOSIX_NATIVE_DOMAIN_SIMPLEOS, 12)
+        expect(io.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(io.native_code).to_equal(-5)
+        expect(io.transferred).to_equal(12)
+
+    it "constructs validation errors without a native domain":
+        step("Create an invalid-capability error")
+        val e = sosix_error_new(SOSIX_ERROR_INVALID_CAPABILITY)
+        expect(e.kind).to_equal(SOSIX_ERROR_INVALID_CAPABILITY)
+        expect(e.native_domain).to_equal(SOSIX_NATIVE_DOMAIN_NONE)
+        expect(e.native_code).to_equal(0)
+
+    it "formats a description only on demand":
+        step("Describe a queue-full error")
+        val text_form = sosix_error_describe(sosix_error_from_status(-11, SOSIX_NATIVE_DOMAIN_POSIX, 0))
+        expect(text_form).to_start_with("queue-full")
+        expect(text_form).to_contain("code=-11")
+        step("Every kind has a stable name")
+        expect(sosix_error_kind_name(SOSIX_ERROR_UNSUPPORTED)).to_equal("unsupported")
+        expect(sosix_error_kind_name(99)).to_equal("unknown")

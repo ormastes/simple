@@ -1,0 +1,96 @@
+# devhub — Jira Atlassian Document Format (ADF) round-trip unit tests.
+#
+# Feature: ADF -> plain text on the read path (the missing inverse of _adf_doc)
+# Category: DevHub, Jira, Backend-to-canonical mapping
+# Status: Implemented
+#
+# devhub targets Jira REST **v3** (`auth.spl` -> `rest/api/3`), where rich-text
+# fields are ADF *objects*, not strings. The write path was correct — `_adf_doc`
+# wraps outbound plain text into an ADF document — but the read path used
+# `_jstr`, which JSON-serialises a value and strips surrounding quotes. An
+# object does not start with `"`, so the entire
+# `{"type":"doc","version":1,...}` blob was returned and printed as the issue
+# description.
+#
+# v3 and v2 are NOT interchangeable: v3 rejects plain text and v2 rejects ADF,
+# so "switch to v2" would break the write path instead.
+#
+# Source: src/app/devhub/adapter_jira_curl.spl
+# Research: doc/01_research/app/tools/devhub/devhub_multi_backend_feature_matrix_2026-09-06.md §5.2, §9.1
+
+use app.devhub.adapter_jira_curl.{adf_to_plain}
+use std.json.{json_parse}
+
+
+# Literal JSON braces are composed, not typed: a brace pair inside a plain
+# double-quoted Simple string is interpolation syntax.
+fn lb() -> text:
+    "{"
+
+fn rb() -> text:
+    "}"
+
+fn obj(inner: text) -> text:
+    lb() + inner + rb()
+
+fn text_node(s: text) -> text:
+    obj("\"type\": \"text\", \"text\": \"" + s + "\"")
+
+fn para(inner: text) -> text:
+    obj("\"type\": \"paragraph\", \"content\": [" + inner + "]")
+
+fn doc(inner: text) -> text:
+    obj("\"type\": \"doc\", \"version\": 1, \"content\": [" + inner + "]")
+
+
+describe "Jira ADF -> plain text":
+
+    describe "the shapes Jira Cloud v3 actually returns":
+        it "flattens a single-paragraph description":
+            expect(adf_to_plain(json_parse(doc(para(text_node("Hello world")))))).to_equal("Hello world")
+
+        it "keeps paragraphs on separate lines":
+            val two = doc(para(text_node("first")) + ", " + para(text_node("second")))
+            expect(adf_to_plain(json_parse(two))).to_equal("first\nsecond")
+
+        it "joins adjacent text nodes within one paragraph":
+            # ADF splits text at every mark boundary, so a sentence with one
+            # bold word arrives as three sibling text nodes.
+            val split = doc(para(text_node("plain ") + ", " + text_node("bold") + ", " + text_node(" tail")))
+            expect(adf_to_plain(json_parse(split))).to_equal("plain bold tail")
+
+        it "renders a hardBreak as a newline":
+            val br = doc(para(text_node("a") + ", " + obj("\"type\": \"hardBreak\"") + ", " + text_node("b")))
+            expect(adf_to_plain(json_parse(br))).to_equal("a\nb")
+
+        it "descends into node types it does not know rather than dropping them":
+            # A description containing a panel, list or table must still yield
+            # its words. Dropping unknown containers would silently lose most
+            # of a real-world description.
+            val panel = obj("\"type\": \"panel\", \"content\": [" + para(text_node("inside a panel")) + "]")
+            expect(adf_to_plain(json_parse(doc(panel)))).to_contain("inside a panel")
+
+        it "extracts list item text":
+            val item = obj("\"type\": \"listItem\", \"content\": [" + para(text_node("bullet one")) + "]")
+            val list = obj("\"type\": \"bulletList\", \"content\": [" + item + "]")
+            expect(adf_to_plain(json_parse(doc(list)))).to_contain("bullet one")
+
+    describe "shapes that are not ADF at all":
+        it "passes a plain JSON string through unchanged":
+            # A v2 response, or a Server/Data Center deployment, returns the
+            # description as a string. The same call site must handle it.
+            expect(adf_to_plain(json_parse("\"just text\""))).to_equal("just text")
+
+        it "returns empty for a missing field":
+            expect(adf_to_plain(nil)).to_equal("")
+
+        it "returns empty for an explicit JSON null":
+            expect(adf_to_plain(json_parse("null"))).to_equal("")
+
+        it "never leaks the raw ADF envelope":
+            # The regression guard for the actual defect: the description used
+            # to come back as the serialised document object.
+            val out = adf_to_plain(json_parse(doc(para(text_node("real content")))))
+            expect(out).to_not_contain("\"type\"")
+            expect(out).to_not_contain("version")
+            expect(out).to_equal("real content")

@@ -1,0 +1,820 @@
+#![allow(primitive_api)]
+
+# Common physical-TLD records and their strict canonical field codec.
+# This module describes generated metadata only.  It owns no source lookup,
+# filesystem publication, or semantic extraction authority.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.common.string_core.{bytes_to_text, text_to_bytes}
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.structural.digest.hash256_codec.{hash256_put, hash256_read}
+use std.common.structural.wire.{wire_check_envelope, wire_envelope_len, wire_get_u8,
+    wire_get_u32, wire_get_u64, wire_has, wire_magic, wire_put_envelope,
+    wire_put_u8, wire_put_u32, wire_put_u64}
+
+pub fn three_payload_contract_max_items_v1() -> i64: 1048576
+pub fn three_payload_contract_max_text_bytes_v1() -> i64: 16777216
+pub fn three_payload_contract_max_payload_bytes_v1() -> i64: 268435456
+
+pub fn three_payload_contract_text_valid_v1(value: text, allow_empty: bool) -> bool:
+    val size = text_to_bytes(value).len()
+    size <= three_payload_contract_max_text_bytes_v1() and (allow_empty or size > 0)
+
+pub fn three_payload_contract_digest_valid_v1(value: text) -> bool:
+    hash256_hex_valid(value)
+
+pub class ThreePayloadContractBudgetV1:
+    remaining_bytes: i64
+    remaining_items: i64
+    used_bytes: i64
+    ok: bool
+
+    me fn add_bytes(count: i64):
+        if not self.ok or count < 0 or count > self.remaining_bytes:
+            self.ok = false
+            return
+        self.remaining_bytes = self.remaining_bytes - count
+        self.used_bytes = self.used_bytes + count
+
+    me fn add_items(count: i64):
+        if not self.ok or count < 0 or count > self.remaining_items:
+            self.ok = false
+            return
+        self.remaining_items = self.remaining_items - count
+
+    me fn add_text(value: text, allow_empty: bool):
+        val size = text_to_bytes(value).len()
+        if not three_payload_contract_text_valid_v1(value, allow_empty):
+            self.ok = false
+            return
+        self.add_bytes(4 + size)
+
+    me fn add_digest(value: text):
+        if not three_payload_contract_digest_valid_v1(value):
+            self.ok = false
+            return
+        self.add_bytes(32)
+
+    me fn add_optional_digest(value: text?):
+        self.add_bytes(1)
+        match value:
+            case Some(digest): self.add_digest(digest)
+            case nil: pass
+
+    me fn add_blob(value: [u8]):
+        if value.len() > three_payload_contract_max_payload_bytes_v1():
+            self.ok = false
+            return
+        self.add_bytes(4 + value.len())
+
+pub fn three_payload_contract_budget_v1() -> ThreePayloadContractBudgetV1:
+    ThreePayloadContractBudgetV1(remaining_bytes: three_payload_contract_max_payload_bytes_v1(),
+        remaining_items: three_payload_contract_max_items_v1(), used_bytes: 0, ok: true)
+
+pub fn three_payload_contract_put_text_v1(out: [u8], value: text) -> [u8]:
+    val raw = text_to_bytes(value)
+    var bytes = wire_put_u32(out, raw.len())
+    for byte in raw: bytes.push(byte)
+    bytes
+
+pub fn three_payload_contract_put_digest_v1(out: [u8], value: text) -> [u8]:
+    hash256_put(out, value)
+
+pub fn three_payload_contract_put_optional_digest_v1(out: [u8], value: text?) -> [u8]:
+    match value:
+        case Some(digest): hash256_put(wire_put_u8(out, 1), digest)
+        case nil: wire_put_u8(out, 0)
+
+pub fn three_payload_contract_put_texts_v1(out: [u8], values: [text]) -> [u8]:
+    var bytes = wire_put_u32(out, values.len())
+    for value in values: bytes = three_payload_contract_put_text_v1(bytes, value)
+    bytes
+
+pub fn three_payload_contract_put_blob_v1(out: [u8], value: [u8]) -> [u8]:
+    var bytes = wire_put_u32(out, value.len())
+    for byte in value: bytes.push(byte)
+    bytes
+
+pub class ThreePayloadContractReaderV1:
+    data: [u8]
+    offset: i64
+    ok: bool
+    error: text
+    retained_text_bytes: i64
+    retained_items: i64
+
+    me fn reject(reason: text):
+        if self.ok: self.error = reason
+        self.ok = false
+
+    me fn read_u8() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 1):
+            self.reject("truncated_u8")
+            return 0
+        val value = wire_get_u8(self.data, self.offset)
+        self.offset = self.offset + 1
+        value
+
+    me fn read_u32() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 4):
+            self.reject("truncated_u32")
+            return 0
+        val value = wire_get_u32(self.data, self.offset)
+        self.offset = self.offset + 4
+        value
+
+    me fn read_u64_nonnegative() -> i64:
+        if not self.ok or not wire_has(self.data, self.offset, 8):
+            self.reject("truncated_u64")
+            return 0
+        val value = wire_get_u64(self.data, self.offset)
+        self.offset = self.offset + 8
+        if value < 0: self.reject("u64_overflow")
+        value
+
+    me fn read_count() -> i64:
+        val count = self.read_u32()
+        if not self.ok or count < 0 or count > three_payload_contract_max_items_v1() or
+                self.retained_items > three_payload_contract_max_items_v1() - count:
+            self.reject("item_bounds_exceeded")
+            return 0
+        self.retained_items = self.retained_items + count
+        count
+
+    me fn read_text(allow_empty: bool) -> text:
+        val count = self.read_u32()
+        if not self.ok or count < 0 or count > three_payload_contract_max_text_bytes_v1() or
+                self.retained_text_bytes > three_payload_contract_max_payload_bytes_v1() - count or
+                not wire_has(self.data, self.offset, count):
+            self.reject("text_bounds_exceeded")
+            return ""
+        val raw = self.data[self.offset..(self.offset + count)]
+        if not allow_empty and count == 0:
+            self.reject("invalid_utf8_or_empty_text")
+            return ""
+        val value = match validated_utf8_bytes_to_text_linear(raw):
+            case Ok(decoded): decoded
+            case Err(_):
+                # Assign directly in the Result arm: the tree interpreter may
+                # otherwise lose the text mutation through a nested method
+                # call even though it preserves the boolean rejection.
+                self.error = "invalid_utf8_or_empty_text"
+                self.ok = false
+                return ""
+        self.offset = self.offset + count
+        self.retained_text_bytes = self.retained_text_bytes + count
+        value
+
+    me fn read_blob() -> [u8]:
+        val count = self.read_u32()
+        if not self.ok or count < 0 or count > three_payload_contract_max_payload_bytes_v1() or
+                not wire_has(self.data, self.offset, count):
+            self.reject("blob_bounds_exceeded")
+            return []
+        val value = self.data[self.offset..(self.offset + count)]
+        self.offset = self.offset + count
+        value
+
+    me fn read_digest() -> text:
+        if not self.ok or not wire_has(self.data, self.offset, 32):
+            self.reject("truncated_digest")
+            return ""
+        val value = hash256_read(self.data, self.offset)
+        self.offset = self.offset + 32
+        value
+
+    me fn read_optional_digest() -> text?:
+        val present = self.read_u8()
+        if not self.ok: return nil
+        if present == 0: return nil
+        if present != 1:
+            self.reject("invalid_optional_tag")
+            return nil
+        Some(self.read_digest())
+
+    me fn read_texts(allow_empty: bool) -> [text]:
+        var values: [text] = []
+        val count = self.read_count()
+        var index: i64 = 0
+        while self.ok and index < count:
+            values.push(self.read_text(allow_empty))
+            index = index + 1
+        values
+
+    fn finished() -> bool:
+        self.ok and self.offset == self.data.len()
+
+# TLD2 must inspect its embedded TLD1 table in the enclosing byte array before
+# materializing the body-containing core slice.  This bounded cursor is local to
+# that preflight: unlike the public reader, its reads cannot cross the declared
+# embedded-core end into extension payload bytes.
+class PhysicalTldCoreBoundsReaderV1:
+    data: [u8]
+    offset: i64
+    end_offset: i64
+    ok: bool
+    error: text
+    retained_text_bytes: i64
+    retained_items: i64
+
+    me fn reject(reason: text):
+        if self.ok: self.error = reason
+        self.ok = false
+
+    me fn has(count: i64) -> bool:
+        self.ok and count >= 0 and self.offset >= 0 and
+            self.offset <= self.end_offset and count <= self.end_offset - self.offset
+
+    me fn read_u8() -> i64:
+        if not self.has(1):
+            self.reject("truncated_u8")
+            return 0
+        val value = wire_get_u8(self.data, self.offset)
+        self.offset = self.offset + 1
+        value
+
+    me fn read_u32() -> i64:
+        if not self.has(4):
+            self.reject("truncated_u32")
+            return 0
+        val value = wire_get_u32(self.data, self.offset)
+        self.offset = self.offset + 4
+        value
+
+    me fn read_u64_nonnegative() -> i64:
+        if not self.has(8):
+            self.reject("truncated_u64")
+            return 0
+        val value = wire_get_u64(self.data, self.offset)
+        self.offset = self.offset + 8
+        if value < 0: self.reject("u64_overflow")
+        value
+
+    me fn read_count() -> i64:
+        val count = self.read_u32()
+        if not self.ok or count < 0 or count > three_payload_contract_max_items_v1() or
+                self.retained_items > three_payload_contract_max_items_v1() - count:
+            self.reject("item_bounds_exceeded")
+            return 0
+        self.retained_items = self.retained_items + count
+        count
+
+    me fn read_text(allow_empty: bool) -> text:
+        val count = self.read_u32()
+        if not self.ok or count < 0 or count > three_payload_contract_max_text_bytes_v1() or
+                self.retained_text_bytes > three_payload_contract_max_payload_bytes_v1() - count or
+                not self.has(count):
+            self.reject("text_bounds_exceeded")
+            return ""
+        val raw = self.data[self.offset..(self.offset + count)]
+        val value = bytes_to_text(raw)
+        if text_to_bytes(value) != raw or (not allow_empty and count == 0):
+            self.reject("invalid_utf8_or_empty_text")
+            return ""
+        self.offset = self.offset + count
+        self.retained_text_bytes = self.retained_text_bytes + count
+        value
+
+    me fn skip_digest():
+        if not self.has(32):
+            self.reject("truncated_digest")
+            return
+        self.offset = self.offset + 32
+
+pub enum TldPayloadRoleV1:
+    PriorModuleTld
+    PackageInitTld
+
+pub struct TldSectionRefV1:
+    role: TldPayloadRoleV1
+    section_index: i64
+    kind: text
+    semantic_object_digest: text
+    offset: i64
+    stored_bytes: i64
+    decoded_bytes: i64
+    encoding_profile: text
+
+pub struct PhysicalTldHeaderV1:
+    schema: i64
+    role: TldPayloadRoleV1
+    semantic_record_digest: text
+    section_table_digest: text
+    payload_bytes: i64
+    sections: [TldSectionRefV1]
+
+pub struct PhysicalTldHeaderDecodeV1:
+    ok: bool
+    value: PhysicalTldHeaderV1?
+    error: text
+    header_bytes: i64
+
+pub struct PhysicalTldObjectV1:
+    header: PhysicalTldHeaderV1
+    canonical_sections: [[u8]]
+
+pub struct PhysicalTldObjectDecodeV1:
+    ok: bool
+    value: PhysicalTldObjectV1?
+    error: text
+
+# TLD2 is an explicit compatibility wrapper around one canonical TLD1 object.
+# Extension offsets are relative to the extension payload region, never to the
+# wrapped TLD1 bytes.  Schema 2 defines presentation field 1 and no mandatory
+# extension semantics; all optional fields are retained opaquely.
+pub struct PhysicalTldExtensionV2:
+    field_id: i64
+    mandatory: bool
+    offset: i64
+    stored_bytes: i64
+    opaque_bytes: [u8]
+
+pub struct PhysicalTldObjectV2:
+    core: PhysicalTldObjectV1
+    extensions: [PhysicalTldExtensionV2]
+
+pub struct PhysicalTldObjectDecodeV2:
+    ok: bool
+    value: PhysicalTldObjectV2?
+    error: text
+
+pub fn physical_tld_presentation_field_id_v2() -> i64: 1
+
+fn _role_tag_v1(role: TldPayloadRoleV1) -> i64:
+    match role:
+        case PriorModuleTld: 1
+        case PackageInitTld: 2
+
+fn _role_from_tag_v1(tag: i64) -> TldPayloadRoleV1?:
+    if tag == 1: return Some(TldPayloadRoleV1.PriorModuleTld)
+    if tag == 2: return Some(TldPayloadRoleV1.PackageInitTld)
+    nil
+
+pub fn tld_section_ref_valid_v1(section: TldSectionRefV1) -> bool:
+    section.section_index >= 0 and
+        three_payload_contract_text_valid_v1(section.kind, false) and
+        three_payload_contract_digest_valid_v1(section.semantic_object_digest) and
+        section.offset >= 0 and section.stored_bytes >= 0 and section.decoded_bytes >= 0 and
+        three_payload_contract_text_valid_v1(section.encoding_profile, false)
+
+pub fn tld_section_ref_budget_v1(budget: ThreePayloadContractBudgetV1,
+        section: TldSectionRefV1):
+    budget.add_bytes(1 + 8)
+    budget.add_text(section.kind, false)
+    budget.add_digest(section.semantic_object_digest)
+    budget.add_bytes(8 + 8 + 8)
+    budget.add_text(section.encoding_profile, false)
+
+pub fn tld_section_ref_put_v1(out: [u8], section: TldSectionRefV1) -> [u8]:
+    var bytes = wire_put_u8(out, _role_tag_v1(section.role))
+    bytes = wire_put_u64(bytes, section.section_index)
+    bytes = three_payload_contract_put_text_v1(bytes, section.kind)
+    bytes = three_payload_contract_put_digest_v1(bytes, section.semantic_object_digest)
+    bytes = wire_put_u64(bytes, section.offset)
+    bytes = wire_put_u64(bytes, section.stored_bytes)
+    bytes = wire_put_u64(bytes, section.decoded_bytes)
+    three_payload_contract_put_text_v1(bytes, section.encoding_profile)
+
+pub fn tld_section_ref_read_v1(reader: ThreePayloadContractReaderV1) -> TldSectionRefV1:
+    val role = _role_from_tag_v1(reader.read_u8())
+    if role == nil: reader.reject("unknown_section_role")
+    val decoded_role = match role:
+        case Some(value): value
+        case nil: TldPayloadRoleV1.PriorModuleTld
+    TldSectionRefV1(role: decoded_role, section_index: reader.read_u64_nonnegative(),
+        kind: reader.read_text(false), semantic_object_digest: reader.read_digest(),
+        offset: reader.read_u64_nonnegative(), stored_bytes: reader.read_u64_nonnegative(),
+        decoded_bytes: reader.read_u64_nonnegative(), encoding_profile: reader.read_text(false))
+
+pub fn physical_tld_section_table_bytes_v1(sections: [TldSectionRefV1]) -> [u8]:
+    if sections.len() > three_payload_contract_max_items_v1(): return []
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(4)
+    budget.add_items(sections.len())
+    for section in sections: tld_section_ref_budget_v1(budget, section)
+    if not budget.ok: return []
+    var out: [u8] = []
+    out = wire_put_u32(out, sections.len())
+    var index: i64 = 0
+    for section in sections:
+        if not tld_section_ref_valid_v1(section) or section.section_index != index: return []
+        out = tld_section_ref_put_v1(out, section)
+        index = index + 1
+    out
+
+pub fn physical_tld_section_table_digest_v1(sections: [TldSectionRefV1]) -> text:
+    val bytes = physical_tld_section_table_bytes_v1(sections)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)
+
+pub fn physical_tld_header_valid_v1(header: PhysicalTldHeaderV1) -> bool:
+    if header.schema != 1 or
+            not three_payload_contract_digest_valid_v1(header.semantic_record_digest) or
+            not three_payload_contract_digest_valid_v1(header.section_table_digest) or
+            header.payload_bytes < 0 or
+            header.payload_bytes > three_payload_contract_max_payload_bytes_v1() or
+            header.sections.len() > three_payload_contract_max_items_v1():
+        return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8 + 1)
+    budget.add_digest(header.semantic_record_digest)
+    budget.add_digest(header.section_table_digest)
+    budget.add_bytes(8 + 4)
+    budget.add_items(header.sections.len())
+    for section in header.sections: tld_section_ref_budget_v1(budget, section)
+    if not budget.ok: return false
+    if physical_tld_section_table_digest_v1(header.sections) != header.section_table_digest:
+        return false
+    var previous_end: i64 = 0
+    var index: i64 = 0
+    for section in header.sections:
+        if section.role != header.role or section.section_index != index or
+                section.offset < previous_end or
+                section.stored_bytes > header.payload_bytes or
+                section.offset > header.payload_bytes - section.stored_bytes:
+            return false
+        previous_end = section.offset + section.stored_bytes
+        index = index + 1
+    true
+
+pub fn physical_tld_header_encode_v1(header: PhysicalTldHeaderV1) -> [u8]:
+    if not physical_tld_header_valid_v1(header): return []
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TLD1"), 1)
+    out = wire_put_u64(out, header.schema)
+    out = wire_put_u8(out, _role_tag_v1(header.role))
+    out = three_payload_contract_put_digest_v1(out, header.semantic_record_digest)
+    out = three_payload_contract_put_digest_v1(out, header.section_table_digest)
+    out = wire_put_u64(out, header.payload_bytes)
+    val table = physical_tld_section_table_bytes_v1(header.sections)
+    for byte in table: out.push(byte)
+    out
+
+fn _decode_failure_v1(error: text) -> PhysicalTldHeaderDecodeV1:
+    PhysicalTldHeaderDecodeV1(ok: false, value: nil, error: error, header_bytes: 0)
+
+fn _physical_tld_header_decode_v1(bytes: [u8], permit_payload: bool,
+        max_sections: i64, max_decoded_bytes: i64) -> PhysicalTldHeaderDecodeV1:
+    if max_sections < 0 or max_sections > three_payload_contract_max_items_v1() or
+            max_decoded_bytes < 0 or max_decoded_bytes > three_payload_contract_max_payload_bytes_v1():
+        return _decode_failure_v1("invalid_tld_decode_bounds")
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1(): return _decode_failure_v1("tld_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("TLD1"), 1): return _decode_failure_v1("tld_v1_envelope_mismatch")
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val schema = reader.read_u64_nonnegative()
+    val role = _role_from_tag_v1(reader.read_u8())
+    if role == nil: return _decode_failure_v1("unknown_tld_role")
+    val semantic_digest = reader.read_digest()
+    val table_digest = reader.read_digest()
+    val payload_bytes = reader.read_u64_nonnegative()
+    val count = reader.read_count()
+    if not reader.ok: return _decode_failure_v1(reader.error)
+    if count > max_sections: return _decode_failure_v1("tld_section_limit_exceeded")
+    var sections: [TldSectionRefV1] = []
+    var index: i64 = 0
+    while reader.ok and index < count:
+        val section = tld_section_ref_read_v1(reader)
+        if not reader.ok: return _decode_failure_v1(reader.error)
+        if section.decoded_bytes > max_decoded_bytes:
+            return _decode_failure_v1("tld_decode_byte_limit_exceeded")
+        sections.push(section)
+        index = index + 1
+    if not reader.ok: return _decode_failure_v1(reader.error)
+    val decoded_role = match role:
+        case Some(value): value
+        case nil: TldPayloadRoleV1.PriorModuleTld
+    val header = PhysicalTldHeaderV1(schema: schema, role: decoded_role,
+        semantic_record_digest: semantic_digest, section_table_digest: table_digest,
+        payload_bytes: payload_bytes, sections: sections)
+    if not physical_tld_header_valid_v1(header): return _decode_failure_v1("noncanonical_tld_header")
+    val remaining = bytes.len() - reader.offset
+    if permit_payload:
+        if remaining != header.payload_bytes: return _decode_failure_v1("tld_payload_length_mismatch")
+    else if remaining != 0:
+        return _decode_failure_v1("trailing_tld_bytes")
+    PhysicalTldHeaderDecodeV1(ok: true, value: Some(header), error: "", header_bytes: reader.offset)
+
+pub fn physical_tld_header_decode_v1(bytes: [u8]) -> PhysicalTldHeaderDecodeV1:
+    _physical_tld_header_decode_v1(bytes, false, three_payload_contract_max_items_v1(),
+        three_payload_contract_max_payload_bytes_v1())
+
+pub fn physical_tld_header_decode_bounded_v1(bytes: [u8], max_sections: i64,
+        max_decoded_bytes: i64) -> PhysicalTldHeaderDecodeV1:
+    _physical_tld_header_decode_v1(bytes, false, max_sections, max_decoded_bytes)
+
+pub fn physical_tld_header_digest_v1(header: PhysicalTldHeaderV1) -> text:
+    val bytes = physical_tld_header_encode_v1(header)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)
+
+fn _physical_tld_object_failure_v1(error: text) -> PhysicalTldObjectDecodeV1:
+    PhysicalTldObjectDecodeV1(ok: false, value: nil, error: error)
+
+pub fn physical_tld_object_valid_v1(value: PhysicalTldObjectV1) -> bool:
+    if not physical_tld_header_valid_v1(value.header) or
+            value.canonical_sections.len() != value.header.sections.len(): return false
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(physical_tld_header_encode_v1(value.header).len())
+    budget.add_bytes(value.header.payload_bytes)
+    if not budget.ok: return false
+    var offset: i64 = 0
+    var index: i64 = 0
+    while index < value.header.sections.len():
+        val section = value.header.sections[index]
+        val body = value.canonical_sections[index]
+        if section.encoding_profile != "raw-v1" or section.offset != offset or
+                section.stored_bytes != body.len() or section.decoded_bytes != body.len() or
+                sha256_u8_hex(body) != section.semantic_object_digest: return false
+        offset = offset + body.len()
+        index = index + 1
+    offset == value.header.payload_bytes
+
+pub fn physical_tld_object_encode_v1(value: PhysicalTldObjectV1) -> [u8]:
+    if not physical_tld_object_valid_v1(value): return []
+    var out = physical_tld_header_encode_v1(value.header)
+    for body in value.canonical_sections:
+        for byte in body: out.push(byte)
+    if out.len() > three_payload_contract_max_payload_bytes_v1(): return []
+    out
+
+pub fn physical_tld_object_decode_bounded_v1(bytes: [u8], max_sections: i64,
+        max_decoded_bytes: i64) -> PhysicalTldObjectDecodeV1:
+    val decoded = _physical_tld_header_decode_v1(bytes, true, max_sections, max_decoded_bytes)
+    if not decoded.ok: return _physical_tld_object_failure_v1(decoded.error)
+    val header = match decoded.value:
+        case Some(value): value
+        case nil: return _physical_tld_object_failure_v1("missing_tld_header")
+    # Preflight the complete payload table before retaining any body slice.  The
+    # common V1 object profile is raw-only, so stored and decoded sizes must be
+    # identical and the caller's decode budget applies to their aggregate.
+    var expected_offset: i64 = 0
+    var retained_body_bytes: i64 = 0
+    for section in header.sections:
+        if section.encoding_profile != "raw-v1":
+            return _physical_tld_object_failure_v1("tld_unsupported_encoding")
+        if section.stored_bytes != section.decoded_bytes:
+            return _physical_tld_object_failure_v1("tld_raw_length_mismatch")
+        if section.offset != expected_offset:
+            return _physical_tld_object_failure_v1("tld_noncontiguous_payload")
+        if section.decoded_bytes > max_decoded_bytes - retained_body_bytes:
+            return _physical_tld_object_failure_v1("tld_aggregate_decode_limit_exceeded")
+        val start = decoded.header_bytes + section.offset
+        val end = start + section.stored_bytes
+        if start < decoded.header_bytes or end < start or end > bytes.len():
+            return _physical_tld_object_failure_v1("tld_section_bounds")
+        retained_body_bytes = retained_body_bytes + section.decoded_bytes
+        expected_offset = expected_offset + section.stored_bytes
+    if expected_offset != header.payload_bytes:
+        return _physical_tld_object_failure_v1("tld_noncontiguous_payload")
+    var bodies: [[u8]] = []
+    for section in header.sections:
+        val start = decoded.header_bytes + section.offset
+        val end = start + section.stored_bytes
+        bodies.push(bytes[start..end])
+    val value = PhysicalTldObjectV1(header: header, canonical_sections: bodies)
+    if not physical_tld_object_valid_v1(value): return _physical_tld_object_failure_v1("tld_body_digest_mismatch")
+    PhysicalTldObjectDecodeV1(ok: true, value: Some(value), error: "")
+
+pub fn physical_tld_object_decode_v1(bytes: [u8]) -> PhysicalTldObjectDecodeV1:
+    physical_tld_object_decode_bounded_v1(bytes, three_payload_contract_max_items_v1(),
+        three_payload_contract_max_payload_bytes_v1())
+
+pub fn physical_tld_object_digest_v1(value: PhysicalTldObjectV1) -> text:
+    val bytes = physical_tld_object_encode_v1(value)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)
+
+fn _physical_tld_object_failure_v2(error: text) -> PhysicalTldObjectDecodeV2:
+    PhysicalTldObjectDecodeV2(ok: false, value: nil, error: error)
+
+pub fn physical_tld_object_valid_v2(value: PhysicalTldObjectV2) -> bool:
+    if not physical_tld_object_valid_v1(value.core) or
+            value.extensions.len() > three_payload_contract_max_items_v1():
+        return false
+    val core_bytes = physical_tld_object_encode_v1(value.core)
+    val budget = three_payload_contract_budget_v1()
+    budget.add_bytes(wire_envelope_len() + 8 + 4)
+    budget.add_bytes(core_bytes.len())
+    budget.add_items(value.extensions.len())
+    var expected_offset: i64 = 0
+    var previous_id: i64 = 0
+    for extension in value.extensions:
+        budget.add_bytes(8 + 1 + 8 + 8)
+        budget.add_bytes(extension.opaque_bytes.len())
+        # Schema 2 has no mandatory extension semantics.  Optional field IDs
+        # are ordered so a decoded object has one byte-exact canonical form.
+        if extension.field_id <= previous_id or extension.mandatory or
+                extension.offset != expected_offset or extension.stored_bytes < 0 or
+                extension.stored_bytes != extension.opaque_bytes.len() or
+                extension.stored_bytes > three_payload_contract_max_payload_bytes_v1() - expected_offset:
+            return false
+        previous_id = extension.field_id
+        expected_offset = expected_offset + extension.stored_bytes
+    budget.ok
+
+pub fn physical_tld_object_encode_v2(value: PhysicalTldObjectV2) -> [u8]:
+    if not physical_tld_object_valid_v2(value): return []
+    val core_bytes = physical_tld_object_encode_v1(value.core)
+    var out: [u8] = []
+    out = wire_put_envelope(out, wire_magic("TLD2"), 2)
+    out = wire_put_u64(out, core_bytes.len())
+    out = wire_put_u32(out, value.extensions.len())
+    for extension in value.extensions:
+        out = wire_put_u64(out, extension.field_id)
+        out = wire_put_u8(out, if extension.mandatory: 1 else: 0)
+        out = wire_put_u64(out, extension.offset)
+        out = wire_put_u64(out, extension.stored_bytes)
+    for byte in core_bytes: out.push(byte)
+    for extension in value.extensions:
+        for byte in extension.opaque_bytes: out.push(byte)
+    if out.len() > three_payload_contract_max_payload_bytes_v1(): return []
+    out
+
+fn _physical_tld_core_bounds_preflight_v2(bytes: [u8], core_start: i64,
+        core_end: i64, max_sections: i64, max_decoded_bytes: i64) -> text:
+    if core_start < 0 or core_end < core_start or core_end > bytes.len():
+        return "tld_v2_core_bounds"
+    if core_end - core_start > three_payload_contract_max_payload_bytes_v1():
+        return "tld_bounds_exceeded"
+    val reader = PhysicalTldCoreBoundsReaderV1(data: bytes, offset: core_start,
+        end_offset: core_end, ok: true, error: "", retained_text_bytes: 0,
+        retained_items: 0)
+    if not reader.has(wire_envelope_len()) or
+            not wire_check_envelope(bytes, core_start, wire_magic("TLD1"), 1):
+        return "tld_v1_envelope_mismatch"
+    reader.offset = reader.offset + wire_envelope_len()
+    val schema = reader.read_u64_nonnegative()
+    val role = _role_from_tag_v1(reader.read_u8())
+    if role == nil: reader.reject("unknown_tld_role")
+    reader.skip_digest()
+    reader.skip_digest()
+    val payload_bytes = reader.read_u64_nonnegative()
+    val count = reader.read_count()
+    if not reader.ok: return reader.error
+    if schema != 1 or payload_bytes > three_payload_contract_max_payload_bytes_v1():
+        return "noncanonical_tld_header"
+    if count > max_sections: return "tld_section_limit_exceeded"
+
+    var retained_stored_bytes: i64 = 0
+    var retained_decoded_bytes: i64 = 0
+    var index: i64 = 0
+    while reader.ok and index < count:
+        val section_role = _role_from_tag_v1(reader.read_u8())
+        if section_role == nil: reader.reject("unknown_section_role")
+        val section_index = reader.read_u64_nonnegative()
+        reader.read_text(false)
+        reader.skip_digest()
+        val offset = reader.read_u64_nonnegative()
+        val stored_bytes = reader.read_u64_nonnegative()
+        val decoded_bytes = reader.read_u64_nonnegative()
+        val encoding_profile = reader.read_text(false)
+        if not reader.ok: return reader.error
+        if section_role != role or section_index != index or
+                stored_bytes > payload_bytes or offset > payload_bytes - stored_bytes:
+            return "noncanonical_tld_header"
+        if encoding_profile != "raw-v1": return "tld_unsupported_encoding"
+        if stored_bytes != decoded_bytes: return "tld_raw_length_mismatch"
+        if offset != retained_stored_bytes: return "tld_noncontiguous_payload"
+        if stored_bytes > payload_bytes - retained_stored_bytes:
+            return "tld_section_bounds"
+        if decoded_bytes > max_decoded_bytes:
+            return "tld_decode_byte_limit_exceeded"
+        if decoded_bytes > max_decoded_bytes - retained_decoded_bytes:
+            return "tld_aggregate_decode_limit_exceeded"
+        retained_stored_bytes = retained_stored_bytes + stored_bytes
+        retained_decoded_bytes = retained_decoded_bytes + decoded_bytes
+        index = index + 1
+    if not reader.ok: return reader.error
+    if payload_bytes != core_end - reader.offset:
+        return "tld_payload_length_mismatch"
+    if retained_stored_bytes != payload_bytes or retained_decoded_bytes != payload_bytes:
+        return "tld_noncontiguous_payload"
+    ""
+
+pub fn physical_tld_object_decode_bounded_v2(bytes: [u8], max_sections: i64,
+        max_decoded_bytes: i64, max_extensions: i64,
+        max_extension_bytes: i64) -> PhysicalTldObjectDecodeV2:
+    if max_sections < 0 or max_sections > three_payload_contract_max_items_v1() or
+            max_decoded_bytes < 0 or max_decoded_bytes > three_payload_contract_max_payload_bytes_v1() or
+            max_extensions < 0 or max_extensions > three_payload_contract_max_items_v1() or
+            max_extension_bytes < 0 or
+            max_extension_bytes > three_payload_contract_max_payload_bytes_v1():
+        return _physical_tld_object_failure_v2("invalid_tld_v2_decode_bounds")
+    if bytes.len() > three_payload_contract_max_payload_bytes_v1():
+        return _physical_tld_object_failure_v2("tld_v2_bounds_exceeded")
+    if not wire_check_envelope(bytes, 0, wire_magic("TLD2"), 2):
+        return _physical_tld_object_failure_v2("tld_v2_envelope_mismatch")
+
+    # Pass 1 retains no extension descriptor or payload.  It rejects unknown
+    # mandatory semantics, arithmetic/range faults and overlap/gaps before any
+    # extension payload slice is allocated.
+    val reader = ThreePayloadContractReaderV1(data: bytes, offset: wire_envelope_len(), ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    val core_byte_count = reader.read_u64_nonnegative()
+    val extension_count = reader.read_count()
+    if not reader.ok: return _physical_tld_object_failure_v2(reader.error)
+    if extension_count > max_extensions:
+        return _physical_tld_object_failure_v2("tld_v2_extension_limit_exceeded")
+    val table_start = reader.offset
+    val table_entry_bytes: i64 = 8 + 1 + 8 + 8
+    val table_bytes = extension_count * table_entry_bytes
+    if not wire_has(bytes, table_start, table_bytes):
+        return _physical_tld_object_failure_v2("truncated_tld_v2_extension_table")
+    var expected_offset: i64 = 0
+    var previous_id: i64 = 0
+    var index: i64 = 0
+    while reader.ok and index < extension_count:
+        val field_id = reader.read_u64_nonnegative()
+        val mandatory_tag = reader.read_u8()
+        val offset = reader.read_u64_nonnegative()
+        val stored_bytes = reader.read_u64_nonnegative()
+        if not reader.ok: return _physical_tld_object_failure_v2(reader.error)
+        if mandatory_tag != 0 and mandatory_tag != 1:
+            return _physical_tld_object_failure_v2("invalid_tld_v2_extension_requirement")
+        if mandatory_tag == 1:
+            return _physical_tld_object_failure_v2("unknown_mandatory_tld_v2_extension")
+        if field_id <= previous_id:
+            return _physical_tld_object_failure_v2("noncanonical_tld_v2_extension_order")
+        if offset != expected_offset:
+            return _physical_tld_object_failure_v2("tld_v2_extension_overlap_or_gap")
+        if stored_bytes > max_extension_bytes - expected_offset:
+            return _physical_tld_object_failure_v2("tld_v2_extension_bytes_exceeded")
+        previous_id = field_id
+        expected_offset = expected_offset + stored_bytes
+        index = index + 1
+
+    val core_start = table_start + table_bytes
+    if core_byte_count > bytes.len() - core_start:
+        return _physical_tld_object_failure_v2("tld_v2_core_bounds")
+    val extension_payload_start = core_start + core_byte_count
+    if expected_offset > bytes.len() - extension_payload_start:
+        return _physical_tld_object_failure_v2("tld_v2_extension_payload_bounds")
+    if expected_offset != bytes.len() - extension_payload_start:
+        return _physical_tld_object_failure_v2("trailing_tld_v2_bytes")
+
+    # Apply caller-owned core limits against the enclosing buffer before the
+    # complete body-containing core slice below is materialized.  This is a
+    # bounded preflight, not a zero-copy decode claim.
+    val core_bounds_error = _physical_tld_core_bounds_preflight_v2(bytes,
+        core_start, extension_payload_start, max_sections, max_decoded_bytes)
+    if core_bounds_error.len() > 0:
+        return _physical_tld_object_failure_v2(core_bounds_error)
+    val core_decoded = physical_tld_object_decode_bounded_v1(
+        bytes[core_start..extension_payload_start], max_sections, max_decoded_bytes)
+    if not core_decoded.ok: return _physical_tld_object_failure_v2(core_decoded.error)
+    val core = match core_decoded.value:
+        case Some(value): value
+        case nil: return _physical_tld_object_failure_v2("missing_tld_v2_core")
+
+    # Pass 2 runs only after the complete extension table and payload extent
+    # were accepted.  Unknown optional fields are copied verbatim for roundtrip.
+    val table_reader = ThreePayloadContractReaderV1(data: bytes, offset: table_start, ok: true,
+        error: "", retained_text_bytes: 0, retained_items: 0)
+    var extensions: [PhysicalTldExtensionV2] = []
+    index = 0
+    while index < extension_count:
+        val field_id = table_reader.read_u64_nonnegative()
+        val mandatory_tag = table_reader.read_u8()
+        val offset = table_reader.read_u64_nonnegative()
+        val stored_bytes = table_reader.read_u64_nonnegative()
+        val start = extension_payload_start + offset
+        val end = start + stored_bytes
+        extensions.push(PhysicalTldExtensionV2(field_id: field_id,
+            mandatory: mandatory_tag == 1, offset: offset, stored_bytes: stored_bytes,
+            opaque_bytes: bytes[start..end]))
+        index = index + 1
+    val value = PhysicalTldObjectV2(core: core, extensions: extensions)
+    if not physical_tld_object_valid_v2(value):
+        return _physical_tld_object_failure_v2("noncanonical_tld_v2_object")
+    PhysicalTldObjectDecodeV2(ok: true, value: Some(value), error: "")
+
+pub fn physical_tld_object_decode_v2(bytes: [u8]) -> PhysicalTldObjectDecodeV2:
+    physical_tld_object_decode_bounded_v2(bytes, three_payload_contract_max_items_v1(),
+        three_payload_contract_max_payload_bytes_v1(), three_payload_contract_max_items_v1(),
+        three_payload_contract_max_payload_bytes_v1())
+
+pub fn physical_tld_object_digest_v2(value: PhysicalTldObjectV2) -> text:
+    val bytes = physical_tld_object_encode_v2(value)
+    if bytes.len() == 0: return ""
+    sha256_u8_hex(bytes)
+
+pub fn physical_tld_projection_text_v1(header: PhysicalTldHeaderV1) -> text:
+    if not physical_tld_header_valid_v1(header): return ""
+    val role = match header.role:
+        case PriorModuleTld: "prior-module"
+        case PackageInitTld: "package-init"
+    var lines = ["# generated Simple .tld projection; not source", "schema=1", "role={role}",
+        "semantic_record_digest={header.semantic_record_digest}",
+        "section_table_digest={header.section_table_digest}",
+        "payload_bytes={header.payload_bytes}", "sections={header.sections.len()}"]
+    for section in header.sections:
+        lines.push("section={section.section_index} kind={section.kind} object={section.semantic_object_digest} offset={section.offset} stored={section.stored_bytes} decoded={section.decoded_bytes} encoding={section.encoding_profile}")
+    lines.join("\n") + "\n"
+
+pub fn physical_tld_projection_text_v2(value: PhysicalTldObjectV2) -> text:
+    if not physical_tld_object_valid_v2(value): return ""
+    # Presentation extensions never participate in semantic identity or alter
+    # the deterministic projection derived from the canonical core header.
+    physical_tld_projection_text_v1(value.core.header)

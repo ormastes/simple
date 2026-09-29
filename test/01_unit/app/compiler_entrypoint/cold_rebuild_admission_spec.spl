@@ -1,0 +1,65 @@
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+use app.compiler_entrypoint.admission.{
+    compiler_entrypoint_index_transition_v1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_publish_v1, package_module_index_read_current_v1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+
+extern fn rt_getpid() -> i64
+
+fn graph_for_cold_rebuild() -> PackageModuleIndexGenerationV1:
+    val digest = sha256_text("one-typed-module")
+    var entry = PackageModuleIndexEntryV1(
+        package_identity: "package-a", module_identity: "a",
+        source_identity: "src/a.spl", source_digest: digest,
+        smf_metadata_digest: digest, export_digest: digest,
+        abi_digest: digest, initializer_digest: digest,
+        provider_digest: digest, action_digest: digest,
+        manifest_digest: digest, scc_identity: "scc-a",
+        direct_imports: [], reverse_dependents: [])
+    var graph = PackageModuleIndexGenerationV1(
+        schema_version: 2, producer_digest: digest,
+        root_generation: "root-a", scv_revision_id: "revision-a",
+        scv_commit_id: "commit-a", scv_tree_id: "tree-a",
+        inventory_digest: digest, entries: [entry],
+        variant_digest: digest)
+    entry.action_digest = package_module_index_entry_action_digest_v1(
+        graph, entry)
+    graph.entries[0] = entry
+    graph
+
+fn snapshot_for_cold_rebuild(
+    graph: PackageModuleIndexGenerationV1, revision: text
+) -> ScvCompileSnapshotV1:
+    ScvCompileSnapshotV1(
+        valid: true, reason: "ok", revision_id: revision,
+        commit_id: graph.scv_commit_id, tree_id: graph.scv_tree_id,
+        inventory_digest: graph.inventory_digest, inventory_count: 1,
+        snapshot_root: "/tmp/frozen", provenance_path: "/tmp/provenance",
+        receipt_path: "/tmp/receipt", source_drifted: false)
+
+describe "Target 6 cold graph rebuild admission":
+    it "preserves a validated old graph until an explicit cold rebuild":
+        val cache_root = "build/test-artifacts/cold-rebuild-index-{rt_getpid()}"
+        dir_remove(cache_root, true)
+        val graph = graph_for_cold_rebuild()
+        step("Publish a complete graph for the prior SCV revision")
+        expect(package_module_index_publish_v1(cache_root, graph)).to_equal(true)
+        val old = package_module_index_read_current_v1(cache_root)
+        expect(old.valid).to_equal(true)
+        expect(old.generation!.entries.len()).to_equal(1)
+        val changed = snapshot_for_cold_rebuild(graph, "revision-b")
+        expect(compiler_entrypoint_index_transition_v1(
+            old, changed, false)).to_equal("stale-graph-rebuild-required")
+        expect(compiler_entrypoint_index_transition_v1(
+            old, changed, true)).to_equal("cold-rebuild-pending")
+        expect(package_module_index_read_current_v1(cache_root).digest).to_equal(
+            old.digest)
+        val unchanged = snapshot_for_cold_rebuild(graph, "revision-a")
+        expect(compiler_entrypoint_index_transition_v1(
+            old, unchanged, false)).to_equal("bound")
+        dir_remove(cache_root, true)

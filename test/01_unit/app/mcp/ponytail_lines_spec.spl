@@ -1,0 +1,78 @@
+"""
+# Ponytail Audit — line counting
+
+**Requirements:** N/A
+
+## Overview
+
+`ponytail_audit_source` reported `lines: 1` for every source: the counter
+iterated characters with `for ch in source` / `ch == "\n"`, which never
+matches in this runtime (and would crash on a StrBytes value). The count is
+now `source.split("\n")` based, i.e. `wc -l` semantics: a trailing newline
+does not count as an extra line. Every count is cross-checked against the
+platform `wc -l` on the same fixture bytes.
+
+## Behavior
+
+- A source whose last line ends with `\n` counts exactly the `wc -l` value.
+- A source whose last line has no trailing newline still counts that line.
+- An empty source counts 0 lines.
+"""
+
+# @feature mcp_ponytail_lines
+# tag: unit
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get, dir_create, dir_remove_all, file_write, time_now_unix_micros}
+use std.nogc_sync_mut.sffi.system.{process_run_timeout}
+use std.common.ponytail.audit.{ponytail_audit_source, ponytail_simplification_report_source}
+
+fn _fixture(content: text) -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/ponytail_lines_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    val path = dir + "/fixture.spl"
+    file_write(path, content)
+    path
+
+# Pull the `lines: N` counter out of a ponytail report.
+fn _reported_lines(report: text) -> i64:
+    for line in report.split("\n"):
+        if line.starts_with("lines: "):
+            return line.substring(7).to_int() ?? -1
+    -1
+
+# Ground truth: what the platform `wc -l` says about the fixture bytes.
+fn _wc_lines(path: text) -> i64:
+    val (wc_out, _wc_err, wc_code) = process_run_timeout("sh", ["-c", "wc -l < " + path], 10000)
+    if wc_code != 0:
+        return -1
+    wc_out.trim().to_int() ?? -1
+
+describe "ponytail line counting":
+    it "counts lines wc -l style, not 1":
+        step("Audit a 5-line fixture with a trailing newline")
+        val path = _fixture("a\nb\nc\nd\ne\n")
+        val report = ponytail_audit_source(path, "a\nb\nc\nd\ne\n")
+        expect(report).to_contain("lines: 5")
+        expect(report).to_contain("status: ok")
+        step("Cross-check the report against wc -l")
+        expect(_reported_lines(report)).to_equal(_wc_lines(path))
+        expect(_wc_lines(path)).to_equal(5)  # oracle: wc -l counts newlines, not segments
+
+    it "counts the last line without a trailing newline too":
+        step("Audit a 2-line fixture with no trailing newline")
+        val path = _fixture("x\ny")
+        val report = ponytail_simplification_report_source(path, "x\ny")
+        expect(report).to_contain("lines: 2")
+        expect(_reported_lines(report)).to_equal(_wc_lines(path) + 1)  # oracle: wc -l misses the unterminated last line
+
+    it "counts an empty source as 0":
+        step("Audit an empty fixture")
+        val path = _fixture("")
+        val report = ponytail_audit_source(path, "")
+        expect(report).to_contain("lines: 0")
+        expect(_reported_lines(report)).to_equal(_wc_lines(path))

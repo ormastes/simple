@@ -1,0 +1,210 @@
+# spipe_docgen reads string state from CoreLexer, not from one line at a time.
+#
+# Two walkers in spipe_docgen/parser.spl decided "am I inside a docstring?" by
+# inspecting the current line alone. Neither could tell a docstring's bare
+# closing `"""` from a FIXTURE string's — `val src = """ ... """` — so on the
+# way out of a fixture both entered docstring mode and discarded everything up
+# to the next triple quote:
+#   - parse_spipe_file collected a bogus doc block made of the following code,
+#     and lost the real standalone doc block after it (and the feature title);
+#   - extract_test_structure dropped the next `describe` heading, while
+#     rendering the fixture's INTERIOR as if it were real structure.
+#
+# Measured 2026-09-05: 70 `*_spec.spl` files open a fixture string, and 38 of
+# them close it with a bare `"""` line — the exact trigger.
+#
+# Entry layer: real source text through the production parser. The fixture is
+# a FILE because a triple quote inside this spec's own literals would open a
+# docstring here.
+#
+# Design: doc/05_design/platform/structural_compute/parser_sharing_contract_v1.md
+
+use std.spec.*
+use app.spipe_docgen.parser.{parse_spipe_file, extract_test_structure}
+use app.io.mod.{file_read_text}
+
+val FIXTURE: text = "test/fixtures/source_facts/docgen_fixture_string_then_scenario.spl"
+val PLAIN: text = "test/fixtures/source_facts/docgen_plain_spec.spl"
+val COLUMN0: text = "test/fixtures/source_facts/docgen_fixture_column0_in_body.spl"
+val FORMS: text = "test/fixtures/source_facts/docgen_string_forms_in_body.spl"
+val PREVINC: text = "test/fixtures/source_facts/docgen_prev_include_fixture_body.spl"
+
+fn heading_lines_mentioning(md: text, needle: text) -> i64:
+    """Count markdown HEADING lines that mention `needle` — a heading is
+    structure; the same text inside a code fence is a scenario's own source."""
+    var n: i64 = 0
+    for line in md.split("\n"):
+        if line.starts_with("#") and line.contains(needle):
+            n = n + 1
+    n
+
+fn structure() -> text:
+    extract_test_structure(file_read_text(FIXTURE))
+
+describe "docgen structure extraction survives a fixture string":
+
+    it "keeps the describe heading that follows a fixture string":
+        """The heading after the fixture is the one the old walker lost."""
+        step("Render the structure of a spec whose first scenario holds a fixture string")
+        val md = structure()
+
+        step("Both real describe blocks are headings")
+        expect(md).to_contain("### before")
+        expect(md).to_contain("### after")
+
+    it "does not promote the fixture's interior to structure":
+        """Text inside a string is content. The old walker rendered a
+        `describe` written inside a fixture as a real H3."""
+        step("Render the same structure")
+        val md = structure()
+
+        step("Nothing from inside the fixture string became a heading")
+        expect(heading_lines_mentioning(md, "NOT A SCENARIO")).to_equal(0)
+        expect(heading_lines_mentioning(md, "NOT AN IT")).to_equal(0)
+
+        step("It is still present as the scenario's own source, inside its body")
+        expect(md).to_contain("NOT A SCENARIO")
+
+    it "keeps every body line after a fixture whose interior sits at column zero":
+        """find_scenario_body_end used to end a body at the first non-blank line
+        whose indent was at or left of the scenario's. A fixture string's
+        interior routinely sits at column 0, so everything after the fixture
+        fell out of the manual — 11 spec files in this tree."""
+        step("Render a scenario whose fixture string holds column-zero lines")
+        val md = extract_test_structure(file_read_text(COLUMN0))
+
+        step("The fixture interior is part of the body")
+        expect(md).to_contain("print(73)")
+
+        step("So is every line after the fixture closes")
+        expect(md).to_contain("after_fixture_marker")
+
+    it "keeps the post-fixture assertions of a committed spec with a column-zero golden":
+        """Corpus arm: resource_wrapper_gen_spec.spl holds a golden string whose
+        interior starts at column 0 (line 61) inside an `it` (line 56); the
+        real assertions follow the golden's close at line 82."""
+        step("Render the real spec's structure")
+        val md = extract_test_structure(file_read_text("test/01_unit/compiler/resource/resource_wrapper_gen_spec.spl"))
+
+        step("An assertion written AFTER the golden block is in the rendered body")
+        expect(md).to_contain("assert_contains(golden")
+
+    it "renders the docstring of the describe that follows the fixture":
+        """Under the old walker this describe was consumed inside bogus
+        docstring mode, so its docstring never reached the manual."""
+        step("Render the structure")
+        val md = structure()
+
+        step("The describe's inline docstring is rendered as its subtitle")
+        expect(md).to_contain("A one-line docstring on the describe.")
+
+    it "is unchanged on a spec with no fixture strings at all":
+        """Control: behaviour the old walker got RIGHT must not regress. This
+        example must pass against the old walker AND the new one."""
+        step("Render a plain spec — a doc block, a describe with a docstring, one it")
+        val md = extract_test_structure(file_read_text(PLAIN))
+        expect(md).to_contain("### plain")
+        expect(md).to_contain("A one-line docstring on the describe.")
+
+        step("Its standalone doc block and title are collected as before")
+        val doc = parse_spipe_file(PLAIN).unwrap()
+        expect(doc.doc_blocks.len()).to_equal(1)
+        expect(doc.feature_title).to_equal("Plain Title")
+
+    it "renders every real describe of a committed spec that carries the construct":
+        """Corpus arm with an independent oracle: the number of `###` headings
+        must equal the number of column-0 `describe` lines in the file — counted
+        here without the extractor, so the assertion has something to be wrong
+        against. This file opens a raw fixture string at line 32 and closes it
+        with a bare triple quote at line 34; its only describe is at line 106."""
+        step("Count column-0 describe lines in a real spec, independently")
+        val path = "test/03_system/compiler/native_cli_mode_transport_regression_spec.spl"
+        val raw = file_read_text(path)
+        var describes: i64 = 0
+        for line in raw.split("\n"):
+            if line.starts_with("describe \""):
+                describes = describes + 1
+        expect(describes).to_equal(1)
+
+        step("The rendered structure has exactly that many H3 headings")
+        var headings: i64 = 0
+        for line in extract_test_structure(raw).split("\n"):
+            if line.starts_with("### "):
+                headings = headings + 1
+        expect(headings).to_equal(describes)
+
+    it "keeps the body whole for every multi-line string form the lexer knows":
+        """Generalization of the body-end fix across string forms: raw
+        `r\"\"\"`, single-quoted `\'\'\'`, and escaped quotes inside. The lexer
+        marks each form's continuation lines the same way (measured `.CC..`
+        for all of them), so a body must survive all of them."""
+        step("Render a spec whose scenarios hold one form each")
+        val md = extract_test_structure(file_read_text(FORMS))
+
+        step("Every post-fixture assertion is present")
+        expect(md).to_contain("after_raw_marker")
+        expect(md).to_contain("after_single_marker")
+        expect(md).to_contain("after_escaped_marker")
+
+    it "keeps the body whole when the source uses CRLF line endings":
+        """Built IN-SPEC, never as a committed file: git normalizes CRLF on
+        checkout, so a CRLF fixture is LF on a fresh clone and the example
+        would test nothing there. The source is asserted to really carry CR."""
+        step("Build a CRLF spec source whose fixture interior sits at column zero")
+        val tq = "\"" + "\"" + "\""
+        val raw = "describe \"crlf\":\r\n" +
+            "    it \"crlf fixture\":\r\n" +
+            "        val d = " + tq + "fn main():\r\n" +
+            "    print(4)\r\n" +
+            tq + "\r\n" +
+            "        expect(after_crlf_marker()).to_equal(true)\r\n"
+        expect(raw).to_contain("\r\n")
+
+        step("The post-fixture assertion survives")
+        expect(extract_test_structure(raw)).to_contain("after_crlf_marker")
+
+    it "expands @prev and @include through a scenario whose body holds a fixture":
+        """find_scenario_body_by_title and find_previous_scenario_body share the
+        same body-end logic. A referenced scenario whose golden sits at column
+        0 used to be truncated on expansion, so the expanding scenario inherited
+        a cut body."""
+        step("Render a spec where later scenarios @prev/@include a golden-holding one")
+        val md = extract_test_structure(file_read_text(PREVINC))
+
+        step("The expanding scenarios keep their own trailing assertions")
+        expect(md).to_contain("after_prev_marker")
+        expect(md).to_contain("after_include_marker")
+
+        step("And the golden's interior was carried across the expansion")
+        expect(md).to_contain("print(1)")
+
+describe "docgen doc-block collection survives a fixture string":
+
+    it "collects the real standalone doc block after the fixture, not a bogus one":
+        """The old walker took the fixture's closing `\"\"\"` as an opener and
+        swallowed the following code as documentation; the real block after
+        it was then lost along with the feature title."""
+        step("Parse the fixture spec file")
+        val doc = parse_spipe_file(FIXTURE).unwrap()
+
+        step("Exactly one doc block is found, and it is the real one")
+        expect(doc.doc_blocks.len()).to_equal(1)
+        expect(doc.doc_blocks[0].content).to_contain("real documentation")
+        expect(doc.doc_blocks[0].content.contains("expect(parse(src))")).to_equal(false)
+
+        step("The feature title comes from that real block")
+        expect(doc.feature_title).to_equal("Real Title")
+
+describe "docgen string-state sabotage arm":
+
+    it "confirms the fixture really carries the construct under test":
+        """A spec asserting an absence proves nothing unless the input really
+        contains the thing."""
+        step("The fixture contains a fixture string closed by a bare triple quote")
+        val raw = file_read_text(FIXTURE)
+        val tq = "\"" + "\"" + "\""
+        expect(raw).to_contain("val src = " + tq)
+        expect(raw).to_contain("\n" + tq + "\n")
+
+        step("And it really does contain the decoy scenario text")
+        expect(raw).to_contain("NOT A SCENARIO")

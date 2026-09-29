@@ -1,16 +1,19 @@
 # Linux Vulkan RenderDoc Reason Forwarding SSpec Daemon Timeout
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
-
 Date: 2026-06-28
 
-## Summary
+## Status
 
-`test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl` times
-out under the current SPipe test daemon on this host, even though the direct
-aggregate evidence check completes quickly. Do not rerun this SSpec repeatedly
-in one session.
+STALE ASSERTION FIXED / DAEMON VERIFICATION PENDING.
+
+The stale forwarding assertion now checks the current lookup components: raw
+external-host reason, capture reason, and the generic gate fallback. This
+repairs the stale source assertion only. It does not prove the lookup's runtime
+precedence and it does not resolve or explain the historical daemon timeout.
+
+The timeout report predates the `SIMPLE_TIMEOUT_SECONDS` handling fix, but that
+chronology is not evidence that the ignored environment budget caused this
+specific timeout.
 
 ## Observed Command
 
@@ -18,7 +21,18 @@ in one session.
 SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl --mode=interpreter --clean --fail-fast
 ```
 
-Observed result:
+Non-authoritative seed result (2026-09-21):
+
+```text
+PASS test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl
+Duration: 257ms
+```
+
+The available `bin/simple` identifies itself as a Rust bootstrap seed. This
+result preserves the red-to-green evidence but cannot close the bug under the
+pure-Simple runtime policy.
+
+Original daemon observation (2026-06-28):
 
 ```text
 ERROR: test daemon timed out: test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl
@@ -37,30 +51,25 @@ gui_showcase_4k_200fps_status=pass
 gui_showcase_8k_perf_status=pass
 ```
 
-## Required Fix
+## Scope
 
-Fix the SPipe daemon profile or split this focused static-forwarding scenario so
-it can complete reliably. Until then, use the direct aggregate evidence for this
-specific forwarding contract and keep the broader Linux RenderDoc gate
-incomplete until Chrome and Electron `.rdc` artifacts have `RDOC` magic.
+Run the focused command with an admitted pure-Simple self-hosted binary and
+record a passing daemon result before closing this bug. The broader Linux
+RenderDoc gate remains incomplete until Chrome and Electron `.rdc` artifacts
+have `RDOC` magic.
 
-## Re-triage 2026-08-17 (m9a_tests lane)
+## TODO: Deferred Verification
 
-**Verdict: timeout evidence is stale and structurally suspect; not re-measured.**
-
-`test/03_system/check/linux_vulkan_renderdoc_reason_forwarding_spec.spl` reads
-check scripts as data rather than forking them (line 126
-`file_read("scripts/check/check-linux-vulkan-render-log-compare.shs")`, line 134
-`file_read("scripts/check/check-gui-renderdoc-feature-coverage-status.shs")`),
-so unlike its sibling `renderdoc_electron_html_gate_spec.spl` it does **not**
-re-run whole gates from inside its examples. That removes the obvious cost
-explanation and makes a genuine 2026-06-28 timeout less likely to still hold.
-
-The original evidence predates both known false-timeout sources named in the
-session brief: `SIMPLE_TIMEOUT_SECONDS` being parsed and discarded until
-`a034851236d`, and the mis-thresholded `kill_simple_monitor.shs` that SIGTERMed
-specs at `MIN_AGE_SECS=60` — below a normal specs ~115s runtime.
-
-**Not re-measured to a `Results:` line from this lane** (host load average
-81-133; runs were SIGTERMed at rc=143 with no `Results:` line = UNVERIFIED, not
-failed). Re-run on a quiet host with an explicit `--timeout` before closing.
+- On Linux/aarch64, after an admitted pure-Simple Stage 2 or Stage 3 CLI is
+  available, run the focused command above through the session daemon with an
+  explicit `--timeout` and with `SIMPLE_TIMEOUT_SECONDS` set to a distinct
+  larger value. Record binary path, SHA-256, stage/provenance, elapsed time, and
+  daemon verdict. This is the required test for this timeout bug.
+- The GPU-free behavioral fixture is now
+  `test/01_unit/scripts/linux_vulkan_renderdoc_reason_precedence_contract_test.shs`.
+  It supplies distinct raw-capture, capture, and generic-gate reasons and proves
+  raw wins, capture is the second fallback, and generic is last.
+- On a prepared Linux Vulkan GUI host, run Chrome and Electron under the
+  canonical RenderDoc wrapper and require both resulting capture files to have
+  `RDOC` magic. This is broader platform completion evidence, not a prerequisite
+  for closing the focused daemon-timeout verdict.

@@ -1,0 +1,89 @@
+"""
+`<wbr>` was not a break opportunity, so a word carrying one never wrapped.
+
+`<wbr>` is a zero-width SOFT break opportunity: HTML gives it no glyph and no
+advance, and CSS Text lets a line break there — but only when the content that
+follows does not fit the remainder of the current line. Because `<wbr>` splits
+the DOM text into separate `#text` siblings, the opportunity lands exactly at
+that node and needs no intra-run machinery; the block loop in
+`simple_web_html_layout_renderer_layout.spl` simply treated it as an ordinary
+childless inline, gave it a 1 px placeholder advance, and never broke.
+
+With `overflow-wrap: normal` (the initial value) a word wider than the line
+OVERFLOWS rather than being cut, so without the `<wbr>` arm the whole word
+stayed on one line and the box came out exactly one line short.
+
+This was the largest ACTIONABLE attributed root of the 8-page Chrome parity
+catalog at round 25's baseline: `html.html` `li` 86 is
+`<p style="width:80px">LongWord<wbr>BreakHere</p>`, Chrome 48 against Simple
+24, and that 24 px shortfall propagated into the page's `ul`, `section` and
+`body` rows (~120 attributed Σ).
+
+Every number below is HARVESTED from Chrome 152 `--headless=new
+--window-size=900,20000` over byte-identical markup, not predicted:
+
+| case                                            | Chrome h | Simple before |
+|-------------------------------------------------|----------|---------------|
+| `w80  LongWord<wbr>BreakHere`                    | 48       | 24            |
+| `w80  LongWordBreakHere`          (control)      | 24       | 24            |
+| `w80  ab<wbr>cd`                  (control)      | 24       | 24            |
+| `w400 LongWord<wbr>BreakHere`     (control)      | 24       | 24            |
+| `w80  Long<wbr>Word<wbr>BreakHere`               | 48       | 24            |
+| `w80  Some words here now`        (control)      | 72       | 72            |
+
+The controls carry the argument, and the fifth row is the one that makes the
+rule GREEDY rather than eager. `Long<wbr>Word<wbr>BreakHere` in an 80 px box is
+**two** lines, not three: Chrome takes only the opportunity it needs, so the
+first `<wbr>` (after which `Word` still fits) is passed over. A predicted value
+of 72 for that row was written down before the harvest and was WRONG; the
+harvest is what settles it, and breaking at every `<wbr>` is the sabotage arm
+this spec exists to fail.
+
+Known residual, stated rather than hidden: a `<wbr>` at pen 0 —
+`<p style="width:80px"><wbr>LongWordBreakHere</p>` — is 48 in Chrome, which
+appears to open an empty first line. The implementation guards the arm with
+`inline_x > inline_start_x`, so Simple answers 24 there. That degenerate case
+is not exercised by any catalog page and is deliberately not encoded here.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-LAYOUT-017 — `<wbr>` is a zero-width soft break opportunity that is taken only when the following word does not fit the line remainder.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+val HEAD: text = "<html><head><style>*{box-sizing:border-box}body{margin:0;font:16px/1.5 sans-serif}</style></head><body>"
+
+fn probe(inner: text, id: text) -> text:
+    simple_web_layout_debug_layout_by_id(HEAD + inner + "</body></html>", VW, VH, id, "h")
+
+describe "<wbr> is a soft break opportunity taken only when the next word does not fit":
+    it "AC-1: the catalog's LongWord<wbr>BreakHere box is 48, not 24":
+        step("Chrome 48 = two 24 px line boxes; this is html.html li 86")
+        expect(probe("<p id=\"o\" style=\"width:80px\">LongWord<wbr>BreakHere</p>", "o")).to_equal("48")
+
+    it "AC-2: a greedy breaker uses only the opportunity it needs":
+        step("Chrome 48, NOT 72 — Long+Word still fit on line one, so the first <wbr> is passed over")
+        step("this row fails the moment the arm breaks at every <wbr> unconditionally")
+        expect(probe("<p id=\"o\" style=\"width:80px\">Long<wbr>Word<wbr>BreakHere</p>", "o")).to_equal("48")
+
+    it "AC-3 (control): the SAME word without a <wbr> still overflows one line":
+        step("Chrome 24 — overflow-wrap:normal forbids an intra-word cut, so nothing may break it")
+        expect(probe("<p id=\"o\" style=\"width:80px\">LongWordBreakHere</p>", "o")).to_equal("24")
+
+    it "AC-4 (control): a <wbr> whose following word FITS adds no line":
+        step("Chrome 24 — the opportunity exists but is not needed, and <wbr> adds no width")
+        expect(probe("<p id=\"o\" style=\"width:80px\">ab<wbr>cd</p>", "o")).to_equal("24")
+
+    it "AC-5 (control): the same markup in a wide box stays on one line":
+        step("Chrome 24 at width 400 — the arm must be conditional on the line remainder, not on the tag")
+        expect(probe("<p id=\"o\" style=\"width:400px\">LongWord<wbr>BreakHere</p>", "o")).to_equal("24")
+
+    it "AC-6 (control): ordinary space wrapping in the same box is untouched":
+        step("Chrome 72 = three lines; the <wbr> arm must not disturb the normal breaker")
+        expect(probe("<div id=\"o\" style=\"width:80px\">Some words here now</div>", "o")).to_equal("72")

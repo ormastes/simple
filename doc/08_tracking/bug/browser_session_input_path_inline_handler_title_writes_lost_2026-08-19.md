@@ -1,4 +1,8 @@
 # BrowserSession: input-path inline handlers run but their document.title writes are lost
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Status: OPEN
@@ -40,3 +44,4 @@ state captured before the dispatch.
 Session-level scripts used for the bisect live at
 `/tmp/claude-1000/sessfull.spl`, `/tmp/claude-1000/sessbi2.spl` (scratch; recreate
 from this record if gone).
+

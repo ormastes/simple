@@ -1,0 +1,264 @@
+# Immutable proof records for a future real packed Engine2D provider adapter.
+# This module validates provider evidence; it does not submit device work.
+use std.common.crypto.sha256.sha256_bytes
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+pub enum Engine2dPackedProofErrorV1:
+    MissingIdentity
+    MissingFence
+    RoutingOnly
+    StaleOrSubstituted
+    PackedChecksumMismatch
+    FenceNotSignaled
+    CancellationNotRetired
+    LeaseNotRetired
+    Replay
+    CapacityExceeded
+    AuthorityRejected
+    ProviderBusy
+pub struct Engine2dPackedSubmissionProofV1:
+    submission_generation: u64
+    epoch: u64
+    provider_identity: EnvironmentDigest256V1
+    image_identity: EnvironmentDigest256V1
+    device_identity: EnvironmentDigest256V1
+    provider_adapter_identity: EnvironmentDigest256V1
+    queue_generation: u64
+    session_generation: u64
+    packed_content_digest: EnvironmentDigest256V1
+    lease_generation: u64
+    fence_identity: EnvironmentDigest256V1
+    routing_only: bool
+    submission_identity: EnvironmentDigest256V1
+pub struct Engine2dPackedCompletionProofV1:
+    submission: Engine2dPackedSubmissionProofV1
+    fence_signaled: bool
+    cancelled: bool
+    readback_present: bool
+    readback_digest: EnvironmentDigest256V1
+    completion_identity: EnvironmentDigest256V1
+pub struct Engine2dPackedRetirementProofV1:
+    completion: Engine2dPackedCompletionProofV1
+    lease_retired: bool
+    retirement_generation: u64
+    retirement_identity: EnvironmentDigest256V1
+pub struct Engine2dPackedProviderAuthorityV1:
+    authority_handle: u64
+    owner_identity: u64
+struct _Engine2dPackedProviderRecordV1:
+    handle: Engine2dPackedProviderAuthorityV1
+    provider_identity: EnvironmentDigest256V1
+    image_identity: EnvironmentDigest256V1
+    device_identity: EnvironmentDigest256V1
+    provider_adapter_identity: EnvironmentDigest256V1
+    queue_generation: u64
+    session_generation: u64
+    inflight: u64
+    live: bool
+struct _Engine2dPackedLiveSubmissionV1:
+    authority: Engine2dPackedProviderAuthorityV1
+    submission_generation: u64
+    submission_identity: EnvironmentDigest256V1
+var _next_packed_proof_owner_v1: u64 = 1u64
+pub class Engine2dPackedProofOwnerV1:
+    var owner_identity: u64
+    var next_authority_handle: u64
+    var next_submission_generation: u64
+    var providers: [_Engine2dPackedProviderRecordV1]
+    var live_submissions: [_Engine2dPackedLiveSubmissionV1]
+    pub static fn create() -> Engine2dPackedProofOwnerV1:
+        val identity = _next_packed_proof_owner_v1
+        if identity != 0u64 and identity != 0xffffffffffffffffu64:
+            _next_packed_proof_owner_v1 = identity + 1u64
+        Engine2dPackedProofOwnerV1(owner_identity: identity, next_authority_handle: 1u64,
+            next_submission_generation: 1u64, providers: [], live_submissions: [])
+
+fn _declared_pcp(d: EnvironmentDigest256V1) -> bool:
+    d.w0 != 0u64 or d.w1 != 0u64 or d.w2 != 0u64 or d.w3 != 0u64
+fn _push64_pcp(out: [i64], value: u64):
+    for i in 0..8: out.push(((value >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_pcp(out: [i64], value: EnvironmentDigest256V1):
+    _push64_pcp(out, value.w0); _push64_pcp(out, value.w1)
+    _push64_pcp(out, value.w2); _push64_pcp(out, value.w3)
+fn _read64_pcp(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+fn _hash_pcp(bytes: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(bytes)
+    EnvironmentDigest256V1(w0: _read64_pcp(raw, 0), w1: _read64_pcp(raw, 8),
+        w2: _read64_pcp(raw, 16), w3: _read64_pcp(raw, 24))
+fn _submission_digest_pcp(s: Engine2dPackedSubmissionProofV1) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_pcp(bytes, 1u64)
+    _push64_pcp(bytes, s.submission_generation); _push64_pcp(bytes, s.epoch)
+    for d in [s.provider_identity, s.image_identity, s.device_identity, s.provider_adapter_identity,
+            s.packed_content_digest, s.fence_identity]: _pushd_pcp(bytes, d)
+    for v in [s.queue_generation, s.session_generation, s.lease_generation,
+            s.routing_only as u64]: _push64_pcp(bytes, v)
+    _hash_pcp(bytes)
+fn _completion_digest_pcp(c: Engine2dPackedCompletionProofV1) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_pcp(bytes, 2u64)
+    _pushd_pcp(bytes, c.submission.submission_identity)
+    _push64_pcp(bytes, c.fence_signaled as u64); _push64_pcp(bytes, c.cancelled as u64)
+    _push64_pcp(bytes, c.readback_present as u64); _pushd_pcp(bytes, c.readback_digest)
+    _hash_pcp(bytes)
+fn _retirement_digest_pcp(r: Engine2dPackedRetirementProofV1) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_pcp(bytes, 3u64)
+    _pushd_pcp(bytes, r.completion.completion_identity)
+    _push64_pcp(bytes, r.lease_retired as u64); _push64_pcp(bytes, r.retirement_generation)
+    _hash_pcp(bytes)
+
+fn _provider_pcp(owner: Engine2dPackedProofOwnerV1,
+    authority: Engine2dPackedProviderAuthorityV1) -> i64:
+    var i = 0
+    while i < owner.providers.len():
+        if authority.owner_identity == owner.owner_identity and
+           owner.providers[i].handle == authority and owner.providers[i].live: return i
+        i = i + 1
+    -1
+
+# Registration records assertions made by a concrete provider adapter. Until
+# a backend wires these assertions to its native queue/fence API, they are not
+# independently verified device-execution proof.
+pub fn engine2d_packed_provider_register_v1(owner: Engine2dPackedProofOwnerV1,
+    provider: EnvironmentDigest256V1, image: EnvironmentDigest256V1,
+    device: EnvironmentDigest256V1, provider_adapter: EnvironmentDigest256V1,
+    queue_generation: u64, session_generation: u64
+) -> Result<Engine2dPackedProviderAuthorityV1, Engine2dPackedProofErrorV1>:
+    if owner.providers.len() >= 256 or owner.next_authority_handle == 0u64 or
+       owner.next_authority_handle == 0xffffffffffffffffu64:
+        return Err(Engine2dPackedProofErrorV1.CapacityExceeded)
+    if not _declared_pcp(provider) or not _declared_pcp(image) or not _declared_pcp(device) or
+       not _declared_pcp(provider_adapter) or queue_generation == 0u64 or session_generation == 0u64:
+        return Err(Engine2dPackedProofErrorV1.MissingIdentity)
+    val handle = Engine2dPackedProviderAuthorityV1(
+        authority_handle: owner.next_authority_handle, owner_identity: owner.owner_identity)
+    owner.next_authority_handle = owner.next_authority_handle + 1u64
+    owner.providers.push(_Engine2dPackedProviderRecordV1(handle: handle,
+        provider_identity: provider, image_identity: image, device_identity: device,
+        provider_adapter_identity: provider_adapter, queue_generation: queue_generation,
+        session_generation: session_generation, inflight: 0u64, live: true))
+    Ok(handle)
+
+pub fn engine2d_packed_submission_proof_v1(owner: Engine2dPackedProofOwnerV1,
+    authority: Engine2dPackedProviderAuthorityV1, epoch: u64,
+    packed_digest: EnvironmentDigest256V1, lease_generation: u64,
+    fence: EnvironmentDigest256V1, routing_only: bool
+) -> Result<Engine2dPackedSubmissionProofV1, Engine2dPackedProofErrorV1>:
+    val index = _provider_pcp(owner, authority)
+    if index < 0: return Err(Engine2dPackedProofErrorV1.AuthorityRejected)
+    if owner.live_submissions.len() >= 256 or owner.next_submission_generation == 0u64 or
+       owner.next_submission_generation == 0xffffffffffffffffu64:
+        return Err(Engine2dPackedProofErrorV1.CapacityExceeded)
+    val provider = owner.providers[index]
+    if epoch == 0u64 or lease_generation == 0u64 or not _declared_pcp(packed_digest):
+        return Err(Engine2dPackedProofErrorV1.MissingIdentity)
+    if not _declared_pcp(fence): return Err(Engine2dPackedProofErrorV1.MissingFence)
+    if routing_only: return Err(Engine2dPackedProofErrorV1.RoutingOnly)
+    if provider.inflight == 0xffffffffffffffffu64:
+        return Err(Engine2dPackedProofErrorV1.CapacityExceeded)
+    var result = Engine2dPackedSubmissionProofV1(
+        submission_generation: owner.next_submission_generation, epoch: epoch,
+        provider_identity: provider.provider_identity,
+        image_identity: provider.image_identity, device_identity: provider.device_identity,
+        provider_adapter_identity: provider.provider_adapter_identity,
+        queue_generation: provider.queue_generation,
+        session_generation: provider.session_generation, packed_content_digest: packed_digest,
+        lease_generation: lease_generation, fence_identity: fence, routing_only: false,
+        submission_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64))
+    result.submission_identity = _submission_digest_pcp(result)
+    owner.next_submission_generation = owner.next_submission_generation + 1u64
+    owner.live_submissions.push(_Engine2dPackedLiveSubmissionV1(authority: authority,
+        submission_generation: result.submission_generation,
+        submission_identity: result.submission_identity))
+    var updated_provider = provider; updated_provider.inflight = provider.inflight + 1u64
+    owner.providers[index] = updated_provider; Ok(result)
+
+pub fn engine2d_packed_completion_proof_v1(owner: Engine2dPackedProofOwnerV1,
+    authority: Engine2dPackedProviderAuthorityV1, submission: Engine2dPackedSubmissionProofV1,
+    observed_packed_digest: EnvironmentDigest256V1, fence_signaled: bool,
+    cancelled: bool, readback_present: bool, readback_digest: EnvironmentDigest256V1
+) -> Result<Engine2dPackedCompletionProofV1, Engine2dPackedProofErrorV1>:
+    val index = _provider_pcp(owner, authority)
+    if index < 0: return Err(Engine2dPackedProofErrorV1.AuthorityRejected)
+    var live = false
+    for record in owner.live_submissions:
+        if record.authority == authority and
+           record.submission_generation == submission.submission_generation and
+           record.submission_identity == submission.submission_identity: live = true
+    if not live: return Err(Engine2dPackedProofErrorV1.Replay)
+    val provider = owner.providers[index]
+    if submission.provider_identity != provider.provider_identity or
+       submission.image_identity != provider.image_identity or
+       submission.device_identity != provider.device_identity or
+       submission.provider_adapter_identity != provider.provider_adapter_identity or
+       submission.queue_generation != provider.queue_generation or
+       submission.session_generation != provider.session_generation or
+       submission.submission_identity != _submission_digest_pcp(submission):
+        return Err(Engine2dPackedProofErrorV1.StaleOrSubstituted)
+    if observed_packed_digest != submission.packed_content_digest:
+        return Err(Engine2dPackedProofErrorV1.PackedChecksumMismatch)
+    if not fence_signaled: return Err(Engine2dPackedProofErrorV1.FenceNotSignaled)
+    if readback_present != _declared_pcp(readback_digest):
+        return Err(Engine2dPackedProofErrorV1.MissingIdentity)
+    var result = Engine2dPackedCompletionProofV1(submission: submission,
+        fence_signaled: true, cancelled: cancelled, readback_present: readback_present,
+        readback_digest: readback_digest,
+        completion_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64))
+    result.completion_identity = _completion_digest_pcp(result); Ok(result)
+
+pub fn engine2d_packed_retirement_proof_v1(owner: Engine2dPackedProofOwnerV1,
+    authority: Engine2dPackedProviderAuthorityV1,
+    completion: Engine2dPackedCompletionProofV1,
+    lease_retired: bool, retirement_generation: u64
+) -> Result<Engine2dPackedRetirementProofV1, Engine2dPackedProofErrorV1>:
+    val index = _provider_pcp(owner, authority)
+    if index < 0: return Err(Engine2dPackedProofErrorV1.AuthorityRejected)
+    val provider = owner.providers[index]
+    if completion.submission.provider_identity != provider.provider_identity or
+       completion.submission.image_identity != provider.image_identity or
+       completion.submission.device_identity != provider.device_identity or
+       completion.submission.provider_adapter_identity != provider.provider_adapter_identity or
+       completion.submission.queue_generation != provider.queue_generation or
+       completion.submission.session_generation != provider.session_generation or
+       completion.completion_identity != _completion_digest_pcp(completion):
+        return Err(Engine2dPackedProofErrorV1.StaleOrSubstituted)
+    var live_index: i64 = -1; var n = 0
+    while n < owner.live_submissions.len():
+        val record = owner.live_submissions[n]
+        if record.authority == authority and
+           record.submission_generation == completion.submission.submission_generation and
+           record.submission_identity == completion.submission.submission_identity: live_index = n
+        n = n + 1
+    if live_index < 0: return Err(Engine2dPackedProofErrorV1.Replay)
+    if not lease_retired or retirement_generation == 0u64:
+        if completion.cancelled: return Err(Engine2dPackedProofErrorV1.CancellationNotRetired)
+        return Err(Engine2dPackedProofErrorV1.LeaseNotRetired)
+    var result = Engine2dPackedRetirementProofV1(completion: completion,
+        lease_retired: true, retirement_generation: retirement_generation,
+        retirement_identity: EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64))
+    result.retirement_identity = _retirement_digest_pcp(result)
+    if provider.inflight == 0u64: return Err(Engine2dPackedProofErrorV1.StaleOrSubstituted)
+    var updated_provider = provider; updated_provider.inflight = provider.inflight - 1u64
+    owner.providers[index] = updated_provider
+    var kept: [_Engine2dPackedLiveSubmissionV1] = []; n = 0
+    while n < owner.live_submissions.len():
+        if n != live_index: kept.push(owner.live_submissions[n])
+        n = n + 1
+    owner.live_submissions = kept; Ok(result)
+
+pub fn engine2d_packed_provider_retire_v1(owner: Engine2dPackedProofOwnerV1,
+    authority: Engine2dPackedProviderAuthorityV1) -> Result<(), Engine2dPackedProofErrorV1>:
+    val index = _provider_pcp(owner, authority)
+    if index < 0: return Err(Engine2dPackedProofErrorV1.AuthorityRejected)
+    if owner.providers[index].inflight != 0u64:
+        return Err(Engine2dPackedProofErrorV1.ProviderBusy)
+    var retired_provider = owner.providers[index]; retired_provider.live = false
+    owner.providers[index] = retired_provider; Ok(())
+
+pub fn engine2d_packed_retirement_proof_valid_v1(r: Engine2dPackedRetirementProofV1) -> bool:
+    r.lease_retired and r.retirement_generation != 0u64 and
+    r.completion.fence_signaled and not r.completion.submission.routing_only and
+    r.completion.submission.submission_identity == _submission_digest_pcp(r.completion.submission) and
+    r.completion.completion_identity == _completion_digest_pcp(r.completion) and
+    r.retirement_identity == _retirement_digest_pcp(r)

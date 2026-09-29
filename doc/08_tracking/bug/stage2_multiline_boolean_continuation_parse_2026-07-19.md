@@ -1,4 +1,8 @@
 # Stage2 rejects multiline boolean return continuations
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** BOOTSTRAP-COMPATIBILITY SOURCE FIXED
 **Severity:** P1 — prevents an incremental Stage4 CLI build
@@ -23,3 +27,4 @@ constraint after directly proving multiline implicit-return continuation.
 - Stage4 v43 direct incremental build: reproduced at
   `src/app/cli/_CliMain/main_and_help.spl:101`
 - retained-Stage2 parse and current Stage4 rebuild: pending
+

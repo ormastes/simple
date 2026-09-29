@@ -18,7 +18,9 @@ use std.io_runtime.{read_file_text}
 use std.io_runtime.{file_exists}
 
 use app.io.mod (cwd, shell)
-use app.cli.query_source_mask.{strip_strings_and_comments}
+# Code-vs-text is CoreLexer's fact. Replaces a per-line masker that could not
+# see `'…'` strings and a docstring tracker keyed on `contains("\"\"\"")`.
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines}
 
 # ============================================================================
 # Tier keyword data (passed as parameter, no module-level mutable state)
@@ -232,8 +234,10 @@ fn check_one_file_indexed(
 
     var violations = 0
     var line_num = 1
-    var in_docstring = false
     val lines = source.split("\n")
+    # Element line_num - 1 pairs with lines[line_num - 1].
+    val code_lines = simple_code_lines(source)
+    val string_continuation = simple_string_continuation_lines(source)
     val core_ops = get_core_op_patterns()
     val full_ops = get_full_op_patterns()
     val active_tier_level = tier_level(tier)
@@ -245,26 +249,18 @@ fn check_one_file_indexed(
             line_num = line_num + 1
             continue
 
-        # --- Docstring tracking ---
-        if in_docstring:
-            if trimmed.contains("\"\"\""):
-                in_docstring = false
+        # --- Docstring / string state, from the lexer ---
+        val line_index = line_num - 1
+        # Inside a string opened on an earlier line: payload, not grammar.
+        if string_continuation[line_index]:
             line_num = line_num + 1
             continue
-
-        # Check for opening """ (docstring)
-        if trimmed.contains("\"\"\""):
-            val first_idx = trimmed.index_of("\"\"\"")
-            if first_idx >= 0:
-                val after_first = trimmed.slice(first_idx + 3, trimmed.len())
-                if not after_first.contains("\"\"\""):
-                    # Opening of multi-line docstring - skip line
-                    in_docstring = true
-                    line_num = line_num + 1
-                    continue
-                # Single-line docstring (""" ... """) - skip this line entirely
-                line_num = line_num + 1
-                continue
+        # A line that OPENS a multi-line string, or is a one-line docstring, is
+        # skipped whole — as the previous tracker did for any line holding """.
+        val opens_multiline = line_index + 1 < lines.len() and string_continuation[line_index + 1]
+        if opens_multiline or code_lines[line_index].trim() == "\"\"":
+            line_num = line_num + 1
+            continue
 
         # Skip comment-only lines
         if trimmed.starts_with("#"):
@@ -281,8 +277,8 @@ fn check_one_file_indexed(
             line_num = line_num + 1
             continue
 
-        # Strip string literal contents and inline comments
-        val code_only = strip_strings_and_comments(trimmed)
+        # String contents blanked and inline comments removed, by the lexer.
+        val code_only = code_lines[line_index].trim()
 
         # Extract the same punctuation-delimited words without materializing
         # roughly thirty full-line replacement strings.

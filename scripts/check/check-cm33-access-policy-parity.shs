@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+SIMPLE_BIN="${SIMPLE_BIN:-${ROOT_DIR}/bin/simple}"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cm33-access-policy.XXXXXX")"
+trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM
+
+SIMPLE_RESOLVED=$(readlink -f "$SIMPLE_BIN")
+SIMPLE_SHA256=$(sha256sum "$SIMPLE_RESOLVED" | awk '{print $1}')
+
+sh "$ROOT_DIR/scripts/check/check-cortex-m-access-policy-source-contract.shs"
+
+clang -std=c11 -O2 -Wall -Wextra -Werror \
+    "$ROOT_DIR/test/fixture/os/cortex_m33_access_policy_oracle.c" \
+    -o "$WORK_DIR/c_oracle"
+"$WORK_DIR/c_oracle" > "$WORK_DIR/c.out"
+
+(cd "$ROOT_DIR" && "$SIMPLE_BIN" run \
+    test/fixture/os/cortex_m33_access_policy_probe.spl) \
+    | grep -E '^(board=|decision_mask=)' > "$WORK_DIR/simple.out"
+
+diff -u "$WORK_DIR/c.out" "$WORK_DIR/simple.out"
+grep -Fxq 'decision_mask=1023' "$WORK_DIR/simple.out"
+
+MATRIX_ROWS=$(grep -c '^board=' "$WORK_DIR/simple.out")
+[ "$MATRIX_ROWS" -eq 39 ]
+for board in an505-m33 stm32u585-m33 ra4m1-m4; do
+    BOARD_ROWS=$(grep -c "^board=$board " "$WORK_DIR/simple.out")
+    [ "$BOARD_ROWS" -eq 13 ]
+done
+EXECUTED_OUTCOMES=$((MATRIX_ROWS * 2))
+
+echo "DIAGNOSTIC_PASS cortex-m-access-policy C-vs-Simple semantic parity"
+echo "evidence_class=diagnostic-unadmitted-compiler evidence_kind=semantic-outcome-matrix boards=3 matrix_rows=$MATRIX_ROWS executed_outcomes=$EXECUTED_OUTCOMES decision_mask=1023"
+echo "compiler_runtime path=$SIMPLE_RESOLVED sha256=$SIMPLE_SHA256 command=run mode=interpreter"
+echo "compiler_branch_coverage=not-measured reason=no-pinned-Simple-runtime-branch-profiler"
+echo "QEMU_NOT_RUN board=an505-m33 reason=host-semantic-parity-gate"
+echo "PHYSICAL_BOARD_NOT_RUN board=stm32u585-uno-q,ra4m1-uno-r4 reason=host-parity-gate"

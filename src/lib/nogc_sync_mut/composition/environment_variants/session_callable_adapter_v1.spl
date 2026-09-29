@@ -1,0 +1,139 @@
+# The production consumer that turns a bound session's provider handles into
+# callables (EGL package 2).
+#
+# `binding_runtime_v1` publishes a plan and opens a session carrying
+# `provider_handles`, and says of itself that those handles "are scalar
+# identities supplied by the loader owner" and that it "never maps or invokes
+# an artifact". `callable_map_v1` is that loader owner. Nothing joined them, so
+# an admitted variant still ended at metadata on every real path.
+#
+# This module is the join, and it is a separate module rather than an edit to
+# `binding_runtime_v1` for a reason that is ownership, not design: every module
+# in this directory except `callable_map_v1` — `binding_runtime_v1` included —
+# is owned by another lane for this wave and is read-only here, and so is every
+# module that reaches them. There is in fact no production caller of
+# `binding_runtime_open_session_v1` at this base at all: the only product path
+# into the binding owner is `environment_composite_publication_commit_v1`
+# (`src/compiler/80.driver/environment_variant_composite_publication_v1.spl:240`),
+# which publishes a plan and stops, and that file is fenced too.
+#
+# So the hook the fenced owner adds is exactly one statement, after it opens
+# the session it already has a runtime and a manager for:
+#
+#     val callables = session_callables_bind_v1(
+#         session, session_callable_capability_v1(session), requests, static_table)
+#
+# Until that line exists the behaviour of every existing caller is bit for bit
+# what it was, because nothing here runs unless it is called.
+#
+# Opting in is a typed token, not a flag. `session_callable_capability_v1`
+# issues one only for a session that is actually open, and the token records
+# the session it was issued for, so a token cannot be replayed against a
+# different session. With no token the adapter maps nothing at all and the
+# session it was handed is untouched — the behaviour a caller had before this
+# module existed, which is also the design's first acceptance step for a
+# callable-bearing session ("False capability creates a scalar session and
+# performs zero executable mappings").
+#
+# Binding is all-or-nothing. A session that ends up half mapped would hold live
+# foreign mappings nothing owns, so the first refusal releases every callable
+# already mapped in that call and returns the refusal unchanged.
+
+use std.nogc_sync_mut.composition.environment_variants.binding_runtime_v1.{
+    BindingRuntimeSessionV1, BINDING_RUNTIME_OK_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.callable_map_v1.{
+    VariantCallableV1, VariantCallableRefusalV1,
+    VariantOperationRequestV1, VariantStaticOperationV1,
+    variant_callable_map_v1, variant_callable_release_v1,
+    VARIANT_CALLABLE_GENERATION_STALE_V1
+}
+
+# The caller presented no capability token, so nothing was mapped. Reported as
+# a code rather than an error because it is a legitimate outcome, not a fault.
+pub const SESSION_CALLABLE_NO_CAPABILITY_V1: i32 = 20
+# The request vector does not describe the session's facets one for one.
+pub const SESSION_CALLABLE_ARITY_MISMATCH_V1: i32 = 21
+# The token was issued for a different session than the one being bound.
+pub const SESSION_CALLABLE_CAPABILITY_FOREIGN_V1: i32 = 22
+
+# An opt-in token for one open session. It carries the session's identity so it
+# cannot be presented against another one; it grants nothing on its own.
+pub struct SessionCallableCapabilityV1:
+    session_id: u64
+    publication_generation: u64
+
+# Issues a token for an OPEN session, and nothing for any other status: a
+# session that failed to open has no facets to map, and handing it a token
+# would only move the refusal later.
+pub fn session_callable_capability_v1(
+    session: BindingRuntimeSessionV1
+) -> SessionCallableCapabilityV1?:
+    if session.status != BINDING_RUNTIME_OK_V1 or session.session_id == 0u64:
+        return nil
+    SessionCallableCapabilityV1(
+        session_id: session.session_id,
+        publication_generation: session.publication_generation)
+
+fn _refuse(code: i32, operation_id: u32, reason: text) -> VariantCallableRefusalV1:
+    VariantCallableRefusalV1(
+        code: code, placement: 0u16, operation_id: operation_id, reason: reason)
+
+# Releases a set of mapped callables, answering how many were released. Used
+# both on the refusal path and by a caller retiring a session.
+pub fn session_callables_release_v1(callables: [VariantCallableV1]) -> i64:
+    var released = 0
+    for callable in callables:
+        if variant_callable_release_v1(callable):
+            released = released + 1
+    released
+
+# Maps one operation per session facet, in facet order.
+#
+# `requests[i]` describes the operation facet `i` of the session binds, so the
+# vectors must be the same length: `binding_runtime_open_session_v1` already
+# guarantees `facet_bindings` and `provider_handles` agree, and a caller that
+# cannot say what every facet binds has not decided yet.
+#
+# Package-1 admission is consumed rather than re-derived: each facet's own
+# `provider_generation` must be the generation the request declares admitted,
+# and the ABI/digest checks stay where they already are, inside
+# `variant_callable_map_v1`.
+pub fn session_callables_bind_v1(
+    session: BindingRuntimeSessionV1,
+    capability: SessionCallableCapabilityV1?,
+    requests: [VariantOperationRequestV1],
+    static_table: [VariantStaticOperationV1]
+) -> Result<[VariantCallableV1], VariantCallableRefusalV1>:
+    val token = match capability:
+        case Some(value): value
+        # Not a refusal: the caller has not opted in, so zero mappings is the
+        # correct and complete answer.
+        case nil: return Ok([])
+    if token.session_id != session.session_id or
+            token.publication_generation != session.publication_generation:
+        return Err(_refuse(SESSION_CALLABLE_CAPABILITY_FOREIGN_V1, 0u32,
+            "capability was issued for session {token.session_id}, not {session.session_id}"))
+    if session.status != BINDING_RUNTIME_OK_V1:
+        return Err(_refuse(SESSION_CALLABLE_NO_CAPABILITY_V1, 0u32,
+            "session {session.session_id} is not open: {session.reason}"))
+    if requests.len() != session.facet_bindings.len():
+        return Err(_refuse(SESSION_CALLABLE_ARITY_MISMATCH_V1, 0u32,
+            "{requests.len()} operation request(s) for {session.facet_bindings.len()} session facet(s)"))
+    var callables: [VariantCallableV1] = []
+    var index = 0
+    while index < requests.len():
+        val request = requests[index]
+        val facet = session.facet_bindings[index]
+        if facet.provider_generation != request.admitted_generation:
+            session_callables_release_v1(callables)
+            return Err(_refuse(VARIANT_CALLABLE_GENERATION_STALE_V1, request.operation_id,
+                "facet {facet.facet_id} holds generation {facet.provider_generation}, not the admitted {request.admitted_generation}"))
+        match variant_callable_map_v1(request, static_table):
+            case Ok(callable): callables.push(callable)
+            case Err(refusal):
+                # Nothing this call mapped stays live once any facet refuses.
+                session_callables_release_v1(callables)
+                return Err(refusal)
+        index = index + 1
+    Ok(callables)

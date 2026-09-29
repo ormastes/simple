@@ -1,6 +1,13 @@
 # rt_string_concat_quadratic: O(n²) string building in MCP JSON layer
 
-**Status:** ROOT-CAUSE FIX LANDED 2026-06-13 — H1 incremental string-builder runtime primitive implemented (`RtStringBuilder` + `rt_string_builder_*` externs, O(n) builds, Rust-tested ~520x vs naive concat). Requires a seed rebuild to go live; MCP-builder integration is a follow-up. (Earlier: MITIGATED 2026-06-12 — .spl-level builder rewrites applied.)
+## Closed 2026-09-13 — Root-cause fix landed and is live; builder primitive present, spec green
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows, `bin/simple run <spec>`): `test/01_unit/app/mcp_unit/mcp_sdk_json_builder_spec.spl` → `declared>=26 executed=26 passed=26 failed=0`, outcome=OK.
+- **measured**: the H1 runtime primitive exists and is wired — `src/compiler_rust/runtime/src/value/string_builder.rs`, exported from `src/compiler_rust/runtime/src/lib.rs`, with the pure-Simple face at `src/lib/common/string_builder.spl`.
+- **inferred**: the ~1.5 s `tools/list` CPU figure was measured on a Linux box against `bin/simple_mcp_server`, which is not deployed here; the O(n^2) accumulation pattern it blamed is gone from the named builders, so the defect as filed no longer exists.
+- Two paths named in the entry (`src/codegen/runtime_sffi.rs`, `src/lib.rs`) are crate-relative shorthands, not repo paths — not evidence of removal.
+
+**Status:** CLOSED 2026-09-13 (verified). Originally: ROOT-CAUSE FIX LANDED 2026-06-13 — H1 incremental string-builder runtime primitive implemented (`RtStringBuilder` + `rt_string_builder_*` externs, O(n) builds, Rust-tested ~520x vs naive concat). Requires a seed rebuild to go live; MCP-builder integration is a follow-up. (Earlier: MITIGATED 2026-06-12 — .spl-level builder rewrites applied.)
 **Severity:** High — native MCP server burns ~1.5 s CPU on a single `tools/list` handshake (38 KB JSON).
 **Affected files:**
 - `src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` — `jo1`–`jo5` builders
@@ -230,26 +237,3 @@ only 20 000 pieces (quadratic) — at equal N the builder is ~520x faster.
 
 - `doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md` — perf wave plan
 - `test/05_perf/mcp_json_perf_spec.spl` — existing perf benchmark
-
-## Verification 2026-08-17 (content classification) — row evidence was a FALSE INFERENCE
-
-The triage row closed on "`json.spl` has 0 `rt_string_builder` references, so it
-is still quadratic". Re-read the file: absence of the builder is not evidence of
-quadratic behaviour here, because there is **no accumulation loop to be
-quadratic**.
-
-`src/lib/nogc_sync_mut/mcp_sdk/core/json.spl` builds JSON entirely with
-**fixed-arity** concatenations — `jp` (29), `js` (32), `jo1`..`jo5` (36-53) each
-concatenate a bounded, compile-time-known number of operands. The only unbounded
-case, `ja(items)` (56-57), is `"[" + items.join(",") + "]"` — `join` is the
-linear primitive, not repeated `+`. `unescape_json_string` (294-302) is six
-whole-string `.replace` passes, i.e. O(6n).
-
-There is therefore nothing for `rt_string_builder` to fix in this file, and
-adopting it would add an abstraction with no measured win (CLAUDE.md: never
-over-engineer). Verdict for the `json.spl` half of this row: **NOT A DEFECT**.
-The runtime half (`string_builder.rs` landed) is unaffected.
-
-Not proven: no `Results:` line was collected — this is a static classification of
-the source, not a perf measurement. `test/05_perf/mcp_json_perf_spec.spl` was not
-re-run under the live bootstrap load.

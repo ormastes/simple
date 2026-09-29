@@ -34,3 +34,8 @@ inset, then emit the title text command in `_emit_widget`'s container branch
 at `(x + 4, y + 2)`. Alternatively keep layout untouched and render the title
 centered ON a thicker drawn top border (Draw-IR-only change, no layout
 impact) — visually close to the TUI treatment.
+
+## Triage 2026-09-13
+Reconfirmed: pixel Draw-IR pipeline still does not render panel titles per
+this record. Needs Draw-IR widget rendering work, not a quick fix. Left
+OPEN, no code change attempted.

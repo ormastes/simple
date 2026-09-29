@@ -32,10 +32,12 @@ treesitter_error_recovery_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter Error Handling and Edge Cases Specification
 
 use compiler.treesitter.*
 
+```
 ## At a Glance
 
 | Field | Value |

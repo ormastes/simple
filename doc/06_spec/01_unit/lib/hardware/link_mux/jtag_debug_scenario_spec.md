@@ -25,7 +25,7 @@ An operator with only ONE physical cable to the board still needs three things a
 | Design | src/lib/hardware/link_mux/ |
 | Research | N/A |
 | Source | `test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -63,6 +63,7 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
 
 #### attaches over the muxed link, halts the hart, patches a register, and resumes it
 
+- attaches over the muxed link, halts the hart, patches a register, and resumes it
 - Power on the target: a tiny RISC-V hart executing a known program in RAM
 - Reset the TAP over the shared link and read back the DTM's IDCODE
 - Confirm the DTM identifies itself with its fixed IDCODE value
@@ -103,10 +104,12 @@ Debug Module also exist as a VHDL mirror under `src/lib/hardware/debug/`
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 114 lines folded for reproduction.
+Runnable source: 116 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("attaches over the muxed link, halts the hart, patches a register, and resumes it")
 step("Power on the target: a tiny RISC-V hart executing a known program in RAM")
 val fpga_00_boot = boot_target_hart()
 
@@ -232,6 +235,7 @@ expect(saved).to_contain("GPR x5 (patched)")
 
 #### rejects a frame whose CRC no longer matches its payload, without delivering it
 
+- rejects a frame whose CRC no longer matches its payload, without delivering it
 - Encode one well-formed JTAG-channel frame
 - Corrupt a single payload bit in transit (a cable glitch), leaving framing intact
 - Feed the corrupted stream into the FPGA-side demux
@@ -243,10 +247,12 @@ expect(saved).to_contain("GPR x5 (patched)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a frame whose CRC no longer matches its payload, without delivering it")
 step("Encode one well-formed JTAG-channel frame")
 val payload: [u8] = [0x41.to_u8(), 0x42.to_u8()]
 val wire_ok = frame_encode(CH_JTAG, payload)
@@ -275,6 +281,7 @@ expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)
 
 #### reports a command error when the operator asks for a register the Debug Module does not support
 
+- reports a command error when the operator asks for a register the Debug Module does not support
 - Boot the target hart, reset the TAP, and select the DMI instruction
 - Issue an abstract-command read for a regno that is neither a GPR nor dpc
 - Read ABSTRACTCS and confirm cmderr reports 'not supported'
@@ -284,10 +291,12 @@ expect(demux_peek(demux_fed, CH_JTAG).len()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("reports a command error when the operator asks for a register the Debug Module does not support")
 step("Boot the target hart, reset the TAP, and select the DMI instruction")
 val fpga_00_boot = boot_target_hart()
 val fpga_01_dmi_selected = send_over_shared_link(fpga_00_boot, append_all(cmds_reset(), cmds_shift_ir(IR_DMI)), []).fpga
@@ -312,6 +321,7 @@ expect(cmderr).to_equal(CMDERR_NOT_SUPPORTED)
 
 #### leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction
 
+- leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction
 - Boot the target hart and reset the TAP, WITHOUT selecting the DMI instruction (reset selects IDCODE)
 - Shift a DMI-encoded haltreq write while IDCODE (not DMI) is still selected
 - Confirm the hart's halt state is unchanged — the shift was inert without the DMI instruction selected
@@ -322,10 +332,12 @@ expect(cmderr).to_equal(CMDERR_NOT_SUPPORTED)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("leaves the Debug Module untouched when a DMI-shaped shift arrives on the wrong TAP instruction")
 step("Boot the target hart and reset the TAP, WITHOUT selecting the DMI instruction (reset selects IDCODE)")
 val fpga_00_boot = boot_target_hart()
 val halted_before = fpga_00_boot.hart.halted
@@ -364,3 +376,60 @@ expect(fpga_01_after_bogus.hart.halted).to_equal(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-RISCV-JTAG-SHARED-LINK-001`
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `4e8c4ac932f85cacaa16dd2a47d0c8c0793d88588dea7f804060d5dd96d2040f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `4e8c4ac932f85cacaa16dd2a47d0c8c0793d88588dea7f804060d5dd96d2040f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `4e8c4ac932f85cacaa16dd2a47d0c8c0793d88588dea7f804060d5dd96d2040f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl
+mirror: doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 8 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl:251:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'attaches over the muxed link, halts the hart, patches a register, and resumes it' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl:378:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a frame whose CRC no longer matches its payload, without delivering it' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/hardware/link_mux/jtag_debug_scenario_spec.spl:399:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports a command error when the operator asks for a register the Debug Module does not support' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

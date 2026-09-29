@@ -1,7 +1,9 @@
 # Bug: native-build broken under deployed seed since ca1e18c1744 (dict-extern migration)
+## Closed 2026-09-16 — ...ration) **Status (2026-07-16):** RESOLVED — verified fixed at origin tip 8932fcb3a148. - *
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status (2026-07-16):** RESOLVED — verified fixed at origin tip 8932fcb3a148.
 
@@ -50,3 +52,4 @@ the file list alone is sufficient (multi-file interaction), and
 ## Verification (2026-07-16)
 
 Verified fixed at origin tip 8932fcb3a148 via independent probe: `probe01_dict_extern_regression_a.spl` (trivial two-function program: `helper()->42`, `main` prints it). Oracle: `bin/simple run` → `42`. Native: `native-build --entry --clean` exit 0, binary built, run → `42`. No "type mismatch: cannot convert dict to int" error at any stage; native-build succeeds with correct output.
+

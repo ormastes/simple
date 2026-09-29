@@ -8,8 +8,8 @@ use os.crypto.aes128_gcm.{aes128_gcm_encrypt, aes128_gcm_decrypt, Aes128GcmResul
 extern fn rt_tls13_aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8]
 @unsafe(reason: "raw AES-256-GCM decrypt provider returns a status-prefixed result", capabilities: [ffi])
 extern fn rt_tls13_aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: [u8]) -> [u8]
-@unsafe(reason: "raw SSH AES-256-GCM packet provider; frame, key, IV, and result are validated", capabilities: [ffi])
-extern fn rt_ssh_aes256_gcm_decrypt_packet(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
+@unsafe(reason: "raw SSH AES-256-GCM packet provider; tagged v2 response is lifted immediately", capabilities: [ffi])
+extern fn rt_ssh_aes256_gcm_decrypt_packet_v2(key: [u8], iv: [u8], seq: i64, packet: [u8]) -> [u8]
 
 val GCM_TAG_LEN: u64 = 16
 val SSH_GCM_MIN_PACKET_LENGTH: u64 = 12
@@ -263,11 +263,21 @@ fn ssh_decrypt_packet_aes256_gcm_payload_direct(data: [u8], seq_c2s: u32, enc_ke
     if enc_key_c2s.len() != 32u64 or iv_c2s.len() != 12u64:
         return Err("invalid encrypted packet contract")
     val packet_length = _validate_gcm_wire_packet(data)?
-    var payload: [u8] = []
+    var raw: [u8] = []
     unsafe(capabilities: [ffi]):
-        payload = rt_ssh_aes256_gcm_decrypt_packet(enc_key_c2s, iv_c2s, seq_c2s.to_i64(), data)
-    if payload.len() == 0u64:
-        return Err("GCM packet decryption failed")
+        raw = rt_ssh_aes256_gcm_decrypt_packet_v2(enc_key_c2s, iv_c2s, seq_c2s.to_i64(), data)
+    if raw.len() == 0u64:
+        return Err("GCM packet decryption failed: invalid provider result")
+    # The v2 provider appends the status byte, so pop preserves the owned
+    # payload array in place and avoids a hot-path payload copy.
+    val status = raw.pop()
+    if status == 0x00:
+        return Err("GCM packet decryption failed: invalid input")
+    if status == 0x01:
+        return Err("GCM packet decryption failed: authentication tag mismatch")
+    if status != 0x02:
+        return Err("GCM packet decryption failed: invalid provider result")
+    val payload = raw
     # The authenticated body reserves one padding-length byte and at least
     # four padding bytes, so a runtime result cannot legitimately exceed this.
     if payload.len() > packet_length - 5u64:

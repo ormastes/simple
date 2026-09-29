@@ -1,4 +1,8 @@
 # RAIN channel recovery is not power-cycle safe (parity table is volatile)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -70,3 +74,4 @@ channel, `crash()` + `recover()`, then `rain_recover_channel(failed)` and assert
 every LBA reads back its original value (no data loss across the power cycle).
 Also assert a mid-recovery power loss (erase done, reprogram not) recovers with
 no loss once parity is durable.
+

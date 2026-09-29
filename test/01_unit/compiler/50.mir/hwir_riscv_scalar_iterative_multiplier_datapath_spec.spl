@@ -1,0 +1,43 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_muldiv_projection.{strict_riscv_scalar_muldiv_projection}
+use compiler.mir.hwir.riscv_scalar_muldiv_iterative_contract.{
+    strict_riscv_scalar_muldiv_iterative_contract}
+use compiler.mir.hwir.riscv_scalar_iterative_multiplier_datapath.{
+    strict_riscv_scalar_iterative_multiplier_datapath}
+
+fn config(xlen: i32, profile: text) -> CoreConfig:
+    CoreConfig(xlen: xlen, physical_address_bits: xlen, register_count: 32,
+        profile: "riscv-gen2-" + profile, isa_profile: profile,
+        compressed_decode_profile: "none")
+
+fn datapath(xlen: i32, profile: text, instruction: u32):
+    strict_riscv_scalar_iterative_multiplier_datapath(
+        strict_riscv_scalar_muldiv_iterative_contract(
+            strict_riscv_scalar_muldiv_projection(
+                config(xlen, profile), "iterative", instruction).unwrap()).unwrap()).unwrap()
+
+describe "RISC-V Gen2 iterative multiplier typed datapath":
+    it "builds the real RV32 and RV64 W-cycle transition graph":
+        val rv32 = datapath(32, "rv32im", 0x022081B3)
+        expect(rv32.contract.multiply_width).to_equal(64)
+        expect(rv32.comb_ops.any(_.result == "acc_next" and _.op == "add")).to_equal(true)
+        expect(rv32.comb_ops.any(_.result == "multiplicand_next" and _.op == "shl")).to_equal(true)
+        expect(rv32.comb_ops.any(_.result == "multiplier_next" and _.op == "shr")).to_equal(true)
+        expect(rv32.bit_extract_ops[0].bit_index).to_equal(0)
+        expect(rv32.fixed_slice_ops[1].high_bit).to_equal(63)
+
+        val rv64w = datapath(64, "rv64im", 0x022081BB)
+        expect(rv64w.contract.operand_width).to_equal(32)
+        expect(rv64w.signals.any(_.name == "architectural_result" and _.bit_width == 64)).to_equal(true)
+        expect(rv64w.comb_ops.any(_.result == "architectural_result" and _.op == "sext")).to_equal(true)
+
+    it "uses a 128-bit product path for RV64 high multiply and rejects divide":
+        val high = datapath(64, "rv64im", 0x022091B3)
+        expect(high.contract.multiply_width).to_equal(128)
+        expect(high.constants.any(_.name == "zero_wide" and _.canonical_bits.len() == 128)).to_equal(true)
+        expect(high.fixed_slice_ops[1].low_bit).to_equal(64)
+        val divide = strict_riscv_scalar_muldiv_iterative_contract(
+            strict_riscv_scalar_muldiv_projection(
+                config(64, "rv64im"), "iterative", 0x0220C1B3).unwrap()).unwrap()
+        expect(strict_riscv_scalar_iterative_multiplier_datapath(divide).is_err()).to_equal(true)

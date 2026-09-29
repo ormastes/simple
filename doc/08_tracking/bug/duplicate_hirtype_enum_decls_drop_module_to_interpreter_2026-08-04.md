@@ -118,23 +118,3 @@ de-duplicate `HirType` so exactly one declaration is registered. (a) is the
 smaller change and turns every remaining instance of this class into a visible
 failure instead of a silent wrong answer; `SIMPLE_JIT_STRICT=1` already does
 this for the JIT path only.
-
-## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
-
-Verdict: STILL-OPEN but MUCH SMALLER than filed; cited file is a STALE-REF
-
-The cited `src/compiler/20.hir/hir_lowering/types.spl` contains ZERO occurrences
-of `enum HirType` (`grep -c` = 0). The declarations live elsewhere, and the count
-is now **7 files, not 26**:
-
-```
-$ grep -rln "enum HirType" src/compiler/ --include=*.spl | wc -l
-7
-# incl. src/compiler/20.hir/hir_types.spl (canonical),
-#       src/compiler/30.types/higher_rank_poly_types.spl,
-#       src/compiler/30.types/const_key_type.spl,
-#       src/compiler/50.mir/__init__.spl
-```
-
-Re-scope this row to those 7 sites and re-derive which shadow the canonical
-struct. Owner paths: src/compiler/20.hir/**, 30.types, 50.mir.

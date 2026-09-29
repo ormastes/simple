@@ -1,0 +1,358 @@
+use std.spec.*
+use std.spec.step
+use app.remote_test.binary_placement.{
+    remote_simple_binary_path, remote_simple_test_command,
+    remote_simple_stage_guard_command, remote_simple_stage_verify_command,
+    remote_simple_installed_verify_command,
+    remote_simple_stage_cleanup_command,
+    remote_simple_publication_cleanup_command, remote_simple_install_command}
+extern fn rt_file_read_text(path: text) -> text
+val TEST_SHA256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "remote interpreter binary placement":
+    it "maps every supported target filesystem to its installed Simple path":
+        step("Resolve Linux, Windows, and SimpleOS independently of the local host")
+        expect(remote_simple_binary_path("linux", "auto").unwrap()).to_equal("/usr/local/bin/simple")
+        expect(remote_simple_binary_path("windows", "auto").unwrap()).to_equal("C:\\Program Files\\Simple\\simple.exe")
+        expect(remote_simple_binary_path("win", "").unwrap()).to_equal("C:\\Program Files\\Simple\\simple.exe")
+        expect(remote_simple_binary_path("simpleos", "auto").unwrap()).to_equal("/usr/bin/simple")
+        expect(remote_simple_binary_path("simple-os", "auto").unwrap()).to_equal("/usr/bin/simple")
+
+    it "preserves an explicit remote path byte for byte":
+        val explicit = "D:\\tools\\simple-custom.exe"
+        expect(remote_simple_binary_path("unknown", explicit).unwrap()).to_equal(explicit)
+        expect(remote_simple_binary_path("windows", explicit).unwrap()).to_equal(explicit)
+
+    it "rejects target-relative explicit interpreter paths before execution":
+        expect(remote_simple_binary_path("linux", "bin/simple").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("simpleos", "usr/bin/simple").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "tools\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_test_command("linux", "bin/simple", "test/a.spl").is_err()).to_equal(true)
+        expect(remote_simple_test_command("windows", "tools\\simple.exe", "C:\\repo\\a.spl").is_err()).to_equal(true)
+
+    it "validates the exact POSIX path bytes used by remote commands":
+        expect(remote_simple_binary_path("linux", "/opt/simple ").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("simpleos", " /usr/bin/simple").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("linux", "/opt/simple\nnext").is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/tmp/simple ", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_stage_guard_command("simpleos", "auto", " /tmp/simple").is_err()).to_equal(true)
+
+    it "rejects filesystem roots where a binary file leaf is required":
+        expect(remote_simple_binary_path("linux", "/").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("simpleos", "/./").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\\share").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\\share\\simple.exe").is_ok()).to_equal(true)
+        expect(remote_simple_binary_path("linux", "/opt/simple/").is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "C:\\", TEST_SHA256).is_err()).to_equal(true)
+
+    it "rejects Windows device aliases and non-file leaf syntax":
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\NUL").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\con.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\COM1.bin").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\LPT9").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\CONOUT$").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\simple.exe:payload").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\simple.exe.").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\simple.exe ").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\simple?.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\simple\t.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\NUL\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools.\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools:stream\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\\share\\AUX\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\tname\\share\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\?\\C:\\Tools\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\.\\pipe\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server?name\\share\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\\share.\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\com10.exe").is_ok()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "C:\\Tools\\.\\simple.exe").is_ok()).to_equal(true)
+        expect(remote_simple_binary_path("windows", "\\\\server\\share\\simple.exe").is_ok()).to_equal(true)
+
+    it "rejects an unknown target when automatic placement was requested":
+        val result = remote_simple_binary_path("plan9", "auto")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("use --remote-os linux|windows|simpleos")
+
+    it "renders target-specific quoted test commands with the placed binary":
+        val linux = remote_simple_test_command("linux", "auto", "test/a user's spec.spl").unwrap()
+        expect(linux).to_equal("'/usr/local/bin/simple' test 'test/a user'\"'\"'s spec.spl' --no-session-daemon --sequential 2>&1")
+        val windows = remote_simple_test_command("windows", "auto", "C:\\repo\\spec file.spl").unwrap()
+        expect(windows).to_equal("powershell.exe -NoProfile -NonInteractive -Command \"& 'C:\\Program Files\\Simple\\simple.exe' test 'C:\\repo\\spec file.spl' --no-session-daemon --sequential 2>&1; exit $LASTEXITCODE\"")
+
+    it "quotes PowerShell apostrophes and rejects command-breaking Windows values":
+        val quoted = remote_simple_test_command("windows", "auto", "C:\\repo\\user's spec.spl").unwrap()
+        expect(quoted).to_contain("'C:\\repo\\user''s spec.spl'")
+        expect(remote_simple_test_command("windows", "auto", "bad\"path.spl").is_err()).to_equal(true)
+        expect(remote_simple_test_command("windows", "auto", "bad\npath.spl").is_err()).to_equal(true)
+
+    it "renders atomic target-specific binary publication commands":
+        val linux = remote_simple_install_command("linux", "auto", "/tmp/simple upload", TEST_SHA256).unwrap()
+        expect(linux).to_contain("(set -C; : > '/usr/local/bin/simple.remote-test-new')")
+        expect(linux).to_contain("cp -- '/tmp/simple upload' '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("chmod 0755 -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
+        expect(linux).to_contain("source_parent='/tmp'; probe=$source_parent")
+        expect(linux).to_contain("[ -L \"$probe\" ]")
+        expect(linux).to_contain("[ -L '/usr/local/bin/simple' ]")
+        expect(linux).to_contain("[ ! -f '/usr/local/bin/simple' ]")
+        expect(linux).to_contain("installed path is not a regular file")
+        expect(linux).to_end_with("mv -fT -- '/usr/local/bin/simple.remote-test-new' '/usr/local/bin/simple'")
+
+        val simpleos = remote_simple_install_command("simpleos", "auto", "/tmp/simple", TEST_SHA256).unwrap()
+        expect(simpleos).to_contain("'/usr/bin/simple.remote-test-new'")
+
+        val windows = remote_simple_install_command("windows", "auto", "C:\\Temp\\simple upload.exe", TEST_SHA256).unwrap()
+        expect(windows).to_contain("$dst = 'C:\\Program Files\\Simple\\simple.exe'")
+        expect(windows).to_contain("Remove-Item -LiteralPath $src -Force")
+        expect(windows).to_contain("[System.IO.FileMode]::CreateNew")
+        expect(windows).to_contain("$createParentItem = Get-Item -LiteralPath $existingParentPath")
+        expect(windows).to_contain("publication ancestor is redirected or not a directory")
+        expect(windows).to_contain("New-Item -ItemType Directory -Force -Path $createParent")
+        val windows_ancestor_check = windows.index_of(
+            "$createParentItem = Get-Item -LiteralPath $existingParentPath") ?? -1
+        val windows_parent_create = windows.index_of(
+            "New-Item -ItemType Directory -Force -Path $createParent") ?? -1
+        expect(windows_parent_create).to_be_greater_than(windows_ancestor_check)
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("regular non-reparse file")
+        expect(windows).to_contain("[System.IO.File]::Replace($tmp, $dst, $null, $true)")
+        expect(windows).to_contain("[System.IO.File]::Move($tmp, $dst)")
+        val validate_destination = windows.index_of("$existing = Get-Item") ?? -1
+        val consume_staging = windows.index_of("Remove-Item -LiteralPath $src -Force") ?? -1
+        expect(validate_destination).to_be_greater_than(-1)
+        expect(consume_staging).to_be_greater_than(validate_destination)
+        expect(windows.contains("Move-Item")).to_equal(false)
+        expect(windows).to_contain("Get-FileHash -LiteralPath $tmp -Algorithm SHA256")
+        expect(windows).to_contain("publication copy SHA-256 mismatch")
+        expect(linux).to_contain("sha256sum -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("create_probe=$parent")
+        expect(linux).to_contain("publication ancestor is redirected or not a directory")
+        val linux_ancestor_check = linux.index_of("create_probe=$parent") ?? -1
+        val linux_parent_create = linux.index_of("mkdir -p -- \"$parent\"") ?? -1
+        expect(linux_parent_create).to_be_greater_than(linux_ancestor_check)
+        expect(linux).to_contain("exit 75")
+
+        val special_parent = remote_simple_install_command("linux",
+            "/opt/team's Simple/[nightly]/simple", "/tmp/simple", TEST_SHA256).unwrap()
+        expect(special_parent).to_contain(
+            "parent='/opt/team'\"'\"'s Simple/[nightly]'; create_probe=$parent")
+        expect(special_parent.contains("$(dirname")).to_equal(false)
+        val root_parent = remote_simple_install_command(
+            "simpleos", "/simple", "/tmp/simple", TEST_SHA256).unwrap()
+        expect(root_parent).to_contain("parent='/'; create_probe=$parent")
+
+    it "renders a pre-upload absence guard for both mutable leaves":
+        val linux = remote_simple_stage_guard_command("linux", "auto", "/tmp/simple upload").unwrap()
+        expect(linux).to_contain("[ -e '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ -L '/usr/local/bin/simple.remote-test-new' ]")
+        expect(linux).to_contain("stage_parent='/tmp'")
+        expect(linux).to_contain("while [ \"$probe\" != / ]")
+        expect(linux).to_contain("[ -L \"$probe\" ]")
+        expect(linux).to_contain("exit 73")
+
+        val windows = remote_simple_stage_guard_command(
+            "windows", "auto", "C:\\Temp\\simple upload.exe").unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath $stage -Force")
+        expect(windows).to_contain("Get-Item -LiteralPath $tmp -Force")
+        expect(windows).to_contain("$stageParent = Get-Item -LiteralPath (Split-Path -Parent $stage) -Force")
+        expect(windows).to_contain("while ($null -ne $stageParent)")
+        expect(windows).to_contain("$stageParent = $stageParent.Parent")
+        expect(windows).to_contain("exit 73")
+
+    it "applies placement validation before rendering a staging guard":
+        expect(remote_simple_stage_guard_command("linux", "auto", "/usr/local/bin/simple").is_err()).to_equal(true)
+        expect(remote_simple_stage_guard_command("windows", "auto", "relative\\simple.exe").is_err()).to_equal(true)
+        expect(remote_simple_stage_guard_command("plan9", "auto", "/tmp/simple").is_err()).to_equal(true)
+
+    it "runs the remote staging guard before terminal upload":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val local_guard = source.index_of("if not file_is_regular_no_follow(local_path)") ?? -1
+        val guard = source.index_of("val guard = terminal_execute(self.connection, guard_command, timeout_ms)") ?? -1
+        val digest = source.index_of("val local_digest = file_hash_sha256(local_path)") ?? -1
+        val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
+        expect(local_guard).to_be_greater_than(-1)
+        expect(digest).to_be_greater_than(local_guard)
+        expect(guard).to_be_greater_than(-1)
+        expect(upload).to_be_greater_than(guard)
+        expect(upload).to_be_greater_than(digest)
+
+    it "renders target-side SHA-256 verification for uploaded bytes":
+        val digest = TEST_SHA256
+        val linux = remote_simple_stage_verify_command("linux", "/tmp/simple upload", digest).unwrap()
+        expect(linux).to_contain("[ -L '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ ! -f '/tmp/simple upload' ]")
+        expect(linux).to_contain("sha256sum -- '/tmp/simple upload'")
+        expect(linux).to_contain("parent='/tmp'; probe=$parent")
+        expect(linux).to_contain("uploaded Simple parent is redirected")
+        expect(linux).to_contain("actual=${actual%% *}")
+        expect(linux).to_contain("exit 74")
+
+        val windows = remote_simple_stage_verify_command(
+            "windows", "C:\\Temp\\simple upload.exe", digest.upper()).unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath 'C:\\Temp\\simple upload.exe' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("Get-FileHash -LiteralPath 'C:\\Temp\\simple upload.exe' -Algorithm SHA256")
+        expect(windows).to_contain("$stageParent = Get-Item -LiteralPath (Split-Path -Parent 'C:\\Temp\\simple upload.exe') -Force")
+        expect(windows).to_contain("uploaded Simple parent is redirected")
+        expect(windows).to_contain(".Hash.ToLowerInvariant()")
+        expect(windows).to_contain("'" + digest + "'")
+
+    it "rechecks staging file identity immediately before publication copy":
+        val linux = remote_simple_install_command(
+            "linux", "auto", "/tmp/simple upload", TEST_SHA256).unwrap()
+        expect(linux).to_contain("[ -L '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ ! -f '/tmp/simple upload' ]")
+        expect(linux).to_contain("source_parent='/tmp'; probe=$source_parent")
+        expect(linux).to_contain("staging parent is redirected")
+        expect(linux).to_contain("parent='/usr/local/bin'")
+        expect(linux).to_contain("while [ \"$probe\" != / ]")
+        expect(linux).to_contain("[ -L \"$probe\" ]")
+
+        val windows = remote_simple_install_command(
+            "windows", "auto", "C:\\Temp\\simple upload.exe", TEST_SHA256).unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath $src -Force")
+        expect(windows).to_contain("$sourceItem.PSIsContainer")
+        expect(windows).to_contain("$sourceParent = Get-Item -LiteralPath (Split-Path -Parent $src) -Force")
+        expect(windows).to_contain("$sourceParent = $sourceParent.Parent")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("$parentItem = Get-Item -LiteralPath (Split-Path -Parent $dst) -Force")
+        expect(windows).to_contain("while ($null -ne $parentItem)")
+        expect(windows).to_contain("$parentItem = $parentItem.Parent")
+
+    it "rejects malformed digest verification requests":
+        val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+        val bad_digest = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        expect(remote_simple_stage_verify_command("linux", "/tmp/simple", "abc").is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("linux", "tmp/simple", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("windows", "C:\\Temp\\simple.exe", bad_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("linux", "/", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("simpleos", "/tmp/simple\nnext", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("windows", "C:\\Tools\\NUL", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("windows", "\\\\?\\C:\\Tools\\simple.exe", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("windows", "C:\\Temp\\simple.exe ", zero_digest).is_err()).to_equal(true)
+        expect(remote_simple_stage_verify_command("plan9", "/tmp/simple", zero_digest).is_err()).to_equal(true)
+
+    it "verifies the final installed interpreter after publication":
+        val linux = remote_simple_installed_verify_command(
+            "linux", "auto", TEST_SHA256).unwrap()
+        expect(linux).to_contain("[ ! -f '/usr/local/bin/simple' ]")
+        expect(linux).to_contain("parent='/usr/local/bin'; probe=$parent")
+        expect(linux).to_contain("[ -L \"$probe\" ]")
+        expect(linux).to_contain("sha256sum -- '/usr/local/bin/simple'")
+        expect(linux).to_contain("exit 79")
+
+        val windows = remote_simple_installed_verify_command(
+            "windows", "auto", TEST_SHA256.upper()).unwrap()
+        expect(windows).to_contain(
+            "Get-Item -LiteralPath 'C:\\Program Files\\Simple\\simple.exe' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain(
+            "$parentItem = Get-Item -LiteralPath (Split-Path -Parent 'C:\\Program Files\\Simple\\simple.exe') -Force")
+        expect(windows).to_contain("$parentItem = $parentItem.Parent")
+        expect(windows).to_contain(
+            "Get-FileHash -LiteralPath 'C:\\Program Files\\Simple\\simple.exe' -Algorithm SHA256")
+        expect(windows).to_contain("exit 79")
+
+        expect(remote_simple_installed_verify_command(
+            "linux", "auto", "bad-digest").is_err()).to_equal(true)
+        expect(remote_simple_installed_verify_command(
+            "plan9", "auto", TEST_SHA256).is_err()).to_equal(true)
+
+    it "renders race-aware cleanup for failed staging uploads":
+        val linux = remote_simple_stage_cleanup_command(
+            "linux", "/tmp/simple upload").unwrap()
+        expect(linux).to_contain("[ -L '/tmp/simple upload' ]")
+        expect(linux).to_contain("[ ! -f '/tmp/simple upload' ]")
+        expect(linux).to_contain("rm -f -- '/tmp/simple upload'")
+        expect(linux).to_contain("exit 77")
+
+        val windows = remote_simple_stage_cleanup_command(
+            "windows", "C:\\Temp\\simple upload.exe").unwrap()
+        expect(windows).to_contain("Get-Item -LiteralPath 'C:\\Temp\\simple upload.exe' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("Remove-Item -LiteralPath 'C:\\Temp\\simple upload.exe' -Force")
+        expect(windows).to_contain("$parentItem = Get-Item -LiteralPath (Split-Path -Parent 'C:\\Temp\\simple upload.exe') -Force")
+        expect(windows).to_contain("$parentItem = $parentItem.Parent")
+        expect(windows).to_contain("exit 77")
+
+        expect(remote_simple_stage_cleanup_command("linux", "tmp/simple").is_err()).to_equal(true)
+        expect(remote_simple_stage_cleanup_command("windows", "C:\\Tools\\NUL").is_err()).to_equal(true)
+        expect(remote_simple_stage_cleanup_command("plan9", "/tmp/simple").is_err()).to_equal(true)
+
+    it "renders race-aware cleanup for failed publication siblings":
+        val linux = remote_simple_publication_cleanup_command("linux", "auto").unwrap()
+        expect(linux).to_contain("[ -L '/usr/local/bin/simple.remote-test-new' ]")
+        expect(linux).to_contain("rm -f -- '/usr/local/bin/simple.remote-test-new'")
+        expect(linux).to_contain("parent='/usr/local/bin'; probe=$parent")
+        expect(linux).to_contain("redirected publication parent")
+        expect(linux).to_contain("exit 78")
+
+        val windows = remote_simple_publication_cleanup_command("windows", "auto").unwrap()
+        expect(windows).to_contain(
+            "Get-Item -LiteralPath 'C:\\Program Files\\Simple\\simple.exe.remote-test-new' -Force")
+        expect(windows).to_contain("[System.IO.FileAttributes]::ReparsePoint")
+        expect(windows).to_contain("$parentItem = Get-Item -LiteralPath (Split-Path -Parent 'C:\\Program Files\\Simple\\simple.exe.remote-test-new') -Force")
+        expect(windows).to_contain("exit 78")
+        expect(remote_simple_publication_cleanup_command("plan9", "auto").is_err()).to_equal(true)
+
+    it "verifies uploaded bytes before publishing the interpreter":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val upload = source.index_of("terminal_upload(self.connection, local_path, staged_path)") ?? -1
+        val verify = source.index_of("val verified = terminal_execute(self.connection, verify_command, timeout_ms)") ?? -1
+        val publish = source.index_of("val result = terminal_execute(self.connection, command, timeout_ms)") ?? -1
+        expect(upload).to_be_greater_than(-1)
+        expect(verify).to_be_greater_than(upload)
+        expect(publish).to_be_greater_than(verify)
+
+    it "verifies the installed bytes after publishing the interpreter":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val publish = source.index_of("val result = terminal_execute(self.connection, command, timeout_ms)") ?? -1
+        val installed_verify = source.index_of("val installed_verified = terminal_execute") ?? -1
+        val success = source.index_of("Ok(self.simple_binary)") ?? -1
+        expect(publish).to_be_greater_than(-1)
+        expect(installed_verify).to_be_greater_than(publish)
+        expect(success).to_be_greater_than(installed_verify)
+
+    it "cleans owned regular staging and publication leaves after failures":
+        val source = rt_file_read_text("src/app/test_daemon/adapters/remote_pc_adapter.spl") ?? ""
+        val cleanup_render = source.index_of("val cleanup_command = remote_simple_stage_cleanup_command") ?? -1
+        val upload_failure = source.index_of("if not terminal_upload") ?? -1
+        val upload_cleanup = source.index_of("val upload_cleanup = terminal_execute") ?? -1
+        val verify_failure = source.index_of("if verified.exit_code != 0") ?? -1
+        val verify_cleanup = source.index_of("val verify_cleanup = terminal_execute") ?? -1
+        val publish_failure = source.index_of("if result.exit_code != 0") ?? -1
+        val staging_cleanup = source.index_of("val staging_cleanup = terminal_execute") ?? -1
+        val publication_cleanup = source.index_of("val publication_cleanup = terminal_execute") ?? -1
+        expect(cleanup_render).to_be_greater_than(-1)
+        expect(upload_cleanup).to_be_greater_than(upload_failure)
+        expect(verify_cleanup).to_be_greater_than(verify_failure)
+        expect(publication_cleanup).to_be_greater_than(publish_failure)
+        expect(staging_cleanup).to_be_greater_than(publication_cleanup)
+
+    it "rejects unsafe Windows staging values and unknown automatic targets":
+        expect(remote_simple_install_command("windows", "auto", "bad\"stage.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("plan9", "auto", "/tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/tmp/simple", "bad-digest").is_err()).to_equal(true)
+
+    it "keeps uploads away from the live and sibling publication paths":
+        expect(remote_simple_install_command("linux", "auto", "", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "auto", "/usr/local/bin/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("simpleos", "auto", "/usr/bin/simple.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "c:/program files/simple/SIMPLE.EXE", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("win", "auto", "C:\\Program Files\\Simple\\simple.exe.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+
+    it "rejects lexical aliases of live publication paths":
+        expect(remote_simple_install_command("linux", "auto", "/usr/local/lib/../bin/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("simpleos", "auto", "/usr/lib/../bin/simple.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "c:\\Program Files\\Other\\..\\Simple\\SIMPLE.EXE", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("win", "auto", "C:/Program Files/Simple/cache/../simple.exe.remote-test-new", TEST_SHA256).is_err()).to_equal(true)
+
+    it "requires absolute staging and installed paths":
+        expect(remote_simple_install_command("linux", "auto", "tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "auto", "1:\\Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("linux", "relative/simple", "/tmp/simple", TEST_SHA256).is_err()).to_equal(true)
+        expect(remote_simple_install_command("windows", "Simple\\simple.exe", "C:\\Temp\\simple.exe", TEST_SHA256).is_err()).to_equal(true)

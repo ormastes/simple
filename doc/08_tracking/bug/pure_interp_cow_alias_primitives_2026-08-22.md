@@ -1,4 +1,9 @@
 # Pure-Simple core interpreter: every collection write goes through a temp alias
+## Closed 2026-09-16 — Status FIXED; pinned by spec and 5 perf-gate rows
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-22
 **Area:** pure-Simple tree-walk interpreter — `src/compiler/10.frontend/core/interpreter/`
@@ -69,3 +74,4 @@ Mutate through the single owner at every site:
   with `array index out of bounds: index is 127 but length is 0` (128-bucket env
   hashmap never initialised). This is why the spec pins the mechanism by source
   shape plus a library-level behaviour test rather than by an end-to-end timing.
+

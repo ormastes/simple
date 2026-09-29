@@ -1,7 +1,8 @@
 # Stage 4 HIR Import Crash
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -174,11 +175,3 @@ core-C-bootstrap ABI (`Dict.has`, `rt_is_debug_mode_enabled`,
 proof; TODO592 remains open for the fresh admitted self-hosted runner. No full
 Stage 4 was rerun.
 
-## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
-
-Verdict: STALE-REF
-
-The cited `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` no longer
-contains the diagnostic text: `grep -rn "unresolved import" src/compiler/20.hir/`
-returns zero hits across the whole 20.hir layer. Location must be re-established
-before this row can be actioned. Owner path: src/compiler/20.hir/hir_lowering/**.

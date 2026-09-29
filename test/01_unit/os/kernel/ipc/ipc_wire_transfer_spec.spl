@@ -1,0 +1,252 @@
+"""
+## Purpose and audience
+
+Executable specification for the SimpleOS IPC wire envelope codec and its
+ring-3 pointer policy — `src/os/kernel/ipc/ipc_wire.spl`. Written for kernel
+IPC maintainers and for ring-3 client authors
+(`examples/09_embedded/simpleos_remote_gui/remote_window_runtime.c`) who read
+the same 32-byte header at `msg+24` (payload_len) and `msg+32` (payload).
+
+## Operator workflow
+
+Run this spec with the deployed Sep-5 bootstrap seed and confirm zero failed
+scenarios:
+
+```sh
+src/compiler_rust/target/bootstrap/simple run \
+  test/01_unit/os/kernel/ipc/ipc_wire_transfer_spec.spl
+```
+
+## Compatibility and limitations
+
+Status: **partially guarded — codec, pointer policy and the manager's
+fail-closed send rejections only.**
+
+`ipc_wire.spl` has zero importers under `src/` today, so this spec guards the
+codec as a standalone contract rather than as an observed kernel data path.
+Three families of scenario are deliberately absent and are tracked in
+`doc/08_tracking/bug/ipc_wire_canonical_recv_abi_never_landed_2026-09-06.md`:
+
+  * the canonical syscall-21 dest-buffer receive ABI (a3 VA / a4 capacity,
+    returning bytes written) — that code does not exist on origin; the
+    handler returns a kernel pointer instead;
+  * `IpcManager.send_owned`'s success path — it calls `_copy_owned_payload`,
+    which is defined nowhere in `src/`;
+  * every scenario needing `os.kernel.ipc.syscall_ipc` or
+    `os.kernel.scheduler.scheduler` — that module closure does not currently
+    load (see the bug record for the verbatim error).
+
+## Verification guidance and troubleshooting
+
+Every numeric expectation carries a trailing `# oracle:` naming the clause it
+guards, either in `ipc_wire.spl`'s header layout comment or in
+`src/os/kernel/errno.spl`. A failing scenario names the offset or errno it
+expected; compare it against that clause before changing this spec.
+"""
+# @manual_section: IPC wire envelope codec and ring-3 pointer policy
+
+use std.spec.step
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.ipc.ipc.{IpcManager, IPC_OWNED_PAYLOAD_TOO_LARGE}
+use os.kernel.ipc.ipc_wire.{
+    ipc_wire_encode, ipc_wire_read_u32, ipc_wire_read_u64,
+    ipc_wire_payload_method, ipc_user_range_check,
+    IPC_WIRE_HEADER_SIZE, IPC_WIRE_PAYLOAD_MAX, IPC_WIRE_CAPACITY,
+    IPC_WIRE_V1_FLAG
+}
+use os.kernel.errno.{EFAULT, EINVAL}
+
+# A page-aligned address inside the user half of the canonical address space.
+val USER_OK_PTR: u64 = 1048576u64          # 0x100000
+# First address of the kernel half — must never be accepted from ring-3.
+val KERNEL_PTR: u64 = 140737488355328u64   # 0x0000_8000_0000_0000
+
+fn _payload_with_method(method: u32, extra: i64) -> [u8]:
+    """Build a compositor-style payload: method word first, then filler."""
+    var bytes: [u8] = []
+    var i: i64 = 0
+    while i < 4:
+        val shift = (i * 8).to_u64()
+        bytes.push(((method.to_u64() >> shift) & 255u64).to_u8())
+        i = i + 1
+    i = 0
+    while i < extra:
+        bytes.push((65 + (i % 26)).to_u8())
+        i = i + 1
+    bytes
+
+fn _header(src_port: u64, dst_port: u64, method: u32) -> IpcMessage:
+    IpcMessage(
+        src_port: src_port,
+        dst_port: dst_port,
+        method: method,
+        flags: IPC_WIRE_V1_FLAG,
+        payload_len: 0u32,
+        cap_count: 0u32
+    )
+
+describe "IPC wire envelope codec":
+    it "lays the 32-byte header out exactly as the ring-3 client reads it":
+        # @req REQ-OS-IPC-WIRE-001
+        step("Encode an envelope carrying a 12-byte payload")
+        val payload = _payload_with_method(7u32, 8)
+        val wire = ipc_wire_encode(
+            72623859790382856u64, 1234605616436508552u64, 7u32, 1u32, payload
+        )
+
+        step("Total length is header plus payload")
+        expect(wire.len()).to_equal(44)  # oracle: ipc_wire.spl header comment — 32-byte header + payload[payload_len]
+
+        step("Scalars are stored little-endian at the documented offsets")
+        expect(wire[0]).to_equal(8u8)  # oracle: ipc_wire.spl +0 src_port u64 little-endian — least significant byte first
+        expect(wire[7]).to_equal(1u8)  # oracle: ipc_wire.spl +0 src_port u64 little-endian — most significant byte last
+        expect(ipc_wire_read_u64(wire, 0)).to_equal(72623859790382856u64)  # oracle: ipc_wire.spl +0 src_port u64
+        expect(ipc_wire_read_u64(wire, 8)).to_equal(1234605616436508552u64)  # oracle: ipc_wire.spl +8 dst_port u64
+        expect(ipc_wire_read_u32(wire, 16)).to_equal(7u32)  # oracle: ipc_wire.spl +16 method u32
+        expect(ipc_wire_read_u32(wire, 20)).to_equal(1u32)  # oracle: ipc_wire.spl +20 flags u32
+        expect(ipc_wire_read_u32(wire, 24)).to_equal(12u32)  # oracle: ipc_wire.spl +24 payload_len u32 — the ring-3 client's msg+24 read
+        expect(ipc_wire_read_u32(wire, 28)).to_equal(0u32)  # oracle: ipc_wire.spl +28 cap_count u32 — this encoder never attaches capabilities
+
+        step("The payload begins at +32, byte for byte")
+        expect(wire[32]).to_equal(payload[0])  # oracle: ipc_wire.spl +32 payload[payload_len] — the ring-3 client's msg+32 read
+        expect(wire[43]).to_equal(payload[11])  # oracle: ipc_wire.spl +32 payload[payload_len] — last payload byte
+
+    it "encodes an empty payload as a bare header":
+        # @req REQ-OS-IPC-WIRE-002
+        step("Encode with no payload bytes at all")
+        val empty: [u8] = []
+        val wire = ipc_wire_encode(1u64, 2u64, 0u32, 0u32, empty)
+
+        expect(wire.len()).to_equal(IPC_WIRE_HEADER_SIZE)  # oracle: ipc_wire.spl IPC_WIRE_HEADER_SIZE = 32
+        expect(ipc_wire_read_u32(wire, 24)).to_equal(0u32)  # oracle: ipc_wire.spl "payload_len is always the real length of payload"
+
+    it "never emits a payload_len larger than the one payload page":
+        # @req REQ-OS-IPC-WIRE-003
+        step("Encode a payload 16 bytes longer than the one-page cap")
+        val payload = _payload_with_method(1u32, IPC_WIRE_PAYLOAD_MAX + 12)
+        val wire = ipc_wire_encode(1u64, 2u64, 1u32, 0u32, payload)
+
+        step("Both the emitted bytes and the advertised length stop at the cap")
+        expect(wire.len()).to_equal(IPC_WIRE_CAPACITY)  # oracle: ipc_wire.spl IPC_WIRE_CAPACITY = 4128 — the largest envelope
+        expect(ipc_wire_read_u32(wire, 24)).to_equal(4096u32)  # oracle: ipc_wire.spl "truncated to the cap rather than emitting a header that over-promises"
+        expect(wire[4127]).to_equal(payload[4095])  # oracle: ipc_wire.spl encode loop — truncation keeps the first IPC_WIRE_PAYLOAD_MAX bytes
+
+    it "read helpers fail closed on out-of-range offsets":
+        # @req REQ-OS-IPC-WIRE-004
+        step("Build a short envelope to read past the end of")
+        val payload = _payload_with_method(5u32, 0)
+        val wire = ipc_wire_encode(255u64, 0u64, 0u32, 0u32, payload)
+        val last = wire.len()
+
+        expect(ipc_wire_read_u32(wire, 0 - 1)).to_equal(0u32)  # oracle: ipc_wire_read_u32 "Returns 0 if out of range" — negative offset
+        expect(ipc_wire_read_u32(wire, last - 3)).to_equal(0u32)  # oracle: ipc_wire_read_u32 "Returns 0 if out of range" — offset + 4 > len
+        expect(ipc_wire_read_u64(wire, last - 7)).to_equal(0u64)  # oracle: ipc_wire_read_u64 "Returns 0 if out of range" — offset + 8 > len
+        expect(ipc_wire_read_u64(wire, 0)).to_equal(255u64)  # oracle: ipc_wire.spl +0 src_port u64 — an in-range read is unaffected
+
+    it "round-trips extreme scalar values without sign or shift loss":
+        # @req REQ-OS-IPC-WIRE-005
+        step("Encode with the largest representable port and method")
+        val empty: [u8] = []
+        val wire = ipc_wire_encode(
+            18446744073709551615u64, 0u64, 4294967295u32, 4294967295u32, empty
+        )
+
+        expect(ipc_wire_read_u64(wire, 0)).to_equal(18446744073709551615u64)  # oracle: _wire_byte_of_u64 widens to u64 before shifting — no sign extension
+        expect(ipc_wire_read_u32(wire, 16)).to_equal(4294967295u32)  # oracle: _wire_byte_of_u32 delegates to _wire_byte_of_u64 — no truncation at bit 31
+        expect(ipc_wire_read_u32(wire, 20)).to_equal(4294967295u32)  # oracle: ipc_wire.spl +20 flags u32 round trip
+
+    it "lifts the compositor method out of the first payload word":
+        # @req REQ-OS-IPC-WIRE-006
+        step("A compositor payload stamps its method as the first LE word")
+        expect(ipc_wire_payload_method(_payload_with_method(9u32, 4))).to_equal(9u32)  # oracle: ipc_wire_payload_method "the method id a sender stamped into the first payload word"
+
+        step("A payload shorter than one word carries no method")
+        val stub: [u8] = [1u8, 2u8, 3u8]
+        val empty: [u8] = []
+        expect(ipc_wire_payload_method(stub)).to_equal(0u32)  # oracle: ipc_wire_payload_method "Returns 0 for payloads shorter than one word"
+        expect(ipc_wire_payload_method(empty)).to_equal(0u32)  # oracle: ipc_wire_payload_method "Returns 0 for payloads shorter than one word"
+
+    it "keeps the wire geometry constants mutually consistent":
+        # @req REQ-OS-IPC-WIRE-007
+        step("Capacity is exactly one header plus one payload page")
+        expect(IPC_WIRE_HEADER_SIZE + IPC_WIRE_PAYLOAD_MAX).to_equal(IPC_WIRE_CAPACITY)  # oracle: ipc_wire.spl "the largest envelope is 4128 bytes"
+        expect(IPC_WIRE_HEADER_SIZE).to_equal(32)  # oracle: message_buffer.spl MSG_HDR_SIZE
+        expect(IPC_WIRE_PAYLOAD_MAX).to_equal(4096)  # oracle: message_buffer.spl BUFFER_PAGE_SIZE
+        expect(IPC_WIRE_V1_FLAG).to_equal(1u32)  # oracle: ipc_wire.spl "flags bit 0 — this envelope uses the v1 layout"
+
+describe "IPC user-pointer policy":
+    it "accepts a plain user-half buffer of the expected size":
+        # @req REQ-OS-IPC-WIRE-010
+        step("A full-capacity envelope at a mapped user address is admissible")
+        expect(ipc_user_range_check(USER_OK_PTR, 4128u64, 32u64, 4128u64)).to_equal(0)  # oracle: ipc_user_range_check "Returns 0 when [ptr, ptr+len) may be copied to/from"
+
+    it "rejects a null or low-page pointer with EFAULT":
+        # @req REQ-OS-IPC-WIRE-011
+        step("The first page is reserved so NULL-adjacent pointers cannot pass")
+        expect(ipc_user_range_check(0u64, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_user_range_check "-EFAULT null / low-page pointer"
+        expect(ipc_user_range_check(4095u64, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_wire.spl IPC_USER_VA_MIN = 4096 — the last reserved byte
+
+        step("The reserved window ends at IPC_USER_VA_MIN inclusive")
+        expect(ipc_user_range_check(4096u64, 32u64, 32u64, 4128u64)).to_equal(0)  # oracle: ipc_user_range_check tests `ptr < IPC_USER_VA_MIN` — the boundary itself is admissible
+
+    it "rejects a kernel-half pointer with EFAULT":
+        # @req REQ-OS-IPC-WIRE-012
+        step("Anything at or above the canonical boundary is kernel memory")
+        expect(ipc_user_range_check(KERNEL_PTR, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_wire.spl IPC_USER_VA_LIMIT = 0x0000_8000_0000_0000
+        expect(ipc_user_range_check(KERNEL_PTR + 4096u64, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_user_range_check "-EFAULT ... at or above the user/kernel virtual-address boundary"
+
+    it "rejects a range that runs off the end of the user half":
+        # @req REQ-OS-IPC-WIRE-013
+        step("A pointer inside the user half whose END crosses the boundary fails")
+        expect(ipc_user_range_check(KERNEL_PTR - 16u64, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_user_range_check "-EFAULT ... any part of the range at or above the boundary"
+
+        step("A range ending exactly on the boundary is admissible — the end is exclusive")
+        expect(ipc_user_range_check(KERNEL_PTR - 32u64, 32u64, 32u64, 4128u64)).to_equal(0)  # oracle: ipc_user_range_check tests `ptr + len > IPC_USER_VA_LIMIT`, not `>=`
+
+    it "rejects arithmetic wraparound with EFAULT":
+        # @req REQ-OS-IPC-WIRE-014
+        step("A near-maximal pointer whose range wraps past zero is refused")
+        expect(ipc_user_range_check(18446744073709551607u64, 32u64, 32u64, 4128u64)).to_equal(0 - EFAULT)  # oracle: ipc_user_range_check "-EFAULT ... arithmetic wraparound"
+
+    it "rejects a length outside the accepted band before looking at the pointer":
+        # @req REQ-OS-IPC-WIRE-015
+        step("A too-short length is EINVAL even though the pointer is null")
+        expect(ipc_user_range_check(0u64, 8u64, 32u64, 4128u64)).to_equal(0 - EINVAL)  # oracle: ipc_user_range_check checks `len < min_len` first, so length loses to no pointer check
+
+        step("A length past the one-envelope cap is EINVAL at a good pointer")
+        expect(ipc_user_range_check(USER_OK_PTR, 4129u64, 32u64, 4128u64)).to_equal(0 - EINVAL)  # oracle: ipc_user_range_check "-EINVAL length outside the caller's accepted band"
+
+    it "admits a zero-length range only when the band allows it":
+        # @req REQ-OS-IPC-WIRE-016
+        step("A caller that accepts zero length short-circuits before the pointer checks")
+        expect(ipc_user_range_check(0u64, 0u64, 0u64, 4096u64)).to_equal(0)  # oracle: ipc_user_range_check "if len == 0u64: return 0" precedes every pointer test
+
+        step("A recv destination declaring min_len 32 rejects a zero-length range")
+        expect(ipc_user_range_check(0u64, 0u64, 32u64, 4128u64)).to_equal(0 - EINVAL)  # oracle: ipc_user_range_check `len < min_len` — how a caller expresses "must hold at least one header"
+
+describe "IPC manager fail-closed send rejections":
+    it "refuses a payload larger than one page without queueing it":
+        # @req REQ-OS-IPC-WIRE-020
+        step("Create a compositor port and offer it an over-page payload")
+        var manager = IpcManager.new()
+        val port = manager.create_port(TaskId(id: 1u64), "compositor")
+        val payload = _payload_with_method(1u32, IPC_WIRE_PAYLOAD_MAX - 3)
+        val outcome = manager.send_owned(
+            TaskId(id: 1u64), port.id, _header(port.id, port.id, 1u32), payload
+        )
+
+        expect(outcome).to_equal(IPC_OWNED_PAYLOAD_TOO_LARGE)  # oracle: ipc.spl:29 IPC_OWNED_PAYLOAD_TOO_LARGE = -4, checked before every other send precondition
+        expect(outcome).to_equal(-4)  # oracle: ipc.spl send_owned docstring "-4 = payload exceeds the per-message cap"
+
+    it "reports an unknown destination port instead of dropping the message":
+        # @req REQ-OS-IPC-WIRE-021
+        step("Send from a genuinely owned source port to a port that was never created")
+        var manager = IpcManager.new()
+        val source = manager.create_port(TaskId(id: 1u64), "client")
+        val empty: [u8] = []
+        val outcome = manager.send_owned(
+            TaskId(id: 1u64), source.id, _header(source.id, 4242u64, 1u32), empty
+        )
+
+        expect(outcome).to_equal(-1)  # oracle: ipc.spl send_owned docstring "-1 = destination port not found"

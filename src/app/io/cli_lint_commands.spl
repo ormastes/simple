@@ -3,10 +3,11 @@
 # src / app / cli / lint_entry.spl starts quickly and reliably.
 
 use std.tooling.easy_fix.types.{FixConfidence}
-use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, read_file, print_diff}
+use lazy compiler.tools.formatter.main.{make_formatter, check_formatting, format_file_inplace, fmt_read_file, print_diff}
 use compiler.tools.lint.main.{
     Linter, LintCliPolicy, LintReadFileResult, lint_read_file,
-    run_lint_source_with_linter_policy}
+    run_lint_source_with_linter_policy, simple_lint_adapter_result,
+    simple_lint_verdict_name, simple_lint_human_summary}
 use lazy compiler.tools.fix.main.{collect_fixes_from_source, FixToolApplicator, apply_fixes_to_disk, fix_read_source}
 use lazy compiler.tools.fix.rules.{check_simd_opportunities, check_short_grammar_refactor, easyfix_id_text, easyfix_description_text}
 use std.tooling.easy_fix.{FixConfidence}
@@ -15,6 +16,9 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use std.nogc_sync_mut.io.mod_stub.{is_dir}
 use app.io.source_discovery.{discover_spl_files, source_path_identity}
 use app.io.cli_ops.{_cli_eprint, _cli_process_run, _cli_run_workspace_root_guard}
+use compiler.common.assurance.warning_phase.warning_phase_env_var_name
+
+extern fn rt_env_set(key: text, value: text) -> bool
 use app.io.cli_fix_options.{fix_option_error}
 use app.io.cli_fmt_options.{fmt_option_error}
 use common.text.{escape_json}
@@ -38,7 +42,13 @@ pub fn lint_option_error(args: [text]) -> text:
         other_count = other_count + 1
         # --wm-lane enables the default-off WM/GUI/web/2D portable-lane
         # dependency boundary rule (wm_lane_boundary) and nothing else.
-        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--wm-lane":
+        if arg == "--deny-all" or arg == "--warn-all" or arg == "--json" or arg == "--fix" or arg == "--fix-all" or arg == "--fix-dry-run" or arg == "--mcp-perf" or arg == "--all" or arg == "--simd" or arg == "--wm-lane" or arg == "--gpu-2d-perf":
+            continue
+        # Assurance WARNING PHASE: drop every diagnostic this profile raises by
+        # exactly one severity level (error -> warning), still reporting all of
+        # them. A MODIFIER, orthogonal to --profile, deliberately not a profile
+        # spelling. See compiler.common.assurance.warning_phase.
+        if arg == "--assurance-warning-phase":
             continue
         if arg.starts_with("--profile="):
             if arg.len() == "--profile=".len():
@@ -64,8 +74,16 @@ fn run_lint_command(args: [text]) -> i64:
             _cli_eprint("Error: {option_error}")
         return 2
 
+    # --assurance-warning-phase is threaded to every projection through the
+    # shared env knob rather than a new parameter on each of them: the driver,
+    # the interpreter and lint all read the SAME knob, so one write here cannot
+    # leave two components disagreeing about the phase (the premise-5b hazard
+    # policy_schema.spl's header describes for the profile itself).
+    if args.contains("--assurance-warning-phase"):
+        val _wp_set = rt_env_set(warning_phase_env_var_name(), "1")
+
     if args.contains("--help") or args.contains("-h"):
-        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file-or-directory> [more-targets...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
         return 0
 
     var files: [text] = []
@@ -131,7 +149,7 @@ fn run_lint_command(args: [text]) -> i64:
         if json_output:
             print "{\"type\":\"lint-error\",\"message\":\"no input files\"}"
             return 2
-        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--mcp-perf] [--simd]"
+        print "Usage: simple lint <file.spl> [file2.spl...] [--deny-all] [--warn-all] [--profile=TIER] [--assurance-warning-phase] [--mcp-perf] [--simd]"
         print ""
         print "Runs lint passes on Simple source files."
         print "Checks for:"
@@ -145,6 +163,10 @@ fn run_lint_command(args: [text]) -> i64:
         return 1
 
     var failed_files = 0
+    var completed_files: u32 = 0
+    var diagnostic_files: u32 = 0
+    var error_files: u32 = 0
+    var warning_files: u32 = 0
     # Files the parse gate rejected. These were NOT analysed at all — no
     # AST-based lint ran on them — so they must be counted and reported
     # separately from files that were analysed and found faulty. Without this
@@ -226,8 +248,13 @@ fn run_lint_command(args: [text]) -> i64:
                 source = loaded_source
         val file_exit = run_lint_source_with_linter_policy(
             lint_session, file_path, lint_policy, source)
+        diagnostic_files = diagnostic_files + (lint_session.last_diagnostic_count as u32)
+        error_files = error_files + (lint_session.last_error_count as u32)
+        warning_files = warning_files + (lint_session.last_warning_count as u32)
         if file_exit == 3:
             not_linted_files = not_linted_files + 1
+        else:
+            completed_files = completed_files + 1
         if file_exit != 0:
             if exit_code == 0:
                 # 3 is the internal NOT-LINTED marker, not a process exit code.
@@ -250,25 +277,18 @@ fn run_lint_command(args: [text]) -> i64:
                     print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
-    # Fail closed on skipped files. A run that could not parse a file has NOT
-    # verified it, so "passed" is never a truthful summary for that run — even
-    # if every diagnostic that did surface was only a warning.
-    if not_linted_files > 0 and exit_code == 0:
-        exit_code = 1
-    if failed_files > 0:
-        if json_output:
-            print "{\"type\":\"lint-summary\",\"status\":\"failed\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files}}"
-        else:
-            print ""
-            if not_linted_files > 0:
-                print "NOT LINTED: {not_linted_files} file(s) could not be parsed and were never analysed"
-            print "Lint failed in {failed_files} file(s)"
-    elif exit_code == 0:
-        if json_output:
-            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0,\"not_linted_files\":0}"
-        else:
-            print ""
-            print "Lint passed: all files clean"
+    val rule_count = lint_session.lints.len() as u32
+    val adapter = simple_lint_adapter_result(
+        lint_files.len() as u32, completed_files, not_linted_files as u32,
+        rule_count, if completed_files > 0: rule_count else: 0,
+        diagnostic_files, error_files, warning_files)
+    if adapter.exit_code != 0 and exit_code == 0:
+        exit_code = adapter.exit_code
+    if json_output:
+        print "{\"type\":\"lint-summary\",\"status\":\"{simple_lint_verdict_name(adapter.kernel_result)}\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files},\"completed_files\":{completed_files}}"
+    else:
+        print ""
+        print simple_lint_human_summary(adapter.kernel_result)
     exit_code
 
 fn run_fmt_command(args: [text]) -> i64:
@@ -335,7 +355,7 @@ fn run_fmt_command(args: [text]) -> i64:
                     exit_code = 1
         elif diff_mode:
             val fmt = make_formatter()
-            val orig_result = read_file(file_path)
+            val orig_result = fmt_read_file(file_path)
             match orig_result:
                 case Err(e):
                     _cli_eprint("Error reading file: {e}")

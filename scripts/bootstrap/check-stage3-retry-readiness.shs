@@ -1,0 +1,115 @@
+#!/bin/sh
+set -u
+
+root_arg=
+static_only=0
+
+fail() {
+  printf '%s\n' \
+    'schema=simple-bootstrap-stage3-retry-readiness-v1' \
+    'status=refused' \
+    "reason=$1" \
+    "source_root=${root_arg:-unavailable}"
+  exit 1
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --source-root=*) root_arg=${arg#*=} ;;
+    --static-only) static_only=1 ;;
+  esac
+done
+
+[ -n "$root_arg" ] || fail source-root-required
+[ -d "$root_arg" ] && [ ! -L "$root_arg" ] || fail source-root-not-canonical
+root=$(CDPATH= cd -- "$root_arg" && pwd -P) || fail source-root-not-canonical
+[ "$root" = "$root_arg" ] || fail source-root-not-canonical
+[ "$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)" = "$root" ] || \
+  fail source-root-not-git-worktree
+[ -z "$(git -C "$root" status --porcelain=v1 2>/dev/null)" ] || \
+  fail source-worktree-dirty
+. "$root/scripts/bootstrap/lib/centralized-storage.shs"
+simple_bootstrap_storage_init "$root" || fail centralized-storage-unavailable
+
+batching="$root/src/compiler/20.hir/hir_lowering/module_surface_registry.spl"
+diagnostics="$root/src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+orchestration="$root/src/compiler/80.driver/driver_orchestration.spl"
+native_build="$root/src/app/cli/native_build_main.spl"
+pipeline="$root/src/compiler/80.driver/pipeline_fn.spl"
+focused="$root/src/app/cli/bootstrap_focused_native_build.spl"
+bootstrap_main="$root/src/app/cli/bootstrap_main.spl"
+bootstrap="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+snapshot="$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+manifest_verify="$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs"
+composition="$root/src/compositions/kernel_llvm_cranelift/compiler/driver/bootstrap_k1_selected.spl"
+
+for required in "$batching" "$diagnostics" "$orchestration" "$native_build" \
+  "$pipeline" "$focused" "$bootstrap_main" "$bootstrap" "$snapshot" \
+  "$manifest_verify" "$composition"; do
+  [ -f "$required" ] && [ ! -L "$required" ] || fail required-readiness-source-missing
+done
+
+[ "$(grep -c 'fn module_surface_promote_roots(roots: \[Any\]) -> bool:' "$batching" 2>/dev/null || true)" -eq 1 ] || \
+  fail batching-root-authority-missing
+[ "$(grep -c 'module_surface_promote_roots(roots)' "$batching" 2>/dev/null || true)" -ge 2 ] || \
+  fail batching-call-sites-missing
+
+grep -Fq '[hir-fatal]' "$diagnostics" || fail source-diagnostic-emission-missing
+grep -Fq '[post-hir-validation-fatal]' "$diagnostics" || fail validation-diagnostic-emission-missing
+grep -Fq 'source diagnostics were emitted as [hir-fatal]' "$orchestration" || \
+  fail diagnostic-transport-disclosure-missing
+grep -Fq 'line.contains("[hir-fatal")' "$native_build" || \
+  fail diagnostic-preservation-filter-missing
+
+grep -Fq ') -> text:' "$pipeline" || fail pipeline-return-contract-missing
+grep -Eq '^[[:space:]]+mangled$' "$pipeline" || fail pipeline-return-value-missing
+! grep -Fq 'Ok(CompiledUnit' "$pipeline" || fail pipeline-return-kind-regressed
+
+grep -Fq 'pub fn run_exact_stage3_focused_capsule(args: [text]) -> i64:' "$focused" || \
+  fail pure-simple-stage3-route-missing
+! grep -Fq 'rt_native_build' "$focused" || fail focused-stage3-seed-fallback-present
+grep -Fq 'if env_get("SIMPLE_BOOTSTRAP_STAGE3") == "1":' "$bootstrap_main" || \
+  fail bootstrap-stage3-marker-route-missing
+grep -Fq 'return run_exact_stage3_focused_capsule(args)' "$bootstrap_main" || \
+  fail bootstrap-stage3-focused-dispatch-missing
+
+stage3_block=$(sed -n '/^  # Stage 3:/,/^  stage3_status=\$?/p' "$bootstrap")
+printf '%s\n' "$stage3_block" | grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3=1' || \
+  fail stage3-command-marker-missing
+printf '%s\n' "$stage3_block" | grep -Fq -- '--entry src/app/cli/bootstrap_main.spl' || \
+  fail stage3-command-entry-missing
+printf '%s\n' "$stage3_block" | grep -Fq -- '--source src/compiler --source src/app --source src/lib' || \
+  fail stage3-command-source-roots-missing
+! printf '%s\n' "$stage3_block" | grep -Fq 'SIMPLE_NATIVE_BUILD_RUST=1' || \
+  fail stage3-command-seed-fallback-present
+
+grep -Fq 'src/lib src/compositions examples/10_tooling' "$snapshot" || \
+  fail source-fingerprint-omits-compositions
+grep -Fq 'SIMPLE_BOOTSTRAP_STAGE3' "$manifest_verify" || \
+  fail stage3-manifest-verifier-command-stale
+grep -Fq 'src/compositions/kernel_llvm_cranelift' "$manifest_verify" || \
+  fail stage3-manifest-verifier-sources-stale
+
+if [ "$static_only" -eq 1 ]; then
+  BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  BOOTSTRAP_STAGE3_VERSION_ROOT=$root
+  export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH" 2>/dev/null || fail stage3-authority-facade-invalid
+  readiness_tmp=$(mktemp -d "${SIMPLE_BOOTSTRAP_TMP_ROOT}/stage3-retry-readiness.XXXXXX") || \
+    fail temporary-evidence-directory-unavailable
+  trap 'rm -rf "$readiness_tmp"' EXIT HUP INT TERM
+  readiness_snapshot="$readiness_tmp/source.snapshot"
+  bootstrap_stage3_source_snapshot "$readiness_snapshot" "$root" >/dev/null 2>&1 || \
+    fail clean-source-fingerprint-failed
+  readiness_sha=$(bootstrap_stage3_hash_file "$readiness_snapshot") || \
+    fail clean-source-fingerprint-unhashable
+  printf '%s\n' \
+    'schema=simple-bootstrap-stage3-retry-readiness-v1' \
+    'status=pass' \
+    'reason=static-root-cause-and-route-proven' \
+    "source_root=$root" \
+    "source_snapshot_sha256=$readiness_sha"
+  exit 0
+fi
+
+exec "$root/scripts/bootstrap/check-stage3-recovery-authority.shs" "$@"

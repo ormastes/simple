@@ -1,0 +1,89 @@
+#!/bin/sh
+# Producer for build/os/simpleos_x86_64_desktop_engine2d.elf.
+#
+# Why this file exists: until 2026-08-31 the ONLY file in the tree naming
+# `build/os/simpleos_x86_64_desktop_engine2d.elf` was its consumer,
+# scripts/check/check-simpleos-x86-64-wm-host-vulkan-pixel-evidence.shs:54.
+# Nothing built it, so that gate stopped at a missing-artifact precondition and
+# the broken src/os/kernel/ import closure behind it (the clobbered
+# std.common.contracts.os.server_data_namespace_v1 contract, bug record
+# doc/08_tracking/bug/simpleos_kernel_imports_missing_server_data_namespace_v1_contract_2026-08-31.md)
+# was never reached by any compiler. A gate whose input has no producer is a
+# gate that cannot fail; this closes that hole.
+#
+# Entry is gui_entry_desktop.spl — the entry that gate's own header names
+# (lines 18, 27, 375, 429) as the WM/engine2d kernel it boots under OVMF.
+#
+# Modeled directly on scripts/os/build-simpleos-x86-64-components-kernel.shs:
+# same seed compiler, same --source closure, same freestanding stub switch, and
+# the same structural read-back. --timeout 1200 is deliberate: the 300s default
+# fakes module failures. SIMPLE_ALLOW_STUB_FALLBACK and
+# SIMPLE_ALLOW_UNRESOLVED_RUNTIME are NEVER set — either would turn a broken
+# closure into a green link and make this lane's evidence a lie.
+#
+# Exit status: 0 = a non-empty x86-64 ELF with .text was produced AND the
+# desktop entry's own root symbol survived --gc-sections; non-zero = nothing
+# usable, with the literal linker/compiler tail on stderr. No partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+ARCH_DIR=$REPO_ROOT/examples/09_embedded/simple_os/arch/x86_64
+ENTRY=${DESKTOP_ENGINE2D_ENTRY:-$ARCH_DIR/gui_entry_desktop.spl}
+LDS=${LINKER:-$ARCH_DIR/linker_128mb.ld}
+KERNEL=${DESKTOP_ENGINE2D_KERNEL_ELF:-$REPO_ROOT/build/os/simpleos_x86_64_desktop_engine2d.elf}
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/x86_64_desktop_engine2d}
+LOG=$OUT_DIR/kernel-build.log
+CACHE=$OUT_DIR/kcache
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/src/compiler_rust/target/release/simple}
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+
+fail() { printf 'build-x86-64-desktop-engine2d: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN (build the seed: cargo build --release --bin simple in src/compiler_rust)"
+[ -f "$ENTRY" ] || fail "missing entry $ENTRY"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+mkdir -p "$OUT_DIR" build/os build/os/generated
+rm -f "$KERNEL"
+
+printf 'pub fn ssh_live_build_marker() -> text:\n    "x86-64-desktop-engine2d"\n' \
+    > build/os/generated/ssh_live_build_marker.spl
+
+OBJCOPY_PREFIX=""
+for d in /usr/lib/llvm-23/bin /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+    [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+done
+
+# Exit status read DIRECTLY into a variable on the next line — never through a
+# pipe, whose $? is the last pipeline element's status.
+set +e
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$REPO_ROOT/src" SIMPLE_OS_LOG_MODE=off \
+SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+    "$SIMPLE_BIN" native-build \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os \
+    --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+    --entry-closure --cache-dir "$CACHE" \
+    --timeout "$NB_TIMEOUT" \
+    --entry "$ENTRY" --target x86_64-unknown-none \
+    --linker-script "$LDS" -o "$KERNEL" >"$LOG" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || { tail -60 "$LOG" >&2; fail "native-build failed (rc=$rc), log: $LOG"; }
+
+[ -s "$KERNEL" ] || fail "native-build reported success but $KERNEL is missing or empty"
+
+hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+case "$hdr" in
+    *X86-64*) ;;
+    *) fail "$KERNEL is not an x86-64 ELF" ;;
+esac
+readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+    || fail "$KERNEL has no .text section (empty-link false success)"
+
+size=$(wc -c <"$KERNEL")
+printf 'PASS — x86_64 desktop engine2d kernel built by the RUST SEED (%s): %s (%s bytes, x86-64 ELF with .text)\n' \
+    "$SIMPLE_BIN" "$KERNEL" "$size"

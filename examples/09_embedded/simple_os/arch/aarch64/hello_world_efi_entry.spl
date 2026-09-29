@@ -1,0 +1,73 @@
+# SimpleOS aarch64 hello-world in-guest execution entry (EDK2/AAVMF real-firmware lane).
+#
+# Boot chain: EDK2/AAVMF pflash -> vendor/limine/BOOTAA64.EFI (a real EFI
+# application on a FAT ESP) -> this kernel ELF, loaded with `protocol: limine`.
+# NEVER QEMU `-kernel`, NEVER isa-debug-exit — the same artifact must be able to
+# boot on hardware (.claude/rules/board-runnable.md). The gate that runs this
+# (scripts/check/check-simpleos-aarch64-hello-world-in-guest-efi.shs) self-checks
+# the assembled QEMU argv for both forbidden flags before starting the VM.
+#
+# What it proves: a hello-world program WRITTEN IN SIMPLE and compiled to a
+# freestanding aarch64 ELF by the RUST SEED (the pure-Simple self-hosted
+# compiler cannot compile anything yet — two located bugs) runs inside the guest
+# under real firmware and prints ITS OWN output to the PL011 console.
+#
+# HONEST SCOPE — read this before citing the gate:
+# The program runs in KERNEL mode (EL1), not in a ring-3/EL0 user task loaded off
+# the guest's own filesystem. The x86_64 sibling lane reaches ring 3 because
+# os.kernel.memory.vmm_address_space + os.kernel.arch_adapt.x86_64_user_entry
+# provide an x86_64-only map+enter path; there is no aarch64 counterpart in
+# src/os today (aarch64 has no `_aarch64_enter_user`, and the Limine aarch64 boot
+# lane never builds a user address space). Closing that is a separate, larger
+# piece of work and is filed rather than papered over. What IS proven here is
+# strictly: real firmware -> real EFI application -> Simple-compiled guest code
+# executing and emitting its own marker on serial.
+#
+# Freestanding discipline (learned from limine_entry.spl and the x86_64 lane):
+#   * The entry function MUST be named literally `_start` — native-build only
+#     auto-generates the `--defsym=_start=<mangled>` alias for a top-level
+#     function of that exact name in the entry file. `ENTRY(kernel_main)` in
+#     boot/linker_limine.ld would otherwise resolve to nothing, the entry point
+#     would be 0x0, and --gc-sections would discard the whole reachable graph,
+#     yielding a "successful" ~1KB link with no .text.
+#   * This file lives in examples/09_embedded/simple_os/arch/aarch64/ so that
+#     boot-object autodiscovery finds the sibling boot/freestanding_runtime.c
+#     (it keys off the --entry file's own directory).
+#   * No module-level `val` initializers; constants stay function-local.
+
+use os.kernel.log.klog_api.{log_init_serial, log_raw_println, LOG_INFO}
+
+@unsafe(reason: "bare WFE park has no artifact-verified contract", capabilities: [ffi])
+extern fn rt_aarch64_wfe_spin()
+
+fn hello_world_program() -> i64:
+    """The hello-world program itself.
+
+    Deliberately a separate function from the boot glue so its output is
+    attributable to the PROGRAM and not to a boot stage: every line it emits
+    carries the HELLO_ prefix, and the gate's must-FAIL fixture is a serial
+    capture containing only the boot lines with these stripped out.
+
+    Returns 0 on success, which the entry reports as the program's exit code.
+    """
+    log_raw_println("HELLO_NATIVE_SIMPLEOS_AARCH64_OK hello world from Simple")
+    log_raw_println("HELLO_NATIVE_SIMPLEOS_AARCH64 second line proves the program kept running")
+    0
+
+@noreturn
+fn _start():
+    """aarch64 hello-world ELF entry point.
+
+    Limine hands off at EL1 with the MMU on, a valid stack, and no arguments —
+    no assembly boot glue is needed here (unlike riscv64/x86_64, whose `_start`
+    must set up their own stack/mode first).
+    """
+    log_init_serial(LOG_INFO)
+    log_raw_println("[hello] SimpleOS aarch64 hello-world in-guest (EDK2/AAVMF -> BOOTAA64.EFI)")
+    log_raw_println("[hello] serial up, invoking the Simple hello-world program")
+    val rc = hello_world_program()
+    log_raw_println("[hello] native program exited rc={rc}")
+    log_raw_println("[hello] parking")
+    while true:
+        unsafe:
+            rt_aarch64_wfe_spin()

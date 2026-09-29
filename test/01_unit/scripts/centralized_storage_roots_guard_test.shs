@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+TEST_ROOT="${SIMPLE_WORKTREE_STORAGE_ROOT:-$ROOT_DIR/.simple/storage}/test/centralized-storage-guard.$$"
+trap 'rm -rf "$TEST_ROOT"' EXIT HUP INT TERM
+mkdir -p "$TEST_ROOT/repo/scripts/audit" "$TEST_ROOT/repo/src/app"
+cp "$ROOT_DIR/scripts/audit/check-centralized-storage-roots.shs" "$TEST_ROOT/repo/scripts/audit/"
+
+cd "$TEST_ROOT/repo"
+git init -q
+git config user.email test@example.invalid
+git config user.name test
+printf '%s\n' 'val root = SIMPLE_WORKTREE_STORAGE_ROOT + "/build/app"' >src/app/main.spl
+git add .
+git commit -qm baseline
+
+sh scripts/audit/check-centralized-storage-roots.shs --self-test >/dev/null
+
+printf '%s\n' 'val root = "/tmp/new-cache"' >>src/app/main.spl
+if sh scripts/audit/check-centralized-storage-roots.shs --working >working.out 2>working.err; then
+    echo 'FAIL: direct temp mutation was admitted' >&2
+    exit 1
+fi
+grep -q 'direct-temp-literal' working.err
+
+git add src/app/main.spl
+if sh scripts/audit/check-centralized-storage-roots.shs --staged >staged.out 2>staged.err; then
+    echo 'FAIL: staged direct temp mutation was admitted' >&2
+    exit 1
+fi
+grep -q 'src/app/main.spl:2: direct-temp-literal' staged.err
+
+sed 's#(/private)?/tmp#(/private)?/disabled-temp#' scripts/audit/check-centralized-storage-roots.shs >scripts/audit/mutated.shs
+chmod +x scripts/audit/mutated.shs
+if sh scripts/audit/mutated.shs --self-test >/dev/null 2>&1; then
+    echo 'FAIL: detector mutation survived self-test' >&2
+    exit 1
+fi
+rm -f scripts/audit/mutated.shs
+
+git reset -q --hard HEAD
+printf '%s\n' 'val root = SIMPLE_USER_STORAGE_ROOT + "/cache/tool"' >>src/app/main.spl
+sh scripts/audit/check-centralized-storage-roots.shs --working >/dev/null
+
+echo 'PASS: centralized storage root guard detects production mutations'

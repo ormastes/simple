@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+fn source(path: text) -> text:
+    file_read(path)
+
+fn expect_semantic_alias(path: text, alias_name: text):
+    val content = source(path)
+    expect(content).to_contain("use std.io_runtime")
+    expect(content).to_contain(alias_name)
+    expect(content.contains("rt_file_read_text")).to_equal(false)
+    expect(content.contains("rt_file_write_text")).to_equal(false)
+
+describe "runtime file alias leaf batch 2":
+    it "keeps canonical raw read and write semantics behind public names":
+        val owner = source("src/lib/nogc_sync_mut/io_runtime.spl")
+        expect(owner).to_contain("extern fn rt_file_read_text(path: text) -> text")
+        expect(owner).to_contain("extern fn rt_file_write_text(path: text, content: text) -> bool")
+        expect(owner).to_contain("pub fn file_read_raw(path: text) -> text:\n    rt_file_read_text(path)")
+        expect(owner).to_contain("pub fn file_write_raw(path: text, content: text) -> bool:\n    rt_file_write_text(path, content)")
+        expect(owner.contains("export rt_file_write_text")).to_equal(false)
+        expect(owner.contains("export rt_file_read_text")).to_equal(false)
+
+    it "keeps the canonical existence wrapper as a direct boolean call":
+        val owner = source("src/lib/nogc_sync_mut/io_runtime.spl")
+        val plugin = source("src/lib/nogc_sync_mut/web_ui/plugin.spl")
+        expect(owner).to_contain("pub fn file_exists(path: text) -> bool:\n    rt_file_exists(path)")
+        expect(plugin).to_contain("use std.io_runtime.{file_read_raw, file_write, file_exists}")
+        expect(plugin.contains("rt_file_exists")).to_equal(false)
+
+    it "aliases raw reads without changing leaf nil handling":
+        expect_semantic_alias("src/lib/nogc_sync_mut/test_runner/test_manifest.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/test_runner/test_runner_single.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/web_framework/controller.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/daemon_sdk/lock.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/package/dist.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/i18n/bundle.spl", "file_read_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/notebook/gpu_config.spl", "file_read_raw")
+        expect(source("src/lib/nogc_sync_mut/daemon_sdk/lock.spl")).to_contain("file_read_raw(lock_path) ?? \"\"")
+        expect(source("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl")).to_contain("file_read_raw(path) ?? \"\"")
+
+    it "aliases raw writes without adding parent creation or retry":
+        expect_semantic_alias("src/lib/nogc_sync_mut/test_runner/test_manifest.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/shell/file.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/daemon_sdk/lock.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/package/dist.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/notebook/local_exec.spl", "file_write_raw")
+        expect_semantic_alias("src/lib/nogc_sync_mut/notebook/lsp_bridge.spl", "file_write_raw")
+        expect(source("src/lib/nogc_sync_mut/daemon_sdk/protocol.spl")).to_contain("if file_write_raw(tmp_path, content):")
+
+    it "publishes semantic rename and time names without rt aliases":
+        val file_ops = source("src/lib/nogc_sync_mut/io/file_ops.spl")
+        val time_ops = source("src/lib/nogc_sync_mut/io/time_ops.spl")
+        val io_init = source("src/lib/nogc_sync_mut/io/__init__.spl")
+        val io_facade = source("src/lib/nogc_sync_mut/io.spl")
+        expect(file_ops).to_contain("fn file_rename(src: text, dst: text) -> bool:")
+        expect(time_ops).to_contain("fn timestamp_now() -> i64:\n    time_now_unix_micros()")
+        expect(time_ops).to_contain("fn sleep_ms(milliseconds: i64):")
+        expect(io_init).to_contain("export file_rename")
+        expect(io_init).to_contain("export timestamp_now, sleep_ms")
+        expect(io_facade).to_contain("timestamp_now, sleep_ms, rt_debug_set_active")
+        expect(io_init.contains("export rt_file_rename")).to_equal(false)
+        expect(io_init.contains("export rt_timestamp_now")).to_equal(false)
+        expect(io_init.contains("export rt_sleep_ms")).to_equal(false)

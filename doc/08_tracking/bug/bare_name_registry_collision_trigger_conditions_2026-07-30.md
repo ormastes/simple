@@ -1,7 +1,10 @@
 # Bare-name registry collision: trigger conditions NOT established (lane PROBE1)
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** the defect is real *in situ*; the **mechanism** the campaign has been
 renaming against is **unproven**, and the primary evidence for it has an internal
 contradiction. Run inline by the orchestrator after the subagent lane was halted
 on an API quota.
@@ -106,23 +109,3 @@ Instrument inside the real `HirLowering`/`SymbolTable` call graph using **real
 code — and bisect what actually makes `fn_matched` false. Until that lands, treat
 the mechanism as open.
 
-## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
-
-Verdict: STILL-OPEN (cited line accurate)
-
-The registry is still keyed on a BARE name with no module qualifier —
-`src/compiler/10.frontend/core/types.spl:733`:
-
-```spl
-fn named_type_register(name: text, field_names: [text], field_types: [i64]) -> i64:
-    val existing = named_type_find(name)
-    if existing >= 0:
-        ...
-        return existing
-```
-
-Backing storage is flat parallel arrays (`var named_type_names: [text]`), so two
-modules declaring the same type name resolve to one entry.
-ROOT-CAUSE FAMILY: flat bare-name registries (see also
-duplicate_type_name_collision_audit_2026-07-17,
-diag_stage_facet_cross_module_collision_under_test_2026-07-06).

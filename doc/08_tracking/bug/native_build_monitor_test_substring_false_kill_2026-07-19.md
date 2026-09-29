@@ -1,7 +1,10 @@
 # Native build monitor test-substring false kill
+## Open 2026-09-16 — needs owner triage
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED
 **Severity:** P1 — a healthy incremental build was terminated as a hung test
 
 ## Reproduction
@@ -28,3 +31,4 @@ wrapped real test as positive and
 `sh scripts/resource/kill_simple_monitor_test.shs`: PASS. The monitor still
 kills the calibrated test CPU/RSS runaways and spares native-build, healthy,
 young, protected, and root-owned rows.
+

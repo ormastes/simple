@@ -1,0 +1,49 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+checker=$ROOT_DIR/scripts/check/check-demand-driven-smf-evidence-static.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/ddsm-evidence-contract.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+copy_fixture() {
+    destination=$1
+    mkdir -p "$destination/scripts/check/lib" "$destination/test/03_system/compiler/perf" "$destination/test/05_perf/compiler" "$destination/src/compiler/80.driver/smf" "$destination/src/app/compiler_entrypoint" "$destination/src/lib/compiler_artifact_service" "$destination/src/compiler/80.driver/action_graph" "$destination/src/compiler/20.hir/import_materialization" "$destination/src/compiler/50.mir/admission" "$destination/src/compiler/80.driver/backend" "$destination/src/compiler/40.mono/shape" "$destination/src/lib/common/io" "$destination/src/compiler/10.frontend/lexer"
+    cp "$ROOT_DIR/scripts/check/check-demand-driven-smf-compile-pipeline.shs" "$destination/scripts/check/"
+    cp "$ROOT_DIR/scripts/check/check-demand-driven-smf-compile-performance.shs" "$destination/scripts/check/"
+    cp "$ROOT_DIR/scripts/check/lib/demand-driven-smf-evidence.shs" "$destination/scripts/check/lib/"
+    cp "$ROOT_DIR/test/03_system/compiler/perf/demand_driven_smf_compile_pipeline_spec.spl" "$destination/test/03_system/compiler/perf/"
+    cp "$ROOT_DIR/test/05_perf/compiler/demand_driven_smf_compile_pipeline_perf_spec.spl" "$destination/test/05_perf/compiler/"
+    for file in src/compiler/80.driver/smf/package_image_v1.spl src/app/compiler_entrypoint/demand_entry_path.spl src/lib/compiler_artifact_service/service.spl src/compiler/80.driver/action_graph/coordinator.spl src/compiler/20.hir/import_materialization/materializer.spl src/compiler/50.mir/admission/mir_admission_v1.spl src/compiler/80.driver/backend/demand_backend_plan.spl src/compiler/40.mono/shape/layout_shape.spl src/lib/common/io/read_only_file_view.spl src/compiler/10.frontend/lexer/lexical_scan_simd.spl; do
+        cp "$ROOT_DIR/$file" "$destination/$file"
+    done
+}
+
+copy_fixture "$work/good"
+DDSM_ROOT_DIR="$work/good" "$checker" >/dev/null
+
+cp -R "$work/good" "$work/missing-map"
+sed -i.bak '/authority=DDSM-REQ-020/d' "$work/missing-map/scripts/check/check-demand-driven-smf-compile-pipeline.shs"
+rm -f "$work/missing-map/scripts/check/check-demand-driven-smf-compile-pipeline.shs.bak"
+if DDSM_ROOT_DIR="$work/missing-map" "$checker" >/dev/null 2>&1; then
+    echo 'FAIL: missing REQ mapping was admitted' >&2
+    exit 1
+fi
+
+cp -R "$work/good" "$work/missing-owner"
+rm "$work/missing-owner/src/compiler/50.mir/admission/mir_admission_v1.spl"
+if DDSM_ROOT_DIR="$work/missing-owner" "$checker" >/dev/null 2>&1; then
+    echo 'FAIL: missing static implementation owner was admitted' >&2
+    exit 1
+fi
+
+if DDSM_EVIDENCE_DIR="$work/no-evidence" "$ROOT_DIR/scripts/check/check-demand-driven-smf-compile-pipeline.shs" --scenario sectioned-archive >/dev/null 2>&1; then
+    echo 'FAIL: absent runtime evidence was admitted' >&2
+    exit 1
+fi
+if DDSM_EVIDENCE_DIR="$work/no-evidence" "$ROOT_DIR/scripts/check/check-demand-driven-smf-compile-performance.shs" --scenario warm-command >/dev/null 2>&1; then
+    echo 'FAIL: absent performance evidence was admitted' >&2
+    exit 1
+fi
+
+echo 'PASS: demand-driven SMF umbrella mapping mutations and absent runtime/performance evidence fail closed'

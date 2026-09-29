@@ -13,6 +13,7 @@
 use std.nogc_sync_mut.engine.render.backend3d.{
     RenderBackend3D, BufferHandle, RenderPassHandle
 }
+use std.nogc_sync_mut.binary_io.{f32_to_bits}
 
 # ============================================================================
 # LightKind — discriminates the light type stored in LightUniform.light_type
@@ -291,23 +292,67 @@ fn gpu_lighting_init(backend: RenderBackend3D, max_lights: i64) -> GpuLightingSt
     )
 
 # ============================================================================
-# gpu_lighting_upload — serialize lights to bytes and upload
+# LightUniform wire format — std140-compatible, little-endian, 64-byte stride
 #
-# Packs LightUniform fields into a zeroed [u8] byte array.
-# TODO: replace placeholder zeroed serialization with real f32→[u8] packing
-#       once rt_f32_to_bytes (or equivalent) is available in the runtime.
+#   0..3   position_x  f32
+#   4..7   position_y  f32
+#   8..11  position_z  f32
+#  12..15  light_type  u32
+#  16..19  color_r     f32
+#  20..23  color_g     f32
+#  24..27  color_b     f32
+#  28..31  intensity   f32
+#  32..63  reserved (zero) — pads the entry to the 64-byte uniform stride
+# ============================================================================
+
+val LIGHT_UNIFORM_STRIDE: i64 = 64
+
+fn _push_u32_le(bytes: [u8], bits: u32) -> [u8]:
+    """Append one little-endian u32 to `bytes`."""
+    var out = bytes
+    out.push((bits & 0xffu32) as u8)
+    out.push(((bits >> 8) & 0xffu32) as u8)
+    out.push(((bits >> 16) & 0xffu32) as u8)
+    out.push(((bits >> 24) & 0xffu32) as u8)
+    out
+
+fn light_uniform_to_bytes(light: LightUniform) -> [u8]:
+    """Serialize one LightUniform into its 64-byte uniform-buffer entry."""
+    var bytes: [u8] = []
+    bytes = _push_u32_le(bytes, f32_to_bits(light.position_x))
+    bytes = _push_u32_le(bytes, f32_to_bits(light.position_y))
+    bytes = _push_u32_le(bytes, f32_to_bits(light.position_z))
+    bytes = _push_u32_le(bytes, light.light_type as u32)
+    bytes = _push_u32_le(bytes, f32_to_bits(light.color_r))
+    bytes = _push_u32_le(bytes, f32_to_bits(light.color_g))
+    bytes = _push_u32_le(bytes, f32_to_bits(light.color_b))
+    bytes = _push_u32_le(bytes, f32_to_bits(light.intensity))
+    var pad = 32
+    while pad < LIGHT_UNIFORM_STRIDE:
+        bytes.push(0)
+        pad = pad + 1
+    bytes
+
+fn lights_to_bytes(lights: [LightUniform]) -> [u8]:
+    """Serialize every light back-to-back at the 64-byte stride."""
+    var bytes: [u8] = []
+    var i = 0
+    while i < lights.len():
+        val entry = light_uniform_to_bytes(lights[i])
+        var j = 0
+        while j < entry.len():
+            bytes.push(entry[j])
+            j = j + 1
+        i = i + 1
+    bytes
+
+# ============================================================================
+# gpu_lighting_upload — serialize lights to bytes and upload
 # ============================================================================
 
 fn gpu_lighting_upload(state: GpuLightingState, backend: RenderBackend3D, lights: [LightUniform]) -> GpuLightingState:
     val count = lights.len()
-    val byte_count = count * 64
-
-    # TODO: real f32/i64 serialization — zeroed placeholder for now
-    var bytes: [u8] = []
-    var i = 0
-    while i < byte_count:
-        bytes.push(0)
-        i = i + 1
+    val bytes = lights_to_bytes(lights)
 
     backend.upload_buffer(state.buffer, bytes, 0)
 

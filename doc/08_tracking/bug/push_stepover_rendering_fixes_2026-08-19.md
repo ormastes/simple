@@ -1,4 +1,8 @@
 # Push step-over record — rendering-lane fixes landing, 2026-08-19
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Landing range: `daead78d1a3e..<tip>` (452-commit multi-session backlog; this
 session authored 4 commits: plan doc, glass_test_page/SIMD-gate fixes,
@@ -39,3 +43,4 @@ session's commits; the two full-range FAILs are backlog-owned and the two
 full-scan reds are structurally pre-existing. Landing with --no-verify and
 this record. The 9-symbol removal and 25-pair divergence backlog remain OPEN
 debts owned by the sessions that introduced them.
+

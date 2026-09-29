@@ -1,7 +1,6 @@
 # Draw IR window shadow is clipped and overwritten
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Status: open (TODO 554)
 
 ## Observed
 

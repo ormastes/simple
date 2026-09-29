@@ -1,0 +1,205 @@
+# Service-owned performance campaign policy for capability PASS admission.
+#
+# The value projection below is diagnostic only. The authoritative entrypoint
+# looks up an immutable, preregistered campaign inside this service. A caller
+# cannot choose RSS limits, fixture bytes, baseline identity, or regression
+# values by constructing a SimpleOsCapabilityAdmissionContextV1.
+
+use std.common.structural.digest.hash256.{hash256_hex_valid}
+use std.common.contracts.execution.simpleos_performance_v1.{
+    SimpleOsPerformanceWorkloadV1,
+    simpleos_performance_workload_to_text
+}
+use std.common.structural.parallel_commit.simpleos_ledger_commit_v1.{
+    SimpleOsCapabilityStatus,
+    SimpleOsCapabilityAdmissionContextV1,
+    SimpleOsCapabilityLedgerCandidateV1,
+    simpleos_capability_row_key
+}
+use os.services.evidence.artifact_snapshot.{
+    SimpleOsEvidenceArtifactSnapshotV1
+}
+use os.services.evidence.capability_ledger.{
+    simpleos_capability_candidate_validate,
+    simpleos_capability_performance_projection
+}
+
+pub const SIMPLEOS_EVIDENCE_MAX_PERFORMANCE_CAMPAIGNS_V1: i64 = 128
+pub const SIMPLEOS_EVIDENCE_MAX_CAMPAIGN_RSS_BYTES_V1: u64 = 1099511627776u64
+
+pub struct SimpleOsPerformanceCampaignPolicyV1:
+    row_key: text
+    workload: SimpleOsPerformanceWorkloadV1
+    config_hash: text
+    board_identity: text
+    cpu_identity: text
+    frequency_hz: i64
+    noise_profile: text
+    accelerator_identity: text
+    fixture_hash: text
+    baseline_identity_hash: text
+    baseline_value: u64
+    baseline_rss_bytes: u64
+    max_rss_bytes: u64
+    externally_comparable: bool
+
+pub struct SimpleOsEvidencePerformancePolicyCheckV1:
+    applicable: bool
+    ok: bool
+    reason: text
+
+# There is no admitted, preregistered native baseline in the current source
+# tree. This immutable catalog can only grow with reviewed fixture and baseline
+# artifacts; an empty catalog deliberately makes performance PASS unavailable.
+val _CAMPAIGNS: [SimpleOsPerformanceCampaignPolicyV1] = []
+
+fn _result(applicable: bool, ok: bool, reason: text)
+        -> SimpleOsEvidencePerformancePolicyCheckV1:
+    SimpleOsEvidencePerformancePolicyCheckV1(
+        applicable: applicable, ok: ok, reason: reason)
+
+fn _requires_performance(candidate: SimpleOsCapabilityLedgerCandidateV1) -> bool:
+    val row = candidate.row
+    row.requirement_id == "NFR-002" or row.requirement_id == "NFR-003"
+        or row.capability.contains("perf")
+        or row.capability.contains("performance")
+
+fn _artifact_has_hash(values: [text], wanted: text) -> bool:
+    for value in values:
+        if value == wanted: return true
+    false
+
+fn _metadata_valid(value: text) -> bool:
+    value.len() > 0 and value.len() <= 128
+        and not value.contains("\0") and not value.contains("\n")
+        and not value.contains("\r")
+
+# Pure, non-authorizing projection for deterministic policy tests and review.
+# A caller-supplied policy can never be passed to the authoritative lookup.
+pub fn simpleos_evidence_performance_policy_value_check_v1(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1,
+    policy: SimpleOsPerformanceCampaignPolicyV1
+) -> SimpleOsEvidencePerformancePolicyCheckV1:
+    if not _requires_performance(candidate):
+        return _result(false, false, "performance-not-applicable")
+    val candidate_check = simpleos_capability_candidate_validate(candidate)
+    if not candidate_check.ok:
+        return _result(true, false, "candidate:" + candidate_check.reason)
+    if candidate.row.status != SimpleOsCapabilityStatus.Pass:
+        return _result(true, false, "performance-pass-required")
+    val receipt = candidate.receipt
+    if policy.row_key != simpleos_capability_row_key(candidate.row)
+        or simpleos_performance_workload_to_text(policy.workload) !=
+            receipt.performance_workload:
+        return _result(true, false, "performance-policy-identity")
+    if not hash256_hex_valid(policy.config_hash)
+        or policy.config_hash != receipt.config_hash
+        or not _metadata_valid(policy.board_identity)
+        or policy.board_identity != receipt.board_identity
+        or not _metadata_valid(policy.cpu_identity)
+        or policy.cpu_identity != receipt.performance_cpu_identity
+        or policy.frequency_hz <= 0
+        or policy.frequency_hz != receipt.performance_frequency_hz
+        or not _metadata_valid(policy.noise_profile)
+        or policy.noise_profile != receipt.performance_noise_profile
+        or not _metadata_valid(policy.accelerator_identity)
+        or policy.accelerator_identity != receipt.accelerator:
+        return _result(true, false, "performance-policy-environment")
+    if not hash256_hex_valid(policy.fixture_hash)
+        or not hash256_hex_valid(policy.baseline_identity_hash)
+        or policy.fixture_hash == policy.baseline_identity_hash
+        or snapshot.artifact_bytes.len() != receipt.artifact_hashes.len()
+        or snapshot.performance_fixture_artifact_index < 0
+        or snapshot.performance_fixture_artifact_index >=
+            snapshot.artifact_bytes.len()
+        or receipt.artifact_hashes[
+            snapshot.performance_fixture_artifact_index] != policy.fixture_hash
+        or not _artifact_has_hash(
+            receipt.artifact_hashes, policy.baseline_identity_hash):
+        return _result(true, false, "performance-policy-artifacts")
+    if policy.max_rss_bytes == 0u64
+        or policy.max_rss_bytes > SIMPLEOS_EVIDENCE_MAX_CAMPAIGN_RSS_BYTES_V1
+        or policy.baseline_rss_bytes == 0u64
+        or policy.baseline_rss_bytes > policy.max_rss_bytes
+        or policy.baseline_value == 0u64
+        or policy.baseline_value > 9223372036854775807u64
+        or not policy.externally_comparable:
+        return _result(true, false, "performance-policy-bounds")
+
+    # The existing canonical projection owns percentile, absolute budget,
+    # noise, sample count, regression, and per-sample RSS checks. Every policy
+    # value passed to it originates from this service's immutable catalog.
+    val context = SimpleOsCapabilityAdmissionContextV1(
+        admission_owner: "simpleos-evidence-service",
+        issued_nonce: receipt.nonce,
+        current_source_hash: receipt.source_hash,
+        current_image_hash: receipt.image_hash,
+        current_binary_hash: receipt.binary_hash,
+        current_config_hash: receipt.config_hash,
+        current_artifact_hashes: receipt.artifact_hashes,
+        freshness_lower_bound_unix_us: 1,
+        now_unix_us: receipt.finished_unix_us,
+        trusted_signer_key_id: receipt.signer_key_id,
+        signature_verified: false,
+        source_hash_verified: false,
+        image_hash_verified: false,
+        binary_hash_verified: false,
+        config_hash_verified: false,
+        artifacts_verified: false,
+        performance_configured_max_rss_bytes: policy.max_rss_bytes,
+        performance_baseline_value: policy.baseline_value,
+        performance_baseline_rss_bytes: policy.baseline_rss_bytes,
+        performance_fixture_hash: policy.fixture_hash,
+        performance_baseline_identity_hash: policy.baseline_identity_hash,
+        performance_external_comparability_verified:
+            policy.externally_comparable)
+    val projection = simpleos_capability_performance_projection(
+        candidate, context)
+    if not projection.admissible:
+        return _result(true, false, "performance-policy-admission")
+    _result(true, true, "")
+
+pub fn simpleos_evidence_performance_policy_check_v1(
+    candidate: SimpleOsCapabilityLedgerCandidateV1,
+    snapshot: SimpleOsEvidenceArtifactSnapshotV1
+) -> SimpleOsEvidencePerformancePolicyCheckV1:
+    if not _requires_performance(candidate):
+        return _result(false, true, "")
+    if _CAMPAIGNS.len() > SIMPLEOS_EVIDENCE_MAX_PERFORMANCE_CAMPAIGNS_V1:
+        return _result(true, false, "performance-policy-bound")
+    val key = simpleos_capability_row_key(candidate.row)
+    val receipt = candidate.receipt
+    var found = false
+    var selected = SimpleOsPerformanceCampaignPolicyV1(
+        row_key: "", workload: SimpleOsPerformanceWorkloadV1.WarmServerStartup,
+        config_hash: "", board_identity: "", cpu_identity: "",
+        frequency_hz: 0, noise_profile: "", accelerator_identity: "",
+        fixture_hash: "", baseline_identity_hash: "", baseline_value: 0u64,
+        baseline_rss_bytes: 0u64, max_rss_bytes: 0u64,
+        externally_comparable: false)
+    for policy in _CAMPAIGNS:
+        if policy.row_key == key
+            and simpleos_performance_workload_to_text(policy.workload) ==
+                receipt.performance_workload
+            and policy.config_hash == receipt.config_hash
+            and policy.board_identity == receipt.board_identity
+            and policy.cpu_identity == receipt.performance_cpu_identity
+            and policy.frequency_hz == receipt.performance_frequency_hz
+            and policy.noise_profile == receipt.performance_noise_profile
+            and policy.accelerator_identity == receipt.accelerator:
+            if found:
+                return _result(true, false, "performance-policy-duplicate")
+            selected = policy
+            found = true
+    if not found:
+        return _result(true, false, "performance-policy-unavailable")
+    simpleos_evidence_performance_policy_value_check_v1(
+        candidate, snapshot, selected)
+
+export SIMPLEOS_EVIDENCE_MAX_PERFORMANCE_CAMPAIGNS_V1
+export SIMPLEOS_EVIDENCE_MAX_CAMPAIGN_RSS_BYTES_V1
+export SimpleOsPerformanceCampaignPolicyV1
+export SimpleOsEvidencePerformancePolicyCheckV1
+export simpleos_evidence_performance_policy_value_check_v1
+export simpleos_evidence_performance_policy_check_v1

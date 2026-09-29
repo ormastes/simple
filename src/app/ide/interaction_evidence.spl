@@ -1,0 +1,62 @@
+# IDE interaction evidence shared by the production CLI and SSpec.
+
+use std.editor.core.session.{EditSession}
+use std.editor.services.md_diagnostics.{md_diagnose}
+use app.editor.commands.{editor_dispatch, editor_cmd_with}
+use app.office.launcher.{launcher_open_action, launcher_action_to_component}
+
+struct IdeInteractionEvidence:
+    mode: text
+    path: text
+    opened: bool
+    edited: bool
+    edit_message: text
+    diagnostic_count: i64
+    office_action: text
+    office_component: text
+
+fn ide_interaction_evidence(mode: text, path: text) -> IdeInteractionEvidence:
+    """Exercise the production editor session and Office launcher in memory."""
+    var session = EditSession.new()
+    if path == "":
+        session.open_empty()
+    else:
+        session.open_file(path)
+    var buffer = session.active_buffer()
+    val edit = editor_dispatch(
+        buffer,
+        editor_cmd_with("insert-text", "# IDE interaction evidence\n\n")
+    )
+    val content = buffer.full_text()
+    val action = launcher_open_action("sheets")
+    val component_result = launcher_action_to_component(action)
+    val component = if component_result.is_some(): component_result.unwrap() else: ""
+    IdeInteractionEvidence(
+        mode: mode,
+        path: path,
+        opened: session.document_count() == 1,
+        edited: edit.ok and content.starts_with("# IDE interaction evidence"),
+        edit_message: edit.message,
+        diagnostic_count: md_diagnose(content, path).len(),
+        office_action: action,
+        office_component: component
+    )
+
+fn ide_interaction_report(evidence: IdeInteractionEvidence) -> [text]:
+    val display_path = if evidence.path == "": "[No Name]" else: evidence.path
+    [
+        "Simple IDE interaction check",
+        "mode: {evidence.mode}",
+        "path: {display_path}",
+        "opened: {evidence.opened}",
+        "edited: {evidence.edited}",
+        "edit: {evidence.edit_message}",
+        "diagnostics: {evidence.diagnostic_count}",
+        "office-action: {evidence.office_action}",
+        "office-component: {evidence.office_component}"
+    ]
+
+fn ide_interaction_exit_code(evidence: IdeInteractionEvidence) -> i64:
+    if evidence.opened and evidence.edited and evidence.office_component == "sheets": 0 else: 1
+
+export ide_interaction_evidence, ide_interaction_report, ide_interaction_exit_code

@@ -1,0 +1,86 @@
+# Filesystem-backed PID1 launch preparation.
+#
+# This is the one boot-owned transition from kernel bring-up to userspace
+# service management.  It deliberately uses the shared live-scheduler fs-exec
+# seam; it never creates a bootstrap scheduler and never gives PID1 ambient
+# `CapabilitySet.full()` authority.
+
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult, fs_exec_read_boot_executable_bytes, fs_exec_prepare_spawn_into_scheduler_from_bytes_with_spawn_spec}
+use os.kernel.loader.spawn_recipes.{SPAWN_RECIPE_SERVICE_MANAGER, spawn_recipe_seed_parent_caps, spawn_recipe_spec}
+use os.kernel.loader.spawn_authority.{spawn_authority_forbid_ambient_after_pid1}
+use os.kernel.loader.workload_image_hash.{workload_image_blake3_hash}
+use os.kernel.security.execution_context.{KernelCallContext, kernel_call_context_from_legacy_task}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.task_types.{TaskId, sched_exec_arch}
+
+pub fn pid1_image_path() -> text:
+    "/system/service_manager.smf"
+
+fn _pid1_syscall_filter() -> [u64]:
+    """Exact bootstrap manager ABI, including its kernel-mediated audit sink."""
+    [1u64, 23u64, 60u64, 61u64, 136u64, 137u64]
+
+fn _pid1_kernel_context() -> KernelCallContext:
+    """Kernel-origin bootstrap context with concrete, minimum PID1 seed caps."""
+    kernel_call_context_from_legacy_task(
+        TaskId(id: 0u64),
+        spawn_recipe_seed_parent_caps(SPAWN_RECIPE_SERVICE_MANAGER, 0u64),
+        0u64, 0u64, 1u64
+    )
+
+pub fn pid1_prepare_into_scheduler_from_bytes(
+    bytes: [u8],
+    scheduler: Scheduler
+) -> FsExecPrepareResult:
+    """Validate/build PID1 and place it in the supplied live scheduler.
+
+    The returned scheduler must be installed by the architecture trap runtime
+    before user-mode handoff. A non-positive pid is the complete failure
+    signal; callers must retain their serial recovery path in that case.
+    """
+    val path = pid1_image_path()
+    val spec = spawn_recipe_spec(SPAWN_RECIPE_SERVICE_MANAGER, workload_image_blake3_hash(bytes))
+    val prepared = fs_exec_prepare_spawn_into_scheduler_from_bytes_with_spawn_spec(
+        _pid1_kernel_context(),
+        spec,
+        path,
+        bytes,
+        sched_exec_arch(),
+        [path],
+        [],
+        scheduler
+    )
+    if prepared.pid <= 0:
+        return prepared
+    var live_scheduler = prepared.scheduler
+    val pid1 = TaskId(id: prepared.pid as u64)
+    # fs-exec must have performed the trusted managed-child identity binding;
+    # an unbound PID1 is never allowed to reach the ambient-spawn seal.
+    if not live_scheduler.bind_managed_child_syscall_filter(pid1, _pid1_syscall_filter()):
+        live_scheduler.exit_task_by_id(pid1, -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if not live_scheduler.bind_filesystem_view(TaskId(id: prepared.pid as u64), "/"):
+        live_scheduler.exit_task_by_id(TaskId(id: prepared.pid as u64), -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if not live_scheduler.set_reaper_task(TaskId(id: prepared.pid as u64)):
+        live_scheduler.exit_task_by_id(TaskId(id: prepared.pid as u64), -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    if not live_scheduler.grant_root_mint_authority(TaskId(id: prepared.pid as u64)):
+        live_scheduler.exit_task_by_id(TaskId(id: prepared.pid as u64), -125)
+        return FsExecPrepareResult(scheduler: live_scheduler, pid: -12, entry: 0)
+    FsExecPrepareResult(scheduler: live_scheduler, pid: prepared.pid, entry: prepared.entry)
+
+pub fn pid1_prepare_into_scheduler(scheduler: Scheduler) -> FsExecPrepareResult:
+    """Load the canonical service-manager path through the active filesystem bridge."""
+    pid1_prepare_into_scheduler_from_bytes(fs_exec_read_boot_executable_bytes(pid1_image_path()), scheduler)
+
+pub fn pid1_commit_bootstrap_authority():
+    """Permanently close ambient spawn before executing the prepared PID1.
+
+    PID1 itself was created from an explicit, concrete CSpace above. Once its
+    task is registered there is no legitimate reason to leave the legacy
+    ambient-spawn window open: future user workloads must use an explicit
+    recipe and derive authority from their live parent pouch. Task 0 remains a
+    kernel-origin sentinel, not an exception that can obtain ambient authority.
+    """
+    spawn_authority_forbid_ambient_after_pid1()

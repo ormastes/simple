@@ -1,0 +1,287 @@
+use compiler.loader.parser_structural_mask_mapper_v1.*
+use compiler.loader.parser_structural_source_buffer_v1.*
+use compiler.loader.parser_structural_provider_activation_v2.*
+use compiler.loader.parser_structural_mask_mapping_authorization_v1.ParserStructuralMappingAuthorizationV1
+use compiler.loader.parser_mask_call_native_v1.parser_mask_call_native_v1
+use compiler.loader.parser_lexical_mask_call_native_v1.parser_lexical_mask_call_native_v1
+use compiler.backend.native.parser_lexical_avx2_classifier_v1.{ParserLexicalCandidateMasksV1,
+    PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1, PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1}
+use compiler.loader.parser_lexical_mapping_authorization_v1.{ParserLexicalMappingAuthorizationV1,
+    parser_lexical_mapping_authorization_valid_v1}
+use compiler.driver.parser_simd_execution_capability_v1.*
+use compiler.driver.execution_domain_affinity_lease_v1.*
+use std.nogc_sync_mut.composition.environment_variants.provider_generation_v2.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{EnvironmentSnapshotV1,
+    EnvironmentDigest256V1}
+
+pub enum ParserStructuralGuardedScopeErrorV1:
+    AuthorityRejected
+    UnknownOrReplayed
+    RangeRejected
+    NativeCallFailed
+    ReleaseFailed
+    CapacityExceeded
+pub struct ParserStructuralGuardedScopeV1:
+    scope_id: u64
+pub struct ParserStructuralGuardedScopeExecutionAuthorityV1:
+    provider_handle: u64
+    provider_generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    plan_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    execution_count: u64
+    last_offset: u64
+    last_mask: u32
+struct _GuardedScopeRecordV1:
+    scope: ParserStructuralGuardedScopeV1
+    mapped: ParserStructuralMappedKernelV1
+    source: ParserStructuralNativeSourceLeaseV1
+    authorization: ParserStructuralMappingAuthorizationV1
+    kernel_token: ParserStructuralKernelCallTokenV1
+    source_token: ParserStructuralSourceCallTokenV1
+    pin: ProviderGenerationPinV2
+    affinity: ExecutionDomainAffinityLeaseV1
+    window: ExecutionDomainAffinityCallTokenV1
+    live: bool
+    window_live: bool
+    pin_live: bool
+    source_retain_live: bool
+    mapper_retain_live: bool
+    cleanup_pending: bool
+    ended: bool
+    execution_count: u64
+    last_offset: u64
+    last_mask: u32
+struct _GuardedScopePendingV1:
+    kernel_tokens: [ParserStructuralKernelCallTokenV1]
+    source_tokens: [ParserStructuralSourceCallTokenV1]
+    pins: [ProviderGenerationPinV2]
+    affinities: [ExecutionDomainAffinityLeaseV1]
+    windows: [ExecutionDomainAffinityCallTokenV1]
+pub class ParserStructuralGuardedScopeOwnerV1:
+    var records: [_GuardedScopeRecordV1]
+    var pending: [_GuardedScopePendingV1]
+    var next_id: u64
+    pub static fn create() -> ParserStructuralGuardedScopeOwnerV1:
+        ParserStructuralGuardedScopeOwnerV1(records: [], pending: [], next_id: 1u64)
+
+# Loader-internal cleanup; public visibility is required for the sealed
+# aggregate module, which supplies every authoritative child owner.
+pub fn parser_structural_guarded_scope_cleanup_pending_v1(owner: ParserStructuralGuardedScopeOwnerV1,
+    mapper: ParserStructuralMapperOwnerV1, generations: ProviderGenerationManagerV2,
+    sources: ParserStructuralSourceBufferOwnerV1,
+    affinity_owner: ExecutionDomainAffinityLeaseOwnerV1) -> Result<u64, ParserStructuralGuardedScopeErrorV1>:
+    var kept: [_GuardedScopePendingV1] = []
+    for original in owner.pending:
+        var pending = original
+        var failed = false
+        if pending.windows.len() == 1:
+            if execution_domain_affinity_call_exit_v1(affinity_owner, pending.affinities[0], pending.windows[0]).is_err(): failed = true
+            else: pending.windows = []; pending.affinities = []
+        if not failed and pending.pins.len() == 1:
+            if provider_generation_pin_release_v2(generations, pending.pins[0]).is_err(): failed = true
+            else: pending.pins = []
+        if not failed and pending.source_tokens.len() == 1:
+            if not parser_structural_source_call_release_v1(sources, pending.source_tokens[0]): failed = true
+            else: pending.source_tokens = []
+        if not failed and pending.kernel_tokens.len() == 1:
+            if not parser_structural_mapper_call_release_v1(mapper, pending.kernel_tokens[0]): failed = true
+            else: pending.kernel_tokens = []
+        if failed: kept.push(pending)
+    owner.pending = kept
+    if kept.len() > 0: Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+    else: Ok(0u64)
+
+pub fn parser_structural_guarded_scope_begin_v1(owner: ParserStructuralGuardedScopeOwnerV1,
+    mapper: ParserStructuralMapperOwnerV1, mapped: ParserStructuralMappedKernelV1,
+    generations: ProviderGenerationManagerV2, activations: ParserStructuralProviderActivationOwnerV2,
+    activation: ParserStructuralProviderActivationV2, sources: ParserStructuralSourceBufferOwnerV1,
+    source: ParserStructuralNativeSourceLeaseV1, affinity_owner: ExecutionDomainAffinityLeaseOwnerV1,
+    affinity: ExecutionDomainAffinityLeaseV1, snapshot: EnvironmentSnapshotV1, features: [u64],
+    authorization: ParserStructuralMappingAuthorizationV1,
+    capability: ParserSimdExecutionCapabilityReceiptV1
+) -> Result<ParserStructuralGuardedScopeV1, ParserStructuralGuardedScopeErrorV1>:
+    if owner.records.len() + owner.pending.len() >= 256 or owner.next_id == 0u64 or owner.next_id == 0xffffffffffffffffu64:
+        return Err(ParserStructuralGuardedScopeErrorV1.CapacityExceeded)
+    if parser_structural_guarded_scope_cleanup_pending_v1(owner, mapper, generations,
+            sources, affinity_owner).is_err(): return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+    owner.pending.push(_GuardedScopePendingV1(kernel_tokens: [], source_tokens: [],
+        pins: [], affinities: [], windows: []))
+    val pending_index = owner.pending.len() - 1
+    val kt = match parser_structural_mapper_call_retain_v1(mapper, mapped, authorization):
+        case Ok(v): v
+        case Err(_):
+            owner.pending = []
+            return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+    owner.pending[pending_index].kernel_tokens = [kt]
+    val st = match parser_structural_source_call_retain_v1(sources, source):
+        case Ok(v): v
+        case Err(_):
+            if parser_structural_guarded_scope_cleanup_pending_v1(owner, mapper, generations, sources, affinity_owner).is_err(): return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+    owner.pending[pending_index].source_tokens = [st]
+    val pin = match parser_structural_provider_pin_v2(activations, generations, mapper,
+            activation, authorization, mapped):
+        case Ok(v): v
+        case Err(_):
+            if parser_structural_guarded_scope_cleanup_pending_v1(owner, mapper, generations, sources, affinity_owner).is_err(): return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+    owner.pending[pending_index].pins = [pin]
+    if parser_simd_execution_capability_validate_with_affinity_v1(capability, snapshot, features,
+            authorization, affinity_owner, affinity).is_err():
+        if parser_structural_guarded_scope_cleanup_pending_v1(owner, mapper, generations, sources, affinity_owner).is_err(): return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+        return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+    val window = match execution_domain_affinity_call_enter_v1(affinity_owner, snapshot, affinity):
+        case Ok(v): v
+        case Err(_):
+            if parser_structural_guarded_scope_cleanup_pending_v1(owner, mapper, generations, sources, affinity_owner).is_err(): return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+            return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+    owner.pending[pending_index].affinities = [affinity]
+    owner.pending[pending_index].windows = [window]
+    val scope = ParserStructuralGuardedScopeV1(scope_id: owner.next_id); owner.next_id = owner.next_id + 1u64
+    owner.records.push(_GuardedScopeRecordV1(scope: scope, mapped: mapped, source: source,
+        authorization: authorization, kernel_token: kt, source_token: st, pin: pin,
+        affinity: affinity, window: window, live: true, window_live: true,
+        pin_live: true, source_retain_live: true, mapper_retain_live: true,
+        cleanup_pending: false, ended: false, execution_count: 0u64,
+        last_offset: 0u64, last_mask: 0u32))
+    owner.pending = []
+    Ok(scope)
+
+pub fn parser_structural_guarded_scope_call_block_v1(owner: ParserStructuralGuardedScopeOwnerV1,
+    mapper: ParserStructuralMapperOwnerV1, sources: ParserStructuralSourceBufferOwnerV1,
+    scope: ParserStructuralGuardedScopeV1, offset: u64, first: u8, second: u8
+) -> Result<u32, ParserStructuralGuardedScopeErrorV1>:
+    var i = 0
+    while i < owner.records.len():
+        val r = owner.records[i]
+        if r.scope == scope and r.live and not r.cleanup_pending and not r.ended:
+            # Replacement may publish a new generation, but this scope's exact
+            # V2 pin keeps its generation alive. Revalidate the private pin-to-
+            # authorization correlation immediately before every native call.
+            if not r.pin_live or r.pin.provider_handle == 0u64 or r.pin.generation == 0u64 or
+               r.pin.provider_identity != r.authorization.provider_identity or
+               r.pin.variant_identity != r.authorization.variant_identity:
+                return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+            if r.execution_count == 0xffffffffffffffffu64:
+                return Err(ParserStructuralGuardedScopeErrorV1.CapacityExceeded)
+            val f = match parser_structural_mapper_resolve_retained_private_v1(mapper, r.mapped, r.kernel_token):
+                case Ok(v): v
+                case Err(_): return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+            val s = match parser_structural_source_buffer_resolve_retained_private_v1(sources,
+                    r.source, r.source_token, offset, 32u64):
+                case Ok(v): v
+                case Err(_): return Err(ParserStructuralGuardedScopeErrorV1.RangeRejected)
+            val called = parser_mask_call_native_v1(f, s, first, second)
+            if called.is_err(): return Err(ParserStructuralGuardedScopeErrorV1.NativeCallFailed)
+            val mask = (called.unwrap() as u64 & 0xffffffffu64) as u32
+            owner.records[i].execution_count = r.execution_count + 1u64
+            owner.records[i].last_offset = offset
+            owner.records[i].last_mask = mask
+            return Ok(mask)
+        i = i + 1
+    Err(ParserStructuralGuardedScopeErrorV1.UnknownOrReplayed)
+
+# Loader-internal exact lexical classifier. The scope owns the authenticated
+# mapping/source retains, V2 generation pin, and live affinity call window.
+# Only value masks leave this boundary; private addresses never do.
+pub fn parser_structural_guarded_scope_lexical_masks_v1(owner: ParserStructuralGuardedScopeOwnerV1,
+    mapper: ParserStructuralMapperOwnerV1, sources: ParserStructuralSourceBufferOwnerV1,
+    scope: ParserStructuralGuardedScopeV1, lexical: ParserLexicalMappingAuthorizationV1,
+    offset: u64
+) -> Result<ParserLexicalCandidateMasksV1, ParserStructuralGuardedScopeErrorV1>:
+    var i = 0
+    while i < owner.records.len():
+        val r = owner.records[i]
+        if r.scope == scope and r.live and not r.cleanup_pending and not r.ended:
+            if not parser_lexical_mapping_authorization_valid_v1(lexical) or
+               lexical.structural != r.authorization or
+               r.authorization.provider_interface_handle != PARSER_LEXICAL_CLASSIFIER_INTERFACE_HANDLE_V1 or
+               r.authorization.code_size != PARSER_LEXICAL_CLASSIFIER_CODE_SIZE_V1 or
+               not r.pin_live or r.pin.provider_identity != r.authorization.provider_identity or
+               r.pin.variant_identity != r.authorization.variant_identity:
+                return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+            if r.execution_count > 0xffffffffffffffffu64 - 15u64:
+                return Err(ParserStructuralGuardedScopeErrorV1.CapacityExceeded)
+            val f = match parser_structural_mapper_resolve_retained_private_v1(mapper, r.mapped, r.kernel_token):
+                case Ok(v): v
+                case Err(_): return Err(ParserStructuralGuardedScopeErrorV1.AuthorityRejected)
+            val s = match parser_structural_source_buffer_resolve_retained_private_v1(sources,
+                    r.source, r.source_token, offset, 32u64):
+                case Ok(v): v
+                case Err(_): return Err(ParserStructuralGuardedScopeErrorV1.RangeRejected)
+            var masks: [u32] = []
+            for needle in [39u8, 34u8, 92u8, 35u8, 10u8, 47u8, 42u8,
+                    123u8, 125u8, 40u8, 41u8, 91u8, 93u8, 44u8, 58u8]:
+                val called = parser_lexical_mask_call_native_v1(f, s, needle)
+                if called.is_err():
+                    owner.records[i].execution_count = r.execution_count + masks.len() as u64
+                    return Err(ParserStructuralGuardedScopeErrorV1.NativeCallFailed)
+                masks.push(called.unwrap())
+            val braces = masks[7] | masks[8]
+            val structural = braces | masks[9] | masks[10] | masks[11] |
+                masks[12] | masks[13] | masks[14]
+            owner.records[i].execution_count = r.execution_count + 15u64
+            owner.records[i].last_offset = offset
+            owner.records[i].last_mask = structural
+            return Ok(ParserLexicalCandidateMasksV1(single_quote: masks[0], double_quote: masks[1],
+                backslash: masks[2], hash: masks[3], newline: masks[4], slash: masks[5],
+                star: masks[6], braces: braces, structural_delimiters: structural))
+        i = i + 1
+    Err(ParserStructuralGuardedScopeErrorV1.UnknownOrReplayed)
+
+# Loader-internal authority projection. All identity and generation values come
+# from the private activation authorization and owner-issued V2 pin.
+pub fn parser_structural_guarded_scope_execution_authority_v1(
+    owner: ParserStructuralGuardedScopeOwnerV1, scope: ParserStructuralGuardedScopeV1
+) -> Result<ParserStructuralGuardedScopeExecutionAuthorityV1, ParserStructuralGuardedScopeErrorV1>:
+    for r in owner.records:
+        if r.scope == scope and r.live and r.pin_live and not r.cleanup_pending and not r.ended:
+            return Ok(ParserStructuralGuardedScopeExecutionAuthorityV1(
+                provider_handle: r.pin.provider_handle, provider_generation: r.pin.generation,
+                provider_identity: r.authorization.provider_identity,
+                variant_identity: r.authorization.variant_identity,
+                artifact_identity: r.authorization.artifact_digest,
+                plan_identity: r.authorization.plan_digest,
+                environment_identity: r.authorization.environment_identity,
+                environment_generation: r.authorization.environment_generation,
+                execution_count: r.execution_count, last_offset: r.last_offset,
+                last_mask: r.last_mask))
+    Err(ParserStructuralGuardedScopeErrorV1.UnknownOrReplayed)
+
+pub fn parser_structural_guarded_scope_end_v1(owner: ParserStructuralGuardedScopeOwnerV1,
+    mapper: ParserStructuralMapperOwnerV1, generations: ProviderGenerationManagerV2,
+    sources: ParserStructuralSourceBufferOwnerV1, affinity_owner: ExecutionDomainAffinityLeaseOwnerV1,
+    scope: ParserStructuralGuardedScopeV1) -> Result<(), ParserStructuralGuardedScopeErrorV1>:
+    var i = 0
+    while i < owner.records.len():
+        var r = owner.records[i]
+        if r.scope == scope and r.live and not r.ended:
+            r.cleanup_pending = true; owner.records[i] = r
+            if r.window_live:
+                if execution_domain_affinity_call_exit_v1(affinity_owner, r.affinity, r.window).is_err():
+                    return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+                r.window_live = false; owner.records[i] = r
+            if r.pin_live:
+                if provider_generation_pin_release_v2(generations, r.pin).is_err():
+                    return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+                r.pin_live = false; owner.records[i] = r
+            if r.source_retain_live:
+                if not parser_structural_source_call_release_v1(sources, r.source_token):
+                    return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+                r.source_retain_live = false; owner.records[i] = r
+            if r.mapper_retain_live:
+                if not parser_structural_mapper_call_release_v1(mapper, r.kernel_token):
+                    return Err(ParserStructuralGuardedScopeErrorV1.ReleaseFailed)
+                r.mapper_retain_live = false; owner.records[i] = r
+            r.live = false; r.ended = true; r.cleanup_pending = false
+            var kept: [_GuardedScopeRecordV1] = []; var j = 0
+            while j < owner.records.len():
+                if j != i: kept.push(owner.records[j])
+                j = j + 1
+            owner.records = kept; return Ok(())
+        i = i + 1
+    Err(ParserStructuralGuardedScopeErrorV1.UnknownOrReplayed)

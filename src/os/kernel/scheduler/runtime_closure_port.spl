@@ -1,0 +1,126 @@
+# Scheduler-owned closure lifecycle port (v1).
+#
+# This is deliberately a scalar-only, bounded foundation.  It owns slot
+# metadata and lifecycle transitions; architecture adapters may later attach
+# real stacks and entry trampolines without changing handle validation.
+
+pub val RUNTIME_CLOSURE_SLOT_CAP: i64 = 32
+pub val RUNTIME_CLOSURE_MAX_ARGS: i64 = 3
+pub val RUNTIME_CLOSURE_MAX_GENERATION: i64 = 0x3fffffffffffffff
+
+enum RuntimeClosureState:
+    Free
+    Pending
+    Running
+    Completed
+    Faulted
+    Detached
+
+enum RuntimeClosureEntry:
+    Noop
+    Add
+    Fault
+
+enum RuntimeClosureResult:
+    Accepted(handle: i64)
+    Full
+    Invalid
+    NotReady
+    Joined(value: i64)
+    Faulted(code: i64)
+
+struct RuntimeClosureSlot:
+    generation: i64
+    state: RuntimeClosureState
+    entry: RuntimeClosureEntry
+    arg0: i64
+    arg1: i64
+    result: i64
+    fault: i64
+
+struct RuntimeClosurePortV1:
+    slots: [RuntimeClosureSlot]
+    next_generation: i64
+    pending: i64
+    running: i64
+    completed: i64
+    faults: i64
+    rollbacks: i64
+
+impl RuntimeClosurePortV1:
+    static fn new() -> RuntimeClosurePortV1:
+        var slots: [RuntimeClosureSlot] = []
+        var i: i64 = 0
+        while i < RUNTIME_CLOSURE_SLOT_CAP:
+            slots = slots.push(RuntimeClosureSlot(generation: 1, state: RuntimeClosureState.Free, entry: RuntimeClosureEntry.Noop, arg0: 0, arg1: 0, result: 0, fault: 0))
+            i = i + 1
+        RuntimeClosurePortV1(slots: slots, next_generation: 1, pending: 0, running: 0, completed: 0, faults: 0, rollbacks: 0)
+
+    me spawn(entry: RuntimeClosureEntry, arg0: i64, arg1: i64) -> RuntimeClosureResult:
+        if arg0 == 0x7fffffffffffffff: return RuntimeClosureResult.Invalid
+        var i: i64 = 0
+        while i < self.slots.len():
+            if self.slots[i].state == RuntimeClosureState.Free:
+                var generation = self.slots[i].generation
+                if generation <= 0: generation = 1
+                self.slots[i] = RuntimeClosureSlot(generation: generation, state: RuntimeClosureState.Pending, entry: entry, arg0: arg0, arg1: arg1, result: 0, fault: 0)
+                self.pending = self.pending + 1
+                return RuntimeClosureResult.Accepted(generation * RUNTIME_CLOSURE_SLOT_CAP + i)
+            i = i + 1
+        self.rollbacks = self.rollbacks + 1
+        RuntimeClosureResult.Full
+
+    me step() -> i64:
+        var i: i64 = 0
+        while i < self.slots.len():
+            if self.slots[i].state == RuntimeClosureState.Pending:
+                self.slots[i].state = RuntimeClosureState.Running
+                self.pending = self.pending - 1
+                self.running = self.running + 1
+                if self.slots[i].entry == RuntimeClosureEntry.Fault:
+                    self.slots[i].state = RuntimeClosureState.Faulted
+                    self.slots[i].fault = -1
+                    self.faults = self.faults + 1
+                else:
+                    self.slots[i].result = if self.slots[i].entry == RuntimeClosureEntry.Add: self.slots[i].arg0 + self.slots[i].arg1 else 0
+                    self.slots[i].state = RuntimeClosureState.Completed
+                    self.completed = self.completed + 1
+                self.running = self.running - 1
+                return 1
+            i = i + 1
+        0
+
+    me join(handle: i64) -> RuntimeClosureResult:
+        if handle < 0: return RuntimeClosureResult.Invalid
+        val slot = handle % RUNTIME_CLOSURE_SLOT_CAP
+        val generation = handle / RUNTIME_CLOSURE_SLOT_CAP
+        if slot >= self.slots.len() or self.slots[slot].generation != generation: return RuntimeClosureResult.Invalid
+        if self.slots[slot].state == RuntimeClosureState.Completed:
+            val value = self.slots[slot].result
+            self.slots[slot].state = RuntimeClosureState.Free
+            if self.slots[slot].generation >= RUNTIME_CLOSURE_MAX_GENERATION:
+                self.slots[slot].generation = 0
+            else:
+                self.slots[slot].generation = self.slots[slot].generation + 1
+            RuntimeClosureResult.Joined(value)
+        elif self.slots[slot].state == RuntimeClosureState.Faulted:
+            val code = self.slots[slot].fault
+            self.slots[slot].state = RuntimeClosureState.Free
+            if self.slots[slot].generation >= RUNTIME_CLOSURE_MAX_GENERATION:
+                self.slots[slot].generation = 0
+            else:
+                self.slots[slot].generation = self.slots[slot].generation + 1
+            RuntimeClosureResult.Faulted(code)
+        else: RuntimeClosureResult.NotReady
+
+    me detach(handle: i64) -> bool:
+        if handle < 0: return false
+        val slot = handle % RUNTIME_CLOSURE_SLOT_CAP
+        val generation = handle / RUNTIME_CLOSURE_SLOT_CAP
+        if slot >= self.slots.len() or self.slots[slot].generation != generation: return false
+        self.slots[slot].state = RuntimeClosureState.Free
+        if self.slots[slot].generation >= RUNTIME_CLOSURE_MAX_GENERATION:
+            self.slots[slot].generation = 0
+        else:
+            self.slots[slot].generation = self.slots[slot].generation + 1
+        true

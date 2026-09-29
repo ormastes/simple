@@ -1,7 +1,5 @@
 # TLS Signature Positive Verification Blockers
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 Status: Open
 
 **Filed:** 2026-06-06

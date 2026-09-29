@@ -195,6 +195,40 @@ static int alloc_clusters(const unsigned char *data, size_t len)
     return first;
 }
 
+
+/* Verify that a payload really landed in the cluster chain it was staged to.
+ *
+ * Restored 2026-08-31 alongside read_bounded_public_file: the three signed-
+ * media call sites at make_os_disk.c:439-443 referenced this helper but no
+ * definition ever landed, so make_os_disk.c failed to LINK on origin/main.
+ *
+ * The walk deliberately mirrors alloc_clusters() exactly -- same contiguous
+ * `first + i` chain, same per-cluster chunking, same cluster_offset() bounds
+ * test -- so the check compares what alloc_clusters actually wrote rather
+ * than re-deriving a layout that could agree with a bug. A zero cluster, an
+ * empty payload, or any byte mismatch is fatal: signed media must never be
+ * emitted with a member that was silently truncated or not staged at all.
+ */
+static void require_cluster_bytes(int first, struct bytes payload, const char *message)
+{
+    if (first <= 0 || !payload.len || !payload.data)
+        die(message);
+    size_t needed = (payload.len + g_cluster_size - 1) / g_cluster_size;
+    if (needed < 1)
+        needed = 1;
+    for (size_t i = 0; i < needed; ++i) {
+        int cluster = first + (int)i;
+        size_t start = i * g_cluster_size;
+        size_t chunk = payload.len > start ? payload.len - start : 0;
+        if (chunk > g_cluster_size)
+            chunk = g_cluster_size;
+        if (cluster_offset(cluster) + chunk > g_image_size)
+            die(message);
+        if (chunk > 0 &&
+            memcmp(g_image + cluster_offset(cluster), payload.data + start, chunk) != 0)
+            die(message);
+    }
+}
 static int alloc_directory(void)
 {
     return reserve_clusters(DIRECTORY_BYTES);
@@ -257,6 +291,41 @@ static struct bytes read_file(const char *path)
     return out;
 }
 
+
+/* Read a caller-supplied media input under an explicit size bound.
+ *
+ * Restored 2026-08-31: the three SIMPLEOS_SIMPLEBOX_* call sites at
+ * make_os_disk.c:165-167 referenced this helper but no definition ever
+ * landed, so make_os_disk.c did not compile at all on origin/main.
+ *
+ * Semantics the call sites rely on, and why each is fail-closed:
+ *  - an empty/NULL path yields an empty result (the caller treats "not
+ *    requested" and "unreadable" distinctly via simplebox_complete);
+ *  - the path must name a REGULAR file -- a directory, device or FIFO is
+ *    rejected rather than slurped, since these inputs come from the
+ *    environment and are not repo-controlled;
+ *  - a symlink is rejected (lstat, not stat): "public" here means the
+ *    bytes staged onto signed media must be the bytes at the named path;
+ *  - anything larger than `max_bytes` is rejected outright, never
+ *    truncated -- a truncated payload/SCR1/trust blob would be staged as
+ *    if whole.
+ * Every rejection returns an EMPTY struct bytes, which the caller turns
+ * into a hard "signed Simplebox inputs must be non-empty" die().
+ */
+static struct bytes read_bounded_public_file(const char *path, unsigned long max_bytes)
+{
+    struct bytes out = {0};
+    struct stat st;
+    if (!path || path[0] == '\0')
+        return out;
+    if (lstat(path, &st) != 0)
+        return out;
+    if (!S_ISREG(st.st_mode))
+        return out;
+    if (st.st_size < 0 || (unsigned long)st.st_size > max_bytes)
+        return out;
+    return read_file(path);
+}
 static struct bytes read_sibling_file(const char *path, const char *leaf)
 {
     char sibling[1024];

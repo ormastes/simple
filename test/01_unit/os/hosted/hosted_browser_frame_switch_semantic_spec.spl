@@ -1,0 +1,44 @@
+# @cover src/os/hosted/hosted_browser_renderer_registry.spl 5%
+
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, draw_ir_rect
+}
+use os.compositor.compositor_engine2d.Engine2dCompositorBackend
+use os.hosted.hosted_browser_frame_switch.hosted_browser_frame_switch_decide
+
+fn composition(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+            "semantic-switch", "hosted-web", "software", [
+                draw_ir_batch("body", "software", embedding, [
+                    draw_ir_rect("fill", 0, 0, 4, 4, color)
+                ])
+            ])
+
+describe "hosted browser retained frame switch semantics":
+    it "selects no publication for a consumed exact frame and raster for a miss":
+        var raster = Engine2dCompositorBackend.create_named(4, 4, "software")
+        val first = composition(0xFF2563EBu32)
+        raster.render_draw_ir_composition_resources_revision(first, [], 7, 1)
+
+        val consumed = hosted_browser_frame_switch_decide(
+            raster, first, [], 7, 1, false)
+        expect(consumed.reused).to_equal(true)
+        expect(consumed.publication_status).to_equal("none")
+        expect(consumed.receipt.raster_count).to_equal(0)
+        expect(consumed.receipt.readback_count).to_equal(0)
+
+        val pending = hosted_browser_frame_switch_decide(
+            raster, first, [], 7, 1, true)
+        expect(pending.reused).to_equal(true)
+        expect(pending.publication_status).to_equal("frame")
+
+        val changed = hosted_browser_frame_switch_decide(
+            raster, composition(0xFFDC2626u32), [], 7, 2, false)
+        expect(changed.reused).to_equal(false)
+        expect(changed.publication_status).to_equal("raster")
+        expect(raster.revision_render_count).to_equal(1)
+        expect(raster.revision_reuse_count).to_equal(2)
+        raster.shutdown()

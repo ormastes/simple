@@ -1,4 +1,9 @@
 # Pure MIR: `m!.method()` on an `Option<class>` lowers to the unresolved-method placeholder
+## Closed 2026-09-16 — Status FIXED; spec fails pre-fix, passes post-fix; probe prints 42
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-22
 **Area:** pure-Simple MIR lowering — `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`
@@ -47,3 +52,4 @@ module-qualified keys (`_MirLowering/module_lowering.spl:820-851`). Executed
 `a.handle=41 b.count=7 sum=48` natively. No interpreter-fallback blast radius
 exists on this path. Residual, not fixed: a same-scope duplicate declaration in
 ONE module silently returns the first id (`hir_types.spl:333`) with no diagnostic.
+

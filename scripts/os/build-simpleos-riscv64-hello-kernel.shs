@@ -1,0 +1,92 @@
+#!/bin/sh
+# build-simpleos-riscv64-hello-kernel.shs
+#
+# Build build/os/riscv64_hello/{kernel.elf,kernel.Image} — the riscv64
+# hello-world in-guest kernel — from tracked Simple source.
+#
+# COMPILER: the Rust bootstrap SEED, on purpose and stated loudly. The
+# pure-Simple self-hosted compiler cannot compile anything in this tree yet, so
+# every artifact this lane produces is seed-built and the gate says so in its
+# verdict rather than implying self-hosting.
+#
+# SIMPLE_BIN must point at a FRESHLY BUILT seed
+# (`cargo build --release --bin simple` in src/compiler_rust): the checked-in
+# bin/simple is stale and manufactures phantom PARSE failures. It must also
+# carry the cross bare-metal core-C runtime fix (see the comment block added to
+# src/compiler_rust/compiler/src/pipeline/native_project/config.rs in
+# selected_runtime_library) — without it the freestanding riscv64 link dies with
+# dozens of "libsimple_runtime.a(...) is incompatible with ..." errors, because
+# the core-C archive is built with the plain host `cc` and no `--target=`.
+#
+# --timeout 1200 is passed to native-build deliberately: the 300s default makes
+# modules that compile fine "fail". A timeout is not a compile error.
+#
+# The flat Image (objcopy -O binary) is what OpenSBI embeds as FW_PAYLOAD_PATH.
+# The real boot/crt0.S stamps the RISC-V Linux boot-image header onto it (gated
+# by check-simpleos-riscv64-image-header-contract.shs), so an Image-protocol
+# loader chain (U-Boot booti / Limine) can load the very same artifact on a
+# board the day one is available.
+#
+# Exit status: 0 = a non-empty RISC-V ELF with .text plus a non-empty flat Image
+# was produced and the hello-world program symbol is present; non-zero =
+# nothing usable. There is no partial success.
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT"
+
+OUT_DIR=${OUT_DIR:-$REPO_ROOT/build/os/riscv64_hello}
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/src/compiler_rust/target/release/simple}
+ENTRY=$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64/hello_world_sbi_entry.spl
+LDS=$REPO_ROOT/examples/09_embedded/simple_os/arch/riscv64/linker.ld
+KERNEL=$OUT_DIR/kernel.elf
+IMAGE=$OUT_DIR/kernel.Image
+LOG=$OUT_DIR/kernel-build.log
+NB_TIMEOUT=${NATIVE_BUILD_TIMEOUT:-1200}
+
+fail() { printf 'build-riscv64-hello-kernel: ERROR — %s\n' "$*" >&2; exit 1; }
+
+[ -x "$SIMPLE_BIN" ] || fail "no compiler at $SIMPLE_BIN (build the seed: cargo build --release --bin simple in src/compiler_rust)"
+[ -f "$ENTRY" ] || fail "missing entry $ENTRY"
+[ -f "$LDS" ] || fail "missing linker script $LDS"
+
+mkdir -p "$OUT_DIR"
+rm -f "$KERNEL" "$IMAGE"
+
+# Exit status read DIRECTLY into a variable on the next line — never through a
+# pipe, whose $? is the last pipeline element's status.
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure \
+    --timeout "$NB_TIMEOUT" \
+    --entry "$ENTRY" \
+    --target riscv64gc-unknown-none-elf \
+    --linker-script "$LDS" \
+    -o "$KERNEL" >"$LOG" 2>&1
+rc=$?
+[ "$rc" -eq 0 ] || { tail -40 "$LOG" >&2; fail "native-build failed (rc=$rc), log: $LOG"; }
+
+[ -s "$KERNEL" ] || fail "native-build reported success but $KERNEL is missing or empty"
+
+hdr=$(readelf -h "$KERNEL" 2>/dev/null) || fail "readelf could not parse $KERNEL"
+case "$hdr" in
+    *RISC-V*) ;;
+    *) fail "$KERNEL is not a RISC-V ELF" ;;
+esac
+readelf -SW "$KERNEL" 2>/dev/null | grep -q ' \.text ' \
+    || fail "$KERNEL has no .text section (empty-link false success)"
+
+# Real-not-stub check: the hello-world program function must actually be in the
+# image. --gc-sections has previously discarded an unrooted reachable graph and
+# still reported a successful link.
+readelf -sW "$KERNEL" 2>/dev/null | grep -q 'hello_world_program' \
+    || fail "$KERNEL contains no hello_world_program symbol (the program was garbage-collected out)"
+
+OBJCOPY=
+for c in riscv64-unknown-elf-objcopy riscv64-linux-gnu-objcopy llvm-objcopy objcopy; do
+    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
+done
+[ -n "$OBJCOPY" ] || fail "no objcopy available to extract the flat Image"
+"$OBJCOPY" -O binary "$KERNEL" "$IMAGE" || fail "flat Image extraction failed"
+[ -s "$IMAGE" ] || fail "flat Image $IMAGE is empty"
+
+printf 'PASS — riscv64 hello-world kernel built by the RUST SEED (%s): %s (%s bytes ELF) + %s (%s bytes flat Image with .text and hello_world_program)\n' \
+    "$SIMPLE_BIN" "$KERNEL" "$(wc -c <"$KERNEL")" "$IMAGE" "$(wc -c <"$IMAGE")"

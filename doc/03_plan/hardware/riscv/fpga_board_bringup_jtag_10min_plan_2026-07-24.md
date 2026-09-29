@@ -147,3 +147,9 @@ binding). Related: `rv64_fpga_synthesis_plan_2026-07-22.md`,
   always-on BSCANE2 USER4 UART-log tap (`uart_bscan_log.vhd`), zero UART
   cabling. Lesson recorded in the JTAG debugging guide: PS-clocked designs
   are unusable for JTAG-only bring-up here — clock from CFGMCLK.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/fpga_board_bringup_jtag_10min_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

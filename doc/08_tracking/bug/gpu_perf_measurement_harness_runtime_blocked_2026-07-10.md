@@ -1,7 +1,8 @@
 # GPU Performance Measurement Harness Runtime Blocked - 2026-07-10
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Severity
 
@@ -44,3 +45,4 @@ benchmark; the diagnostic-runtime numbers above are not release evidence.
 
 Do not accept modeled transfer-pixel economics, empty subprocess output, or
 the crashing `dlopen` harness as measured offload evidence.
+

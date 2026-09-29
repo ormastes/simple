@@ -112,6 +112,13 @@ pub fn parse_lang_flag(args: &[String]) {
 
 /// Filter out internal flags (GC, sandbox, etc.) from arguments
 pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
+    // Arguments after `run <script>` belong to the user program, not to the
+    // driver: stripping "internal" flags (--fix, --gc*, --debug, ...) there
+    // silently drops legitimate CLI flags before user code ever sees them
+    // (e.g. `simple run qualify_ignore/main.spl test --fix` lost --fix).
+    if args.len() >= 2 && args[0] == "run" {
+        return args.to_vec();
+    }
     let mut filtered_args = Vec::new();
     let mut skip_next = false;
 
@@ -175,6 +182,13 @@ mod tests {
         assert!(flags.gc_log);
         assert!(flags.debug_mode);
         assert!(!flags.gc_off);
+    }
+
+    #[test]
+    fn test_filter_internal_flags_preserves_run_args() {
+        let args = vec!["run".to_string(), "tool.spl".to_string(), "--fix".to_string(), "--gc-log".to_string()];
+        let filtered = filter_internal_flags(&args);
+        assert_eq!(filtered, args);
     }
 
     #[test]

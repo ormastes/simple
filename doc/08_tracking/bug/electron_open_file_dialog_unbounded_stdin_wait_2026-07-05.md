@@ -1,7 +1,8 @@
 # Electron open_file_dialog blocks on stdin with no timeout and silently drops unrelated IPC
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -26,3 +27,4 @@ The moment something wires `open_file_dialog` into a live menu action or keyboar
 
 ## Next Step
 Route open-file-dialog requests through the async_handler reader (`ui.ipc/async_handler.spl`) with a deadline instead of a private stdin loop. Consolidate stdin reading to a single, properly-scoped reader with deadline support. Ensure all abandoned operations send explicit timeout errors back to callers.
+

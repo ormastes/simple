@@ -1,0 +1,236 @@
+"""
+nvme_reg_file — the CONTROLLER-side behaviour of the property (register) file:
+reset values, CAP/VS composition from the transport profile, admin-queue
+validation, and the CC.EN / CSTS.RDY ENABLE HANDSHAKE.
+
+Pure free functions over plain values, same idiom as `nvme_mmio` and
+`nvme_reg_defs`: nothing here mutates. The one owner of the register bytes is
+`HostNvme.mem` (`nvme_host_driver.spl`), which applies these next-state values
+to the BAR0 window at `TransportProfile.reg_base`.
+
+ENABLE HANDSHAKE (NVMe Base 2.3 §3.5.1 initialization sequence, spec text lines
+12174-12180): the host reads CAP, writes AQA / ASQ / ACQ, then writes CC with
+CC.EN='1'; the controller reports readiness by setting CSTS.RDY to '1'.
+
+CONTROLLER RESET (spec text lines 8492-8509, the CC.EN description): clearing
+CC.EN from '1' to '0' causes a Controller Reset, which
+  - deletes all I/O Submission and Completion Queues,
+  - resets the Admin Submission and Completion Queues,
+  - brings the hardware to an idle state, and
+  - does NOT affect the Admin Queue properties AQA, ASQ or ACQ.
+CSTS.RDY is then cleared to '0' by the controller. This module implements
+exactly that: `reg_step` clears CSTS while leaving AQA/ASQ/ACQ untouched and
+raises `RegStep.reset`, which the transport owner uses as the signal to discard
+queue head/tail/phase state.
+
+RDY IS NOT INSTANT. The transition is deliberately modelled as a separate step
+rather than happening inside the CC write, because CAP.TO exists precisely
+because a host must wait for it (CAP.TO, spec text line 7872). That is what
+makes "a CC write that lands mid-transition" a testable state at all.
+
+ILLUSTRATIVE (invented for THIS device; not spec-derived):
+  * every CAP value below except MQES/DSTRD, which are derived from the
+    transport profile so the register file cannot disagree with the queues;
+  * the rule that a CC write arriving while EN != RDY is ignored in full;
+  * reporting an invalid Admin Queue Attributes value by setting CSTS.CFS.
+"""
+
+use nvme_types.*
+use nvme_reg_defs.*
+use nvme_transport_config.*
+
+# ── Version: this device reports NVMe 1.4.0 (VS = MJR.MNR.TER packed) ─────────
+# ILLUSTRATIVE: the SQE/CQE layout in nvme_mmio.spl is the 1.4 one.
+val VS_MAJOR: i64 = 1
+val VS_MINOR: i64 = 4
+val VS_TERTIARY: i64 = 0
+
+fn vs_value() -> i64:
+    (VS_MAJOR << 16) | (VS_MINOR << 8) | VS_TERTIARY
+
+# ILLUSTRATIVE device capabilities.
+val CAP_TO_UNITS:   i64 = 4   # 4 x 500 ms = 2 s worst-case ready timeout
+val CAP_CSS_NVM:    i64 = 1   # bit 0 of CAP.CSS: the NVM command set
+val CAP_MPSMIN_VAL: i64 = 0   # 2^(12+0) = 4 KiB
+val CAP_MPSMAX_VAL: i64 = 0   # 4 KiB only
+val CAP_CQR_VAL:    i64 = 1   # queues must be physically contiguous
+val CAP_AMS_VAL:    i64 = 0   # round robin only
+
+"""CAP.DSTRD for a doorbell stride of `stride` bytes: stride == 2^(2+DSTRD)."""
+fn cap_dstrd_for(stride: i64) -> i64:
+    var d: i64 = 0
+    var s: i64 = 4
+    while s < stride and d < 15:
+        s = s * 2
+        d = d + 1
+    if s != stride:
+        return NULL_IDX
+    d
+
+"""CAP bits 31:00. MQES is 0-based, so a depth-64 queue reports 63."""
+fn cap_lo_for(p: TransportProfile) -> i64:
+    var v: i64 = 0
+    var mqes: i64 = p.queue_depth - 1
+    if mqes < 0:
+        mqes = 0
+    v = bf_put(v, bf_cap_mqes(), mqes)
+    v = bf_put(v, bf_cap_cqr(), CAP_CQR_VAL)
+    v = bf_put(v, bf_cap_ams(), CAP_AMS_VAL)
+    v = bf_put(v, bf_cap_to(), CAP_TO_UNITS)
+    v
+
+"""CAP bits 63:32, shifted down to a dword."""
+fn cap_hi_for(p: TransportProfile) -> i64:
+    var d: i64 = cap_dstrd_for(p.doorbell_stride)
+    if d < 0:
+        d = 0
+    var v: i64 = 0
+    v = bf_put(v, bf_cap_dstrd(), d)
+    v = bf_put(v, bf_cap_css(), CAP_CSS_NVM)
+    v = bf_put(v, bf_cap_mpsmin(), CAP_MPSMIN_VAL)
+    v = bf_put(v, bf_cap_mpsmax(), CAP_MPSMAX_VAL)
+    v
+
+"""Largest queue size (0-based) the controller accepts, from CAP.MQES."""
+fn cap_mqes_of(cap_lo: i64) -> i64:
+    bf_get(cap_lo, bf_cap_mqes())
+
+# ── Admin queue validation ───────────────────────────────────────────────────
+"""
+True when AQA names a usable pair of admin queues.
+
+ASQS and ACQS are 0-based, and the minimum admin queue is 2 entries, so a
+0-based size of 0 (one entry) is invalid; neither may exceed CAP.MQES.
+"""
+fn aqa_valid(aqa: i64, mqes: i64) -> bool:
+    val asqs: i64 = bf_get(aqa, bf_aqa_asqs())
+    val acqs: i64 = bf_get(aqa, bf_aqa_acqs())
+    if asqs < 1 or acqs < 1:
+        return false
+    if asqs > mqes or acqs > mqes:
+        return false
+    true
+
+# ── The enable / reset state machine ─────────────────────────────────────────
+"""Everything `reg_step` needs. Struct param per fw/CONVENTIONS.md."""
+struct RegSnapshot:
+    cc:   i64
+    csts: i64
+    aqa:  i64
+    mqes: i64
+
+"""Outcome of one controller step: the next CSTS plus what the owner must do."""
+struct RegStep:
+    csts:    i64
+    reset:   bool   # a Controller Reset happened: discard queue state
+    changed: bool
+
+"""True while the controller owes the host a CSTS.RDY transition."""
+fn reg_transition_pending(cc: i64, csts: i64) -> bool:
+    if bf_get(csts, bf_csts_cfs()) == 1:
+        return false
+    bf_get(cc, bf_cc_en()) != bf_get(csts, bf_csts_rdy())
+
+"""
+Advance the controller one step.
+
+  EN=1, RDY=0  -> validate AQA; on success RDY:=1, on failure CFS:=1 and RDY
+                  stays 0 (the negative path: enabling with an invalid AQA must
+                  FAIL, not quietly come ready).
+  EN=0, RDY=1  -> Controller Reset: CSTS returns to its reset value 0 (RDY,
+                  CFS, SHST and NSSRO all clear) and `reset` is raised.
+                  AQA/ASQ/ACQ are NOT touched here — see the module docstring.
+  otherwise    -> shutdown bookkeeping only: a non-zero CC.SHN drives
+                  CSTS.SHST to 'shutdown complete'.
+"""
+fn reg_step(s: RegSnapshot) -> RegStep:
+    val en:  i64 = bf_get(s.cc, bf_cc_en())
+    val rdy: i64 = bf_get(s.csts, bf_csts_rdy())
+    val cfs: i64 = bf_get(s.csts, bf_csts_cfs())
+    if en == 0 and rdy == 1:
+        return RegStep(csts: 0, reset: true, changed: true)
+    if en == 1 and rdy == 0 and cfs == 0:
+        if aqa_valid(s.aqa, s.mqes):
+            return RegStep(csts: bf_put(s.csts, bf_csts_rdy(), 1), reset: false, changed: true)
+        return RegStep(csts: bf_put(s.csts, bf_csts_cfs(), 1), reset: false, changed: true)
+    if bf_get(s.cc, bf_cc_shn()) != SHN_NONE and bf_get(s.csts, bf_csts_shst()) != SHST_COMPLETE:
+        return RegStep(csts: bf_put(s.csts, bf_csts_shst(), SHST_COMPLETE), reset: false, changed: true)
+    RegStep(csts: s.csts, reset: false, changed: false)
+
+"""
+The value a CC write actually takes effect as.
+
+While the controller is mid-transition (CC.EN != CSTS.RDY, no fatal status) a
+host CC write is IGNORED in full and CC keeps its old value — the defined
+behaviour this device implements so that "write CC mid-transition" has an
+answer instead of a race. ILLUSTRATIVE.
+"""
+fn cc_write_effective(old_cc: i64, wval: i64, csts: i64) -> i64:
+    if reg_transition_pending(old_cc, csts):
+        return old_cc
+    reg_apply_write32(old_cc, wval, reg_access_for(REG_CC))
+
+"""A CC value a compliant host would write to enable this device."""
+fn cc_enable_value() -> i64:
+    var v: i64 = 0
+    v = bf_put(v, bf_cc_css(), 0)        # NVM command set
+    v = bf_put(v, bf_cc_mps(), 0)        # 4 KiB pages, matching CAP.MPSMIN
+    v = bf_put(v, bf_cc_ams(), 0)        # round robin
+    v = bf_put(v, bf_cc_iosqes(), 6)     # 2^6 = 64-byte SQE, == SQE_BYTES
+    v = bf_put(v, bf_cc_iocqes(), 4)     # 2^4 = 16-byte CQE, == CQE_BYTES
+    bf_put(v, bf_cc_en(), 1)
+
+"""AQA encoding both admin queues at `depth` entries (stored 0-based)."""
+fn aqa_for_depth(depth: i64) -> i64:
+    var n: i64 = depth - 1
+    if n < 0:
+        n = 0
+    bf_put(bf_put(0, bf_aqa_asqs(), n), bf_aqa_acqs(), n)
+
+fn nvme_reg_file_selftest() -> i64:
+    var f: i64 = 0
+    val p = transport_profile_load(BACKEND_EMU)
+    f = f + expect_eq(p.valid, 1, "reg_file selftest has a profile to read")
+    val cap_lo: i64 = cap_lo_for(p)
+    val cap_hi: i64 = cap_hi_for(p)
+    f = f + expect_eq(cap_mqes_of(cap_lo), 63, "CAP.MQES is 0-based: depth 64 reports 63")
+    f = f + expect_eq(bf_get(cap_lo, bf_cap_cqr()), 1, "CAP.CQR set: contiguous queues required")
+    f = f + expect_eq(bf_get(cap_lo, bf_cap_to()), CAP_TO_UNITS, "CAP.TO reads back at bits 31:24")
+    f = f + expect_eq(cap_dstrd_for(4), 0, "stride 4 == 2^(2+0) so DSTRD is 0")
+    f = f + expect_eq(cap_dstrd_for(8), 1, "stride 8 == 2^(2+1) so DSTRD is 1")
+    f = f + expect_eq(cap_dstrd_for(6), NULL_IDX, "a non-power-of-two stride has no DSTRD")
+    f = f + expect_eq(bf_get(cap_hi, bf_cap_dstrd()), 0, "CAP.DSTRD matches the profile stride")
+    f = f + expect_eq(bf_get(cap_hi, bf_cap_css()), CAP_CSS_NVM, "CAP.CSS advertises the NVM command set")
+    f = f + expect_eq(vs_value(), 0x00010400, "VS packs 1.4.0")
+    # CC enable value carries the entry sizes the wire layout actually uses.
+    val cce: i64 = cc_enable_value()
+    f = f + expect_eq(bf_get(cce, bf_cc_en()), 1, "cc_enable_value sets CC.EN")
+    f = f + expect_eq(1 << bf_get(cce, bf_cc_iosqes()), 64, "CC.IOSQES encodes the 64-byte SQE")
+    f = f + expect_eq(1 << bf_get(cce, bf_cc_iocqes()), 16, "CC.IOCQES encodes the 16-byte CQE")
+    # AQA validation.
+    val aqa_ok: i64 = aqa_for_depth(64)
+    f = f + expect_eq(bf_get(aqa_ok, bf_aqa_asqs()), 63, "aqa_for_depth stores ASQS 0-based")
+    f = f + expect_eq(bool_to_int(aqa_valid(aqa_ok, 63)), 1, "a depth-64 AQA is valid at MQES 63")
+    f = f + expect_eq(bool_to_int(aqa_valid(0, 63)), 0, "AQA of zero is invalid (min admin queue is 2 entries)")
+    f = f + expect_eq(bool_to_int(aqa_valid(aqa_for_depth(4096), 63)), 0, "AQA above CAP.MQES is invalid")
+    # The state machine, in isolation from any memory.
+    val idle = RegStep(csts: 0, reset: false, changed: false)
+    f = f + expect_eq(idle.csts, 0, "RegStep is a plain value")
+    val s1 = reg_step(RegSnapshot(cc: 0, csts: 0, aqa: aqa_ok, mqes: 63))
+    f = f + expect_eq(bf_get(s1.csts, bf_csts_rdy()), 0, "no RDY while CC.EN is clear")
+    f = f + expect_eq(bool_to_int(s1.changed), 0, "an idle controller does not change state")
+    val s2 = reg_step(RegSnapshot(cc: cce, csts: 0, aqa: aqa_ok, mqes: 63))
+    f = f + expect_eq(bf_get(s2.csts, bf_csts_rdy()), 1, "EN=1 with a valid AQA brings RDY to 1")
+    f = f + expect_eq(bool_to_int(s2.reset), 0, "coming ready is not a reset")
+    val s3 = reg_step(RegSnapshot(cc: cce, csts: 0, aqa: 0, mqes: 63))
+    f = f + expect_eq(bf_get(s3.csts, bf_csts_rdy()), 0, "EN=1 with an invalid AQA does NOT come ready")
+    f = f + expect_eq(bf_get(s3.csts, bf_csts_cfs()), 1, "EN=1 with an invalid AQA raises CSTS.CFS")
+    val s4 = reg_step(RegSnapshot(cc: 0, csts: s2.csts, aqa: aqa_ok, mqes: 63))
+    f = f + expect_eq(bf_get(s4.csts, bf_csts_rdy()), 0, "clearing CC.EN clears CSTS.RDY")
+    f = f + expect_eq(bool_to_int(s4.reset), 1, "clearing CC.EN raises the Controller Reset signal")
+    # Mid-transition CC writes.
+    f = f + expect_eq(bool_to_int(reg_transition_pending(cce, 0)), 1, "EN=1 RDY=0 is a pending transition")
+    f = f + expect_eq(bool_to_int(reg_transition_pending(cce, s2.csts)), 0, "EN=1 RDY=1 is settled")
+    f = f + expect_eq(cc_write_effective(cce, 0, 0), cce, "a CC write mid-transition is ignored")
+    f = f + expect_eq(cc_write_effective(cce, 0, s2.csts), 0, "the same CC write lands once settled")
+    f

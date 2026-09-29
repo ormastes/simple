@@ -18,31 +18,34 @@ Harness: `sh scripts/check/check-cross-language-perf.shs` in interpreter mode (`
 Spec: `test/01_unit/app/interpreter/perf_spec.spl`, `test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl` (to be created).
 
 ### Baseline & Measurement
-- [ ] **[OPEN]** Capture P0 baseline: run `check-cross-language-perf.shs` interpreter mode; save report to `doc/09_report/perf/interp_baseline_<date>.md` and table to `doc/10_metrics/perf/interp_baseline.md`.
-- [ ] **[OPEN]** `lang_script_vs_compiler_bench_spec.spl` (AC-4) exists and emits benchmark docs; interpreter row is separate from compiler rows.
+- [x] **[OPEN]** Capture P0 baseline: interpreter (`script`-mode) rows captured; report `doc/09_report/perf/perf_baseline_2026-06-13.md`, persistent table `doc/10_metrics/perf/perf_baseline_table.md`. — verified doc/10_metrics/perf/perf_baseline_table.md:5 `| name | mode | metric | value | unit | arch |`
+  - divergence: planned `interp_baseline_<date>.md` / `interp_baseline.md`; shipped `perf_baseline_2026-06-13.md` / `perf_baseline_table.md` (interpreter rows carry `mode=script`, not a separate file).
+- [x] **[OPEN]** `lang_script_vs_compiler_bench_spec.spl` (AC-4) exists and emits benchmark docs; interpreter row is separate from compiler rows. — verified test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl:130 `bench_emit`
 
 ### Startup
-- [ ] **[CLOSED]** Cold startup ≤ reference (interpreter instant-start advantage vs bun/python confirmed); re-verify after any loader change via `check-startup-size-performance-audit.shs`.
+- [ ] **[CLOSED]** Cold startup ≤ reference (interpreter instant-start advantage vs bun/python confirmed); re-verify after any loader change via `check-startup-size-performance-audit.shs` (report generator only — its only fail arms are `mmap-preload-gate`/`network-libs-gate`/`network-size-gate` at :721/:742/:759; it asserts NO startup-timing verdict, so this box needs a real comparison gate).
 - [ ] **[OPEN]** Cold startup re-measured post-P1 opts and recorded in `doc/10_metrics/perf/interp_baseline.md`.
 
 ### Warm Throughput
 - [ ] **[CLOSED]** `debug_state` atomics contention eliminated (micro-opt DONE per research).
 - [ ] **[CLOSED]** `extern dispatch` map lookup optimized (micro-opt DONE per research).
-- [ ] **[CLOSED]** Allocator: mimalloc wired for interpreter heap (DONE per research).
+- [x] **[CLOSED]** Allocator: mimalloc wired for interpreter heap (DONE per research). — verified src/compiler_rust/driver/src/main.rs:70 `#[global_allocator] static GLOBAL: TrackingAlloc<mimalloc::MiMalloc>`
 - [ ] **[CLOSED]** Linker: mold used for seed builds (DONE per research).
-- [ ] **[CLOSED]** Parallel eval: rayon integration DONE per research.
+- [x] **[CLOSED]** Parallel compilation/link: rayon thread-pool integration landed. — verified src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:192 `rayon::ThreadPoolBuilder::new()`
+  - divergence: planned parallel *eval* (interpreter); shipped rayon in the native-project compile pipeline and `linker/parallel.rs` — no rayon use found on the interpreter eval path.
 - [ ] **[OPEN]** MIR bulk-ops recognizer phases 2–8 landed in `src/compiler/60.mir_opt/optimization_passes.spl` **and** re-measured in interpreter mode (RISK: false bulk-copy recognizer regresses all 3 modes — gate behind regression spec before landing).
 - [ ] **[OPEN]** String-copy minimization in `src/lib/nogc_sync_mut/` stdlib collections landed and warm-throughput delta recorded.
 
 ### Per-Op Cost
-- [ ] **[OPEN]** `test/01_unit/app/interpreter/perf_spec.spl` green at per-op budget thresholds (fib35 in-process, method dispatch in `test/05_perf/method_dispatch_bench.spl`, bytes_push 1 MiB in `test/05_perf/bytes_push_1mib.spl`).
+- [ ] **[OPEN]** `test/01_unit/app/interpreter/perf_spec.spl` green at per-op budget thresholds (fib35 in-process, method dispatch in `test/05_perf/bench/method_dispatch_bench.spl`, bytes_push 1 MiB in `test/05_perf/bytes_push_1mib.spl`).
 - [ ] **[OPEN]** Tiered JIT hotspot spec `test/01_unit/compiler/interpreter/tiered_jit_hotspot_spec.spl` green.
 
 ### API/Arch Guard (AC-8)
 - [ ] **[OPEN]** `scripts/check/check-api-arch-guard.shs` green after every interpreter-layer change; public symbol diff (`src/compiler/90.tools/symbol_analyzer.spl` + `src/compiler/99.loader/metadata_symbol_surface.spl`) shows zero unintended removals; snapshot stored in `doc/08_tracking/api_surface/`.
 
 ### rt_* Reduction (AC-9)
-- [ ] **[OPEN]** Baseline rt_* count captured: `grep -r 'rt_' src/lib/nogc_sync_mut --include='*.spl' | grep -v '^\s*//' | wc -l` = 7,974 (record in `doc/10_metrics/perf/rt_baseline.md`).
+- [x] **[OPEN]** Baseline rt_* count captured in `doc/10_metrics/perf/rt_baseline_2026-06-13.md`: app-developer view `examples/**.spl` raw call sites = 3,225; `src/lib/nogc_async_mut/**` `extern fn rt_*` decls = 118. — verified doc/10_metrics/perf/rt_baseline_2026-06-13.md:9 `Raw counts`
+  - divergence: planned a `nogc_sync_mut` line count of 7,974 in `rt_baseline.md`; shipped a dated `rt_baseline_2026-06-13.md` measuring the app-developer (`examples/`) view plus `nogc_async_mut` extern decls instead.
 - [ ] **[OPEN]** After sweep: count re-measured; reduction vs baseline recorded; no direct `rt_*` calls visible in example/app-developer code paths.
 
 ---
@@ -71,15 +74,18 @@ Specs: `test/05_perf/lang/lang_script_vs_compiler_bench_spec.spl` (AC-4); `test/
 - [ ] **[OPEN]** SMF warm throughput (`bench_baseline_driver.spl` SMF-mode rows
   from `bench_smf_workload.spl`) re-measured post-P1 and recorded.
 - [ ] **[OPEN]** Native Cranelift AOT throughput (`check-cross-language-perf.shs` native mode) re-measured; `pure_simple_ctype_perf_gap` (Cranelift no inlining) either resolved or filed as explicit open bug with measurement.
-- [ ] **[CLOSED]** Parallel workers (rayon/green-thread) benchmarked via `check-cross-language-perf.shs` `WORKERS`/`FANOUT_WORKERS` dimensions (DONE per research).
+- [x] **[CLOSED]** Parallel workers (rayon/green-thread) benchmarked via `check-cross-language-perf.shs` `WORKERS`/`FANOUT_WORKERS` dimensions (DONE per research). — verified scripts/check/check-cross-language-perf.shs:1801 `pool_evidence "$SIMPLE_BINARY .../parallel_multicore_green_simple.smf" "$MULTICORE_GREEN_WORKERS"`
 
 ### Cache Reuse (AC-7)
-- [ ] **[PARTIAL — BUILD]** `dynsmf_autoload.spl`: queued background-compile command actually dispatches via `process_spawn_async` (process never spawned per research).
-- [ ] **[PARTIAL — BUILD]** `dynsmf_session.spl:163`: content-hash guard added to dynSMF precompiled lane (currently magic-bytes only, no SHA-256).
-- [ ] **[MISSING — BUILD]** `test/02_integration/app/simple/smf_cache_reuse_spec.spl` created and green: exercises `try_load_smf_cached` for unchanged-script hit and stale-source miss.
-- [ ] **[EXISTS]** Unchanged-script SMF cache reuse (`simple run`): `try_load_smf_cached` + `build/smf/manifest.sdn` + `validate_smf` pipeline confirmed working.
-- [ ] **[EXISTS]** Stale-source cache miss (user scripts): SHA-256 + dep interface-hash in `cache_validator.spl` confirmed working.
-- [ ] **[EXISTS]** Idle background compile via watcher daemon: `WatcherDaemon.generate_smf()` on file-change confirmed working.
+- [x] **[PARTIAL — BUILD]** `src/app/startup/dynsmf_autoload.spl`: queued background-compile command actually dispatches via `process_spawn_async` and records a `dispatched` evidence row carrying the pid. — verified src/app/startup/dynsmf_autoload.spl:56 `process_spawn_async`
+- [x] **[PARTIAL — BUILD]** `src/os/smf/dynsmf_session.spl`: content-hash guard added to the dynSMF precompiled lane — a `<artifact>.srchash` sidecar is compared against the current source hash after the magic-bytes check. — verified src/os/smf/dynsmf_session.spl:188 `val sidecar = dynsmf_srchash_path(artifact_path)`
+  - divergence: planned SHA-256 at `dynsmf_session.spl:163`; shipped an `rt_hash_text`-based srchash/ifacehash sidecar pair in `src/os/smf/dynsmf_session.spl` (not SHA-256, and the file moved out of the planned path).
+- [x] **[MISSING — BUILD]** `test/02_integration/app/simple/smf_cache_reuse_spec.spl` created: exercises the srchash-sidecar cache hit (unchanged source) and stale-source miss, plus absent-sidecar and invalid-magic rejection. — verified test/02_integration/app/simple/smf_cache_reuse_spec.spl:62 `accepts artifact when sidecar hash matches current source hash (cache hit)`
+  - divergence: planned to drive `try_load_smf_cached`; shipped drives `dynsmf_artifact_status_with_hash_injected` over the dynSMF srchash lane. "Green" is not asserted here — no run was performed.
+- [x] **[EXISTS]** Unchanged-script SMF cache reuse (`simple run`): `try_load_smf_cached` + SMF manifest + `validate_smf` pipeline present. — verified src/compiler/80.driver/driver_api_interpret.spl:28 `try_load_smf_cached`
+- [x] **[EXISTS]** Stale-source cache miss (user scripts): source-hash + options-hash + dependency interface hashes compared in `cache_validator.spl`; a mismatch returns `cache_check_result_stale`. — verified src/compiler/80.driver/cache/cache_validator.spl:172 `if current_src_hash != smf_source_hash: return cache_check_result_stale(...)`
+  - divergence: planned SHA-256; shipped `hash_text` (:171) as the source-hash primitive.
+- [x] **[EXISTS]** Idle background compile via watcher daemon: `WatcherDaemon.generate_smf()` on file-change. — verified src/compiler/80.driver/watcher/watcher_daemon.spl:138 `self.generate_smf(self.request_for_changed_file(path))`
 
 ### API/Arch Guard (AC-8)
 - [ ] **[OPEN]** `scripts/check/check-api-arch-guard.shs` green after every compiler/SMF change; public symbol snapshot diffed; snapshot in `doc/08_tracking/api_surface/`.
@@ -96,11 +102,12 @@ Related existing specs: `test/05_perf/http_server/` (existing), `test/05_perf/be
 Note: pre-existing failures in `rate_limit_spec`, `request_validation_spec`, `security_headers_spec` (refactor `cd46a9463a4`) must be quarantined/fixed before AC-8 baseline is captured — they must not count as AC-8 regressions.
 
 ### Baseline & Measurement
-- [ ] **[OPEN]** `web_server_bench_spec.spl` created with arch tag `x86_64`; emits benchmark docs to `doc/09_report/perf/web_baseline_<date>.md` and persistent table to `doc/10_metrics/perf/web_baseline.md`.
+- [x] **[OPEN]** `web_server_bench_spec.spl` created with arch tag `x86_64`; emits benchmark docs to `doc/09_report/perf/web_server_bench.md` and persistent table to `doc/10_metrics/perf/web_server_bench.md`. — verified test/05_perf/web/web_server_bench_spec.spl:200 `it "bench_emit writes report and metrics files"` (paths at :71-72)
+  - divergence: planned dated `web_baseline_<date>.md` + `web_baseline.md`; shipped fixed-name `web_server_bench.md` in both trees (the report file self-dates in its header instead).
 - [ ] **[OPEN]** P0 baseline captured: cold-start ms, req/s, p50 latency ms, p99 latency ms, peak RSS MB all recorded as separate columns.
 
 ### Cold Start
-- [ ] **[CLOSED]** H2 server (`HttpServer` with ALPN), H3/QUIC, and unified entry all implemented (`web-server-optimizer-complete` CLOSED 2026-05-25) — cold-start overhead locked in.
+- [ ] **[CLOSED]** H2 server (`HttpServer` with ALPN), H3/QUIC, and unified entry all implemented (`web-server-optimizer-complete` CLOSED 2026-05-25) — cold-start overhead locked in. (`src/lib/nogc_sync_mut/http/h2/` and `.../h3/` trees and `src/lib/nogc_async_mut/http_server/server.spl:165 class HttpServer` exist, but the tree's only `ALPN` occurrence is a comment at `h2/h2_preface.spl:3` — no ALPN negotiation code found, so the compound claim is unproven.)
 - [ ] **[OPEN]** Cold-start measurement via `web_server_bench_spec.spl` run and recorded.
 
 ### Request Throughput (req/s)
@@ -131,7 +138,8 @@ Target code: `database/pure_sql/database.spl` (`PureDatabase` opened without fil
 Note: SQLite FFI wrapper (`database/sql/`) unavailable in interpreter mode — benchmarks must specify mode.
 
 ### Baseline & Measurement
-- [ ] **[OPEN]** `db_ram_vs_persistent_bench_spec.spl` created; RAM-only section uses `PureDatabase` without file path; emits benchmark docs with `ram-only` label to `doc/09_report/perf/db_baseline_<date>.md`.
+- [x] **[OPEN]** `db_ram_vs_persistent_bench_spec.spl` created; RAM-only section uses `PureDatabase` in-memory and emits via `bench_emit`. — verified test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:275 `it "ram-only: insert N rows and count == N (correctness oracle)"` (label at :49, emit at :344)
+  - divergence: planned label `ram-only` and a dated `db_baseline_<date>.md`; shipped mode label `ram` emitted through the shared `bench_emit` report/table pair.
 - [ ] **[OPEN]** P0 baseline captured: insert throughput (rows/s), point-query throughput (queries/s), range-scan throughput; all recorded separately from persistent rows.
 
 ### Insert Throughput
@@ -154,7 +162,8 @@ Harness: `test/05_perf/db/db_ram_vs_persistent_bench_spec.spl` (same file, separ
 Target code: `PureDatabase._persist()` → `_serialize_disk()` path (text `_persist`); `db/dbfs_engine/mvcc.spl` (WAL/DBFS-backed). Results must be separate from db-RAM rows.
 
 ### Baseline & Measurement
-- [ ] **[OPEN]** Persistent section of `db_ram_vs_persistent_bench_spec.spl` uses `PureDatabase` with file path (text format); WAL section uses `db/dbfs_engine/mvcc.spl`; results emitted with labels `persistent` and `wal` separately.
+- [x] **[OPEN]** Persistent section of `db_ram_vs_persistent_bench_spec.spl` uses `PureDatabase.open_deferred(path)` + `checkpoint()`; WAL section uses `MvccTable`; results emitted with labels `persistent` and `wal` separately. — verified test/05_perf/db/db_ram_vs_persistent_bench_spec.spl:51 `val WAL_MODE: text = "wal"` and :157 `fn run_wal_insert_count`
+  - divergence: planned the persistent lane to be plain file-path `PureDatabase` and the WAL lane to call `db/dbfs_engine/mvcc.spl` directly; shipped `open_deferred`+`checkpoint` and the in-process `MvccTable` façade.
 - [ ] **[OPEN]** P0 baseline captured: insert throughput, query throughput, persist cost (ms/mutation) recorded. Reference point: deferred INSERT 200 rows = 954ms (`pure-db-perf-improve` CLOSED 2026-05-27, `doc/09_report/pure_db_perf_comparison_2026-05-26.md`).
 
 ### Insert + Persist Cost
@@ -167,7 +176,7 @@ Target code: `PureDatabase._persist()` → `_serialize_disk()` path (text `_pers
 - [ ] **[OPEN]** WAL-backed query throughput measured separately.
 
 ### rt_file_create_excl Gap (AC-9 / correctness pre-condition)
-- [ ] **[OPEN]** `rt_file_create_excl` extern landed (TOCTOU lock fix F2); spec-red item resolved before persistent-path benchmark is treated as production-ready.
+- [x] **[OPEN]** `rt_file_create_excl` extern landed (TOCTOU lock fix F2) in both the C runtime and the pure-Simple core. — verified src/runtime/runtime_legacy_core.c:515 `int rt_file_create_excl(...)` and src/runtime/simple_core/core_fs.spl:445 `pub fn rt_file_create_excl`
 
 ### API/Arch Guard (AC-8)
 - [ ] **[OPEN]** `scripts/check/check-api-arch-guard.shs` green for persistent DB public API (`PureDatabase._persist`, `open_deferred`, `checkpoint`, `dbfs_engine` surface); snapshot in `doc/08_tracking/api_surface/`.
@@ -184,11 +193,13 @@ Model: `test/03_system/os/qemu/os/` layout (`common/qemu_os_config.spl`, `common
 Related closed work: `fs-hardening-optimization` CLOSED 2026-05-23, `fs-opt-general` CLOSED 2026-05-23, `scheduler-process-isolation` CLOSED 2026-05-20.
 
 ### Baseline & Measurement
-- [ ] **[OPEN]** `os_fs_sched_bench_spec.spl` created with arch tag `x86_64`; uses `qemu_os_harness.spl` model; emits benchmark docs to `doc/09_report/perf/os_baseline_<date>.md`.
+- [x] **[OPEN]** `os_fs_sched_bench_spec.spl` created with arch tag `x86_64`; emits benchmark docs via `bench_emit`; a QEMU systest variant is stubbed `pending()` for the systest lane. — verified test/05_perf/os/os_fs_sched_bench_spec.spl:54 `val ARCH_TAG: text = "x86_64"` and :230 `pending("qemu boot bound — runs in systest lane")`
+  - divergence: planned to use the `qemu_os_harness.spl` model and emit a dated `os_baseline_<date>.md`; shipped a HOST-PROXY spec (`mode=host_x86_64`, real fs/spawn on the host) with the QEMU variant left pending — so no in-guest number is produced by this spec.
 - [ ] **[OPEN]** P0 baseline captured: fs read throughput (MB/s), fs write throughput (MB/s), exec/spawn latency (ms), scheduler fairness metric; x86_64 numbers not yet captured (confirmed open per research).
 
 ### FS Read/Write Throughput
-- [ ] **[CLOSED]** NVFS hardening + FAT32 read + allocator landed (`harden-nvfs-simpleos` CLOSED 2026-04-24, `fs-opt-general` CLOSED 2026-05-23).
+- [x] **[CLOSED]** NVFS hardening + FAT32 read landed (`harden-nvfs-simpleos` CLOSED 2026-04-24, `fs-opt-general` CLOSED 2026-05-23). — verified src/os/services/fat32/fat32_filesystem_ops.spl:242 `me fn read(handle: u64, size: u64) -> Result<[u8], text>` (and :498 `fn readdir`), with the NVFS service tree at src/os/services/nvfs/{core,driver,posix}
+  - divergence: the "allocator" third of this box is NOT re-verified here — only the FAT32 read path and the NVFS service tree were confirmed.
 - [ ] **[CLOSED]** FS profiling harness waves completed: 9/15 + 11/11 + 12/14 (`fs-hardening-optimization` CLOSED 2026-05-23); 6 pre-existing blockers deferred (documented).
 - [ ] **[CLOSED]** MIR optimizer: struct-array-loop improvements; C extern → pure Simple for `rt_bytes_alloc`, `rt_text_to_bytes` (`fs-opt-general` CLOSED).
 - [ ] **[OPEN]** `os_fs_sched_bench_spec.spl` measures FAT32 read/write throughput in QEMU x86_64; results vs `doc/10_metrics/fs_driver_vfat_comparison.md` recorded.
@@ -198,7 +209,9 @@ Related closed work: `fs-hardening-optimization` CLOSED 2026-05-23, `fs-opt-gene
 - [ ] **[OPEN]** QEMU broker session sharing (`qemu-perf-session` OPEN, phase 1-dev in progress) either completed or latency measured without session pooling and delta documented.
 
 ### Scheduler Fairness
-- [ ] **[CLOSED]** Process isolation + scheduler landed (`scheduler-process-isolation` CLOSED 2026-05-20); no public symbol duplication found.
+- [x] **[CLOSED]** Process isolation + scheduler landed (`scheduler-process-isolation` CLOSED 2026-05-20). — citation replaced 2026-09-05; now verified src/os/kernel/abi/syscall_shim_process.spl:338 `dispatch_enter_user_blocking(a0, g_shim_scheduler)` reaching the real `@cfg(x86_64)` arm at src/os/kernel/arch/user_entry_bridge.spl:21-24 `dispatch_x86_64_enter_user(pid_hint, scheduler)`, with the address-space switch at src/os/kernel/memory/vmm_address_space.spl:314 `paging_switch_address_space(space.phys_root)`
+  - divergence: the previous citation (`scheduler_exec.spl:69 _record_exec_user_handoff`) does NOT hold and was replaced — only the `@cfg(arm64)` body calls anything; the arm32/riscv64/riscv32/x86_64/x86 bodies (`:73,:79,:85,:91,:97`) bind all three arguments to unused `val`s and do nothing, and this checklist is x86_64-scoped.
+  - divergence: the "no public symbol duplication found" half is NOT re-verified here — `scripts/check/check-api-arch-guard.shs` is not a push-tier row in `config/check/must_check_gates.sdn`, so nothing enforces it.
 - [ ] **[OPEN]** Scheduler fairness metric (e.g. max/min CPU share ratio under N workers) measured by `os_fs_sched_bench_spec.spl` in QEMU x86_64; result recorded.
 
 ### Cranelift Inlining Gap
@@ -219,3 +232,9 @@ Related closed work: `fs-hardening-optimization` CLOSED 2026-05-23, `fs-opt-gene
 - Contract test for cross-language report shape: `test/05_perf/profile_scripts/profile_report_contract_test.shs` must stay green after every harness run.
 - Arch extensibility: all new benchmark specs must carry `skip(architectures:[], tags:[])` decorator; arm/riscv columns added without copy-paste per AC-3.
 - Doc locations: dated runs → `doc/09_report/perf/`; persistent tables → `doc/10_metrics/perf/`; API snapshots → `doc/08_tracking/api_surface/`.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/perf_checklists_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

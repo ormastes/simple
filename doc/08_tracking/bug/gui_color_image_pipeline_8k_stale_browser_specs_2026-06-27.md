@@ -1,5 +1,10 @@
 # GUI Color/Image Pipeline 8K Stale Browser Specs
 
+## Closed 2026-09-13 — stale browser-example deps replaced by a core-module probe, as recorded
+- **measured**: `grep -cE 'lab_xyz|image_info' scripts/check/check-gui-color-image-pipeline-8k-evidence.shs` = 12 — the `std.common.color.lab_xyz` / `std.common.image.image_info` probe named in the resolution is wired in.
+- **measured**: the three stale paths this entry named under `examples/11_advanced/browser/test/` do not exist — consistent with removal as dependencies rather than restoration.
+- **inferred**: the wrapper itself was not executed (Linux GPU 8K evidence lane, unavailable on this Windows host).
+
 Date: 2026-06-27
 
 ## Summary
@@ -9,9 +14,7 @@ focused browser specs and generated-probe imports that are absent in the current
 tree. With the self-hosted Simple binary, the wrapper can no longer produce a
 valid normal 8K GUI color/image evidence row from those stale paths.
 
-Status: resolved by replacing the stale browser-example dependencies with a
-current core-module probe over `std.common.color.lab_xyz` and
-`std.common.image.image_info`.
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Previous Evidence
 

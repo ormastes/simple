@@ -1,0 +1,320 @@
+#!/bin/sh
+# check-freestanding-dict-write-path.shs
+#
+# Reproduce guard for the riscv64 in-guest interpreter row's
+# "module has no main function" defect (goal item 1, row 1).
+#
+# WHAT IT PINS. A freestanding/baremetal C runtime that CLAIMS to have
+# dictionaries — i.e. that defines `rt_dict_new` — must also define a real
+# WRITE path for them:
+#
+#   1. `rt_dict_set` must be defined in the same tree. It is a real entry point
+#      (src/runtime/runtime.h:746) that generated code references directly.
+#   2. `rt_index_set` (the `d[k] = v` subscript path) must decide on the
+#      RECEIVER kind before rejecting a non-int index, so a dict write with a
+#      non-int key is not discarded.
+#   3. `rt_index_get` and `rt_len` must likewise recognise a dict receiver, so
+#      a populated dict does not read back as empty.
+#
+# WHY, and why "it links" proved nothing. Measured 2026-09-01 from the KEPT
+# link objects of the pre-fix riscv64 interpreter build
+# (`.simple/native-objects-*/`):
+#
+#   riscv64-linux-gnu-nm -u mod_*.o   ->  rt_dict_set REFERENCED
+#   nm --defined-only _boot_*.o       ->  rt_dict_set defined by NO boot TU
+#
+# and the link SUCCEEDED anyway, because this lane's "Freestanding unresolved
+# precheck deferred to linker" bridge supplies a silent stub for such a symbol.
+# A call that succeeds and does nothing is the worst available failure mode:
+# every insertion into `HirModule.functions : Dict<SymbolId, HirFunction>` was
+# discarded, the dict stayed EMPTY, `module.functions.values()` yielded an
+# empty array, and the `f.name == "main"` loop in
+# InterpreterBackendImpl.interpret_hir_module never ran its body once. The row
+# reported "module has no main function" over a perfectly well-formed HIR —
+# which is precisely why the investigation kept pointing at the iteration and
+# at the text compare. Both were innocent.
+#
+# `rt_index_set` carried the same hole by a different route: it opened with
+# `if (!IS_INT(index)) return 0;` and only then called rt_array_set, so it
+# never looked at what it was writing INTO. A dict key is an arbitrary
+# RuntimeValue (here a heap struct handle), so every subscript write was
+# rejected before the receiver was examined.
+#
+# Why a SOURCE check and not an in-guest boot: the in-guest evidence is real
+# and is what drove the fix, but reproducing it needs a riscv64 cross
+# toolchain, OpenSBI and QEMU and takes many minutes. This runs in well under a
+# second on every push and catches the same defect at its source. It is also
+# strictly stronger than a link check, because the link is exactly what failed
+# to notice.
+#
+# Verdict is the LAST line of stdout:
+#   PASS  — <n> runtime(s) checked, 0 with a broken dict write path   exit 0
+#   FAIL  — ...                                                       exit 1
+#   ERROR — nothing was checked                                       exit 2
+# A run that examined 0 dict-bearing runtimes is ERROR, never a pass.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+# Strip C comments FIRST. Without this the guard is worthless: the fixed
+# sources carry long comments that NAME rt_dict_set and HEAP_DICT while
+# explaining the defect, and the pre-fix source carried a comment saying
+# rt_dict_set was "deliberately NOT defined here" — so a text match over raw
+# source misclassifies both directions.
+strip_comments() {
+    awk '
+        { line = $0; out = ""
+          while (length(line) > 0) {
+              if (inblock) {
+                  i = index(line, "*/")
+                  if (i == 0) { line = ""; break }
+                  line = substr(line, i + 2); inblock = 0; continue
+              }
+              b = index(line, "/*"); l = index(line, "//")
+              if (l > 0 && (b == 0 || l < b)) { out = out substr(line, 1, l - 1); line = ""; break }
+              if (b > 0) { out = out substr(line, 1, b - 1); line = substr(line, b + 2); inblock = 1; continue }
+              out = out line; line = ""
+          }
+          print out
+        }
+    ' "$1"
+}
+
+# Is <name> DEFINED (not merely declared/called) anywhere in the stripped text
+# on stdin? A definition is `... name(...)` followed by a `{` before any `;`.
+has_definition() {
+    awk -v want="$2" '
+        { buf = buf " " $0 }
+        END {
+            n = split(buf, _unused, "")
+            # find "want(" occurrences and look for { before ;
+            rest = buf
+            while ((p = index(rest, want "(")) > 0) {
+                tail = substr(rest, p + length(want) + 1)
+                # skip if this is a call: previous non-space char is alnum-ish
+                pre = substr(rest, 1, p - 1)
+                sub(/[ \t]+$/, "", pre)
+                lastc = substr(pre, length(pre), 1)
+                if (lastc == "*" || lastc == "" || lastc ~ /[A-Za-z0-9_]/) {
+                    # close the paren, then inspect what follows
+                    depth = 1; i = 1
+                    while (i <= length(tail) && depth > 0) {
+                        c = substr(tail, i, 1)
+                        if (c == "(") depth++
+                        else if (c == ")") depth--
+                        i++
+                    }
+                    after = substr(tail, i)
+                    sub(/^[ \t]+/, "", after)
+                    if (substr(after, 1, 1) == "{") { print "yes"; exit }
+                }
+                rest = substr(rest, p + length(want) + 1)
+            }
+        }
+    ' "$1"
+}
+
+# Does the body of <fn> mention HEAP_DICT (i.e. dispatch on a dict receiver)?
+# Extracted from the stripped text so an explanatory comment cannot satisfy it.
+body_handles_dict() {
+    awk -v want="$2" '
+        BEGIN { infn = 0; depth = 0 }
+        {
+            line = $0
+            if (!infn && index(line, want "(") > 0 && index(line, ";") == 0) { infn = 1 }
+            if (infn) {
+                body = body " " line
+                for (i = 1; i <= length(line); i++) {
+                    c = substr(line, i, 1)
+                    if (c == "{") { depth++; started = 1 }
+                    else if (c == "}") { depth--; if (started && depth <= 0) { infn = 0 } }
+                }
+            }
+        }
+        END { if (index(body, "HEAP_DICT") > 0) print "yes" }
+    ' "$1"
+}
+
+EV_CHECKED=0
+EV_BAD=
+
+scan_root() {
+    EV_CHECKED=0
+    EV_BAD=
+    _root=$1
+    _tmp=$(mktemp -d)
+    # Freestanding/baremetal runtimes only. Vendored code is out of scope per
+    # CLAUDE.md's Owned-Code Scope, and the HOSTED runtime is not scanned:
+    # src/runtime/runtime_native.c is the reference implementation these are
+    # measured against, not a subject.
+    for f in $(find "$_root/examples/09_embedded/simple_os" "$_root/src/os" \
+                    -name '*.c' 2>/dev/null | grep -v '/vendor/' | sort); do
+        [ -f "$f" ] || continue
+        strip_comments "$f" > "$_tmp/s.c"
+        # Only runtimes that CLAIM to have dicts are subjects.
+        [ -n "$(has_definition "$_tmp/s.c" rt_dict_new)" ] || continue
+        EV_CHECKED=$((EV_CHECKED + 1))
+        _why=
+        [ -n "$(has_definition "$_tmp/s.c" rt_dict_set)" ] \
+            || _why="$_why,no-rt_dict_set"
+        # The receiver-kind criteria below are expressed in terms of HEAP_DICT,
+        # so they apply ONLY to runtimes that actually tag dicts that way.
+        # arm64 and x86_64 implement dicts by delegating to a MAP
+        # representation and never define HEAP_DICT; probing them for a
+        # HEAP_DICT arm asks the wrong question and reported both as broken in
+        # the first revision of this guard. Their dict-write correctness is a
+        # real question, but it is a DIFFERENT one and needs its own probe
+        # rather than a criterion borrowed from another arch's layout.
+        if ! grep -q '#define[ \t][ \t]*HEAP_DICT' "$_tmp/s.c"; then
+            [ -z "$_why" ] || EV_BAD="$EV_BAD ${f#$_root/}:${_why#,}"
+            continue
+        fi
+        if [ -n "$(has_definition "$_tmp/s.c" rt_index_set)" ]; then
+            [ -n "$(body_handles_dict "$_tmp/s.c" rt_index_set)" ] \
+                || _why="$_why,rt_index_set-ignores-dict"
+        fi
+        if [ -n "$(has_definition "$_tmp/s.c" rt_index_get)" ]; then
+            [ -n "$(body_handles_dict "$_tmp/s.c" rt_index_get)" ] \
+                || _why="$_why,rt_index_get-ignores-dict"
+        fi
+        if [ -n "$(has_definition "$_tmp/s.c" rt_len)" ]; then
+            [ -n "$(body_handles_dict "$_tmp/s.c" rt_len)" ] \
+                || _why="$_why,rt_len-ignores-dict"
+        fi
+        [ -z "$_why" ] || EV_BAD="$EV_BAD ${f#$_root/}:${_why#,}"
+    done
+    rm -rf "$_tmp"
+}
+
+selftest() {
+    d=$(mktemp -d)
+    mkdir -p "$d/examples/09_embedded/simple_os" "$d/src/os"
+
+    # F1: the INCIDENT shape — dicts exist, no rt_dict_set, rt_index_set
+    # rejects non-int keys before looking at the receiver. Must FAIL.
+    cat >"$d/examples/09_embedded/simple_os/incident.c" <<'EOF'
+#define HEAP_DICT 11U
+RuntimeValue rt_dict_new(int64_t cap) { return NIL_VALUE; }
+int64_t rt_dict_values(int64_t d) { return 0; }
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue i, RuntimeValue x)
+{
+    if (!IS_INT(i)) return 0;
+    return rt_array_set(v, (RuntimeValue)DECODE_INT(i), x);
+}
+EOF
+
+    # F2: the FIXED shape. Must PASS.
+    cat >"$d/examples/09_embedded/simple_os/fixed.c" <<'EOF'
+#define HEAP_DICT 11U
+RuntimeValue rt_dict_new(int64_t cap) { return NIL_VALUE; }
+int8_t rt_dict_set(int64_t d, int64_t k, int64_t v) { return 1; }
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue i, RuntimeValue x)
+{
+    if (IS_HEAP(v)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+        if (h && h->type == HEAP_DICT) return simpleos_dict_store(v, i, x);
+    }
+    if (!IS_INT(i)) return 0;
+    return rt_array_set(v, (RuntimeValue)DECODE_INT(i), x);
+}
+RuntimeValue rt_index_get(RuntimeValue v, RuntimeValue i)
+{
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (h->type == HEAP_DICT) return simpleos_dict_lookup(v, i);
+    return NIL_VALUE;
+}
+RuntimeValue rt_len(RuntimeValue v)
+{
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+    if (h->type == HEAP_DICT) return simpleos_dict_count(v);
+    return 0;
+}
+EOF
+
+    # F3: a runtime with NO dicts at all is not a subject and must be skipped.
+    cat >"$d/src/os/nodict.c" <<'EOF'
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue i, RuntimeValue x)
+{
+    if (!IS_INT(i)) return 0;
+    return rt_array_set(v, (RuntimeValue)DECODE_INT(i), x);
+}
+EOF
+
+    # F4: a COMMENT naming rt_dict_set/HEAP_DICT must not satisfy anything.
+    # This is the pre-fix source's exact shape and the reason comments are
+    # stripped first.
+    cat >"$d/src/os/commented.c" <<'EOF'
+#define HEAP_DICT 11U
+RuntimeValue rt_dict_new(int64_t cap) { return NIL_VALUE; }
+/* rt_dict_set is deliberately NOT defined here; HEAP_DICT is handled
+ * by rt_index_set below. */
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue i, RuntimeValue x)
+{
+    if (!IS_INT(i)) return 0;
+    return rt_array_set(v, (RuntimeValue)DECODE_INT(i), x);
+}
+EOF
+
+    # F5: rt_dict_set present but rt_index_set still blind to dicts — the
+    # subscript half of the defect alone must FAIL.
+    cat >"$d/src/os/half.c" <<'EOF'
+#define HEAP_DICT 11U
+RuntimeValue rt_dict_new(int64_t cap) { return NIL_VALUE; }
+int8_t rt_dict_set(int64_t d, int64_t k, int64_t v) { return 1; }
+RuntimeValue rt_index_set(RuntimeValue v, RuntimeValue i, RuntimeValue x)
+{
+    if (!IS_INT(i)) return 0;
+    return rt_array_set(v, (RuntimeValue)DECODE_INT(i), x);
+}
+EOF
+
+    _f=0
+    scan_root "$d"
+    [ "$EV_CHECKED" -eq 4 ] || {
+        echo "selftest F0 FAILED: expected 4 dict-bearing runtimes, got $EV_CHECKED" >&2; _f=1; }
+    case "$EV_BAD" in *incident.c:*no-rt_dict_set*) : ;;
+        *) echo "selftest F1 FAILED: incident not flagged" >&2; _f=1 ;; esac
+    case "$EV_BAD" in *incident.c:*rt_index_set-ignores-dict*) : ;;
+        *) echo "selftest F1b FAILED: blind rt_index_set not flagged" >&2; _f=1 ;; esac
+    case "$EV_BAD" in *fixed.c*) echo "selftest F2 FAILED: fixed shape flagged" >&2; _f=1 ;;
+        *) : ;; esac
+    case "$EV_BAD" in *nodict.c*) echo "selftest F3 FAILED: dict-free runtime scanned" >&2; _f=1 ;;
+        *) : ;; esac
+    case "$EV_BAD" in *commented.c:*no-rt_dict_set*) : ;;
+        *) echo "selftest F4 FAILED: comment masked the missing definition" >&2; _f=1 ;; esac
+    case "$EV_BAD" in *half.c:*rt_index_set-ignores-dict*) : ;;
+        *) echo "selftest F5 FAILED: subscript-only hole not flagged" >&2; _f=1 ;; esac
+    case "$EV_BAD" in *half.c:*no-rt_dict_set*)
+        echo "selftest F5b FAILED: rt_dict_set present but reported missing" >&2; _f=1 ;;
+        *) : ;; esac
+
+    # F6: an empty tree must check 0 so the caller is forced to ERROR.
+    e=$(mktemp -d); mkdir -p "$e/examples/09_embedded/simple_os" "$e/src/os"
+    scan_root "$e"; rm -rf "$e"
+    [ "$EV_CHECKED" -eq 0 ] || { echo "selftest F6 FAILED: empty tree checked $EV_CHECKED" >&2; _f=1; }
+
+    rm -rf "$d"
+    [ "$_f" -eq 0 ] || return 1
+    return 0
+}
+
+case "${1-}" in
+    --selftest) selftest && { echo "selftest: 9 fixture(s) OK"; exit 0; }
+                echo "ERROR — nothing was checked (selftest failed)"; exit 2 ;;
+esac
+
+# selftest runs before every scan and is fatal.
+selftest >/dev/null 2>&1 || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+scan_root "$ROOT"
+
+if [ "$EV_CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked (no freestanding runtime defines rt_dict_new)"
+    exit 2
+fi
+if [ -n "$EV_BAD" ]; then
+    echo "FAIL — $EV_CHECKED runtime(s) checked, broken dict write path in:$EV_BAD"
+    exit 1
+fi
+echo "PASS — $EV_CHECKED runtime(s) checked, 0 with a broken dict write path"
+exit 0

@@ -1,0 +1,117 @@
+"""
+## Purpose and audience
+
+Purpose: pin that the Draw IR route cache is NOT keyed on a per-mutation
+counter, so a scroll, animation tick or tab switch hits the decided route
+instead of re-arming the sampler and re-scanning the whole surface.
+Audience: renderer maintainers working on the web CPU<->GPU boundary.
+
+## Operator workflow
+
+Render the same tiny fixture repeatedly, bumping only
+`DrawIrComposition.generation` each frame, and read the route counters.
+
+## Verification guidance
+
+Absolute oracles, not parity: a known ARGB value at two fixed points of the
+fixture, plus exact counter values. Not a performance acceptance test.
+
+## Recovery and troubleshooting
+
+If the pixel-compare counter grows past the sampling phase, the route key has
+picked up a per-frame identity again -- see
+doc/08_tracking/bug/web_draw_ir_sampler_rearms_on_generation_2026-09-11.md.
+
+research: doc/01_research/ui/gpu_offload/cpu_gpu_boundary_census_2026-09-11.md
+plan: doc/03_plan/ui/gpu_offload/web_vulkan_cpu_gpu_boundary_fix_plan_2026-09-11.md
+"""
+
+# @tag: web, draw-ir, gpu, route-cache
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl
+# @manual_section: draw_ir_route_key_generation_independence
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_draw_ir_gpu_route_sample,
+    web_draw_ir_gpu_route_policy_reset,
+    web_draw_ir_gpu_route_policy_consult_count,
+    web_draw_ir_pixels_equal_call_count,
+    web_draw_ir_composition_route_key
+}
+
+val FIXTURE_HTML: text =
+    "<html><body style=\"margin:0\">" +
+    "<div style=\"width:8px;height:8px;background:#ff0000\"></div>" +
+    "</body></html>"
+val FIXTURE_EXTENT: i32 = 16
+# Absolute oracle: opaque red inside the 8x8 block, opaque white outside it.
+val FIXTURE_RED: u32 = 4294901760u32
+val FIXTURE_WHITE: u32 = 4294967295u32
+# Sampling runs 3 paired frames, each performing exactly two exact compares
+# (upload-vs-oracle and gpu-vs-oracle). Steady frames must add none.
+val SAMPLING_COMPARES: i32 = 6
+
+describe "Draw IR route key generation independence":
+
+    context "the route key ignores the producer generation":
+        it "gives two compositions differing only in generation the same key":
+            # @req REQ-DRAWIRROUTEKEY-001
+            step("Key two real compositions that differ only in generation")
+            val base = simple_web_layout_render_html_draw_ir(
+                FIXTURE_HTML, FIXTURE_EXTENT, FIXTURE_EXTENT)
+            var bumped = base
+            bumped.generation = base.generation + 1
+
+            step("Confirm the two compositions really do differ in generation")
+            expect(bumped.generation).to_not_equal(base.generation)
+            expect(bumped.composition_id).to_equal(base.composition_id)
+            expect(bumped.scene_key).to_equal(base.scene_key)
+
+            step("Both land on the same route-cache key")
+            val first = web_draw_ir_composition_route_key(
+                base, FIXTURE_EXTENT, FIXTURE_EXTENT, "software")
+            val second = web_draw_ir_composition_route_key(
+                bumped, FIXTURE_EXTENT, FIXTURE_EXTENT, "software")
+            # @capture(statistics): the two route keys and whether they embed generation/sha256 tokens
+            expect(first).to_equal(second)
+            expect(first.contains("draw-ir-generation")).to_equal(false)
+            expect(first.contains("draw-ir-sha256")).to_equal(false)
+
+    context "steady frames after the sampling phase":
+        it "performs zero full-surface pixel compares while generation bumps":
+            # @req REQ-DRAWIRROUTEKEY-002
+            step("Render six frames, bumping only the composition generation")
+            web_draw_ir_gpu_route_policy_reset()
+            val base = simple_web_layout_render_html_draw_ir(
+                FIXTURE_HTML, FIXTURE_EXTENT, FIXTURE_EXTENT)
+
+            var frame = 0
+            var compares_after_sampling = -1
+            while frame < 6:
+                var composition = base
+                composition.generation = base.generation + frame.to_i64()
+                val pixels = web_draw_ir_gpu_route_sample(
+                    composition, FIXTURE_EXTENT, FIXTURE_EXTENT, "software")
+
+                step("Absolute pixel oracle for frame {frame}")
+                expect(pixels.len()).to_equal(256)
+                expect(pixels[2 * FIXTURE_EXTENT + 2]).to_equal(FIXTURE_RED)
+                expect(pixels[12 * FIXTURE_EXTENT + 12]).to_equal(FIXTURE_WHITE)
+
+                if frame == 2:
+                    compares_after_sampling = web_draw_ir_pixels_equal_call_count()
+                frame = frame + 1
+
+            step("Sampling spent exactly two compares per paired frame")
+            # @capture(statistics): pixel-compare call count after the sampling phase
+            expect(compares_after_sampling).to_equal(SAMPLING_COMPARES)
+
+            step("The three steady frames added none")
+            expect(web_draw_ir_pixels_equal_call_count()).to_equal(
+                SAMPLING_COMPARES)
+
+            step("Every frame still consulted the route")
+            expect(web_draw_ir_gpu_route_policy_consult_count()).to_equal(6)

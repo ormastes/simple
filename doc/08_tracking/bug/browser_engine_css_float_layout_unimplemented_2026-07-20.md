@@ -1,7 +1,10 @@
 # browser_engine: CSS `float`/`clear` layout produces no visible geometry (all-zero pixel counts)
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** open
 **Found:** 2026-07-20 (whole-suite triage campaign, test/01_unit shard)
 **Area:** `src/lib/gc_async_mut/gpu/browser_engine/**` (contested GPU/browser-engine area;
 related to `browser_engine_text_metrics_api_drift_2026-07-20.md` filed same shard)
@@ -80,3 +83,4 @@ Confirmed independently via the Draw IR tree (not pixel counts) in
   ignore floats for their own flow position). `clear` therefore has no
   currently-observable effect, independent of this file's own float gap.
   RED-by-design, left RED — same root cause, not a separate bug.
+

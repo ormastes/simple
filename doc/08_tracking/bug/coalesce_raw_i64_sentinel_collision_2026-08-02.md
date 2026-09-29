@@ -1,7 +1,30 @@
 # `??` on a raw i64 treats the value 3 as nil (JIT sentinel collision)
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+## Closed 2026-09-13 — fix re-verified by running; no longer reproduces
+
+**Status: CLOSED (fixed and re-verified).**
+
+The entry was already marked FIXED (seed HIR lowering, 2026-08-04) but carried
+no post-fix transcript. Re-ran both reported expressions on the Rust seed
+`build/vt4/bootstrap/simple.exe`:
+
+```
+val xs = [0, 1, 2, 3, 4, 5]
+print "idx3 {xs[3] ?? -1}"      # JIT: 3   (was -1)   interpret: 3
+val a: i64 = 3
+print "a {a ?? 99}"             # JIT: 3   (was 99)   interpret: 3
+```
+
+Both the array-index form and the plain `val a: i64 = 3` form now yield `3` on
+the default **JIT** lane — the only lane that was ever wrong — and `interpret`
+still agrees, so the fix did not regress the previously-correct lane. The
+`TAG_SPECIAL == 3` sentinel no longer swallows the literal integer 3.
+
+MEASURED. Not re-checked: the standalone native lane, which the entry records as
+failing closed rather than silently wrong, so it was never a source of bad data.
+
+
+- **Status:** FIXED (seed HIR lowering, 2026-08-04)
 - **Engines:** JIT only. Interpreter was always correct. Standalone native fails
   closed (see "Native scope correction").
 - **Memory ref:** `reference_coalesce_on_raw_i64_corrupts_index_3`
@@ -151,47 +174,3 @@ Sabotage control, both arms rebuilt from source:
 A behavioural `.spl` spec cannot guard this: `bin/simple test` hard-defaults to
 the tree-walk interpreter, which was always correct here, so such a spec stays
 green on a fully broken JIT.
-
-## Update 2026-08-17: the "known remaining gap" was the SAME bug as the OOB one, and is now root-caused
-
-This doc's closing section left `[3].first() ?? -1` yielding `-1` as a separate
-"flat-`T?`-lane collision". It is not separate. It is the same defect as
-`doc/08_tracking/bug/jit_array_oob_read_leaks_raw_rt_nil_sentinel_2026-08-07.md`,
-seen from the other side, and both trace to one line of the method result-type
-table this doc already fingered but chose not to change:
-
-  `src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:1478`
-  `"first" | "last" | "get" | "max" | "min" => Some(*element)`
-  (and `:1601` for dict `get`/`remove`)
-
-Because these genuinely-optional accessors are typed as the bare element type,
-`needs_int_unbox` in
-`src/compiler_rust/compiler/src/mir/lower/lowering_expr_struct.rs:600-617`
-unboxes their result to a RAW i64 before anything inspects it. That is what
-makes the `!= nil` check this doc's fix deliberately RETAINED for those
-accessors (`control.rs:1815-1847`) a raw-integer compare against 3 — precisely
-the hazard the rest of the fix removed, just relocated onto the accessor lane.
-The same unbox is why a MISS formats as the integer `3` instead of `nil`.
-
-Measured 2026-08-17 on a seed built from HEAD (JIT arm):
-
-```
-FAIL present_3_get_coalesce got=-1 want=3      # ys=[1,2,3]; ys.get(2) ?? -1
-FAIL present_3_first got=-1 want=3             # [3,4].first() ?? -1
-FAIL present_3_last got=-1 want=3              # [4,3].last() ?? -1
-FAIL present_3_dict_coalesce got=-1 want=3     # {"k":3}.get("k") ?? -1
-FAIL array_get_miss_bare got=3 want=nil        # the other direction
-```
-
-The direction this doc DID fix stays fixed — `raw_coalesce_3`,
-`raw_coalesce_computed3`, `raw_coalesce_neg3`, `raw_coalesce_u8_3`,
-`raw_coalesce_i32_3` and the 0/11/19/24 neighbours all PASS on the same binary.
-
-Fix: type those accessors `TypeId::ANY` so the value stays BOXED (nil = word 3,
-present 3 = word 24, distinguishable). This does NOT require the `T?`/`Pointer`
-retyping that this doc measured and rejected, and so does not depend on `at`'s
-broken value-position lowering being fixed first.
-
-Class-level regression fence (subprocess-based, since spec bodies run
-interpreted and the interpreter is correct here):
-`test/01_unit/compiler/codegen/rt_nil_sentinel_collision_class_spec.spl`

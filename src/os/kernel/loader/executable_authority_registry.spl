@@ -68,6 +68,8 @@ pub enum ExecutableAuthorityErrorV1:
     MappingPinActive
     InvalidMappingPinLease
     InvalidMappingReleaseCoordinate
+    InvalidBootServiceReceipt
+    BootServiceReservationActive
 
 pub struct ExecutableAuthorityTokenV1:
     slot_index: i64
@@ -99,6 +101,22 @@ pub(package) struct ExecutableAuthorityArmedPreparationV1:
     identity: ExecutableAuthorityArmedIdentityV1
     image_handle: ExecutableImageHandleV1
 
+pub(package) struct ExecutableAuthorityBootServiceBindingV1:
+    canonical_source_path: text
+    image_hash: text
+    admission_id: text
+    target: ManifestTarget
+    trust_epoch: u64
+    mount_id: u64
+    mount_generation: u64
+    file_id: u64
+    file_generation: u64
+    open_handle_id: u64
+    filesystem_name: text
+    role: text
+    size_bytes: u64
+    entry_point: u64
+
 pub(package) struct ExecutableAuthorityCloseLeaseV1:
     token: ExecutableAuthorityTokenV1
     close_attempt: u64
@@ -107,6 +125,10 @@ pub(package) struct ExecutableAuthorityCloseLeaseV1:
 pub struct ExecutableAuthorityJointLeaseV1:
     _token: ExecutableAuthorityTokenV1
     _joint_nonce: u64
+
+pub(package) struct ExecutableAuthorityBootServiceReservationV1:
+    _token: ExecutableAuthorityTokenV1
+    _reservation_nonce: u64
 
 pub struct ExecutableRiscv32UserEntryLeaseV1:
     _token: ExecutableAuthorityTokenV1
@@ -164,6 +186,10 @@ struct ExecutableAuthoritySlotV1:
     rv32_mapping_root_id: u64
     rv32_mapping_root_generation: u64
     close_attempt: u64
+    boot_receipt_nonce: u64
+    boot_receipt_reservation_nonce: u64
+    boot_receipt_consumed: bool
+    boot_receipt_reserved: bool
     has_entry_identity: bool
     entry_point: u64
     image_handle: ExecutableImageHandleV1
@@ -262,6 +288,44 @@ fn _authority_token_index(
     if slot.generation != token.generation or slot.nonce != token.nonce:
         return -1
     token.slot_index
+
+fn _authority_boot_service_binding_matches(
+    slot: ExecutableAuthoritySlotV1,
+    binding: ExecutableAuthorityBootServiceBindingV1
+) -> bool:
+    val image = slot.image_handle
+    binding.canonical_source_path != "" and binding.image_hash != "" and
+        binding.admission_id != "" and binding.trust_epoch != 0u64 and
+        binding.mount_id != 0u64 and binding.mount_generation != 0u64 and
+        binding.file_id != 0u64 and binding.file_generation != 0u64 and
+        binding.open_handle_id != 0u64 and binding.filesystem_name != "" and
+        binding.role != "" and binding.size_bytes != 0u64 and
+        binding.entry_point != 0u64 and slot.has_entry_identity and
+        slot.entry_point == binding.entry_point and
+        image.canonical_source_path == binding.canonical_source_path and
+        image.image_hash == binding.image_hash and
+        image.admission_id == binding.admission_id and
+        image.target.os == binding.target.os and
+        image.target.arch == binding.target.arch and
+        image.target.abi == binding.target.abi and
+        image.trust_epoch == binding.trust_epoch and
+        image.mount_id == binding.mount_id and
+        image.mount_generation == binding.mount_generation and
+        image.file_id == binding.file_id and
+        image.file_generation == binding.file_generation and
+        image.open_handle_id == binding.open_handle_id and
+        image.filesystem_name == binding.filesystem_name and
+        image.role == binding.role and image.size_bytes == binding.size_bytes
+
+fn _authority_cancel_boot_service_receipt(
+    slot: ExecutableAuthoritySlotV1
+) -> ExecutableAuthoritySlotV1:
+    var updated = slot
+    updated.boot_receipt_nonce = 0u64
+    updated.boot_receipt_reservation_nonce = 0u64
+    updated.boot_receipt_consumed = true
+    updated.boot_receipt_reserved = false
+    updated
 
 fn _authority_next_nonce(
     state: ExecutableAuthorityRegistryStateV1,
@@ -474,6 +538,10 @@ pub(package) fn executable_authority_issue_verified(
                             rv32_mapping_root_id: 0u64,
                             rv32_mapping_root_generation: 0u64,
                             close_attempt: 0u64,
+                            boot_receipt_nonce: 0u64,
+                            boot_receipt_reservation_nonce: 0u64,
+                            boot_receipt_consumed: false,
+                            boot_receipt_reserved: false,
                             has_entry_identity: has_entry_identity,
                             entry_point: entry_point,
                             image_handle: image_handle
@@ -497,6 +565,155 @@ pub(package) fn executable_authority_issue_verified(
         case Some(token): Ok(token)
         case nil: Err(ExecutableAuthorityErrorV1.InvalidRegistry)
 
+pub(package) fn executable_authority_arm_boot_service_receipt_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    binding: ExecutableAuthorityBootServiceBindingV1
+) -> Result<u64, ExecutableAuthorityErrorV1>:
+    """Arm one receipt nonce on an exact live installed-image authority."""
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var receipt_nonce: u64 = 0u64
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
+                        error = ExecutableAuthorityErrorV1.NotArmed
+                    elif slot.boot_receipt_nonce != 0u64 or
+                        slot.boot_receipt_consumed:
+                        error = ExecutableAuthorityErrorV1.InvalidBootServiceReceipt
+                    elif not _authority_boot_service_binding_matches(slot, binding):
+                        error = ExecutableAuthorityErrorV1.InvalidBootServiceReceipt
+                    elif state.next_nonce_counter == 0xffffffffffffffffu64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        var nonce = _authority_mix64(
+                            _authority_next_nonce(state, slot.generation, index) ^
+                            0x4253545250435441u64)
+                        if nonce == 0u64:
+                            error = ExecutableAuthorityErrorV1.NonceExhausted
+                        else:
+                            var updated = slot
+                            updated.boot_receipt_nonce = nonce
+                            updated.boot_receipt_reservation_nonce = 0u64
+                            updated.boot_receipt_consumed = false
+                            updated.boot_receipt_reserved = false
+                            state.slots[index] = updated
+                            state.next_nonce_counter = state.next_nonce_counter + 1u64
+                            receipt_nonce = nonce
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None: return Err(error)
+    if receipt_nonce == 0u64:
+        return Err(ExecutableAuthorityErrorV1.InvalidBootServiceReceipt)
+    Ok(receipt_nonce)
+
+pub(package) fn executable_authority_begin_boot_service_reservation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    token: ExecutableAuthorityTokenV1,
+    receipt_nonce: u64,
+    binding: ExecutableAuthorityBootServiceBindingV1
+) -> Result<ExecutableAuthorityBootServiceReservationV1, ExecutableAuthorityErrorV1>:
+    """Consume one receipt and block all competing raw authority transitions."""
+    if receipt_nonce == 0u64:
+        return Err(ExecutableAuthorityErrorV1.InvalidBootServiceReceipt)
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    var reservation: ExecutableAuthorityBootServiceReservationV1? = nil
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
+                        error = ExecutableAuthorityErrorV1.BootServiceReservationActive
+                    elif slot.boot_receipt_consumed or
+                        slot.boot_receipt_nonce != receipt_nonce or
+                        not _authority_boot_service_binding_matches(slot, binding):
+                        error = ExecutableAuthorityErrorV1.InvalidBootServiceReceipt
+                    elif state.next_nonce_counter == 0xffffffffffffffffu64:
+                        error = ExecutableAuthorityErrorV1.NonceExhausted
+                    else:
+                        var reservation_nonce = _authority_mix64(
+                            _authority_next_nonce(state, slot.generation, index) ^
+                            receipt_nonce ^ 0x4253545253455256u64)
+                        if reservation_nonce == 0u64:
+                            error = ExecutableAuthorityErrorV1.NonceExhausted
+                        else:
+                            var updated = slot
+                            updated.boot_receipt_nonce = 0u64
+                            updated.boot_receipt_reservation_nonce = reservation_nonce
+                            updated.boot_receipt_consumed = true
+                            updated.boot_receipt_reserved = true
+                            state.slots[index] = updated
+                            state.next_nonce_counter = state.next_nonce_counter + 1u64
+                            reservation = Some(
+                                ExecutableAuthorityBootServiceReservationV1(
+                                    _token: token,
+                                    _reservation_nonce: reservation_nonce))
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error != ExecutableAuthorityErrorV1.None: return Err(error)
+    match reservation:
+        case Some(value): Ok(value)
+        case nil: Err(ExecutableAuthorityErrorV1.InvalidBootServiceReceipt)
+
+pub(package) fn executable_authority_finish_boot_service_reservation_v1(
+    owner: ExecutableAuthorityRegistryV1,
+    reservation: ExecutableAuthorityBootServiceReservationV1
+) -> Result<(), ExecutableAuthorityErrorV1>:
+    if not _authority_lock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    var error = ExecutableAuthorityErrorV1.None
+    match _authority_registry_state:
+        case nil: error = ExecutableAuthorityErrorV1.InvalidRegistry
+        case Some(current):
+            var state = current
+            if not _authority_owner_matches(state, owner):
+                error = ExecutableAuthorityErrorV1.InvalidRegistry
+            else:
+                val index = _authority_token_index(state, reservation._token)
+                if index < 0:
+                    error = ExecutableAuthorityErrorV1.InvalidToken
+                else:
+                    val slot = state.slots[index]
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        not slot.boot_receipt_reserved or
+                        slot.boot_receipt_reservation_nonce !=
+                            reservation._reservation_nonce:
+                        error = ExecutableAuthorityErrorV1.InvalidBootServiceReceipt
+                    else:
+                        var updated = slot
+                        updated.boot_receipt_reservation_nonce = 0u64
+                        updated.boot_receipt_reserved = false
+                        state.slots[index] = updated
+            _authority_registry_state = Some(state)
+    if not _authority_unlock():
+        return Err(ExecutableAuthorityErrorV1.SerializationUnavailable)
+    if error == ExecutableAuthorityErrorV1.None: Ok(()) else: Err(error)
+
 pub fn executable_authority_commit(
     owner: ExecutableAuthorityRegistryV1,
     token: ExecutableAuthorityTokenV1
@@ -519,9 +736,12 @@ pub fn executable_authority_commit(
                     val slot = state.slots[index]
                     match slot.state:
                         case ExecutableAuthorityStateV1.Armed:
-                            var updated = slot
-                            updated.state = ExecutableAuthorityStateV1.Committed
-                            state.slots[index] = updated
+                            if slot.boot_receipt_reserved:
+                                error = ExecutableAuthorityErrorV1.BootServiceReservationActive
+                            else:
+                                var updated = _authority_cancel_boot_service_receipt(slot)
+                                updated.state = ExecutableAuthorityStateV1.Committed
+                                state.slots[index] = updated
                         case ExecutableAuthorityStateV1.JointReserved:
                             error = ExecutableAuthorityErrorV1.InvalidJointLease
                         case ExecutableAuthorityStateV1.Committed:
@@ -593,7 +813,8 @@ pub(package) fn executable_authority_begin_joint_reservation_v1(
                     error = ExecutableAuthorityErrorV1.InvalidToken
                 else:
                     val slot = state.slots[index]
-                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     elif not _authority_joint_request_matches(
                         slot, consumer, entry_point, canonical_path):
@@ -614,7 +835,7 @@ pub(package) fn executable_authority_begin_joint_reservation_v1(
                                 if joint_nonce == 0u64:
                                     error = ExecutableAuthorityErrorV1.NonceExhausted
                                 else:
-                                    var updated = slot
+                                    var updated = _authority_cancel_boot_service_receipt(slot)
                                     updated.state = ExecutableAuthorityStateV1.JointReserved
                                     updated.joint_nonce = joint_nonce
                                     state.slots[index] = updated
@@ -700,7 +921,8 @@ pub(package) fn executable_authority_begin_riscv32_user_entry_reservation_v1(
                     error = ExecutableAuthorityErrorV1.InvalidToken
                 else:
                     val slot = state.slots[index]
-                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     elif not _authority_rv32_joint_request_matches(
                         slot, consumer, entry_point, canonical_path):
@@ -718,7 +940,7 @@ pub(package) fn executable_authority_begin_riscv32_user_entry_reservation_v1(
                             joint_nonce == entry_nonce:
                             error = ExecutableAuthorityErrorV1.NonceExhausted
                         else:
-                            var updated = slot
+                            var updated = _authority_cancel_boot_service_receipt(slot)
                             updated.state = ExecutableAuthorityStateV1.JointReserved
                             updated.joint_nonce = joint_nonce
                             updated.rv32_entry_nonce = entry_nonce
@@ -821,7 +1043,8 @@ pub(package) fn executable_authority_begin_riscv32_mapping_transaction_v1(
                     error = ExecutableAuthorityErrorV1.InvalidToken
                 else:
                     val slot = state.slots[index]
-                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     elif not _authority_rv32_joint_request_matches(
                         slot, consumer, entry_point, canonical_path):
@@ -843,7 +1066,7 @@ pub(package) fn executable_authority_begin_riscv32_mapping_transaction_v1(
                             joint_nonce == pin_nonce or entry_nonce == pin_nonce:
                             error = ExecutableAuthorityErrorV1.NonceExhausted
                         else:
-                            var updated = slot
+                            var updated = _authority_cancel_boot_service_receipt(slot)
                             updated.state = ExecutableAuthorityStateV1.JointReserved
                             updated.joint_nonce = joint_nonce
                             updated.rv32_entry_nonce = entry_nonce
@@ -1442,7 +1665,9 @@ fn _authority_begin_close(
                     var may_close = false
                     match slot.state:
                         case ExecutableAuthorityStateV1.Armed:
-                            if require_retrieved:
+                            if slot.boot_receipt_reserved:
+                                error = ExecutableAuthorityErrorV1.BootServiceReservationActive
+                            elif require_retrieved:
                                 error = ExecutableAuthorityErrorV1.NotRetrieved
                             else:
                                 may_close = true
@@ -1467,7 +1692,7 @@ fn _authority_begin_close(
                         if slot.close_attempt == 18446744073709551615u64:
                             error = ExecutableAuthorityErrorV1.NonceExhausted
                         else:
-                            var updated = slot
+                            var updated = _authority_cancel_boot_service_receipt(slot)
                             updated.state = ExecutableAuthorityStateV1.CloseInProgress
                             updated.close_attempt = slot.close_attempt + 1u64
                             state.slots[index] = updated
@@ -1604,7 +1829,8 @@ pub(package) fn executable_authority_snapshot_armed_identity(
                     error = ExecutableAuthorityErrorV1.InvalidToken
                 else:
                     val slot = state.slots[index]
-                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     else:
                         val copied = _authority_copy_armed_identity(slot, token)
@@ -1644,7 +1870,8 @@ pub(package) fn executable_authority_snapshot_armed_preparation_v1(
                     error = ExecutableAuthorityErrorV1.InvalidToken
                 else:
                     val slot = state.slots[index]
-                    if slot.state != ExecutableAuthorityStateV1.Armed:
+                    if slot.state != ExecutableAuthorityStateV1.Armed or
+                        slot.boot_receipt_reserved:
                         error = ExecutableAuthorityErrorV1.NotArmed
                     else:
                         val copied = _authority_copy_armed_identity(slot, token)
@@ -1699,6 +1926,18 @@ pub fn executable_authority_capacity(owner: ExecutableAuthorityRegistryV1) -> i6
 
 pub fn executable_authority_owner_valid(owner: ExecutableAuthorityRegistryV1) -> bool:
     _authority_counts(owner).3
+
+pub(package) fn executable_authority_owner_live_v1(
+    owner: ExecutableAuthorityRegistryV1
+) -> bool:
+    """Check only the registry owner coordinate in O(1) under its mutex."""
+    if not _authority_lock(): return false
+    var live = false
+    match _authority_registry_state:
+        case Some(state): live = _authority_owner_matches(state, owner)
+        case nil: ()
+    if not _authority_unlock(): return false
+    live
 
 export ExecutableAuthorityStateV1, ExecutableAuthorityErrorV1
 export ExecutableAuthorityTokenV1, ExecutableAuthoritySnapshotV1

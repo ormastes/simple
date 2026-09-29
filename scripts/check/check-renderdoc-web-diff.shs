@@ -1,0 +1,286 @@
+#!/bin/sh
+# RenderDoc web-renderer diff gate.
+#
+# Orchestrates: export(capture A) + export(capture B) + the pure-Simple diff in
+# src/app/ui/renderdoc_diff/. Side A is the Chrome (Vulkan-backed) capture of the
+# shared catalog page, side B the Simple Vulkan web renderer capture of the same page.
+#
+# All logic lives in Simple; this script only resolves inputs, runs them, and prints
+# key=value status lines. `--selftest` runs first and is FATAL: it drives the real
+# scanner over hand-written events.json fixtures under test/fixtures/renderdoc_diff/,
+# so it needs no RenderDoc and no .rdc and runs on macOS.
+#
+# Verdict is the LAST line of stdout: 0 PASS / 1 FAIL / 2 ERROR.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+FIXTURES="test/fixtures/renderdoc_diff"
+OUT_DIR="${RDOC_DIFF_OUT:-build/renderdoc/diff}"
+CAPTURE_A=""
+CAPTURE_B=""
+EVENTS_A=""
+EVENTS_B=""
+RUN_SELFTEST=1
+SELFTEST_ONLY=0
+THUMBS=""
+
+usage() {
+    cat >&2 <<'EOF'
+usage: check-renderdoc-web-diff.shs [--selftest]
+                                    [--capture-a <a.rdc>] [--capture-b <b.rdc>]
+                                    [--events-a <a.events.json>] [--events-b <b.events.json>]
+                                    [--out <dir>] [--thumbs]
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        --no-selftest) RUN_SELFTEST=0; shift ;;
+        --capture-a) CAPTURE_A="$2"; shift 2 ;;
+        --capture-b) CAPTURE_B="$2"; shift 2 ;;
+        --events-a) EVENTS_A="$2"; shift 2 ;;
+        --events-b) EVENTS_B="$2"; shift 2 ;;
+        --out) OUT_DIR="$2"; shift 2 ;;
+        --thumbs) THUMBS="--thumbs"; shift ;;
+        -h|--help) usage; exit 2 ;;
+        *) echo "unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
+
+# --- resolve a Simple binary -------------------------------------------------
+find_simple() {
+    if [ -n "${SIMPLE_SEED:-}" ] && [ -x "${SIMPLE_SEED}" ]; then
+        echo "${SIMPLE_SEED}"
+        return 0
+    fi
+    for candidate in \
+        "$ROOT_DIR/bin/simple" \
+        "$ROOT_DIR/src/compiler_rust/target/bootstrap/simple" \
+        "$ROOT_DIR/src/compiler_rust/target/release/simple"
+    do
+        if [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+SIMPLE_BIN="$(find_simple || true)"
+
+run_diff() {
+    # run_diff <a.events.json> <b.events.json> <outdir>; echoes stdout, returns rc
+    "$SIMPLE_BIN" run src/app/ui/renderdoc_diff/main.spl "$1" "$2" --out "$3" 2>/dev/null
+}
+
+# --- selftest ----------------------------------------------------------------
+SELFTEST_COUNT=0
+SELFTEST_FAILED=0
+
+expect_case() {
+    # expect_case <name> <expected-rc> <expected-substring>
+    name="$1"; want_rc="$2"; want_text="$3"
+    SELFTEST_COUNT=$((SELFTEST_COUNT + 1))
+    mkdir -p "$OUT_DIR/selftest/$name"
+    log="$OUT_DIR/selftest/$name/run.log"
+    # status is read DIRECTLY into a variable on the line after the invocation, never
+    # through a pipe: a pipeline's $? is the last stage's status and has produced
+    # false greens in this repo before.
+    set +e
+    run_diff "$FIXTURES/${name}_a.events.json" "$FIXTURES/${name}_b.events.json" \
+        "$OUT_DIR/selftest/$name" >"$log" 2>&1
+    rc=$?
+    set -e
+    verdict="$(grep 'RENDERDOC DIFF:' "$log" | tail -1)"
+    ok=1
+    if [ "$rc" != "$want_rc" ]; then ok=0; fi
+    case "$verdict" in
+        *"$want_text"*) ;;
+        *) ok=0 ;;
+    esac
+    if [ "$ok" = "1" ]; then
+        echo "selftest ok   $name -> rc=$rc $verdict"
+    else
+        SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+        echo "selftest FAIL $name -> rc=$rc (want $want_rc) $verdict (want '$want_text')" >&2
+    fi
+}
+
+selftest() {
+    if [ -z "$SIMPLE_BIN" ]; then
+        echo "renderdoc_diff_status=blocked:no-simple-binary"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (no Simple binary; set SIMPLE_SEED)"
+        exit 2
+    fi
+    if [ ! -d "$FIXTURES" ]; then
+        echo "renderdoc_diff_status=blocked:no-fixtures"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (fixture directory $FIXTURES missing)"
+        exit 2
+    fi
+    # Liveness precondition: a bootstrap-only binary has no `run` subcommand, which
+    # would turn every fixture into a non-zero exit and report FAIL where the truth is
+    # "nothing was checked". A run that emits no verdict line at all is blocked, not a
+    # failure. Passing this probe is NOT itself a pass - the fixtures below decide.
+    probe_log="$OUT_DIR/selftest/liveness.log"
+    mkdir -p "$(dirname "$probe_log")"
+    set +e
+    run_diff "$FIXTURES/identical_a.events.json" "$FIXTURES/identical_b.events.json" \
+        "$OUT_DIR/selftest/liveness" >"$probe_log" 2>&1
+    set -e
+    if ! grep -q 'RENDERDOC DIFF:' "$probe_log"; then
+        echo "renderdoc_diff_status=blocked:simple-binary-cannot-run"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked ($SIMPLE_BIN produced no verdict; it likely has no 'run' subcommand)"
+        exit 2
+    fi
+    expect_case identical        0 "PASS — 4 event(s) aligned, 0 divergent"
+    expect_case missing_draw     1 "first divergent event 14 (missing-draw)"
+    expect_case extra_draw       1 "(extra-draw)"
+    expect_case order            1 "(order)"
+    expect_case output_mismatch  1 "first divergent event 14 (output-mismatch)"
+    expect_case size_mismatch    1 "first divergent event 20 (size-mismatch)"
+    expect_case format_mismatch  1 "first divergent event 30 (format-mismatch)"
+    expect_case empty            2 "ERROR — nothing was checked"
+    # the export contract's own fail-closed paths, exercised without RenderDoc
+    SELFTEST_COUNT=$((SELFTEST_COUNT + 1))
+    bad="$OUT_DIR/selftest/bad-magic.rdc"
+    mkdir -p "$(dirname "$bad")"
+    printf 'NOTRDOC-not-a-capture' > "$bad"
+    set +e
+    sh scripts/tool/renderdoc-export-events.shs "$bad" >/dev/null 2>&1
+    rc=$?
+    set -e
+    if [ "$rc" = "1" ]; then
+        echo "selftest ok   export_bad_magic -> rc=1"
+    else
+        SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+        echo "selftest FAIL export_bad_magic -> rc=$rc (want 1)" >&2
+    fi
+    SELFTEST_COUNT=$((SELFTEST_COUNT + 1))
+    good="$OUT_DIR/selftest/good-magic.rdc"
+    printf 'RDOC-well-formed-magic-only' > "$good"
+    explog="$OUT_DIR/selftest/export-no-renderdoccmd.log"
+    set +e
+    RDOC_FORCE_NO_RENDERDOCCMD=1 sh scripts/tool/renderdoc-export-events.shs "$good" >"$explog" 2>&1
+    rc=$?
+    set -e
+    exp_out="$(cat "$explog")"
+    case "$exp_out" in
+        *"renderdoc_status=blocked:renderdoccmd-missing"*)
+            if [ "$rc" = "2" ]; then
+                echo "selftest ok   export_no_renderdoccmd -> rc=2 blocked:renderdoccmd-missing"
+            else
+                SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+                echo "selftest FAIL export_no_renderdoccmd -> rc=$rc (want 2)" >&2
+            fi
+            ;;
+        *)
+            SELFTEST_FAILED=$((SELFTEST_FAILED + 1))
+            echo "selftest FAIL export_no_renderdoccmd -> no blocked:renderdoccmd-missing line" >&2
+            ;;
+    esac
+}
+
+if [ "$SELFTEST_ONLY" = "1" ]; then
+    selftest
+    if [ "$SELFTEST_COUNT" = "0" ]; then
+        echo "renderdoc_diff_status=blocked:selftest-vacuous"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (selftest executed 0 fixtures)"
+        exit 2
+    fi
+    if [ "$SELFTEST_FAILED" != "0" ]; then
+        echo "renderdoc_diff_status=fail"
+        echo "RENDERDOC DIFF: FAIL — $SELFTEST_FAILED of $SELFTEST_COUNT selftest fixture(s) failed"
+        exit 1
+    fi
+    echo "renderdoc_diff_status=pass"
+    echo "renderdoc_diff_selftest_fixtures=$SELFTEST_COUNT"
+    echo "RENDERDOC DIFF: PASS — $SELFTEST_COUNT selftest fixture(s) checked, 0 failed"
+    exit 0
+fi
+
+# --- real scan ---------------------------------------------------------------
+if [ -z "$SIMPLE_BIN" ]; then
+    echo "renderdoc_diff_status=blocked:no-simple-binary"
+    echo "RENDERDOC DIFF: ERROR — nothing was checked (no Simple binary; set SIMPLE_SEED)"
+    exit 2
+fi
+
+if [ "$RUN_SELFTEST" = "1" ]; then
+    selftest
+    if [ "$SELFTEST_FAILED" != "0" ]; then
+        echo "renderdoc_diff_status=fail"
+        echo "RENDERDOC DIFF: FAIL — $SELFTEST_FAILED of $SELFTEST_COUNT selftest fixture(s) failed"
+        exit 1
+    fi
+fi
+
+mkdir -p "$OUT_DIR"
+
+export_side() {
+    # export_side <capture.rdc> <label>; echoes the produced events.json path
+    capture="$1"; label="$2"
+    if [ ! -f "$capture" ]; then
+        echo "renderdoc_diff_status=blocked:missing-capture-$label" >&2
+        return 2
+    fi
+    sh scripts/tool/renderdoc-export-events.shs "$capture" $THUMBS >"$OUT_DIR/export-$label.log" 2>&1
+    rc=$?
+    if [ "$rc" != "0" ]; then
+        reason="$(grep -o 'renderdoc_status=blocked:[a-z-]*' "$OUT_DIR/export-$label.log" | tail -1 | sed 's/renderdoc_status=//')"
+        if [ -z "$reason" ]; then reason="export-failed-$label"; fi
+        echo "renderdoc_diff_status=$reason" >&2
+        return "$rc"
+    fi
+    echo "${capture}.events.json"
+}
+
+if [ -z "$EVENTS_A" ]; then
+    if [ -z "$CAPTURE_A" ]; then
+        echo "renderdoc_diff_status=blocked:no-capture-a"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (no --capture-a and no --events-a)"
+        exit 2
+    fi
+    EVENTS_A="$(export_side "$CAPTURE_A" a)" || {
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (side a export failed; see $OUT_DIR/export-a.log)"
+        exit 2
+    }
+fi
+if [ -z "$EVENTS_B" ]; then
+    if [ -z "$CAPTURE_B" ]; then
+        echo "renderdoc_diff_status=blocked:no-capture-b"
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (no --capture-b and no --events-b)"
+        exit 2
+    fi
+    EVENTS_B="$(export_side "$CAPTURE_B" b)" || {
+        echo "RENDERDOC DIFF: ERROR — nothing was checked (side b export failed; see $OUT_DIR/export-b.log)"
+        exit 2
+    }
+fi
+
+DIFF_LOG="$OUT_DIR/diff-run.log"
+set +e
+run_diff "$EVENTS_A" "$EVENTS_B" "$OUT_DIR" >"$DIFF_LOG" 2>&1
+DIFF_RC=$?
+set -e
+
+ALIGNED="$(grep '^renderdoc_diff_aligned=' "$DIFF_LOG" | tail -1 | cut -d= -f2)"
+DIVERGENT="$(grep '^renderdoc_diff_divergent=' "$DIFF_LOG" | tail -1 | cut -d= -f2)"
+FIRST="$(grep '^renderdoc_diff_first_divergent=' "$DIFF_LOG" | tail -1 | cut -d= -f2)"
+VERDICT="$(grep 'RENDERDOC DIFF:' "$DIFF_LOG" | tail -1)"
+
+case "$DIFF_RC" in
+    0) STATUS=pass ;;
+    1) STATUS=fail ;;
+    *) STATUS=blocked:diff-error ;;
+esac
+
+echo "renderdoc_diff_status=$STATUS"
+echo "renderdoc_diff_aligned=${ALIGNED:-0}"
+echo "renderdoc_diff_divergent=${DIVERGENT:-0}"
+echo "renderdoc_diff_first_divergent=${FIRST:--1}"
+echo "renderdoc_diff_report=$OUT_DIR/diff.md"
+printf '%s\n' "$VERDICT"
+exit "$DIFF_RC"

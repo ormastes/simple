@@ -1,4 +1,8 @@
 # `expect(X).<non-matcher>()` and `expect(X) <arith>` are SILENTLY VACUOUS
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** expect_non_matcher_tail_silently_vacuous_2026-08-09
 **Status:** FIXED 2026-08-09 (see RESOLUTION at end)
@@ -358,3 +362,4 @@ from other sessions' in-flight work had to be worked around locally:
 "source-list-absent" link failures (`rt_packed_span_v1_*`, `rt_counterpart_*`)
 whose C files exist but were never registered in
 `src/compiler_rust/runtime/build.rs`.
+

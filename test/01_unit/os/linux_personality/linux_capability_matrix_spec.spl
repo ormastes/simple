@@ -1,0 +1,72 @@
+"""Linux-personality admission must not authorize syscall stubs.
+
+@cover src/os/linux_personality/abi/linux_capability_matrix.spl
+@cover src/os/linux_personality/syscall_contract.spl
+"""
+
+use std.spec
+use os.linux_personality.abi.linux_capability_matrix.{LinuxCapability, LinuxCapabilityMatrix, build_linux_capability_matrix_from_contract, build_simpleos_linux_capability_matrix}
+use os.linux_personality.syscall_contract.{LinuxPersonalityContract}
+
+describe "Linux capability matrix syscall admission":
+    it "does not advertise futex as ready while the syscall contract is stubbed":
+        val matrix = build_simpleos_linux_capability_matrix()
+        expect(matrix.c4_name).to_equal("futex")
+        expect(matrix.c4_status).to_equal("stub")
+        expect(matrix.ready_count()).to_equal(2)
+
+    it "adapts every overlapping status from the canonical contract":
+        val contract = LinuxPersonalityContract.create()
+        contract.evaluate_from_posix()
+        val matrix = build_linux_capability_matrix_from_contract(contract)
+        expect(matrix.c0_status).to_equal(contract.capability_status("elf_load"))
+        expect(matrix.c4_status).to_equal(contract.capability_status("futex"))
+        expect(matrix.c7_status).to_equal(contract.capability_status("epoll"))
+        expect(matrix.c11_status).to_equal(contract.capability_status("ioctl"))
+
+    it "fails closed for unknown contract capabilities":
+        val contract = LinuxPersonalityContract.create()
+        expect(contract.capability_status("not_a_capability")).to_equal("missing")
+        expect(contract.capability_note("not_a_capability")).to_equal("not implemented")
+
+    it "rejects a game profile while futex remains a stub":
+        val contract = LinuxPersonalityContract.create()
+        contract.elf_ready = true
+        contract.dynlink_ready = true
+        contract.mmap_status = "partial"
+        contract.clone_status = "partial"
+        contract.signal_status = "partial"
+        contract.futex_status = "stub"
+        expect(contract.is_game_viable()).to_equal(false)
+
+    it "requires an implemented futex before admitting the baseline profile":
+        val contract = LinuxPersonalityContract.create()
+        contract.elf_ready = true
+        contract.dynlink_ready = true
+        contract.mmap_status = "partial"
+        contract.clone_status = "partial"
+        contract.signal_status = "partial"
+        contract.futex_status = "ready"
+        expect(contract.is_game_viable()).to_equal(true)
+
+    it "does not treat partial capability coverage as all ready":
+        val matrix = LinuxCapabilityMatrix.create()
+        matrix.add(LinuxCapability.ready("elf_load", "loader"))
+        matrix.add(LinuxCapability.partial("mmap", "mm", "anonymous only"))
+        expect(matrix.all_ready()).to_equal(false)
+
+    it "keeps the fixed v1 matrix bounded at its fourteen persisted slots":
+        val matrix = LinuxCapabilityMatrix.create()
+        var i = 0
+        while i < 15:
+            matrix.add(LinuxCapability.ready("cap" + i.to_text(), "test"))
+            i = i + 1
+        expect(matrix.count).to_equal(14)
+        expect(matrix.c13_name).to_equal("cap13")
+
+    it "re-evaluates the syscall snapshot without duplicating rows":
+        val contract = LinuxPersonalityContract.create()
+        contract.evaluate_from_posix()
+        contract.evaluate_from_posix()
+        expect(contract.syscall_matrix.count).to_equal(10)
+        expect(contract.syscall_matrix.get_status("futex")).to_equal("stub")

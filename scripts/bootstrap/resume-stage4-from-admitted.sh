@@ -5,6 +5,7 @@
 resume_stage4_continuation_lock=
 resume_stage4_before=
 resume_stage4_receipt=
+resume_stage4_admission=
 resume_stage4_work=
 
 resume_stage4_release_continuation_lock() {
@@ -30,17 +31,31 @@ resume_stage4_snapshot() {
 resume_stage4_prepare() {
   output=$(bootstrap_stage3_canonical_path "$1") || return 1
   root=$2 platform=$3 planner_receipt=$(bootstrap_stage3_canonical_file "$4") || return 1
+  preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+  preflight_seed="$root/src/compiler_rust/target/bootstrap/simple"
+  case "$platform" in *windows*) preflight_seed="${preflight_seed}.exe" ;; esac
+  preflight_expected_config="platform=${platform};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
+  sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+    --seed="$preflight_seed" --expect-config="$preflight_expected_config" \
+    --verify-receipt="$preflight_receipt" || {
+    echo "error: Stage 4 continuation lacks current authoritative preflight evidence" >&2
+    return 1
+  }
+  preflight_receipt=$(bootstrap_stage3_canonical_file "$preflight_receipt") || return 1
   bootstrap_planner_v2_verify "$planner_receipt" "$root" || {
     echo "error: Stage 4 planner admission v2 did not verify" >&2; return 1;
   }
   [ "$(bootstrap_planner_v2_field target "$planner_receipt")" = "//bootstrap:stage4" ] || return 1
+  [ "$(bootstrap_planner_v2_field platform "$planner_receipt")" = "$platform" ] || return 1
   [ "$output" = "$1" ] && [ -d "$output" ] && [ ! -L "$output" ] || return 1
   manifest="$output/stage3/$platform/provenance.env"
   candidate="$output/stage3/$platform/simple"
   case "$platform" in *windows*) candidate="${candidate}.exe" ;; esac
   manifest=$(bootstrap_stage3_canonical_file "$manifest") || return 1
   candidate=$(bootstrap_stage3_canonical_file "$candidate") || return 1
-  bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" || {
+  stage2_sanity="${manifest%/*}/stage2-sanity.env"
+  bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
+    "$candidate" "${manifest}.authority-map.env" || {
     echo "error: admitted Stage 3 provenance did not verify" >&2; return 1;
   }
   [ "$(bootstrap_stage3_manifest_value backend "$manifest")" = "$backend" ] || return 1
@@ -49,6 +64,17 @@ resume_stage4_prepare() {
     "$(bootstrap_stage3_manifest_value runtime_path "$manifest")") || return 1
   SIMPLE_RUNTIME_PATH=$bootstrap_runtime_authority_path
   export SIMPLE_RUNTIME_PATH
+  planner_sha=$(bootstrap_stage3_hash_file "$planner_receipt") || return 1
+  candidate_sha=$(bootstrap_stage3_hash_file "$candidate") || return 1
+  source_sha=$(bootstrap_stage3_manifest_value source_fingerprint "$manifest") || return 1
+  expected_binding=$(printf '%s\n' \
+    "planner_sha256=$planner_sha" \
+    "candidate_sha256=$candidate_sha" \
+    "source_fingerprint=$source_sha" \
+    "backend=$backend" | bootstrap_stage3_hash_stdin) || return 1
+  [ "${SIMPLE_BOOTSTRAP_STAGE4_BINDING_SHA256:-}" = "$expected_binding" ] || {
+    echo "error: Stage 4 planner/candidate/source/backend binding mismatch" >&2; return 1;
+  }
   full="$output/full/$platform/simple"
   case "$platform" in *windows*) full="${full}.exe" ;; esac
   [ ! -e "$full" ] && [ ! -L "$full" ] &&
@@ -65,12 +91,20 @@ resume_stage4_prepare() {
   resume_stage4_snapshot "$resume_stage4_before" "$output" "$platform" || return 1
   receipt="$output/stage4-continuation.env"; resume_stage4_receipt=$receipt
   [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  admission="$output/stage4-continuation-admission.env"
+  [ ! -e "$admission" ] && [ ! -L "$admission" ] || return 1
+  resume_stage4_admission=$admission
   umask 077
   {
-    echo schema=simple-bootstrap-stage4-continuation-v1
+    echo schema=simple-bootstrap-stage4-continuation-admission-v1
     echo status=prepared
     echo planner_receipt_path="$planner_receipt"
     echo planner_receipt_sha256="$(bootstrap_stage3_hash_file "$planner_receipt")"
+    echo planner_stage4_binding_sha256="$expected_binding"
+    echo preflight_receipt_path="$preflight_receipt"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file "$preflight_receipt")"
+    echo source_fingerprint="$source_sha"
+    echo backend="$backend"
     echo stage3_provenance_path="$manifest"
     echo stage3_provenance_sha256="$(bootstrap_stage3_hash_file "$manifest")"
     echo parent_compiler_path="$candidate"
@@ -81,9 +115,9 @@ resume_stage4_prepare() {
     echo bootstrap_lock_owner_pid="$$"
     echo immutable_snapshot_path="$resume_stage4_before"
     echo immutable_snapshot_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_before")"
-  } >"${receipt}.tmp.$$"
-  mv "${receipt}.tmp.$$" "$receipt"
-  STAGE4_CONTINUATION_RECEIPT=$receipt
+  } >"${admission}.tmp.$$"
+  mv "${admission}.tmp.$$" "$admission"
+  STAGE4_CONTINUATION_RECEIPT=$admission
   export STAGE4_CONTINUATION_RECEIPT
 }
 
@@ -103,8 +137,16 @@ resume_stage4_finalize() {
   [ -f "$full_bin" ] && [ ! -L "$full_bin" ] &&
     [ -f "${full_bin}.provenance.env" ] && [ ! -L "${full_bin}.provenance.env" ] || return 1
   tmp="${resume_stage4_receipt}.tmp.$$"; resume_stage4_work=$tmp
-  sed 's/^status=prepared$/status=pass/' "$resume_stage4_receipt" >"$tmp" || return 1
+  # Provenance already pins the admission bytes. Never rewrite them when
+  # publishing completion: completion -> provenance -> admission is acyclic.
+  [ ! -e "$resume_stage4_receipt" ] && [ ! -L "$resume_stage4_receipt" ] || return 1
+  stage4_verify_continuation_binding "${full_bin}.provenance.env" || return 1
+  [ "$(bootstrap_stage3_manifest_value stage4_continuation_path "${full_bin}.provenance.env")" = "$resume_stage4_admission" ] || return 1
+  sed -e 's/^schema=simple-bootstrap-stage4-continuation-admission-v1$/schema=simple-bootstrap-stage4-continuation-v2/' \
+      -e 's/^status=prepared$/status=pass/' "$resume_stage4_admission" >"$tmp" || return 1
   {
+    echo admission_path="$resume_stage4_admission"
+    echo admission_sha256="$(bootstrap_stage3_hash_file "$resume_stage4_admission")"
     echo immutable_status=pass
     echo immutable_after_path="$after"
     echo immutable_after_sha256="$(bootstrap_stage3_hash_file "$after")"
@@ -119,7 +161,8 @@ resume_stage4_finalize() {
     echo deploy_receipt_path=not-published >>"$tmp" || return 1
     echo deploy_receipt_sha256=not-published >>"$tmp" || return 1
   else
-    deploy_receipt="$repo_root/bin/release/$PLATFORM/bootstrap-deploy-receipt.env"
+    resume_stage4_deploy_platform=$(simple_release_platform_dir "$PLATFORM") || return 1
+    deploy_receipt="$repo_root/bin/release/$resume_stage4_deploy_platform/bootstrap-deploy-receipt.env"
     [ -f "$deploy_receipt" ] && [ ! -L "$deploy_receipt" ] || return 1
     echo publication_status=deployed >>"$tmp" || return 1
     echo deploy_receipt_path="$deploy_receipt" >>"$tmp" || return 1

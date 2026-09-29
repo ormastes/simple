@@ -1,4 +1,8 @@
 # SQL `StatementCache.get_or_prepare` never hits cache — `Dict.get()` present-key landmine
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Severity:** high (writes/reads silently diverge for repeated same-SQL
@@ -104,3 +108,4 @@ the downstream symptom (data loss / early return, not just a silently-skipped
 branch) is more severe than the original doc's scope suggests. No `.spl`
 source fix attempted here per campaign guide (interpreter-side, needs
 redeploy to verify).
+

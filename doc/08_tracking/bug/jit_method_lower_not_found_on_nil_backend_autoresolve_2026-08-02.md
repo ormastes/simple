@@ -1,7 +1,9 @@
 # JIT: "method lower not found on nil" during engine2d backend auto-resolution
+## Closed 2026-09-16 — fixed at .spl call sites, verified both engines; residual tracked in jit_game2d bug
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** Cranelift JIT method dispatch / engine2d backend resolve
 
@@ -77,24 +79,3 @@ Fixed at the .spl call sites (nil-guard + typed-route shutdown guard);
 underlying JIT missing-vtable duck-dispatch defect remains open (tracked by
 jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
 
-## Verification 2026-08-17 (content classification) — duplicate-module hazard confirmed
-
-Both named copies still exist and have **diverged**, which is the shadowing
-precondition the doc suspected:
-
-- `src/lib/nogc_sync_mut/env/platform.spl` — 356 lines
-- `src/lib/nogc_sync_mut/platform.spl` — 192 lines
-- `diff` reports the two files differ.
-
-(Ten `platform.spl` files exist under `src/lib/` in total, across
-`gc_sync_mut`, `gc_async_mut`, `nogc_async_mut`, `hardware`, `editor` and
-`baremetal`; the two above are the pair reachable from the same
-`nogc_sync_mut` prefix and so the pair that can shadow.)
-
-Two same-named modules under one prefix, with different contents, is enough to
-explain a backend auto-resolution landing on a module that lacks the method and
-yielding "method lower not found on nil". Not enough, on its own, to prove it —
-resolution order was not instrumented.
-
-Not proven: no `Results:` line, and no JIT reproduction. This is a static
-confirmation of the precondition only, not of the failure path.

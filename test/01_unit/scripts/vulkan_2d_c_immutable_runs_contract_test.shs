@@ -1,0 +1,264 @@
+#!/bin/sh
+# Contract-only test: force the C leg to skip before any Vulkan process can
+# launch, then verify immutable run publication and pointer semantics.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+WRAPPER="$ROOT/scripts/check/check-vulkan-2d-c-compare.shs"
+IMMUTABLE_LIB="$ROOT/scripts/check/lib/immutable-perf-run.shs"
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/vk2d-immutable-contract.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT HUP INT TERM
+
+\. "$IMMUTABLE_LIB"
+
+for invalid_id in .hidden ../escape path/name 'bad id'; do
+    if perf_immutable_valid_run_id "$invalid_id"; then
+        echo "unsafe run id accepted: $invalid_id" >&2
+        exit 1
+    fi
+done
+
+# The private stage doubles as the atomic run-id reservation and is mode 0700.
+perf_immutable_prepare_run "$TMP_ROOT/helper" reserved
+helper_stage=$PERF_IMMUTABLE_STAGE_DIR
+first_nonce=$PERF_IMMUTABLE_RUN_NONCE
+if stat -f '%Lp' "$helper_stage" >/dev/null 2>&1; then
+    helper_mode=$(stat -f '%Lp' "$helper_stage")
+else
+    helper_mode=$(stat -c '%a' "$helper_stage")
+fi
+[ "$helper_mode" = 700 ] || exit 1
+if perf_immutable_prepare_run "$TMP_ROOT/helper" reserved; then
+    echo "concurrent run-id reservation unexpectedly succeeded" >&2
+    exit 1
+else
+    [ "$?" -eq 2 ] || exit 1
+fi
+perf_immutable_remove_stage "$helper_stage"
+[ ! -e "$helper_stage" ] && [ ! -L "$helper_stage" ] || exit 1
+perf_immutable_prepare_run "$TMP_ROOT/helper" distinct-nonce
+second_nonce=$PERF_IMMUTABLE_RUN_NONCE
+[ "$first_nonce" != "$second_nonce" ] || {
+    echo "sequential immutable preparations reused a producer nonce" >&2
+    exit 1
+}
+perf_immutable_remove_stage "$PERF_IMMUTABLE_STAGE_DIR"
+
+# Simulate a final path appearing after reservation: publication must neither
+# overwrite it nor move the private stage beneath it.
+perf_immutable_prepare_run "$TMP_ROOT/helper" publish-race
+race_stage=$PERF_IMMUTABLE_STAGE_DIR
+race_final=$PERF_IMMUTABLE_FINAL_DIR
+mkdir "$race_final"
+printf 'keep\n' >"$race_final/marker"
+if perf_immutable_publish_run "$race_stage" "$race_final"; then
+    echo "racing final directory was overwritten" >&2
+    exit 1
+else
+    [ "$?" -eq 2 ] || exit 1
+fi
+[ "$(cat "$race_final/marker")" = keep ] || exit 1
+[ -d "$race_stage" ] || exit 1
+perf_immutable_remove_stage "$race_stage"
+
+# A trapped producer failure removes partial staging without publishing it.
+if sh -c '\. "$1"; perf_immutable_prepare_run "$2" interrupted; stage=$PERF_IMMUTABLE_STAGE_DIR; trap '\''perf_immutable_remove_stage "$stage"'\'' EXIT; trap '\''exit 143'\'' TERM; : >"$stage/partial"; kill -TERM "$$"' \
+    immutable-test "$IMMUTABLE_LIB" "$TMP_ROOT/helper"; then
+    echo "interrupted producer unexpectedly succeeded" >&2
+    exit 1
+fi
+[ ! -e "$TMP_ROOT/helper/runs/.interrupted.stage" ] || exit 1
+
+# A runs-directory symlink and a pre-existing final symlink both fail closed.
+mkdir "$TMP_ROOT/symlink-target" "$TMP_ROOT/symlink-root"
+ln -s "$TMP_ROOT/symlink-target" "$TMP_ROOT/symlink-root/runs"
+if perf_immutable_prepare_run "$TMP_ROOT/symlink-root" unsafe; then
+    echo "symlinked runs directory unexpectedly accepted" >&2
+    exit 1
+fi
+ln -s "$TMP_ROOT/symlink-target" "$TMP_ROOT/helper/runs/final-link"
+if perf_immutable_prepare_run "$TMP_ROOT/helper" final-link; then
+    echo "symlinked final run unexpectedly accepted" >&2
+    exit 1
+else
+    [ "$?" -eq 2 ] || exit 1
+fi
+
+run_skip() {
+    id=$1
+    VK2D_OUT_DIR="$TMP_ROOT/out" VK2D_RUN_ID="$id" \
+        VK_ICD_FILENAMES="$TMP_ROOT/no-such-vulkan-icd.json" \
+        sh "$WRAPPER" >"$TMP_ROOT/$id.stdout"
+}
+
+run_skip first
+run_skip second
+
+[ -d "$TMP_ROOT/out/runs/first" ] || exit 1
+[ -d "$TMP_ROOT/out/runs/second" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/evidence.env" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/c.env.raw" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/second/evidence.env" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/c.stdout.raw" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/c.stderr.raw" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/simple.stdout.raw" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/simple.stderr.raw" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/c.toolchain.env" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/c.runtime.env" ] || exit 1
+[ -f "$TMP_ROOT/out/runs/first/simple.runtime.env" ] || exit 1
+[ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/runs/first/evidence.env")" = first ] || exit 1
+[ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/runs/second/evidence.env")" = second ] || exit 1
+[ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/latest")" = second ] || exit 1
+[ "$(sed -n 's/^authoritative=//p' "$TMP_ROOT/out/latest")" = false ] || exit 1
+
+manifest="$TMP_ROOT/out/runs/first/run.manifest.env"
+for required_manifest_field in \
+    source_policy git_commit git_tree git_dirty git_tracked_diff_sha256 \
+    run_started_utc run_started_epoch run_nonce \
+    wrapper_path wrapper_sha256 immutable_run_helper_path immutable_run_helper_sha256 \
+    admission_helper_path admission_helper_sha256 config_sha256 fixture_sha256 \
+    shader_source_sha256 c_command_argc c_command_argv_0 c_command_argv_sha256 \
+    simple_command_argc simple_command_argv_0 simple_command_argv_sha256 manifest_digest_sha256; do
+    grep -F "${required_manifest_field}=" "$manifest" >/dev/null || {
+        echo "required provenance field missing: $required_manifest_field" >&2
+        exit 1
+    }
+done
+[ "$(sed -n 's/^c_command_argc=//p' "$manifest")" = 7 ] || exit 1
+[ "$(sed -n 's/^simple_command_argc=//p' "$manifest")" = 3 ] || exit 1
+if grep -Eq '(^|[[:space:]])eval([[:space:]]|$)|`' "$WRAPPER"; then
+    echo "wrapper command contract contains eval or backticks" >&2
+    exit 1
+fi
+
+# A declared cross-revision candidate remains usable for forensic comparison,
+# but aggregation must expose it as analysis-only rather than accepting it as
+# current-tree performance evidence.  Recompute the manifest digest so this
+# is a source-policy mismatch, not a malformed/tampered manifest.
+run_skip cross-revision
+cross_manifest="$TMP_ROOT/out/runs/cross-revision/run.manifest.env"
+cross_tmp="$TMP_ROOT/cross.manifest.tmp"
+sed 's/^git_commit=.*/git_commit=0000000000000000000000000000000000000000/' "$cross_manifest" |
+    sed '/^manifest_digest_sha256=/d' >"$cross_tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+    cross_digest=$(sha256sum "$cross_tmp" | awk '{print $1}')
+else
+    cross_digest=$(shasum -a 256 "$cross_tmp" | awk '{print $1}')
+fi
+printf 'manifest_digest_sha256=%s\n' "$cross_digest" >>"$cross_tmp"
+mv "$cross_tmp" "$cross_manifest"
+sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/cross-revision" >"$TMP_ROOT/cross.stdout"
+grep -F 'compare_status=skipped' "$TMP_ROOT/cross.stdout" >/dev/null || exit 1
+grep -F 'compare_reason=provenance-cross-revision:source-revision-mismatch' "$TMP_ROOT/cross.stdout" >/dev/null || exit 1
+
+# Aggregation uses the immutable run's budget, never a caller override.
+VK2D_BUDGET_X1000=999999 sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/first" >"$TMP_ROOT/budget.stdout"
+grep -F 'compare_budget_x1000=2000' "$TMP_ROOT/budget.stdout" >/dev/null || exit 1
+
+# Manifest scalar/argv fields are line-safe; a caller cannot inject records
+# through a newline-bearing executable path.
+newline_simple_bin=$(printf 'bad\npath')
+if SIMPLE_BIN="$newline_simple_bin" VK2D_OUT_DIR="$TMP_ROOT/out" VK2D_RUN_ID=newline-argv \
+    VK_ICD_FILENAMES="$TMP_ROOT/no-such-vulkan-icd.json" \
+    sh "$WRAPPER" >"$TMP_ROOT/newline.stdout" 2>"$TMP_ROOT/newline.stderr"; then
+    echo "newline-bearing command argv was accepted" >&2
+    exit 1
+fi
+grep -F 'manifest path contains a newline' "$TMP_ROOT/newline.stderr" >/dev/null || exit 1
+[ ! -e "$TMP_ROOT/out/runs/newline-argv" ] || exit 1
+
+# A calendar-invalid value is not accepted merely because its shape resembles
+# an RFC 3339 UTC timestamp, even with a recomputed manifest digest.
+run_skip invalid-date
+invalid_date_manifest="$TMP_ROOT/out/runs/invalid-date/run.manifest.env"
+invalid_date_tmp="$TMP_ROOT/invalid-date.manifest.tmp"
+sed 's/^run_started_utc=.*/run_started_utc=2026-99-99T99:99:99Z/' "$invalid_date_manifest" |
+    sed '/^manifest_digest_sha256=/d' >"$invalid_date_tmp"
+if command -v sha256sum >/dev/null 2>&1; then
+    invalid_date_digest=$(sha256sum "$invalid_date_tmp" | awk '{print $1}')
+else
+    invalid_date_digest=$(shasum -a 256 "$invalid_date_tmp" | awk '{print $1}')
+fi
+printf 'manifest_digest_sha256=%s\n' "$invalid_date_digest" >>"$invalid_date_tmp"
+mv "$invalid_date_tmp" "$invalid_date_manifest"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/invalid-date" >"$TMP_ROOT/invalid-date.stdout" 2>"$TMP_ROOT/invalid-date.stderr"; then
+    echo "calendar-invalid provenance timestamp was accepted" >&2
+    exit 1
+fi
+grep -F 'invalid immutable run provenance' "$TMP_ROOT/invalid-date.stderr" >/dev/null || exit 1
+
+# A provenance edit without a matching manifest digest is tampering, not a
+# candidate revision, and must fail closed before aggregate admission.
+run_skip provenance-tamper
+tampered_manifest="$TMP_ROOT/out/runs/provenance-tamper/run.manifest.env"
+sed -i.bak 's/^git_tree=.*/git_tree=0000000000000000000000000000000000000000/' "$tampered_manifest"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/provenance-tamper" >"$TMP_ROOT/provenance-tamper.stdout" 2>"$TMP_ROOT/provenance-tamper.stderr"; then
+    echo "tampered provenance manifest was accepted" >&2
+    exit 1
+fi
+grep -F 'invalid immutable run provenance' "$TMP_ROOT/provenance-tamper.stderr" >/dev/null || exit 1
+rm -f "$tampered_manifest.bak"
+
+if VK2D_OUT_DIR="$TMP_ROOT/out" VK2D_RUN_ID=first \
+    VK_ICD_FILENAMES="$TMP_ROOT/no-such-vulkan-icd.json" \
+    sh "$WRAPPER" >"$TMP_ROOT/collision.stdout" 2>"$TMP_ROOT/collision.stderr"; then
+    echo "immutable run collision unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -F 'run-id-collision:first' "$TMP_ROOT/collision.stderr" >/dev/null || exit 1
+[ "$(sed -n 's/^run_id=//p' "$TMP_ROOT/out/runs/first/evidence.env")" = first ] || exit 1
+
+# A latest pointer is a convenience index, not an aggregate input.  This
+# remains true even when it points to a complete run, and when made stale.
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/latest" >"$TMP_ROOT/latest.stdout" 2>"$TMP_ROOT/latest.stderr"; then
+    echo "latest pointer was accepted as authoritative evidence" >&2
+    exit 1
+fi
+grep -F 'invalid row directory' "$TMP_ROOT/latest.stderr" >/dev/null || exit 1
+printf '%s\n' 'schema=immutable-perf-latest-pointer-v1' 'authoritative=false' \
+    'run_id=stale' 'relative_path=runs/stale' >"$TMP_ROOT/out/latest"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/latest" >"$TMP_ROOT/stale.stdout" 2>"$TMP_ROOT/stale.stderr"; then
+    echo "stale latest pointer was accepted as authoritative evidence" >&2
+    exit 1
+fi
+grep -F 'invalid row directory' "$TMP_ROOT/stale.stderr" >/dev/null || exit 1
+
+ln -s "$TMP_ROOT/out/runs/first" "$TMP_ROOT/out/runs/linked"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/linked" >"$TMP_ROOT/linked.stdout" 2>"$TMP_ROOT/linked.stderr"; then
+    echo "symlinked immutable run was accepted" >&2
+    exit 1
+fi
+grep -F 'invalid row directory' "$TMP_ROOT/linked.stderr" >/dev/null || exit 1
+
+mkdir -p "$TMP_ROOT/stale/runs/copied"
+cp "$TMP_ROOT/out/runs/first/c.env" "$TMP_ROOT/stale/runs/copied/c.env"
+cp "$TMP_ROOT/out/runs/first/simple.env" "$TMP_ROOT/stale/runs/copied/simple.env"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/stale/runs/copied" >"$TMP_ROOT/copied.stdout" 2>"$TMP_ROOT/copied.stderr"; then
+    echo "copied stale rows were accepted as an immutable run" >&2
+    exit 1
+fi
+grep -F 'invalid immutable run manifest' "$TMP_ROOT/copied.stderr" >/dev/null || exit 1
+
+# Direct immutable run directories remain the only supported aggregate input.
+sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/first" >"$TMP_ROOT/aggregate.stdout"
+grep -F 'compare_status=skipped' "$TMP_ROOT/aggregate.stdout" >/dev/null || exit 1
+
+# Published receipt mutation is detected before aggregation.
+printf 'tampered\n' >>"$TMP_ROOT/out/runs/second/c.stdout.raw"
+if sh "$WRAPPER" --aggregate "$TMP_ROOT/out/runs/second" >"$TMP_ROOT/tampered.stdout" 2>"$TMP_ROOT/tampered.stderr"; then
+    echo "tampered immutable receipt was accepted" >&2
+    exit 1
+fi
+grep -F 'stale immutable run receipt:c.stdout.raw' "$TMP_ROOT/tampered.stderr" >/dev/null || exit 1
+
+# A hostile convenience pointer cannot redirect writes and cannot make a
+# completed immutable run fail publication.
+printf 'victim\n' >"$TMP_ROOT/victim"
+rm "$TMP_ROOT/out/latest"
+ln -s "$TMP_ROOT/victim" "$TMP_ROOT/out/latest"
+run_skip pointer-safe 2>"$TMP_ROOT/pointer-safe.stderr"
+[ "$(cat "$TMP_ROOT/victim")" = victim ] || exit 1
+[ -d "$TMP_ROOT/out/runs/pointer-safe" ] || exit 1
+grep -F 'non-authoritative latest pointer was not updated' "$TMP_ROOT/pointer-safe.stderr" >/dev/null || exit 1
+
+echo "vulkan_2d_c_immutable_runs_contract=pass"

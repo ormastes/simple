@@ -137,8 +137,10 @@ cosmetic.** Full trace of both pipelines:
   `dispatch_to_simple_app`) and **refuses to fall back to Rust** on failure.
   The Rust `native_project` pipeline
   (`src/compiler_rust/compiler/src/pipeline/native_project`) is reached only
-  via `SIMPLE_NATIVE_BUILD_RUST=1` or a cross-target executable build
-  (`native_build_wants_cross_target`), i.e. an escape hatch, not the default.
+  via the exact `SIMPLE_NATIVE_BUILD_RUST=1` seed escape hatch. Explicit host
+  targets and cross-target object emission remain pure-Simple; an unopted
+  non-host executable, archive, or shared-library request fails closed instead
+  of silently selecting Rust.
 - **Fixture.** 3-module fixture (`main.spl` importing `mod_a.spl`,
   `mod_b.spl`, pure `i64` arithmetic, no stdlib), built via
   `env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build

@@ -1,0 +1,447 @@
+#!/bin/sh
+# Synthetic Windows-only consumer contract. Never operates on the real checkout.
+set -Eeuo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
+test_case=${STAGE3_MATERIALIZED_TEST_CASE:-full}
+case "$test_case" in full|bounded) ;; *) echo "unknown STAGE3_MATERIALIZED_TEST_CASE: $test_case" >&2; exit 2 ;; esac
+case_name=setup
+# The v2 publisher deliberately accepts only lexically drive-qualified Windows
+# receipt paths.  MSYS /tmp is not drive-qualified, and CI-provided user temp
+# directories can inherit ACLs that deny the shell.  Keep this disposable
+# fixture under the checkout's ignored bootstrap output root so the test
+# reaches the native consumer on every Windows runner.
+fixture_tmp_parent="$root/build/bootstrap/windows-stage3-consumer-test"
+mkdir -p "$fixture_tmp_parent"
+TMPDIR=$fixture_tmp_parent
+export TMPDIR
+tmp=$(mktemp -d "$fixture_tmp_parent/stage3-consumer-test.XXXXXX")
+consumer_tmp="$tmp/consumer-tmp"
+mkdir -p "$consumer_tmp"
+repo="$tmp/repo"
+if [ "$test_case" = bounded ]; then
+    # Exercise the Windows path handling without exceeding MAX_PATH. The
+    # spaces are intentional; the repeated component keeps the fixture long
+    # enough to catch accidental shell word splitting.
+    repo="$tmp/space root/repo"
+fi
+cleanup() {
+    case "$tmp" in "$fixture_tmp_parent"/stage3-consumer-test.*) ;; *) return 1 ;; esac
+    # Unlink junction leaves before any recursive removal of the owned fixture.
+    FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '
+      foreach ($name in @("dir-link","extra-junction","src/compiler_rust/target/bootstrap","src/compiler_rust/target/unowned")) {
+        $p=[IO.Path]::Combine($env:FIXTURE_ROOT,$name)
+        if ([IO.Directory]::Exists($p)) { [IO.Directory]::Delete($p,$false) }
+      }' >/dev/null 2>&1 || :
+    rm -rf -- "$tmp"
+    rmdir -- "$fixture_tmp_parent" 2>/dev/null || :
+}
+git_repo() { git -c core.longpaths=true -C "$repo" "$@"; }
+trap cleanup EXIT
+trap 'rc=$?; printf "FAIL case=%s line=%s exit=%s\n" "$case_name" "$LINENO" "$rc" >&2; tail -c 2500 "$tmp/error" >&2 2>/dev/null || :; exit "$rc"' ERR
+mkdir -p "$repo/scripts/setup" "$repo/target-dir" "$repo/bin"
+cp "$root/scripts/setup/materialize-symlinks-windows.shs" "$root/scripts/setup/windows-materialized-pending-policy.tsv" "$repo/scripts/setup/"
+git -c core.longpaths=true -C "$repo" init -q
+git_repo config core.symlinks false
+git_repo config core.autocrlf false
+git_repo config core.longpaths true
+# A gitlink's pinned commit need not exist in the superproject object store.
+git -C "$tmp" init -q child-source
+git -C "$tmp/child-source" config core.autocrlf false
+printf 'pinned child\n' >"$tmp/child-source/child.txt"
+git -C "$tmp/child-source" add child.txt
+child_tree=$(git -C "$tmp/child-source" write-tree)
+child_head=$(printf 'pinned child\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$tmp/child-source" commit-tree "$child_tree")
+git -C "$tmp/child-source" update-ref HEAD "$child_head"
+# A nested gitlink is absent from the child's ordinary status inventory.
+git -C "$tmp/child-source" update-index --add --cacheinfo "160000,$child_head,grandchild"
+child_tree=$(git -C "$tmp/child-source" write-tree)
+child_head=$(printf 'child with nested gitlink\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$tmp/child-source" commit-tree "$child_tree" -p "$child_head")
+git -C "$tmp/child-source" update-ref HEAD "$child_head"
+printf 'tracked original\n' >"$repo/source.spl"
+printf 'file payload\n' >"$repo/target.txt"
+printf 'directory payload\n' >"$repo/target-dir/tracked.txt"
+printf target.txt >"$repo/file-link"
+printf target.txt >"$repo/shared-file-link"
+printf target-dir >"$repo/dir-link"
+printf target-dir/tracked.txt >"$repo/nested-target-link"
+printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
+git_repo add .
+git_repo update-index --add --cacheinfo "160000,$child_head,child-module"
+for link in file-link shared-file-link dir-link nested-target-link bin/bb; do
+    blob=$(git_repo hash-object -w -- "$repo/$link")
+    git_repo update-index --cacheinfo "120000,$blob,$link"
+done
+# Seed HEAD only in the disposable repository; no real checkout commit/ref edit.
+tree=$(git_repo write-tree)
+head=$(printf 'synthetic consumer fixture\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git_repo commit-tree "$tree")
+git_repo update-ref HEAD "$head"
+case_name=synthetic-producer
+/usr/bin/sh "$repo/scripts/setup/materialize-symlinks-windows.shs" --strict-missing --receipt "$tmp/good" "$repo" >"$tmp/error" 2>&1
+receipt="$tmp/good"
+
+accept() {
+    case_name=$1
+    TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"
+    test ! -s "$tmp/stdout"
+    grep -Eq '^dirty_fingerprint=[0-9a-f]{64}$' "$tmp/$1.state"
+    grep -qx 'alias_collapse_count=1' "$tmp/$1.state"
+    test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+}
+reject() {
+    case_name=$1
+    if TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/$1.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then
+        echo "unexpected acceptance: $1" >&2; return 1
+    fi
+    test ! -s "$tmp/stdout"
+    test ! -e "$tmp/$1.state"
+    test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+}
+reject_reason() {
+    reject "$1"
+    grep -Fqx "$2" "$tmp/error"
+}
+fingerprint() { sed -n 's/^dirty_fingerprint=//p' "$1"; }
+
+reject_wrong_gitlink_root() {
+    # Keep the exact pinned HEAD but direct Git's worktree outside this child.
+    # Accepting the bound MSYS spelling must never accept another root.
+    git -C "$repo/child-module" config core.worktree "$(cygpath -am "$tmp/child-source")"
+    test "$(git -C "$repo/child-module" rev-parse HEAD)" = "$child_head"
+    reject same-head-wrong-gitlink-root
+    grep -Fq 'git.gitlink-root' "$tmp/error"
+    git -C "$repo/child-module" config --unset core.worktree
+}
+
+if [ "${1:-}" = --gitlink-root-only ]; then
+    git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
+    reject_wrong_gitlink_root
+    echo 'bootstrap_stage3_same_head_wrong_gitlink_root=true'
+    exit 0
+fi
+
+if [ "${1:-}" = --generated-authority-only ]; then
+    generated_target="$repo/src/compiler_rust/target"
+    generated_inputs=$(printf '%064d' 1)
+    generated_hash=$(printf '%064d' 2)
+    generated_name="$generated_inputs-$generated_hash"
+    generated_dir="$generated_target/bootstrap.generations/$generated_name"
+    generated_marker="$generated_target/bootstrap.current.env"
+    mkdir -p "$generated_dir" "$generated_target/bootstrap.generations/wrong" "$tmp/outside"
+    printf '/src/compiler_rust/target/\n' >>"$repo/.git/info/exclude"
+    printf 'schema=simple-bootstrap-seed-artifact-stamp-v2\ninputs_fingerprint=%s\nseed_sha256=%s\nnative_all_sha256=%s\nbackfill_status=absent\nbackfill_sha256=absent\n' \
+        "$generated_inputs" "$generated_hash" "$generated_hash" >"$generated_dir/simple.exe.inputs.sha256"
+    generated_stamp=$(bootstrap_stage3_hash_file "$generated_dir/simple.exe.inputs.sha256")
+    printf 'schema=simple-bootstrap-authority-current-v1\ngeneration=%s\ninputs_fingerprint=%s\ngeneration_sha256=%s\nstamp_sha256=%s\n' \
+        "$generated_name" "$generated_inputs" "$generated_hash" "$generated_stamp" >"$generated_marker"
+    cp "$generated_marker" "$tmp/generated-marker.good"
+    remove_generated_link() {
+        GENERATED_LINK="$(cygpath -aw "$generated_target/bootstrap")" powershell -NoProfile -NonInteractive -Command \
+            '[IO.Directory]::Delete($env:GENERATED_LINK,$false)' >"$tmp/error" 2>&1
+    }
+    point_generated_link() {
+        MSYS="${MSYS:+${MSYS} }winsymlinks:nativestrict" ln -s "$1" "$generated_target/bootstrap"
+    }
+    # Metadata here proves only the source-audit topology boundary. Full runtime
+    # byte admission belongs to resolve_committed_seed and is not simulated.
+    bootstrap_stage3_create_compatibility_link "bootstrap.generations/$generated_name" \
+        "$generated_target/bootstrap" >"$tmp/error" 2>&1
+    reject generated-authority-junction
+    grep -Fq 'authority.link-tag' "$tmp/error"
+    remove_generated_link
+    point_generated_link "bootstrap.generations/$generated_name"
+    accept generated-authority-symlink
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'schema=forged\n' >"$generated_marker"
+    reject generated-forged-marker
+    grep -Fq 'authority.marker' "$tmp/error"
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'generation=%s\n' "$generated_name" >>"$generated_marker"
+    reject generated-duplicate-marker
+    grep -Fq 'authority.fields' "$tmp/error"
+    cp "$tmp/generated-marker.good" "$generated_marker"
+    printf 'tampered\n' >>"$generated_dir/simple.exe.inputs.sha256"
+    reject generated-tampered-stamp
+    grep -Fq 'authority.stamp-hash' "$tmp/error"
+    sed '$d' "$generated_dir/simple.exe.inputs.sha256" >"$tmp/stamp.restored"
+    cp "$tmp/stamp.restored" "$generated_dir/simple.exe.inputs.sha256"
+    : >"$generated_marker.transaction"
+    reject generated-active-transaction
+    grep -Fq 'authority.transaction' "$tmp/error"
+    rm "$generated_marker.transaction"
+    remove_generated_link
+    point_generated_link bootstrap.generations/wrong
+    reject generated-wrong-generation
+    grep -Fq 'authority.link-target' "$tmp/error"
+    remove_generated_link
+    point_generated_link ../../../../outside
+    reject generated-escape-target
+    grep -Fq 'authority.link-target' "$tmp/error"
+    remove_generated_link
+    point_generated_link "bootstrap.generations/$generated_name"
+    bootstrap_stage3_create_compatibility_link "bootstrap.generations/$generated_name" \
+        "$generated_target/unowned" >"$tmp/error" 2>&1
+    reject generated-extra-reparse
+    grep -Fq 'path.unreceipted-reparse' "$tmp/error"
+    echo 'bootstrap_stage3_generated_authority_cases=9'
+    exit 0
+fi
+
+accept positive-file-dir-pending
+git -c core.autocrlf=false clone -q "$tmp/child-source" "$repo/child-module"
+git -C "$repo/child-module" config core.autocrlf false
+accept clean-initialized-gitlink
+mkdir -p "$repo/child-module/grandchild"
+accept empty-uninitialized-nested-gitlink
+printf hidden >"$repo/child-module/grandchild/hidden"
+reject nonempty-uninitialized-nested-gitlink
+rm "$repo/child-module/grandchild/hidden"
+git -C "$repo/child-module" update-index --assume-unchanged child.txt
+reject assume-unchanged-initialized-gitlink
+git -C "$repo/child-module" update-index --no-assume-unchanged child.txt
+git -C "$repo/child-module" update-index --skip-worktree child.txt
+reject skip-worktree-initialized-gitlink
+git -C "$repo/child-module" update-index --no-skip-worktree child.txt
+mkdir -p "$repo/.git/modules"
+mv "$repo/child-module/.git" "$repo/.git/modules/child-module"
+printf 'gitdir: ../.git/modules/child-module\n' >"$repo/child-module/.git"
+accept clean-git-pointer-file
+reject_wrong_gitlink_root
+rm "$repo/child-module/.git"
+mv "$repo/.git/modules/child-module" "$repo/child-module/.git"
+printf changed >>"$repo/child-module/child.txt"
+reject dirty-initialized-gitlink
+git -C "$repo/child-module" checkout -q -- child.txt
+printf extra >"$repo/child-module/untracked.txt"
+reject untracked-initialized-gitlink
+git -C "$repo/child-module" config --local status.showUntrackedFiles no
+git -C "$repo" config --local submodule.child-module.ignore all
+reject ignored-untracked-initialized-gitlink
+git -C "$repo/child-module" config --unset status.showUntrackedFiles
+git -C "$repo" config --unset submodule.child-module.ignore
+rm "$repo/child-module/untracked.txt"
+printf changed >"$repo/child-module/child.txt"
+git -C "$repo/child-module" add child.txt
+other_tree=$(git -C "$repo/child-module" write-tree)
+other_head=$(printf 'other child\n' | GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid git -C "$repo/child-module" commit-tree "$other_tree" -p "$child_head")
+git -C "$repo/child-module" update-ref HEAD "$other_head"
+reject wrong-initialized-gitlink-head
+git -C "$repo/child-module" reset -q --hard "$child_head"
+accept restored-initialized-gitlink
+mkdir -p "$repo/child-module/nested/.git"
+reject nested-repository-under-gitlink
+rmdir "$repo/child-module/nested/.git" "$repo/child-module/nested"
+if [ "$test_case" = bounded ]; then
+    # Keep the long ordinary-file case independent from the canonical
+    # target-dir oracle below, which intentionally has one untracked path.
+    long_dir="$repo/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789/long-path-component-0123456789"
+    long_file="$long_dir/untracked.txt"
+    mkdir -p "$long_dir"
+    printf 'long ordinary untracked payload A\n' >"$long_file"
+    test "$(cygpath -aw "$long_file" | wc -c)" -gt 260
+    accept long-path-untracked-a
+    printf 'long ordinary untracked payload B\n' >"$long_file"
+    accept long-path-untracked-b
+    test "$(fingerprint "$tmp/long-path-untracked-a.state")" != "$(fingerprint "$tmp/long-path-untracked-b.state")"
+    rm -rf -- "$repo/long-path-component-0123456789"
+    test ! -e "$long_file"
+fi
+# Independent canonical oracle: explicitly exclude only the known fixture dir.
+printf '\000\377raw\r\nbytes\000' >"$repo/target-dir/untracked.bin"
+accept untracked-bytes
+(
+    cd "$repo"
+    git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- >"$tmp/diff"
+    printf 'tracked-diff-sha256=%s\n' "$(bootstrap_stage3_hash_file "$tmp/diff")"
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . ':(top,literal,exclude)dir-link' >"$tmp/paths"
+    test "$(wc -l <"$tmp/paths")" -eq 1
+    test "$(cat "$tmp/paths")" = target-dir/untracked.bin
+    flag=0; test ! -x target-dir/untracked.bin || flag=1
+    printf 'untracked-file:24:target-dir/untracked.bin:%s:%s\n' "$flag" "$(bootstrap_stage3_hash_file target-dir/untracked.bin)"
+) >"$tmp/oracle"
+test "$(fingerprint "$tmp/untracked-bytes.state")" = "$(bootstrap_stage3_hash_file "$tmp/oracle")"
+test "$(fingerprint "$tmp/positive-file-dir-pending.state")" != "$(fingerprint "$tmp/untracked-bytes.state")"
+test "$(grep '^alias_collapse_sha256=' "$tmp/positive-file-dir-pending.state")" = "$(grep '^alias_collapse_sha256=' "$tmp/untracked-bytes.state")"
+printf 'dirty tracked bytes\n' >"$repo/source.spl"
+accept dirty-tracked-preserved
+test "$(fingerprint "$tmp/untracked-bytes.state")" != "$(fingerprint "$tmp/dirty-tracked-preserved.state")"
+SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="$receipt" TMPDIR="$consumer_tmp" bootstrap_stage3_git_state "$repo" "$tmp/inherited.state" >"$tmp/stdout" 2>"$tmp/error"
+cmp "$tmp/inherited.state" "$tmp/dirty-tracked-preserved.state"
+test "$(find "$consumer_tmp" -maxdepth 1 -type d -name 'stage3-consumer.*' | wc -l)" -eq 0
+if [ "$test_case" = bounded ]; then
+    # A receipt-header mutation must refuse without publishing a state file.
+    # This is deliberately a cheap negative control: the full suite covers
+    # exhaustive row mutations in its own unbounded lane.
+    sed 's/^schema=.*/schema=invalid/' "$tmp/good" >"$tmp/bad"
+    receipt="$tmp/bad"
+    reject_reason bounded-schema-mutation 'stage3-materialized-consumer: Exception calling "Run" with "0" argument(s): "receipt.header-mismatch"'
+    receipt="$tmp/good"
+
+    # Native symlink creation is privilege-dependent on Windows. It is a
+    # control for the checkout mode, never an alias-consumer prerequisite.
+    native_link="$tmp/native-symlink-control"
+    if NATIVE_LINK="$(cygpath -aw "$native_link")" NATIVE_TARGET="$(cygpath -aw "$repo/target.txt")" powershell -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference="Stop"
+        try {
+          New-Item -ItemType SymbolicLink -Path $env:NATIVE_LINK -Target $env:NATIVE_TARGET | Out-Null
+          exit 0
+        } catch {
+          $code=$_.Exception.HResult -band 0xffff
+          if ($_.Exception -is [NotSupportedException] -or $code -eq 50) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=unsupported code="+$code)
+            exit 77
+          }
+          if ($_.Exception -is [UnauthorizedAccessException] -or $code -in 5,1314) {
+            [Console]::Error.WriteLine("native-symlink-control: skip reason=privilege code="+$code)
+            exit 77
+          }
+          [Console]::Error.WriteLine("native-symlink-control: fail "+$_.Exception.GetType().FullName+" code="+$code)
+          exit 1
+        }' >"$tmp/error" 2>&1; then
+        test -L "$native_link"
+        rm -f -- "$native_link"
+        printf 'native_symlink_control=pass\n'
+    else
+        native_rc=$?
+        if [ "$native_rc" -eq 77 ]; then
+            # Developer Mode / SeCreateSymbolicLinkPrivilege is optional.
+            # Keep a typed skip rather than weakening alias assertions.
+            grep -Eq '^native-symlink-control: skip reason=(unsupported|privilege) code=[0-9]+$' "$tmp/error"
+            printf 'native_symlink_control=skip-privilege-or-filesystem\n'
+        else
+            cat "$tmp/error" >&2
+            exit "$native_rc"
+        fi
+    fi
+    printf 'bootstrap_stage3_git_state_materialized_bounded=true\n'
+    exit 0
+fi
+git -C "$repo" update-index --force-remove file-link bin/bb
+accept file-and-pending-still-untracked
+(
+    cd "$repo"
+    git diff --binary --full-index --no-ext-diff --no-textconv HEAD -- >"$tmp/diff"
+    printf 'tracked-diff-sha256=%s\n' "$(bootstrap_stage3_hash_file "$tmp/diff")"
+    git -c core.quotePath=false ls-files --others --exclude-standard -- . ':(top,literal,exclude)dir-link' | LC_ALL=C /usr/bin/sort >"$tmp/paths"
+    test "$(wc -l <"$tmp/paths")" -eq 3
+    grep -qx file-link "$tmp/paths"
+    grep -qx bin/bb "$tmp/paths"
+    while IFS= read -r path; do
+        flag=0; test ! -x "$path" || flag=1
+        printf 'untracked-file:%s:%s:%s:%s\n' "${#path}" "$path" "$flag" "$(bootstrap_stage3_hash_file "$path")"
+    done <"$tmp/paths"
+) >"$tmp/oracle"
+test "$(fingerprint "$tmp/file-and-pending-still-untracked.state")" = "$(bootstrap_stage3_hash_file "$tmp/oracle")"
+for link in file-link bin/bb; do
+    blob=$(git -C "$repo" rev-parse "HEAD:$link")
+    git -C "$repo" update-index --add --cacheinfo "120000,$blob,$link"
+done
+
+# Every mutation starts from the held-contract positive receipt; row mutations
+# recompute the digest, so rejection cannot be attributed to a stale checksum.
+cat >"$tmp/mutate.ps1" <<'PS'
+$ErrorActionPreference="Stop"
+$utf8=New-Object Text.UTF8Encoding($false,$true)
+$s=[IO.File]::ReadAllText($env:GOOD,$utf8)
+function Hex([string]$v) { ([BitConverter]::ToString($utf8.GetBytes($v))).Replace('-','').ToLowerInvariant() }
+function Drift([string]$key) {
+ $script:s=[regex]::Replace($script:s,"(?m)^$key=([0-9a-f])", { param($m) $key+'='+$(if ($m.Groups[1].Value -eq '0') {'1'} else {'0'}) })
+}
+switch ($env:CASE) {
+ 'schema' { $s=$s.Replace('simple-windows-materialized-links-v2','simple-windows-materialized-links-v1') }
+ 'extra-header' { $s=$s.Replace("records_begin","extra=1`nrecords_begin") }
+ 'duplicate-header' { $s=$s.Replace("records_begin","schema=simple-windows-materialized-links-v2`nrecords_begin") }
+ 'missing-header' { $s=$s -replace '(?m)^result=.*\n','' }
+ 'producer-hash' { Drift 'producer_sha256' }
+ 'policy-hash' { Drift 'policy_sha256' }
+ 'head' { Drift 'head' }
+ 'root' { $s=$s -replace '(?m)^root=.*', 'root=/outside' }
+ 'leading-zero' { $s=$s.Replace('record_count=5','record_count=05') }
+ 'count-overflow' { $s=$s.Replace('record_count=5','record_count=2147483648') }
+ 'count-equation' { $s=$s.Replace('record_count=5','record_count=4') }
+ 'blocked-dirty' { $s=$s.Replace('state=created','state=blocked-dirty-ordinary').Replace('result=complete','result=blocked') }
+ 'flag' { $s=$s.Replace('pending_requires_consumer_revalidation=1','pending_requires_consumer_revalidation=0') }
+ 'kind' { $s=$s.Replace('kind=file','kind=socket') }
+ 'state' { $s=$s.Replace('state=created','state=ready') }
+ 'field-order' { $s=$s.Replace('path_len=','wrong_len=') }
+ 'metadata' { $s=$s -replace 'target_volume=[0-9]+','target_volume=0' }
+ 'file-id' { $s=$s -replace 'target_file_id=[0-9]+:[0-9]+','target_file_id=0:0' }
+ 'final-path' { $s=$s -replace 'target_resolved_hex=5c','target_resolved_hex=5d' }
+ 'sha' { $s=$s -replace 'target_sha256=[0-9a-f]+','target_sha256=0000000000000000000000000000000000000000000000000000000000000000' }
+ 'pending-metadata' { $s=$s.Replace('kind=unknown','kind=file') }
+ 'head-blob' { $s=$s.Replace('target_hex='+(Hex 'target.txt'),'target_hex='+(Hex 'targEt.txt')) }
+ 'external' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=12|target_hex='+(Hex '../../escape')) }
+ 'nested' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=10|path_hex='+(Hex 'dir-link/x')) }
+ 'case-collision' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=8|path_hex='+(Hex 'DIR-LINK')) }
+ 'duplicate-alias' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=16|path_hex='+(Hex 'shared-file-link')) }
+ 'alias-cycle' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=9|target_hex='+(Hex 'file-link')) }
+ 'target-under-alias' { $s=$s.Replace('target_len=10|target_hex='+(Hex 'target.txt'),'target_len=14|target_hex='+(Hex 'dir-link/child')) }
+ 'control' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=9|path_hex='+(Hex "file`nlink")) }
+ 'special' { $s=$s.Replace('path_len=9|path_hex='+(Hex 'file-link'),'path_len=9|path_hex='+(Hex 'file*link')) }
+ 'duplicate-row' { $m=[regex]::Match($s,'(?m)^path_len=.*\n'); $s=$s.Replace('records_end',$m.Value+'records_end') }
+ 'missing-row' { $s=[regex]::Replace($s,'(?m)^path_len=.*\n','',1) }
+ 'row-byte-length' { $s=$s.Replace('path_len=9|','path_len=8|') }
+ 'utf8' { $s=$s.Replace('path_hex=66696c652d6c696e6b','path_hex=ff696c652d6c696e6b') }
+ 'trailing-data' { $s+="trailer=1`n" }
+ 'crlf' { $s=$s.Replace("`n","`r`n") }
+ 'bound-receipt' { $s='x' * (8*1024*1024+1) }
+ 'digest' { }
+ default { throw 'unknown mutation' }
+}
+if ($env:CASE -notin @('crlf','bound-receipt')) {
+ $m=[regex]::Match($s,"(?s)records_begin`n(.*?)records_end")
+ $sha=[Security.Cryptography.SHA256]::Create()
+ $h=([BitConverter]::ToString($sha.ComputeHash($utf8.GetBytes($m.Groups[1].Value)))).Replace('-','').ToLowerInvariant()
+ $s=[regex]::Replace($s,'(?m)^records_sha256=.*','records_sha256='+$h)
+ if ($env:CASE -eq 'digest') { $s=$s.Replace('records_sha256=','records_sha256=0') }
+}
+[IO.File]::WriteAllText($env:BAD,$s,$utf8)
+PS
+for mutation in schema extra-header duplicate-header missing-header producer-hash policy-hash head root leading-zero count-overflow count-equation blocked-dirty flag kind state field-order metadata file-id final-path sha pending-metadata head-blob external nested case-collision duplicate-alias alias-cycle target-under-alias control special duplicate-row missing-row row-byte-length utf8 trailing-data crlf bound-receipt digest; do
+    case_name=$mutation
+    GOOD="$(cygpath -aw "$tmp/good")" BAD="$(cygpath -aw "$tmp/bad")" CASE="$mutation" powershell -NoProfile -NonInteractive -File "$(cygpath -aw "$tmp/mutate.ps1")" >"$tmp/error" 2>&1
+    receipt="$tmp/bad"; reject "$mutation"
+done
+receipt="$tmp/good"
+BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES=1 reject bound-entries
+printf retained >"$tmp/bound-entries-preserved.state"
+case_name=bound-entries-preserved
+if BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES=1 bootstrap_stage3_git_state \
+    "$repo" "$tmp/bound-entries-preserved.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then exit 1; fi
+test "$(cat "$tmp/bound-entries-preserved.state")" = retained
+test ! -s "$tmp/stdout"
+BOOTSTRAP_STAGE3_GIT_MAX_BYTES=1 reject bound-bytes
+BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1 reject bound-time
+BOOTSTRAP_STAGE3_GIT_MAX_ENTRIES=400001 reject bound-increase
+printf tampered >"$repo/bin/bb"
+reject pending-placeholder
+printf ../tools/bb-cli/bin/bb >"$repo/bin/bb"
+mkdir -p "$repo/tools/bb-cli/bin"
+printf appeared >"$repo/tools/bb-cli/bin/bb"
+reject pending-target-appeared
+rm "$repo/tools/bb-cli/bin/bb"
+cp "$repo/scripts/setup/windows-materialized-pending-policy.tsv" "$tmp/policy"
+printf '\n' >>"$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+reject held-policy-bytes
+cp "$tmp/policy" "$repo/scripts/setup/windows-materialized-pending-policy.tsv"
+rm "$repo/file-link"
+cp "$repo/target.txt" "$repo/file-link"
+reject copied-file-not-hardlink
+rm "$repo/file-link"
+ln "$repo/target.txt" "$repo/file-link"
+printf changed >>"$repo/target.txt"
+reject changed-target-sha-size
+printf 'file payload\n' >"$repo/target.txt"
+FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; New-Item -ItemType Junction -Path ([IO.Path]::Combine($env:FIXTURE_ROOT,"extra-junction")) -Target ([IO.Path]::Combine($env:FIXTURE_ROOT,"target-dir")) | Out-Null' >"$tmp/error" 2>&1
+reject unexpected-junction
+FIXTURE_ROOT="$(cygpath -aw "$repo")" powershell -NoProfile -NonInteractive -Command '$ErrorActionPreference="Stop"; [IO.Directory]::Delete([IO.Path]::Combine($env:FIXTURE_ROOT,"extra-junction"),$false)' >"$tmp/error" 2>&1
+mkdir -p "$repo/nested/.git"
+reject nested-repository
+rmdir "$repo/nested/.git" "$repo/nested"
+printf retained >"$tmp/collision.state"
+case_name=atomic-output-collision
+if bootstrap_stage3_git_state "$repo" "$tmp/collision.state" "$receipt" >"$tmp/stdout" 2>"$tmp/error"; then exit 1; fi
+test "$(cat "$tmp/collision.state")" = retained
+test ! -s "$tmp/stdout"
+echo 'bootstrap_stage3_git_state_materialized=true'

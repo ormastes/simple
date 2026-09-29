@@ -27,6 +27,9 @@ fn codegen_inline_asm_single_instruction_collects_cli() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["cli".to_string()],
             volatile: false,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -50,6 +53,9 @@ fn codegen_inline_asm_multi_instruction_collects_cli_hlt() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["cli".to_string(), "hlt".to_string()],
             volatile: false,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -74,6 +80,9 @@ fn native_inline_asm_x86_target_uses_intel_syntax() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["mov ax, 0x28".to_string(), "ltr ax".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -103,6 +112,9 @@ fn native_inline_asm_riscv_target_preserves_raw_instructions() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["wfi".to_string(), "j .".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -131,6 +143,9 @@ fn native_inline_asm_skips_unresolved_simple_operands() {
         block.instructions.push(MirInst::InlineAsm {
             instructions: vec!["mov {out}, cr3".to_string()],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -167,6 +182,9 @@ fn native_inline_asm_c_skips_simple_operand_directives() {
                 "options(nostack)".to_string(),
             ],
             volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
         });
         block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
         ret
@@ -201,13 +219,16 @@ fn main() -> i64:
         &body[0],
         HirStmt::InlineAsm {
             instructions,
-            volatile: true
+            volatile: true,
+            ..
         } if instructions == &vec!["sti".to_string()]
     ));
 }
 
 #[test]
-fn hir_operand_bound_inline_asm_remains_noop() {
+fn hir_operand_bound_inline_asm_lowers_with_operands() {
+    // Until 2026-08-28 an operand-bound block was silently DROPPED (this test
+    // pinned that as "remains_noop"). It now lowers with its operands.
     let body = lower_body(
         r#"
 fn main() -> i64:
@@ -216,5 +237,161 @@ fn main() -> i64:
     return 0
 "#,
     );
-    assert!(!body.iter().any(|stmt| matches!(stmt, HirStmt::InlineAsm { .. })));
+    assert!(body.iter().any(|stmt| matches!(
+        stmt,
+        HirStmt::InlineAsm { operands, .. } if operands.len() == 1
+    )));
+}
+
+/// Reproduce for
+/// `doc/08_tracking/bug/rv64_wm_inline_asm_blocks_arch_mixed_and_operands_unsubstituted_2026-09-01.md`
+/// defect 1. The inline-asm registry is process-global, so entry-closure
+/// discovery leaves x86 blocks in it even for a riscv64 build. RED before the
+/// fix: `block_matches_target` had only an x86 arm, so `in eax, dx`,
+/// `mov cr3, pd`, `out dx, eax` and `invlpg [addr]` were emitted into the
+/// riscv64 translation unit and the riscv64 assembler rejected all four
+/// ("unrecognized instruction mnemonic, did you mean: li?/mv?/not?",
+/// "unknown operand") — 8 of that gate's 18 errors.
+#[test]
+fn native_inline_asm_riscv_target_rejects_x86_blocks() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_x86_in_riscv_tu", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["in eax, dx".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["mov cr3, pd".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["out dx, eax".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["invlpg [addr]".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        // A genuinely riscv block must survive the same filter, so the test
+        // cannot pass by emitting nothing at all.
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["csrr t0, mhartid".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    for x86 in ["in eax, dx", "mov cr3, pd", "out dx, eax", "invlpg [addr]"] {
+        assert!(!c.contains(x86), "x86 asm leaked into the riscv64 TU: {x86}");
+    }
+    assert!(
+        c.contains("\"csrr t0, mhartid\\n\""),
+        "the riscv block must still be emitted, otherwise this test is vacuous"
+    );
+}
+
+/// The reverse arm must keep working: a riscv block stays out of an x86 TU,
+/// and an x86 block stays in it.
+#[test]
+fn native_inline_asm_x86_target_still_rejects_riscv_blocks() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_riscv_in_x86_tu", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["csrw mtvec, t0".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec!["cli".to_string(), "hlt".to_string()],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("x86_64-unknown-none", "", "")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(!c.contains("csrw mtvec, t0"), "riscv asm leaked into the x86_64 TU");
+    assert!(c.contains("\"hlt\\n\""), "the x86 block must still be emitted");
+}
+
+/// Defect 2, end to end through the emitter: a block-form operand placeholder
+/// now reaches the C sidecar with its braces intact, so the existing
+/// `has_unresolved_simple_operand` guard turns it into a skip comment instead
+/// of handing `csrr 0, mcause` to the riscv64 assembler.
+#[test]
+fn native_inline_asm_riscv_skips_block_form_operand_placeholders() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_riscv_operand_skip", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec![
+                "csrr {0}, mcause".to_string(),
+                "csrc mip, {msie}".to_string(),
+                "wfi".to_string(),
+            ],
+            volatile: true,
+            constraints: String::new(),
+            inputs: vec![],
+            outputs: vec![],
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c_for_target(
+        dir.path(),
+        Some(("riscv64-unknown-elf", "-march=rv64imac", "-mabi=lp64")),
+    )
+    .expect("write asm c")
+    .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(!c.contains("csrr 0, mcause"));
+    assert!(!c.contains("csrc mip, msie"));
+    assert!(c.contains("skipped Simple asm with unresolved operands"));
+    assert!(c.contains("\"wfi\\n\""), "unbound lines in the same block must survive");
 }

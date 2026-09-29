@@ -1,0 +1,99 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 80%
+# @tag: unit, engine2d, draw_ir, retained, damage
+
+use std.spec
+use std.gpu.engine2d.engine.Engine2D
+use common.ui.draw_ir.draw_ir_rect
+use common.ui.render_opt.damage_plan.{DamageFramePlan, DAMAGE_PLAN_LOCAL}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_composition_with_images,
+    engine2d_draw_ir_render_composition_damage_with_images,
+    engine2d_draw_ir_render_damage_with_images
+}
+use common.ui.draw_ir.{draw_ir_batch, draw_ir_composition, draw_ir_embedding_config, DRAW_IR_BACKEND_CPU}
+
+fn local_plan(rects: [i64]) -> DamageFramePlan:
+    DamageFramePlan(
+        rects: rects, mode: DAMAGE_PLAN_LOCAL,
+        source_tile_count: rects.len() / 4, output_rect_count: rects.len() / 4,
+        merged_tile_count: 0, dirty_pixels: 16, planned_pixels: 16,
+        tiles_examined: 0, vertical_candidates_examined: 0,
+        run_workspace_allocations: 0, full_fallback_count: 0,
+        fallback_reason: 0)
+
+fn empty_images() -> [Engine2dResolvedDrawIrImage]:
+    []
+
+describe "DrawIR retained local damage replay":
+    it "clears old pixels then replays the full list only under exact disjoint clips":
+        val engine = Engine2D.create_with_backend(8, 4, "software")
+        # Prior retained frame: background plus the old red location.
+        engine.draw_rect_filled(0, 0, 8, 4, 0xFFFFFFFF)
+        engine.draw_rect_filled(0, 0, 2, 2, 0xFFFF0000)
+        val commands = [
+            draw_ir_rect("background", 0, 0, 8, 4, 0xFFFFFFFF),
+            draw_ir_rect("moved", 4, 0, 2, 2, 0xFFFF0000)
+        ]
+        val outcome = engine2d_draw_ir_render_damage_with_images(
+            engine, commands, local_plan([0, 0, 2, 2, 4, 0, 2, 2]),
+            0u32, empty_images())
+        assert_true(outcome.accepted)
+        assert_true(outcome.rects_replayed == 2)
+        assert_true(outcome.ops_rendered == 4)
+        assert_true(outcome.readback.pixels[0] == 0xFFFFFFFF)
+        assert_true(outcome.readback.pixels[4] == 0xFFFF0000)
+        outcome.engine.shutdown()
+
+    it "rejects overlapping local rectangles before clearing or repainting":
+        val engine = Engine2D.create_with_backend(8, 4, "software")
+        engine.draw_rect_filled(0, 0, 1, 1, 0xFF123456)
+        val outcome = engine2d_draw_ir_render_damage_with_images(
+            engine, [draw_ir_rect("box", 0, 0, 4, 4, 0xFFFFFFFF)],
+            local_plan([0, 0, 3, 3, 2, 2, 3, 2]), 0u32, empty_images())
+        assert_true(not outcome.accepted)
+        assert_true(outcome.reason == "damage-plan-not-exact-local")
+        assert_true(outcome.readback.source == "not_requested")
+        assert_true(outcome.engine.read_pixels()[0] == 0xFF123456)
+        outcome.engine.shutdown()
+
+    it "returns the post-render engine explicitly for a retained full-frame owner":
+        val engine = Engine2D.create_with_backend(4, 4, "software")
+        val composition = draw_ir_composition("full", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("root", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 1000, false), [
+                    draw_ir_rect("box", 1, 1, 2, 2, 0xFF00FF00)
+                ])
+        ])
+        val result = engine2d_draw_ir_adv_composition_with_images(
+            engine, composition, false, empty_images())
+        assert_true(not result.fallback_required)
+        assert_true(result.retained_engine != nil)
+        val retained = result.retained_engine.unwrap()
+        assert_true(retained.read_pixels()[5] == 0xFF00FF00)
+        retained.shutdown()
+
+    it "rejects nonzero embedded batches until local damage carries batch identity":
+        val engine = Engine2D.create_with_backend(8, 5, "software")
+        engine.draw_rect_filled(0, 0, 8, 5, 0xFFFFFFFF)
+        engine.draw_rect_filled(2, 1, 3, 2, 0xFFFF0000)
+        val composition = draw_ir_composition("embedded", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("desktop", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("desktop", "desktop", 0, 0, 8, 5, 0, 1000, true), [
+                    draw_ir_rect("background", 0, 0, 8, 5, 0xFFFFFFFF)
+                ]),
+            draw_ir_batch("window", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config("window", "window", 2, 1, 3, 2, 1, 1000, true), [
+                    draw_ir_rect("window-body", 0, 0, 3, 2, 0xFF00FF00)
+                ])
+        ])
+        val outcome = engine2d_draw_ir_render_composition_damage_with_images(
+            engine, composition, local_plan([2, 1, 3, 2]), 0u32, empty_images())
+        assert_true(not outcome.accepted)
+        assert_true(outcome.reason == "damage-batch-requires-full-replay")
+        assert_true(outcome.readback.source == "not_requested")
+        # The rejected local attempt must not clear the candidate damage area;
+        # the retained owner will choose the full replay path next.
+        assert_true(outcome.engine.read_pixels()[2 + 1 * 8] == 0xFFFF0000)
+        assert_true(outcome.engine.read_pixels()[0] == 0xFFFFFFFF)
+        outcome.engine.shutdown()

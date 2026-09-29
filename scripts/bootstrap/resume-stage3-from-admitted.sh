@@ -11,10 +11,57 @@ bootstrap_stage3_error() {
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
-case "$source_output" in /*|*../*|../*|*/..|..) bootstrap_stage3_error "OUTPUT_DIR must be a repo-relative path without .. components: $source_output" ;; esac
-output="$root/$source_output"
-[ "$(CDPATH= cd -- "$output" && pwd -P)" = "$output" ] ||
-  bootstrap_stage3_error "OUTPUT_DIR is not a canonical existing directory: $output"
+
+# VERDICT-on-exit contract: every run of this script must end with exactly one
+# `VERDICT — ` line, so a killed/died background run is diagnosable from its
+# log alone instead of leaving nothing. bootstrap_resume_verdict_written guards
+# against a double write; bootstrap_resume_stage is the coarse step tracker the
+# trap reads. See doc/07_guide/tooling/bootstrap_options.md.
+bootstrap_resume_verdict_written=0
+bootstrap_resume_stage=init
+bootstrap_resume_log=
+bootstrap_resume_release_lock=1
+bootstrap_resume_lock_owned=0
+stage3_guard_unit=
+stage3_guard_evidence=
+bootstrap_resume_verdict() {
+  bootstrap_resume_verdict_written=1
+  line="VERDICT — $1"
+  echo "$line" >&2
+  if [ -n "${bootstrap_resume_log}" ]; then
+    echo "$line" >>"${bootstrap_resume_log}" 2>/dev/null || true
+  fi
+}
+bootstrap_resume_trap() {
+  status=${2:-$?}
+  sig=${1:-none}
+  if [ "$sig" != none ]; then
+    trap - HUP INT TERM
+    case "$sig" in HUP) status=129 ;; INT) status=130 ;; TERM) status=143 ;; esac
+    if [ -n "${stage3_guard_unit:-}" ]; then
+      bootstrap_stage3_memory_signal_cleanup "$stage3_guard_unit" \
+        "$stage3_guard_evidence" "${lock:-}" || true
+      # The helper either removed the lock after verified shutdown or retained
+      # it on failure. Never let the generic EXIT path override that decision.
+      bootstrap_resume_release_lock=0
+    fi
+  fi
+  if [ "${bootstrap_resume_verdict_written}" -eq 0 ]; then
+    bootstrap_resume_verdict "ABORTED: stage=${bootstrap_resume_stage} exit=${status} signal=${sig} reason=${bootstrap_resume_stage}"
+  fi
+  if [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
+     [ "${bootstrap_resume_release_lock:-1}" -eq 1 ]; then
+    rm -rf -- "$lock"
+  elif [ "${bootstrap_resume_lock_owned:-0}" -eq 1 ] &&
+       [ -n "${lock:-}" ] && { [ -e "$lock" ] || [ -L "$lock" ]; }; then
+    echo "ERROR: retaining ${lock:-output lock}: Stage 3 descendants were not proven stopped" >&2
+  fi
+  [ "$sig" = none ] || exit "$status"
+}
+trap 'bootstrap_resume_trap none' EXIT
+trap 'bootstrap_resume_trap HUP' HUP
+trap 'bootstrap_resume_trap INT' INT
+trap 'bootstrap_resume_trap TERM' TERM
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
@@ -24,6 +71,11 @@ export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
 . "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
 BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
 . "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+bootstrap_stage3_resume_output_path "$source_output" "$root" \
+  "${SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT:-}" ||
+  bootstrap_stage3_error "OUTPUT_DIR is not a canonical allowlisted directory: $source_output"
+output=$BOOTSTRAP_STAGE3_RESUME_OUTPUT
 planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
 [ -n "$planner_admission" ] || {
   echo "bootstrap-policy-error: planner-admission-v2-required" >&2; exit 64;
@@ -58,9 +110,16 @@ candidate="$stage3/simple$exe_suffix"
 manifest="$stage3/provenance.env"
 stage3_transcript="$stage3/stage3-command.transcript"
 stage3_log="$output/logs/$platform/stage3-native-build.log"
+bootstrap_resume_log="$stage3_log"
+bootstrap_resume_stage=stage2-verify
+stage3_status="$stage3/stage3-native-build-status.env"
 stage3_sanity="$stage3/stage3-sanity.env"
 stage2_cache="$stage3/stage2-native-cache"
 stage3_cache="$stage3/stage3-native-cache"
+# These caches are compiler-capsule caches only. Full-CLI and test-runner
+# closures must use separate producer-bound paths, conventionally:
+#   build/bootstrap/tool_cache/<phase>/<compiler-sha>/{full-cli,test-runner}
+# Never point two compiler generations at the same writable tool cache.
 home="$stage3/stage3-home"
 tmp="$stage3/stage3-tmp"
 source_before="$stage3/source-inputs-before.txt"
@@ -74,6 +133,232 @@ runtime_origin_after="$stage3/runtime-origin-after.txt"
 runtime_admitted="$stage3/runtime-admitted.txt"
 lock="$output.lock"
 archive="$stage3/attempts/recovery-threads1-$(date -u '+%Y%m%dT%H%M%S')-$$"
+mkdir -p -- "$(dirname "$archive")" || bootstrap_stage3_error "could not create recovery attempts directory"
+if [ -e "$archive" ] || [ -L "$archive" ]; then
+  [ -d "$archive" ] && [ ! -L "$archive" ] ||
+    bootstrap_stage3_error "recovery-threads1 must be a real directory: $archive"
+else
+  mkdir -- "$archive" ||
+    bootstrap_stage3_error "could not create recovery-threads1: $archive"
+fi
+[ "$(bootstrap_stage3_canonical_path "$archive")" = "$archive" ] ||
+  bootstrap_stage3_error "recovery-threads1 is not canonical: $archive"
+
+# A self-hosted native-build controller can contain a crashed worker, print the
+# worker's unsigned exit code, and still return shell status 0.  The recovery
+# wrapper is the supervising parent, so it must classify both channels before
+# any sanity or provenance receipt can be minted.
+bootstrap_stage3_resume_effective_status() {
+  bootstrap_stage3_resume_shell_status=$1
+  bootstrap_stage3_resume_log=$2
+  bootstrap_stage3_resume_candidate=$3
+  bootstrap_stage3_resume_worker_status=absent
+  bootstrap_stage3_resume_diagnostic_class=none
+  bootstrap_stage3_resume_signal_identity=none
+  case "$bootstrap_stage3_resume_shell_status" in
+    ''|*[!0-9]*|*[0-9][0-9][0-9][0-9]*) return 125 ;;
+  esac
+  [ "$bootstrap_stage3_resume_shell_status" -le 255 ] || return 125
+  { [ -f "$bootstrap_stage3_resume_log" ] &&
+    [ ! -L "$bootstrap_stage3_resume_log" ]; } || return 125
+
+  bootstrap_stage3_resume_worker_rows=$(grep -c \
+    '^error: native-build worker exited with code ' \
+    "$bootstrap_stage3_resume_log" || true)
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    bootstrap_stage3_resume_worker_status=$(sed -n \
+      's/^error: native-build worker exited with code \([0-9][0-9]*\)[.]$/\1/p' \
+      "$bootstrap_stage3_resume_log" | tail -n 1)
+    [ -n "$bootstrap_stage3_resume_worker_status" ] || \
+      bootstrap_stage3_resume_worker_status=malformed
+    bootstrap_stage3_resume_diagnostic_class=worker-nonzero-exit
+    if [ "$bootstrap_stage3_resume_worker_status" = 4294967295 ]; then
+      # Simple's process facade represents its signed -1 sentinel as u32 in
+      # this compiled lane. It means signal OR wait failure, not a known
+      # signal number; retain that distinction instead of inventing SIGSEGV.
+      bootstrap_stage3_resume_diagnostic_class=worker-signal-or-wait-failure
+      bootstrap_stage3_resume_signal_identity=unresolved-signal-or-wait-failure
+    fi
+  fi
+  if grep -q '^timeout: .* dumped core$' "$bootstrap_stage3_resume_log"; then
+    bootstrap_stage3_resume_diagnostic_class=worker-core-dump
+    bootstrap_stage3_resume_signal_identity=core-dump-signal-unspecified
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_shell_status" -ge 128 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-signal-exit
+    bootstrap_stage3_resume_signal_identity=signal-number-$((bootstrap_stage3_resume_shell_status - 128))
+  elif [ "$bootstrap_stage3_resume_shell_status" -ne 0 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-nonzero-exit
+  fi
+  [ "$bootstrap_stage3_resume_shell_status" -eq 0 ] || \
+    return "$bootstrap_stage3_resume_shell_status"
+  { [ -f "$bootstrap_stage3_resume_candidate" ] &&
+    [ ! -L "$bootstrap_stage3_resume_candidate" ] &&
+    [ -x "$bootstrap_stage3_resume_candidate" ]; } || {
+      bootstrap_stage3_resume_diagnostic_class=missing-executable-candidate
+      return 1
+    }
+  return 0
+}
+
+bootstrap_stage3_resume_write_status_receipt() {
+  bootstrap_stage3_resume_receipt=$1
+  bootstrap_stage3_resume_receipt_log=$2
+  bootstrap_stage3_resume_receipt_transcript=$3
+  bootstrap_stage3_resume_receipt_shell_status=$4
+  bootstrap_stage3_resume_receipt_effective_status=$5
+  bootstrap_stage3_resume_receipt_worker_status=$6
+  bootstrap_stage3_resume_receipt_requested_route=$7
+  bootstrap_stage3_resume_receipt_fallback_route=$8
+  bootstrap_stage3_resume_receipt_diagnostic_class=$9
+  shift 9
+  bootstrap_stage3_resume_receipt_signal_identity=$1
+  bootstrap_stage3_resume_receipt_tmp="${bootstrap_stage3_resume_receipt}.tmp.$$"
+  [ ! -L "$bootstrap_stage3_resume_receipt" ] || return 125
+  [ ! -e "$bootstrap_stage3_resume_receipt_tmp" ] &&
+    [ ! -L "$bootstrap_stage3_resume_receipt_tmp" ] || return 125
+  bootstrap_stage3_resume_receipt_result=fail
+  [ "$bootstrap_stage3_resume_receipt_effective_status" -ne 0 ] ||
+    bootstrap_stage3_resume_receipt_result=pass
+  {
+    echo schema=simple-bootstrap-stage3-native-build-status-v1
+    echo status="$bootstrap_stage3_resume_receipt_result"
+    echo shell_exit_status="$bootstrap_stage3_resume_receipt_shell_status"
+    echo effective_exit_status="$bootstrap_stage3_resume_receipt_effective_status"
+    echo worker_exit_status="$bootstrap_stage3_resume_receipt_worker_status"
+    echo requested_route="$bootstrap_stage3_resume_receipt_requested_route"
+    echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
+    echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
+    echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
+    echo log_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_log")"
+    echo transcript_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_transcript")"
+  } >"$bootstrap_stage3_resume_receipt_tmp" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+  mv "$bootstrap_stage3_resume_receipt_tmp" \
+    "$bootstrap_stage3_resume_receipt" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+}
+
+# A self-hosted native-build controller can contain a crashed worker, print the
+# worker's unsigned exit code, and still return shell status 0.  The recovery
+# wrapper is the supervising parent, so it must classify both channels before
+# any sanity or provenance receipt can be minted.
+bootstrap_stage3_resume_effective_status() {
+  bootstrap_stage3_resume_shell_status=$1
+  bootstrap_stage3_resume_log=$2
+  bootstrap_stage3_resume_candidate=$3
+  bootstrap_stage3_resume_worker_status=absent
+  bootstrap_stage3_resume_diagnostic_class=none
+  bootstrap_stage3_resume_signal_identity=none
+  case "$bootstrap_stage3_resume_shell_status" in
+    ''|*[!0-9]*|*[0-9][0-9][0-9][0-9]*) return 125 ;;
+  esac
+  [ "$bootstrap_stage3_resume_shell_status" -le 255 ] || return 125
+  { [ -f "$bootstrap_stage3_resume_log" ] &&
+    [ ! -L "$bootstrap_stage3_resume_log" ]; } || return 125
+
+  bootstrap_stage3_resume_worker_rows=$(grep -c \
+    '^error: native-build worker exited with code ' \
+    "$bootstrap_stage3_resume_log" || true)
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    bootstrap_stage3_resume_worker_status=$(sed -n \
+      's/^error: native-build worker exited with code \([0-9][0-9]*\)[.]$/\1/p' \
+      "$bootstrap_stage3_resume_log" | tail -n 1)
+    [ -n "$bootstrap_stage3_resume_worker_status" ] || \
+      bootstrap_stage3_resume_worker_status=malformed
+    bootstrap_stage3_resume_diagnostic_class=worker-nonzero-exit
+    if [ "$bootstrap_stage3_resume_worker_status" = 4294967295 ]; then
+      # Simple's process facade represents its signed -1 sentinel as u32 in
+      # this compiled lane. It means signal OR wait failure, not a known
+      # signal number; retain that distinction instead of inventing SIGSEGV.
+      bootstrap_stage3_resume_diagnostic_class=worker-signal-or-wait-failure
+      bootstrap_stage3_resume_signal_identity=unresolved-signal-or-wait-failure
+    fi
+  fi
+  if grep -q '^timeout: .* dumped core$' "$bootstrap_stage3_resume_log"; then
+    bootstrap_stage3_resume_diagnostic_class=worker-core-dump
+    bootstrap_stage3_resume_signal_identity=core-dump-signal-unspecified
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_worker_rows" -ne 0 ]; then
+    return 1
+  fi
+  if [ "$bootstrap_stage3_resume_shell_status" -ge 128 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-signal-exit
+    bootstrap_stage3_resume_signal_identity=signal-number-$((bootstrap_stage3_resume_shell_status - 128))
+  elif [ "$bootstrap_stage3_resume_shell_status" -ne 0 ]; then
+    bootstrap_stage3_resume_diagnostic_class=shell-nonzero-exit
+  fi
+  [ "$bootstrap_stage3_resume_shell_status" -eq 0 ] || \
+    return "$bootstrap_stage3_resume_shell_status"
+  { [ -f "$bootstrap_stage3_resume_candidate" ] &&
+    [ ! -L "$bootstrap_stage3_resume_candidate" ] &&
+    [ -x "$bootstrap_stage3_resume_candidate" ]; } || {
+      bootstrap_stage3_resume_diagnostic_class=missing-executable-candidate
+      return 1
+    }
+  return 0
+}
+
+bootstrap_stage3_resume_write_status_receipt() {
+  bootstrap_stage3_resume_receipt=$1
+  bootstrap_stage3_resume_receipt_log=$2
+  bootstrap_stage3_resume_receipt_transcript=$3
+  bootstrap_stage3_resume_receipt_shell_status=$4
+  bootstrap_stage3_resume_receipt_effective_status=$5
+  bootstrap_stage3_resume_receipt_worker_status=$6
+  bootstrap_stage3_resume_receipt_requested_route=$7
+  bootstrap_stage3_resume_receipt_fallback_route=$8
+  bootstrap_stage3_resume_receipt_diagnostic_class=$9
+  shift 9
+  bootstrap_stage3_resume_receipt_signal_identity=$1
+  bootstrap_stage3_resume_receipt_tmp="${bootstrap_stage3_resume_receipt}.tmp.$$"
+  [ ! -L "$bootstrap_stage3_resume_receipt" ] || return 125
+  [ ! -e "$bootstrap_stage3_resume_receipt_tmp" ] &&
+    [ ! -L "$bootstrap_stage3_resume_receipt_tmp" ] || return 125
+  bootstrap_stage3_resume_receipt_result=fail
+  [ "$bootstrap_stage3_resume_receipt_effective_status" -ne 0 ] ||
+    bootstrap_stage3_resume_receipt_result=pass
+  {
+    echo schema=simple-bootstrap-stage3-native-build-status-v1
+    echo status="$bootstrap_stage3_resume_receipt_result"
+    echo shell_exit_status="$bootstrap_stage3_resume_receipt_shell_status"
+    echo effective_exit_status="$bootstrap_stage3_resume_receipt_effective_status"
+    echo worker_exit_status="$bootstrap_stage3_resume_receipt_worker_status"
+    echo requested_route="$bootstrap_stage3_resume_receipt_requested_route"
+    echo fallback_route="$bootstrap_stage3_resume_receipt_fallback_route"
+    echo diagnostic_class="$bootstrap_stage3_resume_receipt_diagnostic_class"
+    echo signal_identity="$bootstrap_stage3_resume_receipt_signal_identity"
+    echo preflight_receipt_path="${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:?authoritative preflight receipt is required}"
+    echo preflight_receipt_sha256="$(bootstrap_stage3_hash_file \
+      "${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT}")"
+    echo log_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_log")"
+    echo transcript_sha256="$(bootstrap_stage3_hash_file \
+      "$bootstrap_stage3_resume_receipt_transcript")"
+  } >"$bootstrap_stage3_resume_receipt_tmp" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+  mv "$bootstrap_stage3_resume_receipt_tmp" \
+    "$bootstrap_stage3_resume_receipt" || {
+    rm -f "$bootstrap_stage3_resume_receipt_tmp"
+    return 125
+  }
+}
 
 for required in "$stage2" "$admitted" "$stage2_admission" "$seed" "$stamp" "$native_all" \
   "$stage2_sanity" "$stage2_receiver" "$stage2_receiver_log" \
@@ -106,50 +391,145 @@ stage2_compile_stack_mib=$(bootstrap_stage3_transcript_argv_value_after \
   "$stage2_transcript" --compile-stack-mib 2>/dev/null || true)
 stage2_progress=$(bootstrap_stage3_transcript_explicit_env_value \
   "$stage2_transcript" SIMPLE_BUILD_PROGRESS_EVENTS) || exit 1
-stage2_rust_log=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" RUST_LOG) || exit 1
-stage2_library_path=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" LIBRARY_PATH) || exit 1
-stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256) || exit 1
+# The link-compat shim is host-conditional: bootstrap-from-scratch.sh points
+# LIBRARY_PATH at build/bootstrap/stage3/<platform>/link-compat and records the
+# shim digest whenever it builds one, and the empty/"absent" pair when it does
+# not. Both values are part of the Stage-2 build-args vector the admission
+# receipt commits to, so they must be READ BACK from the transcript exactly like
+# the backend/threads/progress values above. They were hardcoded here as "" and
+# "absent", which silently assumed a no-shim host: on any host that DOES build
+# the shim, the reconstructed vector hashed differently from the recorded one
+# and Stage 3 resume could never start -- and it failed as a bare `return 1`
+# under `set -eu`, printing nothing at all.
+stage2_library_path=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" LIBRARY_PATH) || exit 1
+stage2_link_compat=$(bootstrap_stage3_transcript_explicit_env_value \
+  "$stage2_transcript" SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256) || exit 1
 case "$stage2_backend" in llvm|llvm-lib|cranelift) ;; *) exit 1 ;; esac
 case "$stage2_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
 case "$stage2_compile_stack_mib" in ''|*[!0-9]*|0) stage2_compile_stack_mib='' ;; esac
-# Preserve the legacy environment order and add cache pairs only if their
-# complete, unambiguous values were actually recorded by the new producer.
-set -- "RUST_LOG=$stage2_rust_log" "LIBRARY_PATH=$stage2_library_path" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
-  "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
-  "SIMPLE_NATIVE_BUILD_RUST=1" "SIMPLE_NO_STUB_FALLBACK=1" \
-  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress"
-stage2_cache_replay_file="$output/stage2-cache-replay.$$.args"
-bootstrap_cache_release_stage2_cache_assignments_v1 "$stage2_transcript" > "$stage2_cache_replay_file" || {
-  rm -f "$stage2_cache_replay_file"
-  bootstrap_stage3_error 'Stage2 cache fields incomplete, duplicated or malformed'
+bootstrap_preflight_receipt=${SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT:-"$output/bootstrap-preflight.env"}
+bootstrap_preflight_expected_config="platform=${platform};backend=${stage2_backend};mode=dynload;lane=full-bootstrap"
+sh "$root/scripts/check/check-bootstrap-preflight.shs" \
+  --seed="$seed" --expect-config="$bootstrap_preflight_expected_config" \
+  --verify-receipt="$bootstrap_preflight_receipt" || {
+  echo "bootstrap-policy-error: admitted Stage 3 resume lacks current authoritative preflight evidence" >&2
+  exit 64
 }
-while IFS= read -r stage2_cache_assignment; do
-  set -- "$@" "$stage2_cache_assignment"
-done < "$stage2_cache_replay_file"
-rm -f "$stage2_cache_replay_file"
-set -- "$@" "SIMPLE_BINARY=$seed" native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --source src/compiler --source src/app \
-  --source src/lib --entry-closure --threads "$stage2_threads"
-if [ -n "$stage2_compile_stack_mib" ]; then
-  set -- "$@" --compile-stack-mib "$stage2_compile_stack_mib"
+SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT=$bootstrap_preflight_receipt
+export SIMPLE_BOOTSTRAP_PREFLIGHT_RECEIPT
+# The Stage-2 build-args vector is reconstructed from the RECORDED transcript --
+# every env VALUE and the argv verbatim -- not from a hand-written copy of
+# bootstrap-from-scratch.sh:2827. The hand-written copy was stale in both halves
+# and no Stage 3 resume could verify any Stage 2 the current engine produces:
+#
+#   env  -- it omitted SIMPLE_ABI_POLICY, SIMPLE_PLUGIN_MANIFEST_POLICY,
+#           SIMPLE_KERNEL_K1_POLICY, SIMPLE_COVERAGE_CUTOVER_STATE,
+#           SIMPLE_K1_COMPOSITION_SHA256_BEFORE, SIMPLE_FRONTEND_CACHE,
+#           SIMPLE_FRONTEND_CACHE_DIR,
+#           SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE and
+#           SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT, all of which the engine
+#           hashes;
+#   argv -- it omitted the k1 composition `--source <repo>/src/compositions/
+#           kernel_llvm_cranelift`, which the engine passes FIRST.
+#
+# Measured on the macOS Stage 2 admitted 2026-09-13: the hand-list computed
+# e0b89ae21d0a…, the receipt recorded 126998d2176d…, and Stage 3 refused with
+# `bootstrap-stage3-admission-mismatch: build_args_sha256`. Rebuilt from the
+# transcript the two are identical. The env NAMES and their order stay pinned
+# here (they are the engine's vector, and
+# bootstrap_stage3_stage2_canonical_env_names is the allowlist); only the values
+# and the argv come from the transcript, so a future engine change to a VALUE or
+# to argv can no longer rot this reconstruction. The recorded digest remains the
+# authority -- this makes the recomputation faithful, it does not relax it.
+set --
+while IFS= read -r stage2_transcript_line; do
+  case "$stage2_transcript_line" in argv:*) ;; *) continue ;; esac
+  stage2_transcript_argv=${stage2_transcript_line#argv:}
+  stage2_transcript_argv=${stage2_transcript_argv#*:}
+  set -- "$@" "$stage2_transcript_argv"
+done <"$stage2_transcript"
+[ "$#" -gt 0 ] || exit 1
+[ "$1" = native-build ] || exit 1
+stage2_env_value() {
+  bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
+}
+bootstrap_stage2_darwin_env=
+case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
+# Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
+# bootstrap_windows_{abi,cc,include,lib,libpath}_env between the Darwin tool
+# vector and SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE. Without them every
+# Windows Stage 3 resume refused with `bootstrap-stage3-admission-mismatch:
+# build_args_sha256`. CC is carried exactly when the engine recorded it (always
+# on MSVC, only for an explicit MinGW driver on GNU).
+bootstrap_stage2_windows_env=
+bootstrap_stage2_msvc_env=
+bootstrap_stage2_windows_cc=
+case "$platform" in
+  *windows-msvc*) bootstrap_stage2_windows_env=1 bootstrap_stage2_msvc_env=1 ;;
+  *windows-gnu*) bootstrap_stage2_windows_env=1 ;;
+esac
+if [ -n "$bootstrap_stage2_windows_env" ] &&
+   bootstrap_stage2_windows_cc_value=$(stage2_env_value CC); then
+  bootstrap_stage2_windows_cc="CC=$bootstrap_stage2_windows_cc_value"
 fi
-stage2_verbose_count=$(grep -c '^argv:9:--verbose$' "$stage2_transcript" || true)
-case "$stage2_verbose_count" in 0) ;; 1) set -- "$@" --verbose ;; *) exit 1 ;; esac
-set -- "$@" --cache-dir "$stage2_cache" --mode dynload --entry src/app/cli/bootstrap_main.spl \
-  --runtime-path "$runtime" -o "$stage2"
-stage2_args=$(bootstrap_stage3_args_sha256 "$@") || exit 1
+stage2_args=$(bootstrap_stage3_args_sha256 \
+  "SIMPLE_LLVM_BIN=$(stage2_env_value SIMPLE_LLVM_BIN)" \
+  "SIMPLE_LLVM_PATH=$(stage2_env_value SIMPLE_LLVM_PATH)" \
+  "MIMALLOC_EAGER_COMMIT=$(stage2_env_value MIMALLOC_EAGER_COMMIT)" \
+  "MIMALLOC_ARENA_EAGER_COMMIT=$(stage2_env_value MIMALLOC_ARENA_EAGER_COMMIT)" \
+  "MIMALLOC_PURGE_DELAY=$(stage2_env_value MIMALLOC_PURGE_DELAY)" \
+  "MIMALLOC_PURGE_DECOMMITS=$(stage2_env_value MIMALLOC_PURGE_DECOMMITS)" \
+  "LLVM_SYS_231_PREFIX=$(stage2_env_value LLVM_SYS_231_PREFIX)" \
+  "PATH=$(stage2_env_value PATH)" \
+  "RUST_LOG=$(stage2_env_value RUST_LOG)" \
+  "LIBRARY_PATH=$stage2_library_path" \
+  "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=$stage2_link_compat" \
+  "SIMPLE_BOOTSTRAP=1" \
+  "SIMPLE_ABI_POLICY=$(stage2_env_value SIMPLE_ABI_POLICY)" \
+  "SIMPLE_PLUGIN_MANIFEST_POLICY=$(stage2_env_value SIMPLE_PLUGIN_MANIFEST_POLICY)" \
+  "SIMPLE_KERNEL_K1_POLICY=$(stage2_env_value SIMPLE_KERNEL_K1_POLICY)" \
+  "SIMPLE_COVERAGE_CUTOVER_STATE=$(stage2_env_value SIMPLE_COVERAGE_CUTOVER_STATE)" \
+  "SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$(stage2_env_value SIMPLE_K1_COMPOSITION_SHA256_BEFORE)" \
+  "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+  "SIMPLE_NATIVE_BUILD_RUST=1" \
+  "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
+  "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
+  "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
+  ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
+  ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
+  ${bootstrap_stage2_darwin_env:+"LD=$(stage2_env_value LD)"} \
+  ${bootstrap_stage2_darwin_env:+"LLVM_CONFIG=$(stage2_env_value LLVM_CONFIG)"} \
+  ${bootstrap_stage2_darwin_env:+"SIMPLE_LLVM_REQUIRED_VERSION=$(stage2_env_value SIMPLE_LLVM_REQUIRED_VERSION)"} \
+  ${bootstrap_stage2_windows_env:+"SIMPLE_WINDOWS_ABI=$(stage2_env_value SIMPLE_WINDOWS_ABI)"} \
+  ${bootstrap_stage2_windows_env:+"SIMPLE_LINKER_FLAVOR=$(stage2_env_value SIMPLE_LINKER_FLAVOR)"} \
+  ${bootstrap_stage2_windows_cc:+"$bootstrap_stage2_windows_cc"} \
+  ${bootstrap_stage2_msvc_env:+"INCLUDE=$(stage2_env_value INCLUDE)"} \
+  ${bootstrap_stage2_msvc_env:+"LIB=$(stage2_env_value LIB)"} \
+  ${bootstrap_stage2_msvc_env:+"LIBPATH=$(stage2_env_value LIBPATH)"} \
+  "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
+  "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
+  "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
+  "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
-  "$stage2_sanity" "$stage2" "$root"
+  "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
+  "$stage2" "$root"
 bootstrap_stage3_verify_receiver_evidence_receipt \
-  "$stage2_receiver" "$stage2" "$runtime_admitted" "$stage2_receiver_log"
+  "$stage2_receiver" "$stage2_receiver" "$stage2" "$stage2" \
+  "$runtime_admitted" "$runtime_admitted" "$stage2_receiver_log" "$stage2_receiver_log"
 bootstrap_stage3_verify_stage2_admission_receipt \
-  "$stage2_admission" "$admitted" "$source_before" "$runtime_admitted" \
-  "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_receiver" "$root"
+  "$stage2_admission" "$stage2_admission" "$admitted" "$admitted" \
+  "$source_before" "$source_before" "$runtime_admitted" "$runtime_admitted" \
+  "$runtime" "$runtime" \
+  "$tool_before" "$tool_before" "$stage2_args" "$stage2_sanity" "$stage2_sanity" \
+  "$(dirname -- "$stage2_sanity")" "$stage2_receiver" "$stage2_receiver" \
+  "$stage2_receiver_log" "$stage2_receiver_log" "$root"
 path=$(bootstrap_stage3_transcript_host_value "$stage2_transcript" PATH)
 cmp -s "$runtime_origin_before" "$runtime_origin_after"
 cmp -s "$runtime_origin_after" "$runtime_admitted"
 runtime_check="$archive/runtime-preflight.$$"
-mkdir -p "$archive"
 bootstrap_stage3_directory_snapshot "$runtime_check" "$runtime"
 cmp -s "$runtime_admitted" "$runtime_check"
 rm -f "$runtime_check"
@@ -164,36 +544,55 @@ resume_tool_check="$archive/tool-preflight.$$"
 bootstrap_stage3_source_snapshot "$resume_source_check" "$root"
 bootstrap_stage3_git_state "$root" "$resume_git_check"
 bootstrap_stage3_tool_authority_snapshot "$resume_tool_check" "$path" "$root"
-cmp -s "$source_before" "$resume_source_check"
-cmp -s "$git_before" "$resume_git_check"
-cmp -s "$tool_before" "$resume_tool_check"
+# Each cmp IS the refusal: a bare 'cmp -s' under 'set -eu' aborts the script
+# when the snapshots differ.  That enforcement is correct and is unchanged
+# below -- what was missing is the reason.  Measured 2026-09-03: a resume whose
+# only drift was a moved git HEAD ran its full ~13-minute preflight and exited 1
+# having printed NOTHING, which is exactly the silent-exit failure this file's
+# own header names as having made a real Stage-2 refusal undiagnosable.  Saying
+# which of source/git/tool differs turns a blind 13-minute run into a one-line
+# answer.  Same exit status and same abort point as before; only stderr gains a
+# line.  CROSS-PLATFORM IMPACT: none, nothing here is OS-dependent.
+cmp -s "$source_before" "$resume_source_check" || {
+  echo "error: Stage-2 source snapshot changed since admission: $source_before differs from $resume_source_check" >&2
+  exit 1
+}
+cmp -s "$git_before" "$resume_git_check" || {
+  echo "error: Stage-2 git state changed since admission: $git_before differs from $resume_git_check (re-mint Stage 2 over the current tree)" >&2
+  exit 1
+}
+cmp -s "$tool_before" "$resume_tool_check" || {
+  echo "error: Stage-2 tool authority changed since admission: $tool_before differs from $resume_tool_check" >&2
+  exit 1
+}
 rm -f "$resume_source_check" "$resume_git_check" "$resume_tool_check"
 
-if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate" >/dev/null 2>&1; then
+if [ -f "$manifest" ] && bootstrap_stage3_verify_manifest \
+  "$manifest" "$manifest" "$root" "$candidate" "$candidate" \
+  "${manifest}.authority-map.env" >/dev/null 2>&1; then
   echo "error: canonical Stage 3 already converged: $manifest" >&2
   exit 1
 fi
 mkdir "$lock" || { echo "error: bootstrap output is locked: $lock" >&2; exit 1; }
+bootstrap_resume_lock_owned=1
 printf '%s\n' "$$" >"$lock/pid"
+bootstrap_resume_stage=stage3-build
 bootstrap_release_resume_cleanup() {
   resume_status=$?
-  bootstrap_cache_release_all
-  for terminal in "$stage3_log" "$stage3_transcript" "$stage3_sanity" "$manifest"; do
+  bootstrap_cache_release_all || resume_status=1
+  for terminal in "$stage3_log" "$stage3_transcript" "$stage3_status" "$stage3_sanity" "$manifest"; do
     [ ! -f "$terminal" ] || cp -p "$terminal" "$archive/terminal.${terminal##*/}"
   done
   bootstrap_cache_freeze_attempt "$archive" || resume_status=1
-  rm -rf -- "$lock"
+  bootstrap_resume_trap none "$resume_status"
   exit "$resume_status"
 }
 trap bootstrap_release_resume_cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
 
-for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"; do
+for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"; do
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
-rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_sanity" "$manifest"
+rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"
 bootstrap_cache_new_path_validate "$stage3_cache" || bootstrap_stage3_error 'noncanonical stage3 cache selection'
 mkdir -p "$home" "$tmp" "$(dirname "$stage3_log")"
 
@@ -234,35 +633,138 @@ seed_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint "$stamp")
 progress="$output/bootstrap-build-progress.events"
 memory_snapshot="$stage3/memory-snapshot-v1.$$.events"
 phase_profile="$stage3/phase-profile.$$.events"
+memory_admission="$stage3/memory-admission.$$.env"
 evidence_run_id="stage3-${platform}-$$"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
+[ ! -e "$memory_admission" ] && [ ! -L "$memory_admission" ] || exit 1
+
+# The 2026-09-22 aarch64 recovery retained 37.3 GiB after its 841-surface
+# parse, then became the global-OOM victim while peer native builds filled the
+# user slice to 126.8 GiB.  Reserve enough host headroom for that observed
+# working set and reject native-build/QEMU overlap before starting the runner.
+: "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"
+export SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB
+# This is deliberately distinct from required free host headroom.  It is a
+# race-resistant per-process virtual-memory ceiling: even if a peer starts
+# after the final process scan, this compiler cannot consume the whole user
+# slice.  50 GiB is above the incident's 42.7-GiB virtual / 37.3-GiB resident
+# working set, while still leaving host recovery margin.
+: "${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB:=51200}"
+case "$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB" in
+  ''|*[!0-9]*|0) bootstrap_stage3_error "invalid Stage 3 process max MiB" ;;
+esac
+stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
+bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
+  bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
+bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" ||
+  bootstrap_stage3_error "concurrent heavy process admission refused; see $memory_admission"
+stage3_guard_watch=disabled-platform
+case "$platform" in
+  *-linux-*)
+    command -v systemd-run >/dev/null 2>&1 &&
+      command -v systemctl >/dev/null 2>&1 &&
+      command -v timeout >/dev/null 2>&1 &&
+      timeout -k 1 3 systemctl --user show-environment >/dev/null 2>&1 ||
+      bootstrap_stage3_error 'systemd user cgroup containment unavailable'
+    stage3_guard_watch=linux-proc-memavailable
+    stage3_guard_unit="simple-bootstrap-stage3-$(date +%s)-$$.service"
+    stage3_guard_evidence="$memory_admission"
+    [ "$(timeout -k 1 3 systemctl --user show "$stage3_guard_unit" \
+        --property=LoadState --value 2>/dev/null)" = not-found ] ||
+      bootstrap_stage3_error 'Stage 3 cgroup unit name collision'
+    ;;
+esac
+{
+  echo "required_host_headroom_mib=$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB"
+  echo "process_virtual_memory_max_mib=$SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB"
+  echo "runtime_headroom_watch=$stage3_guard_watch"
+} >>"$memory_admission"
 
 # See bootstrap_stage3_diagnostic_env in
 # scripts/check/lib/bootstrap-stage3/authority.shs.  Computed once, word-split
 # into both the args hash and the real invocation so they cannot diverge; empty
 # unless an allowlisted print-only probe var is set to exactly 1.
 stage3_diagnostic_env=$(bootstrap_stage3_diagnostic_env) || exit 1
+# Opt-in parallelism / per-file timeout for the Stage 3 recompile.  Unset
+# reproduces the pinned `--threads 1` argv byte-for-byte.  Baked into both the
+# args hash and the transcribed invocation (the child runs under `env -i`, so
+# an outer variable would never reach it).  `full` = online CPUs.
+stage3_threads=${SIMPLE_NATIVE_BUILD_THREADS:-1}
+[ "$stage3_threads" != full ] ||
+  stage3_threads=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 1)
+case "$stage3_threads" in ''|*[!0-9]*|0) exit 1 ;; esac
+stage3_requested_route=direct
+stage3_fallback_route=none
+if [ "$stage3_threads" -gt 1 ]; then
+  stage3_requested_route=coordinator
+  stage3_fallback_route=direct
+fi
+stage3_timeout_args=
+case "${SIMPLE_NATIVE_FILE_TIMEOUT:-}" in
+  '') ;;
+  *[!0-9]*) exit 1 ;;
+  *) stage3_timeout_args="--timeout $SIMPLE_NATIVE_FILE_TIMEOUT" ;;
+esac
+# Allocatable mission-critical mode for the Stage 3 recompile (step 1,
+# 2026-08-28).  OPT-IN: `SIMPLE_STAGE3_MISSION_CRITICAL=1` pins the assurance
+# profile to `critical` (driver_types.spl reads SIMPLE_SAFETY_PROFILE into
+# CompileContext.assurance_policy; the safety pass DENIES at critical) and
+# turns the WARNING PHASE on (driver_safety_severity.safety_pass_severity_phased
+# drops that Deny to Warn), so the recompile stays green while every violation
+# is printed.  Unset reproduces the pinned argv byte-for-byte.  Baked into both
+# the args hash and the transcribed invocation, exactly like the threads knob
+# above, because the child runs under `env -i`.  Flipping this to default-on is
+# the "mission-critical default for phase 3" lane and is deliberately NOT done
+# here: it changes the Stage 3 args hash for every existing admission receipt.
+stage3_mc_env=
+case "${SIMPLE_STAGE3_MISSION_CRITICAL:-}" in
+  '') ;;
+  1) stage3_mc_env="SIMPLE_SAFETY_PROFILE=critical SIMPLE_ASSURANCE_WARNING_PHASE=1" ;;
+  *) echo "error: SIMPLE_STAGE3_MISSION_CRITICAL must be unset or exactly 1" >&2; exit 1 ;;
+esac
+# One-time SCV compile-event-journal cold init for the Stage 3 recompile.
+# OPT-IN, same shape as stage3_mc_env above.  The compiler's own admission
+# (src/app/compiler_entrypoint/inventory_events.spl:207) fails closed on a
+# checkout with no event cursor and PRESCRIBES
+# `SIMPLE_SCV_INVENTORY_COLD_INIT=1` -- but the Stage 3 child runs under
+# `env -i`, so an outer export never reached it and the prescribed remedy was
+# unreachable (2026-09-14, F74 Stage 3 runs 3 and 4: identical
+# `SCV-E-ADMISSION: compile-event-journal-missing` with the variable set).
+# This is an explicit, single-variable pass-through -- NOT a blanket env leak:
+# the value is validated to be exactly `1` and is baked into BOTH the args
+# hash and the transcribed invocation, so unset reproduces the pinned argv
+# byte-for-byte and an existing admission receipt is unaffected.
+stage3_cold_init_env=
+case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+  '') ;;
+  1) stage3_cold_init_env="SIMPLE_SCV_INVENTORY_COLD_INIT=1" ;;
+  *) echo "error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1" >&2; exit 1 ;;
+esac
 stage3_args=$(bootstrap_stage3_args_sha256 \
   "RUST_LOG=error" "LIBRARY_PATH=" "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent" \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
-  "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
-  "SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
+  "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
+  "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
+  "SIMPLE_FRONTEND_CACHE=0" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
+  "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
+  ${stage3_mc_env} ${stage3_cold_init_env} \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
   "SIMPLE_MEM_SNAPSHOT_FILE=$memory_snapshot" \
   "SIMPLE_EVIDENCE_RUN_ID=$evidence_run_id" \
   "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
-  "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
+  "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=$stage3_threads" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
   "SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap" "SIMPLE_BINARY=$admitted" \
   ${stage3_diagnostic_env} \
   native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
+  --runtime-bundle core-c-bootstrap --threads "$stage3_threads" \
+  ${stage3_timeout_args} --cache-dir "$stage3_cache" \
   --mode dynload --runtime-path "$runtime" -o "$candidate" \
   src/app/cli/bootstrap_main.spl)
 
@@ -270,37 +772,147 @@ bootstrap_planner_v2_verify_parent_compiler_binding \
   "$planner_admission" "$stage2" "$admitted" || exit 64
 
 set +e
-bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
-  "$home" "$tmp" "$path" RUST_LOG=error LIBRARY_PATH= \
-  SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
-  SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_STAGE3_STREAMING_SURFACES=1 \
-  SIMPLE_FRONTEND_CACHE=1 "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
-  SIMPLE_HIR_CACHE=1 "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
-  MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=0 SIMPLE_NATIVE_ARENA_DECLS=1 \
-  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
-  SIMPLE_COMPILER_PHASE_PROFILE=1 \
-  SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
-  SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
-  SIMPLE_EVIDENCE_RUN_ID="$evidence_run_id" \
-  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-  SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
-  SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \
-  SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_BINARY="$admitted" \
-  ${stage3_diagnostic_env} -- \
-  "$admitted" native-build --target "$platform" --backend "$stage2_backend" \
-  --runtime-bundle core-c-bootstrap --threads 1 --cache-dir "$stage3_cache" \
-  --mode dynload --runtime-path "$runtime" -o "$candidate" \
-  src/app/cli/bootstrap_main.spl
-status=$?
-set -e
-bootstrap_cache_report_log "$stage3_log"
-if [ "$status" -ne 0 ]; then
-  exit "$status"
+worker="$root/scripts/bootstrap/lib/stage3-native-build-worker.sh"
+[ -x "$worker" ] || bootstrap_stage3_error "Stage 3 cgroup worker is not executable: $worker"
+stage3_timeout_seconds=${SIMPLE_NATIVE_FILE_TIMEOUT:-}
+if [ "$stage3_guard_watch" = linux-proc-memavailable ]; then
+  systemd-run --user --quiet --wait --collect --unit="$stage3_guard_unit" \
+    --property=KillMode=control-group \
+    --property="MemoryHigh=${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB}M" \
+    --property="MemoryMax=${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB}M" \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+elif case "$platform" in *-apple-darwin*) true ;; *) false ;; esac; then
+  # Darwin has no cgroup and rejects RLIMIT_AS, so the worker skips `ulimit -v`.
+  # The watchdog must honor a Stage 3 process cap configured below the tree
+  # cap, while retaining the stricter existing tree cap by default.
+  # Stage 3 compiles the whole compiler in one process; 6 GB tripped in HIR on
+  # a 24 GB M4. macOS Stage 3 defaults to 7 GB (7e9 bytes). Export it so the
+  # transcribed-run watchdog inside the worker applies the same tree cap.
+  : "${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:=6835937}"
+  export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+  stage3_darwin_rss_cap_kib=$(bootstrap_stage3_memory_darwin_rss_cap_kib \
+    "$stage3_process_max_kib" \
+    "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB") ||
+    bootstrap_stage3_error 'invalid Darwin Stage 3 RSS cap'
+  stage3_darwin_rss_session_mode=$(bootstrap_stage3_memory_darwin_session_mode)
+  perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+    --session-mode="$stage3_darwin_rss_session_mode" \
+    --rss-cap-mode="${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+    --max-rss-kib="$stage3_darwin_rss_cap_kib" \
+    --interval-ms="${SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS:-100}" \
+    --receipt="$stage3_log.rss.env" -- \
+    "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
+else
+  "$worker" "$stage3_transcript" "$root" "$stage3_log" "$home" "$tmp" \
+    "$path" "$admitted" "$platform" "$stage2_backend" "$stage3_threads" \
+    "$stage3_timeout_seconds" "$stage3_cache" "$runtime" "$candidate" \
+    "$progress" "$phase_profile" "$memory_snapshot" "$evidence_run_id" \
+    "$stage3_requested_route" "$stage3_fallback_route" "$stage3_process_max_kib" \
+    "$stage3_mc_env" "$stage3_cold_init_env" "$stage3_diagnostic_env" \
+    "$SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB" &
 fi
-[ -x "$candidate" ] || {
-  echo "error: Stage 3 compiler exited successfully without an executable candidate" >&2
-  exit 1
-}
+stage3_guard_pid=$!
+stage3_guard_tripped=0
+stage3_guard_reserve_kib=$((SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB * 1024))
+while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_guard_pid" 2>/dev/null; do
+  stage3_guard_available_kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)
+  case "$stage3_guard_available_kib" in
+    ''|*[!0-9]*)
+      stage3_guard_tripped=1
+      echo 'runtime_headroom_watch_result=probe-failed' >>"$memory_admission"
+      ;;
+    *)
+      if [ "$stage3_guard_available_kib" -le "$stage3_guard_reserve_kib" ]; then
+        stage3_guard_tripped=1
+        echo "runtime_headroom_watch_result=reserve-crossed" >>"$memory_admission"
+        echo "runtime_headroom_watch_available_kib=$stage3_guard_available_kib" >>"$memory_admission"
+      fi
+      ;;
+  esac
+  [ "$stage3_guard_tripped" -eq 0 ] || {
+    # Stop descendants before the supervising subshell. This preserves the
+    # host and makes the wrapper's nonzero result authoritative; cache files
+    # already atomically published remain reusable on the next admitted run.
+    if bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
+        "$memory_admission"; then
+      echo 'runtime_headroom_watch_shutdown=verified' >>"$memory_admission"
+      # systemd-run --wait normally exits with the now-terminal service. Keep
+      # wrapper shutdown bounded even if its D-Bus client wedges afterward.
+      stage3_supervisor_wait=0
+      while kill -0 "$stage3_guard_pid" 2>/dev/null &&
+            [ "$stage3_supervisor_wait" -lt 5 ]; do
+        sleep 1
+        stage3_supervisor_wait=$((stage3_supervisor_wait + 1))
+      done
+      if kill -0 "$stage3_guard_pid" 2>/dev/null; then
+        kill -TERM "$stage3_guard_pid" 2>/dev/null || true
+        sleep 1
+      fi
+      kill -0 "$stage3_guard_pid" 2>/dev/null &&
+        kill -KILL "$stage3_guard_pid" 2>/dev/null || true
+    else
+      echo 'runtime_headroom_watch_shutdown=unverified' >>"$memory_admission"
+      # The child may still own or mutate candidate/cache output.  Do not wait
+      # without a bound and do not release the output lock.  The retained lock
+      # is the fail-closed recovery signal for an operator to inspect.
+      bootstrap_resume_release_lock=0
+      bootstrap_resume_verdict \
+        'ABORTED: stage=stage3-native-build exit=125 signal=none reason=shutdown-unverified-lock-retained'
+      exit 125
+    fi
+    break
+  }
+  sleep 2
+done
+wait "$stage3_guard_pid"
+status=$?
+if [ -n "$stage3_guard_unit" ] &&
+   ! bootstrap_stage3_memory_unit_inactive "$stage3_guard_unit"; then
+  echo 'runtime_headroom_watch_shutdown=unverified-after-supervisor-exit' \
+    >>"$memory_admission"
+  bootstrap_resume_release_lock=0
+  bootstrap_resume_verdict \
+    'ABORTED: stage=stage3-native-build exit=125 signal=none reason=cgroup-still-populated-lock-retained'
+  exit 125
+fi
+if [ "$stage3_guard_tripped" -eq 0 ]; then
+  echo 'runtime_headroom_watch_result=completed' >>"$memory_admission"
+else
+  status=125
+fi
+set -e
+effective_status=0
+bootstrap_stage3_resume_effective_status "$status" "$stage3_log" \
+  "$candidate" || effective_status=$?
+worker_status=$bootstrap_stage3_resume_worker_status
+diagnostic_class=$bootstrap_stage3_resume_diagnostic_class
+signal_identity=$bootstrap_stage3_resume_signal_identity
+if ! bootstrap_stage3_resume_write_status_receipt "$stage3_status" \
+  "$stage3_log" "$stage3_transcript" "$status" "$effective_status" \
+  "$worker_status" "$stage3_requested_route" "$stage3_fallback_route" \
+  "$diagnostic_class" "$signal_identity"; then
+  rm -f "$candidate" "$stage3_sanity" "$manifest"
+  echo "error: Stage 3 native-build status receipt publication failed" >&2
+  exit 125
+fi
+if [ "$effective_status" -ne 0 ]; then
+  rm -f "$candidate" "$stage3_sanity" "$manifest"
+  echo "error: Stage 3 native-build failed (shell=$status worker=$worker_status effective=$effective_status class=$diagnostic_class signal=$signal_identity route=$stage3_requested_route fallback=$stage3_fallback_route)" >&2
+  exit "$effective_status"
+fi
+bootstrap_cache_report_log "$stage3_log"
 ! grep -qE '^(Build complete: [0-9]+ compiled|Linked: .* via clang)' "$stage3_log" || exit 1
 [ "$(bootstrap_stage3_hash_file "$admitted")" = "$admitted_sha" ] || exit 1
 runtime_check="$archive/runtime-after.$$"
@@ -310,7 +922,7 @@ rm -f "$runtime_check"
 
 CANDIDATE_FRONTEND_ROOT=$root
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
-COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
+COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 . "$root/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs"
@@ -320,10 +932,36 @@ bootstrap_stage_sanity() (
   version_expect_status=0
   version_expected=$(bootstrap_stage3_canonical_version "$sanity_repo_root") || \
     version_expect_status=1
-  for name in $(env | sed 's/=.*//'); do unset "$name"; done
+  # The outer guard owns these values. Scrubbing them makes the bounded-log
+  # collector create a new session, escaping the still-active outer monitor.
+  # Validate before any candidate execution, and preserve presence (including
+  # malformed/empty contracts) rather than silently falling back to standalone.
+  if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
+    case "${SIMPLE_BOOTSTRAP_SESSION_ID:-}" in ''|*[!0-9]*|0) return 125 ;; esac
+    case "${SIMPLE_BOOTSTRAP_SESSION_EXEC:-}" in /*) ;; *) return 125 ;; esac
+    "${SIMPLE_BOOTSTRAP_SESSION_EXEC}" --check || return 125
+  fi
+  case "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE-enforce}" in enforce|monitor) ;; *) return 125 ;; esac
+  for name in $(env | sed 's/=.*//'); do
+    case "$name" in
+      SIMPLE_BOOTSTRAP_SESSION_ID|SIMPLE_BOOTSTRAP_SESSION_EXEC|SIMPLE_BOOTSTRAP_RSS_CAP_MODE) continue ;;
+      ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;;
+    esac
+    unset "$name"
+  done
   HOME=$sanity_home TMPDIR=$sanity_tmp PATH=$sanity_path LC_ALL=C LANG=C
   export HOME TMPDIR PATH LC_ALL LANG
-  evidence_tmp="$evidence.tmp.$$" frontend_log="$evidence_tmp.frontend"
+  evidence_tmp="$evidence.tmp.$$"
+  frontend_log="$evidence.frontend-driver.log"
+  frontend0_log="$evidence.frontend-bootstrap-0.log"
+  frontend0_receipt="$evidence.frontend-bootstrap-0.status.env"
+  frontend1_log="$evidence.frontend-bootstrap-1.log"
+  frontend1_receipt="$evidence.frontend-bootstrap-1.status.env"
+  candidate_frontend_capture_setup "${frontend0_log%/*}" || return 1
+  frontend_log_authority=$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend_log##*/}
+  frontend_hash_or_dash() { [ -f "$1" ] && bootstrap_stage3_hash_file "$1" || echo -; }
+  rm -f "$frontend_log" "$frontend0_log" "$frontend0_receipt" \
+    "$frontend1_log" "$frontend1_receipt"
   before=$(bootstrap_stage3_hash_file "$candidate_sanity")
   version_status=0; version=$(run_timeout 10 "$candidate_sanity" --version 2>&1) || version_status=$?
   version_match_status=1
@@ -336,12 +974,20 @@ bootstrap_stage_sanity() (
   frontend_status=0
   CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
     CANDIDATE_FRONTEND_BOOTSTRAP=0 \
-    candidate_frontend_smoke "$candidate_sanity" >"$frontend_log" 2>&1 || frontend_status=$?
+    CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_log##*/}" \
+    CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend0_log" \
+    CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend0_receipt##*/}" \
+    candidate_frontend_pinned_smoke "$candidate_sanity" "$frontend_log_authority" || frontend_status=$?
   frontend_bootstrap_status=0
+  frontend_bootstrap_ran=false
   if [ "$frontend_status" -eq 0 ]; then
+    frontend_bootstrap_ran=true
     CANDIDATE_FRONTEND_BACKEND="$stage2_backend" \
       CANDIDATE_FRONTEND_BOOTSTRAP=1 \
-      candidate_frontend_smoke "$candidate_sanity" >>"$frontend_log" 2>&1 || \
+      CANDIDATE_FRONTEND_LOG_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_log##*/}" \
+      CANDIDATE_FRONTEND_LOG_DISPLAY_PATH="$frontend1_log" \
+      CANDIDATE_FRONTEND_STATUS_PATH="$CANDIDATE_FRONTEND_CAPTURE_PARENT/${frontend1_receipt##*/}" \
+      candidate_frontend_pinned_smoke "$candidate_sanity" "$frontend_log_authority" || \
       frontend_bootstrap_status=$?
     frontend_status=$frontend_bootstrap_status
   fi
@@ -359,10 +1005,24 @@ bootstrap_stage_sanity() (
     echo unsupported_status="$unsupported_status"; \
     printf 'unsupported_output_sha256=%s\n' "$(printf %s "$unsupported" | bootstrap_stage3_hash_stream)"; \
     echo frontend_smoke_status="$frontend_status"; \
+    echo frontend_smoke_backend="$stage2_backend"; \
     echo frontend_smoke_bootstrap_mode_status="$frontend_bootstrap_status"; \
-    echo frontend_smoke_output_sha256="$(bootstrap_stage3_hash_file "$frontend_log")"; \
+    echo frontend_smoke_bootstrap0_raw_status="$([ -f "$frontend0_receipt" ] && sed -n 's/^raw_status=//p' "$frontend0_receipt" || echo "$frontend_status")"; \
+    echo frontend_smoke_bootstrap0_log_path="$frontend0_log"; \
+    echo frontend_smoke_bootstrap0_log_sha256="$(frontend_hash_or_dash "$frontend0_log")"; \
+    echo frontend_smoke_bootstrap0_status_path="$frontend0_receipt"; \
+    echo frontend_smoke_bootstrap0_status_sha256="$(frontend_hash_or_dash "$frontend0_receipt")"; \
+    echo frontend_smoke_bootstrap1_ran="$frontend_bootstrap_ran"; \
+    echo frontend_smoke_bootstrap1_raw_status="$([ -f "$frontend1_receipt" ] && sed -n 's/^raw_status=//p' "$frontend1_receipt" || echo not-run)"; \
+    echo frontend_smoke_bootstrap1_log_path="$([ "$frontend_bootstrap_ran" = true ] && echo "$frontend1_log" || echo -)"; \
+    echo frontend_smoke_bootstrap1_log_sha256="$([ "$frontend_bootstrap_ran" = true ] && frontend_hash_or_dash "$frontend1_log" || echo -)"; \
+    echo frontend_smoke_bootstrap1_status_path="$([ "$frontend_bootstrap_ran" = true ] && echo "$frontend1_receipt" || echo -)"; \
+    echo frontend_smoke_bootstrap1_status_sha256="$([ "$frontend_bootstrap_ran" = true ] && frontend_hash_or_dash "$frontend1_receipt" || echo -)"; \
+    echo frontend_smoke_output_sha256="$(frontend_hash_or_dash "$frontend_log")"; \
+    echo frontend_smoke_driver_log_path="$frontend_log"; \
+    echo frontend_smoke_driver_log_sha256="$(frontend_hash_or_dash "$frontend_log")"; \
     echo candidate_sha256_after="$after"; } >"$evidence_tmp"
-  mv "$evidence_tmp" "$evidence"; rm -f "$frontend_log"; [ "$sanity_status" = pass ]
+  mv "$evidence_tmp" "$evidence"; [ "$sanity_status" = pass ]
 )
 bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
 bootstrap_stage3_source_snapshot "$source_after" "$root"
@@ -383,7 +1043,7 @@ BSTAGE3_STAGE2_ADMISSION=$stage2_admission BSTAGE3_STAGE3=$candidate
 BSTAGE3_SOURCE_BEFORE=$source_before BSTAGE3_SOURCE_AFTER=$source_after
 BSTAGE3_STAGE2_LOG=$stage2_log BSTAGE3_STAGE3_LOG=$stage3_log
 BSTAGE3_STAGE2_ARGS_SHA256=$stage2_args BSTAGE3_STAGE3_ARGS_SHA256=$stage3_args
-BSTAGE3_STAGE2_THREADS=$stage2_threads BSTAGE3_STAGE3_THREADS=1
+BSTAGE3_STAGE2_THREADS=$stage2_threads BSTAGE3_STAGE3_THREADS=$stage3_threads
 BSTAGE3_STAGE2_CACHE_DIR=$stage2_cache BSTAGE3_STAGE3_CACHE_DIR=$stage3_cache
 BSTAGE3_RUNTIME_PATH=$runtime BSTAGE3_STAGE2_COMMAND_OUTPUT=$stage2
 BSTAGE3_STAGE3_COMMAND_OUTPUT=$candidate BSTAGE3_BOOTSTRAP_SCRIPT=$script
@@ -394,14 +1054,35 @@ BSTAGE3_SEED_INPUTS_FINGERPRINT=$seed_fingerprint BSTAGE3_SEED_FEATURES=
 BSTAGE3_GIT_BEFORE=$git_before BSTAGE3_GIT_AFTER=$git_after
 BSTAGE3_STAGE2_TRANSCRIPT=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT=$stage3_transcript
 BSTAGE3_STAGE2_SANITY=$stage2_sanity BSTAGE3_STAGE2_RECEIVER=$stage2_receiver
+BSTAGE3_STAGE2_SANITY_DISPLAY=$stage2_sanity
+BSTAGE3_STAGE2_SANITY_COMPANION_PARENT=$(dirname -- "$stage2_sanity")
 BSTAGE3_STAGE3_SANITY=$stage3_sanity
-BSTAGE3_LOCK=$lock BSTAGE3_RUST_LOG=error
+BSTAGE3_MANIFEST_DISPLAY=$manifest
+BSTAGE3_STAGE2_RECEIVER_LOG="$(dirname -- "$stage2_receiver")/stage2-receiver.log"
+BSTAGE3_STAGE3_SANITY_COMPANION_PARENT="$(dirname -- "$stage3_sanity")"
+BSTAGE3_JOBS_RECEIPT="$(dirname -- "$manifest")/effective-build-jobs.env"
+[ -f "$BSTAGE3_JOBS_RECEIPT" ] || { printf 'schema=simple-bootstrap-effective-build-jobs-v1\nstatus=ready\njobs=%s\n' "$stage3_threads" >"$BSTAGE3_JOBS_RECEIPT"; chmod 0400 "$BSTAGE3_JOBS_RECEIPT"; }
+BSTAGE3_SEED_DISPLAY=$seed BSTAGE3_NATIVE_ALL_DISPLAY=$native_all BSTAGE3_BACKFILL_DISPLAY=$backfill
+BSTAGE3_STAGE2_DISPLAY=$stage2 BSTAGE3_STAGE2_ADMITTED_DISPLAY=$admitted BSTAGE3_STAGE2_ADMISSION_DISPLAY=$stage2_admission
+BSTAGE3_STAGE2_LOG_DISPLAY=$stage2_log BSTAGE3_STAGE3_LOG_DISPLAY=$stage3_log
+BSTAGE3_STAGE2_TRANSCRIPT_DISPLAY=$stage2_transcript BSTAGE3_STAGE3_TRANSCRIPT_DISPLAY=$stage3_transcript
+BSTAGE3_STAGE2_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE2_SANITY_COMPANION_PARENT
+BSTAGE3_STAGE2_RECEIVER_DISPLAY=$stage2_receiver BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY=$BSTAGE3_STAGE2_RECEIVER_LOG
+BSTAGE3_STAGE3_SANITY_DISPLAY=$stage3_sanity BSTAGE3_STAGE3_SANITY_COMPANION_PARENT_DISPLAY=$BSTAGE3_STAGE3_SANITY_COMPANION_PARENT
+BSTAGE3_GIT_AFTER_DISPLAY=$git_after BSTAGE3_RUNTIME_ORIGIN_AFTER_DISPLAY=$runtime_origin_after
+BSTAGE3_RUNTIME_ADMITTED_DISPLAY=$runtime_admitted BSTAGE3_TOOL_AUTHORITY_DISPLAY=$tool_after
+BSTAGE3_SEED_STAMP_DISPLAY=$stamp BSTAGE3_SOURCE_AFTER_DISPLAY=$source_after BSTAGE3_STAGE3_DISPLAY=$candidate
+BSTAGE3_BOOTSTRAP_SCRIPT_DISPLAY=$script BSTAGE3_HELPER_DISPLAY=$helper
+BSTAGE3_STAGE2_CACHE_DIR_DISPLAY=$stage2_cache BSTAGE3_STAGE3_CACHE_DIR_DISPLAY=$stage3_cache
+BSTAGE3_RUNTIME_PATH_DISPLAY=$runtime BSTAGE3_SOURCE_BEFORE_DISPLAY=$source_before
+BSTAGE3_TOOL_AUTHORITY_BEFORE_DISPLAY=$tool_before BSTAGE3_JOBS_RECEIPT_DISPLAY=$BSTAGE3_JOBS_RECEIPT
+BSTAGE3_LOCK=$lock BSTAGE3_LOCK_DISPLAY=$lock BSTAGE3_RUST_LOG=error
 export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MODE \
   BSTAGE3_SEED BSTAGE3_SEED_STAMP BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
   BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
   BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT BSTAGE3_TOOL_AUTHORITY \
   BSTAGE3_TOOL_AUTHORITY_BEFORE BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED \
-  BSTAGE3_STAGE2_ADMISSION BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER \
+  BSTAGE3_STAGE2_ADMISSION BSTAGE3_STAGE3 BSTAGE3_SOURCE_BEFORE BSTAGE3_SOURCE_AFTER BSTAGE3_LOCK_DISPLAY \
   BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG BSTAGE3_STAGE2_ARGS_SHA256 \
   BSTAGE3_STAGE3_ARGS_SHA256 BSTAGE3_STAGE2_THREADS BSTAGE3_STAGE3_THREADS \
   BSTAGE3_STAGE2_CACHE_DIR BSTAGE3_STAGE3_CACHE_DIR BSTAGE3_RUNTIME_PATH \
@@ -410,6 +1091,12 @@ export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND BSTAGE3_MO
   BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE BSTAGE3_SEED_INPUTS_FINGERPRINT \
   BSTAGE3_SEED_FEATURES BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
   BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT BSTAGE3_STAGE2_SANITY \
-  BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+  BSTAGE3_STAGE2_SANITY_DISPLAY BSTAGE3_STAGE2_SANITY_COMPANION_PARENT \
+  BSTAGE3_STAGE2_RECEIVER BSTAGE3_STAGE2_RECEIVER_DISPLAY \
+  BSTAGE3_STAGE2_RECEIVER_LOG BSTAGE3_STAGE2_RECEIVER_LOG_DISPLAY \
+  BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK BSTAGE3_RUST_LOG
+bootstrap_resume_stage=manifest-verify
 bootstrap_stage3_write_manifest
-bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"
+bootstrap_stage3_verify_manifest "$manifest" "$manifest" "$root" "$candidate" \
+  "$candidate" "${manifest}.authority-map.env"
+bootstrap_resume_verdict "ADMITTED: stage=complete exit=0 signal=none reason=manifest-verified"

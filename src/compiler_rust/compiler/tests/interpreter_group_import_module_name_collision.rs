@@ -77,9 +77,15 @@ fn main() -> i32:
     .expect("write entry module");
 
     let (exit_code, results) = evaluate_unflattened(&main_path);
-    assert_eq!(exit_code, 0, "top-level selected class must not become a module dictionary");
+    assert_eq!(
+        exit_code, 0,
+        "top-level selected class must not become a module dictionary"
+    );
     assert_eq!(results.len(), 1, "the nested BDD example must execute exactly once");
-    assert!(results[0].2, "the nested BDD example must resolve the selected class and self");
+    assert!(
+        results[0].2,
+        "the nested BDD example must resolve the selected class and self"
+    );
     assert!(!results[0].3, "the nested BDD example must not be skipped");
 }
 
@@ -116,11 +122,7 @@ fn main() -> i32:
 #[test]
 fn explicit_module_alias_retains_qualified_access() {
     let dir = tempdir().expect("create temp source directory");
-    fs::write(
-        dir.path().join("MirProgram.spl"),
-        "fn answer() -> i64:\n    42\n",
-    )
-    .expect("write imported module");
+    fs::write(dir.path().join("MirProgram.spl"), "fn answer() -> i64:\n    42\n").expect("write imported module");
     let main_path = dir.path().join("main.spl");
     fs::write(
         &main_path,
@@ -134,11 +136,7 @@ fn explicit_module_alias_retains_qualified_access() {
 #[test]
 fn absent_same_name_export_does_not_hide_module_namespace() {
     let dir = tempdir().expect("create temp source directory");
-    fs::write(
-        dir.path().join("Widget.spl"),
-        "fn answer() -> i64:\n    42\n",
-    )
-    .expect("write imported module");
+    fs::write(dir.path().join("Widget.spl"), "fn answer() -> i64:\n    42\n").expect("write imported module");
     let main_path = dir.path().join("main.spl");
     fs::write(
         &main_path,
@@ -154,11 +152,7 @@ fn path_derived_main_namespace_remains_suppressed() {
     let dir = tempdir().expect("create temp source directory");
     let tools_dir = dir.path().join("tools");
     fs::create_dir(&tools_dir).expect("create imported module directory");
-    fs::write(
-        tools_dir.join("main.spl"),
-        "fn answer() -> i64:\n    42\n",
-    )
-    .expect("write imported module");
+    fs::write(tools_dir.join("main.spl"), "fn answer() -> i64:\n    42\n").expect("write imported module");
     let main_path = dir.path().join("entry.spl");
     fs::write(&main_path, "use tools.main.{answer}\n\nanswer() - 42\n").expect("write entry module");
 

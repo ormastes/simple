@@ -1,0 +1,158 @@
+# Authoritative reverse-reference facts published by registry and IR owners.
+
+use std.common.crypto.sha256.{sha256_text}
+
+struct ReverseReferenceOwnerFactV1:
+    projection_kind: text
+    subject_identity: text
+    consumer_identity: text
+    evidence_digest: text
+
+struct ReverseReferenceOwnerSnapshotV1:
+    facts: [ReverseReferenceOwnerFactV1]
+    known_families: [text]
+
+var _reverse_reference_owner_facts_v1: [ReverseReferenceOwnerFactV1] = []
+var _reverse_reference_known_families_v1: [text] = []
+var _reverse_reference_owner_active_v1: bool = false
+var _reverse_reference_source_aliases_v1: {text: [text]} = {}
+
+fn reverse_reference_owner_clear_v1():
+    _reverse_reference_owner_facts_v1 = []
+    _reverse_reference_known_families_v1 = []
+    _reverse_reference_source_aliases_v1 = {}
+
+fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text):
+    if not _reverse_reference_owner_active_v1 or identity == "" or source == "":
+        return
+    var sources: [text] = if _reverse_reference_source_aliases_v1.contains_key(identity):
+        _reverse_reference_source_aliases_v1[identity]
+    else:
+        []
+    if not sources.contains(source):
+        sources = sources.push(source)
+        _reverse_reference_source_aliases_v1[identity] = sources
+
+fn reverse_reference_owner_source_aliases_v1(identity: text) -> [text]:
+    if _reverse_reference_source_aliases_v1.contains_key(identity):
+        return _reverse_reference_source_aliases_v1[identity]
+    []
+
+fn reverse_reference_owner_begin_v1() -> bool:
+    if _reverse_reference_owner_active_v1:
+        return false
+    reverse_reference_owner_clear_v1()
+    _reverse_reference_owner_active_v1 = true
+    true
+
+fn reverse_reference_owner_end_v1():
+    reverse_reference_owner_clear_v1()
+    _reverse_reference_owner_active_v1 = false
+
+fn reverse_reference_owner_mark_known_v1(family: text):
+    if not _reverse_reference_owner_active_v1:
+        return
+    if not _reverse_reference_known_families_v1.contains(family):
+        _reverse_reference_known_families_v1 =
+            _reverse_reference_known_families_v1.push(family)
+
+fn reverse_reference_owner_register_v1(family: text, subject: text,
+        consumer: text, evidence: text):
+    if not _reverse_reference_owner_active_v1:
+        return
+    reverse_reference_owner_mark_known_v1(family)
+    if subject == "" or consumer == "":
+        return
+    val digest = reverse_reference_fact_digest_v1(
+        family, subject, consumer, evidence)
+    val fact = ReverseReferenceOwnerFactV1(family, subject, consumer, digest)
+    for existing in _reverse_reference_owner_facts_v1:
+        if existing.projection_kind == family and
+                existing.subject_identity == subject and
+                existing.consumer_identity == consumer and
+                existing.evidence_digest == digest:
+            return
+    _reverse_reference_owner_facts_v1 = _reverse_reference_owner_facts_v1.push(fact)
+
+fn reverse_reference_fact_digest_v1(family: text, subject: text,
+        consumer: text, evidence: text) -> text:
+    sha256_text(
+        "{family.len()}:{family}{subject.len()}:{subject}" +
+        "{consumer.len()}:{consumer}{evidence.len()}:{evidence}")
+
+fn reverse_reference_register_import_export_v1(imported_export: text,
+        consuming_module: text, interface_digest: text):
+    reverse_reference_owner_register_v1(
+        "direct-import-export", imported_export, consuming_module, interface_digest)
+
+fn reverse_reference_register_module_scc_peer_v1(member_module: text,
+        peer_module: text, scc_digest: text):
+    # This family is body-sensitive and therefore records only proven peers
+    # in one strongly connected component. Ordinary import edges belong to
+    # direct-import-export and must not be promoted to SCC membership.
+    reverse_reference_owner_register_v1(
+        "module-scc-artifact", member_module, peer_module, scc_digest)
+
+fn reverse_reference_register_trait_candidate_v1(trait_or_type: text,
+        consuming_obligation: text, candidate_digest: text):
+    reverse_reference_owner_register_v1(
+        "trait-type-implementation", trait_or_type, consuming_obligation, candidate_digest)
+
+fn reverse_reference_register_unresolved_method_v1(method_leaf: text,
+        call_site: text, candidate_digest: text):
+    reverse_reference_owner_register_v1(
+        "unresolved-method-candidate", method_leaf, call_site, candidate_digest)
+
+fn reverse_reference_register_annotation_v1(annotation: text,
+        consumer: text, annotation_digest: text):
+    reverse_reference_owner_register_v1(
+        "annotation-consumer", annotation, consumer, annotation_digest)
+
+fn reverse_reference_register_generic_specialization_v1(definition: text,
+        specialization_consumer: text, specialization_digest: text):
+    reverse_reference_owner_register_v1(
+        "generic-specialization", definition, specialization_consumer,
+        specialization_digest)
+
+fn reverse_reference_register_aop_v1(selector_or_advice: text,
+        target_or_partition: text, selection_digest: text):
+    reverse_reference_owner_register_v1(
+        "aop-consumer", selector_or_advice, target_or_partition, selection_digest)
+
+fn reverse_reference_register_runtime_provider_v1(operation_or_provider: text,
+        link_consumer: text, provider_digest: text):
+    reverse_reference_owner_register_v1(
+        "runtime-provider", operation_or_provider, link_consumer, provider_digest)
+
+fn reverse_reference_register_initializer_v1(initialized_subject: text,
+        dependent_initializer: text, dag_digest: text):
+    reverse_reference_owner_register_v1(
+        "initializer-dependent", initialized_subject, dependent_initializer, dag_digest)
+
+fn reverse_reference_register_relocation_v1(emitted_symbol: text,
+        relocation_owner: text, relocation_digest: text):
+    reverse_reference_owner_register_v1(
+        "emitted-symbol-relocation", emitted_symbol, relocation_owner, relocation_digest)
+
+fn reverse_reference_owner_snapshot_v1() -> ReverseReferenceOwnerSnapshotV1:
+    ReverseReferenceOwnerSnapshotV1(
+        _reverse_reference_owner_facts_v1,
+        _reverse_reference_known_families_v1)
+
+export ReverseReferenceOwnerFactV1, ReverseReferenceOwnerSnapshotV1
+export reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
+export reverse_reference_owner_mark_known_v1
+export reverse_reference_owner_register_source_alias_v1
+export reverse_reference_owner_source_aliases_v1
+export reverse_reference_owner_register_v1, reverse_reference_owner_snapshot_v1
+export reverse_reference_fact_digest_v1
+export reverse_reference_register_import_export_v1
+export reverse_reference_register_module_scc_peer_v1
+export reverse_reference_register_trait_candidate_v1
+export reverse_reference_register_unresolved_method_v1
+export reverse_reference_register_annotation_v1
+export reverse_reference_register_generic_specialization_v1
+export reverse_reference_register_aop_v1
+export reverse_reference_register_runtime_provider_v1
+export reverse_reference_register_initializer_v1
+export reverse_reference_register_relocation_v1

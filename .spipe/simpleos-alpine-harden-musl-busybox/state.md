@@ -28,41 +28,11 @@ feature (multi-pillar, multi-session)
 ### P2 — musl-shaped pure-Simple libc
 - AC-3: pure-Simple string/ctype/stdlib core vs musl outputs. [DONE — string+stdlib slices green]
 - AC-4: pure-Simple musl-style buffered stdio (FILE*/fread/fwrite/fgets/fflush). [DONE — FileBuf green]
-- AC-5: port remaining pure-computation C libc → pure Simple. [DONE for string/mem/stdlib-integer:
-  +simpleos_string_copy.spl (strcpy/strncpy/strcat/strncat/strdup/strndup/strnlen/strlcpy/strlcat, 30/0)
-  +simpleos_string_search.spl (strstr/strspn/strcspn/strpbrk/memchr/memrchr/strcasecmp/strncasecmp/
-  strtok_r/strerror, 51/0) +simpleos_stdlib_num.spl (strtoul/strtoll/strtoull/div/ldiv/lldiv/rand,
-  41/0) — 26 fns, 122 examples, all pure (no extern/rt_/C). C twins kept until parity.
-  REMAINDER BLOCKED & FILED: float (strtod/strtof/math/printf_float) needs reliable f64; syscall group
-  (alloc/fs/fork/signal/pthread/time/…) is legitimately C — `simpleos_libc_float_port_blocked_f64_2026-06-28.md`.
-  Opus-review follow-up (2026-06-28): added strlcpy/strlcat (BSD, were dropped) via LcResult{bytes,total};
-  fixed strtoul to accept leading +/- sign (C-conformant, was diverging); strtok (non-reentrant, static
-  state) DELIBERATELY superseded by reentrant strtok_r — not ported (decision recorded, not silent skip).]
+- AC-5: 6 source-missing modules (dirent/dlfcn/locale/mmap/spawn/wchar) reimplemented or loud stub.
+  [OPEN]
 ### P3 — busybox multi-call (keep MDSOC+)
 - AC-6: `simplebox` argv[0]/argv[1] dispatch over registry + `--list`, MDSOC+ annotated. [DONE — green]
 - AC-7: missing applets (dd/chown/timeout/+) pure-Simple + registered. [DONE — cores green]
-- AC-6b: WIRE userland→image. [DONE — simplebox_main.spl entry genuinely consumes pure-Simple libc
-  (seq via libc_strtoul, 8/0); simplebox_build.spl native-build→rootfs (5/0); image_builder packs
-  /bin/simplebox into the rootfs + deploy manifest (proven by image_builder_artifact_spec block 1).
-  Pre-existing nvfs-marker failure in that spec's block 3 filed (image_builder_nvfs_rootfs_marker_
-  preexisting_2026-06-28.md) — NOT caused by this wire (origin fails it identically).
-  SYSROOT BUILT FOR REAL (sh src/os/port/llvm/sysroot.shs): libsimpleos_c.a 137KB + crt0.o + simpleos.ld
-  + headers under build/os/sysroot (gitignored). simplebox_build.spl = canonical invocation
-  (--backend llvm/--source src/os+src/lib/--entry-closure/--target x86_64-unknown-none/
-  --linker-script), 7/0 (dropped a no-op --timeout assertion: the 120s deaths were Simple's own
-  process_run_timeout default, not native-build).
-  ROOT-CAUSED the cross-compile blocker (was mis-filed as "no emit"). Three symptoms, none "no emit":
-  (1) 120s death = process_run_timeout default (test harness); (2) ld.lld cannot open
-  simple_rt_runtime.o = STALE deployed bin/simple seed (current cargo seed builds single libc module
-  -> real freestanding PIE ELF); (3) THE WALL = const-eval `cannot parse 'c' as i64`: native-build
-  parses hex literals digit-by-digit via int(hc), and int("c") numeric-parses->fails, so ANY hex
-  literal with an a-f digit (e.g. kernel 0xc... LIMINE consts scanned by --source src/os) aborted.
-  FIXED in primary_expr.spl (lookup-string hex map, no int(letter)); verified 0xca=202/0xDEAD=57005/
-  0b1010=10; regression spec hex_literal_const_eval_spec.spl 7/0. Lane libc EXONERATED (marker test:
-  renaming ["c",...]->["zzcmark",...] kept identical 'c' error). With hex fixed, native-build still
-  can't emit a typed/module integer val (`val x:i64=255`->"unwrap on Type"; module `val M:i64=0xca`->
-  "kind on nil") — SEPARATE pre-existing gaps, now the remaining blocker (Part 2 of the bug doc).
-  Bug doc: native_build_const_eval_int_letter_2026-06-28.md. Image pack uses placeholder until Part 2.]
 ### P4 — PIE/SSP/RELRO policy
 - AC-8: desktop/Hosted hardening stays UNCONDITIONALLY ON (no regression); ADD embedded opt-out via
   preset. [DONE — resolve_hardening + regression-guarded spec green]
@@ -72,10 +42,7 @@ feature (multi-pillar, multi-session)
 ### P5 — SimpleOS as compiler HOST
 - AC-11: `cfg_normalize_os("simpleos")` + `@cfg(os="simpleos")` parse + platform_defaults unix-like.
   [DONE — cfg+attr branches green, linux/freebsd regression-guarded]
-- AC-12: linker treats "simpleos" unix-like; link-plan spec. [DONE — platform_defaults simpleos
-  host branches (libs/crt/loader), proven populated-vs-empty-fallback, linux/freebsd regression-
-  guarded, 12/0]. host_os() runtime-detection string is the runtime's job on real SimpleOS (not
-  needed for cross-link); port of remaining C libc postponed (keep C until parity per user).
+- AC-12: `host_os()` can return "simpleos"; linker treats it unix-like; link-plan spec. [OPEN]
 ### P6 — Docs & tracking
 - AC-13: new sspec SYSTEM tests follow `qemu_systest_contract` fail-closed + listed in guide. [DONE]
 - AC-14: deferred perf/hw items filed as concrete bugs, no silent TODO/NOTE. [DONE — 3 bugs filed]

@@ -1,0 +1,127 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @tag: system, web, draw_ir, transform, fail_closed
+"""The real Web producer must retain authored transform state on every match.
+
+This bounded inline source is separate from the pinned corpus and its SHA gate.
+It checks provenance and fail-closed plain-rectangle admission, not pixels.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use common.ui.draw_ir.{
+    DrawIrCommand, DrawIrStyleProp, draw_ir_rect_bounds, draw_ir_rect_clipped,
+    draw_ir_style_prop}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_opaque_box_plain_rect_rejection_reason}
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    "<missing>"
+
+fn _style_key_count(command: DrawIrCommand, key: text) -> i64:
+    var count: i64 = 0
+    for prop in command.computed_style:
+        if prop.key == key:
+            count = count + 1
+    count
+
+fn _is_transform_key(key: text) -> bool:
+    key == "transform" or key == "translate" or key == "scale" or key == "rotate"
+
+fn _geometry_normalized_probe(
+    command: DrawIrCommand, selected_key: text, omit_selected: bool
+) -> DrawIrCommand:
+    var probe = draw_ir_rect_clipped(
+        "transformed-probe", 0, 0, 4, 4, command.color,
+        draw_ir_rect_bounds(0, 0, 16, 16))
+    var props: [DrawIrStyleProp] = []
+    for prop in command.computed_style:
+        if omit_selected and prop.key == selected_key:
+            continue
+        val value = if _is_transform_key(prop.key) and prop.key != selected_key:
+            "none"
+        else:
+            prop.value
+        props.push(draw_ir_style_prop(prop.key, value))
+    probe.computed_style = props
+    probe
+
+describe "real Web transform provenance":
+    it "retains four raw declarations across shared-class style reconstruction and rejects both transformed boxes":
+        step("Render two class-matched boxes and an untransformed child")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;width:16px;height:16px;background:white}" +
+            ".moved{display:block;width:4px;height:4px;background:#336699;" +
+            "transform:rotate(7deg) translate(.25px,.25px);" +
+            "translate:.25px .25px;scale:1;rotate:7deg;color:#123456}" +
+            ".control{display:block;width:2px;height:2px;background:#abcdef}" +
+            "</style></head><body><div id='first' class='moved'>" +
+            "<div id='plain' class='control'></div></div>" +
+            "<div id='second' class='moved'></div></body></html>"
+        )
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(rendered.document_html).to_equal(html)
+
+        step("Inspect real node styles after the shared-class cascade")
+        var styled_nodes = 0
+        var control_nodes = 0
+        var index = 0
+        while index < rendered.hit_index.nodes.len():
+            val id = rendered.hit_index.nodes[index].id_attr
+            val style = rendered.hit_index.styles[index]
+            if id == "first" or id == "second":
+                styled_nodes = styled_nodes + 1
+                expect(style.transform_raw).to_equal("rotate(7deg) translate(.25px,.25px)")
+                expect(style.translate_raw).to_equal(".25px .25px")
+                expect(style.scale_raw).to_equal("1")
+                expect(style.rotate_raw).to_equal("7deg")
+            elif id == "plain":
+                control_nodes = control_nodes + 1
+                expect(style.transform_raw).to_equal("none")
+                expect(style.translate_raw).to_equal("none")
+                expect(style.scale_raw).to_equal("none")
+                expect(style.rotate_raw).to_equal("none")
+            index = index + 1
+        expect(styled_nodes).to_equal(2)
+        expect(control_nodes).to_equal(1)
+
+        step("Inspect emitted source commands and reject transformed rectangles")
+        var styled_commands = 0
+        var control_commands = 0
+        for batch in rendered.composition.batches:
+            for command in batch.commands:
+                if command.component_id == "first" or command.component_id == "second":
+                    styled_commands = styled_commands + 1
+                    expect(_style_value(command, "transform")).to_equal(
+                        "rotate(7deg) translate(.25px,.25px)")
+                    expect(_style_value(command, "translate")).to_equal(".25px .25px")
+                    expect(_style_value(command, "scale")).to_equal("1")
+                    expect(_style_value(command, "rotate")).to_equal("7deg")
+                    expect(_style_key_count(command, "transform")).to_equal(1)
+                    expect(_style_key_count(command, "translate")).to_equal(1)
+                    expect(_style_key_count(command, "scale")).to_equal(1)
+                    expect(_style_key_count(command, "rotate")).to_equal(1)
+                    expect(web_opaque_box_plain_rect_rejection_reason(command) == "").to_equal(false)
+                    for key in ["transform", "translate", "scale", "rotate"]:
+                        val isolated = _geometry_normalized_probe(command, key, false)
+                        expect(web_opaque_box_plain_rect_rejection_reason(isolated)).to_equal(
+                            "unhandled-paint-style-value:0:" + key)
+                        val missing = _geometry_normalized_probe(command, key, true)
+                        expect(web_opaque_box_plain_rect_rejection_reason(missing)).to_equal(
+                            "missing-paint-style-key:0:" + key)
+                elif command.component_id == "plain":
+                    control_commands = control_commands + 1
+                    expect(_style_value(command, "transform")).to_equal("none")
+                    expect(_style_value(command, "translate")).to_equal("none")
+                    expect(_style_value(command, "scale")).to_equal("none")
+                    expect(_style_value(command, "rotate")).to_equal("none")
+        expect(styled_commands).to_equal(2)
+        expect(control_commands).to_equal(1)

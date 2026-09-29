@@ -1,0 +1,492 @@
+# SCV-IMPL-B-01 — sj-capsule transaction coordinator.
+#
+# Design authority: doc/01_research/app/tools/scv/scv_v2_sj_integration_report_2026-08-25.md
+# ("Backend transaction" + "Failure matrix" + "One writer, multiple readers").
+# The sj-capsule variant WON the conflict resolutions: there is NO independent
+# `scvd` mutator. Every mutating SCV/Git/jj operation serializes behind ONE
+# exclusive repository lease held by the sj capsule; readers use immutable
+# snapshots and never take the lease.
+#
+# The 12 steps (report §"Backend transaction"):
+#    1 lease        acquire sj exclusive repository lease        REAL
+#    2 cursor_sync  synchronize watcher/event cursor             REAL
+#    3 coalesce     coalesce event batch                         REAL (E-04)
+#    4 capture      capture stable bytes once                    REAL
+#    5 wal          append SCV event WAL records                 REAL (E-03/MIG-10)
+#    6 objects      write missing local implicit content objects REAL
+#    7 index        update parser/entity indexes transactionally REAL
+#    8 jj_snapshot  ask jj to snapshot / create the change       SEAMED
+#    9 jj_read_ids  read ChangeId/commit/operation/tree          SEAMED
+#   10 backend_map  commit SCV backend_map + snapshot txn        REAL (conditional on 8/9)
+#   11 publish      atomically publish SCV head/cursor           REAL
+#   12 release      release lease                                REAL
+#
+# HONESTY — steps 8 and 9 are a SEAM, not an implementation. `sj raw jj …`
+# currently prints the BUILT COMMAND STRING instead of executing it
+# (`handle_cli_args` synthesizes and returns it with exit 0; `rt_shell_exec` is
+# never reached), so no jj mutation can be driven from here today. That is
+# SCV-IMPL-B-02's scope. Rather than fake a success, steps 8/9 run through a
+# pluggable executor whose DEFAULT is `unavailable` — exactly the D-06 merge
+# validation ladder pattern in merge_validation.spl. An unavailable jj lane
+# does NOT abort the transaction and does NOT claim an anchor: steps 1-7 and
+# 10-12 still complete and the transaction lands in the report's own
+# `unanchored` state, which is precisely the "after SCV WAL, before jj" row of
+# the failure matrix. There is no mode in this file that can report an anchored
+# transaction without a real backend id supplied from outside it.
+#
+# NOTE: this file never runs a mutating jj/sj command against any repository.
+
+use app.io.mod (file_exists, file_read, file_delete, dir_create, dir_remove_all, is_dir)
+use std.scv.event_coalesce.{scv_coalesce_open, scv_coalesce_add, scv_coalesce_flush_ready, scv_coalesce_atomic_save}
+use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
+use std.scv.store.{scv_hash_text, scv_write_text}
+use std.scv.journal.{scv_event_batch_record, scv_event_batch_commit, scv_event_batch_is_committed}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+
+fn scv_sj_capsule_version() -> text:
+    "scv/sj-capsule/v1"
+
+# ---------------------------------------------------------------- layout ----
+
+fn scv_sj_dir(root: text) -> text:
+    "{root}/.sj"
+
+fn scv_sj_lease_path(root: text) -> text:
+    "{scv_sj_dir(root)}/lease"
+
+fn scv_sj_lease_holder_path(root: text) -> text:
+    "{scv_sj_lease_path(root)}/holder"
+
+fn scv_sj_capsule_dir(root: text) -> text:
+    "{root}/.scv/sj"
+
+fn scv_sj_cursor_path(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/cursor"
+
+fn scv_sj_head_path(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/head"
+
+fn scv_sj_objects_dir(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/objects"
+
+fn scv_sj_index_path(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/index"
+
+fn scv_sj_backend_map_path(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/backend_map"
+
+fn scv_sj_txn_state_path(root: text) -> text:
+    "{scv_sj_capsule_dir(root)}/txn_state"
+
+# ----------------------------------------------------------------- lease ----
+#
+# The exclusion primitive is `dir_create` (mkdir), NOT a check-then-write on a
+# regular file. mkdir on an existing path fails at the syscall, so two capsule
+# attempts racing at the same instant cannot both observe success — the loser
+# gets `false` from the kernel, not from a TOCTOU window this code opened. A
+# read-modify-write lock file would have that window; this deliberately does
+# not. Verified on this host: first dir_create -> true, second -> false.
+
+fn scv_sj_lease_acquire(root: text, holder: text) -> text:
+    dir_create(scv_sj_dir(root), true)
+    if not dir_create(scv_sj_lease_path(root), false):
+        return "conflict: lease held by {scv_sj_lease_holder(root)}"
+    scv_write_text(scv_sj_lease_holder_path(root), "holder={holder} utc={current_time_ms()}\n")
+    "ok: {holder}"
+
+fn scv_sj_lease_holder(root: text) -> text:
+    val p = scv_sj_lease_holder_path(root)
+    if not file_exists(p):
+        return "unknown"
+    for line in file_read(p).split("\n"):
+        if line.starts_with("holder="):
+            return line[7:].split(" ")[0]
+    "unknown"
+
+fn scv_sj_lease_is_held(root: text) -> bool:
+    is_dir(scv_sj_lease_path(root))
+
+# Release is holder-checked: a capsule can never drop a lease it does not own.
+fn scv_sj_lease_release(root: text, holder: text) -> text:
+    if not scv_sj_lease_is_held(root):
+        return "error: no lease held"
+    val owner = scv_sj_lease_holder(root)
+    if owner != holder:
+        return "error: lease held by {owner}, not {holder}"
+    file_delete(scv_sj_lease_holder_path(root))
+    dir_remove_all(scv_sj_lease_path(root))
+    "ok: released"
+
+# ------------------------------------------------------- jj executor seam ----
+#
+# Mirrors merge_validation.spl's pluggable rungs. `mode`:
+#   "unavailable" (DEFAULT) — no jj lane; steps 8/9 report unavailable.
+#   "recorded"              — the CALLER supplies real backend ids captured
+#                             out-of-band. Ids are validated, never invented.
+#   anything else           — fail-closed, including "sj" / "shell": that lane
+#                             is SCV-IMPL-B-02 and is NOT implemented here.
+struct ScvJjExecutor:
+    mode: text
+    change_id: text
+    commit_id: text
+    operation_id: text
+    tree_id: text
+
+fn scv_jj_executor_unavailable() -> ScvJjExecutor:
+    ScvJjExecutor(mode: "unavailable", change_id: "", commit_id: "", operation_id: "", tree_id: "")
+
+fn scv_jj_executor_recorded(change_id: text, commit_id: text, operation_id: text, tree_id: text) -> ScvJjExecutor:
+    ScvJjExecutor(mode: "recorded", change_id: change_id, commit_id: commit_id, operation_id: operation_id, tree_id: tree_id)
+
+# The lane that would shell out to `sj raw jj`. It is deliberately NOT wired:
+# `sj raw jj log` returns the built command string rather than executing it, so
+# a "success" from that path would be a fabricated one.
+fn scv_jj_executor_sj_lane() -> ScvJjExecutor:
+    ScvJjExecutor(mode: "sj", change_id: "", commit_id: "", operation_id: "", tree_id: "")
+
+# Step 8. Returns "pass" | "unavailable: <reason>" | "fail: <reason>".
+fn scv_jj_snapshot(ex: ScvJjExecutor) -> text:
+    if ex.mode == "unavailable":
+        return "unavailable: no jj executor configured"
+    if ex.mode == "sj":
+        return "unavailable: sj raw jj does not execute jj yet (SCV-IMPL-B-02)"
+    if ex.mode != "recorded":
+        return "fail: unknown jj executor mode {ex.mode}"
+    if ex.change_id == "" or ex.commit_id == "" or ex.operation_id == "" or ex.tree_id == "":
+        return "fail: recorded executor missing backend ids"
+    "pass"
+
+# Step 9. Reads the ids the snapshot produced; empty unless step 8 passed.
+fn scv_jj_read_ids(ex: ScvJjExecutor) -> text:
+    if scv_jj_snapshot(ex) != "pass":
+        return ""
+    "change={ex.change_id} commit={ex.commit_id} operation={ex.operation_id} tree={ex.tree_id}"
+
+# -------------------------------------------------------------- 12 steps ----
+
+fn scv_sj_capsule_steps() -> [text]:
+    ["lease", "cursor_sync", "coalesce", "capture", "wal", "objects", "index", "jj_snapshot", "jj_read_ids", "backend_map", "publish", "release"]
+
+fn scv_sj_capsule_seamed_steps() -> [text]:
+    ["jj_snapshot", "jj_read_ids"]
+
+fn scv_sj_step_is_seamed(step: text) -> bool:
+    step == "jj_snapshot" or step == "jj_read_ids"
+
+# Step 2 — the watcher/event cursor. An overflowed cursor is not a silent
+# resync: the transaction records `invalidate` and the caller must rescan
+# (failure matrix, "watcher overflow during txn").
+fn scv_sj_cursor_sync(root: text, token: text, overflowed: bool) -> text:
+    dir_create(scv_sj_capsule_dir(root), true)
+    val state = if overflowed: "invalidate" else: "synced"
+    scv_write_text(scv_sj_cursor_path(root), "token={token} state={state}\n")
+    state
+
+fn scv_sj_cursor_state(root: text) -> text:
+    val p = scv_sj_cursor_path(root)
+    if not file_exists(p):
+        return "absent"
+    for part in file_read(p).trim().split(" "):
+        if part.starts_with("state="):
+            return part[6:]
+    "absent"
+
+# Step 4 — capture stable bytes ONCE per path (report: "capture stable bytes
+# once"). Returns "path|content_id" rows; a vanished path is dropped, not
+# guessed at.
+fn scv_sj_capture(paths: [text]) -> [text]:
+    var out: [text] = []
+    var seen: [text] = []
+    for p in paths:
+        if seen.contains(p):
+            continue
+        seen.push(p)
+        if not file_exists(p):
+            continue
+        out.push("{p}|{scv_hash_text("scv-content", file_read(p))}")
+    out
+
+fn scv_sj_capture_row_path(row: text) -> text:
+    row.split("|")[0]
+
+fn scv_sj_capture_row_id(row: text) -> text:
+    val parts = row.split("|")
+    if parts.len() < 2: "" else: parts[1]
+
+# Step 6 — write missing local implicit content objects. Idempotent: an object
+# already present is not rewritten, and the count of NEW objects is returned.
+fn scv_sj_write_objects(root: text, captured: [text], contents: [text]) -> i64:
+    dir_create(scv_sj_objects_dir(root), true)
+    var written = 0
+    var i = 0
+    while i < captured.len():
+        val id = scv_sj_capture_row_id(captured[i])
+        val body = if i < contents.len(): contents[i] else: ""
+        val dest = "{scv_sj_objects_dir(root)}/{id}"
+        if not file_exists(dest):
+            scv_write_text(dest, body)
+            written = written + 1
+        i = i + 1
+    written
+
+fn scv_sj_object_exists(root: text, content_id: text) -> bool:
+    file_exists("{scv_sj_objects_dir(root)}/{content_id}")
+
+# Step 7 — parser/entity index rows, written whole (never a partial index).
+fn scv_sj_update_index(root: text, txn_id: text, captured: [text]) -> i64:
+    dir_create(scv_sj_capsule_dir(root), true)
+    var payload = ""
+    for row in captured:
+        payload = payload + "{txn_id}|{row}\n"
+    val prior = if file_exists(scv_sj_index_path(root)): file_read(scv_sj_index_path(root)) else: ""
+    scv_write_text(scv_sj_index_path(root), "{prior}{payload}")
+    captured.len()
+
+# Step 10 — backend map. Only ever written with ids that came from a passing
+# step 9; there is no path that writes a synthesized backend id.
+fn scv_sj_commit_backend_map(root: text, txn_id: text, ids: text) -> text:
+    if ids == "":
+        return "unanchored"
+    val prior = if file_exists(scv_sj_backend_map_path(root)): file_read(scv_sj_backend_map_path(root)) else: ""
+    scv_write_text(scv_sj_backend_map_path(root), "{prior}{txn_id} {ids}\n")
+    "mapped"
+
+fn scv_sj_backend_map_rows(root: text) -> [text]:
+    if not file_exists(scv_sj_backend_map_path(root)):
+        return []
+    var out: [text] = []
+    for line in file_read(scv_sj_backend_map_path(root)).split("\n"):
+        if line.trim() != "":
+            out.push(line.trim())
+    out
+
+# Step 11 — publish head atomically (tmp write + rename), so a crash mid-publish
+# leaves the OLD head, never a torn one; the WAL replay then re-publishes.
+# NOTE: the seed's file_atomic_write recurses without bound inside file_rename
+# (stack overflow at depth 1000), so the head is written through scv_write_text
+# and the tmp+rename publish is a NAMED SEAM: TODO(SCV-IMPL-B-01) restore
+# tmp-write+rename once file_rename is fixed. Torn-write protection therefore
+# rests on the WAL replay path, not on rename atomicity, today.
+fn scv_sj_publish_head(root: text, txn_id: text, state: text) -> bool:
+    dir_create(scv_sj_capsule_dir(root), true)
+    scv_write_text(scv_sj_head_path(root), "txn={txn_id} state={state}\n")
+
+fn scv_sj_head_state(root: text) -> text:
+    val p = scv_sj_head_path(root)
+    if not file_exists(p):
+        return "absent"
+    for part in file_read(p).trim().split(" "):
+        if part.starts_with("state="):
+            return part[6:]
+    "absent"
+
+fn scv_sj_head_txn(root: text) -> text:
+    val p = scv_sj_head_path(root)
+    if not file_exists(p):
+        return ""
+    for part in file_read(p).trim().split(" "):
+        if part.starts_with("txn="):
+            return part[4:]
+    ""
+
+# ------------------------------------------------------- failure matrix ----
+#
+# Report §"Failure matrix", one required behavior per failure point. A fault
+# named at a step decides the transaction's terminal state.
+fn scv_sj_failure_behavior(point: text) -> text:
+    if point == "before_capture":
+        return "no_state_change: event pending"
+    if point == "after_wal_before_jj":
+        return "unanchored: local snapshot recoverable"
+    if point == "jj_ok_map_failed":
+        return "reconcile_required: from operation/commit/tree on restart"
+    if point == "map_ok_publish_failed":
+        return "replay_required: replay WAL idempotently"
+    if point == "watcher_overflow":
+        return "invalidate_cursor: reconciliation scan"
+    if point == "parser_failed":
+        return "keep_snapshot: parse_error or fallback"
+    if point == "matcher_failed":
+        return "keep_revision: identities unresolved"
+    if point == "crash_during_checkout":
+        return "stale_workspace_recovery: then scv reconcile"
+    if point == "git_mutation_outside_sj":
+        return "import_refs: record external-mutation event"
+    "unknown_failure_point"
+
+fn scv_sj_failure_points() -> [text]:
+    ["before_capture", "after_wal_before_jj", "jj_ok_map_failed", "map_ok_publish_failed", "watcher_overflow", "parser_failed", "matcher_failed", "crash_during_checkout", "git_mutation_outside_sj"]
+
+# ------------------------------------------------------- the transaction ----
+#
+# `fault` names the step at which an injected failure occurs ("" = none).
+# Report rows are "<step>: <status>"; the last row is "verdict: <state>".
+# Verdicts:
+#   committed   — all 12 steps real-passed AND a real backend anchor exists.
+#   unanchored  — steps 1-7,10-12 done, jj lane unavailable. NOT a success
+#                 claim: the snapshot is local-recoverable and unanchored.
+#   aborted     — a fault before/at byte capture; lease released, no state.
+#   reconcile_required / replay_required — post-jj faults, per the matrix.
+fn scv_sj_capsule_transaction(root: text, holder: text, txn_id: text, paths: [text], contents: [text], ex: ScvJjExecutor, cursor_token: text, overflowed: bool, fault: text) -> text:
+    var report = ""
+    # 1 lease
+    val lease = scv_sj_lease_acquire(root, holder)
+    if not lease.starts_with("ok"):
+        return "lease: {lease}\nverdict: rejected_no_lease\n"
+    report = report + "lease: acquired by {holder}\n"
+
+    var verdict = ""
+
+    # 2 cursor_sync
+    val cur = scv_sj_cursor_sync(root, cursor_token, overflowed)
+    report = report + "cursor_sync: {cur}\n"
+    if overflowed:
+        report = report + "coalesce: skipped\ncapture: skipped\nwal: skipped\nobjects: skipped\nindex: skipped\n"
+        report = report + "jj_snapshot: skipped\njj_read_ids: skipped\nbackend_map: skipped\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: {scv_sj_failure_behavior("watcher_overflow").split(":")[0]}\n"
+
+    # 3 coalesce — atomic-save folding from E-04 applied to the path batch.
+    val batch = scv_sj_coalesce_paths(paths)
+    report = report + "coalesce: {paths.len()} -> {batch.len()}\n"
+
+    if fault == "before_capture":
+        report = report + "capture: aborted\nwal: skipped\nobjects: skipped\nindex: skipped\njj_snapshot: skipped\njj_read_ids: skipped\nbackend_map: skipped\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: aborted\n"
+
+    # 4 capture
+    val captured = scv_sj_capture(batch)
+    report = report + "capture: {captured.len()} stable bytes\n"
+
+    # 5 wal — E-03 pending/committed event batch lifecycle.
+    for row in captured:
+        scv_event_batch_record(root, txn_id, "capture", scv_sj_capture_row_path(row), scv_sj_capture_row_id(row))
+    val wal_committed = scv_event_batch_commit(root, txn_id)
+    report = report + "wal: {if wal_committed: "committed" else: "failed"}\n"
+    if not wal_committed:
+        report = report + "objects: skipped\nindex: skipped\njj_snapshot: skipped\njj_read_ids: skipped\nbackend_map: skipped\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: aborted\n"
+
+    # 6 objects
+    val written = scv_sj_write_objects(root, captured, contents)
+    report = report + "objects: {written} written\n"
+
+    # 7 index
+    report = report + "index: {scv_sj_update_index(root, txn_id, captured)} rows\n"
+
+    if fault == "after_wal_before_jj":
+        report = report + "jj_snapshot: aborted\njj_read_ids: skipped\nbackend_map: unanchored\n"
+        scv_sj_publish_head(root, txn_id, "unanchored")
+        report = report + "publish: unanchored\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: unanchored\n"
+
+    # 8 jj_snapshot (SEAM)
+    val snap = scv_jj_snapshot(ex)
+    report = report + "jj_snapshot: {snap}\n"
+    if snap.starts_with("fail"):
+        report = report + "jj_read_ids: skipped\nbackend_map: skipped\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: rejected\n"
+
+    # 9 jj_read_ids (SEAM)
+    val ids = scv_jj_read_ids(ex)
+    report = report + "jj_read_ids: {if ids == "": "unavailable" else: ids}\n"
+
+    # 10 backend_map
+    if fault == "jj_ok_map_failed":
+        report = report + "backend_map: failed\npublish: skipped\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: reconcile_required\n"
+    val mapped = scv_sj_commit_backend_map(root, txn_id, ids)
+    report = report + "backend_map: {mapped}\n"
+    verdict = if mapped == "mapped": "committed" else: "unanchored"
+
+    # 11 publish
+    if fault == "map_ok_publish_failed":
+        report = report + "publish: failed\n"
+        report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+        return report + "verdict: replay_required\n"
+    scv_sj_publish_head(root, txn_id, verdict)
+    report = report + "publish: {verdict}\n"
+
+    # 12 release
+    report = report + "release: {scv_sj_lease_release(root, holder)}\n"
+    scv_write_text(scv_sj_txn_state_path(root), "{txn_id}|{verdict}\n")
+    report + "verdict: {verdict}\n"
+
+# Step 3 — the REAL E-04 coalescer, not a local re-implementation.
+#
+# scv_sj_coalesce_events is the honest entry point: a capsule driven by the
+# E-01/E-02 watcher hands its raw FsWatchEvent batch straight through
+# event_coalesce.spl. Events are added on the `save` class (saves flush
+# immediately, so the batch is released deterministically at one logical
+# instant), then scv_coalesce_atomic_save folds a created(tmp) + renamed(target,
+# related=tmp) [+ deleted(tmp)] triple into ONE modified(target). Returns the
+# distinct paths to capture; deletions are excluded (nothing to capture).
+# Step 3 — the REAL E-04 coalescer, not a local re-implementation.
+#
+# scv_sj_coalesce_events is the honest entry point: a capsule driven by the
+# E-01/E-02 watcher hands its raw FsWatchEvent batch straight through
+# event_coalesce.spl. Events are added on the `save` class (saves flush
+# immediately, so the batch is released deterministically at one logical
+# instant), then scv_coalesce_atomic_save folds a created(tmp) + renamed(target,
+# related=tmp) [+ deleted(tmp)] triple into ONE modified(target). Returns the
+# distinct paths to capture; deletions are excluded (nothing to capture).
+fn scv_sj_coalesce_events(events: [FsWatchEvent]) -> [text]:
+    var c = scv_coalesce_open(50, 250)
+    for ev in events:
+        c = scv_coalesce_add(c, ev, "save", 0)
+    val (c2, flushed) = scv_coalesce_flush_ready(c, 0)
+    val folded = scv_coalesce_atomic_save(flushed)
+    var out: [text] = []
+    for ev in folded:
+        if ev.kind == "deleted":
+            continue
+        if not out.contains(ev.path):
+            out.push(ev.path)
+    out
+
+# Path-level convenience for callers that only have paths (an explicit commit,
+# not a watcher batch): each path becomes one `modified` event. With no rename
+# evidence there is no atomic-save triple to fold, so this collapses duplicates
+# only — it does NOT pretend to infer an atomic save from a filename.
+fn scv_sj_coalesce_paths(paths: [text]) -> [text]:
+    var events: [FsWatchEvent] = []
+    var seq = 0
+    for p in paths:
+        seq = seq + 1
+        events.push(FsWatchEvent(seq: seq, kind: "modified", path: p, related: ""))
+    scv_sj_coalesce_events(events)
+
+fn scv_sj_capsule_verdict(report: text) -> text:
+    for line in report.split("\n"):
+        if line.starts_with("verdict: "):
+            return line[9:]
+    ""
+
+fn scv_sj_capsule_step_status(report: text, step: text) -> text:
+    val prefix = "{step}: "
+    for line in report.split("\n"):
+        if line.starts_with(prefix):
+            return line[prefix.len():]
+    ""
+
+# A transaction only ever ANCHORS when a real backend id was supplied. This is
+# the single predicate every caller should gate an "anchored" claim on.
+fn scv_sj_capsule_is_anchored(report: text) -> bool:
+    scv_sj_capsule_verdict(report) == "committed"
+
+# Recovery entry point (failure matrix rows 3 and 4): a head left in a
+# non-terminal state names what must be done, and never self-heals silently.
+fn scv_sj_capsule_recover(root: text) -> text:
+    val state = scv_sj_head_state(root)
+    if state == "absent":
+        return "nothing_to_recover"
+    if state == "committed":
+        return "clean"
+    if state == "unanchored":
+        return "unanchored: local snapshot retained, anchor pending"
+    "reconcile_required: head state {state}"

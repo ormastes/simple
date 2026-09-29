@@ -1,4 +1,9 @@
 # Deployed `bin/simple` refuses `test`/`lint`/`fmt` — all spec verification blocked
+## Closed 2026-09-16 — RESOLVED/not reproducible 2026-07-30; mem_cli_spec 7/7 verified normally
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Found:** 2026-07-30 ~12:30 UTC, mid-session, on a shared working copy.
 **RESOLVED / NOT REPRODUCIBLE as of 2026-07-30 ~15:20 UTC.** Plain
@@ -15,31 +20,7 @@ can change this under you. Original severity line follows.
 
 ~~**Severity:** BLOCKER for every workflow that verifies anything. No spec can be
 run repo-wide until this is resolved.
-**Status:** RESOLVED — re-verified 2026-08-17. See below; the rest of this
-file is kept for history.
-
-## Re-verification 2026-08-17 (partial-fix sweep, lane 1)
-
-```
-$ bin/simple fmt --help  >/dev/null 2>&1 ; echo $?
-0
-$ bin/simple lint --help >/dev/null 2>&1 ; echo $?
-0
-```
-
-Neither `fmt` nor `lint` is refused. Spec verification is not blocked: this
-sweep ran `bin/simple test` against several spec files in the same session and
-got real `Results:` lines back every time. This agrees with the "RESOLVED / NOT
-REPRODUCIBLE as of 2026-07-30 ~15:20 UTC" note already at the top of this file,
-which the header status line contradicted for two and a half weeks.
-
-NOT PROVED: the root cause was never identified, so a recurrence cannot be
-ruled out -- the original filing's refusal to paper over it still stands. What
-is settled is only that the symptom is absent today.
-
---- original filing below, kept for history ---
-
-**Status (original):** Open. Not root-caused. Deliberately NOT "fixed" by swapping
+**Status:** Open. Not root-caused. Deliberately NOT "fixed" by swapping
 binaries — see "Why nothing was swapped".
 
 ## Symptom
@@ -237,3 +218,4 @@ Held back pending a working runner, because it must not land unverified:
    the one tool that still dispatches).
 2. Produce a genuine pure-Simple binary via bootstrap and deploy it.
 3. Re-verify the held changes above before landing them.
+

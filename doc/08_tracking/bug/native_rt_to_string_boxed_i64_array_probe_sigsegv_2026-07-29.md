@@ -1,4 +1,8 @@
 # Native `rt_to_string` boxed-integer array probe SIGSEGV
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -63,3 +67,4 @@ DONE Generated 1 docs (1 complete, 0 stubs)
 Build and generation logs are retained under
 `/tmp/simple-docgen-rt-to-string-fix/`. No full bootstrap or Rust-seed fallback
 was used.
+

@@ -24,7 +24,7 @@ The table-service proving vertical of the Simple Enterprise Suite, exercised end
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/restaurant_vertical_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -80,6 +80,11 @@ Lane: .spipe/simple_enterprise_suite (W2-E, §7.3/§7.4 restaurant vertical).
 
 #### opens, orders two rounds, serves, and closes a balanced bill
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- opens, orders two rounds, serves, and closes a balanced bill
 - Open a clean store and seat a party of 2 at table T1
    - Expected: opened.reason equals `accepted`
    - Expected: restaurant_table_session(store, "tenant-a", "venue-1", "T1") equals `sess-1`
@@ -107,10 +112,12 @@ Lane: .spipe/simple_enterprise_suite (W2-E, §7.3/§7.4 restaurant vertical).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 42 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("opens, orders two rounds, serves, and closes a balanced bill")
 step("Open a clean store and seat a party of 2 at table T1")
 val store = fresh_store("e2e")
 val t = tenant_a()
@@ -161,6 +168,7 @@ store_close(store)
 
 #### denies opening a table that already has an active session
 
+- denies opening a table that already has an active session
 - Open T1 once
    - Expected: table_open_session(store, hs, t, host, envelope("do-1", "restaurant.table.open"), "sess-a", "venue-1", "T1", 2).reason equals `accepted`
 - A second open of the SAME table is denied table-occupied
@@ -172,10 +180,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies opening a table that already has an active session")
 val store = fresh_store("double_open")
 val t = tenant_a()
 val host = host_a()
@@ -195,6 +205,7 @@ store_close(store)
 
 #### denies invalid line state transitions — the machine is forward-only
 
+- denies invalid line state transitions — the machine is forward-only
 - Serving an ordered-but-not-ready line is denied
    - Expected: early.reason equals `invalid-transition`
    - Expected: restaurant_line_status(store, "tenant-a", "sess-1", "line-1") equals `ordered`
@@ -212,10 +223,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies invalid line state transitions — the machine is forward-only")
 val store = fresh_store("transitions")
 val t = tenant_a()
 val host = host_a()
@@ -246,6 +259,7 @@ store_close(store)
 
 #### denies closing a bill while unserved lines remain — unless voided
 
+- denies closing a bill while unserved lines remain — unless voided
 - Closing with line-2 still ordered is denied unserved-lines
    - Expected: premature.reason equals `unserved-lines`
 - Void line-2 — the bill closes on the served soup alone
@@ -257,10 +271,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("denies closing a bill while unserved lines remain — unless voided")
 val store = fresh_store("unserved")
 val t = tenant_a()
 val host = host_a()
@@ -289,6 +305,7 @@ store_close(store)
 
 #### replaying the same order-line command changes nothing
 
+- replaying the same order-line command changes nothing
 - Order the line once
    - Expected: first.reason equals `accepted`
 - Replay the SAME idempotency key
@@ -303,10 +320,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("replaying the same order-line command changes nothing")
 val store = fresh_store("replay")
 val t = tenant_a()
 val host = host_a()
@@ -335,6 +354,7 @@ store_close(store)
 
 #### tenant B cannot see or mutate tenant A's tables and menu
 
+- tenant B cannot see or mutate tenant A's tables and menu
 - Tenant B sees the table as free and the session as unknown
    - Expected: restaurant_table_session(store, "tenant-b", "venue-1", "T1") equals ``
    - Expected: restaurant_session_state(store, "tenant-b", "sess-a") equals ``
@@ -350,10 +370,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("tenant B cannot see or mutate tenant A's tables and menu")
 val store = fresh_store("isolation")
 val ta = tenant_a()
 val host = host_a()
@@ -386,6 +408,7 @@ store_close(store)
 
 #### reopens the database with sessions, lines, and replay guard intact
 
+- reopens the database with sessions, lines, and replay guard intact
 - Close the store (simulated shutdown)
 - Reopen and verify session, line state, and audit chain
    - Expected: restaurant_table_session(store2, "tenant-a", "venue-1", "T1") equals `sess-1`
@@ -400,10 +423,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reopens the database with sessions, lines, and replay guard intact")
 val store = fresh_store("restart")
 val t = tenant_a()
 val host = host_a()
@@ -453,3 +478,54 @@ store_close(store2)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `6d93e6f94c1a8fa9481d7af36d91725cfd0b4be991480091e401f6dfe7e2fc52`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `6d93e6f94c1a8fa9481d7af36d91725cfd0b4be991480091e401f6dfe7e2fc52`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `6d93e6f94c1a8fa9481d7af36d91725cfd0b4be991480091e401f6dfe7e2fc52`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
+
+SSpec documentization score: 88/100
+source: test/03_system/app/enterprise/restaurant_vertical_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/restaurant_vertical_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=80
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/restaurant_vertical_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/restaurant_vertical_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/restaurant_vertical_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-20): 2 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/restaurant_vertical_spec.spl:122:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'opens, orders two rounds, serves, and closes a balanced bill' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/restaurant_vertical_spec.spl:169:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies opening a table that already has an active session' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/restaurant_vertical_spec.spl:186:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'denies invalid line state transitions — the machine is forward-only' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

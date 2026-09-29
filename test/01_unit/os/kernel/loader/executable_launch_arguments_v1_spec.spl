@@ -1,0 +1,179 @@
+use std.spec
+use os.kernel.loader.executable_launch_arguments_v1.{
+    EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ARGV,
+    EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ENVP,
+    ExecutableLaunchArgumentsErrorV1,
+    executable_launch_arguments_v1_errno,
+    executable_launch_arguments_v1_validate
+}
+
+fn _texts(count: i64, value: text) -> [text]:
+    var out: [text] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+describe "ExecutableLaunchArgumentsV1 validation":
+    it "defaults empty argv to a loader-owned path copy":
+        var caller_argv: [text] = []
+        val result = executable_launch_arguments_v1_validate("/bin/hello", caller_argv, [])
+        expect(result.is_ok()).to_be_true()
+        val launch = result.unwrap()
+        caller_argv.push("changed")
+        expect(launch.path).to_equal("/bin/hello")
+        expect(launch.argv).to_equal(["/bin/hello"])
+        expect(launch.argv_bytes).to_equal(11)
+        expect(launch.envp_bytes).to_equal(0)
+        # The path is charged separately from the default argv[0] copy.
+        expect(launch.combined_bytes).to_equal(22)
+
+    it "deep-copies explicit argument and environment vectors":
+        var caller_argv = ["hello", "world"]
+        var caller_envp = ["A=1"]
+        val result = executable_launch_arguments_v1_validate(
+            "/bin/hello", caller_argv, caller_envp)
+        caller_argv[0] = "mutated"
+        caller_envp[0] = "B=2"
+        val launch = result.unwrap()
+        expect(launch.argv).to_equal(["hello", "world"])
+        expect(launch.envp).to_equal(["A=1"])
+        expect(launch.argv_bytes).to_equal(12)
+        expect(launch.envp_bytes).to_equal(4)
+        # path C string (11) + argv (12) + envp (4)
+        expect(launch.combined_bytes).to_equal(27)
+
+    it "rejects an empty executable path as EINVAL":
+        val result = executable_launch_arguments_v1_validate("", [], [])
+        expect(result.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.InvalidEmptyPath)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.InvalidEmptyPath)).to_equal(-22)
+
+    it "rejects embedded NUL in path argv and envp as EINVAL":
+        val path_result = executable_launch_arguments_v1_validate("/bin/x\0hidden", [], [])
+        val argv_result = executable_launch_arguments_v1_validate("/bin/x", ["x\0hidden"], [])
+        val envp_result = executable_launch_arguments_v1_validate("/bin/x", ["x"], ["A=1\0B=2"])
+        expect(path_result.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.InvalidPathEmbeddedNul)
+        expect(argv_result.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.InvalidArgvEmbeddedNul)
+        expect(envp_result.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.InvalidEnvpEmbeddedNul)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.InvalidArgvEmbeddedNul)).to_equal(-22)
+
+    it "accepts the maximum argv entry count and rejects one more":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", _texts(EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ARGV, "x"), [])
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", _texts(EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ARGV + 1, "x"), [])
+        expect(accepted.is_ok()).to_be_true()
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.TooManyArgvEntries)
+
+    it "accepts the maximum envp entry count and rejects one more":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x"], _texts(EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ENVP, "A="))
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x"], _texts(EXECUTABLE_LAUNCH_ARGUMENTS_V1_MAX_ENVP + 1, "A="))
+        expect(accepted.is_ok()).to_be_true()
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.TooManyEnvpEntries)
+
+    it "counts UTF-8 bytes and the terminating NUL for every string":
+        val result = executable_launch_arguments_v1_validate("/bin/x", ["é"], ["雪=1"])
+        val launch = result.unwrap()
+        expect(launch.argv_bytes).to_equal(3)
+        expect(launch.envp_bytes).to_equal(6)
+
+    it "accepts a 4095-byte payload and rejects a 4096-byte payload":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x".repeat(4095)], [])
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x".repeat(4096)], [])
+        expect(accepted.is_ok()).to_be_true()
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.ArgvStringTooLarge)
+
+    it "applies the NUL-inclusive C-string bound to the executable path":
+        val accepted = executable_launch_arguments_v1_validate(
+            "x".repeat(4095), [], [])
+        val rejected = executable_launch_arguments_v1_validate(
+            "x".repeat(4096), [], [])
+        expect(accepted.is_ok()).to_be_true()
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.PathStringTooLarge)
+
+    it "applies byte bounds rather than codepoint bounds to UTF-8 strings":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", ["é".repeat(2047) + "x"], [])
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", ["é".repeat(2048)], [])
+        expect(accepted.unwrap().argv_bytes).to_equal(4096)
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.ArgvStringTooLarge)
+
+    it "reports an oversized environment string separately from argv":
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x"], ["A=" + "x".repeat(4094)])
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.EnvpStringTooLarge)
+
+    it "rejects argv whose NUL-inclusive byte total exceeds 32768":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", _texts(8, "x".repeat(4095)), [])
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", _texts(8, "x".repeat(4095)) + [""], [])
+        expect(accepted.unwrap().argv_bytes).to_equal(32768)
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.ArgvBytesTooLarge)
+
+    it "rejects envp whose NUL-inclusive byte total exceeds 32768":
+        val accepted = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x"], _texts(8, "x".repeat(4095)))
+        val rejected = executable_launch_arguments_v1_validate(
+            "/bin/x", ["x"], _texts(8, "x".repeat(4095)) + [""])
+        expect(accepted.unwrap().envp_bytes).to_equal(32768)
+        expect(rejected.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.EnvpBytesTooLarge)
+
+    it "accepts the exact 65536-byte path plus vectors boundary":
+        # path: 2; argv: 32768; envp: 7*4096 + 4094 = 32766.
+        val envp = _texts(7, "x".repeat(4095)) + ["x".repeat(4093)]
+        val result = executable_launch_arguments_v1_validate(
+            "x", _texts(8, "x".repeat(4095)), envp)
+        val launch = result.unwrap()
+        expect(launch.argv_bytes).to_equal(32768)
+        expect(launch.envp_bytes).to_equal(32766)
+        expect(launch.combined_bytes).to_equal(65536)
+
+    it "rejects the first byte beyond the combined launch boundary":
+        # Each vector remains within its own 32768-byte cap; only the combined
+        # path + argv + envp budget is exceeded.
+        val envp = _texts(7, "x".repeat(4095)) + ["x".repeat(4094)]
+        val result = executable_launch_arguments_v1_validate(
+            "x", _texts(8, "x".repeat(4095)), envp)
+        expect(result.unwrap_err()).to_equal(
+            ExecutableLaunchArgumentsErrorV1.CombinedBytesTooLarge)
+
+    it "maps every size failure class to E2BIG":
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.TooManyArgvEntries)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.TooManyEnvpEntries)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.PathStringTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.ArgvStringTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.EnvpStringTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.ArgvBytesTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.EnvpBytesTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.CombinedBytesTooLarge)).to_equal(-7)
+        expect(executable_launch_arguments_v1_errno(
+            ExecutableLaunchArgumentsErrorV1.SizeOverflow)).to_equal(-7)

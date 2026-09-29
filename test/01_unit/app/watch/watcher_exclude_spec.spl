@@ -1,0 +1,57 @@
+"""
+## Purpose and audience
+Purpose: Pin the watcher's exclude filter so build output, VCS metadata and
+editor scratch files never enter a poll snapshot.
+Audience: watch and tooling maintainers.
+"""
+
+use std.spec.*
+use app.watch.watcher.{watch_path_is_excluded, watch_filter_paths}
+
+describe "watch_path_is_excluded":
+    it "excludes build output under target/":
+        expect(watch_path_is_excluded("target/debug/foo.spl")).to_equal(true)
+        expect(watch_path_is_excluded("src/target/gen.spl")).to_equal(true)
+        expect(watch_path_is_excluded("./target/x.spl")).to_equal(true)
+
+    it "excludes VCS metadata under .git/":
+        expect(watch_path_is_excluded(".git/objects/ab/cd.spl")).to_equal(true)
+        expect(watch_path_is_excluded("src/.git/hooks/pre.spl")).to_equal(true)
+
+    it "excludes editor scratch suffixes":
+        expect(watch_path_is_excluded("src/app/main.spl.swp")).to_equal(true)
+        expect(watch_path_is_excluded("src/app/main.tmp")).to_equal(true)
+
+    it "keeps ordinary source paths":
+        expect(watch_path_is_excluded("src/app/watch/watcher.spl")).to_equal(false)
+        expect(watch_path_is_excluded("src/lib/common/text.spl")).to_equal(false)
+
+    it "does not exclude on a substring that is not a path component":
+        # "targeting" and "digital" contain "target" / "git" but are real dirs.
+        expect(watch_path_is_excluded("src/targeting/aim.spl")).to_equal(false)
+        expect(watch_path_is_excluded("src/digital/x.spl")).to_equal(false)
+        expect(watch_path_is_excluded("src/swap/main.spl")).to_equal(false)
+
+describe "watch_filter_paths":
+    it "drops every excluded entry and keeps the rest in order":
+        val kept = watch_filter_paths([
+            "src/a.spl",
+            "target/b.spl",
+            "src/b.spl",
+            ".git/c.spl",
+            "src/c.spl.swp",
+            "src/d.tmp",
+            "src/e.spl"
+        ])
+        expect(kept.len()).to_equal(3)
+        expect(kept[0]).to_equal("src/a.spl")
+        expect(kept[1]).to_equal("src/b.spl")
+        expect(kept[2]).to_equal("src/e.spl")
+
+    it "returns an empty list when every entry is excluded":
+        val kept = watch_filter_paths(["target/x.spl", ".git/y.spl", "z.tmp"])
+        expect(kept.len()).to_equal(0)
+
+    it "returns an empty list for an empty input rather than inventing entries":
+        val empty: [text] = []
+        expect(watch_filter_paths(empty).len()).to_equal(0)

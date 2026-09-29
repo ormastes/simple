@@ -1,0 +1,128 @@
+"""Cache daemon admission and idle lifecycle.
+
+This state is availability coordination only.  It is never cache correctness
+authority; verified CAS/journal evidence remains required after admission.
+"""
+
+val CACHE_DAEMON_IDLE_ARM_MS: i64 = 10000i64
+val CACHE_DAEMON_IDLE_EXIT_MAX_MS: i64 = 12000i64
+val CACHE_DAEMON_OPEN: i64 = 0i64
+val CACHE_DAEMON_DRAINING: i64 = 1i64
+val CACHE_DAEMON_STOPPED: i64 = 2i64
+
+class CacheDaemonLifecycle:
+    request_count: i64
+    lease_count: i64
+    publication_count: i64
+    gc_transaction_count: i64
+    idle_since_ms: i64
+    admission_open: bool
+    shutdown_state: i64
+    checkpoint_complete: bool
+    writer_epoch_released: bool
+
+    static fn create(start_ms: i64) -> CacheDaemonLifecycle:
+        CacheDaemonLifecycle(
+            request_count: 0i64,
+            lease_count: 0i64,
+            publication_count: 0i64,
+            gc_transaction_count: 0i64,
+            idle_since_ms: start_ms,
+            admission_open: true,
+            shutdown_state: CACHE_DAEMON_OPEN,
+            checkpoint_complete: false,
+            writer_epoch_released: false,
+        )
+
+    fn activity_count() -> i64:
+        self.request_count + self.lease_count + self.publication_count + self.gc_transaction_count
+
+    me note_activity(now_ms: i64):
+        self.idle_since_ms = -1i64
+
+    me begin_request(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.request_count = self.request_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_request(now_ms: i64):
+        if self.request_count > 0i64:
+            self.request_count = self.request_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_lease(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.lease_count = self.lease_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_lease(now_ms: i64):
+        if self.lease_count > 0i64:
+            self.lease_count = self.lease_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_publication(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.publication_count = self.publication_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_publication(now_ms: i64):
+        if self.publication_count > 0i64:
+            self.publication_count = self.publication_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me begin_gc_transaction(now_ms: i64) -> bool:
+        if not self.admission_open:
+            return false
+        self.gc_transaction_count = self.gc_transaction_count + 1i64
+        self.note_activity(now_ms)
+        true
+
+    me end_gc_transaction(now_ms: i64):
+        if self.gc_transaction_count > 0i64:
+            self.gc_transaction_count = self.gc_transaction_count - 1i64
+        self.arm_if_idle(now_ms)
+
+    me arm_if_idle(now_ms: i64):
+        if self.activity_count() == 0i64 and self.idle_since_ms < 0i64:
+            self.idle_since_ms = now_ms
+
+    me should_begin_shutdown(now_ms: i64) -> bool:
+        if self.shutdown_state != CACHE_DAEMON_OPEN:
+            return false
+        self.arm_if_idle(now_ms)
+        if self.activity_count() != 0i64 or self.idle_since_ms < 0i64:
+            return false
+        if now_ms - self.idle_since_ms < CACHE_DAEMON_IDLE_ARM_MS:
+            return false
+        self.admission_open = false
+        self.shutdown_state = CACHE_DAEMON_DRAINING
+        true
+
+    fn exceeded_exit_bound(now_ms: i64) -> bool:
+        self.activity_count() == 0i64 and self.idle_since_ms >= 0i64 and
+            now_ms - self.idle_since_ms >= CACHE_DAEMON_IDLE_EXIT_MAX_MS
+
+    me note_checkpoint_complete():
+        if self.shutdown_state == CACHE_DAEMON_DRAINING:
+            self.checkpoint_complete = true
+
+    me note_writer_epoch_released():
+        if self.shutdown_state == CACHE_DAEMON_DRAINING:
+            self.writer_epoch_released = true
+
+    me finish_shutdown() -> bool:
+        if self.shutdown_state != CACHE_DAEMON_DRAINING or self.activity_count() != 0i64:
+            return false
+        if not self.checkpoint_complete or not self.writer_epoch_released:
+            return false
+        self.shutdown_state = CACHE_DAEMON_STOPPED
+        true
+
+fn cache_daemon_lifecycle_new(start_ms: i64) -> CacheDaemonLifecycle:
+    CacheDaemonLifecycle.create(start_ms)

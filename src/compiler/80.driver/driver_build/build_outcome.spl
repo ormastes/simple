@@ -1,3 +1,5 @@
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+
 # Build Outcome Records
 #
 # The shared vocabulary for "what happened to one unit of work" during a build.
@@ -140,13 +142,12 @@ fn build_outcome_classify_status(status: i64, timed_out: bool) -> BuildOutcomeKi
 #   * REPORT the policy in the summary, so a reader knows whether they are seeing
 #     everything (`shown=N retained=N total=M`). Silent truncation is the same
 #     defect class as a silent failure.
-extern fn rt_env_get(key: text) -> text
 extern fn rt_file_append_text(path: text, content: text) -> bool
 
 # Diagnostic lines kept verbatim per unit. Matches the existing display cap so
 # retained and shown are the same number and the summary can say so honestly.
 fn build_outcome_retained_line_cap() -> i64:
-    val override = rt_env_get("SIMPLE_BUILD_DIAG_RETAIN") ?? ""
+    val override = sosix_env_get_nullable("SIMPLE_BUILD_DIAG_RETAIN") ?? ""
     if override != "":
         # Hand-rolled rather than `text.to_i64()`: this tree has an open defect
         # where a chained `.to_i64()` returns garbage under JIT (see the same
@@ -166,7 +167,7 @@ fn build_outcome_retained_line_cap() -> i64:
 
 # Where discarded diagnostic text goes. It is DISCARDED FROM MEMORY, not lost.
 fn build_outcome_spill_log_path() -> text:
-    val override = rt_env_get("SIMPLE_BUILD_DIAG_LOG") ?? ""
+    val override = sosix_env_get_nullable("SIMPLE_BUILD_DIAG_LOG") ?? ""
     if override != "":
         return override
     "build/build_diagnostics.log"
@@ -416,14 +417,36 @@ impl BuildOutcomeSet:
     fn reason_block_for(source_path: text) -> text:
         for outcome in self.records:
             if outcome.source_path == source_path:
-                if outcome.diagnostics == "":
-                    return "      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)\n"
+                # These two fallbacks used to emit BYTE-IDENTICAL text, so a
+                # reader could not tell "the producer stored nothing" from "the
+                # producer stored something that renders as nothing" -- two
+                # different defects with two different fixes. That ambiguity
+                # blinded four investigations on 2026-09-06. Name the site, and
+                # report the LENGTH and the producer's own exact line counts, so
+                # a corrupt-but-non-empty payload (the `<invalid-heap:0x…>` shape)
+                # is visibly distinct from a genuinely absent one.
+                if outcome.diagnostics == "" or outcome.diagnostics.len() <= 0:
+                    return "      reason: (none recorded [empty-at-record] — BUG in the"
+                        + " producer: a non-OK unit must carry a diagnostic;"
+                        + " diagnostics-len={outcome.diagnostics.len()}"
+                        + " total={outcome.diagnostic_total}"
+                        + " retained={outcome.diagnostic_retained})\n"
                 var block = ""
                 for line in outcome.diagnostics.split("\n"):
                     if line != "":
                         block = block + "      reason: {line}\n"
                 if block == "":
-                    return "      reason: (none recorded — BUG in the producer: a non-OK unit must carry a diagnostic)\n"
+                    # Non-empty by both tests above, yet split/render produced no
+                    # line: the stored text did not survive being read back. That
+                    # is the text-crossing defect, NOT a producer that forgot a
+                    # reason -- say so, and keep the measured length as evidence.
+                    return "      reason: (none recorded [lost-in-render] — the stored"
+                        + " diagnostic is non-empty but renders as no lines;"
+                        + " diagnostics-len={outcome.diagnostics.len()}"
+                        + " total={outcome.diagnostic_total}"
+                        + " retained={outcome.diagnostic_retained};"
+                        + " tracked in doc/08_tracking/bug/"
+                        + "stage2_aot_error_message_lost_invalid_heap_2026-09-06.md)\n"
                 # R9: state the retention policy whenever text was dropped, so a
                 # reader can tell "10 problems" from "10 of 1948 problems". The
                 # count is always exact; only the text is bounded.

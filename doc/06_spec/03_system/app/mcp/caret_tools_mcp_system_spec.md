@@ -20,7 +20,7 @@ Purpose: Prove that LLM Caret's infrastructure tools are reachable from any
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/mcp/caret_tools_mcp_system_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -50,6 +50,11 @@ so its own startup path never imports the caret module graph.
 
 #### initialize succeeds and tools/list advertises all nine caret_* tools with confirm semantics
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- initialize succeeds and tools/list advertises all nine caret_* tools with confirm semantics
 - initialize answered with serverInfo on id 1
 - tools/list on id 2 names every caret_* tool
 - mutating caret tools document the confirm requirement in their schema
@@ -58,10 +63,12 @@ so its own startup path never imports the caret module graph.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("initialize succeeds and tools/list advertises all nine caret_* tools with confirm semantics")
 val nonce = _nonce()
 _prepare(nonce)
 val out = _send(_init() + _tools_list("2"), "300")
@@ -85,6 +92,7 @@ expect(list).to_contain("\"confirm\":{\"type\":\"string\",\"description\":\"Must
 
 #### caret_wiki_search returns a real hit for a seeded page
 
+- caret_wiki_search returns a real hit for a seeded page
 - the hit names the seeded page id, title and file url (absolute oracle: the nonce)
    - Expected: resp does not contain `"isError":true`
 
@@ -92,10 +100,12 @@ expect(list).to_contain("\"confirm\":{\"type\":\"string\",\"description\":\"Must
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("caret_wiki_search returns a real hit for a seeded page")
 val nonce = _nonce()
 val seed = _prepare(nonce)
 val out = _send(_init() + _call("3", "caret_wiki_search", "{\"query\":\"MCP-SEED-BODY " + nonce + "\"}"), "300")
@@ -110,6 +120,7 @@ expect(resp).to_contain("seed_" + nonce + ".md\\tSeed " + nonce + "\\tfile://" +
 
 #### caret_wiki_write is denied without confirm and writes the page with confirm: true
 
+- caret_wiki_write is denied without confirm and writes the page with confirm: true
 - without confirm: an isError result naming the confirm requirement, and no file on disk
 - with confirm: true the page is created and the disk holds the exact body
    - Expected: ok does not contain `"isError":true`
@@ -122,10 +133,12 @@ expect(resp).to_contain("seed_" + nonce + ".md\\tSeed " + nonce + "\\tfile://" +
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 29 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("caret_wiki_write is denied without confirm and writes the page with confirm: true")
 val nonce = _nonce()
 _prepare(nonce)
 val page = "mcp_written_" + nonce + ".md"
@@ -169,3 +182,56 @@ expect(read).to_contain(body)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-APP-MCP-CARET-001`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `864c035f28466b8e2268103bf8e383c0d359c2605207b1dee2f6b8671d18b99f`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `864c035f28466b8e2268103bf8e383c0d359c2605207b1dee2f6b8671d18b99f`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `864c035f28466b8e2268103bf8e383c0d359c2605207b1dee2f6b8671d18b99f`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/mcp/caret_tools_mcp_system_spec.spl
+mirror: doc/06_spec/03_system/app/mcp/caret_tools_mcp_system_spec.md (current)
+findings: 6 blockers: 1
+  narrative=100 structure=100 oracle=100
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=86; blocker cap makes effective=49
+doc/06_spec/03_system/app/mcp/caret_tools_mcp_system_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/mcp/caret_tools_mcp_system_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/mcp/caret_tools_mcp_system_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/03_system/app/mcp/caret_tools_mcp_system_spec.spl:87:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'initialize succeeds and tools/list advertises all nine caret_* tools with confirm semantics' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/mcp/caret_tools_mcp_system_spec.spl:107:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'caret_wiki_search returns a real hit for a seeded page' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/mcp/caret_tools_mcp_system_spec.spl:119:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'caret_wiki_write is denied without confirm and writes the page with confirm: true' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

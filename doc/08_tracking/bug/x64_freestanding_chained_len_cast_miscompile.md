@@ -1,4 +1,8 @@
 # x64 freestanding: chained `x.len().to_u32()` — NOT A BUG (retracted)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RESOLVED / NOT REPRODUCIBLE. This file previously claimed a cranelift
 backend mis-lowering of a cast chained onto a call result
@@ -41,3 +45,4 @@ ALSO false — see
 - One thing remains unexplained (not chased, superseded): the very first getfile
   boot produced an EMPTY object (0 bytes) rather than 712-of-garbage; the likely
   cause is a transient/reconnect, not a chained cast. The endpoint is byte-exact.
+

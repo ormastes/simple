@@ -1,0 +1,146 @@
+"""
+## Purpose and audience
+For the Engine2D Vulkan maintainer who touches the image src-over kernel:
+`_glsl_blit()` in `backend_vulkan_glsl.spl` and the `spirv_blit()` words in
+`backend_vulkan_spirv_raster_blobs.spl`. Companion to
+`doc/08_tracking/bug/vulkan_glsl_blend_formula_stale_vs_cpu_2026-09-12.md`.
+
+The frozen CPU oracle is `blend()` in `src/lib/**/engine2d/color.spl`: it
+composites in premultiplied space and unpremultiplies by the resulting output
+alpha, so `dst_weight = (da * (255 - sa)) / 255` appears BOTH in the alpha
+accumulation and in every channel numerator. The pre-unpremultiply formula that
+this file exists to keep out uses `inv` in the channel numerators and divides by
+the constant 255. For `0x01020304` over `0x10203040` the two disagree by a
+readable amount -- `0x101E2D3C` (frozen) vs `0x101F2F3F` (stale) -- and until
+2026-09-12 the checked-in GLSL text carried the stale one while the hand-
+assembled SPIR-V blob carried the frozen one, with nothing in the tree able to
+notice the divergence.
+
+## Operator workflow
+`SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+ <vulkan-capable simple> run \
+ test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_blend_cpu_parity_spec.spl`
+
+The byte-level companion is `sh scripts/check/check-blit-spirv-pinned.shs`,
+which proves the committed blob IS glslangValidator output for the committed
+GLSL. The two are complementary and neither replaces the other: the pin check
+proves the device runs the text you can read, this file proves the text is
+RIGHT. A GLSL-only sabotage is invisible to the device until the blob is
+regenerated -- that asymmetry is the whole bug, and it is why the sabotage
+recipe below has a regeneration step in the middle of it.
+
+## Compatibility and limitations
+REQUIRES a real Vulkan device and says so by FAILING, never skipping: the first
+expectation asserts `backend_name() == "vulkan"`. `draw_image_blend` has a host
+fallback (`emu_draw_image_blend`) that computes the CPU `blend()` directly, so a
+skip -- or a silent fallback -- would turn every exact-value claim here into a
+tautology about the emulator.
+
+Covers the two branches the kernel actually has for a src-over composite: the
+translucent path (`0 < sa < 255`, the arithmetic), and the `sa == 255` raw-store
+path, where both CPU and kernel must return the SOURCE word untouched rather
+than running it through the arithmetic (which would be lossy). `sa == 0` is
+covered as the third early-out. NOT covered here: clipping, scaling and opacity
+scaling of the same kernel -- those are the boundary/drawing/typed-upload specs.
+
+## Verification guidance and troubleshooting
+The sabotage that proves this file discriminates: change `dst_weight` back to
+`inv` in the three channel numerators of `_glsl_blit()`, run
+`sh scripts/tool/gen-blit-spirv.shs`, and re-run. The exact-value example goes
+red reading `0x101F2F3F`; the `sa == 255` and `sa == 0` examples stay green,
+which is exactly why an exact-value oracle was needed rather than a "blending
+happened" smoke check. Restore and regenerate to return to green.
+
+If the mirror example fails while the device example passes, the CPU oracle
+moved and this file's literals are stale -- fix `color.spl` or the bug record,
+never the literal alone.
+"""
+# Lifecycle: doc/08_tracking/bug/vulkan_glsl_blend_formula_stale_vs_cpu_2026-09-12.md
+# @manual_section: vulkan_blend_cpu_parity
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl 30%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_spirv_raster_blobs.spl 2%
+# @tag: unit, gpu, engine2d, vulkan, blend
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{blend}
+
+val FB: i32 = 32
+val AT_X: i32 = 5
+val AT_Y: i32 = 7
+
+# The frozen triple. dst alpha is 0x10, NOT 0xFF -- the stale and frozen
+# formulas agree whenever the destination is opaque, so an opaque ground would
+# make this whole file vacuous.
+val GROUND: u32 = 0x10203040u32
+val SRC_TRANSLUCENT: u32 = 0x01020304u32
+val EXPECT_TRANSLUCENT: u32 = 0x101E2D3Cu32
+val SRC_OPAQUE: u32 = 0xFF020304u32
+val SRC_INVISIBLE: u32 = 0x00FFFFFFu32
+
+fn one_pixel(c: u32) -> [u32]:
+    var out: [u32] = [0u32; 1]
+    out[0] = c
+    out
+
+fn blended_at(src: u32) -> u32:
+    """Composite one src-over pixel on the device and read it back."""
+    val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+    e.clear(GROUND)
+    e.draw_image_blend(AT_X, AT_Y, 1i32, 1i32, one_pixel(src))
+    e.finalize_compute_frame_no_readback()
+    val px = e.read_pixels_with_source().pixels
+    e.shutdown()
+    px[AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64()]
+
+describe "The Vulkan src-over kernel computes the frozen CPU blend exactly":
+
+    it "runs on a real Vulkan device, and fails rather than skipping when it cannot":
+        # PRECONDITION. Every claim below is about DEVICE pixels, and the host
+        # fallback for draw_image_blend literally calls the CPU `blend()` this
+        # file compares against -- so a skip would prove nothing at all.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        val name = e.backend_name()
+        e.shutdown()
+        expect(name).to_equal("vulkan")
+
+    it "blends 0x01020304 over 0x10203040 to exactly 0x101E2D3C on the device":
+        # REPRODUCING, exact value. dst_weight = (0x10 * 254) / 255 = 15,
+        # out_a = 1 + 15 = 16, and each channel is (s*1 + d*15) / 16 ->
+        # (30, 45, 60). The stale pre-unpremultiply formula yields 0x101F2F3F
+        # here; every channel differs, so a partial regression is still visible.
+        expect(blended_at(SRC_TRANSLUCENT)).to_equal(EXPECT_TRANSLUCENT)
+
+    it "agrees with the frozen CPU blend() for that same pair":
+        # MIRROR. Pinning the literal alone would let the CPU oracle drift away
+        # from the device without anything going red; pinning only the mirror
+        # would let BOTH drift together. Both claims are needed.
+        expect(blend(SRC_TRANSLUCENT, GROUND)).to_equal(EXPECT_TRANSLUCENT)
+        expect(blended_at(SRC_TRANSLUCENT)).to_equal(blend(SRC_TRANSLUCENT, GROUND))
+
+    it "stores an opaque source word raw instead of running it through the arithmetic":
+        # BOUNDARY, sa == 255. Both CPU and kernel take an early-out here and
+        # must return the SOURCE untouched. Routing 0xFF020304 through the
+        # arithmetic instead would give out_a = 255 + 0 and unchanged channels
+        # by luck -- so the discriminating part is that the channels survive
+        # EXACTLY, with dst = 0x10203040 contributing nothing.
+        expect(blended_at(SRC_OPAQUE)).to_equal(SRC_OPAQUE)
+        expect(blend(SRC_OPAQUE, GROUND)).to_equal(SRC_OPAQUE)
+
+    it "leaves the destination untouched for a fully transparent source":
+        # BOUNDARY, sa == 0. The kernel returns before touching fb; the CPU
+        # returns dst. This is also the guard for out_a == 0, which is the only
+        # way the channel division could divide by zero.
+        expect(blended_at(SRC_INVISIBLE)).to_equal(GROUND)
+        expect(blend(SRC_INVISIBLE, GROUND)).to_equal(GROUND)
+
+    it "leaves the pixel next to the composite on the untouched ground":
+        # BOUNDARY in space. A kernel that wrote one pixel too many would be
+        # invisible to every example above, all of which read one address.
+        val e = Engine2D.create_with_backend_fast(FB, FB, "vulkan")
+        e.clear(GROUND)
+        e.draw_image_blend(AT_X, AT_Y, 1i32, 1i32, one_pixel(SRC_TRANSLUCENT))
+        e.finalize_compute_frame_no_readback()
+        val px = e.read_pixels_with_source().pixels
+        e.shutdown()
+        expect(px[AT_Y.to_i64() * FB.to_i64() + AT_X.to_i64() + 1]).to_equal(GROUND)

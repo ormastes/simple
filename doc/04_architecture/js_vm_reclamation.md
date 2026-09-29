@@ -1,8 +1,7 @@
 <!-- codex-architecture -->
 # JavaScript VM Reclamation Architecture
 
-Status: **PROPOSED / RED — ABI and SSpec contract only; no collector or
-executable reclamation evidence exists.**
+Status: **RED — design only; no collector or executable evidence exists.**
 
 ## Scope and selected owner
 
@@ -49,9 +48,6 @@ Current implementation map:
 Frozen, non-overlapping APIs:
 
 ```text
-JsHeapHandle(store_kind,slot:i64,generation:i64)
-JsExternalRootKey(handle,owner_kind,owner_id)
-JsTypedEdge(kind,handle)
 EnvironmentStack.create_env(parent_env_id)
 EnvironmentStack.mark_environment_graph(...)
 EnvironmentStack.sweep_unmarked_environments(...)
@@ -80,86 +76,20 @@ code never sweeps or compacts stores; stores never discover
 delegate exclusively to `JsGlobalBindingStore`; they do not own storage or
 marking.
 
-## Frozen ownership ABI
-
-`JsHeapHandle(store_kind,slot:i64,generation:i64)` replaces raw reusable IDs at
-every cross-store, metadata, browser, callback, and external-return boundary.
-`store_kind` is the closed storage discriminator `object`, `function`, or
-`environment`; `slot` selects storage within that store and `generation`
-proves which lifetime occupies that slot. A slot generation advances before
-reclamation publishes the slot to its free list. Generation exhaustion retires
-the slot rather than wrapping. Unknown store kinds fail closed.
-
-`JsTypedEdge(kind,handle)` is the only VM graph-edge representation outside a
-store's direct `JsValue` variants. `kind` is the closed semantic edge-family
-discriminator; `handle.store_kind` alone selects the object, function, or
-environment store. This keeps generic semantic families such as
-`timer_argument` and `temporary_host_return` valid for either object/array or
-function values without property-name inference. The initial closed semantic
-inventory is: `object`,
-`function`, `environment`, `closure_environment`, `timer_callback`,
-`timer_argument`, `promise_task`, `promise_handler`, `promise_registration`,
-`stream_source`, `stream_destination`, `iterator_source`, `wasm_module`,
-`wasm_import`, `wasm_export`, `wasm_function`, `dom_node`, `dom_style`,
-`listener_target`, `listener_callback`, `pending_event`, and
-`temporary_host_return`. Ordinary JavaScript numbers are never decoded as
-handles.
-
-`JsExternalRootKey(handle,owner_kind,owner_id)` identifies one independent
-external owner of one handle lifetime. The external-root table maps that key
-to its `JsTypedEdge` and an O(1) retain count. Retaining the same key twice
-increments its count; two clients use distinct `owner_id` values and cannot
-release each other. Release requires the exact key, decrements only that key,
-and rejects an absent or stale-generation key without changing any live root.
-Equality by raw slot is forbidden.
-
-Every stale handle operation is fail-closed:
-
-| Operation | Required result | Permitted mutation |
-|---|---|---|
-| retain | reject stale generation | none |
-| resolve | reject and return no value | none |
-| mark | reject and do not enqueue | stale-reject counter only |
-| release | reject stale/foreign key | stale-reject counter only |
-
-The independent-owner oracle starts with zero counts and applies
-`retain A, retain A, retain B, release A, release A, release B`. Key A counts
-must be `[0,1,2,2,1,0,0]`; key B counts must be
-`[0,0,0,1,1,1,0]`. Thus a same-key retain is counted twice, while releasing A
-never changes B.
-
-This is an ABI migration, not a compatibility adapter. Before sweep or reuse
-is enabled, `JsValue` reference variants, object prototypes/properties,
-function closure metadata, environment parents/bindings, interpreter tables,
-runtime return values, browser DOM/listener records, timers, promises, streams,
-iterators, and WASM bridges must carry handles or typed edges atomically. A
-mixed raw-ID/generation-aware production mode is forbidden. Decode-only
-compatibility may exist for retained fixtures, but it cannot enter production
-marking or release.
-
 ## Correctness prerequisite: lexical parents
 
-The canonical lexical-parent prerequisite now stores and validates
-`parent_env_id`, walks the real lexical chain, and has static shadowing/capture
-coverage. That prerequisite is not runtime-admitted reclamation evidence. The
-ABI migration must preserve those semantics while converting every parent and
-`closure_env` reference to `JsHeapHandle`. The environment marker follows the
-typed parent edge and every binding value; a function follows its typed closure
-edge. Reclamation remains disabled if lexical behavior or generation checks
-fail.
+`EnvironmentStack.create_env(parent)` currently ignores `parent`, and variable
+lookup falls directly from the current frame to global scope. Before
+reclamation can be enabled, every environment must store `parent_env_id`;
+`get_var` and `set_var` must walk that real lexical chain. The environment mark
+visitor follows the parent edge and every binding value. A function follows
+its `closure_env` edge. Tests must first lock shadowing, nested capture, and
+post-return closure behavior; reclamation remains disabled if those tests fail.
 
 ## Complete typed root inventory
 
-`JsVmRoots` is typed: object, function, environment, and `JsValue` roots are
-distinct. A raw integer is never guessed to be an object edge. The operative
-`std.js.types.JsValue` has no `Symbol` variant, so migration must delete stale
-`JsValue.Symbol` match arms in the selected engine/browser surface; it must not
-add a speculative symbol store, root, edge kind, or value variant.
-The frozen deletion inventory is
-`src/lib/nogc_sync_mut/js/engine/interpreter.spl`,
-`src/lib/nogc_sync_mut/js/engine/interpreter_async.spl`, and
-`src/lib/gc_async_mut/web/browser_session_storage.spl`. The static migration
-gate rejects any remaining `JsValue.Symbol` arm in those files.
+`JsVmRoots` is typed: object, function, environment, symbol, and `JsValue`
+roots are distinct. A raw integer is never guessed to be an object edge.
 
 Strong interpreter roots include:
 
@@ -201,29 +131,28 @@ safe because each typed ID is marked once.
 
 ## Numeric backing-ID migration gate
 
-Ownership-bearing IDs currently stored as `JsValue.Number`, including
+Ownership-bearing IDs stored as `JsValue.Number`, including
 `__simple_typed_array_buffer`, `__simple_data_view_buffer`,
 `__simple_stream_pending_pipe_dest`, `__simple_stream_source_id`,
 `__simple_uint8_iterator_source_id`, `__simple_wasm_streaming_target`,
 `__simple_wasm_runtime_memory_buffer`, `__simple_timer_callback_id`, and
 dynamic `__simple_handler_next:*` links, are invisible to a typed tracer and
 could be reclaimed or reused incorrectly. WebGPU/module IDs and every other
-numeric `*_id` property must be classified as either a non-VM external scalar
-or a VM ownership edge. Before sweep is enabled, every VM ownership edge moves
-to a typed side table owned by its store or becomes an explicitly registered
-`JsTypedEdge`. Property-name matching is not a tracer and is prohibited. A
-static inventory test rejects unclassified/new numeric ownership and rejects
-collector code that branches on author-visible property names. Until this
-migration is complete the collector gate is RED.
+numeric `*_id` property must be classified as either an external scalar handle
+or a VM ownership edge. Before sweep is enabled, every ownership edge must
+move to a typed side table owned by its store, or become an explicitly
+registered typed root. A static inventory test rejects unclassified or newly
+introduced numeric ownership edges. Until this migration is complete the
+collector gate is RED.
 
 ## Stable IDs and collection
 
 Object properties are parallel arrays today. Sweep removes/tombstones all
 parallel entries in lockstep, clears prototypes, and returns dead slots to a
 free list. Objects, functions, and environments retain stable IDs for their
-live lifetime; live entries are never compacted. Every reference uses
-`JsHeapHandle`; resolving a handle compares its generation before reading the
-slot. A stale handle cannot observe, retain, release, or mark a new occupant.
+live lifetime; live entries are never compacted. Reused slots carry generation
+validation (or an equivalent non-aliasing handle) so stale host IDs cannot
+resolve to a new object.
 
 `JsGlobalBindingStore` replaces the interpreter's parallel global name/value
 arrays. `set` replaces an existing name rather than appending it; `delete`
@@ -243,15 +172,6 @@ Each object/function/environment/global/property store reports:
 VM statistics also expose `collection_count` and `deferred_collection_count`.
 The test oracle compares `live` and `slot_capacity`; filtering counters or
 reporting only monotonic totals cannot close the bug.
-
-Allocation and release update `live`, `allocated_total`, `reclaimed_total`,
-free-list length, and `live_high_water` in O(1). Allocation must not scan
-liveness arrays, property arrays, roots, or the graph. Mark preparation builds
-or consumes maintained typed adjacency once; graph traversal is O(V+E), not
-one full property scan per marked object. The N/2N oracle compares explicit
-allocation-scan and mark-visit counters. The focused contract fixes N=`128`,
-2N=`256`, and frozen-root allowance=`32`: allocation scans remain zero and
-`visits_2n <= 2 * visits_n + 32`.
 
 ## Safe points and deferred collection
 
@@ -300,20 +220,10 @@ with production budgets in
 All new reclamation evidence is absent/unimplemented at this design checkpoint,
 so overall status is RED.
 
-The first contract artifact is
-`test/01_unit/lib/nogc_sync_mut/js/engine/js_vm_reclamation_spec.spl` with its
-mirrored manual. Its helpers fail explicitly until the ownership ABI and
-typed-edge inventory exist; its presence is not executable evidence.
-Its 1,000 focused cycles are only a deterministic precursor. The 10,000-cycle
-NFR-WEB-BROWSER-006/014 measurement remains a separately planned external
-production-browser gate and is not tagged or claimed by the unit contract.
-
 ## Risks and fail-closed gates
 
 - An unregistered host raw ID or generation-reuse alias can become use-after-
   free; typed registration and stale-handle negative tests are mandatory.
-- Deduplicating external roots by raw value lets one client release another;
-  keyed retain counts and independent-owner tests are mandatory.
 - Numeric hidden ownership IDs can sever live buffer/view graphs; sweep stays
   disabled until their inventory is zero.
 - Native, bound, WASM, Promise, timer, async, and cache tables can retain stale
@@ -324,5 +234,3 @@ production-browser gate and is not tagged or claimed by the unit contract.
   state; only iterative marking at the frozen safe point is allowed.
 - Implementing in `common/js` or the compatibility facade would leave the
   selected browser engine leaking; owner-path tests reject that layout.
-- O(N) live-count scans in allocation merely move the performance bug; exact
-  allocation-scan counters must remain zero for N, 2N, and 1,000-cycle runs.

@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/bugs/llvm_native_dynamic_compare_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers interpreter-path correctness for text/ANY relational compares. See
+"Known gap" below for why this spec cannot itself reach the Rust seed's LLVM
+native-build backend.
+"""
+
+# doc-path: doc/01_research/local/llvm_native_dynamic_compare_spec.md
+# doc-path: doc/03_plan/sys_test/llvm_native_dynamic_compare_spec.md
+# doc-path: doc/04_architecture/llvm_native_dynamic_compare_spec.md
+# doc-path: doc/05_design/llvm_native_dynamic_compare_spec_oracles.md
+# @manual: primary
+
+"""
+# LLVM Native-Build Relational/Equality Compare on Text/ANY Values
+
+**Feature IDs:** #P0-LLVM-DYNAMIC-CMP-001
+**Category:** Runtime / Codegen
+**Difficulty:** 3/5
+**Status:** Implemented (Rust seed LLVM backend)
+**Requirements:** N/A
+**Plan:** native_defect_systemic_plan.md (Package B, class 1)
+**Design:** N/A
+**Research:** doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md
+
+## Overview
+
+Regression guard for the Rust seed's LLVM native-build backend
+(`src/compiler_rust/compiler/src/codegen/llvm/instructions.rs:271-290,
+620-627`): relational (`<` `<=` `>` `>=`) and equality ops on text/ANY
+operands used to compile to a raw `icmp` on the tagged i64 representation
+(effectively an address/handle compare), because unlike the Cranelift
+backend (`codegen/instr/core.rs:395-457`), the LLVM backend never routed
+text/unknown-typed operands to a runtime dynamic compare. Fixed by porting
+the Cranelift guard order into the LLVM backend: raw `icmp` only when BOTH
+operands are PROVEN numeric (int/bool/char) by static `TypeId`; text-typed
+(either side) -> `rt_text_cmp_any`; otherwise (ANY / unresolved / unknown) ->
+`rt_native_cmp`. `Eq`/`NotEq` already had this fallback via
+`rt_native_eq`/`rt_native_neq`; only the ordering ops (`Lt`/`LtEq`/`Gt`/
+`GtEq`) were missing it in the LLVM backend specifically.
+
+## Known gap (named, not silently worked around)
+
+This sspec harness's engine-probe mechanism
+(`src/lib/nogc_sync_mut/spec/engine_probe.spl`) supports only `"jit"`
+(Cranelift) and `"interpret"` — there is no named engine that routes a probe
+through the Rust seed's **LLVM native-build** path (`native-build --backend
+llvm`), which is the only backend this defect lived in. Cranelift/JIT and
+the tree-walking interpreter were both already correct before this fix (see
+`test/01_unit/bugs/text_ordering_cmp_spec.spl`), so an engine-probe assertion
+here would pass on both the pre-fix and post-fix seed and prove nothing about
+the actual regression. Direct evidence for the LLVM backend fix is instead
+the Rust codegen unit tests added alongside it in
+`src/compiler_rust/compiler/src/codegen/llvm/instructions.rs` (`mod tests`:
+`scalar_ordering_compares_use_raw_icmp`, `text_ordering_compares_use_rt_text_cmp_any`,
+`any_ordering_compares_use_rt_native_cmp`), which assert on the emitted LLVM
+IR directly. The scenarios below establish the *value-level contract* (what
+the correct answer is) so that any future engine that can reach the LLVM
+native-build lane from sspec has scenarios ready to point at it.
+"""
+
+use std.spec.step
+
+use std.spec
+
+fn _cmp_lt(a: any, b: any) -> bool:
+    """Relational compare where the static type of both operands is erased
+    (parameter typed `any`), forcing the interpreter's / a native compiler's
+    dynamic-dispatch path — the same operand shape the LLVM backend's ANY
+    fallback (`rt_native_cmp`) exists for."""
+    a < b
+
+fn _sort_any_texts(xs: array<any>) -> array<any>:
+    """Sort an untyped (ANY-erased) collection of text values. `.sort()`'s
+    default comparator uses the `<` relational operator, so this exercises
+    exactly the same erased-type compare path the LLVM native-build class-1
+    defect lived in: neither element's static type survives to the compare
+    site, so a correct sort here depends on the dynamic `rt_native_cmp` (or
+    `rt_text_cmp_any`) fallback, not a raw tagged-pointer `icmp`."""
+    var ys = xs
+    ys.sort()
+    ys
+
+describe "relational compare on statically-erased (ANY) text operands":
+    it "orders two ANY-typed text values by content, not identity":
+        # @req REQ-SSPEC-UNIT
+        step("orders two ANY-typed text values by content, not identity")
+        expect(_cmp_lt("apple", "banana")).to_equal(true)
+        expect(_cmp_lt("banana", "apple")).to_equal(false)
+
+    it "orders ANY-typed numeric values numerically (fast path unaffected)":
+        # @req REQ-SSPEC-UNIT
+        step("orders ANY-typed numeric values numerically (fast path unaffected)")
+        expect(_cmp_lt(1, 2)).to_equal(true)
+        expect(_cmp_lt(2, 1)).to_equal(false)
+        expect(_cmp_lt(5, 5)).to_equal(false)
+
+    it "sorting an untyped collection of text values gives lexicographic (value) order":
+        # @req REQ-SSPEC-UNIT
+        step("sorting an untyped collection of text values gives lexicographic (value) order")
+        # This is the shape named in the systemic plan's class-1 regression:
+        # "sort/compare of text values from an untyped collection gives
+        # value order". Pre-fix, an LLVM native-build of an equivalent
+        # program would have sorted by tagged-pointer/address, which is
+        # nondeterministic across runs and not lexicographic.
+        val words: array<any> = ["banana", "apple", "cherry", "apple"]
+        val sorted = _sort_any_texts(words)
+        expect(sorted[0]).to_equal("apple")
+        expect(sorted[1]).to_equal("apple")
+        expect(sorted[2]).to_equal("banana")
+        expect(sorted[3]).to_equal("cherry")
+
+    it "keeps ANY-typed text equality content-based (already-correct baseline)":
+        # @req REQ-SSPEC-UNIT
+        step("keeps ANY-typed text equality content-based (already-correct baseline)")
+        # Eq/NotEq already routed through rt_native_eq/neq before this fix;
+        # this scenario is the control column proving the harness itself can
+        # discriminate content vs. identity compare.
+        val a: any = "same"
+        val b: any = "sa" + "me"
+        expect(a == b).to_equal(true)
+        expect(a != b).to_equal(false)

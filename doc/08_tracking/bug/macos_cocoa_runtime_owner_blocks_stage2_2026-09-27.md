@@ -1,0 +1,76 @@
+# macOS Cocoa ownership blocks admitted Stage 2 bootstrap
+
+Status: Cocoa artifact ownership fixed in this branch and passed in the
+isolated bootstrap retry. Stage 2 admission is blocked by the separate
+empty-CXX failure recorded in
+`macos_stage2_empty_cxx_after_cocoa_owner_2026-09-27.md`.
+
+## Reproduction
+
+An isolated `bootstrap-in-snapshot.shs --rev HEAD --keep -- ...
+--full-bootstrap --stop-after-stage2 --jobs=4` run from revision
+`4bfc8e03ac8` failed before Stage 2 compilation at the
+`macos-cocoa-owner` preflight. Evidence is retained under
+`/private/tmp/simpleos-stage2-snapshot-20260927/build/bootstrap/logs/
+aarch64-apple-darwin/macos-cocoa-owner.log`.
+
+The checker requires each `_rt_cocoa_*` provider exactly once in
+`libsimple_runtime.dylib` and absent from `libsimple_native_all.a`.
+For `_rt_cocoa_window_new`, `llvm-nm -gU -A` found **two** archive
+definitions: one in `spl_hosted_runtime` and one in `hosted_cocoa.o`.
+`llvm-nm -gU` found **zero** definitions in the runtime dylib. The same
+failure was reported for all twelve Cocoa API names in the checker.
+
+## Source conflict
+
+- `src/compiler_rust/native_all/src/lib.rs` deliberately pulls
+  `spl_hosted_runtime` into the static archive, exporting `rt_cocoa_*`.
+- `src/compiler_rust/runtime/build.rs` separately compiles
+  `src/runtime/hosted_cocoa.c` into a static Objective-C archive on macOS.
+- `scripts/bootstrap/bootstrap-from-scratch.sh` requires dynamic Cocoa
+  ownership before it spends a Stage 2 compile.
+
+The static ownership comments and dynamic admission policy disagree.
+The existing `cdylib_hides_c_runtime_exports_2026-09-06.md` also records
+that rustc's cdylib export list hides C-defined runtime providers, so
+merely moving the Objective-C object into the dylib link is insufficient.
+
+## Required resolution and verification
+
+Choose one dynamic provider for every Cocoa symbol and remove both static
+definitions from the admitted native-all archive. Ensure the dynamic
+provider is exported through the dylib ABI on macOS. Verify the real
+artifacts with `scripts/check/check-macos-cocoa-runtime-owner.shs`, then
+rerun the cache-preserving Stage 2 bootstrap to admission. Keep the
+preflight gate strict; a skipped gate would leave duplicate or missing
+runtime symbols in release candidates.
+
+The SimpleOS OFD completion changes on this branch remain unverified by
+the self-hosted product runtime until this bootstrap blocker is resolved.
+
+## Repair and artifact check
+
+The macOS Rust build now renames the twelve Objective-C entry points to
+`simple_cocoa_impl_*`. `simple-runtime` forwards them through local
+`#[no_mangle]` functions, which rustc includes in the dylib export list.
+`simple-native-all` no longer pulls the hosted Cocoa stub on macOS. The
+missing `cocoa_dynload_owner_selfcheck.c` now probes all twelve `dlsym`
+entries and rejects invalid window dimensions without opening a GUI.
+
+Both Rust artifacts were rebuilt from this worktree. The existing
+`check-macos-cocoa-runtime-owner.shs` returned `macOS Cocoa runtime
+ownership: PASS` against the resulting dylib and native archive. This
+proves the Cocoa ownership repair, not the separate generic C provider
+export gap in `cdylib_hides_c_runtime_exports_2026-09-06.md` or Stage 2
+admission. A fresh immutable bootstrap must still verify that whole chain.
+
+The first committed bootstrap retry then exposed a second macOS build
+error: the LLVM 23 Objective-C object referenced four
+`_objc_msgSendClass$...` symbols that the macOS 11 dylib link could not
+resolve. A local object comparison showed Xcode Clang emitted ordinary
+message dispatch for the same source at the macOS 11 deployment target.
+The build script now resolves Xcode Clang through `xcrun --find clang`
+for this Objective-C file only and sets the macOS 11 target. A rebuilt
+dylib and the Cocoa owner checker both pass with that compiler. The
+cache-preserving bootstrap retry passed the Cocoa gate, then failed at
+Stage 2's empty CXX assignment; it admitted no runtime.

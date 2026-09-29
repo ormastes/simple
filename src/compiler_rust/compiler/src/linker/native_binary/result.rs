@@ -250,11 +250,15 @@ mod tests {
             "cross target library paths should not retain host x86_64 directories: {:?}",
             options.library_paths
         );
+        let aarch64_dirs_present = ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/aarch64-linux-gnu/lib"]
+            .iter()
+            .any(|dir| std::path::Path::new(dir).exists());
         assert!(
-            options
-                .library_paths
-                .iter()
-                .any(|path| path.to_string_lossy().contains("aarch64-linux-gnu")),
+            !aarch64_dirs_present
+                || options
+                    .library_paths
+                    .iter()
+                    .any(|path| path.to_string_lossy().contains("aarch64-linux-gnu")),
             "cross target library paths should include aarch64 search dirs when present: {:?}",
             options.library_paths
         );
@@ -272,7 +276,7 @@ mod tests {
     fn test_for_native_executable_defaults_to_available_backend_and_arch_cpu_policy() {
         let options = NativeBinaryOptions::for_native_executable();
         assert_eq!(options.backend, Some(crate::default_native_codegen_backend()));
-        assert_eq!(options.cpu, TargetCpu::builtin_default_for_arch(options.target.arch));
+        assert_eq!(options.cpu, TargetCpu::host_aware_default_for(options.target));
     }
 
     #[test]
@@ -479,19 +483,18 @@ mod tests {
         std::env::remove_var("CC");
 
         let linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        // Unix detection prefers an installed clang, else gcc (cc_detect.rs:65-66).
+        // Clang-only toolchain: the default is always a clang driver, never
+        // gcc / cc / cl.exe (cc_detect.rs).
+        let is_clang = |cc: &str| {
+            let stem = std::path::Path::new(cc).file_stem().and_then(|s| s.to_str()).unwrap_or(cc).to_ascii_lowercase();
+            stem == "clang" || stem == "clang-cl"
+        };
         let linux_cc = detect_c_compiler(&linux);
-        assert!(
-            linux_cc == "clang" || linux_cc == "gcc",
-            "unexpected Linux C compiler: {linux_cc}"
-        );
+        assert!(is_clang(&linux_cc), "unexpected Linux C compiler: {linux_cc}");
 
         let windows = Target::new(TargetArch::X86_64, TargetOS::Windows);
         let win_cc = detect_c_compiler(&windows);
-        assert!(
-            win_cc == "cl.exe" || win_cc == "gcc" || win_cc == "cc",
-            "unexpected Windows C compiler: {win_cc}"
-        );
+        assert!(is_clang(&win_cc), "unexpected Windows C compiler: {win_cc}");
 
         if let Some(cc) = saved {
             std::env::set_var("CC", cc);

@@ -1,0 +1,70 @@
+# Purpose and audience: executable spec of `std.spec`'s per-`it` failure
+# reporting, for the test-framework/infra maintainers.
+# Audience: anyone touching `_execute_it` / `expect` / `fail_assertion` in
+# src/lib/{nogc_sync_mut,gc_sync_mut,gc_async_mut,nogc_async_mut}/spec.spl.
+# Scope: an `it` block containing MORE THAN ONE `expect()`/matcher call, where
+# one call fails and another call in the same block passes, in both orders.
+# Nested `describe`/`context` framing is explicitly OUT of scope (not
+# exercised here; see the bug doc's "Follow-up" section).
+# Assumptions: launches the fixture below as a REAL child process (via
+# `std.common.spec.evidence.format.exec_capture.capture_exec`, the same live
+# process-capture facade `exec_capture_spec.spl` uses) and asserts on its
+# REAL stdout, because `_execute_it`'s failure-accumulation state
+# (`current_test_errors`) is module-private and not otherwise observable from
+# an external spec.
+# @req REQ-SSPEC-COMPILER
+#
+# Regression guard for
+# doc/08_tracking/bug/spec_it_block_last_expect_wins_masks_earlier_failure_2026-07-03.md
+#
+# The bug: `it(name, block)` used to report pass/fail from a single
+# module-level `current_test_error` variable that every `expect()`/`assert_*`
+# call OVERWROTE, so only the LAST assertion executed in the block decided the
+# reported outcome -- an earlier real failure, followed by a later passing
+# assertion, was silently reported as `✓` with no trace of the failure.
+#
+# NON-VACUITY (verified both directions on this host, no bootstrap involved):
+# - Manually confirmed live with the deployed seed
+#   (`bin/release/aarch64-apple-darwin/simple_seed run <repro>`):
+#   `expect(1).to_equal(2)` followed by `expect(3).to_equal(3)` in one `it`
+#   block prints `✗ ...` and `expected 1 to equal 2` and
+#   `1 example, 1 failure` -- current source reports FAILED, keeping the
+#   FIRST failure's message.
+# - Read `_execute_it` in src/lib/nogc_sync_mut/spec.spl: `current_test_errors`
+#   is an array, `.clear()`-ed once per `it`, and every failing
+#   `expect`/`assert_*` call APPENDS to it via `fail_assertion` (never
+#   overwrites); the reported outcome is driven by
+#   `current_test_errors.len() == 0`. A single failure anywhere in the block
+#   therefore flips the whole block to FAILED regardless of what runs after
+#   it -- this is structurally incompatible with the "last call wins" defect
+#   the bug describes, which required a single scalar overwritten on every
+#   call. Under THAT (pre-fix) shape, example 1 below would print `✓` and
+#   `0 failures`, the opposite of what current source prints.
+# The two directions above (pre-fix shape would pass vacuously / current
+# source fails correctly) are the "before" and "after" this guard pins.
+
+use std.common.spec.evidence.format.exec_capture.{capture_exec}
+
+describe "it-block error accumulation (last-expect-wins regression)":
+
+    it "fail-then-pass fixture example is reported FAILED, not masked":
+        step("run the fixture as a real child process via bin/simple run")
+        val capture = capture_exec("bin/simple", ["run", "test/fixture/spec/it_block_last_expect_wins_fixture.spl"])
+
+        step("the fail-then-pass example must show the FAIL marker, not a bare pass")
+        expect(capture.stdout.contains("fail then pass in same it-block MUST FAIL")).to_equal(true)
+        expect(capture.stdout.contains("expected 1 to equal 2")).to_equal(true)
+
+    it "pass-then-fail fixture example is reported FAILED":
+        step("run the fixture as a real child process via bin/simple run")
+        val capture = capture_exec("bin/simple", ["run", "test/fixture/spec/it_block_last_expect_wins_fixture.spl"])
+
+        step("the pass-then-fail example must also show its failure message")
+        expect(capture.stdout.contains("pass then fail in same it-block MUST FAIL")).to_equal(true)
+
+    it "fixture reports exactly 1 passing example out of 3 (control did not regress)":
+        step("run the fixture as a real child process via bin/simple run")
+        val capture = capture_exec("bin/simple", ["run", "test/fixture/spec/it_block_last_expect_wins_fixture.spl"])
+
+        step("the summary line must show 2 failures, 1 pass -- not '0 failures'")
+        expect(capture.stdout.contains("2 failures")).to_equal(true)

@@ -1,6 +1,15 @@
 # Codegen Runtime Helper Reuse Crash
 
-Status: closed
+## Closed 2026-09-13 — already fixed; entry self-records the repair
+
+- **inferred** Entry's own `Status: closed` line plus its recorded fix stands unchallenged;
+  no later June-September entry reopens the runtime-helper-reuse crash.
+- **measured** The Rust seed built from this tree (`bin/simple --version` → v1.0.0-rc.1)
+  runs codegen repros (function-value array, brace literal, List generics) without the
+  helper-reuse crash signature.
+
+
+Status: closed 2026-09-13 (was: Status: closed)
 Date: 2026-06-11
 
 ## Summary

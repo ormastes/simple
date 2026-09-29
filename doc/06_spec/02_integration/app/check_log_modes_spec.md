@@ -125,13 +125,6 @@ expect(code).to_equal(1)
 
 </details>
 
-### JSON applies SSpec guidance without contaminating output
-
-Checking one valid source and one SSpec command-block source with `--json`
-returns exit 1 and exactly one compact JSON object. The summary reports two
-checked files, one error, and one file with errors; guidance text is suppressed
-from machine output.
-
 ## At a Glance
 
 | Field | Value |
@@ -151,8 +144,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -59,15 +59,12 @@ double tanh(double x);
 double log(double x);
 double log2(double x);
 double log10(double x);
-double logb(double x);
 double exp(double x);
 double exp2(double x);
-double erf(double x);
 double pow(double x, double y);
 double ceil(double x);
 double floor(double x);
 double round(double x);
-double rint(double x);
 double trunc(double x);
 double fmod(double x, double y);
 double remainder(double x, double y);
@@ -77,6 +74,7 @@ double modf(double x, double *iptr);
 double copysign(double x, double y);
 double fmin(double x, double y);
 double fmax(double x, double y);
+double fma(double x, double y, double z);
 double hypot(double x, double y);
 
 /* Near-zero accurate variants */

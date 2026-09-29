@@ -1,0 +1,263 @@
+# codex-system-test
+# Focused behavioral coverage for the five L7 semantic-owner adapters.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-008 REQ-CSM-012 REQ-CSM-017
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser.macro_registry.{MacroRegistry, IntroducedSymbol}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName,
+    module_surfaces_from_modules}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1}
+use compiler.traits.trait_coherence.{CoherenceChecker}
+use compiler.semantics.aspect_seal.facet_model.{AspectBindingSet}
+use compiler.semantics.aspect_seal.seal.{AspectSeal, AspectSealProfile,
+    aspect_seal_check}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.semantics.semantic_scope_contribution_v1.{SemanticScopeDimensionV1}
+use compiler.semantics.semantic_scope_issuers_v2.{
+    SemanticIssuerAttemptContextV2,
+    issue_declaration_scope_v2,
+    issue_trait_scope_v2,
+    issue_aspect_scope_v2,
+    issue_macro_scope_v2,
+    issue_body_scope_v2,
+    semantic_scope_issuer_gateway_install_available_v2,
+}
+
+fn issuer_digest_v2(label: text) -> text:
+    sha256_text("semantic-issuer-spec:" + label)
+
+fn issuer_context_v2() -> SemanticIssuerAttemptContextV2:
+    SemanticIssuerAttemptContextV2(
+        scope_owner_instance_digest: issuer_digest_v2("scope-owner"),
+        scope_session_serial: 7,
+        writer_instance_digest: issuer_digest_v2("writer"),
+        generation: 11,
+        manifest_digest: issuer_digest_v2("manifest"),
+        generation_closure_digest: issuer_digest_v2("closure"),
+        binding_digest: issuer_digest_v2("binding"),
+        query_domain_digest: issuer_digest_v2("queries"),
+        semantic_rules_digest: issuer_digest_v2("rules"),
+        attempt_seal_digest: issuer_digest_v2("attempt"),
+        cancellation_epoch: 4,
+        pin_id_digest: issuer_digest_v2("pin"),
+        pin_reader_epoch: 8,
+        pin_generation: 11,
+        pin_manifest_digest: issuer_digest_v2("manifest"),
+        pin_deadline_monotonic_ms: 9000,
+        process_instance_nonce_digest: issuer_digest_v2("process"),
+        boot_identity_digest: issuer_digest_v2("boot"),
+        namespace_entry_digest: issuer_digest_v2("namespace"),
+        source_universe: ["live.scope"])
+
+fn issuer_surfaces_v2() -> ModuleSurfacesByName:
+    val source = "pub fn live_scope_entry() -> i64:\n    7\n"
+    var modules = {}
+    modules["live.scope"] = parse_full_frontend(source, "live.scope",
+        "live.scope", Logger(level: 0))
+    module_surfaces_from_modules(modules, [SourceFile(path: "live.scope",
+        content: source, module_name: "live.scope")]).unwrap()
+
+fn issuer_aspect_seal_v2() -> AspectSeal:
+    aspect_seal_check(AspectBindingSet(aspects: [], bindings: []),
+        AspectSealProfile(critical: false)).unwrap()
+
+fn issuer_ledger_v2() -> PortableBodyLedgerV1:
+    PortableBodyLedgerV1.create(PortableBodyLimitsV1.standard()).unwrap()
+
+describe "L7 semantic scope issuer adapters V2":
+    it "issues owner-verifiable evidence for all five semantic phases":
+        step("Run each real owner phase and issue its private evidence handle")
+        val context = issuer_context_v2()
+        val declarations = issue_declaration_scope_v2(issuer_surfaces_v2(), context).unwrap()
+        val traits = issue_trait_scope_v2(CoherenceChecker.create(), context).unwrap()
+        val aspects = issue_aspect_scope_v2(issuer_aspect_seal_v2(), context).unwrap()
+        val macros = issue_macro_scope_v2(MacroRegistry.default(), context).unwrap()
+        val bodies = issue_body_scope_v2([], issuer_ledger_v2(), context).unwrap()
+
+        step("Validate each owner-created handle against the exact attempt identity")
+        val declaration_projection = declarations.validate_issued_scope_v2(
+            declarations.handle_v2(), context).unwrap()
+        val trait_projection = traits.validate_issued_scope_v2(
+            traits.handle_v2(), context).unwrap()
+        val aspect_projection = aspects.validate_issued_scope_v2(
+            aspects.handle_v2(), context).unwrap()
+        val macro_projection = macros.validate_issued_scope_v2(
+            macros.handle_v2(), context).unwrap()
+        val body_projection = bodies.validate_issued_scope_v2(
+            bodies.handle_v2(), context).unwrap()
+        expect(declaration_projection.dimension).to_equal(
+                SemanticScopeDimensionV1.DeclarationsReexports)
+        expect(trait_projection.dimension).to_equal(
+                SemanticScopeDimensionV1.TraitCandidatesCoherence)
+        expect(aspect_projection.dimension).to_equal(
+                SemanticScopeDimensionV1.AspectCandidatesOrdering)
+        expect(macro_projection.dimension).to_equal(
+                SemanticScopeDimensionV1.MacroCtfeLookup)
+        expect(body_projection.dimension).to_equal(
+                SemanticScopeDimensionV1.BodyDependencyClosure)
+
+        step("Retain conditional phase absence and the exact source universe")
+        expect(declaration_projection.members).to_equal(["live.scope"])
+        expect(declaration_projection.negative_witnesses).to_equal([])
+        expect(trait_projection.members).to_equal([])
+        expect(trait_projection.negative_witnesses).to_equal([
+            "trait-candidate-universe-empty"])
+        expect(aspect_projection.members).to_equal([])
+        expect(aspect_projection.negative_witnesses).to_equal([
+            "aspect-candidate-universe-empty"])
+        expect(macro_projection.members).to_equal([])
+        expect(macro_projection.negative_witnesses).to_equal([
+            "macro-ctfe-universe-empty"])
+        expect(body_projection.members).to_equal([])
+        expect(body_projection.negative_witnesses).to_equal([
+            "body-dependency-universe-empty"])
+        expect(body_projection.dependency_enumeration.body_object_digests).to_equal([])
+        expect(declaration_projection.coverage).to_equal(SemanticCoverageV1.Unknown)
+        expect(declaration_projection.universe_complete).to_equal(false)
+        expect(declaration_projection.gateway_install_available).to_equal(false)
+
+    it "rejects foreign handles and changed attempt or pin identity":
+        val context = issuer_context_v2()
+        val first = issue_trait_scope_v2(CoherenceChecker.create(), context).unwrap()
+        val second = issue_trait_scope_v2(CoherenceChecker.create(), context).unwrap()
+        step("Reject an issuer handle created by a different retained owner")
+        expect(first.validate_issued_scope_v2(second.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.AuthorityUnavailable))
+
+        step("Reject the same handle when any exact attempt identity changes")
+        var changed = context
+        changed.pin_reader_epoch = 10
+        expect(first.validate_issued_scope_v2(first.handle_v2(), changed)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        changed = context
+        changed.generation = 12
+        changed.pin_generation = 12
+        expect(first.validate_issued_scope_v2(first.handle_v2(), changed)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        changed = context
+        changed.attempt_seal_digest = issuer_digest_v2("other-attempt")
+        expect(first.validate_issued_scope_v2(first.handle_v2(), changed)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+    it "invalidates evidence when each retained semantic owner changes":
+        val context = issuer_context_v2()
+        val surfaces = issuer_surfaces_v2()
+        val checker = CoherenceChecker.create()
+        val seal = issuer_aspect_seal_v2()
+        val registry = MacroRegistry.default()
+        val ledger = issuer_ledger_v2()
+        val declarations = issue_declaration_scope_v2(surfaces, context).unwrap()
+        val traits = issue_trait_scope_v2(checker, context).unwrap()
+        val aspects = issue_aspect_scope_v2(seal, context).unwrap()
+        val macros = issue_macro_scope_v2(registry, context).unwrap()
+        val bodies = issue_body_scope_v2([], ledger, context).unwrap()
+
+        step("Advance one owner revision behind every issued handle")
+        surfaces.generation = surfaces.generation + 1
+        checker.register_trait("LaterTrait")
+        seal.lines.push("changed-after-seal")
+        registry.set_ll1_mode(true)
+        expect(ledger.charge_work(1)).to_equal(true)
+
+        expect(declarations.validate_issued_scope_v2(
+            declarations.handle_v2(), context)).to_equal(
+                Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        expect(traits.validate_issued_scope_v2(traits.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        expect(aspects.validate_issued_scope_v2(aspects.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        expect(macros.validate_issued_scope_v2(macros.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+        expect(bodies.validate_issued_scope_v2(bodies.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+    it "invalidates body evidence when a rejected charge poisons the ledger":
+        val context = issuer_context_v2()
+        val ledger = issuer_ledger_v2()
+        val bodies = issue_body_scope_v2([], ledger, context).unwrap()
+
+        step("Reject an over-limit charge whose counter itself does not advance")
+        expect(ledger.charge_work(1000001)).to_equal(false)
+        expect(bodies.validate_issued_scope_v2(bodies.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+    it "binds declaration signatures, aliases, and macro lookup order":
+        val context = issuer_context_v2()
+        val surfaces = issuer_surfaces_v2()
+        val declarations = issue_declaration_scope_v2(surfaces, context).unwrap()
+        var callable = surfaces.surfaces[0].callable_values[0]
+        callable.is_public = false
+        surfaces.surfaces[0].callable_values[0] = callable
+        expect(declarations.validate_issued_scope_v2(
+            declarations.handle_v2(), context)).to_equal(
+                Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+        val aliased_surfaces = issuer_surfaces_v2()
+        val aliased = issue_declaration_scope_v2(aliased_surfaces, context).unwrap()
+        aliased_surfaces.index_by_name["live.scope.alias"] = 0
+        aliased_surfaces.ordered_names.push("live.scope.alias")
+        aliased_surfaces.ordered_indices.push(0)
+        expect(aliased.validate_issued_scope_v2(
+            aliased.handle_v2(), context)).to_equal(
+                Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+        val registry = MacroRegistry.default()
+        registry.introduced_symbols["live.scope"] = [
+            IntroducedSymbol.Variable(name: "same", type_name: "i64",
+                is_const: false, source_macro: "first"),
+            IntroducedSymbol.Variable(name: "same", type_name: "text",
+                is_const: false, source_macro: "second"),
+        ]
+        val macros = issue_macro_scope_v2(registry, context).unwrap()
+        registry.introduced_symbols["live.scope"] = [
+            IntroducedSymbol.Variable(name: "same", type_name: "text",
+                is_const: false, source_macro: "second"),
+            IntroducedSymbol.Variable(name: "same", type_name: "i64",
+                is_const: false, source_macro: "first"),
+        ]
+        expect(macros.validate_issued_scope_v2(macros.handle_v2(), context)).to_equal(
+            Err(ThreePayloadFallbackV1.ScopeGenerationMismatch))
+
+    it "includes trait and macro dependencies only when their owners are active":
+        step("Activate real trait and macro owner state")
+        val context = issuer_context_v2()
+        val checker = CoherenceChecker.create()
+        checker.register_trait("LiveTrait")
+        val trait_receipt = issue_trait_scope_v2(checker, context).unwrap()
+        val trait_projection = trait_receipt.validate_issued_scope_v2(
+            trait_receipt.handle_v2(), context).unwrap()
+        expect(trait_projection.members).to_equal(["live.scope"])
+        expect(trait_projection.negative_witnesses).to_equal([])
+
+        val registry = MacroRegistry.default()
+        registry.introduced_symbols["live.scope"] = [
+            IntroducedSymbol.Variable(name: "generated", type_name: "i64",
+                is_const: false, source_macro: "active")]
+        val macro_receipt = issue_macro_scope_v2(registry, context).unwrap()
+        val macro_projection = macro_receipt.validate_issued_scope_v2(
+            macro_receipt.handle_v2(), context).unwrap()
+        expect(macro_projection.members).to_equal(["live.scope"])
+        expect(macro_projection.negative_witnesses).to_equal([])
+
+    it "reports the live gateway installation path unavailable":
+        step("Keep installation closed without source-owner completion leases")
+        expect(semantic_scope_issuer_gateway_install_available_v2()).to_equal(false)
+
+    it "revokes one issued generation without reviving copied handles":
+        step("Close the retained issuer and reject its previously valid handle")
+        val context = issuer_context_v2()
+        val receipt = issue_trait_scope_v2(
+            CoherenceChecker.create(), context).unwrap()
+        val handle = receipt.handle_v2()
+        expect(receipt.validate_issued_scope_v2(handle, context).is_ok()).to_equal(true)
+        expect(receipt.close_v2()).to_equal(Ok(()))
+        expect(receipt.validate_issued_scope_v2(handle, context)).to_equal(
+            Err(ThreePayloadFallbackV1.AuthorityUnavailable))
+        expect(receipt.close_v2()).to_equal(
+            Err(ThreePayloadFallbackV1.AuthorityUnavailable))

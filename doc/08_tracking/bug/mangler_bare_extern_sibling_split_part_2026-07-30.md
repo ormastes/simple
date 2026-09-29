@@ -1,7 +1,8 @@
 # Bug: Rust seed mangler emits bare extern for free function shared across sibling split-part modules re-exported through a facade
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-07-30
 - **Area:** `src/compiler_rust/compiler/src/pipeline/native_project/mangle.rs`
@@ -187,3 +188,4 @@ mechanically enumerable (36 directories, bounded search). Shape (b) (package
 many `__init__.spl`-style package facades in the repo and most link fine, so a
 blanket rewrite would be unjustified churn. Not swept in this pass; left for a
 future targeted investigation if it recurs at the link stage.
+

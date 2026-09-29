@@ -1,0 +1,328 @@
+# codex-impl
+# Typed semantic-owner contribution port for one pinned compile attempt.
+#
+# Candidate values and projections are copied evidence.  The authority type is
+# opaque outside this module and there is intentionally no successful public
+# issuer in this slice: existing declaration, trait, aspect, macro/CTFE and HIR
+# body owners must each install a live adapter before the writer can seal scope
+# completeness.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1,
+    three_payload_contract_max_items_v1,
+    three_payload_contract_text_valid_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.{
+    SemanticScopeContributionLiveRequestV1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectStageV1, PortablePortabilityV1
+}
+use compiler.hir.portable_body_profile_types.{PortableBodyDescriptorV1}
+use compiler.hir.portable_body_semantics.{portable_embedded_body_profile_digest_v1}
+
+pub enum SemanticScopeDimensionV1:
+    DeclarationsReexports
+    TraitCandidatesCoherence
+    AspectCandidatesOrdering
+    MacroCtfeLookup
+    BodyDependencyClosure
+
+pub enum SemanticScopeBodyUseProfileV1:
+    CallOnly
+    EmbeddedPureClosedFunctions
+    MacroExpansion
+    GenericTemplate
+    TraitDefaultBody
+    AroundAdvice
+    BodySensitiveAdvice
+
+pub struct SemanticScopeDependencyEdgeV1:
+    body_object_digest: text
+    caller_symbol_id: i64
+    caller_name: text
+    callee_symbol_id: i64
+    callee_name: text
+
+pub struct SemanticScopeDependencyEnumerationV1:
+    body_object_digests: [text]
+    edges: [SemanticScopeDependencyEdgeV1]
+    enumeration_digest: text
+
+pub struct SemanticScopeContributionCandidateV1:
+    dimension: SemanticScopeDimensionV1
+    scope_binding_digest: text
+    query_domain_digest: text
+    owner_rules_digest: text
+    source_universe_digest: text
+    members: [text]
+    negative_witnesses: [text]
+    source_universe: [text]
+    dependency_enumeration: SemanticScopeDependencyEnumerationV1
+    coverage: SemanticCoverageV1
+    universe_complete: bool
+    contribution_digest: text
+
+pub struct SemanticScopeContributionProjectionV1:
+    dimension: SemanticScopeDimensionV1
+    scope_binding_digest: text
+    query_domain_digest: text
+    owner_rules_digest: text
+    source_universe_digest: text
+    dependency_enumeration_digest: text
+    contribution_digest: text
+    issuer_instance_digest: text
+    issuer_generation: i64
+    authority_serial: i64
+
+# Only an existing semantic-owner adapter may eventually construct this type.
+# Exporting the name permits the writer port to consume it without exporting
+# its aggregate constructor or fields as a public source declaration.
+struct SemanticScopeContributionAuthorityV1:
+    projection: SemanticScopeContributionProjectionV1
+
+fn _dimension_name_v1(value: SemanticScopeDimensionV1) -> text:
+    match value:
+        case DeclarationsReexports: "declarations_reexports"
+        case TraitCandidatesCoherence: "trait_candidates_coherence"
+        case AspectCandidatesOrdering: "aspect_candidates_ordering"
+        case MacroCtfeLookup: "macro_ctfe_lookup"
+        case BodyDependencyClosure: "body_dependency_closure"
+
+pub fn semantic_scope_required_dimension_v1(index: i64) -> SemanticScopeDimensionV1?:
+    if index == 0: return Some(SemanticScopeDimensionV1.DeclarationsReexports)
+    if index == 1: return Some(SemanticScopeDimensionV1.TraitCandidatesCoherence)
+    if index == 2: return Some(SemanticScopeDimensionV1.AspectCandidatesOrdering)
+    if index == 3: return Some(SemanticScopeDimensionV1.MacroCtfeLookup)
+    if index == 4: return Some(SemanticScopeDimensionV1.BodyDependencyClosure)
+    nil
+
+pub fn semantic_scope_body_use_profile_supported_v1(
+    value: SemanticScopeBodyUseProfileV1,
+) -> bool:
+    match value:
+        case CallOnly | EmbeddedPureClosedFunctions: true
+        case MacroExpansion | GenericTemplate | TraitDefaultBody |
+                AroundAdvice | BodySensitiveAdvice: false
+
+fn _sorted_unique_text_v1(values: [text], allow_empty: bool) -> bool:
+    if values.len() > three_payload_contract_max_items_v1(): return false
+    var prior = ""
+    var first = true
+    for value in values:
+        if not three_payload_contract_text_valid_v1(value, allow_empty): return false
+        if not first and value <= prior: return false
+        prior = value
+        first = false
+    true
+
+fn _edge_key_v1(value: SemanticScopeDependencyEdgeV1) -> text:
+    value.body_object_digest + "\u0000" + value.caller_symbol_id.to_string() +
+        "\u0000" + value.caller_name + "\u0000" +
+        value.callee_symbol_id.to_string() + "\u0000" + value.callee_name
+
+fn _dependency_enumeration_canonical_v1(
+    value: SemanticScopeDependencyEnumerationV1,
+) -> text:
+    var canonical = "simple.semantic-scope.dependencies.v1\n"
+    for digest in value.body_object_digests:
+        canonical = canonical + "body\u0000" + digest + "\n"
+    for edge in value.edges:
+        canonical = canonical + "edge\u0000" + _edge_key_v1(edge) + "\n"
+    canonical
+
+pub fn semantic_scope_dependency_enumeration_valid_v1(
+    value: SemanticScopeDependencyEnumerationV1,
+) -> bool:
+    if value.body_object_digests.len() > three_payload_contract_max_items_v1() or
+            value.edges.len() > three_payload_contract_max_items_v1() or
+            not _sorted_unique_text_v1(value.body_object_digests, false):
+        return false
+    for digest in value.body_object_digests:
+        if not three_payload_contract_digest_valid_v1(digest): return false
+    var prior = ""
+    var first = true
+    for edge in value.edges:
+        if (not three_payload_contract_digest_valid_v1(edge.body_object_digest) or
+                value.body_object_digests.index_of(edge.body_object_digest) < 0 or
+                edge.caller_symbol_id < 0 or edge.callee_symbol_id < 0 or
+                not three_payload_contract_text_valid_v1(edge.caller_name, false) or
+                not three_payload_contract_text_valid_v1(edge.callee_name, false)):
+            return false
+        val key = _edge_key_v1(edge)
+        if not first and key <= prior: return false
+        prior = key
+        first = false
+    sha256_text(_dependency_enumeration_canonical_v1(value)) ==
+        value.enumeration_digest
+
+pub fn semantic_scope_empty_dependency_enumeration_v1(
+) -> SemanticScopeDependencyEnumerationV1:
+    var value = SemanticScopeDependencyEnumerationV1(body_object_digests: [],
+        edges: [], enumeration_digest: "")
+    value.enumeration_digest = sha256_text(
+        _dependency_enumeration_canonical_v1(value))
+    value
+
+pub fn semantic_scope_body_dependency_enumeration_v1(
+    descriptors: [PortableBodyDescriptorV1],
+) -> Result<SemanticScopeDependencyEnumerationV1, ThreePayloadFallbackV1>:
+    if descriptors.len() > three_payload_contract_max_items_v1():
+        return Err(ThreePayloadFallbackV1.BoundsExceeded)
+    var body_digests: [text] = []
+    var edges: [SemanticScopeDependencyEdgeV1] = []
+    var prior_body = ""
+    var first_body = true
+    var prior_edge = ""
+    var first_edge = true
+    for descriptor in descriptors:
+        if (descriptor.object_kind != "portable_hir_object" or
+                descriptor.object_schema != 2 or
+                descriptor.semantic_profile_digest !=
+                    portable_embedded_body_profile_digest_v1() or
+                descriptor.stage != PortableObjectStageV1.Base or
+                descriptor.portability != PortablePortabilityV1.Portable or
+                descriptor.target_contract_digest.is_some() or
+                not three_payload_contract_digest_valid_v1(
+                    descriptor.raw_content_digest) or
+                not three_payload_contract_digest_valid_v1(
+                    descriptor.dependency_digest)):
+            return Err(ThreePayloadFallbackV1.UnsupportedSemantics)
+        if not first_body and descriptor.raw_content_digest <= prior_body:
+            return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+        body_digests.push(descriptor.raw_content_digest)
+        prior_body = descriptor.raw_content_digest
+        first_body = false
+        for edge in descriptor.dependency_edges:
+            val copied = SemanticScopeDependencyEdgeV1(
+                body_object_digest: descriptor.raw_content_digest,
+                caller_symbol_id: edge.caller_symbol_id,
+                caller_name: edge.caller_name,
+                callee_symbol_id: edge.callee_symbol_id,
+                callee_name: edge.callee_name)
+            val key = _edge_key_v1(copied)
+            if not first_edge and key <= prior_edge:
+                return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+            edges.push(copied)
+            prior_edge = key
+            first_edge = false
+    var value = SemanticScopeDependencyEnumerationV1(
+        body_object_digests: body_digests, edges: edges,
+        enumeration_digest: "")
+    value.enumeration_digest = sha256_text(
+        _dependency_enumeration_canonical_v1(value))
+    if not semantic_scope_dependency_enumeration_valid_v1(value):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    Ok(value)
+
+fn _contribution_canonical_v1(
+    value: SemanticScopeContributionCandidateV1,
+) -> text:
+    var canonical = "simple.semantic-scope.contribution.v1\n" +
+        _dimension_name_v1(value.dimension) + "\n" +
+        value.scope_binding_digest + "\n" + value.query_domain_digest + "\n" +
+        value.owner_rules_digest + "\n" + value.source_universe_digest + "\n" +
+        value.dependency_enumeration.enumeration_digest + "\n"
+    for member in value.members: canonical = canonical + "member\u0000" + member + "\n"
+    for witness in value.negative_witnesses:
+        canonical = canonical + "negative\u0000" + witness + "\n"
+    for source in value.source_universe:
+        canonical = canonical + "source\u0000" + source + "\n"
+    canonical + (if value.universe_complete: "complete" else: "incomplete")
+
+pub fn semantic_scope_source_universe_digest_v1(values: [text]) -> text:
+    if not _sorted_unique_text_v1(values, false): return ""
+    var canonical = "simple.semantic-scope.source-universe.v1\n"
+    for value in values: canonical = canonical + value + "\n"
+    sha256_text(canonical)
+
+pub fn semantic_scope_contribution_candidate_valid_v1(
+    value: SemanticScopeContributionCandidateV1,
+) -> bool:
+    if (not three_payload_contract_digest_valid_v1(value.scope_binding_digest) or
+            not three_payload_contract_digest_valid_v1(value.query_domain_digest) or
+            not three_payload_contract_digest_valid_v1(value.owner_rules_digest) or
+            not _sorted_unique_text_v1(value.members, false) or
+            not _sorted_unique_text_v1(value.negative_witnesses, false) or
+            semantic_scope_source_universe_digest_v1(value.source_universe) !=
+                value.source_universe_digest or
+            not semantic_scope_dependency_enumeration_valid_v1(
+                value.dependency_enumeration) or
+            value.coverage != SemanticCoverageV1.Complete or
+            not value.universe_complete):
+        return false
+    if value.dimension != SemanticScopeDimensionV1.BodyDependencyClosure and
+            (value.dependency_enumeration.body_object_digests.len() != 0 or
+             value.dependency_enumeration.edges.len() != 0):
+        return false
+    for member in value.members:
+        if value.source_universe.index_of(member) < 0: return false
+    sha256_text(_contribution_canonical_v1(value)) == value.contribution_digest
+
+pub fn semantic_scope_contribution_candidate_digest_v1(
+    value: SemanticScopeContributionCandidateV1,
+) -> text:
+    sha256_text(_contribution_canonical_v1(value))
+
+pub fn semantic_scope_contribution_port_available_v1() -> bool:
+    # None of the five existing semantic owners exposes a live, issuer-checked
+    # complete-universe receipt yet.  Copied arrays and equal digests cannot
+    # open this port.
+    false
+
+# Structural matching is deliberately separate from owner validation so a
+# caller cannot turn a self-consistent candidate DTO into live authority.
+pub fn semantic_owner_live_contribution_candidate_matches_v1(
+    candidate: SemanticScopeContributionCandidateV1,
+    request: SemanticScopeContributionLiveRequestV1,
+) -> bool:
+    if not semantic_scope_contribution_candidate_valid_v1(candidate): return false
+    val expected = semantic_scope_required_dimension_v1(request.dimension_index)
+    if expected.is_none() or candidate.dimension != expected.unwrap(): return false
+    val identity = request.identity
+    identity.generation >= 0 and identity.cancellation_epoch >= 0 and
+        three_payload_contract_digest_valid_v1(identity.writer_instance_digest) and
+        three_payload_contract_digest_valid_v1(identity.manifest_digest) and
+        three_payload_contract_digest_valid_v1(identity.pin_snapshot_digest) and
+        three_payload_contract_digest_valid_v1(
+            identity.generation_closure_digest) and
+        three_payload_contract_digest_valid_v1(identity.binding_digest) and
+        three_payload_contract_digest_valid_v1(identity.query_domain_digest) and
+        three_payload_contract_digest_valid_v1(identity.semantic_rules_digest) and
+        candidate.scope_binding_digest == identity.binding_digest and
+        candidate.query_domain_digest == identity.query_domain_digest and
+        candidate.contribution_digest == request.contribution_digest and
+        three_payload_contract_digest_valid_v1(request.issuer_instance_digest) and
+        request.issuer_generation >= 0 and request.authority_serial > 0
+
+# The named live operation exists at the semantic aggregation boundary, but it
+# remains closed until each of the five real semantic owners can validate its
+# own issuer instance/generation/serial.  Candidate equality is necessary and
+# explicitly insufficient.
+pub fn semantic_owner_validate_live_contribution_v1(
+    candidate: SemanticScopeContributionCandidateV1,
+    request: SemanticScopeContributionLiveRequestV1,
+) -> bool:
+    if not semantic_owner_live_contribution_candidate_matches_v1(candidate,
+            request):
+        return false
+    semantic_scope_contribution_port_available_v1()
+
+pub fn semantic_scope_contribution_issue_v1(
+    candidate: SemanticScopeContributionCandidateV1,
+) -> Result<SemanticScopeContributionAuthorityV1, ThreePayloadFallbackV1>:
+    if not semantic_scope_contribution_candidate_valid_v1(candidate):
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    # The candidate is evidence only.  This function may be connected only by
+    # an existing semantic owner that also installs private issuer validation.
+    Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+
+pub fn semantic_scope_contribution_projection_v1(
+    authority: SemanticScopeContributionAuthorityV1,
+) -> SemanticScopeContributionProjectionV1:
+    authority.projection
+
+export SemanticScopeContributionAuthorityV1

@@ -511,10 +511,46 @@ fn metal_sffi_buffer_download(data: [u8], buffer: i64, size: i64) -> bool:
 fn metal_sffi_buffer_upload(buffer: i64, data: [u8], size: i64) -> bool:
     rt_metal_buffer_upload(buffer, data, size)
 
+@unsafe(reason: "raw host allocation ABI for parameter marshalling", capabilities: [ffi])
+extern fn rt_alloc(size: i64) -> i64
+@unsafe(reason: "raw host release ABI for parameter marshalling", capabilities: [ffi])
+extern fn rt_free(ptr: i64)
+@unsafe(reason: "raw host i32 store ABI for parameter marshalling", capabilities: [ffi, raw_ptr])
+extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
+
 # reason: positional io metal_sffi API mirrors the frozen runtime ABI
 @unsafe(reason: "raw Metal frame submission with borrowed parameter pointer", capabilities: [ffi, raw_ptr])
 fn metal_sffi_run_compute_frame(queue: i64, pipeline: i64, buf0: i64, buf1: i64, params: [u8], gx: i64, gy: i64, gz: i64, bx: i64, by: i64, bz: i64) -> bool:
-    rt_metal_run_compute_frame(queue, pipeline, buf0, buf1, params.data_ptr(), params.len(), gx, gy, gz, bx, by, bz) == 1
+    # Marshal params into a real host buffer before submission: in the
+    # interpreted lane `[u8].data_ptr()` addresses the runtime's boxed value
+    # cells rather than packed bytes, so the kernel's parameter guards read
+    # garbage and silently no-op every dispatch (visible as text never
+    # reaching the Metal framebuffer while everything reports success).
+    val n = params.len()
+    val ptr = unsafe(capabilities: [ffi]):
+        rt_alloc(n)
+    if ptr == 0:
+        return false
+    var off: i64 = 0
+    while off + 4 <= n:
+        val word = params[off].to_i64() | (params[off + 1].to_i64() << 8) | (params[off + 2].to_i64() << 16) | (params[off + 3].to_i64() << 24)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i32(ptr, off, word as i32)
+        off = off + 4
+    if off < n:
+        var tail: i64 = 0
+        var shift: i64 = 0
+        val tail_start = off
+        while off < n:
+            tail = tail | (params[off].to_i64() << shift)
+            off = off + 1
+            shift = shift + 8
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_ptr_write_i32(ptr, tail_start, tail as i32)
+    val rc = rt_metal_run_compute_frame(queue, pipeline, buf0, buf1, ptr, n, gx, gy, gz, bx, by, bz)
+    unsafe(capabilities: [ffi]):
+        rt_free(ptr)
+    rc == 1
 
 fn metal_last_error() -> text:
     var cstr: i64 = 0

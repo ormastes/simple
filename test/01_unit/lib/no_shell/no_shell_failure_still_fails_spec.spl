@@ -1,0 +1,45 @@
+# GENERALIZING SPEC — the other half of the /bin/sh removal.
+#
+# Removing a shell-out is only a fix if a genuine failure STILL reports failure.
+# The defect being repaired was a silent no-op (everything false); the tempting
+# wrong repair is a silent success (everything true). Neither is acceptable, so
+# this spec pins the negative side of every converted operation independently of
+# the positive side pinned by no_shell_native_primitives_spec.spl.
+
+use std.nogc_sync_mut.shell.dir.{exist}
+use std.nogc_sync_mut.env.config.{source_file}
+use app.io.process_ops.{shell_bool, shell_output_default}
+use std.nogc_async_mut.io.process_ops.{shell}
+use std.spec.step
+
+describe "No-shell conversions preserve real failure":
+    it "does not report a missing directory as present":
+        expect(exist("zz_no_such_dir_at_all")).to_equal(false)
+        expect(exist("src/zz/deeply/absent")).to_equal(false)
+
+    it "reads a missing dotenv file as empty rather than inventing content":
+        expect(source_file(path: "zz_no_such_dotenv_file.env").len()).to_equal(0)
+
+    it "propagates a non-zero shell exit through the platform-resolved shell":
+        # shell_bool routes through _shell_command_args, which now resolves
+        # cmd.exe on Windows and /bin/sh on POSIX. A command that succeeds must
+        # be true and a command that fails must be false -- if the resolver
+        # picked a shell that does not exist, BOTH would be false, which is why
+        # the success case is asserted here too.
+        expect(shell_bool("echo ok")).to_equal(true)
+        expect(shell_bool("exit 7")).to_equal(false)
+
+    it "falls back to the caller's default when a command fails":
+        expect(shell_output_default("exit 3", "DEFAULT").trim()).to_equal("DEFAULT")
+
+    it "keeps the lib-side shell() honest for mcp shell_cmd":
+        # std.nogc_async_mut.mcp.main_lazy_json.shell_cmd hardcoded /bin/sh
+        # and now routes through this exported shell(), so the class-(c)
+        # conversion is pinned on the primitive it was pointed at. Both
+        # directions again: a resolver that picked a nonexistent shell
+        # would fail BOTH cases and look like a passing negative test.
+        val ok = shell("echo ok")
+        expect(ok.exit_code).to_equal(0)
+        expect(ok.stdout.trim()).to_equal("ok")
+        val bad = shell("exit 7")
+        expect(bad.exit_code).to_equal(7)

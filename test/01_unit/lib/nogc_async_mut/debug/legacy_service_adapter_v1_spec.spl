@@ -1,0 +1,99 @@
+use std.spec.*
+use std.common.convert.{try_parse_int}
+use std.common.debug.contracts_v1.{DebugSessionId}
+use std.common.debug.service_v1.{
+    central_debug_service_v1_receipts, central_debug_service_v1_session_count,
+}
+use std.nogc_async_mut.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
+use std.nogc_async_mut.debug.legacy_service_adapter_v1.{LegacyDebugBackendAdapterV1}
+
+class FakeLegacyBackend:
+    attach_ok: bool
+    events: [text]
+    evaluate_calls: i64
+
+    static fn create(attach_ok: bool) -> FakeLegacyBackend:
+        FakeLegacyBackend(attach_ok: attach_ok, events: [], evaluate_calls: 0)
+
+impl DebugBackend for FakeLegacyBackend:
+    fn name() -> String: "fake"
+    me attach(program_path: String, args: [String]) -> Result<Nil, String>:
+        self.events.push("attach")
+        if self.attach_ok: Ok(nil) else: Err("fixture attach failed")
+    me detach() -> Result<Nil, String>:
+        self.events.push("detach")
+        Ok(nil)
+    me run() -> Result<Nil, String>:
+        self.events.push("run")
+        Ok(nil)
+    fn pause() -> Result<Nil, String>: Ok(nil)
+    fn resume() -> Result<Nil, String>: Ok(nil)
+    fn step_over() -> Result<Nil, String>: Ok(nil)
+    fn step_in() -> Result<Nil, String>: Ok(nil)
+    fn step_out() -> Result<Nil, String>: Ok(nil)
+    fn add_breakpoint(file: String, line: Int) -> Result<Int, String>: Ok(1)
+    fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>: Ok(nil)
+    fn stack_trace() -> Result<[FrameInfo], String>: Ok([])
+    fn locals() -> Result<[VarInfo], String>: Ok([])
+    me evaluate(expr: String) -> Result<String, String>:
+        self.evaluate_calls = self.evaluate_calls + 1
+        Ok("evaluated")
+    fn current_location() -> Result<LocationInfo, String>:
+        Ok(LocationInfo.at("fixture.spl", 1, "fixture"))
+
+fn session_number(session_id: DebugSessionId) -> i64:
+    val parsed = try_parse_int(session_id.value.substring(6, session_id.value.len()))
+    match parsed:
+        case Some(value): value
+        case None: fail("central session id was not numeric: {session_id.value}")
+
+describe "LegacyDebugBackendAdapterV1 migration ownership":
+    it "shares the central owner across adapters and issues unique sessions":
+        val first_backend = FakeLegacyBackend.create(true)
+        val second_backend = FakeLegacyBackend.create(true)
+        val first = LegacyDebugBackendAdapterV1.create(first_backend)
+        val second = LegacyDebugBackendAdapterV1.create(second_backend)
+        val first_id = first.open("build-first", "first.spl", [])!
+        val second_id = second.open("build-second", "second.spl", [])!
+        expect(first_id.value == second_id.value).to_equal(false)
+        expect(central_debug_service_v1_session_count()).to_be_greater_than(1)
+        first.close(first_id)!
+        second.close(second_id)!
+
+    it "rolls back a failed attach while retaining failure and close receipts":
+        val before = central_debug_service_v1_session_count()
+        val failed_backend = FakeLegacyBackend.create(false)
+        val failed = LegacyDebugBackendAdapterV1.create(failed_backend)
+        expect(failed.open("build-failed", "failed.spl", []).is_err()).to_equal(true)
+        expect(central_debug_service_v1_session_count()).to_equal(before)
+
+        # Open the next session to recover the monotonically preceding failed id.
+        val marker_backend = FakeLegacyBackend.create(true)
+        val marker = LegacyDebugBackendAdapterV1.create(marker_backend)
+        val marker_id = marker.open("build-marker", "marker.spl", [])!
+        val failed_id = DebugSessionId(value: "debug-{session_number(marker_id) - 1}")
+        val receipts = central_debug_service_v1_receipts(failed_id)
+        expect(receipts.filter(_.action == "legacy.attach" and not _.allowed).len()).to_equal(1)
+        expect(receipts.filter(_.action == "session.close").len()).to_equal(1)
+        marker.close(marker_id)!
+
+    it "denies legacy evaluation before calling the backend":
+        val backend = FakeLegacyBackend.create(true)
+        val adapter = LegacyDebugBackendAdapterV1.create(backend)
+        val session_id = adapter.open("build-evaluate", "evaluate.spl", [])!
+        val result = adapter.evaluate(session_id, "side_effect()")
+        expect(result.is_err()).to_equal(true)
+        expect(backend.evaluate_calls).to_equal(0)
+        val receipts = central_debug_service_v1_receipts(session_id)
+        expect(receipts.filter(_.action == "legacy.evaluate" and not _.allowed).len()).to_equal(1)
+        adapter.close(session_id)!
+
+    it "detaches the backend before centrally closing the session":
+        val backend = FakeLegacyBackend.create(true)
+        val adapter = LegacyDebugBackendAdapterV1.create(backend)
+        val session_id = adapter.open("build-close", "close.spl", [])!
+        adapter.close(session_id)!
+        expect(backend.events).to_equal(["attach", "detach"])
+        val receipts = central_debug_service_v1_receipts(session_id)
+        expect(receipts[receipts.len() - 2].action).to_equal("legacy.detach.outcome")
+        expect(receipts[receipts.len() - 1].action).to_equal("session.close")

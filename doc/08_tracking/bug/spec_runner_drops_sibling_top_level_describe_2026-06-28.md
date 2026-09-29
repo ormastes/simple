@@ -1,21 +1,13 @@
 # Spec Runner Silently Runs Only the LAST Top-Level `describe` (hollow green)
+## Open 2026-09-16 — needs owner triage
 
-## Status: NOT-REPRODUCED (2026-08-17)
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
-A three-sibling-top-level-`describe` probe run under
-`SIMPLE_EXECUTION_MODE=interpreter` executes ALL groups:
-
-```
-group A: A1, A2 | group B: B1 | group C: C1
-SPEC FILE VERDICT: ... declared>=4 executed=4 passed=4 failed=0 dropped=0
-```
-
-`declared>=4 executed=4` is the exact counter-evidence to the "only the LAST
-group runs" claim -- under the reported defect this would read `executed=1`.
-The pre-existing regression spec
-`test/01_unit/std/spec_sibling_top_level_describe_spec.spl` (3 sibling groups,
-6 examples) is also green: `declared>=6 executed=6 passed=6 failed=0 dropped=0`.
-
+## Triage note 2026-09-13 — could not verify: the spec runner is broken on this host
+- **measured** (Windows Rust seed v1.0.0-rc.1): `bin/simple test` is non-functional here — a 3-line 1-assertion spec returns in under a second with `WARNING: test daemon unavailable; running directly`, `error: test-runner: code -1 (process_run_bounded killed the child at its budget)` and a false `reason=outer-bound-timeout budget_ms=930000`. Seven real specs produced byte-identical verdicts.
+- **inferred**: every runner-behaviour claim in this entry (example counts, PASS/FAIL bookkeeping, daemon timeouts) is therefore unverifiable here; a green or red from this host would be meaningless either way.
+- **inferred**: left OPEN, not stale — the referenced spec files all still exist.
 
 Date: 2026-06-28
 
@@ -59,3 +51,4 @@ former siblings one level deep. Then all it-blocks run.
   it-blocks == reported examples), OR
 - the runner emits a hard error/warning when it would drop a top-level describe,
   so a hollow green is impossible to ship silently.
+

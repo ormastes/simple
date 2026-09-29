@@ -1,0 +1,48 @@
+#!/bin/sh
+# The fingerprint resolver needs the repository's Rust channel already installed.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+perl - "$root" <<'PERL'
+use strict;
+use warnings;
+my ($root) = @ARGV;
+sub read_file {
+    open my $fh, '<', $_[0] or die "open $_[0]: $!\n";
+    local $/;
+    return <$fh>;
+}
+my $policy = read_file("$root/src/compiler_rust/rust-toolchain.toml");
+my ($channel) = $policy =~ /^channel\s*=\s*"([A-Za-z0-9_.-]+)"\s*$/m;
+defined $channel or die "missing repository channel\n";
+my ($component_list) = $policy =~ /^components\s*=\s*\[([^\]]+)\]\s*$/m;
+defined $component_list or die "missing repository components\n";
+my @components = sort($component_list =~ /"([A-Za-z0-9_-]+)"/g);
+@components or die "empty repository components\n";
+my $workflow = read_file("$root/.github/workflows/macos-phase23-evidence.yml");
+sub has_pinned_setup {
+    my ($text) = @_;
+    my $installed = 0;
+    for my $step (split /^      - /m, $text) {
+        if ($step =~ /(?:^|\n        )uses: dtolnay\/rust-toolchain\@([^\s]+)\s*$/m) {
+            return 0 unless $1 eq $channel;
+            # Optional/advisory provisioning cannot establish build authority.
+            return 0 if $step =~ /^        (?:if|continue-on-error):/m;
+            my ($wanted) = $step =~ /^          components:\s*([^\n]+)$/m;
+            return 0 unless defined $wanted;
+            my @actual = sort split /\s*,\s*/, $wanted;
+            return 0 unless join(',', @actual) eq join(',', @components);
+            $installed = 1;
+        }
+        return $installed if $step =~ /^        run: sh scripts\/check\/run-macos-phase23-evidence\.shs\s*$/m;
+    }
+    return 0;
+}
+has_pinned_setup($workflow) or die "repository Rust setup is absent, mismatched, or after bootstrap\n";
+my $missing = $workflow;
+$missing =~ s/dtolnay\/rust-toolchain\@[^\s]+/missing\/setup\@none/g;
+has_pinned_setup($missing) and die "missing setup accepted\n";
+my $mismatched = $workflow;
+$mismatched =~ s/dtolnay\/rust-toolchain\@[^\s]+/dtolnay\/rust-toolchain\@wrong-channel/g;
+has_pinned_setup($mismatched) and die "mismatched setup accepted\n";
+print "PASS: macOS Phase 2/3 provisions repository Rust channel and components before bootstrap\n";
+PERL

@@ -1,0 +1,227 @@
+#!/bin/sh
+# check-bump-heap-exhaustion-reported.shs
+#
+# Every NULL-returning path of the freestanding bump allocator must NAME itself
+# on the console, and every riscv64 boot TU that can print must wire the report.
+#
+# WHY THIS GUARD EXISTS (measured 2026-09-01)
+# -------------------------------------------
+# The riscv64 in-guest build-and-run row (row 2 of
+# check-simpleos-riscv64-interpreter-in-guest-opensbi.shs) restarted 67 times in
+# one boot under real OpenSBI fw_payload with NO diagnostic of any kind: no
+# trap, no FATAL, no OpenSBI re-banner (the firmware banner appears exactly
+# ONCE -- the GUEST was re-entering spl_start, the machine never reset). Two
+# sessions read that as a firmware/reset problem.
+#
+# The cause was a full bump arena. `rv_alloc()` returned NULL, the caller stored
+# through it, and the fault was unattributable. An exhaustion report DID exist
+# -- but it lived in `malloc()`, and `rt_alloc`, `calloc`, `realloc` and every
+# in-TU `rv_alloc(...)` call site (which is the whole Simple runtime object
+# path) bypass `malloc()` entirely. So the report was live code that could
+# essentially never fire. Moving it to `rv_alloc()` -- the single funnel -- made
+# the failure name itself on the FIRST boot after the change.
+#
+# PER-DEFINITION, NOT A TREE-WIDE GREP. This tree has already lost two sessions
+# to the trap where a tree-wide grep stays green while the definition that
+# matters is unpatched (see
+# doc/08_tracking/bug/riscv64_in_guest_dict_values_yields_empty_erased_receiver_2026-09-01.md:
+# `baremetal_stubs.c`, not `baremetal_runtime_core.inc.c`, is the TU whose rt_*
+# definitions WIN the link). A grep for the macro name anywhere in the header
+# would pass on a header that defines it and never calls it, and a grep for the
+# report text anywhere in the tree would pass while the winning TU is silent.
+# So this guard checks, separately:
+#   (a) each `return 0;` inside each allocator FUNCTION BODY in the header is
+#       preceded on its own line by RV_HEAP_EXHAUSTED_REPORT();
+#   (b) each riscv64 boot TU that includes the header defines the macro to a
+#       real reporting function, and that function actually calls serial_puts.
+#
+# Verdict is the LAST line of stdout:
+#   PASS — <n> definition(s) checked, every NULL path reports
+#   FAIL — <n> definition(s) checked, silent NULL path(s): <names>
+#   ERROR — nothing was checked: <reason>          (exit 2; 0 definitions is
+#                                                   always ERROR, never a pass)
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+HEADER_REL=examples/09_embedded/simple_os/arch/common/baremetal_bump_heap.h
+TUS="examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c
+examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c"
+
+fail()    { printf 'FAIL — %s\n' "$1"; exit 1; }
+nothing() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+
+# ---------------------------------------------------------------------------
+# scan_header <header> -> prints one offender name per silent NULL path.
+# Sets SCAN_N (definitions examined). Reads a file, never the git index.
+# ---------------------------------------------------------------------------
+scan_header() {
+    awk '
+        # Track which allocator function body we are inside. Only the bump
+        # allocators are in scope; the size-arithmetic helpers (rv_size_*)
+        # return 0 to mean "overflow" to their CALLER and print nothing.
+        /^static (inline )?(void \*|int )rv_[a-z_0-9]+\(/ {
+            fname = $0
+            # Strip the ARGUMENT LIST first. Doing it the other way round is
+            # a real trap: the greedy prefix strip would eat past the space
+            # inside `(size_t size)` and leave garbage, silently counting 0
+            # definitions -- which the empty-header fixture would not catch.
+            sub(/\(.*$/, "", fname); sub(/^.*[ *]/, "", fname)
+            inbody = 1; next
+        }
+        inbody && /^}/ { if (fname ~ /^rv_(alloc|alloc_aligned|calloc|realloc)$/) n++; inbody = 0; fname = ""; next }
+        inbody {
+            if (fname ~ /^rv_(alloc|alloc_aligned)$/ && $0 ~ /return 0;/) {
+                # SAME LINE only. Accepting a report on the PREVIOUS line was
+                # tried and is unsound: a guarded `{ REPORT(); return 0; }` one
+                # line above excuses an UNGUARDED `return 0;` below it, which is
+                # exactly the shape of the must-FAIL fixture.
+                if ($0 !~ /RV_HEAP_EXHAUSTED_REPORT\(\)/) {
+                    print "OFFENDER " fname ":" NR
+                }
+            }
+        }
+        END { print "COUNT " n+0 }
+    ' "$1"
+}
+
+selftest() {
+    st=$(mktemp -d); n=0; st_fail=0
+
+    # (must-PASS) every NULL path reports.
+    cat > "$st/good.h" <<'GOODH'
+static void *rv_alloc(size_t size){
+    size_t aligned = 0;
+    if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (aligned > RV_HEAP_SIZE - g_heap_off) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    return p;
+}
+static void *rv_alloc_aligned(size_t size, size_t align){
+    if (offset > RV_HEAP_SIZE) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    return p;
+}
+GOODH
+    n=$((n+1))
+    out=$(scan_header "$st/good.h")
+    echo "$out" | grep -q '^OFFENDER ' && { echo "selftest: clean header wrongly flagged" >&2; st_fail=1; }
+    n=$((n+1))
+    echo "$out" | grep -q '^COUNT 2$' || { echo "selftest: clean header counted wrong ($out)" >&2; st_fail=1; }
+
+    # (must-FAIL) replays the incident's exact shape: one silent NULL path.
+    cat > "$st/bad.h" <<'BADH'
+static void *rv_alloc(size_t size){
+    size_t aligned = 0;
+    if (!rv_size_align16(size, &aligned)) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    if (aligned > RV_HEAP_SIZE - g_heap_off) return 0;
+    return p;
+}
+BADH
+    n=$((n+1))
+    scan_header "$st/bad.h" | grep -q '^OFFENDER rv_alloc:' \
+        || { echo "selftest: silent NULL path wrongly accepted" >&2; st_fail=1; }
+
+    # (must-PASS, decoy) an unrelated helper returning 0 must NOT be flagged --
+    # rv_size_mul reports overflow to its caller and prints nothing by design.
+    cat > "$st/decoy.h" <<'DECOYH'
+static inline int rv_size_mul(size_t l, size_t r, size_t *out){
+    if (l != 0 && r > (size_t)-1 / l) return 0;
+    *out = l * r;
+    return 1;
+}
+static void *rv_alloc(size_t size){
+    if (!ok) { RV_HEAP_EXHAUSTED_REPORT(); return 0; }
+    return p;
+}
+DECOYH
+    n=$((n+1))
+    scan_header "$st/decoy.h" | grep -q '^OFFENDER ' \
+        && { echo "selftest: non-allocator helper wrongly flagged" >&2; st_fail=1; }
+
+    # (must-FAIL) a TU that names the macro but wires it to nothing that prints.
+    cat > "$st/tu_bad.c" <<'TUBAD'
+#define RV_HEAP_EXHAUSTED_REPORT() ((void)0)
+#include "../../common/baremetal_bump_heap.h"
+TUBAD
+    n=$((n+1))
+    if tu_wires_report "$st/tu_bad.c"; then
+        echo "selftest: no-op-wired TU wrongly accepted" >&2; st_fail=1
+    fi
+
+    # (must-PASS) a TU wired to a real serial_puts reporter.
+    cat > "$st/tu_good.c" <<'TUGOOD'
+static void rv_report_heap_exhausted(void)
+{
+    serial_puts("[rv64] FATAL bump heap exhausted\r\n");
+}
+#define RV_HEAP_EXHAUSTED_REPORT() rv_report_heap_exhausted()
+#include "../../common/baremetal_bump_heap.h"
+TUGOOD
+    n=$((n+1))
+    tu_wires_report "$st/tu_good.c" \
+        || { echo "selftest: correctly wired TU wrongly rejected" >&2; st_fail=1; }
+
+    # (must-FAIL) an empty header must yield 0 definitions so the caller ERRORs.
+    : > "$st/empty.h"
+    n=$((n+1))
+    scan_header "$st/empty.h" | grep -q '^COUNT 0$' \
+        || { echo "selftest: empty header did not report 0 definitions" >&2; st_fail=1; }
+
+    rm -rf "$st"
+    [ "$st_fail" -eq 0 ] || return 1
+    SELFTEST_N=$n
+    printf '[bump-heap] selftest OK (%s fixtures)\n' "$n"
+    return 0
+}
+
+# tu_wires_report <file> — the TU must define RV_HEAP_EXHAUSTED_REPORT to a
+# named function (not a no-op cast) AND that function must call serial_puts.
+tu_wires_report() {
+    f=$1
+    def=$(grep -a '^#define RV_HEAP_EXHAUSTED_REPORT()' "$f" 2>/dev/null | head -1) || return 1
+    [ -n "$def" ] || return 1
+    case "$def" in
+        *'((void)0)'*|*'()$') return 1 ;;
+    esac
+    fn=$(printf '%s\n' "$def" | sed 's/^#define RV_HEAP_EXHAUSTED_REPORT() *//; s/(.*$//; s/[[:space:]]*$//')
+    [ -n "$fn" ] || return 1
+    grep -aq "^static void $fn(void)" "$f" || return 1
+    # The reporter body must actually print.
+    sed -n "/^static void $fn(void)/,/^}/p" "$f" | grep -aq 'serial_puts' || return 1
+    return 0
+}
+
+selftest || nothing "selftest failed — the scanner cannot be trusted"
+if [ "${1:-}" = "--selftest" ]; then
+    [ "${SELFTEST_N:-0}" -gt 0 ] || nothing "selftest executed 0 fixtures"
+    printf 'PASS — %s selftest fixture(s) checked, the NULL-path scanner and the TU wiring check both discriminate\n' "$SELFTEST_N"
+    exit 0
+fi
+
+HEADER=$ROOT/$HEADER_REL
+[ -f "$HEADER" ] || nothing "missing $HEADER_REL"
+
+CHECKED=0
+OFFENDERS=
+
+out=$(scan_header "$HEADER")
+CHECKED=$(printf '%s\n' "$out" | sed -n 's/^COUNT //p')
+[ -n "$CHECKED" ] || nothing "scanner produced no definition count for $HEADER_REL"
+for o in $(printf '%s\n' "$out" | sed -n 's/^OFFENDER //p'); do
+    OFFENDERS="${OFFENDERS:+$OFFENDERS }$HEADER_REL:$o"
+done
+
+for tu in $TUS; do
+    f=$ROOT/$tu
+    [ -f "$f" ] || nothing "missing boot TU $tu"
+    grep -aq 'baremetal_bump_heap.h' "$f" || continue
+    CHECKED=$((CHECKED + 1))
+    tu_wires_report "$f" \
+        || OFFENDERS="${OFFENDERS:+$OFFENDERS }$(basename "$tu"):RV_HEAP_EXHAUSTED_REPORT-not-wired-to-a-printing-reporter"
+done
+
+[ "$CHECKED" -gt 0 ] || nothing "0 definitions examined"
+
+if [ -n "$OFFENDERS" ]; then
+    fail "$CHECKED definition(s) checked, silent NULL path(s): $OFFENDERS"
+fi
+
+printf 'PASS — %s definition(s) checked, every bump-allocator NULL path reports exhaustion and every riscv64 boot TU wires a printing reporter\n' "$CHECKED"

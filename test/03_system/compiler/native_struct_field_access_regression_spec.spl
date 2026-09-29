@@ -1,4 +1,10 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """Native struct-field access regression for the self-hosted AOT path."""
+
+use std.spec.step
 
 use std.spec.*
 use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
@@ -6,9 +12,14 @@ use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
 val BUILD_DIR = "build/native_struct_field_access_regression"
 val SOURCE_PATH = BUILD_DIR + "/main.spl"
 val BINARY_PATH = BUILD_DIR + "/main"
+val ERASED_SOURCE_PATH = BUILD_DIR + "/erased_receiver.spl"
+val ORDER_SOURCE_PATH = BUILD_DIR + "/erased_receiver_order.spl"
 
 describe "self-hosted native struct field access":
+    # @manual: show
     it "compiles and reads a text field from a local struct":
+        # @req REQ-SSPEC-SYSTEM
+        step("compiles and reads a text field from a local struct")
         step("Write the minimal struct-field AOT repro")
         expect(dir_create_all(BUILD_DIR)).to_equal(true)
         expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
@@ -32,3 +43,108 @@ describe "self-hosted native struct field access":
         val ran = shell(BINARY_PATH)
         expect(ran.exit_code).to_equal(0)
         expect(ran.stdout).to_equal("A")
+
+    # @manual: show
+    # Regression for
+    # doc/08_tracking/bug/stage2_struct_field_offset_model_mismatch_oob_read_2026-08-30.md
+    #
+    # When the receiver type erases to ANY, the HIR lowerer picks a field
+    # offset from whichever struct in scope declares that field name. Picking
+    # the struct with the MOST fields (the rule before the fix) yields the
+    # LARGEST index, which is past the end of every smaller candidate: a
+    # one-field receiver was loaded at byte_offset 32 and returned adjacent
+    # heap bytes (0x2d363230325f7365, the ASCII "es_2026-").
+    #
+    # This must run through `bin/simple run` (the Cranelift JIT), not inline
+    # in the spec body: `bin/simple test` executes spec bodies in the seed's
+    # tree-walking interpreter, which never lowers a FieldGet and therefore
+    # cannot discriminate the defect.
+    #
+    # `env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE` is load-bearing,
+    # not tidiness: the test runner exports `SIMPLE_EXECUTION_MODE=interpret`
+    # and `SIMPLE_RUNTIME_MODE=interpreter`, the child `bin/simple run`
+    # inherits them, and the interpreter answers 42 whether or not the offset
+    # model is broken. Measured on the unfixed binary: with the vars inherited
+    # this scenario PASSES vacuously; with them stripped it reads
+    # 6873726019372056632 at byte_offset 32.
+    it "rejects an erased receiver with conflicting narrow and wide layouts":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects an erased receiver with conflicting narrow and wide layouts")
+        step("Write distinct narrow and wide sentinels that share a field name at different slots")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(
+            ERASED_SOURCE_PATH,
+            "struct ZzSmall:\n" +
+            "    zzq: i64\n" +
+            "\n" +
+            "struct ZzBig:\n" +
+            "    p0: i64\n" +
+            "    p1: i64\n" +
+            "    zzq: i64\n" +
+            "    p2: i64\n" +
+            "    p3: i64\n" +
+            "\n" +
+            "fn read_zzq(o: any) -> i64:\n" +
+            "    return o.zzq\n" +
+            "\n" +
+            "fn main():\n" +
+            "    var s = ZzSmall(zzq: 7)\n" +
+            "    var w = ZzBig(p0: 11, p1: 13, zzq: 42, p2: 17, p3: 19)\n" +
+            "    print(read_zzq(w))\n"
+        )).to_equal(true)
+
+        step("Run it through the JIT lowering path and require an ambiguity refusal")
+        val erased = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+            "bin/simple run " + ERASED_SOURCE_PATH + " 2>&1"
+        )
+        expect(erased.exit_code == 0).to_equal(false)
+
+        step("Observe that neither narrow nor wide sentinel is guessed")
+        expect(erased.stdout).to_contain("cannot infer field")
+
+    # @manual: show
+    # Generalization: the same shape with the declaration order reversed and a
+    # third candidate at a middle index, so a green verdict cannot be an
+    # artifact of type-registry iteration order.
+    it "rejects conflicting erased-receiver layouts independently of declaration order":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects conflicting erased-receiver layouts independently of declaration order")
+        step("Declare a wide target and narrow sentinel in reverse order")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(
+            ORDER_SOURCE_PATH,
+            "struct ZzWide:\n" +
+            "    q0: i64\n" +
+            "    q1: i64\n" +
+            "    zzr: i64\n" +
+            "    q2: i64\n" +
+            "    q3: i64\n" +
+            "    q4: i64\n" +
+            "\n" +
+            "struct ZzMid:\n" +
+            "    m0: i64\n" +
+            "    zzr: i64\n" +
+            "    m1: i64\n" +
+            "\n" +
+            "struct ZzTiny:\n" +
+            "    zzr: i64\n" +
+            "\n" +
+            "fn read_zzr(o: any) -> i64:\n" +
+            "    return o.zzr\n" +
+            "\n" +
+            "fn main():\n" +
+            "    var t = ZzTiny(zzr: 7)\n" +
+            "    var w = ZzWide(q0: 1, q1: 2, zzr: 42, q2: 3, q3: 4, q4: 5)\n" +
+            "    print(read_zzr(w))\n"
+        )).to_equal(true)
+
+        step("Run it through the JIT lowering path and require an ambiguity refusal")
+        val ordered = shell(
+            "env -u SIMPLE_EXECUTION_MODE -u SIMPLE_RUNTIME_MODE " +
+            "bin/simple run " + ORDER_SOURCE_PATH + " 2>&1"
+        )
+        expect(ordered.exit_code == 0).to_equal(false)
+
+        step("Observe that the dynamic layout remains fail-closed after order reversal")
+        expect(ordered.stdout).to_contain("cannot infer field")

@@ -10,12 +10,12 @@ use compiler.frontend.trace_policy.{frontend_compiler_trace_enabled}
 use compiler.core.parser.{parser_error}
 use compiler.core.parser_decls.{parse_module_body}
 use compiler.frontend.core.string_interpolation_expand.{
-    parse_interpolation_fragment
+    parse_interpolation_fragment, interpolation_literalize_region
 }
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
-use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_hal_flags}
+use compiler.core.ast.{decl_get_is_async, decl_get_is_gpu_kernel, decl_get_rt_hal_flags, decl_get_asm_placement}
 use compiler.core.ast.{decl_get_param_types, decl_get_ret_type, decl_get_visibility_text, module_decl_at, module_decl_count_get}
 use compiler.core.ast.{decl_get_gpu_target_text, decl_get_gpu_target_arg_name_text, decl_get_gpu_backends_text}
 use compiler.core.ast.{decl_get_is_hardware, decl_get_clocked_args, decl_get_vhdl_generic_args, decl_get_flatten_struct_output}
@@ -729,6 +729,11 @@ fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
     )
 
 fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
+    # Interpolations only; see flat_bridge_build_string_regions.
+    val (_rewritten, interps) = flat_bridge_build_string_regions(value, span)
+    interps
+
+fn flat_bridge_build_string_regions(value: text, span: Span) -> (text, [Interpolation]):
     # Bug #136 (normal native path): the core lexer copies each `{expr}`
     # interpolation region VERBATIM into the string token and never parses the
     # inner expression, so the bridge previously emitted StringLit(value, nil)
@@ -736,11 +741,18 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     # parts to splice -- `{expr}` printed literally. Scan top-level `{...}`
     # regions here (brace-depth tracked so nested braces stay in one region,
     # mirroring the MIR split logic) and sub-parse each inner into a real Expr
-    # so the HIR/MIR interpolation chain can evaluate and splice it. If any
-    # region is not a clean single expression, return [] so the string is
-    # treated as a plain literal (preserves brace-bearing non-interp strings
-    # like CSS/JSON).
+    # so the HIR/MIR interpolation chain can evaluate and splice it.
+    #
+    # Region-only fallback (seed parity, owner ruling 2026-09-27): a region
+    # that is not a clean single expression (CSS/JSON text) is literalized
+    # ALONE -- its braces are doubled in the returned text, which the MIR
+    # split_interpolation_segments `{{`/`}}` rule reads back verbatim -- while
+    # valid neighbouring regions still interpolate. An unbalanced string stays
+    # wholly literal: `(value, [])`.
     var interps: [Interpolation] = []
+    var chunks: [text] = []
+    var copied_until = 0
+    var region_start = 0
     var depth = 0
     var inner_parts: [text] = []
     var i = 0
@@ -762,6 +774,7 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             i = i + 1
         elif depth == 0 and ch == "{":
             depth = 1
+            region_start = i
             inner_parts = []
         elif depth > 0 and ch == "{":
             depth = depth + 1
@@ -771,21 +784,28 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
             if depth == 0:
                 val part_idx = parse_interpolation_fragment(inner_parts.join(""))
                 if part_idx < 0:
-                    return []
-                interps.push(Interpolation(
-                    expr: convert_flat_expr(part_idx),
-                    has_format: false,
-                    format: "",
-                    span: span
-                ))
+                    chunks.push(value.substring(copied_until, region_start))
+                    chunks.push(interpolation_literalize_region(
+                        value.substring(region_start, i + 1)))
+                    copied_until = i + 1
+                else:
+                    interps.push(Interpolation(
+                        expr: convert_flat_expr(part_idx),
+                        has_format: false,
+                        format: "",
+                        span: span
+                    ))
             else:
                 inner_parts.push(ch)
         elif depth > 0:
             inner_parts.push(ch)
         i = i + 1
     if depth != 0:
-        return []
-    interps
+        return (value, [])
+    if copied_until == 0:
+        return (value, interps)
+    chunks.push(value.substring(copied_until, n))
+    (chunks.join(""), interps)
 
 fn flat_bridge_decode_brace_escapes(value: text) -> text:
     """Bug interp_brace_literal_collides_with_string_interpolation: a string
@@ -849,9 +869,9 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # brace-decoder allocation when no brace can affect either operation.
         if not str_val.contains("{") and not str_val.contains("}"):
             return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
-        val str_interps = flat_bridge_build_string_interps(str_val, span)
+        val (str_regions_val, str_interps) = flat_bridge_build_string_regions(str_val, span)
         if str_interps.len() > 0:
-            return Expr(kind: ExprKind.StringLit(str_val, str_interps), span: span)
+            return Expr(kind: ExprKind.StringLit(str_regions_val, str_interps), span: span)
         else:
             # No real `{expr}` placeholder (str_interps is empty). Decode any
             # `{{`/`}}` escapes directly since nothing downstream will (see
@@ -1180,6 +1200,16 @@ fn convert_flat_expr(idx: i64) -> Expr:
         # suffixed literal compiled as the tagged-nil constant 3 (NVMe rv32
         # fw mask-361 failures, 2026-07-24). Lower exactly like the
         # equivalent `<lit> as <suffix>` cast, which the pipeline handles.
+        if expr_get_extra(idx) == 2:
+            val string_suffix = expr_get_float(idx)
+            val string_value = Expr(kind: ExprKind.StringLit(expr_get_str(idx), nil), span: span)
+            if string_suffix == "path":
+                val path_type = Expr(kind: ExprKind.Ident("LazyPathTemplate"), span: span)
+                val path_ctor = Expr(kind: ExprKind.Field(path_type, "new"), span: span)
+                val path_arg = CallArg(has_name: false, name: "", value: string_value, span: span)
+                return Expr(kind: ExprKind.Call(path_ctor, [path_arg]), span: span)
+            val string_type = Type(kind: TypeKind.Named(string_suffix, []), span: span)
+            return Expr(kind: ExprKind.Cast(string_value, string_type), span: span)
         val suf_type = Type(kind: TypeKind.Named(expr_get_str(idx), []), span: span)
         val suf_float_text = expr_get_float(idx)
         if suf_float_text != "":
@@ -2145,6 +2175,48 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         proof_uses: contract_proof_uses
     )
     var fn_attributes: [Attribute] = []
+    # Asm-embedding contract (design A.2): rebuild the placement attributes
+    # the parser recorded as raw spellings ("naked|section(.text.boot)|align(16)|global").
+    val asm_placement = decl_get_asm_placement(idx)
+    if asm_placement != "":
+        for spelling in asm_placement.split("|"):
+            if spelling == "":
+                continue
+            val paren = spelling.index_of("(")
+            if paren < 0:
+                fn_attributes.push(Attribute(name: spelling, args: [], span: span))
+                continue
+            val attr_name = spelling[0:paren]
+            val raw_arg = spelling[paren + 1:spelling.len() - 1]
+            if attr_name == "align":
+                var n: i64 = 0
+                var digit_i = 0
+                var all_digits = raw_arg.len() > 0
+                while digit_i < raw_arg.len():
+                    val b = raw_arg.byte_at(digit_i)
+                    if b < 48 or b > 57:
+                        all_digits = false
+                        break
+                    n = n * 10 + (b - 48)
+                    digit_i = digit_i + 1
+                val align_arg = if all_digits: Expr(kind: ExprKind.IntLit(n), span: span) else: Expr(kind: ExprKind.Ident(raw_arg), span: span)
+                fn_attributes.push(Attribute(name: attr_name, args: [align_arg], span: span))
+            elif attr_name == "export":
+                # `@export("C"[, name: "sym"])` is recorded as `export(C,name:sym)`
+                # (string tokens unquoted); parse_export_attrs wants the ABI as
+                # a StringLit and each kwarg as `Assign(Ident, StringLit)`.
+                var export_args: [Expr] = []
+                for piece in raw_arg.split(","):
+                    val colon = piece.index_of(":")
+                    if colon < 0:
+                        export_args.push(Expr(kind: ExprKind.StringLit(piece, nil), span: span))
+                    else:
+                        val key = Expr(kind: ExprKind.Ident(piece[0:colon]), span: span)
+                        val value = Expr(kind: ExprKind.StringLit(piece[colon + 1:piece.len()], nil), span: span)
+                        export_args.push(Expr(kind: ExprKind.Assign(key, nil, value), span: span))
+                fn_attributes.push(Attribute(name: attr_name, args: export_args, span: span))
+            else:
+                fn_attributes.push(Attribute(name: attr_name, args: [Expr(kind: ExprKind.StringLit(raw_arg, nil), span: span)], span: span))
     val rt_hal_flags = decl_get_rt_hal_flags(idx)
     if (rt_hal_flags & 1) != 0:
         var rt_args: [Expr] = [Expr(kind: ExprKind.Ident("hal"), span: span)]

@@ -13,6 +13,26 @@ Source warnings describe likely application defects. Optimizer remarks describe 
 decisions. Runtime profiles rank candidates but never authorize a semantics-changing
 transformation.
 
+## Joint time and memory decision
+
+Measure the same semantic workload before and after with matched host, fixture,
+warmup, and sample count; record each immutable binary identity. Retain
+p50/p95 elapsed time and peak/steady RSS for each relevant startup, warm, or
+build cohort. Prefer a
+change that improves both. If one regresses, calculate
+`candidate_p95 / baseline_p95 + candidate_peak_RSS / baseline_peak_RSS`.
+An overall tradeoff improves only when this sum is below `2` by more than the
+measured noise and both metrics remain within their independent hard budgets.
+Publish both ratios and the sum; missing or unmatched measurements do not
+qualify. Correctness, output identity, and feature preservation remain gates.
+SPipe's `perf_joint_compare_v1` in
+`src/lib/common/spec/evidence/format/simulation_profile.spl` returns the
+rounded-up per-mille ratios, sum, and explicit invalid/budget/no-gain reason.
+`perf_joint_to_evidence_v1` projects valid verdicts into closed SPipe evidence
+and marks unmatched or missing cohorts as parse failures.
+The helper requires at least three paired samples; a release lane still needs
+its own larger sample-count gate.
+
 Collection rules use the `collection_performance` configuration name. SDN entries and
 `@allow`/`@warn`/`@deny` attributes resolve lint names without rebuilding the registry per
 name, so large explicit configurations do not multiply registry allocation and scanning.
@@ -26,13 +46,6 @@ Combined source and parsed-AST lint phases share one request-local line view and
 after projection, avoiding duplicate source splitting without retaining editor contents.
 The same view feeds file attributes and migrated line-oriented rules; compatibility source
 wrappers remain for standalone callers.
-
-The first typed collection-analysis slice is request-local `HirPerfFacts`. Its
-COLL002 projection requires a resolved method symbol, authoritative typed array/slice
-receiver, verified version-matched linear-cost metadata, and positive loop ancestry.
-Unknown or unverified facts produce no typed warning and no fix. Until the standard-
-library registry and driver adapter land, existing source-pattern collection warnings
-remain advisory compatibility output rather than typed proof.
 
 ## Optimizer truth
 
@@ -298,28 +311,3 @@ Collection loop-invariant hoisting is disabled and contains no dormant header-re
 body. The compatibility entrypoints return the original blocks. A future implementation
 must consume a real preheader plus dominance, alias/memory, effects, zero-trip, and
 speculatability proofs; analysis-only scalar predicates do not authorize movement.
-
-## SPipe and LLM workflow
-
-Performance work enters through `$sp_dev` and uses `$system_test` for executable
-SSpec evidence. Keep four evidence classes separate:
-
-1. fast typed diagnostics for high-confidence source mistakes;
-2. MIR transforms and structured passed/missed/analysis/failure remarks;
-3. bounded deep summaries with explicit incomplete reasons;
-4. profile evidence tied to the same fixture, binary, and revision.
-
-For a hot-path rewrite, review complexity before allocation/copy behavior,
-layout/locality, invariant work, and dispatch. Pair semantic fixtures with a
-structural activation or rejection oracle when optimizer behavior is risky.
-Static bounds must be labeled static; do not claim latency, allocation, or peak
-RSS without retained measurements. Update the audit, architecture, detail
-design, agent plan, executable SSpec, and mirrored manual together when their
-contract changes. The full repository audit is
-[`simple_compiler_performance_memory_efficiency_audit.md`](../../01_research/local/simple_compiler_performance_memory_efficiency_audit.md).
-
-Compiler query/check output follows the same allocation policy. Compose stdout,
-the mandatory newline, and stderr once; plain output returns unchanged after
-the escape search, while ANSI cleanup retains visible spans rather than one
-text fragment per character. Cleanup deliberately occurs after stream
-composition, preserving escape sequences split across stdout and stderr.

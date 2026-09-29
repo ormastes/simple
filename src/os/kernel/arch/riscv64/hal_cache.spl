@@ -18,14 +18,14 @@
 #   hal_cache_clean_dcache_with_log(log, caps, addr, len, stride)
 #   hal_cache_invalidate_dcache_with_log(log, caps, addr, len, stride)
 #
-# PortableNumericCapabilities production authority is the boot DTB capability.
-# ISA-text helpers below are stateless test seams only.
+# PortableNumericCapabilities handshake (AC-3):
+#   hal_cache_init_from_dtb_info(info)
+#   hal_cache_init_with_isa(isa)
+#   portable_numeric_capabilities_has_riscv_zicbom() -> bool
+#   portable_numeric_capabilities_has_riscv_zicbom_default() -> bool
 
 use std.nogc_async_mut_noalloc.baremetal.riscv.{fence_i, cbo_flush, cbo_clean, cbo_inval}
-use os.kernel.boot.riscv_noalloc_dtb_capability.{
-    riscv_noalloc_dtb_has_zicbom,
-    riscv_noalloc_dtb_cache_stride
-}
+use os.kernel.boot.dtb_parser.{DtbDeviceInfo}
 
 # ============================================================================
 # CmoCapSnapshot — capability probe result
@@ -64,13 +64,16 @@ fn make_empty_log() -> CacheOpLog:
 # PortableNumericCapabilities handshake state
 # ============================================================================
 
+var ZICBOM_STATE: bool = false
+var CACHELINE_STRIDE_STATE: u32 = 64u32
+
+fn portable_numeric_capabilities_has_riscv_zicbom() -> bool:
+    """Return Zicbom capability as set by hal_cache_init_with_isa."""
+    ZICBOM_STATE
+
 fn portable_numeric_capabilities_has_riscv_zicbom_default() -> bool:
     """Return the safe pre-init default — always false."""
     false
-
-fn portable_numeric_capabilities_has_riscv_zicbom() -> bool:
-    """Compatibility getter backed by the sole boot-owned production authority."""
-    riscv_noalloc_dtb_has_zicbom()
 
 # ============================================================================
 # CMO probe helpers
@@ -95,28 +98,44 @@ fn hal_cache_probe_with_cmo_disabled() -> CmoCapSnapshot:
     """Capability snapshot: CMO probing disabled by config."""
     CmoCapSnapshot(has_zicbom: false, has_zicboz: false, has_zicbop: false)
 
-fn hal_cache_init_with_isa(isa: text) -> CmoCapSnapshot:
-    """Compatibility probe: returns a snapshot and never mutates production state."""
-    hal_cache_probe_with_isa(isa)
+fn hal_cache_init_with_isa(isa: text):
+    """Probe CMO from ISA string and write result to module-level state."""
+    val caps = hal_cache_probe_with_isa(isa)
+    ZICBOM_STATE = caps.has_zicbom
+    CACHELINE_STRIDE_STATE = 64u32
+
+fn _normalized_cbom_block_size(value: u32) -> u32:
+    """Accept a nonzero power-of-two CBOM size; otherwise use the safe default."""
+    if value > 0u32 and (value & (value - 1u32)) == 0u32:
+        value
+    else:
+        64u32
+
+fn hal_cache_init_from_dtb_info(info: DtbDeviceInfo):
+    """Initialize cache capabilities and stride from parsed production DTB data."""
+    if not info.valid:
+        ZICBOM_STATE = false
+        CACHELINE_STRIDE_STATE = 64u32
+        return
+    val caps = hal_cache_probe_with_isa(info.first_enabled_riscv_isa)
+    ZICBOM_STATE = caps.has_zicbom
+    CACHELINE_STRIDE_STATE = _normalized_cbom_block_size(info.cbom_block_size)
 
 # ============================================================================
 # Test-log seams — production logic without real asm (observable in tests)
 # ============================================================================
 
-fn _hal_cache_line_count(len: u64, stride: u32) -> u32:
-    if len == 0u64 or stride == 0u32:
-        return 0u32
-    val count = 1u64 + (len - 1u64) / stride as u64
-    if count > 0xFFFFFFFFu64: 0xFFFFFFFFu32 else: count as u32
-
 fn hal_cache_sync_icache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64) -> CacheOpLog:
     """Simulate hal_cache_sync_icache: cbo.flush per-line if Zicbom, then fence.i.
     Returns a CacheOpLog with counters populated (avoids parameter-mutation interpreter bug)."""
     val stride: u32 = 64u32
-    val cbo_flush_count = if caps.has_zicbom:
-        _hal_cache_line_count(len, stride)
-    else:
-        0u32
+    var cbo_flush_count: u32 = 0u32
+    if caps.has_zicbom:
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_flush_count = cbo_flush_count + 1u32
+            cur = cur + stride as u64
     CacheOpLog(
         fence_i_count: 1u32,
         cbo_clean_count: 0u32,
@@ -132,7 +151,11 @@ fn hal_cache_clean_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u64, st
     var cbo_clean_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        cbo_clean_count = _hal_cache_line_count(len, stride)
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_clean_count = cbo_clean_count + 1u32
+            cur = cur + stride as u64
     else:
         diagnostic_emitted = true
     CacheOpLog(
@@ -150,7 +173,11 @@ fn hal_cache_invalidate_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u6
     var cbo_inval_count: u32 = 0u32
     var diagnostic_emitted: bool = false
     if caps.has_zicbom:
-        cbo_inval_count = _hal_cache_line_count(len, stride)
+        var cur = addr
+        val end_addr = addr + len
+        while cur < end_addr:
+            cbo_inval_count = cbo_inval_count + 1u32
+            cur = cur + stride as u64
     else:
         diagnostic_emitted = true
     CacheOpLog(
@@ -168,59 +195,51 @@ fn hal_cache_invalidate_dcache_with_log(caps: CmoCapSnapshot, addr: u64, len: u6
 # ============================================================================
 
 fn current_cmo_caps() -> CmoCapSnapshot:
-    """Snapshot of the boot-owned DTB capability."""
-    CmoCapSnapshot(has_zicbom: riscv_noalloc_dtb_has_zicbom(), has_zicboz: false, has_zicbop: false)
+    """Snapshot of current CMO capability state from module-level ZICBOM_STATE."""
+    CmoCapSnapshot(has_zicbom: ZICBOM_STATE, has_zicboz: false, has_zicbop: false)
 
 fn current_cacheline_stride() -> u32:
-    """Validated common Zicbom block size, or the fail-closed 64-byte fallback."""
-    riscv_noalloc_dtb_cache_stride()
-
-fn _cache_range_end(addr: u64, len: u64) -> u64:
-    if len > 0xffffffffffffffff - addr: return addr
-    addr + len
-
-fn hal_cache_range_is_valid(addr: u64, len: u64) -> bool:
-    len == 0u64 or _cache_range_end(addr, len) != addr
+    """Return the boot-selected CBOM stride (64 when absent or invalid)."""
+    CACHELINE_STRIDE_STATE
 
 fn hal_cache_sync_icache(addr: u64, len: u64):
     """Sync icache: cbo.flush per-line (if Zicbom) then fence.i."""
     val stride = current_cacheline_stride()
-    val stride64 = stride as u64
-    if riscv_noalloc_dtb_has_zicbom() and stride > 0u32 and len > 0u64 and hal_cache_range_is_valid(addr, len):
+    val end_addr = _cache_range_end(addr, len)
+    if len != 0u64 and end_addr == addr:
+        fence_i()
+        return
+    if riscv_noalloc_dtb_has_zicbom():
         var cur = addr
-        val last_addr = addr + len - 1u64
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_flush(cur)
-            if last_addr - cur < stride64:
-                break
-            cur = cur + stride64
+            cur = cur + stride as u64
     fence_i()
 
 fn hal_cache_clean_dcache(addr: u64, len: u64):
     """Clean dcache: cbo.clean per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    val stride64 = stride as u64
-    if riscv_noalloc_dtb_has_zicbom() and stride > 0u32 and len > 0u64 and hal_cache_range_is_valid(addr, len):
+    val end_addr = _cache_range_end(addr, len)
+    if len != 0u64 and end_addr == addr: return
+    if riscv_noalloc_dtb_has_zicbom():
         var cur = addr
-        val last_addr = addr + len - 1u64
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_clean(cur)
-            if last_addr - cur < stride64:
-                break
-            cur = cur + stride64
+            cur = cur + stride as u64
 
 fn hal_cache_invalidate_dcache(addr: u64, len: u64):
     """Invalidate dcache: cbo.inval per-line when Zicbom=true, else emit diagnostic."""
     val stride = current_cacheline_stride()
-    val stride64 = stride as u64
-    if riscv_noalloc_dtb_has_zicbom() and stride > 0u32 and len > 0u64 and hal_cache_range_is_valid(addr, len):
+    val end_addr = _cache_range_end(addr, len)
+    if len != 0u64 and end_addr == addr: return
+    if riscv_noalloc_dtb_has_zicbom():
         var cur = addr
-        val last_addr = addr + len - 1u64
-        while true:
+        val end_addr = addr + len
+        while cur < end_addr:
             cbo_inval(cur)
-            if last_addr - cur < stride64:
-                break
-            cur = cur + stride64
+            cur = cur + stride as u64
 
 # ============================================================================
 # AC-3: export ZICBOM state for compiler backend registry query

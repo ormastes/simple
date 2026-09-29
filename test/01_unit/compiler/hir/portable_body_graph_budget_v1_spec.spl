@@ -1,0 +1,202 @@
+# B05: portable-body graph determinism and bounded ledger behavior.  These
+# facts are semantic primitives only; they are not a portable-object grant.
+# @req REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use test.fixtures.compiler.completeness95.hir_cases_v1.{fixture_graph_v1}
+use compiler.hir.portable_body_budget.{PortableBodyLedgerV1,
+    portable_body_sort_work_v1}
+use compiler.hir.portable_body_graph.{portable_body_graph_analyze_v1,
+    portable_body_graph_analyze_precharged_v1}
+use compiler.hir.portable_body_profile_types.{PortableBodyLimitsV1,
+    PortableBodyGraphFactsV1, PortableBodyErrorV1}
+
+fn ledger() -> PortableBodyLedgerV1:
+    match PortableBodyLedgerV1.create(PortableBodyLimitsV1.standard()):
+        case Ok(value): value
+        case Err(error): fail("fixture ledger unavailable: " + error.to_string())
+
+fn expect_graph_error(
+    result: Result<PortableBodyGraphFactsV1, PortableBodyErrorV1>,
+    kind: text, detail: text):
+    match result:
+        case Ok(_): fail("expected graph refusal: " + detail)
+        case Err(error):
+            match error:
+                case PortableBodyErrorV1.InvalidProfileIdentity:
+                    expect(kind).to_equal("InvalidProfileIdentity")
+                    expect(detail).to_equal("")
+                case PortableBodyErrorV1.UnsupportedBodyKind:
+                    expect(kind).to_equal("UnsupportedBodyKind")
+                    expect(detail).to_equal("")
+                case PortableBodyErrorV1.UnsupportedSemantics(actual):
+                    expect(kind).to_equal("UnsupportedSemantics")
+                    expect(actual).to_equal(detail)
+                case PortableBodyErrorV1.BoundsExceeded(actual):
+                    expect(kind).to_equal("BoundsExceeded")
+                    expect(actual).to_equal(detail)
+                case PortableBodyErrorV1.EncodeRefused:
+                    expect(kind).to_equal("EncodeRefused")
+                    expect(detail).to_equal("")
+                case PortableBodyErrorV1.DecodeRefused(actual):
+                    expect(kind).to_equal("DecodeRefused")
+                    expect(actual).to_equal(detail)
+                case PortableBodyErrorV1.AuthorityUnavailable(actual):
+                    expect(kind).to_equal("AuthorityUnavailable")
+                    expect(actual).to_equal(detail)
+
+describe "B05 portable body graph budget [OPT-L07-T005]":
+    it "should analyze a deduplicated DAG with deterministic longest path":
+        step("Freeze the exact source and required case universe")
+        val (nodes, edges) = fixture_graph_v1("chain")
+        val result = portable_body_graph_analyze_v1(nodes, edges, ledger())
+        match result:
+            case Ok(facts):
+                expect(facts.dependency_edges.len()).to_equal(2)
+                expect(facts.call_occurrences).to_equal(2)
+                expect(facts.longest_call_chain).to_equal(3)
+                expect(facts.dependency_digest.len()).to_be_greater_than(0)
+            case Err(error): fail("DAG expected Ok: " + error.to_string())
+
+    it "should preserve empty, fanout, and duplicate-occurrence edge cases":
+        step("Exercise the production owner with a real typed input")
+        val (empty_nodes, empty_edges) = fixture_graph_v1("empty")
+        match portable_body_graph_analyze_v1(empty_nodes, empty_edges, ledger()):
+            case Ok(facts):
+                expect(facts.dependency_edges.len()).to_equal(0)
+                expect(facts.longest_call_chain).to_equal(0)
+            case Err(error): fail("empty graph expected Ok: " + error.to_string())
+        val (fanout_nodes, fanout_edges) = fixture_graph_v1("fanout")
+        val fanout = portable_body_graph_analyze_v1(fanout_nodes, fanout_edges,
+            ledger())
+        match fanout:
+            case Ok(facts): expect(facts.dependency_edges.len()).to_equal(2)
+            case Err(error): fail("fanout expected Ok: " + error.to_string())
+        val (dup_nodes, dup_edges) = fixture_graph_v1("duplicate")
+        match portable_body_graph_analyze_v1(dup_nodes, dup_edges, ledger()):
+            case Ok(facts):
+                expect(facts.dependency_edges.len()).to_equal(1)
+                expect(facts.call_occurrences).to_equal(2)
+            case Err(error): fail("duplicate edge expected Ok: " + error.to_string())
+
+    it "should make reverse occurrence order stable and semantic mutation visible":
+        step("Exercise the production owner with a real typed input")
+        val (nodes, edges) = fixture_graph_v1("chain")
+        val (reverse_nodes, reverse_edges) = fixture_graph_v1("reverse_chain")
+        val forward = portable_body_graph_analyze_v1(nodes, edges, ledger())
+        val reverse = portable_body_graph_analyze_v1(reverse_nodes, reverse_edges,
+            ledger())
+        match (forward, reverse):
+            case (Ok(left), Ok(right)):
+                expect(left.dependency_digest).to_equal(right.dependency_digest)
+                expect(left.dependency_edges.len()).to_equal(
+                    right.dependency_edges.len())
+            case _: fail("reverse graph expected both Results Ok")
+        val (mutated_nodes, mutated_edges) = fixture_graph_v1("mutated")
+        match (forward, portable_body_graph_analyze_v1(mutated_nodes,
+                mutated_edges, ledger())):
+            case (Ok(left), Ok(right)):
+                expect(left.dependency_digest == right.dependency_digest).to_equal(false)
+            case _: fail("mutated graph expected both Results Ok")
+        val (prefix_nodes, prefix_edges) = fixture_graph_v1("prefix")
+        match portable_body_graph_analyze_v1(prefix_nodes, prefix_edges, ledger()):
+            case Ok(facts): expect(facts.dependency_edges.len()).to_equal(2)
+            case Err(error): fail("shared-prefix graph expected Ok: " + error.to_string())
+
+    it "should reject foreign and recursive graph semantics before a digest grant":
+        step("Inject one missing case or invalid boundary")
+        val (foreign_nodes, foreign_edges) = fixture_graph_v1("foreign")
+        expect_graph_error(portable_body_graph_analyze_v1(foreign_nodes,
+            foreign_edges, ledger()), "UnsupportedSemantics",
+            "dependency edge names a foreign function")
+        val (cycle_nodes, cycle_edges) = fixture_graph_v1("cycle")
+        expect_graph_error(portable_body_graph_analyze_v1(cycle_nodes,
+            cycle_edges, ledger()), "UnsupportedSemantics",
+            "recursive dependency graph")
+        val (mismatch_nodes, mismatch_edges) = fixture_graph_v1("name_mismatch")
+        expect_graph_error(portable_body_graph_analyze_v1(mismatch_nodes,
+            mismatch_edges, ledger()), "UnsupportedSemantics",
+            "dependency graph node name mismatch")
+        expect(portable_body_sort_work_v1(0)).to_equal(0)
+        expect(portable_body_sort_work_v1(1)).to_equal(0)
+        expect(portable_body_sort_work_v1(9223372036854775807)).to_equal(-1)
+
+    it "should reject one-short graph and precharge budgets":
+        step("Require the exact refusal before publication or execution")
+        var limits = PortableBodyLimitsV1.standard()
+        limits.max_graph_nodes = 2
+        val bounded_ledger = match PortableBodyLedgerV1.create(limits):
+            case Ok(value): value
+            case Err(error): fail("bounded ledger unavailable: " + error.to_string())
+        val (nodes, edges) = fixture_graph_v1("chain")
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            bounded_ledger), "BoundsExceeded", "dependency graph node budget")
+        val (negative_nodes, negative_edges) = fixture_graph_v1("negative")
+        expect_graph_error(portable_body_graph_analyze_v1(negative_nodes,
+            negative_edges, ledger()), "UnsupportedSemantics",
+            "duplicate or negative graph node")
+        val (duplicate_node_ids, duplicate_node_edges) =
+            fixture_graph_v1("duplicate_nodes")
+        expect_graph_error(portable_body_graph_analyze_v1(duplicate_node_ids,
+            duplicate_node_edges, ledger()), "UnsupportedSemantics",
+            "duplicate or negative graph node")
+        var max_limits = PortableBodyLimitsV1.standard()
+        max_limits.max_graph_nodes = 3
+        val max_ledger = match PortableBodyLedgerV1.create(max_limits):
+            case Ok(value): value
+            case Err(error): fail("max ledger unavailable: " + error.to_string())
+        match portable_body_graph_analyze_v1(nodes, edges, max_ledger):
+            case Ok(facts): expect(facts.dependency_edges.len()).to_equal(2)
+            case Err(error): fail("max-valid graph expected Ok: " + error.to_string())
+        val precharged = ledger()
+        expect(precharged.charge_call_occurrences(edges.len())).to_equal(true)
+        val accepted = portable_body_graph_analyze_precharged_v1(nodes, edges,
+            precharged, 0)
+        match accepted:
+            case Ok(facts): expect(facts.call_occurrences).to_equal(2)
+            case Err(error): fail("precharged graph expected Ok: " + error.to_string())
+        expect_graph_error(portable_body_graph_analyze_precharged_v1(nodes,
+            edges, ledger(), 99), "BoundsExceeded", "call occurrence reservation mismatch")
+
+    it "should refuse one-short text, work, and retained budgets without growing a poisoned ledger":
+        step("Require the exact refusal before publication or execution")
+        var text_limits = PortableBodyLimitsV1.standard()
+        text_limits.max_text_bytes = 1
+        val text_ledger = match PortableBodyLedgerV1.create(text_limits):
+            case Ok(value): value
+            case Err(error): fail("text ledger unavailable: " + error.to_string())
+        val (nodes, edges) = fixture_graph_v1("chain")
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            text_ledger), "BoundsExceeded", "semantic text budget")
+        var work_limits = PortableBodyLimitsV1.standard()
+        work_limits.max_work_units = 1
+        val work_ledger = match PortableBodyLedgerV1.create(work_limits):
+            case Ok(value): value
+            case Err(error): fail("work ledger unavailable: " + error.to_string())
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            work_ledger), "BoundsExceeded", "semantic work budget")
+        var retained_limits = PortableBodyLimitsV1.standard()
+        retained_limits.max_retained_bytes = 1
+        val retained_ledger = match PortableBodyLedgerV1.create(retained_limits):
+            case Ok(value): value
+            case Err(error): fail("retained ledger unavailable: " + error.to_string())
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            retained_ledger), "BoundsExceeded", "retained semantic budget")
+        var poison_limits = PortableBodyLimitsV1.standard()
+        poison_limits.max_graph_nodes = 1
+        val poison_ledger = match PortableBodyLedgerV1.create(poison_limits):
+            case Ok(value): value
+            case Err(error): fail("poison ledger unavailable: " + error.to_string())
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            poison_ledger), "BoundsExceeded", "dependency graph node budget")
+        val before = poison_ledger.snapshot()
+        expect_graph_error(portable_body_graph_analyze_v1(nodes, edges,
+            poison_ledger), "BoundsExceeded", "dependency graph node budget")
+        val after = poison_ledger.snapshot()
+        expect(after.graph_nodes).to_equal(before.graph_nodes)
+        expect(after.work_units).to_equal(before.work_units)
+
+    it "should bind graph budget hits to the admitted build":
+        step("Bind executed branch hits to the admitted build")
+        fail("MissingEvidence: B05 qualified branch instrumentation and runner")

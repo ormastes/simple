@@ -1,0 +1,87 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# bug: doc/08_tracking/bug/vulkan_2d_c_compare_skips_on_macos_2026-09-11.md
+# plan: doc/03_plan/infra/macos_open_bugs_fix_lanes_2026-09-12.md (Lane 4)
+
+"""# A clean measurement can actually be admitted
+
+`scripts/check/check-vulkan-2d-c-compare.shs` measured the C leg against real
+MoltenVK — 800x600, 64 rects, 300 frames, a clean live contract, a real Apple
+device identity — and then reported `compare_status=skipped` anyway, every
+single time.
+
+Not because the measurement was bad. Because `aggregate()` refuses to run the
+admission step until both legs already read `admitted`, and nothing in the
+script ever assigned `admitted`: the only terminal success state was
+`measured-unadmitted`, reason `receipt-needs-common-admission`. The admission
+step was gated behind the very status it exists to produce, so the gate was
+structurally fail-open — `rc=0` on a comparison that never happened.
+
+Two further structural defects were found while fixing it and are pinned here
+too: the live path built its rows with `sed 's/^c_/c_/p'`, which copies the
+consumer keys `status`/`reason`/`p95_ns` into a row whose validator accepts
+exactly 21 projection keys (`unexpected-key-status`); and the rows name
+`$FINAL_RUN_DIR/...` paths that do not exist until the run is published, so
+hashing them mid-run answers `stale-binary` for a perfectly good binary.
+
+The promotion path is now `perf_compare_admit_leg`, which performs exactly the
+single-sided checks the pairwise admission already performed — the cross-leg
+equality checks are untouched — plus a real `perf-binary-admission-v1` receipt,
+a format that until now had a validator and **no producer anywhere in the
+repo**.
+
+This spec runs with no GPU, no ICD and no Vulkan: the oracle is the committed
+helper itself, driven over synthetic rows by
+`test/01_unit/scripts/perf_compare_leg_admission_contract_test.shs`.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val HARNESS: text = "test/01_unit/scripts/perf_compare_leg_admission_contract_test.shs"
+
+fn harness_output() -> text:
+    val out = process_run("sh", ["-c",
+        "o=$(sh " + HARNESS + " 2>&1); rc=$?; printf '%s\\nHARNESS_RC=%s\\n' \"$o\" \"$rc\""])
+    out.0
+
+describe "per-leg admission promotes a clean measurement":
+    # @manual scenario evidence
+
+    it "admits a leg whose row, source, binary, receipt and artifact all bind":
+        # @req REQ-SSPEC-UNIT
+        step("admits a leg whose row, source, binary, receipt and artifact all bind")
+        step("Build a complete 21-key projection row over real files and admit it")
+        val s = harness_output()
+        expect(s).to_contain("HARNESS_RC=0")
+        step("The leg reaches admitted — the state the gate could never reach before")
+        expect(s).to_contain("CLEAN=admitted:admitted")
+        step("The harness self-asserted every case rather than merely printing them")
+        expect(s).to_contain("CONTRACT=PASS")
+
+    it "refuses a leg for a named reason when its binding is broken":
+        # @req REQ-SSPEC-UNIT
+        step("refuses a leg for a named reason when its binding is broken")
+        step("Three sabotages, each of which must be refused with its own reason")
+        val s = harness_output()
+        expect(s).to_contain("HARNESS_RC=0")
+        step("A row claiming a binary hash the file does not have is stale-binary")
+        expect(s).to_contain("TAMPERED_BINARY=unadmitted:stale-binary")
+        step("No receipt — the state EVERY row was in before this change — is refused")
+        expect(s).to_contain("NO_RECEIPT=unadmitted:invalid-binary-admission")
+        step("A well-formed receipt for a different binary kind is refused")
+        expect(s).to_contain("WRONG_KIND=unadmitted:invalid-binary-admission")
+
+describe "the live compare gate feeds admission rows it can actually validate":
+    # @manual scenario evidence
+
+    it "hands aggregate the stage-path rows, not the not-yet-published ones":
+        # @req REQ-SSPEC-UNIT
+        step("hands aggregate the stage-path rows, not the not-yet-published ones")
+        step("Read the tracked gate; the durable rows name paths publication has not created yet")
+        val s = harness_output()
+        expect(s).to_contain("HARNESS_RC=0")
+        step("Reverting this line restores a silent unconditional skip")
+        expect(s).to_contain("AGGREGATE_FEED=ok")

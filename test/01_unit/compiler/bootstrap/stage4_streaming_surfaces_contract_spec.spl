@@ -1,37 +1,68 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+use std.spec.step
+
 use std.io.{file_read}
 use std.spec.{describe, it, expect}
 
-val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+# module_surface.spl became a facade over module_surface_types.spl /
+# module_surface_declarations.spl / module_surface_registry.spl (4b88aebf00b);
+# the streaming selector moved to driver_phase_gates.spl (5409b246adc).
+val SURFACE_TYPES = "src/compiler/20.hir/hir_lowering/module_surface_types.spl"
+val SURFACE_DECLS = "src/compiler/20.hir/hir_lowering/module_surface_declarations.spl"
 val PARSER_TYPES = "src/compiler/10.frontend/parser_types.spl"
-val PARSER = "src/compiler/10.frontend/core/parser.spl"
-val FN_STRUCT_DECLS = "src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl"
 val MODULE_ASSEMBLY = "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
 val DESUGAR_ASYNC = "src/compiler/10.frontend/desugar/desugar_async.spl"
 val SOURCE_11 = "src/compiler/70.backend/backend/interpreter.spl"
 val SOURCE_11_EXPR = "src/compiler/70.backend/backend/interpreter_expr.spl"
 val SOURCE_11_BINOP = "src/compiler/70.backend/backend/interpreter_binop.spl"
 val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
-val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
+val REGISTRATION = "src/compiler/20.hir/hir_lowering/_Items/module_import_registration.spl"
+val LOWERING_TYPES = "src/compiler/20.hir/hir_lowering/types.spl"
+val LOWERING_HELPERS = "src/compiler/20.hir/hir_lowering/_Items/lowering_helpers.spl"
+val PHASE_GATES = "src/compiler/80.driver/driver_phase_gates.spl"
 val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
 val HIR_LOWERING = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val HIR_SUPPORT = "src/compiler/80.driver/driver_hir_pipeline_support.spl"
 val PRODUCER = "scripts/bootstrap/bootstrap-from-scratch.sh"
 val RUNTIME = "src/runtime/runtime_native.c"
 val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
 val RUST_RUNTIME = "src/compiler_rust/runtime/src/value/collections.rs"
 val RUST_MEMORY = "src/runtime/runtime_memory.c"
 
+fn streaming_selector() -> text:
+    val gates = file_read(PHASE_GATES)
+    val start = gates.index_of("fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:")
+    val end = gates.index_of("fn bootstrap_last_fixed_input(")
+    if start < 0 or end <= start:
+        return ""
+    gates.substring(start, end)
+
+fn streaming_surface_helper() -> text:
+    val driver = file_read(SOURCE_PARSING)
+    val start = driver.index_of("    me add_streaming_module_surface(")
+    val end = driver.index_of("me parse_all_streaming_surfaces_in_place_impl() -> bool:")
+    if start < 0 or end <= start:
+        return ""
+    driver.substring(start, end)
+
 describe "Stage4 streaming surface ownership":
     it "keeps the complete module surface registry reference-owned":
-        val surface = file_read(SURFACE)
+        val surface = file_read(SURFACE_TYPES)
         expect(surface).to_contain("class ModuleSurfacesByName:")
         expect(surface.contains("struct ModuleSurfacesByName:")).to_equal(false)
 
-    it "bounds source 11 and projects it through compact headers and a reference owner":
+    it "bounds source 11 and projects callables through compact function headers":
+        # 509a9b5617f bounded the Stage3 surface frontier with function
+        # headers; the parser owner is boxed and projected by
+        # module_surface_from_owner.
         val parser_types = file_read(PARSER_TYPES)
         val assembly = file_read(MODULE_ASSEMBLY)
         val desugar = file_read(DESUGAR_ASYNC)
-        val surface = file_read(SURFACE)
-        val driver = file_read(SOURCE_PARSING)
+        val declarations = file_read(SURFACE_DECLS)
+        val helper = streaming_surface_helper()
         val source_11 = file_read(SOURCE_11)
         val source_11_expr = file_read(SOURCE_11_EXPR)
         val source_11_binop = file_read(SOURCE_11_BINOP)
@@ -49,70 +80,79 @@ describe "Stage4 streaming surface ownership":
         expect(assembly).to_contain("function_headers[fn_.name] = parser_function_header(fn_)")
         expect(assembly).to_contain("built_module.function_headers = function_headers")
         expect(desugar).to_contain("function_headers: desugared_function_headers")
-        expect(surface).to_contain("class ModuleSurfaceParserOwner:")
-        expect(surface).to_contain("owner: ModuleSurfaceParserOwner")
-        expect(surface).to_contain("owner.value.function_headers.contains_key(name)")
-        expect(driver).to_contain("val module_owner = ModuleSurfaceParserOwner.new(module)")
-        expect(driver).to_contain("module_surface_from_owner(")
-        expect(driver).to_contain("log_module_surface_stage(source.path, \"parse-start\")")
-        expect(driver).to_contain("log_module_surface_stage(source.path, \"surface-done\")")
+        expect(declarations).to_contain("pub class ModuleSurfaceParserOwner:")
+        expect(declarations).to_contain("pub fn module_surface_from_owner(\n    owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64\n) -> Result<ModuleSurface, text>:")
+        expect(declarations).to_contain("val callable = if owner.value.function_headers.contains_key(name):")
+        expect(declarations).to_contain("module_surface_callable_from_header(owner.value.function_headers[name])")
+        expect(helper).to_contain("val module_owner = ModuleSurfaceParserOwner.new(module)")
+        expect(helper).to_contain("val surface_result = module_surface_from_owner(\n            module_owner, source, source_index)")
+        expect(helper).to_contain("log_module_surface_stage(source_path, \"parse-start\")")
+        expect(helper).to_contain("log_module_surface_stage(source_path, \"surface-done\")")
 
     it "retains type aliases and required declaration carriers":
-        val surface = file_read(SURFACE)
+        # @req REQ-SSPEC-UNIT
+        step("retains type aliases and required declaration carriers")
+        # 4576fa62184 retained declaration payloads as index-aligned name
+        # arrays; alias lookups go through the frozen names.
+        val types = file_read(SURFACE_TYPES)
+        val declarations = file_read(SURFACE_DECLS)
         val lowering = file_read(LOWERING)
-        expect(surface).to_contain("type_aliases: Dict<text, ModuleSurfaceTypeAlias>")
-        expect(surface).to_contain("for name in owner.value.type_aliases.keys():")
-        expect(surface).to_contain("default_methods: [Function]")
-        expect(surface).to_contain("variants: [Variant]")
-        expect(lowering).to_contain("if m.type_aliases.contains_key(name):")
-        expect(lowering).to_contain("keys = imported_mod.type_aliases.keys()")
+        val registration = file_read(REGISTRATION)
+        expect(types).to_contain("type_aliases: Dict<text, ModuleSurfaceTypeAlias>")
+        expect(types).to_contain("type_alias_values: [ModuleSurfaceTypeAlias]")
+        expect(types).to_contain("default_methods: [ParserFunction]")
+        expect(types).to_contain("variants: [Variant]")
+        expect(declarations).to_contain("for name in owner.value.type_aliases.keys():")
+        expect(lowering).to_contain("if module_surface_name_position(m.type_alias_names, name) >= 0:")
+        expect(registration).to_contain("val alias_position = self.surface_name_position(surface_key, \"A\", imported_name)")
 
     it "requires every explicit Stage4 admission condition without a resource-profile gate":
-        val driver = file_read(ORCHESTRATION)
+        # @req REQ-SSPEC-UNIT
+        step("requires every explicit Stage4 admission condition without a resource-profile gate")
+        # 5cee6490581 made entry-closure authority include the explicit entry;
+        # a54fc9c57cf made low memory an opt-in knob independent of streaming.
+        val selector = streaming_selector()
+        val gates = file_read(PHASE_GATES)
         val producer = file_read(PRODUCER)
-        val selector_start = driver.index_of("pub fn driver_streaming_surface_enabled")
-        val selector_end = driver.index_of("impl CompilerDriver:")
-        expect(selector_start).to_be_greater_than(0)
-        expect(selector_end).to_be_greater_than(selector_start)
-        val selector = driver.substring(selector_start, selector_end)
+        expect(selector.len()).to_be_greater_than(0)
         expect(selector).to_contain("ctx.options.mode == CompileMode.Aot")
-        expect(selector.contains("ctx.options.low_memory")).to_equal(false)
-        expect(selector).to_contain("SIMPLE_BOOTSTRAP")
-        expect(selector).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        expect(selector.contains("low_memory")).to_equal(false)
+        expect(selector).to_contain("(driver_env_get_opt(\"SIMPLE_BOOTSTRAP\") ?? \"\") == \"1\"")
+        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx) and")
+        expect(gates).to_contain("(driver_env_get_opt(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\") ?? \"\") == \"1\"")
         expect(selector).to_contain("SIMPLE_BOOTSTRAP_STAGE4")
         expect(selector).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES")
         expect(selector).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
         expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
-        expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=1")
+        expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=\"$\{NATIVE_LOW_MEMORY}\"")
         expect(producer).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES=1")
         expect(producer).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES=1")
         expect(producer).to_contain("SIMPLE_NATIVE_ARENA_DECLS=1")
         expect(producer).to_contain("Stage 4 emitted stale flat-AST index diagnostics")
 
     it "keeps structural streaming enabled for the unlimited incremental profile":
+        # @req REQ-SSPEC-UNIT
+        step("keeps structural streaming enabled for the unlimited incremental profile")
+        # a54fc9c57cf: low memory is opt-in (default 0); Stage4 streaming stays
+        # on unconditionally beside it.
         val producer = file_read(PRODUCER)
         expect(producer).to_contain("execution_profile=incremental-unlimited")
         expect(producer).to_contain("jobs=")
         expect(producer).to_contain("host_cpus")
-        expect(producer).to_contain("--threads")
-        expect(producer).to_contain("selfhost_jobs")
-        expect(producer).to_contain("--low-memory")
-        expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=1")
+        expect(producer).to_contain("--threads \"$\{selfhost_jobs}\"")
+        expect(producer).to_contain("NATIVE_LOW_MEMORY=$\{SIMPLE_NATIVE_LOW_MEMORY:-0}")
+        expect(producer).to_contain("$([ \"$\{NATIVE_LOW_MEMORY}\" = 0 ] || printf -- --low-memory)")
+        expect(producer).to_contain("SIMPLE_BOOTSTRAP_LOW_MEMORY=\"$\{NATIVE_LOW_MEMORY}\" \\\n    SIMPLE_STAGE4_STREAMING_SURFACES=1 \\")
         expect(producer.contains("stage4_low_memory=0")).to_equal(false)
 
     it "keeps streaming opt-in with Stage3 and legacy Stage4 producers":
-        val driver = file_read(ORCHESTRATION)
-        val selector_start = driver.index_of("pub fn driver_streaming_surface_enabled")
-        val selector_end = driver.index_of("impl CompilerDriver:")
-        val selector = driver.substring(selector_start, selector_end)
-        expect(selector).to_contain("SIMPLE_STAGE3_STREAMING_SURFACES")
-        expect(selector).to_contain("SIMPLE_BOOTSTRAP_STAGE4")
-        expect(selector).to_contain("SIMPLE_STAGE4_STREAMING_SURFACES")
-        expect(selector).to_contain("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val selector = streaming_selector()
+        expect(selector).to_contain("((driver_env_get_opt(\"SIMPLE_STAGE3_STREAMING_SURFACES\") ?? \"\") == \"1\" or\n         ((driver_env_get_opt(\"SIMPLE_BOOTSTRAP_STAGE4\") ?? \"\") == \"1\" and\n          (driver_env_get_opt(\"SIMPLE_STAGE4_STREAMING_SURFACES\") ?? \"\") == \"1\"))")
+        expect(selector).to_contain("driver_source_entry_closure_enabled(ctx)")
         expect(selector).to_contain("ctx.options.mode == CompileMode.Aot")
         expect(selector).to_contain("ctx.options.backend != \"vhdl\"")
 
-    it "enables native declaration arenas in the Stage3 transcribed build":
+    it "switches Stage3 declaration arenas on after compact surfaces":
         val producer = file_read(PRODUCER)
         val hash_start = producer.index_of("stage3_build_args_sha256=$(")
         val stage3_start = producer.index_of("# Stage 3: stage2 recompiles bootstrap_main.spl")
@@ -130,21 +170,24 @@ describe "Stage4 streaming surface ownership":
         expect(stage3_block).to_contain("MALLOC_TRIM_THRESHOLD_=0")
         expect(hash_block).to_contain("\"SIMPLE_NATIVE_ARENA_DECLS=1\"")
         expect(stage3_block).to_contain("SIMPLE_NATIVE_ARENA_DECLS=1")
+        val parsing = file_read(SOURCE_PARSING)
+        expect(parsing).to_not_contain("rt_env_set(\"SIMPLE_NATIVE_ARENA_DECLS\"")
 
-    it "promotes only the retained surface before reclaiming the rich module":
-        val driver = file_read(SOURCE_PARSING)
-        val start = driver.index_of("me add_streaming_module_surface")
-        val end = driver.index_of("me parse_all_streaming_surfaces_impl")
-        val body = driver.substring(start, end)
-        val begin = body.index_of("rt_transient_array_scope_begin()")
-        val parse = body.index_of("parse_full_frontend(")
-        val owner = body.index_of("ModuleSurfaceParserOwner.new(module)")
-        val build = body.index_of("module_surface_from_owner(")
-        val surface_unwrap = body.index_of("surface_result.unwrap()")
-        val pause = body.index_of("rt_transient_array_scope_pause()")
-        val promote = body.index_of("module_surface_promote(")
-        val publish = body.index_of("builder.add_surface_canonical(")
-        val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
+    it "builds the retained surface inside the parser scope, then pauses, promotes, reclaims, and publishes":
+        # 4b88aebf00b: the surface is built while the per-file scope is live,
+        # promoted after the pause, and the scope is reclaimed BEFORE the
+        # persistent builder is mutated (builder allocations are not made
+        # persistent by a pause).
+        val body = streaming_surface_helper()
+        val begin = body.index_of("if not _sffi_transient_array_scope_begin():")
+        val parse = body.index_of("self.parse_full_frontend_selected_v1(", begin)
+        val owner = body.index_of("ModuleSurfaceParserOwner.new(module)", parse)
+        val build = body.index_of("module_surface_from_owner(", owner)
+        val surface_unwrap = body.index_of("val surface = surface_result.unwrap()", build)
+        val pause = body.index_of("if not _sffi_transient_array_scope_pause():", surface_unwrap)
+        val promote = body.index_of("if not module_surface_promote(surface):", pause)
+        val reclaim = body.index_of("if not driver_end_transient_parse_scope():", promote)
+        val publish = body.index_of("builder.add_surface_canonical_identity(", reclaim)
         expect(begin).to_be_greater_than(0)
         expect(parse).to_be_greater_than(begin)
         expect(owner).to_be_greater_than(parse)
@@ -152,11 +195,14 @@ describe "Stage4 streaming surface ownership":
         expect(surface_unwrap).to_be_greater_than(build)
         expect(pause).to_be_greater_than(surface_unwrap)
         expect(promote).to_be_greater_than(pause)
-        expect(publish).to_be_greater_than(promote)
-        expect(reclaim).to_be_greater_than(publish)
+        expect(reclaim).to_be_greater_than(promote)
+        expect(publish).to_be_greater_than(reclaim)
         expect(body.contains("rt_transient_heap_promote(module)")).to_equal(false)
 
     it "walks retained graphs through raw struct allocations":
+        # @req REQ-SSPEC-UNIT
+        step("walks retained graphs through raw struct allocations")
+        # 99ecdb5cff9 promoted raw aggregate graphs.
         val runtime = file_read(RUNTIME)
         val check = file_read(RUNTIME_CHECK)
         val rust_runtime = file_read(RUST_RUNTIME)
@@ -164,6 +210,8 @@ describe "Stage4 streaming surface ownership":
         expect(runtime).to_contain("RT_CORE_TRANSIENT_RAW")
         expect(runtime).to_contain("rt_core_transient_raw_lookup(raw_ptr)")
         expect(runtime).to_contain("offset + sizeof(int64_t) <= node.bytes")
+        expect(runtime).to_contain("rt_core_transient_array_scope_paused")
+        expect(runtime).to_contain("array->cap = 0")
         expect(check).to_contain("tagged raw root promotes through collection and raw aggregate edges")
         expect(check).to_contain("a second promotion of the retained graph succeeds")
         expect(rust_runtime).to_contain("rt_transient_raw_words")
@@ -171,39 +219,108 @@ describe "Stage4 streaming surface ownership":
         expect(rust_memory).to_contain("rt_transient_raw_scope_end")
         expect(rust_memory).to_contain("RT_TRANSIENT_RAW_OWNED_BIT")
 
-    it "ends a transient scope before replacing parser roots":
-        val driver = file_read(SOURCE_PARSING)
-        val start = driver.index_of("fn driver_end_transient_parse_scope")
-        val end = driver.index_of("impl CompilerDriver:")
+    it "reclaims each reparsed AST after persistent HIR lowering":
+        # a04600b188e / 4b88aebf00b: the per-file scope stays open through
+        # lowering; only the HIR root, its diagnostic/symbol/memo owners and
+        # the flat HIR row escape before the scope is reclaimed.
+        val driver = file_read(HIR_LOWERING)
+        val lowering_types = file_read(LOWERING_TYPES)
+        val start = driver.index_of("me lower_streaming_surface_source")
+        val end = driver.index_of("me lower_and_check_streaming_surfaces_impl")
+        expect(start).to_be_greater_than(0)
+        expect(end).to_be_greater_than(start)
         val body = driver.substring(start, end)
-        val lexer_clear = body.index_of("\n    lexer_release_parse_source_globals()")
-        val ast_clear = body.index_of("\n    ast_reset()")
-        val scope_end = body.index_of("\n    val ended = rt_transient_array_scope_end()")
-        expect(lexer_clear).to_be_greater_than(scope_end)
-        expect(ast_clear).to_be_greater_than(lexer_clear)
-        val assembly = file_read(MODULE_ASSEMBLY)
-        val assembly_start = assembly.index_of("pub fn parse_and_build_module_scoped")
-        val assembly_end = assembly.index_of("fn parse_and_build_module(source:")
-        val assembly_body = assembly.substring(assembly_start, assembly_end)
-        val assembly_scope_end = assembly_body.index_of("\n        val _ended = rt_transient_array_scope_end()")
-        val assembly_lexer_clear = assembly_body.index_of("\n        lexer_release_parse_source_globals()")
-        val assembly_ast_clear = assembly_body.index_of("\n        ast_reset()")
-        expect(assembly_lexer_clear).to_be_greater_than(assembly_scope_end)
-        expect(assembly_ast_clear).to_be_greater_than(assembly_lexer_clear)
+        val begin = body.index_of("if not rt_transient_array_scope_begin():")
+        val parse = body.index_of("parse_full_frontend(", begin)
+        val lower = body.index_of("lowering.lower_parser_module_unstub(module, is_entry)", parse)
+        val pause = body.index_of("if not rt_transient_array_scope_pause():", lower)
+        val promote = body.index_of("if not rt_transient_heap_promote(hir_module):", pause)
+        val diagnostics = body.index_of("lowering.promote_diagnostics_transient_owner()", promote)
+        val memos = body.index_of("lowering.promote_phase_memo_transient_owners()", diagnostics)
+        val symbols = body.index_of("lowering.promote_symbol_table_transient_owners()", memos)
+        val flat_row = body.index_of("bootstrap_hir_modules_promote_last()", symbols)
+        val registries = body.index_of("driver_promote_frontend_registry_owners()", flat_row)
+        val reclaim = body.index_of("if not driver_end_transient_parse_scope():", registries)
+        expect(begin).to_be_greater_than(0)
+        expect(parse).to_be_greater_than(begin)
+        expect(lower).to_be_greater_than(parse)
+        expect(pause).to_be_greater_than(lower)
+        expect(promote).to_be_greater_than(pause)
+        expect(diagnostics).to_be_greater_than(promote)
+        expect(memos).to_be_greater_than(diagnostics)
+        expect(symbols).to_be_greater_than(memos)
+        expect(flat_row).to_be_greater_than(symbols)
+        expect(registries).to_be_greater_than(flat_row)
+        expect(reclaim).to_be_greater_than(registries)
+        expect(body.contains("rt_transient_heap_promote(lowering)")).to_equal(false)
 
-    it "replaces file-local parser owners before reading the next source":
-        val parser = file_read(PARSER)
-        val init_start = parser.index_of("fn parser_init_with_path")
-        val init_end = parser.index_of("# Per-token timing probe")
-        val init_body = parser.substring(init_start, init_end)
-        expect(init_body).to_contain("par_errors = []")
-        expect(init_body).to_contain("par_warnings = []")
-        expect(init_body).to_contain("par_struct_names = []")
-        expect(init_body.contains("par_errors.clear()")).to_equal(false)
-        expect(init_body.contains("par_warnings.clear()")).to_equal(false)
-        expect(init_body.contains("par_struct_names.clear()")).to_equal(false)
-        expect(init_body).to_contain("parser_generic_constraints_reset()")
-        val declarations = file_read(FN_STRUCT_DECLS)
-        expect(declarations).to_contain("fn parser_generic_constraints_reset():")
-        expect(declarations).to_contain("file_generic_constraints = {}")
-        expect(declarations).to_contain("file_generic_constraint_modes = {}")
+        val owner_start = lowering_types.index_of(
+            "me promote_diagnostics_transient_owner() -> bool:")
+        val owner_end = lowering_types.index_of(
+            "me promote_phase_memo_transient_owners() -> bool:", owner_start)
+        expect(owner_start).to_be_greater_than(0)
+        expect(owner_end).to_be_greater_than(owner_start)
+        val owner = lowering_types.substring(owner_start, owner_end)
+        for root in [
+            "self.errors", "self.diagnostic_messages",
+            "self.diagnostic_recovered", "table.symbols", "table.scopes",
+            "table.qualified_functions", "table.qualified_types",
+            "table.module_callables"
+        ]:
+            expect(owner).to_contain("rt_transient_heap_promote(" + root + ")")
+        expect(lowering_types.contains("rt_transient_heap_promote(self)")).to_equal(false)
+
+    it "promotes only the new flat HIR row and rolls back every appended owner on failure":
+        # 4b88aebf00b: promote_last promotes exactly the newest committed row
+        # (plus the seven outer owners); rollback_last pops every parallel
+        # owner; the streaming driver rolls the row back on every failure path
+        # after lowering.
+        val lowering_helpers = file_read(LOWERING_HELPERS)
+        val driver = file_read(HIR_LOWERING)
+        val support = file_read(HIR_SUPPORT)
+        val promote_start = lowering_helpers.index_of("fn bootstrap_hir_modules_promote_last() -> bool:")
+        val rollback_start = lowering_helpers.index_of("fn bootstrap_hir_modules_rollback_last(expected_count: i64) -> bool:")
+        val rollback_end = lowering_helpers.index_of("fn bootstrap_hir_entry_index() -> i64:")
+        expect(promote_start).to_be_greater_than(0)
+        expect(rollback_start).to_be_greater_than(promote_start)
+        expect(rollback_end).to_be_greater_than(rollback_start)
+        val promote = lowering_helpers.substring(promote_start, rollback_start)
+        val rollback = lowering_helpers.substring(rollback_start, rollback_end)
+        expect(promote).to_contain("val last = committed - 1")
+        for owner in ["names", "symbols", "functions", "constants", "enums", "structs", "classes"]:
+            expect(promote).to_contain("_sffi_transient_heap_promote(_bootstrap_hir_module_" + owner + "[last])")
+            expect(promote).to_contain("_sffi_transient_heap_promote(_bootstrap_hir_module_" + owner + ")")
+            expect(rollback).to_contain("_bootstrap_hir_module_" + owner + ".pop()")
+        expect(rollback).to_contain("if expected_count < 0 or committed != expected_count + 1:")
+        expect(rollback).to_contain("_bootstrap_hir_module_committed_count = expected_count")
+        expect(support).to_contain("if bootstrap_hir_modules_rollback_last(expected_count):")
+        expect(support).to_contain("    rt_exit(1)")
+
+        val start = driver.index_of("me lower_streaming_surface_source")
+        val end = driver.index_of("me lower_and_check_streaming_surfaces_impl")
+        val body = driver.substring(start, end)
+        val lower = body.index_of("lowering.lower_parser_module_unstub(module, is_entry)")
+        val after_lower = body.substring(lower, body.len())
+        # Every failure return after lowering first rolls back the flat row.
+        val failure_returns = after_lower.split("return Err(").len() - 1
+        val rollbacks = after_lower.split("driver_rollback_flat_hir_row_or_abort(flat_row_count_before)").len() - 1
+        expect(failure_returns).to_be_greater_than(0)
+        expect(rollbacks).to_equal(failure_returns)
+
+    it "clears parser roots after ending a transient scope":
+        # 9083fa7ce6e: the scope ends BEFORE any process-lifetime frontend
+        # owner is replaced, so the replacements are born outside the scope.
+        val driver = file_read(SOURCE_PARSING)
+        val start = driver.index_of("pub fn driver_end_transient_parse_scope() -> bool:")
+        val end = driver.index_of("impl CompilerDriver:", start)
+        expect(start).to_be_greater_than(0)
+        expect(end).to_be_greater_than(start)
+        val body = driver.substring(start, end)
+        val scope_end = body.index_of("val ended = _sffi_transient_array_scope_end()")
+        val lexer_clear = body.index_of("lexer_release_parse_source_globals()", scope_end)
+        val intern_clear = body.index_of("core_token_text_intern_reset()", lexer_clear)
+        val ast_clear = body.index_of("ast_reset()", intern_clear)
+        expect(scope_end).to_be_greater_than(0)
+        expect(lexer_clear).to_be_greater_than(scope_end)
+        expect(intern_clear).to_be_greater_than(lexer_clear)
+        expect(ast_clear).to_be_greater_than(intern_clear)

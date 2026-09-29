@@ -1,4 +1,13 @@
 # Bug: GUI RenderDoc aggregate spec multiplies cached gate artifacts
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage note 2026-09-13 — not verifiable on this host; left OPEN, not stale
+- **measured**: every product path this entry references still exists in the tree, so there is no removed-code / dead-reference basis for closing it stale.
+- **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
+- **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
 **Status:** mitigated
 
@@ -67,3 +76,4 @@ to retain the raw stdout string in the test runner.
   scenarios.
 - The older `simple_test_runner_memory_leak_2026-06-14.md` runner leak still
   applies to very large interpreted test sessions.
+

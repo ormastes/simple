@@ -191,7 +191,6 @@ pub(super) fn apply_macro_hygiene_node(node: &Node, ctx: &mut MacroHygieneContex
                 body,
                 simd_requested: stmt.simd_requested,
                 is_suspend: stmt.is_suspend,
-                auto_enumerate: stmt.auto_enumerate,
                 invariants: stmt.invariants.clone(),
                 label: stmt.label.clone(),
             })
@@ -460,6 +459,7 @@ pub(super) fn apply_macro_hygiene_expr(expr: &Expr, ctx: &mut MacroHygieneContex
         },
         Expr::Spread(expr) => Expr::Spread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::DictSpread(expr) => Expr::DictSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
+        Expr::StructSpread(expr) => Expr::StructSpread(Box::new(apply_macro_hygiene_expr(expr, ctx))),
         Expr::StructInit { name, fields, spread } => Expr::StructInit {
             name: name.clone(),
             fields: fields

@@ -1,0 +1,113 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Pins the two equivalences the 2026-09-12 text-measurement fix rests on. Both
+# are exactness properties, not tolerances: the fast paths must return the SAME
+# number as the paths they bypass, because a differing advance moves glyphs and
+# the pixel oracle on the web catalog pages would stop being byte-identical.
+#
+#   1. `sfnt_glyph_advance_into` (hmtx only, no `glyf` outline decode) must
+#      report the same advance as `sfnt_measure_glyph_into` (full measure).
+#   2. `sfnt_cmap_glyph_ids_into` (one cmap parse, N codepoints) must report the
+#      same glyph ids as N separate `sfnt_cmap_glyph_id` calls.
+#
+# Measured motivation: doc/08_tracking/bug/web_text_measurement_kern_uncached_2026-09-12.md
+
+use std.spec
+use std.common.encoding.sfnt.{parse_offset_table}
+use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id, sfnt_cmap_glyph_ids_into}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX,
+    sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_blob_glyph_ids_into}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val PINNED_FONT: text = "assets/fonts/google-fonts/ofl/pixelifysans/PixelifySans[wght].ttf"
+
+describe "metrics-only glyph advance":
+    it "matches the full measure advance for 10 glyphs at 3 sizes":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        expect(blob.len()).to_be_greater_than(0)
+        val sizes: [i64] = [16, 24, 48]
+        # 'A' 'V' 'W' 'a' 'e' 'i' 'm' 'o' '0' ' '
+        val codepoints: [i64] = [65, 86, 87, 97, 101, 105, 109, 111, 48, 32]
+        var compared: i64 = 0
+        for size in sizes:
+            for cp in codepoints:
+                var full_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size, full_meta)
+                var quick_meta: [i64] = [0; 20]
+                sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size, quick_meta)
+                if full_meta[7] == 310031:
+                    expect(quick_meta[7]).to_equal(310031)
+                    expect(quick_meta[2]).to_equal(full_meta[2])
+                    expect(quick_meta[6]).to_equal(full_meta[6])
+                    compared = compared + 1
+        # Non-vacuity: a run that compared nothing is not evidence.
+        expect(compared).to_be_greater_than(20)
+
+    it "gives the same advance by glyph index as by codepoint":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = match parse_offset_table(blob):
+            Some(value): value
+            None: fail("pinned font must parse")
+        val glyph_id = sfnt_cmap_glyph_id(font, 65) as i64
+        expect(glyph_id).to_be_greater_than(0)
+        var by_cp: [i64] = [0; 20]
+        sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 24, by_cp)
+        var by_index: [i64] = [0; 20]
+        sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_INDEX, glyph_id, 24, by_index)
+        expect(by_index[7]).to_equal(310031)
+        expect(by_index[2]).to_equal(by_cp[2])
+
+    it "scales the advance with the requested pixel size":
+        # @req REQ-SSPEC-LIB
+        # Guards the size axis directly: an advance computed without the size
+        # would be identical at 16 and 64, and the sabotage run that drops the
+        # size from the scale turns exactly this expectation red.
+        val blob = file_read_bytes(PINNED_FONT)
+        var small: [i64] = [0; 20]
+        sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 16, small)
+        var large: [i64] = [0; 20]
+        sfnt_glyph_advance_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 65, 64, large)
+        expect(small[7]).to_equal(310031)
+        expect(large[7]).to_equal(310031)
+        expect(large[2]).to_be_greater_than(small[2])
+
+describe "batched cmap glyph-id resolution":
+    it "matches per-codepoint lookup for 20 ASCII codepoints":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = match parse_offset_table(blob):
+            Some(value): value
+            None: fail("pinned font must parse")
+        var codepoints: [i64] = [0; 20]
+        var i: i64 = 0
+        while i < 20:
+            codepoints[i] = 65 + i
+            i = i + 1
+        var batched: [i64] = [0; 20]
+        sfnt_cmap_glyph_ids_into(font, codepoints, batched)
+        var present: i64 = 0
+        i = 0
+        while i < 20:
+            expect(batched[i]).to_equal(sfnt_cmap_glyph_id(font, codepoints[i] as u32) as i64)
+            if batched[i] > 0:
+                present = present + 1
+            i = i + 1
+        expect(present).to_be_greater_than(15)
+
+    it "resolves the same ids straight from the blob":
+        # @req REQ-SSPEC-LIB
+        val blob = file_read_bytes(PINNED_FONT)
+        val font = match parse_offset_table(blob):
+            Some(value): value
+            None: fail("pinned font must parse")
+        val codepoints: [i64] = [65, 86, 32, 48]
+        var from_blob: [i64] = [0; 4]
+        sfnt_blob_glyph_ids_into(blob, codepoints, from_blob)
+        var i: i64 = 0
+        while i < 4:
+            expect(from_blob[i]).to_equal(sfnt_cmap_glyph_id(font, codepoints[i] as u32) as i64)
+            i = i + 1

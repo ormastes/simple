@@ -19,7 +19,50 @@ val EXIT_RECOVERY_FAILED = 43
 # Graceful Shutdown
 # ============================================================================
 
-fn shutdown_graceful(reason: text, completed: [text], passed: i64, failed: i64, skipped: i64):
+fn shutdown_truncation_lines(
+    reason: text,
+    completed: i64,
+    total_files: i64,
+    passed: i64,
+    failed: i64,
+    skipped: i64
+) -> [text]:
+    """The abort banner, as data, so it can be asserted on without exiting.
+
+    `shutdown_graceful` calls `exit()`, so its output is untestable in
+    process; the wording is the load-bearing part here, so it lives in a
+    pure function that a spec can read.
+
+    States the truncation as a FRACTION. This block used to print
+    `Completed tests: 20` and then Passed/Failed/Skipped underneath, which
+    reads exactly like a finished run: nothing said how many files never
+    ran, so a sweep that trusted it silently measured only the first ~20
+    specs per directory and reported that as if it covered everything. The
+    denominator is the whole point -- "20" is meaningless, "20 of 1340" is
+    not.
+    """
+    var out: [text] = []
+    out.push("")
+    out.push("=========================================")
+    out.push("RUN ABORTED BEFORE COMPLETION")
+    out.push("=========================================")
+    out.push("The suite was CUT SHORT by the resource watchdog.")
+    out.push("Reason: {reason}")
+    if total_files > 0:
+        out.push("Executed: {completed} of {total_files} test file(s)")
+        out.push("NEVER RUN: {total_files - completed} test file(s)")
+    else:
+        # No invented denominator: unknown is reported as unknown.
+        out.push("Executed: {completed} test file(s) (total unknown)")
+        out.push("NEVER RUN: unknown -- an unknown number of files were not reached")
+    out.push("")
+    out.push("The counts below are PARTIAL. They describe only the files that")
+    out.push("ran before the abort, and are NOT a measurement of the suite.")
+    out.push("Partial: {passed} passed, {failed} failed, {skipped} skipped")
+    out.push("")
+    out
+
+fn shutdown_graceful(reason: text, completed: [text], passed: i64, failed: i64, skipped: i64, total_files: i64 = 0):
     """Execute graceful shutdown sequence
 
     Sequence:
@@ -35,14 +78,8 @@ fn shutdown_graceful(reason: text, completed: [text], passed: i64, failed: i64, 
         failed: Total tests failed so far
         skipped: Total tests skipped so far
     """
-    print ""
-    print "========================================="
-    print "GRACEFUL SHUTDOWN INITIATED"
-    print "========================================="
-    print "Reason: {reason}"
-    print "Completed tests: {completed.len()}"
-    print "Passed: {passed}, Failed: {failed}, Skipped: {skipped}"
-    print ""
+    for line in shutdown_truncation_lines(reason, completed.len(), total_files, passed, failed, skipped):
+        print line
 
     # Step 1: Save checkpoint FIRST (most critical)
     print "[SHUTDOWN] Step 1/4: Saving checkpoint..."

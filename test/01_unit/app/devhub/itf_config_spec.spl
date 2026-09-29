@@ -1,19 +1,13 @@
-"""
-## Purpose and audience
-Purpose: Prove that ITF configuration.
-Audience: compiler and tooling engineers who maintain this spec.
-"""
-# @req: REQ-APP-DEVHUB-001 — stable requirement identity for this spec.
-
 # @cover src/app/devhub/config.spl 60%
 
-use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, save_auth_token, load_auth_token}
+use app.devhub.config.{ItfConfig, resolve_editor, _apply_config_value, load_config, load_config_for_target, confluence_target_from_args, resolve_auth_token, save_config, save_confluence_target, save_auth_token, load_auth_token}
 use app.devhub.errors.{ItfError}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_dir_create_all(path: text) -> bool
 extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_delete(path: text) -> bool
 
 # Fixture-HOME harness (same pattern as wiki_backend_routing_spec.spl /
@@ -52,14 +46,34 @@ fn _auth_token_roundtrip(provider: text, token: text) -> text:
     loaded
 
 
-use std.spec.step
+fn _load_target_with_fixture(config_body: text, target: text) -> ItfConfig:
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val config = load_config_for_target(target)
+    val _restore_home = rt_env_set("HOME", original_home)
+    config
+
+
+fn _resolve_target_token_with_fixture(config_body: text, auth_body: text, target: text) -> text:
+    val dir = "{FIXTURE_HOME}/.config/itf"
+    val _mk = rt_dir_create_all(dir)
+    val _cfg = rt_file_write_text("{dir}/config.sdn", config_body)
+    val _auth = rt_file_write_text("{dir}/auth.sdn", auth_body)
+    val original_home = rt_env_get("HOME") ?? ""
+    val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+    val token = resolve_auth_token(load_config_for_target(target), "confluence")
+    val _clean_auth = rt_file_delete("{dir}/auth.sdn")
+    val _restore_home = rt_env_set("HOME", original_home)
+    token
+
 
 describe "ITF configuration":
 
     context "ItfConfig.default":
         it "creates config with sensible defaults":
-            step("Verify: creates config with sensible defaults")
-            # @req: REQ-APP-DEVHUB-001
             val config = ItfConfig.default()
             expect(config.confluence_url).to_equal("")
             expect(config.jira_acli_path).to_equal("acli")
@@ -67,114 +81,162 @@ describe "ITF configuration":
             expect(config.color_mode).to_equal("auto")
 
         it "tasks_default_backend defaults to unset (cmd_tasks.spl falls back to github)":
-            step("Verify: tasks_default_backend defaults to unset (cmd_tasks.spl falls back to github)")
             val config = ItfConfig.default()
             expect(config.tasks_default_backend).to_equal("")
 
         it "tasks_jira_done_status defaults to unset (cmd_tasks.spl falls back to Done)":
-            step("Verify: tasks_jira_done_status defaults to unset (cmd_tasks.spl falls back to Done)")
             val config = ItfConfig.default()
             expect(config.tasks_jira_done_status).to_equal("")
 
     context "_apply_config_value (tasks.default_backend, D1/gap G6)":
         it "parses `tasks: default_backend:` into ItfConfig.tasks_default_backend":
-            step("Verify: parses `tasks: default_backend:` into ItfConfig.tasks_default_backend")
             val config = _apply_config_value(ItfConfig.default(), "tasks", "default_backend", "jira")
             expect(config.tasks_default_backend).to_equal("jira")
 
         it "leaves wiki_default_backend untouched when only tasks.default_backend is set":
-            step("Verify: leaves wiki_default_backend untouched when only tasks.default_backend is set")
             val config = _apply_config_value(ItfConfig.default(), "tasks", "default_backend", "jira")
             expect(config.wiki_default_backend).to_equal("")
 
     context "_apply_config_value (tasks.jira_done_status, D5/gap G6)":
         it "parses `tasks: jira_done_status:` into ItfConfig.tasks_jira_done_status":
-            step("Verify: parses `tasks: jira_done_status:` into ItfConfig.tasks_jira_done_status")
             val config = _apply_config_value(ItfConfig.default(), "tasks", "jira_done_status", "Resolved")
             expect(config.tasks_jira_done_status).to_equal("Resolved")
 
         it "leaves tasks_default_backend untouched when only tasks.jira_done_status is set":
-            step("Verify: leaves tasks_default_backend untouched when only tasks.jira_done_status is set")
             val config = _apply_config_value(ItfConfig.default(), "tasks", "jira_done_status", "Resolved")
             expect(config.tasks_default_backend).to_equal("")
 
     context "load_config colon-split (bug itf-config-colon-value-split)":
         it "a URL value containing its own colon round-trips through load_config unchanged":
-            step("Verify: a URL value containing its own colon round-trips through load_config unchanged")
             val config = _load_config_with_fixture_config("confluence:\n    url: https://x.atlassian.net/wiki\n")
             expect(config.confluence_url).to_equal("https://x.atlassian.net/wiki")
 
         it "a plain single-word value is unaffected by the first-colon-only split":
-            step("Verify: a plain single-word value is unaffected by the first-colon-only split")
             val config = _load_config_with_fixture_config("output:\n    format: json\n")
             expect(config.default_output).to_equal("json")
 
         it "a token_cmd value containing its own colon (e.g. a URI-shaped command) round-trips unchanged":
-            step("Verify: a token_cmd value containing its own colon (e.g. a URI-shaped command) round-trips unchanged")
             val config = _load_config_with_fixture_config("token_cmd:\n    jira: op read op://vault/item/token\n")
-            expect(config.token_cmds.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(config.token_cmds.len()).to_equal(1)
             expect(config.token_cmds[0].1).to_equal("op read op://vault/item/token")
+
+    context "named Confluence targets":
+        it "selects an explicit host and accepts profile as its CLI alias":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    user: alpha@example.com\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    user: beta@example.com\n"
+            val config = _load_target_with_fixture(body, confluence_target_from_args(["list", "--profile", "beta"]))
+            expect(config.confluence_target).to_equal("beta")
+            expect(config.confluence_url).to_equal("https://beta.example/wiki")
+            expect(confluence_target_from_args(["list", "--host", "alpha"])).to_equal("alpha")
+
+        it "accepts equals selectors and rejects missing or conflicting selectors":
+            expect(confluence_target_from_args(["list", "--host=alpha"])).to_equal("alpha")
+            expect(confluence_target_from_args(["list", "--profile=beta"])).to_equal("beta")
+            expect(confluence_target_from_args(["list", "--host"])).to_equal("__invalid_confluence_selector__")
+            expect(confluence_target_from_args(["list", "--host=alpha", "--profile=beta"])).to_equal("__invalid_confluence_selector__")
+
+        it "target writes preserve nested header maps in sibling targets":
+            val dir = "{FIXTURE_HOME}/.config/itf"
+            val _mk = rt_dir_create_all(dir)
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    headers:\n        X-Alpha: replace\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    headers:\n        X-Beta: keep\n        X-Scope: one\n"
+            val _write = rt_file_write_text("{dir}/config.sdn", body)
+            val original_home = rt_env_get("HOME") ?? ""
+            val _set_home = rt_env_set("HOME", FIXTURE_HOME)
+            val _saved = save_confluence_target(_load_target_with_fixture(body, "alpha"))
+            val saved = rt_file_read_text("{dir}/config.sdn") ?? ""
+            val _restore_home = rt_env_set("HOME", original_home)
+            expect(saved).to_contain("confluence.beta:")
+            expect(saved).to_contain("X-Beta: keep")
+            expect(saved).to_contain("X-Scope: one")
+
+        it "uses configured default_target before file-order fallback":
+            val body = "confluence:\n    default_target: beta\n\nconfluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
+            expect(_load_target_with_fixture(body, "").confluence_url).to_equal("https://beta.example/wiki")
+
+        it "uses the first named target when no default is configured":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n\nconfluence.beta:\n    url: https://beta.example/wiki\n"
+            expect(_load_target_with_fixture(body, "").confluence_target).to_equal("alpha")
+
+        it "loads gateway and repeated ordered headers only from the selected target":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    gateway_url: https://gateway.example/confluence\n    header: X-Classification: Internal\n    header: X-Scope: A\n    header: X-Scope: B\n\nconfluence.beta:\n    url: https://beta.example/wiki\n    header: X-Classification: Public\n"
+            val config = _load_target_with_fixture(body, "alpha")
+            expect(config.confluence_gateway_url).to_equal("https://gateway.example/confluence")
+            expect(config.confluence_headers.len()).to_equal(3)
+            expect(config.confluence_headers[0]).to_equal("X-Classification: Internal")
+            expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "parses nested per-target header maps while retaining duplicate values":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n    gateway_url: https://gateway.example/confluence\n    headers:\n        X-Foo: bar\n        X-Scope: A\n        X-Scope: B\n"
+            val config = _load_target_with_fixture(body, "alpha")
+            expect(config.confluence_headers.len()).to_equal(3)
+            expect(config.confluence_headers[0]).to_equal("X-Foo: bar")
+            expect(config.confluence_headers[1]).to_equal("X-Scope: A")
+            expect(config.confluence_headers[2]).to_equal("X-Scope: B")
+
+        it "loads Jira and Bitbucket gateway routes with ordered headers":
+            val body = "jira:\n    url: https://jira.example\n    gateway_url: https://gateway.example/jira\n    headers:\n        X-Classification: restricted\n        X-Scope: jira\n\nbitbucket:\n    url: https://bitbucket.example\n    gateway_url: https://gateway.example/bitbucket\n    header: X-Classification: internal\n"
+            val config = _load_config_with_fixture_config(body)
+            expect(config.jira_gateway_url).to_equal("https://gateway.example/jira")
+            expect(config.jira_headers.len()).to_equal(2)
+            expect(config.jira_headers[1]).to_equal("X-Scope: jira")
+            expect(config.bb_gateway_url).to_equal("https://gateway.example/bitbucket")
+            expect(config.bb_headers[0]).to_equal("X-Classification: internal")
+
+        it "resolves target-scoped auth and keeps the legacy token fallback":
+            val body = "confluence.alpha:\n    url: https://alpha.example/wiki\n"
+            val scoped = _resolve_target_token_with_fixture(body, "confluence.alpha:\n    token: alpha-secret\n\nconfluence:\n    token: legacy-secret\n", "alpha")
+            val fallback = _resolve_target_token_with_fixture(body, "confluence:\n    token: legacy-secret\n", "alpha")
+            expect(scoped).to_equal("alpha-secret")
+            expect(fallback).to_equal("legacy-secret")
 
     context "load_auth_token colon-split (bug itf-config-colon-value-split)":
         it "a token value containing its own colon round-trips through save_auth_token/load_auth_token unchanged":
-            step("Verify: a token value containing its own colon round-trips through save_auth_token/load_auth_token unchanged")
             val loaded = _auth_token_roundtrip("confluence", "user:pass:extra")
             expect(loaded).to_equal("user:pass:extra")
 
         it "a plain token without a colon is unaffected":
-            step("Verify: a plain token without a colon is unaffected")
             val loaded = _auth_token_roundtrip("jira", "plaintoken123")
             expect(loaded).to_equal("plaintoken123")
 
     context "ItfError":
         it "auth error has exit code 4":
-            step("Verify: auth error has exit code 4")
             val err = ItfError.auth("missing token")
-            expect(err.exit_code()).to_equal(4)  # oracle: 4 — named expected value from the requirement
+            expect(err.exit_code()).to_equal(4)
 
         it "cancelled error has exit code 2":
-            step("Verify: cancelled error has exit code 2")
             val err = ItfError.cancelled()
-            expect(err.exit_code()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+            expect(err.exit_code()).to_equal(2)
 
         it "api error has exit code 1":
-            step("Verify: api error has exit code 1")
             val err = ItfError.api(500, "internal error")
-            expect(err.exit_code()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(err.exit_code()).to_equal(1)
 
         it "not found has exit code 1":
-            step("Verify: not found has exit code 1")
             val err = ItfError.not_found("page 123")
-            expect(err.exit_code()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(err.exit_code()).to_equal(1)
 
         it "conflict error has exit code 1":
-            step("Verify: conflict error has exit code 1")
             val err = ItfError.conflict(5, 6)
-            expect(err.exit_code()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+            expect(err.exit_code()).to_equal(1)
 
         it "displays trace id when present":
-            step("Verify: displays trace id when present")
             var err = ItfError.api(500, "server error")
             err = ItfError(kind: err.kind, message: err.message, status_code: err.status_code, trace_id: "ABC123")
             val display = err.display()
             expect(display).to_contain("trace: ABC123")
 
         it "omits trace id when empty":
-            step("Verify: omits trace id when empty")
             val err = ItfError.api(500, "server error")
             val display = err.display()
             expect(display).to_contain("error: server error")
 
     context "resolve_editor":
         it "returns vi as default when no overrides":
-            step("Verify: returns vi as default when no overrides")
             val config = ItfConfig.default()
             val editor = resolve_editor(config)
             # Will return vi or whatever EDITOR env var is set
             expect(editor.len()).to_be_greater_than(0)
 
         it "uses config override when set":
-            step("Verify: uses config override when set")
             val config = ItfConfig(
                 confluence_url: "",
                 confluence_user: "",

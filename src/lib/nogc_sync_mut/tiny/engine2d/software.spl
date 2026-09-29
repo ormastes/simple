@@ -8,6 +8,36 @@ use std.tiny.draw.validate.{tiny_draw_validate_counted}
 use std.tiny.engine2d.pixel_format.*
 use std.tiny.wm_contract.ports.{Tiny2DBackendV1}
 
+# Rasteriser work instrumentation.
+#
+# The row-span fill's whole claim is that it performs the per-pixel bounds
+# guard and the pixel-format conversion ONCE per fill instead of once per
+# pixel, so these call counts are the cost oracle for that claim. They are
+# module state, read and reset through the free functions below, and they
+# never affect what is rendered.
+var _tiny_software_store_pixel_count = 0
+var _tiny_software_format_convert_count = 0
+var _tiny_software_checksum_word_count = 0
+
+fn tiny_software_store_pixel_count() -> i32:
+    """Guarded single-pixel stores attempted since the last counter reset."""
+    return _tiny_software_store_pixel_count
+
+fn tiny_software_format_convert_count() -> i32:
+    """Pixel-format conversions performed since the last counter reset."""
+    return _tiny_software_format_convert_count
+
+fn tiny_software_checksum_word_count() -> i32:
+    """Pixel words fed to the surface checksum since the last counter reset."""
+    return _tiny_software_checksum_word_count
+
+fn tiny_software_counters_reset():
+    """Reset every rasteriser work counter to zero."""
+    _tiny_software_store_pixel_count = 0
+    _tiny_software_format_convert_count = 0
+    _tiny_software_checksum_word_count = 0
+
+
 class TinySoftware2D:
     surface_width: i32
     surface_height: i32
@@ -53,7 +83,9 @@ class TinySoftware2D:
         if x < 0 or y < 0 or x >= self.surface_width or y >= self.surface_height: return 0
         self.pixels[y * self.surface_width + x]
 
-    fn checksum() -> i64: tiny_surface_checksum(self.pixels)
+    fn checksum() -> i64:
+        _tiny_software_checksum_word_count = _tiny_software_checksum_word_count + self.pixels.len()
+        tiny_surface_checksum(self.pixels)
 
     fn capability_bits() -> i64: TINY_2D_CAP_SOFTWARE_V1
 
@@ -97,21 +129,41 @@ class TinySoftware2D:
         )
 
     me store_pixel(x: i32, y: i32, argb: i32):
+        """Store one pixel, checking the surface shape, the bounds and the format."""
+        _tiny_software_store_pixel_count = _tiny_software_store_pixel_count + 1
         if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height: return
         if x < 0 or y < 0 or x >= self.surface_width or y >= self.surface_height: return
         var value = argb
         if self.pixel_format == TINY_PIXEL_RGB565:
+            _tiny_software_format_convert_count = _tiny_software_format_convert_count + 1
             value = tiny_argb_to_rgb565(argb)
         self.pixels[y * self.surface_width + x] = value
 
+    me _fill_span(row: i32, x0: i32, x1: i32, packed: i32):
+        """Write an already-converted colour across one clipped, in-bounds row span."""
+        val base = row * self.surface_width
+        var x = x0
+        while x < x1:
+            self.pixels[base + x] = packed
+            x = x + 1
+
     me fill_clipped(rect: TinyRect, clip: TinyRect, color: i32):
-        val area = tiny_intersect(rect, clip)
+        """Fill the clipped rectangle row by row, clipping and converting once."""
+        if self.surface_width <= 0 or self.surface_height <= 0 or self.surface_width > 2147483647 / self.surface_height: return
+        if self.pixels.len() != self.surface_width * self.surface_height: return
+        val surface = TinyRect(x: 0, y: 0, width: self.surface_width, height: self.surface_height)
+        val area = tiny_intersect(tiny_intersect(rect, clip), surface)
+        if area.width <= 0 or area.height <= 0: return
+        var packed = color
+        if self.pixel_format == TINY_PIXEL_RGB565:
+            _tiny_software_format_convert_count = _tiny_software_format_convert_count + 1
+            packed = tiny_argb_to_rgb565(color)
+        val stop = area.bottom()
+        val x0 = area.x
+        val x1 = area.right()
         var y = area.y
-        while y < area.bottom():
-            var x = area.x
-            while x < area.right():
-                self.store_pixel(x, y, color)
-                x = x + 1
+        while y < stop:
+            self._fill_span(y, x0, x1, packed)
             y = y + 1
 
     me execute_valid(stream: [i32], word_count: i32) -> TinyStatus:
@@ -205,6 +257,8 @@ impl Tiny2DBackendV1 for TinySoftware2D:
     fn height() -> i32: self.surface_height
     fn capability_bits() -> i64: TINY_2D_CAP_SOFTWARE_V1
     fn rendered_surface() -> TinyRenderedSurfaceV1: self.surface_receipt()
-    fn checksum() -> i64: tiny_surface_checksum(self.pixels)
+    fn checksum() -> i64:
+        _tiny_software_checksum_word_count = _tiny_software_checksum_word_count + self.pixels.len()
+        tiny_surface_checksum(self.pixels)
     me execute(stream: TinyDrawStreamV1) -> TinyStatus:
         self.execute_stream(stream)

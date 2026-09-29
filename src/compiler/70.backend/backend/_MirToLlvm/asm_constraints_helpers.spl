@@ -17,21 +17,64 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
 extern fn rt_env_get(key: text) -> text
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_new() -> i64
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_push(handle: i64, value: text) -> i64
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_finish(handle: i64) -> text
+@unsafe(reason: "raw append-only IR accumulator ABI", capabilities: [ffi])
+extern fn rt_string_builder_len(handle: i64) -> i64
+@unsafe(reason: "raw append-only IR accumulator release ABI", capabilities: [ffi])
+extern fn rt_string_builder_free(handle: i64)
 
-var _llvm_bootstrap_string_global_text: text = ""
+# Append each declaration to a mutable builder. The former `text =
+# "{text}\n{decl}"` accumulator copied all prior declarations on every add,
+# which is O(n^2) across a whole-program bootstrap IR. `finish` consumes the
+# builder, so retain its output until reset: callers historically may read the
+# accumulator more than once.
+var _llvm_bootstrap_string_globals_handle: i64 = 0
+var _llvm_bootstrap_string_globals_text_cache: text = ""
 
-fn llvm_bootstrap_string_globals_reset():
-    _llvm_bootstrap_string_global_text = ""
+pub fn llvm_bootstrap_string_globals_reset():
+    if _llvm_bootstrap_string_globals_handle != 0:
+        rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+    _llvm_bootstrap_string_globals_handle = 0
+    _llvm_bootstrap_string_globals_text_cache = ""
 
-fn llvm_bootstrap_string_globals_text() -> text:
-    _llvm_bootstrap_string_global_text ?? ""
+pub fn llvm_bootstrap_string_globals_text() -> text:
+    if _llvm_bootstrap_string_globals_handle == 0:
+        return _llvm_bootstrap_string_globals_text_cache
+    val out = rt_string_builder_finish(_llvm_bootstrap_string_globals_handle)
+    _llvm_bootstrap_string_globals_handle = 0
+    if out.len() < 0:
+        panic("compile error: could not finish LLVM bootstrap string globals")
+    _llvm_bootstrap_string_globals_text_cache = out
+    out
 
-fn llvm_bootstrap_string_globals_add(decl: text):
-    val current = _llvm_bootstrap_string_global_text ?? ""
-    if current == "":
-        _llvm_bootstrap_string_global_text = decl
-    else:
-        _llvm_bootstrap_string_global_text = "{current}\n{decl}"
+pub fn llvm_bootstrap_string_globals_add(decl: text):
+    if _llvm_bootstrap_string_globals_handle == 0:
+        _llvm_bootstrap_string_globals_handle = rt_string_builder_new()
+        if _llvm_bootstrap_string_globals_handle == 0:
+            panic("compile error: could not allocate LLVM bootstrap string-global builder")
+        # `text()` consumed a prior builder. Restore that completed module
+        # before accepting a late declaration, rather than silently dropping
+        # the declarations already returned to a caller.
+        if _llvm_bootstrap_string_globals_text_cache != "":
+            if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, _llvm_bootstrap_string_globals_text_cache) == 0:
+                rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+                _llvm_bootstrap_string_globals_handle = 0
+                panic("compile error: could not restore LLVM bootstrap string globals")
+            _llvm_bootstrap_string_globals_text_cache = ""
+    if rt_string_builder_len(_llvm_bootstrap_string_globals_handle) > 0:
+        if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, "\n") == 0:
+            rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+            _llvm_bootstrap_string_globals_handle = 0
+            panic("compile error: could not append LLVM bootstrap string-global separator")
+    if rt_string_builder_push(_llvm_bootstrap_string_globals_handle, decl) == 0:
+        rt_string_builder_free(_llvm_bootstrap_string_globals_handle)
+        _llvm_bootstrap_string_globals_handle = 0
+        panic("compile error: could not append LLVM bootstrap string global")
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -147,6 +190,9 @@ impl MirToLlvm:
         self.builder.emit("declare ptr @rt_env_get_value(i64)")
         self.builder.emit("declare void @rt_print(ptr)")
         self.builder.emit("declare void @rt_println(ptr)")
+        self.builder.emit("declare void @rt_print_str(ptr, i64)")
+        self.builder.emit("declare void @rt_println_str(ptr, i64)")
+        self.builder.emit("declare void @rt_eprintln_str(ptr, i64)")
         self.builder.emit("declare void @rt_panic(ptr, i64)")
         self.builder.emit("declare ptr @rt_array_new(i64)")
         self.builder.emit("declare void @rt_array_free(ptr)")
@@ -194,6 +240,7 @@ impl MirToLlvm:
         self.builder.emit("declare i64 @rt_enum_id(i64)")
         self.builder.emit("declare i64 @rt_enum_discriminant(i64)")
         self.builder.emit("declare i8 @rt_enum_check_discriminant(i64, i64)")
+        self.builder.emit("declare i8 @rt_enum_check_variant(i64, i64, i64)")
         self.builder.emit("declare i64 @rt_enum_payload(i64)")
         # Dict runtime (tagged i64 handle; keys/values are the flat i64 ABI).
         # rt_dict_set/rt_dict_contains return int8_t in C, declared i64 here to
@@ -260,6 +307,11 @@ impl MirToLlvm:
         self.builder.emit("declare ptr @rt_process_run_bounded_tuple(i64, ptr, i64, i64)")
         self.builder.emit("declare i64 @rt_process_run_inherit_value(i64, ptr)")
         self.builder.emit("declare ptr @rt_process_run_timeout_tuple(i64, ptr, i64)")
+        self.builder.emit("declare ptr @rt_process_run_owned_observed_bounded_text(i64, ptr, i64, i64)")
+        # Builtin `text` statics (text.from_char_code / text.from_bytes) are
+        # rewritten by translate_call onto these canonical runtime entries.
+        self.builder.emit("declare ptr @rt_char_from_code(i64)")
+        self.builder.emit("declare ptr @rt_bytes_to_text(ptr)")
         # Register EVERY name declared above so the auto-declare pass in
         # core_codegen never emits a conflicting duplicate declare for them.
         self.defined_func_names["rt_get_args"] = true
@@ -267,6 +319,9 @@ impl MirToLlvm:
         self.defined_func_names["rt_env_get_value"] = true
         self.defined_func_names["rt_print"] = true
         self.defined_func_names["rt_println"] = true
+        self.defined_func_names["rt_print_str"] = true
+        self.defined_func_names["rt_println_str"] = true
+        self.defined_func_names["rt_eprintln_str"] = true
         self.defined_func_names["rt_panic"] = true
         self.defined_func_names["__simple_intrinsic_bounds_check"] = true
         self.defined_func_names["rt_interp_cstr"] = true
@@ -344,15 +399,24 @@ impl MirToLlvm:
         self.defined_func_names["rt_process_run_bounded_tuple"] = true
         self.defined_func_names["rt_process_run_inherit_value"] = true
         self.defined_func_names["rt_process_run_timeout_tuple"] = true
+        self.defined_func_names["rt_process_run_owned_observed_bounded_text"] = true
+        self.defined_func_names["rt_char_from_code"] = true
+        self.defined_func_names["rt_bytes_to_text"] = true
         self.remember_function_param_types("rt_process_run_tuple", ["i64", "ptr"])
         self.remember_function_param_types("rt_process_run_bounded_tuple", ["i64", "ptr", "i64", "i64"])
         self.remember_function_param_types("rt_process_run_inherit_value", ["i64", "ptr"])
         self.remember_function_param_types("rt_process_run_timeout_tuple", ["i64", "ptr", "i64"])
+        self.remember_function_param_types("rt_process_run_owned_observed_bounded_text", ["i64", "ptr", "i64", "i64"])
         self.remember_function_return_type("rt_env_get_value", "ptr")
         self.remember_function_return_type("rt_process_run_tuple", "ptr")
         self.remember_function_return_type("rt_process_run_bounded_tuple", "ptr")
         self.remember_function_return_type("rt_process_run_inherit_value", "i64")
         self.remember_function_return_type("rt_process_run_timeout_tuple", "ptr")
+        self.remember_function_return_type("rt_process_run_owned_observed_bounded_text", "ptr")
+        self.remember_function_param_types("rt_char_from_code", ["i64"])
+        self.remember_function_return_type("rt_char_from_code", "ptr")
+        self.remember_function_param_types("rt_bytes_to_text", ["ptr"])
+        self.remember_function_return_type("rt_bytes_to_text", "ptr")
         self.defined_func_names["rt_array_new"] = true
         self.defined_func_names["rt_array_free"] = true
         self.defined_func_names["rt_array_len"] = true
@@ -385,6 +449,7 @@ impl MirToLlvm:
         self.defined_func_names["rt_enum_id"] = true
         self.defined_func_names["rt_enum_discriminant"] = true
         self.defined_func_names["rt_enum_check_discriminant"] = true
+        self.defined_func_names["rt_enum_check_variant"] = true
         self.defined_func_names["rt_enum_payload"] = true
         self.defined_func_names["rt_dict_new"] = true
         self.defined_func_names["rt_dict_get"] = true
@@ -405,13 +470,10 @@ impl MirToLlvm:
         val escaped = escape_llvm_string(value)
         val str_len = escaped_string_byte_len(value) + 1
         val decl = "{global_name} = private unnamed_addr constant [{str_len} x i8] c\"{escaped}\\00\""
-        if self.bootstrap_mode_enabled():
+        if self.bootstrap_string_globals_active:
             llvm_bootstrap_string_globals_add(decl)
-        self.string_globals = self.string_globals.push(decl)
-        if self.string_global_text.len() == 0:
-            self.string_global_text = decl
         else:
-            self.string_global_text = "{self.string_global_text}\n{decl}"
+            self.string_globals = self.string_globals.push(decl)
         global_name
 
     me emit_unsupported_panic(message: text):

@@ -1,0 +1,105 @@
+"""
+# Mat4.inverse / Mat4.to_mat3 regression specification
+
+**Category:** Stdlib
+**Status:** Implemented
+
+Reproduce spec for C15: `Mat4.inverse()` and `Mat4.to_mat3()` did not exist in
+`src/lib/common/engine/math3d.spl`, so every call raised
+`method `inverse` not found on type `Mat4``.
+
+The round-trip checks below are the discriminating ones: identity and
+translation alone cannot distinguish a correct general inverse from one with
+transposed or sign-flipped cofactors, so each case asserts that both
+`M * M^-1` and `M^-1 * M` equal the identity to within 1e-9.
+"""
+use std.common.engine.math3d.{Mat4, Vec3}
+
+fn abs_f(x: f64) -> f64:
+    if x < 0.0:
+        return 0.0 - x
+    x
+
+fn worst_identity_error(m: Mat4) -> f64:
+    """Largest absolute deviation of M*M^-1 and M^-1*M from the identity."""
+    val inv = m.inverse()
+    val left = m.mul(inv)
+    val right = inv.mul(m)
+    var worst = 0.0
+    var i = 0
+    while i < 16:
+        var want = 0.0
+        if i % 5 == 0:
+            want = 1.0
+        val e1 = abs_f(left.data[i] - want)
+        val e2 = abs_f(right.data[i] - want)
+        if e1 > worst:
+            worst = e1
+        if e2 > worst:
+            worst = e2
+        i = i + 1
+    worst
+
+describe "Mat4.inverse":
+    context "identity":
+        it "inverts to the identity", fn():
+            val inv = Mat4.identity().inverse()
+            expect(inv.data[0]).to_equal(1.0)
+            expect(inv.data[5]).to_equal(1.0)
+            expect(inv.data[10]).to_equal(1.0)
+            expect(inv.data[15]).to_equal(1.0)
+            expect(inv.data[1]).to_equal(0.0)
+
+    context "translation":
+        it "negates the translation column", fn():
+            val inv = Mat4.translation(5.0, 10.0, 15.0).inverse()
+            expect(inv.data[3]).to_equal(-5.0)
+            expect(inv.data[7]).to_equal(-10.0)
+            expect(inv.data[11]).to_equal(-15.0)
+
+    context "scaling":
+        it "reciprocates the diagonal", fn():
+            val inv = Mat4.scaling(2.0, 4.0, 0.5).inverse()
+            expect(inv.data[0]).to_equal(0.5)
+            expect(inv.data[5]).to_equal(0.25)
+            expect(inv.data[10]).to_equal(2.0)
+
+    context "round trip on a composite transform":
+        it "satisfies M * M^-1 == I for translation composed with scaling", fn():
+            val m = Mat4.translation(1.0, 2.0, 3.0).mul(Mat4.scaling(2.0, 0.5, 4.0))
+            expect(worst_identity_error(m) < 0.000000001).to_equal(true)
+
+    context "round trip on a dense non-symmetric matrix":
+        it "satisfies M * M^-1 == I for an arbitrary invertible matrix", fn():
+            # Sign or transposition errors in the adjugate survive the identity,
+            # translation and scaling cases above but not this one.
+            val m = Mat4(data: [
+                1.0, 2.0, 3.0, 4.0,
+                5.0, 1.0, 6.0, 2.0,
+                7.0, 8.0, 1.0, 3.0,
+                2.0, 4.0, 9.0, 1.0
+            ])
+            expect(worst_identity_error(m) < 0.000000001).to_equal(true)
+
+    context "singular matrix":
+        it "returns the identity instead of dividing by zero", fn():
+            expect(Mat4.zero().determinant()).to_equal(0.0)
+            val inv = Mat4.zero().inverse()
+            expect(inv.data[0]).to_equal(1.0)
+            expect(inv.data[1]).to_equal(0.0)
+
+describe "Mat4.to_mat3":
+    context "upper-left submatrix":
+        it "extracts the 3x3 rotation/scale block", fn():
+            val m3 = Mat4.scaling(2.0, 3.0, 4.0).to_mat3()
+            expect(m3.data.len()).to_equal(9)
+            expect(m3.data[0]).to_equal(2.0)
+            expect(m3.data[4]).to_equal(3.0)
+            expect(m3.data[8]).to_equal(4.0)
+
+    context "translation is dropped":
+        it "keeps only the linear part of a translation matrix", fn():
+            val m3 = Mat4.translation(7.0, 8.0, 9.0).to_mat3()
+            expect(m3.data[0]).to_equal(1.0)
+            expect(m3.data[2]).to_equal(0.0)
+            expect(m3.get(1, 2)).to_equal(0.0)

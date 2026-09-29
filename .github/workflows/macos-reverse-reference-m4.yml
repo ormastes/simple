@@ -1,0 +1,265 @@
+name: macOS reverse-reference M4 qualification
+
+env:
+  SIMPLE_WORKTREE_STORAGE_ROOT: ${{ github.workspace }}/build
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      requested_arch:
+        description: Native architecture to qualify
+        required: true
+        type: choice
+        options: [arm64, x86_64]
+      runner_label:
+        description: Native macOS runner label (for example macos-15 or an Intel self-hosted label)
+        required: true
+        default: macos-15
+        type: string
+      source_run_id:
+        description: Workflow run containing the admitted Phase3 artifact bundle
+        required: true
+        type: string
+      source_run_attempt:
+        description: Exact workflow attempt containing the admitted Phase3 artifact
+        required: true
+        type: string
+      source_revision:
+        description: Exact source revision bound by the Phase3 admission receipt
+        required: true
+        type: string
+      phase3_artifact:
+        description: Artifact containing the admitted Phase3 simple candidate and admission.env
+        required: true
+        type: string
+      residency_authority_run_id:
+        description: Workflow run containing the selected M4 authority and admitted architecture baseline
+        required: true
+        type: string
+      residency_authority_artifact:
+        description: Artifact containing the admitted architecture-specific baseline.env
+        required: true
+        type: string
+
+jobs:
+  qualify:
+    runs-on: ${{ inputs.runner_label }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_revision }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.phase3_artifact }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m4/phase3
+      - name: Authenticate exact Phase3 producer and artifact
+        id: phase3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
+          SOURCE_REVISION: ${{ inputs.source_revision }}
+          SOURCE_ARTIFACT: ${{ inputs.phase3_artifact }}
+        run: |
+          set -euo pipefail
+          test "${GITHUB_SHA}" = "${SOURCE_REVISION}"
+          run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")
+          test "$(jq -r '.repository.full_name' <<<"$run_json")" = "${GITHUB_REPOSITORY}"
+          test "$(jq -r '.head_sha' <<<"$run_json")" = "${SOURCE_REVISION}"
+          test "$(jq -r '.run_attempt' <<<"$run_json")" = "${SOURCE_RUN_ATTEMPT}"
+          test "$(jq -r '.status + ":" + .conclusion' <<<"$run_json")" = completed:success
+          source_workflow=$(jq -r '.path' <<<"$run_json")
+          test -n "$source_workflow"
+          source_workflow_sha=$(git show "${SOURCE_REVISION}:${source_workflow}" | shasum -a 256 | awk '{print $1}')
+          artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100")
+          test "$(jq --arg name "$SOURCE_ARTIFACT" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"$artifacts")" = 1
+          source_artifact_id=$(jq -r --arg name "$SOURCE_ARTIFACT" '.artifacts[] | select(.name == $name and .expired == false) | .id' <<<"$artifacts")
+          source_artifact_digest=$(jq -r --arg name "$SOURCE_ARTIFACT" '.artifacts[] | select(.name == $name and .expired == false) | .digest' <<<"$artifacts")
+          [[ "$source_artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          gh attestation verify build/m4/phase3/simple --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh attestation verify build/m4/phase3/admission.env --repo "$GITHUB_REPOSITORY" >/dev/null
+          candidate_sha=$(shasum -a 256 build/m4/phase3/simple | awk '{print $1}')
+          admission_sha=$(shasum -a 256 build/m4/phase3/admission.env | awk '{print $1}')
+          authority_workflow_sha=$(shasum -a 256 .github/workflows/macos-reverse-reference-m4.yml | awk '{print $1}')
+          cat >build/m4/phase3/producer-authority.env <<EOF
+          schema=macos-phase3-producer-authority-v1
+          status=AUTHENTICATED
+          repository=${GITHUB_REPOSITORY}
+          workflow_ref=${GITHUB_REPOSITORY}/${source_workflow}@${SOURCE_REVISION}
+          workflow_sha=${source_workflow_sha}
+          head_sha=${SOURCE_REVISION}
+          run_id=${SOURCE_RUN_ID}
+          run_attempt=${SOURCE_RUN_ATTEMPT}
+          artifact_name=${SOURCE_ARTIFACT}
+          artifact_id=${source_artifact_id}
+          artifact_digest=${source_artifact_digest}
+          candidate_sha256=${candidate_sha}
+          admission_receipt_sha256=${admission_sha}
+          authority_repository=${GITHUB_REPOSITORY}
+          authority_workflow_ref=${GITHUB_WORKFLOW_REF}
+          authority_workflow_sha=${authority_workflow_sha}
+          authority_head_sha=${GITHUB_SHA}
+          authority_run_id=${GITHUB_RUN_ID}
+          authority_run_attempt=${GITHUB_RUN_ATTEMPT}
+          EOF
+          {
+            echo "source_workflow_ref=${GITHUB_REPOSITORY}/${source_workflow}@${SOURCE_REVISION}"
+            echo "source_workflow_sha=${source_workflow_sha}"
+            echo "source_artifact_id=${source_artifact_id}"
+            echo "source_artifact_digest=${source_artifact_digest}"
+            echo "authority_workflow_sha=${authority_workflow_sha}"
+          } >>"$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.residency_authority_artifact }}
+          run-id: ${{ inputs.residency_authority_run_id }}
+          github-token: ${{ github.token }}
+          path: build/m4/residency-authority
+      - name: Validate local M4/M5 workflow contract
+        shell: bash
+        run: sh scripts/check/check-macos-m4-workflow-readiness.shs
+      - name: Native M4 qualification
+        continue-on-error: true
+        shell: bash
+        run: |
+          sh scripts/check/check-macos-reverse-reference-m4.shs \
+            --arch="${{ inputs.requested_arch }}" \
+            --candidate=build/m4/phase3/simple \
+            --admission-receipt=build/m4/phase3/admission.env \
+            --phase3-authority-receipt=build/m4/phase3/producer-authority.env \
+            --compiler=build/m4/phase3/simple \
+            --source-run-id="${{ inputs.source_run_id }}" \
+            --source-run-attempt="${{ inputs.source_run_attempt }}" \
+            --source-repository="${{ github.repository }}" \
+            --source-workflow-ref="${{ steps.phase3.outputs.source_workflow_ref }}" \
+            --source-workflow-sha="${{ steps.phase3.outputs.source_workflow_sha }}" \
+            --source-head-sha="${{ inputs.source_revision }}" \
+            --source-artifact="${{ inputs.phase3_artifact }}" \
+            --source-artifact-id="${{ steps.phase3.outputs.source_artifact_id }}" \
+            --source-artifact-digest="${{ steps.phase3.outputs.source_artifact_digest }}" \
+            --qualification-run-id="${{ github.run_id }}" \
+            --qualification-run-attempt="${{ github.run_attempt }}" \
+            --qualification-repository="${{ github.repository }}" \
+            --qualification-workflow-ref="${{ github.workflow_ref }}" \
+            --qualification-workflow-sha="${{ steps.phase3.outputs.authority_workflow_sha }}" \
+            --qualification-head-sha="${{ github.sha }}" \
+            --qualification-artifact="macos-phase3-m4-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}" \
+            --evidence-artifact="macos-m4-evidence-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}" \
+            --residency-authority-run-id="${{ inputs.residency_authority_run_id }}" \
+            --residency-authority-artifact="${{ inputs.residency_authority_artifact }}" \
+            --residency-baseline-receipt=build/m4/residency-authority/baseline.env \
+            --evidence-dir="build/evidence/m4-${{ inputs.requested_arch }}"
+      - name: Require explicit PASS receipt
+        shell: bash
+        run: |
+          status="build/evidence/m4-${{ inputs.requested_arch }}/status.env"
+          test -f "$status"
+          grep -Fxq 'schema=macos-m4-qualification-v1' "$status"
+          grep -Fxq 'status=PASS' "$status"
+          test "$(grep -c '^status=' "$status")" -eq 1
+          grep -Eq '^candidate_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^admission_receipt_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^phase3_authority_receipt_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^source_artifact_id=[0-9]+$' "$status"
+          grep -Eq '^source_artifact_digest=sha256:[0-9a-f]{64}$' "$status"
+          grep -Eq '^source_workflow_sha=[0-9a-f]{64}$' "$status"
+          grep -Eq '^qualification_workflow_sha=[0-9a-f]{64}$' "$status"
+          grep -Eq '^results_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^evidence_manifest_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^tool_builds_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^xcode_version_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^clang_version_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^target_identity_digest=[0-9a-f]{64}$' "$status"
+          grep -Eq '^sdk_identity=[0-9a-f]{64}$' "$status"
+          grep -Eq '^deployment_target=[0-9]+\.[0-9]+\.[0-9]+$' "$status"
+          grep -Eq '^provider_builds_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_baseline_oracle_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_same_byte_oracle_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_mutated_oracle_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_baseline_archive_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_same_byte_archive_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_mutated_archive_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_baseline_members_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_same_byte_members_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_mutated_members_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_baseline_payloads_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_same_byte_payloads_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_mutated_payloads_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_baseline_manifest_identity=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_same_byte_manifest_identity=[0-9a-f]{64}$' "$status"
+          grep -Eq '^provider_mutated_manifest_identity=[0-9a-f]{64}$' "$status"
+          grep -Eq '^test_runner_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^child_executable_sha256=[0-9a-f]{64}$' "$status"
+          grep -Eq '^kernel_policy_manifest_sha256=[0-9a-f]{64}$' "$status"
+          grep -Fxq 'kernel_k1_policy=llvm-cranelift' "$status"
+          grep -Fxq 'kernel_plugin_abi=1' "$status"
+          grep -Fxq 'plugin_manifest_policy=simple-sdn' "$status"
+          grep -Fxq 'coverage_cutover_policy=atomic-apk-only' "$status"
+          grep -Fxq 'coverage_implementation=apk-only' "$status"
+          grep -Fxq 'performance_threshold_mode=baseline-relative-10-percent' "$status"
+          grep -Fxq 'performance_threshold_status=selected' "$status"
+          grep -Fxq 'performance_baseline_scope=admitted-per-architecture-receipt' "$status"
+          grep -Fxq 'performance_steady_rss_percent=110' "$status"
+          grep -Fxq 'performance_growth_percent=10' "$status"
+          grep -Fxq 'performance_warm_request_count=20' "$status"
+          grep -Fxq 'architecture=${{ inputs.requested_arch }}' "$status"
+          grep -Fxq 'host_architecture=${{ inputs.requested_arch }}' "$status"
+          case '${{ inputs.requested_arch }}' in
+            arm64) expected_target=aarch64-apple-darwin ;;
+            x86_64) expected_target=x86_64-apple-darwin ;;
+            *) exit 1 ;;
+          esac
+          grep -Fxq "target_triple=$expected_target" "$status"
+          grep -Fxq 'source_run_id=${{ inputs.source_run_id }}' "$status"
+          grep -Fxq 'source_run_attempt=${{ inputs.source_run_attempt }}' "$status"
+          grep -Fxq 'source_repository=${{ github.repository }}' "$status"
+          grep -Fxq 'source_head_sha=${{ inputs.source_revision }}' "$status"
+          grep -Fxq 'source_artifact=${{ inputs.phase3_artifact }}' "$status"
+          grep -Fxq 'qualification_run_id=${{ github.run_id }}' "$status"
+          grep -Fxq 'qualification_run_attempt=${{ github.run_attempt }}' "$status"
+          grep -Fxq 'qualification_artifact=macos-phase3-m4-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}' "$status"
+          grep -Fxq 'evidence_artifact=macos-m4-evidence-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}' "$status"
+          grep -Fxq 'residency_authority_run_id=${{ inputs.residency_authority_run_id }}' "$status"
+          grep -Fxq 'residency_authority_artifact=${{ inputs.residency_authority_artifact }}' "$status"
+          cp "$status" build/m4/phase3/m4.env
+          cp "build/evidence/m4-${{ inputs.requested_arch }}/evidence-files.sha256" \
+            build/m4/phase3/m4-evidence-files.sha256
+          cat "$status"
+      - uses: actions/upload-artifact@v4
+        id: qualification_upload
+        if: always()
+        with:
+          name: macos-phase3-m4-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/m4/phase3
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        id: evidence_upload
+        if: always()
+        with:
+          name: macos-m4-evidence-${{ inputs.requested_arch }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: build/evidence/m4-${{ inputs.requested_arch }}
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/attest-build-provenance@v3
+        if: success()
+        with:
+          subject-path: |
+            build/m4/phase3/simple
+            build/m4/phase3/admission.env
+            build/m4/phase3/m4.env
+      - uses: actions/attest-build-provenance@v3
+        if: success()
+        with:
+          subject-path: |
+            build/evidence/m4-${{ inputs.requested_arch }}/status.env
+            build/evidence/m4-${{ inputs.requested_arch }}/evidence-files.sha256

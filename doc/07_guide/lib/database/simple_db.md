@@ -3,9 +3,7 @@
 Simple DB is a two-tier database system written in Simple:
 
 - **Simple DB Embedded** (stdlib) — lightweight embedded database for compiler metadata, project tracking, and application-level key-value/table storage. Ships with every Simple installation. Uses SDN format with atomic file I/O.
-- **Simple DB Full** (historical example) — its submodule history is recoverable,
-  but the recorded implementation is an unfinished skeleton with `pass_todo`;
-  it is not a working server and is not present in the current worktree.
+- **Simple DB Full** (example) — full-featured PostgreSQL-compatible storage engine with MVCC, WAL, TOAST, B-tree indexing, and NVFS-backed append-only storage. Lives in `examples/11_advanced/simple_db/`.
 
 Neither of these is what "DB server" means today: the current DB server tier
 is `std.database.server` (`src/lib/nogc_sync_mut/database/server/` — sessions,

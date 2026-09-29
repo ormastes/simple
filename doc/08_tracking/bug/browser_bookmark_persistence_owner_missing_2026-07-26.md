@@ -1,7 +1,9 @@
 # Browser bookmark persistence owner is missing
+## Closed 2026-09-16 — Implementation fixed; runtime evidence blocked by separate compiler/link failure
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -39,3 +41,4 @@ oversized stores fail closed. BrowserSession revalidates every restored URL.
 it, restores the bookmark through the hosted registry, removes it, closes the
 browser window, and proves a second reopen remains empty. A real target-process
 restart is still required before claiming runtime PASS.
+

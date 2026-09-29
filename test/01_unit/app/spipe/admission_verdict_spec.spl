@@ -1,0 +1,124 @@
+# Purpose and audience: executable specification evidence for the SPipe S1-D
+# admission verdict (§6.4/§13.4 of the refined plan).
+# @req REQ-SPKC-039
+# plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-D)
+# @manual_section: Admission verdict classification
+
+"""
+## Purpose and audience
+Purpose: Executable specification for SPipe admission verdict classifying scopes
+into Accept/AcceptWithDebt/Reject per frozen thresholds (target 850, floor/deny
+700 tenths), verifying hard-diagnostic forcing and regression detection.
+Audience: compiler and tooling engineers maintaining `src/app/spipe/admission/`.
+
+## Lifecycle
+- Research: doc/01_research/infra/spipe/
+- Plan: doc/03_plan/infra/spipe/spipe_knowledge_compiler_refined_plan.md (S1-D)
+- Architecture: doc/04_architecture/infra/spipe/
+- Design: doc/05_design/infra/spipe/ (if available)
+"""
+
+use std.spec.*
+use app.spipe.admission.verdict.{compute_admission_verdict, default_thresholds}
+use app.spipe.model.types.{ScoreReport, Verdict}
+
+fn _report(scope: text, score_tenths: i64) -> ScoreReport:
+    ScoreReport(
+        schema: "spipe-balance/1",
+        scope: scope,
+        score_tenths: score_tenths,
+        components: [],
+        deductions: [],
+        scopes: [],
+    )
+
+describe "SPipe admission verdict":
+    it "accepts a scope scoring at or above the 850-tenths target":
+        # @req REQ-SPKC-039
+        # @capture(protocol_json): verdict classification and reason codes
+        step("Score a scope at 900 tenths with no diagnostics or baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, None, default_thresholds())
+        expect(v.verdict).to_equal(Verdict.Accept)  # oracle: score 900 > target 850
+        expect(v.reasons.len()).to_equal(0)  # oracle: no reasons for accepted scope
+        expect(v.hard_diagnostic_count).to_equal(0)  # oracle: no hard diagnostics
+
+    it "accepts with debt a scope between the deny floor and the target":
+        # @capture(protocol_json): AcceptWithDebt verdict and debt reason code
+        step("Score a scope at 750 tenths (between 700 deny and 850 target)")
+        val v = compute_admission_verdict(_report("", 750), 0, None, default_thresholds())  # oracle: score 750
+        expect(v.verdict).to_equal(Verdict.AcceptWithDebt)  # oracle: 700 < 750 < 850
+        expect(v.reasons.len()).to_equal(1)  # oracle: one reason for debt
+        expect(v.reasons[0].code).to_equal("SPK531")  # oracle: debt reason code
+
+    it "rejects a scope scoring below the 700-tenths deny floor":
+        # @capture(protocol_json): Reject verdict and denial reason code
+        step("Score a scope at 650 tenths")
+        val v = compute_admission_verdict(_report("", 650), 0, None, default_thresholds())  # oracle: score 650
+        expect(v.verdict).to_equal(Verdict.Reject)  # oracle: 650 < deny floor 700
+        var has_deny_reason = false
+        for r in v.reasons:
+            if r.code == "SPK530":
+                has_deny_reason = true
+        expect(has_deny_reason).to_be(true)
+
+    it "rejects regardless of score when hard diagnostics are present":
+        # @capture(protocol_json): hard diagnostic override verdict
+        step("Score a scope at 950 tenths but with 2 hard diagnostics")
+        val v = compute_admission_verdict(_report("", 950), 2, None, default_thresholds())  # oracle: score 950, 2 diagnostics
+        expect(v.verdict).to_equal(Verdict.Reject)  # oracle: overridden by diagnostics
+        var has_hard_reason = false
+        for r in v.reasons:
+            if r.code == "SPK532":
+                has_hard_reason = true
+        expect(has_hard_reason).to_be(true)
+
+    it "rejects a global regression beyond the 5-tenths budget even with a passing score":
+        # @capture(protocol_json): regression detection and rejection
+        step("Score the global scope at 900 tenths after a 920-tenths baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, Some(920), default_thresholds())  # oracle: score 900, baseline 920
+        var has_regression_reason = false
+        for r in v.reasons:
+            if r.code == "SPK533":
+                has_regression_reason = true
+        expect(has_regression_reason).to_be(true)
+        expect(v.verdict).to_equal(Verdict.Reject)
+
+    it "tolerates a global regression within the 5-tenths budget":
+        # @capture(protocol_json): acceptable regression within tolerance
+        step("Score the global scope at 900 tenths after a 903-tenths baseline")
+        val v = compute_admission_verdict(_report("", 900), 0, Some(903), default_thresholds())  # oracle: score 900, baseline 903
+        var has_regression_reason = false
+        for r in v.reasons:
+            if r.code == "SPK533":
+                has_regression_reason = true
+        expect(has_regression_reason).to_be(false)
+
+    it "uses the wider 10-tenths regression budget for a non-global scope":
+        # @capture(protocol_json): per-scope regression budget application
+        step("Score a named scope at 900 after an 908-tenths baseline (within budget)")
+        val ok = compute_admission_verdict(_report("doc/x", 900), 0, Some(908), default_thresholds())  # oracle: score 900, baseline 908
+        var ok_has_reason = false
+        for r in ok.reasons:
+            if r.code == "SPK534":
+                ok_has_reason = true
+        expect(ok_has_reason).to_be(false)
+
+        step("Score the same scope at 900 after a 915-tenths baseline (exceeds budget)")
+        val bad = compute_admission_verdict(_report("doc/x", 900), 0, Some(915), default_thresholds())  # oracle: score 900, baseline 915
+        var bad_has_reason = false
+        for r in bad.reasons:
+            if r.code == "SPK534":
+                bad_has_reason = true
+        expect(bad_has_reason).to_be(true)
+
+    it "carries the exact frozen thresholds through to the verdict":
+        # @capture(protocol_json): threshold values in verdict structure
+        step("Read back the thresholds attached to a computed verdict")
+        val v = compute_admission_verdict(_report("", 900), 0, None, default_thresholds())  # oracle: score 900
+        expect(v.thresholds.target).to_equal(850)  # oracle: target threshold
+        expect(v.thresholds.floor).to_equal(800)  # oracle: floor threshold
+        expect(v.thresholds.deny).to_equal(700)  # oracle: deny threshold
+        expect(v.thresholds.max_global_regression_tenths).to_equal(5)  # oracle: global regression budget
+        expect(v.thresholds.max_scope_regression_tenths).to_equal(10)  # oracle: scope regression budget
+        expect(v.thresholds.legacy_required_improvement_tenths).to_equal(20)  # oracle: legacy improvement threshold
+        expect(v.schema).to_equal("spipe-admission/1")  # oracle: schema version

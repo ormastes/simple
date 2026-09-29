@@ -50,24 +50,28 @@ pub fn simpleos_container_rootfs_gate(rootfs: text, app_path: text) -> text:
         return "rootfs-escape"
     "ready"
 
+pub fn simpleos_wine_container_contract(pid: u64, rootfs: text, app_path: text, rootfs_backend: text) -> SimpleOsContainerContract:
+    val evidence = simpleos_container_namespace_evidence(pid, rootfs, true, true, true, true)
+    val namespace_state = simpleos_container_namespace_gate(evidence)
+    if namespace_state != "ready":
+        return _contract(false, namespace_state, "", "", evidence)
+    val rootfs_state = simpleos_container_rootfs_gate(rootfs, app_path)
+    if rootfs_state != "ready":
+        return _contract(false, rootfs_state, "", "", evidence)
+    if rootfs_backend == "":
+        return _contract(false, "missing-rootfs-backend", "", "", evidence)
+    _contract(
+        true,
+        "",
+        "[desktop-e2e] container-namespace:ok pid {evidence} rootfs={rootfs}",
+        "[desktop-e2e] container-rootfs:ok rootfs={rootfs} app={app_path} rootfs_backend={rootfs_backend}",
+        evidence
+    )
+
 # ============================================================================
-# ContainerNamespaceView — the KERNEL enforcement primitive for the
-# container-manager capsule (src/os/services/container/container_manager.spl).
-#
-# RESTORED by lane SVC2b 2026-07-27: container_manager.spl and its spec both
-# import these symbols from this module, but the module carried only the
-# desktop-e2e wine-container contract above (same file name, different
-# module) — so container_manager_spec failed 5/5 blocks with
-# "function `container_view_rootless` not found". Appended, never replacing
-# any existing symbol.
-#
-# Semantics (the absolute oracles in
-# test/01_unit/os/services/container/container_manager_spec.spl):
-#   * rootless view (root == "") DENIES every path and every pid;
-#   * a view rooted at R allows exactly R and paths at/below R/;
-#   * any path containing ".." is DENIED without normalization (an escape
-#     attempt is never resolved, it is refused);
-#   * a view sees only the pids explicitly declared at create time.
+# Container namespace view — confined mount(root) + pid view a container
+# resolves through. A view sees only the paths at/below its root and only the
+# pids explicitly declared at create time.
 # Pure model: no syscalls, no extern rt_*. Freestanding-safe.
 # ============================================================================
 
@@ -117,21 +121,3 @@ pub fn container_view_pid_decision(view: ContainerNamespaceView, pid: u64) -> te
     if container_view_allows_pid(view, pid):
         return "allow"
     "deny"
-
-pub fn simpleos_wine_container_contract(pid: u64, rootfs: text, app_path: text, rootfs_backend: text) -> SimpleOsContainerContract:
-    val evidence = simpleos_container_namespace_evidence(pid, rootfs, true, true, true, true)
-    val namespace_state = simpleos_container_namespace_gate(evidence)
-    if namespace_state != "ready":
-        return _contract(false, namespace_state, "", "", evidence)
-    val rootfs_state = simpleos_container_rootfs_gate(rootfs, app_path)
-    if rootfs_state != "ready":
-        return _contract(false, rootfs_state, "", "", evidence)
-    if rootfs_backend == "":
-        return _contract(false, "missing-rootfs-backend", "", "", evidence)
-    _contract(
-        true,
-        "",
-        "[desktop-e2e] container-namespace:ok pid {evidence} rootfs={rootfs}",
-        "[desktop-e2e] container-rootfs:ok rootfs={rootfs} app={app_path} rootfs_backend={rootfs_backend}",
-        evidence
-    )

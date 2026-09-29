@@ -2,6 +2,7 @@
 #![allow(clippy::large_enum_variant)]
 
 pub mod arena;
+pub mod capture_write_check;
 pub mod ast;
 pub mod diagnostic;
 pub mod doc_gen;
@@ -58,5 +59,8 @@ mod coalesce_diverging_fallback_test;
 mod multiline_condition_self_body_test;
 mod rejoined_continuation_test;
 mod trailing_operator_single_line_body_test;
+mod lambda_multiline_inline_body_test;
+#[cfg(test)]
+mod if_expr_multiline_condition_test;
 mod try_probe_test;
 mod pipe_lambda_typed_param_test;

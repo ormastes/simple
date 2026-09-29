@@ -159,12 +159,28 @@ self-promote to an aggregate PASS.
   commands, common aggregate-root routing, complete producer argument/env
   mappings, static usage-compatibility coverage, and
   sync/atomic-rename/post-publication hash verification.
+- Candidate release handoff is explicit: the live orchestrator requires the
+  aggregate candidate command to return its semantic blocked status, requires
+  one `result=BLOCKED` candidate report before reviewer activation, and checks
+  the final compatibility report alias byte-for-byte against the final report.
+  Tooling tar admission bounds both member count and expanded manifest bytes,
+  and requires exactly one canonical `./manifest.env` member.
 - Verified locally: focused script contract covers complete PASS plus stale,
   mutated-hash, and missing-receipt BLOCKED behavior.
 - Implemented: `check-mci-v2-release.shs` dependency-orders producers,
   canonical external signing, candidate aggregation, independent-review
   activation, and final aggregation with common identities and bounded child
   execution. Its synthetic workflow is permanently `CONTRACT_ONLY`.
+- Integrated: the release orchestrator now runs the existing canonical
+  `check-simpleos-mission-critical-release.shs` immediately before the
+  SimpleOS manifest producer. It fails closed unless the gate's bounded
+  outputs prove matrix `26/26`, matrix/release `pass`, and release blockers
+  `none`; it publishes a hash-bound
+  `simpleos-mission-critical-gate-v1.env` sidecar with the orchestrator's
+  run/source/configuration tuple and explicitly makes no QEMU claim. The
+  focused fixture covers both the controlled PASS contract and gate-failure
+  rejection. This is orchestration evidence only; it does not weaken or
+  replace the existing gate.
 - Still BLOCKED: all real hardware, QEMU, 24-hour stress, GPU/RenderDoc, and
   other lane executions not represented by fresh same-run receipts. This work
   did not execute or promote any of those rows. The canonical release
@@ -199,6 +215,30 @@ self-promote to an aggregate PASS.
   `build/evidence/mission_critical_infra_hardening_v2/riscv_dual_track_20260811/receipt.md`.
   Resume only with an exact-current admitted pure-Simple compiler. Keep the
   formal dual-track, RTL/SBY, QEMU, FPGA, aggregate, and release rows RED.
+
+### Stale checked-in report routing (preflight 2026-08-12)
+
+The bounded matrix preflight identified nine fixed-date report defaults as
+stale. The matrix now selects the newest same-prefix report unless an explicit
+`*_REPORT` override is supplied, while retaining the filename-age blocker. A
+newer report is routing metadata only; it is not a fresh PASS. Classifications
+and exact producer resumes are:
+
+| Report prefix | Classification | Canonical producer / resume |
+|---|---|---|
+| `shared_wm_renderer_unification_evidence` | current-host executable | `sh scripts/check/check-shared-wm-renderer-unification-evidence.shs` |
+| `cpu_simd_engine2d_evidence` | current-host executable | `SIMPLE_BIN=<admitted-self-hosted> sh scripts/check/check-cpu-simd-engine2d-evidence.shs` |
+| `simpleos_llvm_port_evidence_current` | external-toolchain blocked | `BLOCKED(no-canonical-producer): LLVM_SRC=<pinned-llvm-checkout> sh src/os/port/llvm/build.shs cross` |
+| `gui_renderdoc_feature_coverage_status` | external/hardware blocked | `sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs` |
+| `layered_simple_gui_web_engine2d_bitmap_evidence` | current-host executable | `sh scripts/check/check-layered-simple-gui-web-engine2d-bitmap-evidence.shs` |
+| `production_gui_web_renderer_parity_evidence` | external/hardware blocked | `sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs` |
+| `simple_web_engine2d_js_bitmap_evidence` | current-host executable | `JS_RENDER_RUNTIME=node sh scripts/check/check-simple-web-engine2d-js-bitmap-evidence.shs` |
+| `bun_simple_web_engine2d_js_bitmap_evidence` | current-host executable | `JS_RENDER_RUNTIME=bun sh scripts/check/check-simple-web-engine2d-js-bitmap-evidence.shs` |
+| `qemu_gtk_wm_capture_evidence` | external/hardware blocked | `QEMU_HOST_GTK_SCENE_EVIDENCE=1 sh scripts/check/check-qemu-gtk-wm-capture-evidence.shs` |
+
+The matrix route table is the authoritative resume map for this nine-row stale-report routing subset. The full AC-1/AC-6 evidence matrix, including formal and hardware correspondence HOLD rows, is owned by the mission-critical architecture and system-test plan;
+the existing retained log remains diagnostic only. No timestamp-only refresh,
+cached substitution, GPU/QEMU/RenderDoc run, or PASS promotion is implied.
 
 The highest-capability reviewer receives no implementation ownership. The
 reviewer checks every REQ-MCI-001..011 and NFR-MCI-001..009 against the current

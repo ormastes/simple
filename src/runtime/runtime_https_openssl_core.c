@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>

@@ -1,4 +1,8 @@
 # `simple check` costs ~2s per function declaration (parse), plus ~20s fixed per worker
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
@@ -101,3 +105,18 @@ top of a millisecond-per-file checker is not worth the invalidation surface.
     # 41 trivial functions
     python3 -c 'print("".join(f"fn f{i}(a: i64) -> i64:\n    a + {i}\n\n" for i in range(40)) + "fn main() -> i64:\n    0\n")' > /tmp/f40.spl
     time $B run src/app/check/main.spl /tmp/f40.spl --phase-profile
+
+## Triage 2026-09-13
+
+This is the same superlinear-parse-cost investigation already
+documented in .claude/rules/commands.md ("Fast Path" section) --
+`simple check`/`simple lint` cost is dominated by parse time that
+scales superlinearly with function-decl content, root cause unlocated
+(profiling blocked on ptrace_scope/perf_event_paranoid on the
+investigating host). This lane has no attach-based profiling access
+either and the fix requires locating a superlinear term inside the
+Rust seed's parser -- deep compiler-internals work, not a bounded unit
+fix. Leaving OPEN, no new attempt; commands.md's 2026-08-18 seed
+redeploy note (numbers improved but not fixed) still applies.
+
+

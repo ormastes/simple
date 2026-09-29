@@ -1,0 +1,58 @@
+"""
+Proves the pure classification policy used by Slang's engine-owned readiness
+surface. Runtime dispatch and production tensor parity remain separate gates.
+"""
+
+# Requirements: doc/02_requirements/feature/slang_paged_kv_backend.md
+# @req: REQ-001
+# @req: REQ-013
+
+use std.spec.step
+use std.gc_async_mut.slang.model_executor.backend.{PhysicalPageProviderStatus}
+use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, PhysicalPageActivation, KvExecutionMode, physical_page_activation, kv_execution_mode, kv_execution_mode_text}
+
+describe "Slang physical-page activation":
+    it "rejects unavailable providers and unsupported models before pool state":
+        step("fail closed before native allocation")
+        val unavailable = physical_page_activation(
+            PhysicalPageProviderStatus.Unavailable,
+            PhysicalModelSupport.Supported, 7, true)
+        val unsupported = physical_page_activation(
+            PhysicalPageProviderStatus.Ready,
+            PhysicalModelSupport.Unsupported, 7, true)
+        expect(unavailable).to_equal(PhysicalPageActivation.ProviderUnavailable)
+        expect(unsupported).to_equal(PhysicalPageActivation.ModelUnsupported)
+        expect(kv_execution_mode(true, unavailable)).to_equal(KvExecutionMode.Snapshot)
+
+    it "keeps ABI-ready providers on snapshot fallback until model support is proven":
+        step("negotiate the ABI without claiming an active tensor provider")
+        val state = physical_page_activation(PhysicalPageProviderStatus.Ready,
+            PhysicalModelSupport.Unknown, 0, false)
+        expect(state).to_equal(PhysicalPageActivation.ModelSupportUnknown)
+        expect(kv_execution_mode(true, state)).to_equal(KvExecutionMode.Snapshot)
+        expect(kv_execution_mode_text(kv_execution_mode(true, state))).to_equal("snapshot")
+
+    it "requires a created pool and connected owner after model support":
+        step("reject each incomplete activation boundary")
+        val no_pool = physical_page_activation(PhysicalPageProviderStatus.Ready,
+            PhysicalModelSupport.Supported, 0, true)
+        val no_owner = physical_page_activation(PhysicalPageProviderStatus.Ready,
+            PhysicalModelSupport.Supported, 7, false)
+        expect(no_pool).to_equal(PhysicalPageActivation.PoolInactive)
+        expect(no_owner).to_equal(PhysicalPageActivation.OwnerDisconnected)
+        expect(kv_execution_mode(true, no_owner)).to_equal(KvExecutionMode.Snapshot)
+
+    it "selects physical pages only after all four gates":
+        step("activate an owned provider pool")
+        val active = physical_page_activation(PhysicalPageProviderStatus.Ready,
+            PhysicalModelSupport.Supported, 7, true)
+        expect(active).to_equal(PhysicalPageActivation.Active)
+        expect(kv_execution_mode(true, active)).to_equal(KvExecutionMode.PhysicalPages)
+        expect(kv_execution_mode_text(kv_execution_mode(true, active))).to_equal("physical_pages")
+
+    it "reports unavailable without a resident execution context":
+        step("separate provider capability from loaded execution readiness")
+        expect(kv_execution_mode(false, PhysicalPageActivation.Active)).to_equal(
+            KvExecutionMode.Unavailable)
+        expect(kv_execution_mode_text(kv_execution_mode(false,
+            PhysicalPageActivation.Active))).to_equal("unavailable")

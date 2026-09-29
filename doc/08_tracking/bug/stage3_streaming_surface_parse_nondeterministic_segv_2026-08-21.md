@@ -1,4 +1,9 @@
 # Stage-3 streaming surface parse nondeterministic SEGV (2026-08-21)
+## Closed 2026-09-16 — ...tic SEGV (2026-08-21) ## Status Resolved. The third receipt-bound run completed all 954 st
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Status
 
@@ -61,3 +66,4 @@ by `build/bootstrap/stage3/*/stage3-command.transcript`. Set
 The parser-lifetime issue needs no further bootstrap retry. Continue from the
 separate deterministic HIR import blocker recorded in
 `stage3_incremental_dir_import_resolution_2026-08-21.md`.
+

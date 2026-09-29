@@ -1,0 +1,74 @@
+# Mutating a container reached THROUGH an index must reach the stored value.
+#
+# Bug: doc/08_tracking/bug/mutate_through_index_loses_write_2026-07-31.md
+#
+# That record's audit found two shapes silently discarding the write, with no
+# error and no warning. Re-measured 2026-09-18 on a seed built from
+# origin/main c8fa65bf714, on both lanes:
+#
+# | shape                      | interpret | JIT |
+# |----------------------------|-----------|-----|
+# | `b[0].push(x)`   `[[i64]]` | keeps     | keeps |
+# | `c["k"].push(x)` dict value| keeps     | keeps |
+# | `d["k"] = d["k"].push(x)`  | keeps     | keeps |
+# | `a[0].1.push(x)` tuple fld | **LOSES** | keeps |
+#
+# The dict-value shape LOST the write when the record was written and keeps it
+# now, so it is pinned here: it is recently-fixed behaviour with production
+# callers (`nogc_sync_mut/src/db.spl`, `dependency_tracker/graph.spl`,
+# `src/exp/run.spl`, `src/exp/query.spl` all push straight through a dict value)
+# and nothing else guards it.
+#
+# The tuple-field shape is deliberately NOT asserted here: it still loses the
+# write on the interpret lane while the JIT lane keeps it, so asserting either
+# answer would either add a red or bless a defect. It stays in the record as the
+# one live item, now with the lane split named. Both stdlib sites the record
+# listed for it are already remediated in-tree (`gc_async_mut/pure/collections.spl`
+# keeps two parallel arrays on purpose; `common/encoding/font_cldr_rank.spl` uses
+# the read-modify-write form), which is why this file guards the shapes those
+# fixes depend on rather than the broken one.
+
+use std.spec
+
+describe "mutation through an index reaches the stored value":
+    it "pushes through an array of arrays":
+        var b: [[i64]] = [[10]]
+        b[0].push(99)
+        expect(b[0].len()).to_equal(2)
+
+    it "keeps the pushed element's value through an array of arrays":
+        var b: [[i64]] = [[10]]
+        b[0].push(99)
+        expect(b[0][1]).to_equal(99)
+
+    it "pushes through a dict value":
+        var c: {text: [i64]} = {}
+        c["k"] = [10]
+        c["k"].push(99)
+        expect(c["k"].len()).to_equal(2)
+
+    it "keeps the pushed element's value through a dict value":
+        var c: {text: [i64]} = {}
+        c["k"] = [10]
+        c["k"].push(99)
+        expect(c["k"][1]).to_equal(99)
+
+    it "pushes through a dict value twice":
+        var c: {text: [i64]} = {}
+        c["k"] = []
+        c["k"].push(1)
+        c["k"].push(2)
+        expect(c["k"].len()).to_equal(2)
+
+    it "leaves a sibling key untouched":
+        var c: {text: [i64]} = {}
+        c["a"] = [1]
+        c["b"] = [2]
+        c["a"].push(3)
+        expect(c["b"].len()).to_equal(1)
+
+    it "accepts the explicit write-back form":
+        var d: {text: [i64]} = {}
+        d["k"] = [10]
+        d["k"] = d["k"].push(99)
+        expect(d["k"].len()).to_equal(2)

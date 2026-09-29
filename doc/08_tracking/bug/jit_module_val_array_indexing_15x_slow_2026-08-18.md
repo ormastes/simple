@@ -1,4 +1,8 @@
 # Arrays sourced from a module-level `val` index 15x slower in the JIT — hoisting does not help
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN (SIMPLE-CAPABILITY / PERF-REGRESSION root cause)
 **Filed:** 2026-08-18
@@ -157,3 +161,4 @@ carrying compiler is deployed — see NOT DEPLOYED above. No source change was
 made to the 129 sites; annotating them is a viable belt-and-braces mitigation
 if a deploy stays blocked, but was not done here (129-site churn against a
 fix that already addresses the class).
+

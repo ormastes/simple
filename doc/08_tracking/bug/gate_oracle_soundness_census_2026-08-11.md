@@ -456,3 +456,13 @@ dispatch path (`scripts/hooks/pre-push` vs `.git/hooks/pre-push` vs the
 standalone `pre-push-conflict-tree-guard.shs`/`check-no-conflict-*.shs`
 scripts) was also not fully traced — flagged for follow-up, not resolved
 here.
+
+## Triage 2026-09-13
+
+458-line gate-soundness census covering dozens of check scripts and
+their exit-code-only classifications (e.g. bin/simple run exiting 0
+after a fatal semantic error, native-build's success funnel checking
+only file existence). This is an audit/census document, not a single
+localized bug; each named gap would need its own fix. Out of this
+lane's per-item budget. Leaving OPEN.
+

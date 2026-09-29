@@ -58,7 +58,7 @@ variables and configuration settings across different platforms.
 
 #### Environment variables
 
-#### reads environment variables
+#### reads environment variables set by the process
 
 <details>
 <summary>Executable SSpec</summary>

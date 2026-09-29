@@ -1,6 +1,15 @@
 # gen-lean regeneration pipeline broken (multi-layer drift)
 
-Status: FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites green (27/27)
+## Closed 2026-09-13 — pipeline repaired 2026-06-11, all four lean_* suites green in-entry
+
+- **inferred** Entry status: `FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites
+  green (27/27)`; no later entry reopens the regeneration pipeline.
+- **inferred** The lean frontend it regenerates (`src/compiler/10.frontend/core/`) is
+  present and consistent in this tree (parser_expr.spl, primary_expr.spl, tokens.spl all
+  carry the post-fix symbols referenced by later June entries).
+
+
+Status: closed 2026-09-13 (was: Status: FIXED 2026-06-11 — all layers repaired, 4 lean_* spec suites green (27/27))
 
 **Date:** 2026-06-11
 **Severity:** Medium (verification automation gap — committed Lean proofs cannot be
@@ -49,7 +58,7 @@ restoring FETCH_HEAD copies and re-running)
 - `checker.spl`: `True`/`False` → `true`/`false`; `.append()` → `list + [item]`;
   `ProofStatus` class renamed `ProofStatusReport` (conflicts with enum); `None` → `nil`;
   nil guard on `_rt_process_run` return with static sorry-scan fallback for no-Lean envs.
-- `_Codegen/lean_codegen.spl`: `build_theorem()` uses direct constructor (avoids me-method
+- `codegen_part1.spl`: `build_theorem()` uses direct constructor (avoids me-method
   cross-module mutation loss); `proof_text()` uses `match Some(p)` pattern.
 - `__init__.spl`: `io.fs` stub → `std.nogc_sync_mut.io`; `Dict<text,bool>` → text values;
   `rt_dir_create_all` (unimplemented) → `shell("mkdir -p ...")`.

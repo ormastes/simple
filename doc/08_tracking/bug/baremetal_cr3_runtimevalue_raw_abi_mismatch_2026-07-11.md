@@ -1,4 +1,9 @@
 # Baremetal CR3 RuntimeValue/Raw ABI Mismatch
+## Closed 2026-09-16 — ...ue/Raw ABI Mismatch **Status:** Resolved — workaround deployed; live QEMU evidence confirm
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Resolved — workaround deployed; live QEMU evidence confirms correct CR3 and boot progression.
 
@@ -13,3 +18,4 @@ Legacy tagged helpers remain unchanged. The baremetal runtime now also exports
 uses those explicit scalar primitives. Live QEMU evidence confirms CR3 becomes
 `0x14004000` and execution reaches VFS, dynamic BGA scanout, Engine2D,
 keyboard, mouse, compositor, and desktop shell initialization.
+

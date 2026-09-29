@@ -1,0 +1,129 @@
+#!/bin/sh
+# Contract harness for the per-leg admission added to
+# scripts/check/lib/perf-comparison-admission.shs.
+#
+# Bug: doc/08_tracking/bug/vulkan_2d_c_compare_skips_on_macos_2026-09-11.md
+#
+# Cause 1 of that bug: `aggregate()` in check-vulkan-2d-c-compare.shs requires
+# BOTH legs to already read `admitted` before it will run the admission step --
+# and nothing ever assigned `admitted`, so a leg that measured perfectly against
+# real MoltenVK reported `compare_status=skipped` unconditionally. The admission
+# step was gated behind the very status it exists to produce.
+#
+# This harness exercises the promotion path with no GPU, no ICD and no Vulkan:
+# it builds a synthetic projection row over real files and asserts that
+# perf_compare_admit_leg admits it, plus three sabotages that must each be
+# refused with a NAMED reason.
+#
+# Tokens: CLEAN=<status>:<reason>, TAMPERED_BINARY=..., NO_RECEIPT=...,
+#         WRONG_KIND=..., AGGREGATE_FEED=<ok|MISSING>, CONTRACT=PASS
+
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper="$root/scripts/check/lib/perf-comparison-admission.shs"
+gate="$root/scripts/check/check-vulkan-2d-c-compare.shs"
+[ -f "$helper" ] || { echo "FAIL: admission helper missing"; exit 1; }
+[ -f "$gate" ] || { echo "FAIL: compare gate missing"; exit 1; }
+
+. "$helper"
+
+command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || {
+  echo "FAIL: no sha256 tool -- absence of a hasher is absence of evidence"
+  exit 1
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# perf_admission_validate_bound_file requires link count 1, so every fixture is
+# a freshly written regular file, never a hardlink or symlink.
+printf 'int main(void){return 0;}\n' > "$work/leg.c"
+printf '#!/bin/sh\nexit 0\n' > "$work/leg.bin"
+chmod +x "$work/leg.bin"
+printf 'framebuffer-bytes\n' > "$work/leg.rgba"
+
+src_sha=$(perf_admission_hash_file "$work/leg.c")
+bin_sha=$(perf_admission_hash_file "$work/leg.bin")
+art_sha=$(perf_admission_hash_file "$work/leg.rgba")
+
+receipt_sha=$(perf_compare_write_binary_admission "$work/leg.admission.env" native-reference "$bin_sha") || {
+  echo "FAIL: could not write a binary-admission receipt"
+  exit 1
+}
+
+write_row() {
+  # write_row OUT BINARY_SHA RECEIPT_PATH RECEIPT_SHA
+  {
+    echo "c_workload_id=harness-v1"
+    echo "c_viewport_width=800"
+    echo "c_viewport_height=600"
+    echo "c_warmup_count=5"
+    echo "c_sample_count=300"
+    echo "c_timing_scope=draw-plus-submit-to-fence-p95"
+    echo "c_readback_mode=post-timing-full-frame"
+    echo "c_capture_mode=single-post-timing-capture"
+    echo "c_gpu_identity=device:AppleM4;icd_sha256=$src_sha"
+    echo "c_fallback_state=none"
+    echo "c_source_path=$work/leg.c"
+    echo "c_source_revision=$src_sha"
+    echo "c_checksum_semantics=sampled-u32-xor-stride-4096"
+    echo "c_binary_kind=native-reference"
+    echo "c_binary_path=$work/leg.bin"
+    echo "c_binary_sha256=$2"
+    echo "c_binary_admission_path=$3"
+    echo "c_binary_admission_sha256=$4"
+    echo "c_artifact_path=$work/leg.rgba"
+    echo "c_artifact_sha256=$art_sha"
+    echo "c_checksum=10460147"
+  } > "$1"
+}
+
+write_row "$work/clean.env" "$bin_sha" "$work/leg.admission.env" "$receipt_sha"
+perf_compare_admit_leg "$work/clean.env" c_
+echo "CLEAN=$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON"
+
+# Sabotage 1: the row claims a binary hash the file does not have.
+bogus=0000000000000000000000000000000000000000000000000000000000000000
+write_row "$work/tampered.env" "$bogus" "$work/leg.admission.env" "$receipt_sha"
+perf_compare_admit_leg "$work/tampered.env" c_
+echo "TAMPERED_BINARY=$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON"
+
+# Sabotage 2: no receipt at all -- the exact state every row was in before this
+# change, when no producer of perf-binary-admission-v1 existed anywhere.
+write_row "$work/noreceipt.env" "$bin_sha" "$work/absent.admission.env" "$receipt_sha"
+perf_compare_admit_leg "$work/noreceipt.env" c_
+echo "NO_RECEIPT=$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON"
+
+# Sabotage 3: a well-formed receipt for a DIFFERENT binary kind.
+wrong_sha=$(perf_compare_write_binary_admission "$work/wrong.admission.env" system-browser "$bin_sha")
+write_row "$work/wrongkind.env" "$bin_sha" "$work/wrong.admission.env" "$wrong_sha"
+perf_compare_admit_leg "$work/wrongkind.env" c_
+echo "WRONG_KIND=$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON"
+
+# The live gate must hand `aggregate` the STAGE-path rows. The durable rows name
+# `$FINAL_RUN_DIR/...` paths that do not exist until publication, so validating
+# those would answer `stale-binary` for a good binary -- reverting this line
+# restores a silent unconditional skip.
+if grep -q '"\$OUT_DIR/c.env.admit" "\$OUT_DIR/simple.env.admit"' "$gate"; then
+  echo "AGGREGATE_FEED=ok"
+else
+  echo "AGGREGATE_FEED=MISSING"
+fi
+
+fail_unless() {
+  case "$2" in
+    "$1") ;;
+    *) echo "FAIL: expected $3 to be $1, got $2"; exit 1 ;;
+  esac
+}
+fail_unless "admitted:admitted" "$(perf_compare_admit_leg "$work/clean.env" c_; echo "$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON")" "the clean row"
+perf_compare_admit_leg "$work/tampered.env" c_
+fail_unless "unadmitted:stale-binary" "$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON" "the tampered-binary row"
+perf_compare_admit_leg "$work/noreceipt.env" c_
+fail_unless "unadmitted:invalid-binary-admission" "$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON" "the receiptless row"
+perf_compare_admit_leg "$work/wrongkind.env" c_
+fail_unless "unadmitted:invalid-binary-admission" "$PERF_LEG_ADMISSION_STATUS:$PERF_LEG_ADMISSION_REASON" "the wrong-kind row"
+grep -q '"\$OUT_DIR/c.env.admit" "\$OUT_DIR/simple.env.admit"' "$gate" ||
+  { echo "FAIL: the live gate no longer feeds aggregate the stage-path rows"; exit 1; }
+echo "CONTRACT=PASS"

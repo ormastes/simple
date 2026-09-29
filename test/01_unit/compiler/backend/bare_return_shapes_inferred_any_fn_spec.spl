@@ -1,0 +1,129 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# Generalization spec for
+# doc/08_tracking/bug/seed_cranelift_bare_return_in_inferred_any_fn_traps_2026-09-26.md
+#
+# The reproducing spec pins the lexer's exact shape (`if not flag: return`
+# ahead of a `-> bool` tail call). This one native-builds ONE fixture holding
+# the neighbouring shapes that share the same lowering -- a bare `return`
+# reaching `Terminator::Return(None)` in a function whose return type was
+# inferred `ANY` because its body ends in a value -- plus the shapes that were
+# never affected, so a regression in either direction is caught:
+#
+#   * bare `return` inside a `while` loop body
+#   * bare `return` inside a nested `if`
+#   * bare `return` in an `else` arm (the `if/else` form)
+#   * several bare returns in one function
+#   * the declared `-> unit` / non-value-tail forms, which always worked
+#
+# The fixture prints one letter per check that produced the expected value and
+# `ok` at the end; the spec asserts the whole transcript, so a trap on ANY shape
+# (non-zero exit, truncated transcript) or a wrong value is a failure.
+
+use std.spec.step
+
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FIXTURE = """fn first_over(limit: i64, items: [i64]):
+    var i = 0
+    while i < items.len():
+        if items[i] > limit:
+            return
+        i = i + 1
+    items.len()
+
+fn nested_guard(a: bool, b: bool, x: i64):
+    if a:
+        if b:
+            return
+    x * 2
+
+fn else_arm_return(flag: bool, x: i64):
+    if flag:
+        x + 100
+    else:
+        return
+    x
+
+fn many_returns(k: i64):
+    if k == 1:
+        return
+    if k == 2:
+        return
+    if k == 3:
+        return
+    k * 10
+
+fn declared_unit(flag: bool) -> unit:
+    if flag:
+        return
+    print("U")
+
+fn non_value_tail(flag: bool):
+    if flag:
+        return
+    var y = 1
+
+fn main():
+    first_over(5, [1, 9, 2])
+    print("A")
+    if first_over(5, [1, 2, 3]) == 3:
+        print("B")
+    nested_guard(true, true, 4)
+    print("C")
+    if nested_guard(true, false, 4) == 8 and nested_guard(false, true, 4) == 8:
+        print("D")
+    else_arm_return(false, 7)
+    print("E")
+    if else_arm_return(true, 7) == 7:
+        print("F")
+    many_returns(1)
+    many_returns(2)
+    many_returns(3)
+    print("G")
+    if many_returns(4) == 40:
+        print("H")
+    declared_unit(true)
+    declared_unit(false)
+    non_value_tail(true)
+    non_value_tail(false)
+    print("ok")
+"""
+
+val EXPECTED = "A\nB\nC\nD\nE\nF\nG\nH\nU\nok"
+
+fn work_dir() -> text:
+    val base = env_get("TMPDIR")
+    val root = if base == "": "/tmp" else: base
+    val dir = root + "/simple-spec-bare-return-shapes"
+    dir_create_all(dir)
+    dir
+
+fn native_build(source_path: text, cache: text, exe: text) -> (text, text, i64):
+    env_set("SIMPLE_NATIVE_BUILD_RUST", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    process_run(env_get("SIMPLE_BINARY") ?? "bin/simple", ["native-build", "--backend", "cranelift", "--cache-dir", cache, source_path, "-o", exe])
+
+describe "every bare-return shape inside an inferred-ANY function leaves cleanly":
+
+    """A bare `return` may sit in a loop, a nested `if`, or an `else` arm of a
+    function that otherwise ends in a value. Natively compiled, all of them
+    must leave the function instead of trapping, and the fall-through paths
+    must still produce their tail value."""
+
+    it "natively compiles the multi-shape fixture and gets the full transcript":
+        step("write the fixture")
+        val dir = work_dir()
+        val source_path = dir + "/shapes.spl"
+        val exe = dir + "/shapes.bin"
+        assert_true(file_write(source_path, FIXTURE))
+
+        step("native-build it through the compiler binary")
+        val built = native_build(source_path, dir + "/cache", exe)
+        assert_equal(built[2], 0)
+
+        step("every shape returns or falls through with the expected value")
+        val ran = process_run(exe, [])
+        assert_equal(ran[2], 0)
+        assert_equal(ran[0].trim(), EXPECTED)

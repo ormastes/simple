@@ -1,4 +1,8 @@
 # UNUSED001 typed use-def migration is incomplete
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -21,3 +25,4 @@ document deliberate precision changes; warm latency and allocation evidence cove
 with many declarations.
 
 Unknown or incomplete binding facts must suppress a typed claim, not infer unused state.
+

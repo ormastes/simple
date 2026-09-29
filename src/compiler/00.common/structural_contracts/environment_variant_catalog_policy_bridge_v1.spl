@@ -1,0 +1,137 @@
+# codex-impl
+# Pure projection into the existing catalog policy argument shape. Max/cap and
+# prefer/require remain separate because catalog_v1 accepts only one mode.
+
+use compiler.common.structural_contracts.environment_variant_policy_v1.{
+    EnvironmentVariantPolicyDecisionInputV1, EnvironmentVariantParserProviderV1,
+    EnvironmentVariantParserRequirementV1, EnvironmentVariantHostCpuMaxV1,
+    ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1
+}
+use compiler.common.structural_contracts.offload_profile.{OffloadMode, OffloadFallbackPolicy}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentFeatureSetV1
+}
+use std.nogc_sync_mut.composition.environment_variants.policy.{
+    ENV_POLICY_PREFER_V1, ENV_POLICY_REQUIRE_V1, ENV_POLICY_MAX_V1
+}
+
+pub enum EnvironmentVariantCatalogPolicyBridgeErrorV1:
+    InvalidDecision
+    MissingProviderIdentity
+    MissingVariantIdentity
+    InvalidFeatureCeiling
+
+pub struct EnvironmentVariantCatalogPolicyAuthorityV1:
+    parser_provider_identity: EnvironmentDigest256V1
+    scalar_variant_identity: EnvironmentDigest256V1
+    simd_variant_identity: EnvironmentDigest256V1
+    execution_architecture: u16
+    native_feature_ceiling: EnvironmentFeatureSetV1
+    x86_v1_feature_ceiling: EnvironmentFeatureSetV1
+    x86_v2_feature_ceiling: EnvironmentFeatureSetV1
+    x86_v3_feature_ceiling: EnvironmentFeatureSetV1
+    x86_v4_feature_ceiling: EnvironmentFeatureSetV1
+    max_startup_budget_us: u64
+    max_placement: u16
+
+pub struct EnvironmentVariantCatalogPolicyRequestV1:
+    mode: u16
+    requested_provider: EnvironmentDigest256V1
+    preferred_variant: EnvironmentDigest256V1
+    max_architecture: u16
+    max_startup_budget_us: u64
+    max_placement: u16
+    max_feature_ceiling: EnvironmentFeatureSetV1
+
+pub struct EnvironmentVariantCatalogPolicyProjectionV1:
+    cap_request: EnvironmentVariantCatalogPolicyRequestV1
+    selection_request: EnvironmentVariantCatalogPolicyRequestV1
+    frontend_offload: OffloadMode
+    frontend_offload_auto: bool
+    frontend_fallback: OffloadFallbackPolicy
+    explain_policy_digest: text
+    binding_policy_digest: EnvironmentDigest256V1
+
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _zero() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+fn _hex_nibble(ch: text) -> u64:
+    if ch >= "0" and ch <= "9": return (ch.codepoint() - "0".codepoint()) as u64
+    (ch.codepoint() - "a".codepoint() + 10) as u64
+fn _hex_byte(raw: text, offset: i64) -> u64:
+    (_hex_nibble(raw.substring(offset, offset + 1)) << 4u64) |
+        _hex_nibble(raw.substring(offset + 1, offset + 2))
+fn _hex_word(raw: text, offset: i64) -> u64:
+    # Digest producers in this repository load SHA bytes into u64 words in
+    # little-endian order. Keep conventional hexadecimal byte order at the
+    # text boundary, then reproduce that same typed representation.
+    var value = 0u64
+    for i in 0..8:
+        value = value | (_hex_byte(raw, offset + i * 2) << ((i as u64) * 8u64))
+    value
+pub fn environment_variant_policy_digest256_v1(raw: text) -> Result<EnvironmentDigest256V1, EnvironmentVariantCatalogPolicyBridgeErrorV1>:
+    if not sha256_lower_hex_valid(raw):
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.InvalidDecision)
+    val value = EnvironmentDigest256V1(w0: _hex_word(raw, 0), w1: _hex_word(raw, 16),
+        w2: _hex_word(raw, 32), w3: _hex_word(raw, 48))
+    if not _declared(value):
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.InvalidDecision)
+    Ok(value)
+fn _ceiling_for(decision: EnvironmentVariantPolicyDecisionInputV1,
+                authority: EnvironmentVariantCatalogPolicyAuthorityV1) -> EnvironmentFeatureSetV1:
+    match decision.host_cpu_max:
+        case EnvironmentVariantHostCpuMaxV1.X86_64V1: authority.x86_v1_feature_ceiling
+        case EnvironmentVariantHostCpuMaxV1.X86_64V2: authority.x86_v2_feature_ceiling
+        case EnvironmentVariantHostCpuMaxV1.X86_64V3: authority.x86_v3_feature_ceiling
+        case EnvironmentVariantHostCpuMaxV1.X86_64V4: authority.x86_v4_feature_ceiling
+        case _: authority.native_feature_ceiling
+
+pub fn environment_variant_catalog_policy_project_v1(
+    decision: EnvironmentVariantPolicyDecisionInputV1,
+    authority: EnvironmentVariantCatalogPolicyAuthorityV1
+) -> Result<EnvironmentVariantCatalogPolicyProjectionV1, EnvironmentVariantCatalogPolicyBridgeErrorV1>:
+    if decision.schema_version != ENVIRONMENT_VARIANT_POLICY_SCHEMA_V1 or
+       not sha256_lower_hex_valid(decision.policy_digest):
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.InvalidDecision)
+    if not _declared(authority.parser_provider_identity):
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.MissingProviderIdentity)
+    val ceiling = _ceiling_for(decision, authority)
+    # Architecture matching and actual feature availability remain admission
+    # facts. The bridge only rejects a malformed ceiling authority.
+    if ceiling.architecture != authority.execution_architecture:
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.InvalidFeatureCeiling)
+    var preferred = _zero()
+    if decision.parser_require == EnvironmentVariantParserRequirementV1.Scalar or
+       (decision.parser_require == EnvironmentVariantParserRequirementV1.None and
+        decision.parser_prefer == EnvironmentVariantParserProviderV1.Scalar):
+        preferred = authority.scalar_variant_identity
+    elif decision.parser_require == EnvironmentVariantParserRequirementV1.Simd or
+         (decision.parser_require == EnvironmentVariantParserRequirementV1.None and
+          decision.parser_prefer == EnvironmentVariantParserProviderV1.Simd):
+        preferred = authority.simd_variant_identity
+    if (decision.parser_require != EnvironmentVariantParserRequirementV1.None or
+        decision.parser_prefer != EnvironmentVariantParserProviderV1.Auto) and not _declared(preferred):
+        return Err(EnvironmentVariantCatalogPolicyBridgeErrorV1.MissingVariantIdentity)
+    val selection_mode = if decision.parser_require == EnvironmentVariantParserRequirementV1.None:
+        ENV_POLICY_PREFER_V1
+    else:
+        ENV_POLICY_REQUIRE_V1
+    val cap = EnvironmentVariantCatalogPolicyRequestV1(mode: ENV_POLICY_MAX_V1,
+        requested_provider: authority.parser_provider_identity, preferred_variant: _zero(),
+        max_architecture: authority.execution_architecture,
+        max_startup_budget_us: authority.max_startup_budget_us,
+        max_placement: authority.max_placement, max_feature_ceiling: ceiling)
+    val selection = EnvironmentVariantCatalogPolicyRequestV1(mode: selection_mode,
+        requested_provider: authority.parser_provider_identity, preferred_variant: preferred,
+        max_architecture: authority.execution_architecture,
+        max_startup_budget_us: 0u64, max_placement: 0u16,
+        max_feature_ceiling: ceiling)
+    val binding_digest = environment_variant_policy_digest256_v1(decision.policy_digest)?
+    Ok(EnvironmentVariantCatalogPolicyProjectionV1(cap_request: cap,
+        selection_request: selection, frontend_offload: decision.frontend_offload,
+        frontend_offload_auto: decision.frontend_offload_auto,
+        frontend_fallback: decision.frontend_fallback,
+        explain_policy_digest: decision.policy_digest,
+        binding_policy_digest: binding_digest))

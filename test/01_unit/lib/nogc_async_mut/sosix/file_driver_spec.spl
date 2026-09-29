@@ -1,0 +1,177 @@
+"""The reference file driver performs real positioned reads and writes on this host through the unified SOSIX ring: bytes written through the ring come back through the ring, short reads report partial progress, and a missing file surfaces as a typed native error."""
+
+use std.spec.*
+use std.env.platform.{get_temp_dir}
+use std.nogc_async_mut.io.{file_remove, file_read_text_at}
+use std.common.contracts.sosix.wait_v1.{SOSIX_SYNC_WAIT_COMPLETED}
+use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_NATIVE}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
+use std.nogc_async_mut.sosix.sync.{sosix_sync_fs_read_at, sosix_sync_fs_write_at}
+use std.nogc_async_mut.sosix.file_driver.{SosixHostedFileDriver, SOSIX_FILE_DRIVER_STATUS_IO}
+
+fn setup_sosix_hosted_fs() -> SosixHostedFs:
+    match SosixHostedFs.create(93u64, 7u64, 2):
+        case Ok(fs): fs
+        case Err(_):
+            fail("unresolved sosix oracle: hosted fs could not be created")
+            SosixHostedFs.create(93u64, 7u64, 2).unwrap()
+
+fn scratch_path(name: text) -> text:
+    # Fresh every example: a positioned write does not truncate, so stale bytes would leak in.
+    val path = get_temp_dir() + "/sosix_file_driver_" + name + ".txt"
+    file_remove(path)
+    path
+
+describe "SOSIX reference file driver on the host filesystem":
+    it "rejects a forged file or buffer generation before touching the host file":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Register one file and buffer, then write a known value")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("generation"))
+        val source = driver.buffer_from("safe")
+        val initial = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 4u64, 0u64)
+        expect(initial.error.kind).to_equal(0u8)
+
+        step("Reject a file reference with the same slot and a different generation")
+        val sink = driver.buffer_from("....")
+        val forged_file = SosixCapabilityRef(slot: file.slot, generation: file.generation + 1u32)
+        val bad_read = sosix_sync_fs_read_at(fs, driver, forged_file, sink, 0u64, 0u64, 4u64, 0u64)
+        expect(bad_read.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_read.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+        expect(driver.buffer_bytes(sink)).to_equal("....")
+
+        step("Reject a buffer reference with the same slot and a different generation")
+        val forged_buffer = SosixBufferRef(slot: source.slot, generation: source.generation + 1u32)
+        val bad_write = sosix_sync_fs_write_at(fs, driver, file, forged_buffer, 0u64, 0u64, 4u64, 0u64)
+        expect(bad_write.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(bad_write.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+        expect(driver.buffer_bytes(forged_buffer)).to_equal("")
+
+        step("The valid reference still reads the original bytes")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 4u64, 0u64)
+        expect(read.error.kind).to_equal(0u8)
+        expect(driver.buffer_bytes(sink)).to_equal("safe")
+
+    it "writes bytes through the ring and reads the same bytes back through the ring":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Register a host path and a source buffer with the driver")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("roundtrip"))
+        val source = driver.buffer_from("unified sosix bytes")
+        step("Write the buffer at offset 0 with one synchronous wait")
+        val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 19u64, 0u64)
+        expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(written.waits).to_equal(1u64)
+        expect(written.completion.transferred).to_equal(19u64)
+        expect(written.error.kind).to_equal(0u8)
+        step("Read the middle word back at file offset 8 into a fresh buffer")
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 8u64, 0u64, 5u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.completion.transferred).to_equal(5u64)
+        expect(driver.buffer_bytes(sink)).to_equal("sosix")
+        step("Both operations retired their leases: the ring is empty again")
+        expect(driver.services).to_equal(2u64)
+        expect(fs.telemetry().completions).to_equal(2u64)
+
+    it "reports a short read past the end of the file as partial progress":
+        step("Write five bytes, then ask for sixteen from offset 3")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("short"))
+        val source = driver.buffer_from("abcde")
+        expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 5u64, 0u64).outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 3u64, 0u64, 16u64, 0u64)
+        step("Only the two remaining bytes arrive and the completion says so")
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.completion.transferred).to_equal(2u64)
+        expect(read.completion.partial_progress).to_equal(true)
+        expect(driver.buffer_bytes(sink)).to_equal("de")
+
+    it "places a positioned read at the requested buffer offset without changing surrounding bytes":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Write a short file and register a destination with a prefix and suffix")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("read_buffer_offset"))
+        val source = driver.buffer_from("abc")
+        expect(sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 3u64, 0u64).outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        val sink = driver.buffer_from("XX.....YY")
+        step("Read two bytes from file offset one into destination buffer offset three")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 1u64, 3u64, 2u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.completion.transferred).to_equal(2u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+
+        step("Reject a destination offset past the registered bytes without changing them")
+        val rejected = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 10u64, 1u64, 0u64)
+        expect(rejected.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(rejected.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(rejected.completion.transferred).to_equal(0u64)
+        expect(driver.buffer_bytes(sink)).to_equal("XX.bc..YY")
+
+    it "surfaces a missing file as a typed native error after exactly one wait":
+        step("Read from a path that does not exist")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val file = driver.open_path(scratch_path("does_not_exist_") + "nope")
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 4u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(read.waits).to_equal(1u64)
+        expect(read.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(read.error.native_code).to_equal(SOSIX_FILE_DRIVER_STATUS_IO)
+        expect(driver.buffer_bytes(sink)).to_equal("")
+
+    it "round-trips through a native Windows-style backslash path (sosix C5 portable-fallback verification)":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        # 2026-09-20: this host is Windows; the driver has no OS-specific branch
+        # (see file_driver.spl's C5 TODO history), so a native backslash-separated
+        # path must round-trip through the same host_path_native normalization
+        # every other example here exercises with forward slashes.
+        step("Register a backslash-separated host path and write through it")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val backslash_path = scratch_path("winpath").replace("/", "\\")
+        val file = driver.open_path(backslash_path)
+        val source = driver.buffer_from("windows path bytes")
+        val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 0u64, 19u64, 0u64)
+        expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(written.error.kind).to_equal(0u8)
+        step("Read it back through the same ring")
+        val sink = driver.buffer_from("")
+        val read = sosix_sync_fs_read_at(fs, driver, file, sink, 0u64, 0u64, 19u64, 0u64)
+        expect(read.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(driver.buffer_bytes(sink)).to_equal("windows path bytes")
+
+    it "refuses a write whose buffer window starts past the buffer end without touching the file":
+        # @req REQ-SOSIX-FS-HOST-FILE
+        step("Ask to write 4 bytes from offset 10 of a 5-byte buffer")
+        val fs = setup_sosix_hosted_fs()
+        val driver = SosixHostedFileDriver.create()
+        val path = scratch_path("window")
+        val file = driver.open_path(path)
+        val source = driver.buffer_from("abcde")
+        val written = sosix_sync_fs_write_at(fs, driver, file, source, 0u64, 10u64, 4u64, 0u64)
+        expect(written.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(written.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(written.completion.transferred).to_equal(0u64)
+
+        step("Reject unsigned offsets and lengths that cannot fit the host I/O ABI")
+        val huge_offset = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0u64, 0x8000000000000000u64, 1u64, 0u64)
+        val huge_length = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0u64, 0u64, 0x8000000000000000u64, 0u64)
+        val huge_file_offset = sosix_sync_fs_write_at(
+            fs, driver, file, source, 0x8000000000000000u64, 0u64, 1u64, 0u64)
+        expect(huge_offset.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_length.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_file_offset.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(huge_offset.completion.transferred).to_equal(0u64)
+        expect(huge_length.completion.transferred).to_equal(0u64)
+        expect(huge_file_offset.completion.transferred).to_equal(0u64)
+        expect(file_read_text_at(path, 0, 1).is_err()).to_equal(true)

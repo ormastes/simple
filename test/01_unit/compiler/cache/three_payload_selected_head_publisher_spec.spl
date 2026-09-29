@@ -1,0 +1,88 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.publication.three_payload_generation_publisher_v1.{
+    ThreePayloadDurablePublicationPacketV1}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.*
+use test.fixtures.compiler.cache.three_payload_durable_packet_v1.{durable_packet_v1}
+
+fn selected_expectation_v1(packet: ThreePayloadDurablePublicationPacketV1
+) -> ThreePayloadSelectedHeadExpectationV1:
+    ThreePayloadSelectedHeadExpectationV1(prior_revision: 2,
+        prior_generation: packet.root.generation - 1,
+        target_generation: packet.root.generation,
+        target_manifest_digest: packet.root.manifest_digest,
+        accepted_journal_bytes: packet.durable.accepted_journal_bytes,
+        accepted_journal_digest: packet.durable.accepted_journal_prefix_digest,
+        operation_digest: packet.durable.operation_digest)
+
+describe "three-payload selected-head publication preflight":
+    it "validates a coherent target packet while refusing physical namespace authority":
+        step("Bind the target to the exact journal operation and immutable closure")
+        val packet = durable_packet_v1(7, "selected-target")
+        val expected = selected_expectation_v1(packet)
+        expect(three_payload_selected_head_expectation_valid_v1(expected, packet)).to_equal(true)
+        step("Leave publication closed until the namespace owner supplies physical authority")
+        expect(three_payload_selected_head_preflight_v1(expected, packet)).to_equal(
+            Err(ThreePayloadSelectedHeadCommitFailureV1.NamespaceUnavailable))
+
+    it "rejects malformed prior and mismatched target identities before authority checks":
+        val packet = durable_packet_v1(7, "identity")
+        val expected = selected_expectation_v1(packet)
+        var negative_revision = expected
+        negative_revision.prior_revision = -1
+        expect(three_payload_selected_head_preflight_v1(negative_revision, packet)).to_equal(
+            Err(ThreePayloadSelectedHeadCommitFailureV1.InvalidRequest))
+        var negative_prior = expected
+        negative_prior.prior_generation = -1
+        expect(three_payload_selected_head_expectation_valid_v1(negative_prior, packet)).to_equal(false)
+        var wrong_target = expected
+        wrong_target.target_generation = 8
+        expect(three_payload_selected_head_expectation_valid_v1(wrong_target, packet)).to_equal(false)
+        var wrong_manifest = expected
+        wrong_manifest.target_manifest_digest = sha256_text("other-manifest")
+        expect(three_payload_selected_head_expectation_valid_v1(wrong_manifest, packet)).to_equal(false)
+
+    it "rejects out-of-range prefixes and conflicting digest or operation bindings":
+        val packet = durable_packet_v1(7, "prefix")
+        val expected = selected_expectation_v1(packet)
+        var negative = expected
+        negative.accepted_journal_bytes = -1
+        expect(three_payload_selected_head_expectation_valid_v1(negative, packet)).to_equal(false)
+        var oversized = expected
+        oversized.accepted_journal_bytes = packet.journal.bytes.len() + 1
+        expect(three_payload_selected_head_expectation_valid_v1(oversized, packet)).to_equal(false)
+        var wrong_digest = expected
+        wrong_digest.accepted_journal_digest = sha256_text("different-prefix")
+        expect(three_payload_selected_head_expectation_valid_v1(wrong_digest, packet)).to_equal(false)
+        var wrong_operation = expected
+        wrong_operation.operation_digest = sha256_text("different-operation")
+        expect(three_payload_selected_head_expectation_valid_v1(wrong_operation, packet)).to_equal(false)
+
+    it "rejects a self-consistent copied receipt whose operation belongs to another sequence":
+        step("Change the receipt sequence while retaining its authentic operation digest")
+        val packet = durable_packet_v1(7, "sequence")
+        val expected = selected_expectation_v1(packet)
+        var altered = packet
+        var durable = packet.durable
+        durable.sequence = durable.sequence + 1
+        altered.durable = durable
+        expect(three_payload_selected_head_expectation_valid_v1(expected, altered)).to_equal(false)
+
+    it "allows later journal bytes without authorizing a different selected operation":
+        step("Retain the admitted prefix while the journal contains a later complete operation")
+        val packet = durable_packet_v1(7, "original")
+        val expected = selected_expectation_v1(packet)
+        val later = packet.journal.prepare(sha256_text("later-action"),
+            "public_summary", packet.prepared.manifest.summary_refs[0],
+            packet.root.manifest_digest).unwrap()
+        packet.journal.accept_durable(later).unwrap()
+        var extended = packet
+        var durable = packet.durable
+        durable.journal_digest = sha256_text(packet.journal.bytes)
+        extended.durable = durable
+        expect(three_payload_selected_head_expectation_valid_v1(expected, extended)).to_equal(true)
+        expect(three_payload_selected_head_preflight_v1(expected, extended)).to_equal(
+            Err(ThreePayloadSelectedHeadCommitFailureV1.NamespaceUnavailable))

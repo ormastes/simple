@@ -1,0 +1,123 @@
+# Ad-hoc bootstrap admission policy.
+#
+# This is a developer evidence lane, never a release/bootstrap admission lane.
+
+pub struct BootstrapAdhocDecision:
+    admitted: bool
+    lane: text
+    reason: text
+
+pub fn bootstrap_adhoc_lane_rank(lane: text) -> i64:
+    if lane == "frontend":
+        1
+    elif lane == "hir":
+        2
+    elif lane == "mir":
+        3
+    elif lane == "backend":
+        4
+    elif lane == "full":
+        5
+    else:
+        -1
+
+pub fn bootstrap_adhoc_path_lane(raw_path: text) -> text:
+    if raw_path.contains("\\"):
+        return "full"
+    val path = raw_path
+    if not path.starts_with("src/compiler/"):
+        return "full"
+    if path.starts_with("src/compiler/00.common/") or
+       path.starts_with("src/compiler/85.mdsoc/") or
+       path.starts_with("src/compiler/95.interp/") or
+       path.starts_with("src/compiler/99.loader/") or
+       path.starts_with("src/compiler/weaving/"):
+        return "full"
+    if path.starts_with("src/compiler/10.frontend/"):
+        return "frontend"
+    if path.starts_with("src/compiler/15.blocks/") or
+       path.starts_with("src/compiler/20.hir/") or
+       path.starts_with("src/compiler/25.traits/") or
+       path.starts_with("src/compiler/30.types/") or
+       path.starts_with("src/compiler/35.semantics/"):
+        return "hir"
+    if path.starts_with("src/compiler/40.mono/") or
+       path.starts_with("src/compiler/50.mir/") or
+       path.starts_with("src/compiler/55.borrow/") or
+       path.starts_with("src/compiler/60.mir_opt/"):
+        return "mir"
+    if path.starts_with("src/compiler/70.backend/") or
+       path.starts_with("src/compiler/80.driver/") or
+       path.starts_with("src/compiler/90.tools/"):
+        return "backend"
+    "full"
+
+pub fn bootstrap_adhoc_decide(changed_paths: [text], requested_lane: text) -> BootstrapAdhocDecision:
+    if changed_paths.len() == 0:
+        return BootstrapAdhocDecision(
+            admitted: false,
+            lane: "full",
+            reason: "at least one changed compiler path is required"
+        )
+
+    var required_lane = "frontend"
+    var required_rank = bootstrap_adhoc_lane_rank(required_lane)
+    for path in changed_paths:
+        val path_lane = bootstrap_adhoc_path_lane(path)
+        val path_rank = bootstrap_adhoc_lane_rank(path_lane)
+        if path_lane == "full":
+            return BootstrapAdhocDecision(
+                admitted: false,
+                lane: "full",
+                reason: "change requires full bootstrap: {path}"
+            )
+        if path_rank > required_rank:
+            required_lane = path_lane
+            required_rank = path_rank
+
+    val selected_lane = if requested_lane == "" or requested_lane == "auto":
+        required_lane
+    else:
+        requested_lane
+    val selected_rank = bootstrap_adhoc_lane_rank(selected_lane)
+    if selected_rank < 0 or selected_lane == "full":
+        return BootstrapAdhocDecision(
+            admitted: false,
+            lane: "full",
+            reason: "invalid ad-hoc lane: {selected_lane}"
+        )
+    if selected_rank < required_rank:
+        return BootstrapAdhocDecision(
+            admitted: false,
+            lane: required_lane,
+            reason: "requested lane {selected_lane} is narrower than required lane {required_lane}"
+        )
+    BootstrapAdhocDecision(
+        admitted: true,
+        lane: selected_lane,
+        reason: "ad-hoc evidence only; full Stage4 remains required"
+    )
+
+pub fn bootstrap_adhoc_pass_marker(lane: text) -> text:
+    "BOOTSTRAP_ADHOC_PASS lane={lane}"
+
+pub fn bootstrap_adhoc_output_has_exact_marker(output: text, lane: text) -> bool:
+    val expected = bootstrap_adhoc_pass_marker(lane)
+    val framed = "\n" + output + "\n"
+    framed.contains("\n" + expected + "\n")
+
+pub fn bootstrap_adhoc_timeout_ms(lane: text) -> i64:
+    if lane == "frontend":
+        120000
+    elif lane == "hir" or lane == "mir":
+        300000
+    else:
+        420000
+
+pub fn bootstrap_adhoc_memory_bytes(lane: text) -> i64:
+    if lane == "frontend":
+        2147483648
+    elif lane == "hir" or lane == "mir":
+        4294967296
+    else:
+        6442450944

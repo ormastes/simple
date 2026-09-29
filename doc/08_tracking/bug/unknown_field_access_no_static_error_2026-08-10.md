@@ -1,4 +1,8 @@
 # Unknown struct/class field access: no static error, silent phantom-field write
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — blast radius unquantified; hard-error decision deferred to user
 **Found:** 2026-08-10, investigating regression from `ca750206e0c7` (BoxGeometry refactor
@@ -43,3 +47,8 @@ same file), so counting hits over the spec corpus is vacuous. A run of
 `test/01_unit/compiler` showed 0 hits — vacuously. Quantifying requires either
 implementing the static check and sweeping, or a per-module `run`-path lowering
 sweep. Until that number exists, do not flip this to a hard error.
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: fix surface is the Rust seed (src/compiler_rust/compiler/src/hir/lower/expr/access.rs) and the record explicitly defers the hard-error policy decision to the user; not a bounded fix. No change made.
+

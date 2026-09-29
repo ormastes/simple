@@ -1,0 +1,27 @@
+"""Typed handoff failures cannot be interpreted as negative guest exits."""
+use std.spec.{describe, it, expect}
+use os.kernel.arch.user_handoff_result_v2.{
+    UserHandoffResultV2, UserHandoffErrorV2, user_handoff_legacy_status_v2
+}
+
+fn _guest_exit_v2(result: UserHandoffResultV2) -> i64?:
+    match result:
+        case UserHandoffResultV2.Exited(code): Some(code)
+        case UserHandoffResultV2.Failed(_): nil
+
+describe "typed user handoff completion":
+    it "preserves -4096 as a guest exit without using it as an absence sentinel":
+        val exited = _guest_exit_v2(UserHandoffResultV2.Exited(-4096))
+        expect(exited.is_some()).to_equal(true)
+        expect(exited.unwrap()).to_equal(-4096)
+        val missing = _guest_exit_v2(
+            UserHandoffResultV2.Failed(UserHandoffErrorV2.CompletionMissing))
+        expect(missing.is_some()).to_equal(false)
+
+    it "retains failure provenance even when legacy scalars collide":
+        val guest = UserHandoffResultV2.Exited(-22)
+        val rejected = UserHandoffResultV2.Failed(UserHandoffErrorV2.ValidationRejected)
+        expect(user_handoff_legacy_status_v2(guest)).to_equal(-22)
+        expect(user_handoff_legacy_status_v2(rejected)).to_equal(-22)
+        expect(_guest_exit_v2(guest).is_some()).to_equal(true)
+        expect(_guest_exit_v2(rejected).is_some()).to_equal(false)

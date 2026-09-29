@@ -6,8 +6,6 @@
 #
 # Requires compiled binary mode (spl_dlopen not available in interpreter).
 
-use app.mcp_t32.session_state.{McpT32Session}
-
 var T32_API_LIB_PATH = ""
 
 fn t32_ctypes_set_api_lib_path(path: text):
@@ -26,8 +24,10 @@ extern fn rt_memset(dest: i64, byte_val: i64, len: i64) -> i64
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_env_get(name: text) -> text
 extern fn rt_file_exists(path: text) -> bool
-extern fn stderr_write(data: text) -> i64
-extern fn stderr_flush() -> i64
+@unsafe(reason: "core runtime tagged-text diagnostic output ABI", capabilities: [ffi])
+extern fn rt_stderr_write(data: text) -> i64
+@unsafe(reason: "core runtime diagnostic output flush ABI", capabilities: [ffi])
+extern fn rt_stderr_flush()
 
 # --- Module state ---
 
@@ -41,8 +41,9 @@ var _t32_fptr_cache: {text: i64} = {}
 # --- Internal helpers ---
 
 fn _t32_ctypes_log(msg: text):
-    stderr_write("[t32-ctypes] " + msg + "\n")
-    stderr_flush()
+    unsafe(capabilities: [ffi]):
+        rt_stderr_write("[t32-ctypes] " + msg + "\n")
+        rt_stderr_flush()
 
 fn _t32_fptr(name: text) -> i64:
     if _t32_fptr_cache.contains(name):
@@ -201,7 +202,7 @@ fn t32_ctypes_get_message() -> (text, i64):
     val msg_type = rt_ptr_read_i32(type_buf, 0)
     rt_free(msg_buf)
     rt_free(type_buf)
-    (message, i64(msg_type))
+    (message, msg_type.to_i64())
 
 fn t32_ctypes_get_practice_state() -> i64:
     val state_buf = rt_alloc(8)
@@ -212,7 +213,7 @@ fn t32_ctypes_get_practice_state() -> i64:
         return -1
     val state = rt_ptr_read_i32(state_buf, 0)
     rt_free(state_buf)
-    i64(state)
+    state.to_i64()
 
 # --- Unified adapter (matches t32_run_remote signature) ---
 
@@ -230,6 +231,3 @@ fn t32_ctypes_run_remote(session: McpT32Session, cmd: text) -> (text, i64):
         return ("", rc)
     # Everything else → T32_Cmd
     t32_ctypes_cmd(cmd.trim())
-
-export t32_ctypes_load, t32_ctypes_available, t32_ctypes_init, t32_ctypes_eval, t32_ctypes_set_api_lib_path
-export t32_ctypes_get_message, t32_ctypes_get_practice_state, t32_ctypes_run_remote

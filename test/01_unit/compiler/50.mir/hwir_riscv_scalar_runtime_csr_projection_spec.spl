@@ -1,0 +1,162 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostEvaluation, HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_csr_admission.{strict_riscv_scalar_runtime_csr_admission}
+use compiler.mir.hwir.riscv_scalar_runtime_csr_projection.{strict_riscv_scalar_runtime_csr_projection}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn csr_instruction(csr: i64, rs1_or_zimm: i64, funct3: i64, rd: i64) -> i64:
+    (csr << 20) | (rs1_or_zimm << 15) | (funct3 << 12) | (rd << 7) | 0x73
+
+fn dynamic_csr_capture_inputs(contract, row_number: i64, instruction: i64,
+    handshake: i64, provider_tag: i64, rs1_value: i64, privilege: i64,
+    csr_present: i64, csr_read_value: i64) -> [HwHostInput]:
+    val row = contract.rows[row_number as i32]
+    [HwHostInput.bits("request_handshake", handshake), HwHostInput.bits("request_provider_tag", provider_tag),
+        HwHostInput.bits("decode_legal", 1), HwHostInput.bits("decoded_row_index", row.decoded_row_index),
+        HwHostInput.bits("decoded_execution_class", 6), HwHostInput.bits("decoded_memory_effect", 3),
+        HwHostInput.bits("decoded_semantic_opcode", row.semantic_opcode),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", 0),
+        HwHostInput.bits("canonical_instruction", instruction), HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4), HwHostInput.bits("instruction_rd_field", (instruction >> 7) & 31),
+        HwHostInput.bits("instruction_rs1_field", (instruction >> 15) & 31), HwHostInput.bits("instruction_rs2_field", (instruction >> 20) & 31),
+        HwHostInput.bits("rs1_value", rs1_value), HwHostInput.bits("pc_before", 0x100), HwHostInput.bits("fallthrough_pc", 0x104),
+        HwHostInput.bits("privilege", privilege), HwHostInput.bits("provider_event_id", 7), HwHostInput.bits("decode_event_id", 7),
+        HwHostInput.bits("lineage_valid", 1), HwHostInput.bits("illegal_valid", 0), HwHostInput.bits("csr_present", csr_present),
+        HwHostInput.bits("csr_read_value", csr_read_value)]
+
+fn dynamic_csr_capture_eval(module, contract, handshake: i64) -> HwHostEvaluation:
+    val instruction = csr_instruction(0x300, 0, 1, 1)
+    evaluate_strict_comb_hwir(module,
+        dynamic_csr_capture_inputs(contract, 0, instruction, handshake, 3, 99, 3, 1, 16)).unwrap()
+
+describe "dynamic runtime Zicsr capture projection":
+    it "closes the exact plan-bound projection with the capture-only service ABI":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val contract = strict_riscv_scalar_runtime_csr_admission(config, plan).unwrap()
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_capture", config, plan).unwrap()
+        expect(module.shape_diagnostic()).to_equal("")
+        expect(module.port_width("request_handshake")).to_equal(1)
+        expect(module.port_width("csr_read_value")).to_equal(64)
+        expect(module.port_width("csr_lookup_address")).to_equal(12)
+        expect(module.port_width("legal_commit_value")).to_equal(64)
+        expect(module.origins[0].source_name).to_contain(contract.structural_sha256())
+        expect(module.origins.len()).to_equal(7)
+        expect(module.origins.any(_.source_name == "rv.zicsr.csrrw")).to_be(true)
+        expect(module.origins.any(_.source_name == "rv.zicsr.csrrci")).to_be(true)
+
+    it "has explicit raw extraction, all six row gates, staged controls, and policy proof":
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_rows",
+            CoreConfig.rv32_zicsr_zifencei(), riscv_scalar_decoder_plan("rv32i_zicsr_zifencei").unwrap()).unwrap()
+        for name in ["rd_shift", "rs1_shift", "rs2_shift", "canonical_rd", "canonical_rs1", "canonical_rs2",
+                "row_match_0", "row_match_1", "row_match_2", "row_match_3", "row_match_4", "row_match_5",
+                "immediate", "set_form", "clear_form", "write_always", "read_suppress", "policy_ok", "trap_pre"]:
+            expect(module.datapath_width(name)).to_be_greater_than(0)
+        var canonical_rd_extract = false; var canonical_rs1_extract = false; var canonical_rs2_extract = false
+        var malformed_tag_gate = false; var x0_write_gate = false; var readonly_gate = false
+        for op in module.comb_ops:
+            if op.result == "canonical_rd" and op.op == "trunc" and op.lhs == "rd_shift": canonical_rd_extract = true
+            if op.result == "canonical_rs1" and op.op == "trunc" and op.lhs == "rs1_shift": canonical_rs1_extract = true
+            if op.result == "canonical_rs2" and op.op == "trunc" and op.lhs == "rs2_shift": canonical_rs2_extract = true
+            if op.result == "fault01" and op.lhs == "admitted_capture" and op.rhs == "admission_missing": malformed_tag_gate = true
+            if op.result == "write_requested" and op.lhs == "write_always" and op.rhs == "rs1_nonzero": x0_write_gate = true
+            if op.result == "readonly_write" and op.lhs == "readonly" and op.rhs == "write_requested": readonly_gate = true
+        expect(canonical_rd_extract).to_be(true)
+        expect(canonical_rs1_extract).to_be(true)
+        expect(canonical_rs2_extract).to_be(true)
+        expect(malformed_tag_gate).to_be(true)
+        expect(x0_write_gate).to_be(true)
+        expect(readonly_gate).to_be(true)
+        expect(module.compare_ops.any(_.result == "tag_ok" and _.lhs == "request_provider_tag" and _.rhs == "tag_csr")).to_be(true)
+        expect(module.compare_ops.any(_.result == "form_encoding_0" and _.lhs == "masked_0" and _.rhs == "value_0")).to_be(true)
+        expect(module.compare_ops.any(_.result == "readonly" and _.lhs == "read_only_class" and _.rhs == "three2")).to_be(true)
+        expect(module.select_ops.any(_.result == "source_pre" and _.condition == "immediate")).to_be(true)
+        expect(module.select_ops.any(_.result == "source_value" and _.condition == "rs1_zero")).to_be(true)
+        expect(module.select_ops.any(_.result == "read_requested" and _.condition == "read_suppress" and _.when_true == "not_rd_zero" and _.when_false == "one1")).to_be(true)
+        expect(module.select_ops.any(_.result == "legal_commit_intent" and _.condition == "admitted")).to_be(true)
+
+    it "uses compare predicates and only exposes trap or commit data after capture admission":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val contract = strict_riscv_scalar_runtime_csr_admission(config, plan).unwrap()
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_eval", config, plan).unwrap()
+        expect(module.comb_ops.any(_.op == "eq" or _.op == "ne" or _.op == "ge")).to_be(false)
+        expect(module.comb_ops.any(_.result == "privilege_sufficient" and _.op == "uge")).to_be(true)
+        val captured = dynamic_csr_capture_eval(module, contract, 1)
+        expect(captured.value_of("admitted").unwrap()).to_equal(1)
+        expect(captured.value_of("csr_lookup_read_enable").unwrap()).to_equal(1)
+        expect(captured.value_of("legal_commit_intent").unwrap()).to_equal(1)
+        expect(captured.value_of("legal_commit_address").unwrap()).to_equal(0x300)
+        expect(captured.value_of("legal_commit_value").unwrap()).to_equal(0)
+        val idle = dynamic_csr_capture_eval(module, contract, 0)
+        expect(idle.value_of("admitted").unwrap()).to_equal(0)
+        expect(idle.value_of("execute_trap_cause").unwrap()).to_equal(0)
+        expect(idle.value_of("legal_commit_address").unwrap()).to_equal(0)
+        expect(idle.value_of("legal_commit_value").unwrap()).to_equal(0)
+
+    it "evaluates every Zicsr form with its frozen row and exact commit intent":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val contract = strict_riscv_scalar_runtime_csr_admission(config, plan).unwrap()
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_all_forms", config, plan).unwrap()
+        # row, funct3, source field, host rs1, expected final write value.
+        for case in [(0, 1, 5, 10, 10), (1, 2, 5, 10, 26), (2, 3, 6, 6, 16),
+                (3, 5, 3, 99, 3), (4, 6, 3, 99, 19), (5, 7, 3, 99, 16)]:
+            val instruction = csr_instruction(0x300, case[2], case[1], 1)
+            val result = evaluate_strict_comb_hwir(module, dynamic_csr_capture_inputs(contract,
+                case[0], instruction, 1, 3, case[3], 3, 1, 16)).unwrap()
+            expect(result.value_of("admitted").unwrap()).to_equal(1)
+            expect(result.value_of("protocol_fault_candidate").unwrap()).to_equal(0)
+            expect(result.value_of("access_allowed").unwrap()).to_equal(1)
+            expect(result.value_of("execute_trap_valid").unwrap()).to_equal(0)
+            expect(result.value_of("csr_lookup_address").unwrap()).to_equal(0x300)
+            expect(result.value_of("csr_lookup_read_enable").unwrap()).to_equal(1)
+            expect(result.value_of("legal_commit_intent").unwrap()).to_equal(1)
+            expect(result.value_of("legal_commit_value").unwrap()).to_equal(case[4])
+
+    it "normalizes x0 and suppresses only CSRRW and CSRRWI reads when rd is x0":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val contract = strict_riscv_scalar_runtime_csr_admission(config, plan).unwrap()
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_x0", config, plan).unwrap()
+        for case in [(0, 1, 0), (3, 5, 7)]:
+            val result = evaluate_strict_comb_hwir(module, dynamic_csr_capture_inputs(contract, case[0],
+                csr_instruction(0x300, case[2], case[1], 0), 1, 3, 99, 3, 1, 16)).unwrap()
+            expect(result.value_of("admitted").unwrap()).to_equal(1)
+            expect(result.value_of("csr_lookup_read_enable").unwrap()).to_equal(0)
+            expect(result.value_of("legal_commit_intent").unwrap()).to_equal(1)
+        val hostile_x0 = evaluate_strict_comb_hwir(module, dynamic_csr_capture_inputs(contract, 1,
+            csr_instruction(0x300, 0, 2, 1), 1, 3, 99, 3, 1, 16)).unwrap()
+        expect(hostile_x0.value_of("admitted").unwrap()).to_equal(1)
+        expect(hostile_x0.value_of("csr_lookup_read_enable").unwrap()).to_equal(1)
+        expect(hostile_x0.value_of("legal_commit_intent").unwrap()).to_equal(0)
+        expect(hostile_x0.value_of("legal_commit_value").unwrap()).to_equal(0)
+
+    it "distinguishes malformed tag-three claims from tag-outside idle and execute access traps":
+        val config = CoreConfig.rv64_zicsr_zifencei()
+        val plan = riscv_scalar_decoder_plan("rv64i_zicsr_zifencei").unwrap()
+        val contract = strict_riscv_scalar_runtime_csr_admission(config, plan).unwrap()
+        val module = strict_riscv_scalar_runtime_csr_projection("runtime_csr_faults", config, plan).unwrap()
+        val instruction = csr_instruction(0x300, 1, 2, 1)
+        val outside = evaluate_strict_comb_hwir(module, dynamic_csr_capture_inputs(contract,
+            1, instruction, 1, 2, 1, 3, 1, 16)).unwrap()
+        expect(outside.value_of("admitted").unwrap()).to_equal(0)
+        expect(outside.value_of("protocol_fault_candidate").unwrap()).to_equal(0)
+        for input_index in [3, 5, 6, 11, 12, 13]:
+            var malformed = dynamic_csr_capture_inputs(contract, 1, instruction, 1, 3, 1, 3, 1, 16)
+            malformed[input_index] = HwHostInput.bits(malformed[input_index].name, malformed[input_index].value + 1)
+            val result = evaluate_strict_comb_hwir(module, malformed).unwrap()
+            expect(result.value_of("admitted").unwrap()).to_equal(0)
+            expect(result.value_of("protocol_fault_candidate").unwrap()).to_equal(1)
+            expect(result.value_of("execute_trap_valid").unwrap()).to_equal(0)
+        for policy_case in [(0, 3, 1), (1, 1, 1), (1, 3, 1)]:
+            val csr = if policy_case[0] == 0: 0x300 elif policy_case[1] == 1: 0x300 else: 0xc00
+            val present = if policy_case[0] == 0: 0 else: 1
+            val result = evaluate_strict_comb_hwir(module, dynamic_csr_capture_inputs(contract, 1,
+                csr_instruction(csr, policy_case[2], 2, 1), 1, 3, 1, policy_case[1], present, 16)).unwrap()
+            expect(result.value_of("admitted").unwrap()).to_equal(1)
+            expect(result.value_of("protocol_fault_candidate").unwrap()).to_equal(0)
+            expect(result.value_of("execute_trap_valid").unwrap()).to_equal(1)
+            expect(result.value_of("execute_trap_cause").unwrap()).to_equal(2)
+            expect(result.value_of("legal_commit_intent").unwrap()).to_equal(0)

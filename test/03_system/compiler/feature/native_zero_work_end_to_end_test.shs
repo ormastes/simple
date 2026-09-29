@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+runtime=${SIMPLE_BIN:-bin/release/simple}
+case "$runtime" in
+  /*) ;;
+  *) runtime="$PWD/$runtime" ;;
+esac
+if [ ! -x "$runtime" ]; then
+  echo "STATUS: BLOCKED — compatible self-hosted runtime unavailable"
+  exit 2
+fi
+if ! "$runtime" --version >/dev/null 2>&1; then
+  echo "STATUS: BLOCKED — compatible self-hosted runtime unavailable"
+  exit 2
+fi
+
+root=${TMPDIR:-/tmp}/simple-native-zero-work-e2e.$$
+cache=$root/cache
+output=$root/app
+mkdir -p "$root"
+fixture=test/03_system/app/compiler/feature/fixtures/minimal_native_compile_main.spl
+env SIMPLE_NATIVE_NOOP_CACHE_ROOT="$cache" "$runtime" native-build \
+  --source src/compiler --source src/lib --entry-closure --entry "$fixture" \
+  --output "$output" >"$root/first.log" 2>"$root/first.err"
+env SIMPLE_NATIVE_NOOP_CACHE_ROOT="$cache" "$runtime" native-build \
+  --source src/compiler --source src/lib --entry-closure --entry "$fixture" \
+  --output "$output" >"$root/second.log" 2>"$root/second.err"
+receipt=$(sed -n '/\[MBH-NFR-002\] admission=hit/p' "$root/second.log")
+case "$receipt" in
+  *"parser=0 hir=0 mir=0 codegen=0 link=0"*) ;;
+  *) echo "FAIL: unchanged native-build did not report zero scheduler work"; exit 1 ;;
+esac
+printf '%s\n' "$receipt"
+echo "PASS: actual native-build zero-work counters"

@@ -25,8 +25,20 @@ The package exposes two dependency-free Node entrypoints:
 node cli/spipe.js info
 node cli/spipe.js experts
 node cli/spipe.js doctor ../..
+node cli/spipe.js reverse-references inventory.json A-target --cursor-key-file .spipe/reverse-reference.key --folder doc
 node mcp/server.js
 ```
+
+`reverse-references` exposes the snapshot-bound folder index as stable JSON.
+It reads an already compiled inventory and requires a caller-owned cursor-key
+file, allowing authenticated pagination across separate CLI invocations
+without adding a filesystem scan to the query path. See `cli/README.md`.
+
+The MCP server exposes the same compiled-inventory query as
+`spipe_folder_reverse_references`. Its schema requires `inventory_path` and
+`target_uid`; optional `folder_path`, `limit`, `max_work_units`, and
+authenticated `cursor` fields provide deterministic bounded pagination. See
+`mcp/README.md` for cache invalidation and continuation details.
 
 `doctor` checks both reusable SPipe process surfaces and host mount invariants
 such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and
@@ -34,14 +46,6 @@ such as `.spipe/doc`, `.spipe/spipe_project`, `.spipe/spipe`, and
 
 When installed as an npm-style package, the binaries are `spipe` and
 `spipe-mcp`.
-
-Protected release policy is available through `release-guide` and
-`release-capabilities`. These are inspection commands, not release mutation
-commands: signing, protected-ref updates, and publication remain external,
-explicitly authorized operations. The guide also explains why GitHub authors
-cannot submit an `APPROVED` review, how the separate `SPipe Self Review
-Admission` required status works, its five scope kinds, and the exact
-remediation class for rejection or invalidation.
 
 The CLI also owns the reusable LLM fine-tune process. It can initialize host
 attempt registries, record data downloads, model research, base-model choice,
@@ -66,7 +70,7 @@ Run the package layout check before publishing or updating a host submodule
 pointer:
 
 ```sh
-sh scripts/build.shs
+sh scripts/build.sh
 ```
 
 Host repositories that mount SPipe as submodules should also keep the parent
@@ -94,6 +98,14 @@ docs:
 
 The Unix setup script also accepts `--doc-root PATH` or `SPIPE_DOC_ROOT=PATH`.
 
+When the selected host is a Simple workspace, this command also installs the
+repository root-manifest pre-commit hook in the default `.git/hooks` directory.
+It does so only when the host has `FILE.md`,
+`scripts/setup/setup-hooks.shs`, and
+`scripts/hooks/pre-commit-root-guard`; other hosts, incomplete checkouts, and
+`--dry-run` report the skipped or planned hook action without modifying hooks.
+The existing repository installer owns hook preservation and verification.
+
 On Windows PowerShell:
 
 ```powershell
@@ -102,15 +114,6 @@ powershell -ExecutionPolicy Bypass -File .spipe\spipe\scripts\setup-spipe-links.
 
 Use `--force` or `-Force` only when replacing existing host directories with
 links to this module.
-
-## Guarded release operations
-
-The CLI and MCP server expose deterministic validation/planning operations for
-isolated sessions, read-only main fix discovery, reviewed beta backports,
-release-first forward ports, immutable candidates, and exact promotion. They
-perform no repository or release mutation. Main-fix discovery never selects or
-cherry-picks a candidate; external protected authorities remain responsible
-for integration, signing, pushing, and publication.
 
 ## Subproject Experts
 

@@ -68,6 +68,24 @@ gate_error() {
     exit 2
 }
 
+# Cleanup registry for mktemp'd work dirs. A single trap registered ONCE here
+# (rather than a fresh `trap ... EXIT` at every mktemp site) because
+# hw_check_candidate's own work dir is created and torn down NESTED inside
+# hw_selftest's work dir's lifetime (hw_selftest calls hw_check_candidate per
+# fixture) -- a per-site EXIT trap would silently clobber the outer one when
+# the inner function returns, leaving the outer dir unprotected against a
+# later interrupt. Accumulating into one list and trapping once avoids that.
+HW_CLEANUP_DIRS=""
+hw_register_cleanup_dir() {
+    HW_CLEANUP_DIRS="$HW_CLEANUP_DIRS $1"
+}
+hw_cleanup_all() {
+    for hw_cleanup_dir in $HW_CLEANUP_DIRS; do
+        rm -rf "$hw_cleanup_dir"
+    done
+}
+trap hw_cleanup_all EXIT HUP INT TERM
+
 case "$HW_THREADS" in
     ''|*[!0-9]*|0) gate_error "HW_THREADS must be a positive integer" ;;
 esac
@@ -143,6 +161,19 @@ hw_probe() {
     if [ "$HW_RC" -ne 0 ]; then
         HW_CLASS=fail
         HW_DETAIL="build exited $HW_RC"
+        # Echo the build log's tail. Without this the gate emits a one-line
+        # verdict naming only the exit code, the mktemp'd work dir is removed
+        # by the cleanup trap, and the ONLY evidence of why the build failed is
+        # gone -- which on 2026-09-06 cost an hour on a failure that does not
+        # reproduce standalone (the gate runs concurrently with the stage
+        # engine, so contention-only failures are exactly the ones needing this
+        # log). Printed BEFORE the verdict so the last-line verdict contract,
+        # which bootstrap-qualify-stage2.shs greps, is untouched.
+        if [ -s "$hw_log" ]; then
+            echo "--- build log tail ($hw_form form, rc=$HW_RC) ---" >&2
+            tail -n 30 "$hw_log" >&2
+            echo "--- end build log tail ---" >&2
+        fi
         return 0
     fi
     if [ ! -x "$hw_out" ]; then
@@ -188,6 +219,7 @@ hw_check_candidate() {
     hwc_candidate=$1
     hwc_name=$(basename "$hwc_candidate")
     hwc_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build.XXXXXX") || return 1
+    hw_register_cleanup_dir "$hwc_work"
 
     hw_probe "$hwc_candidate" "$hwc_work" entry
     HW_CHECKED=$((HW_CHECKED + 1))
@@ -212,6 +244,7 @@ hw_check_candidate() {
 hw_selftest() {
     st_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build-selftest.XXXXXX") ||
         gate_error "selftest could not create a work dir"
+    hw_register_cleanup_dir "$st_work"
     st_fail=""
     st_n=0
 

@@ -28,7 +28,7 @@ test_runner_args_ci_spec -> app
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -108,6 +108,32 @@ expect(options.sdoctest).to_equal(true)
 
 </details>
 
+#### enables every maintained test surface in whole mode
+
+- enables every maintained test surface in whole mode
+   - Expected: options.run_all is true
+   - Expected: options.sdoctest is true
+   - Expected: options.spl_doctest is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-UNIT
+step("enables every maintained test surface in whole mode")
+val options = parse_test_args(["--whole"])
+
+expect(options.run_all).to_equal(true)
+expect(options.sdoctest).to_equal(true)
+expect(options.spl_doctest).to_equal(true)
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -127,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

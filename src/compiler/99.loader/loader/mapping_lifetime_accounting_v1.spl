@@ -1,0 +1,525 @@
+# Provider-neutral mapping lifetime and resident-byte accounting.
+#
+# This owner does not call mmap/munmap.  It creates a close permit only after
+# retirement has blocked new pins and all existing pins have drained.  The
+# provider must return the permit with its close result.  Failed closes retain
+# the mapping and its resident-byte charge for a later, freshly-tokened retry.
+
+val MAPPING_LIFETIME_SEQUENCE_MAX_V1: i64 = 2147483647
+val MAPPING_LIFETIME_ID_MAX_BYTES_V1: i64 = 256
+
+enum MappingLifetimePhaseV1:
+    Live
+    Retiring
+    Closing
+    Retryable
+
+enum MappingLifetimeFailureV1:
+    NoFailure
+    InvalidLedger
+    InvalidMapping
+    CapacityExceeded
+    DuplicateMapping
+    MappingMissing
+    MappingNotLive
+    MappingPinned
+    LedgerIdentityMismatch
+    StalePinReceipt
+    SequenceExhausted
+    CloseAlreadyPending
+    StaleClosePermit
+    CloseFailed
+
+struct MappingLifetimeRecordV1:
+    mapping_id: text
+    mapping_sequence: i64
+    mapped_bytes: i64
+    live_pin_tokens: [i64]
+    phase: MappingLifetimePhaseV1
+    active_close_token: i64
+
+struct MappingPinReceiptV1:
+    ledger_owner: text
+    ledger_epoch: i64
+    mapping_id: text
+    mapping_sequence: i64
+    pin_token: i64
+
+struct MappingClosePermitV1:
+    ledger_owner: text
+    ledger_epoch: i64
+    mapping_id: text
+    mapping_sequence: i64
+    close_token: i64
+    mapped_bytes: i64
+
+struct MappingLifetimeLedgerV1:
+    ledger_owner: text
+    ledger_epoch: i64
+    max_records: i64
+    max_resident_bytes: i64
+    next_mapping_sequence: i64
+    next_pin_token: i64
+    next_close_token: i64
+    records: [MappingLifetimeRecordV1]
+    resident_bytes: i64
+    close_attempts: i64
+    pin_refusals: i64
+    close_failures: i64
+    releases_completed: i64
+
+struct MappingLifetimeCheckV1:
+    ok: bool
+    reason: text
+
+struct MappingLifetimeTransitionV1:
+    ok: bool
+    ledger: MappingLifetimeLedgerV1
+    failure: MappingLifetimeFailureV1
+    reason: text
+    pin_receipt_present: bool
+    pin_receipt: MappingPinReceiptV1
+    close_permit_present: bool
+    close_permit: MappingClosePermitV1
+
+fn _mapping_pin_receipt_empty_v1() -> MappingPinReceiptV1:
+    MappingPinReceiptV1(
+        ledger_owner: "",
+        ledger_epoch: 0,
+        mapping_id: "",
+        mapping_sequence: 0,
+        pin_token: 0,
+    )
+
+fn _mapping_close_permit_empty_v1() -> MappingClosePermitV1:
+    MappingClosePermitV1(
+        ledger_owner: "",
+        ledger_epoch: 0,
+        mapping_id: "",
+        mapping_sequence: 0,
+        close_token: 0,
+        mapped_bytes: 0,
+    )
+
+fn _mapping_lifetime_transition_v1(
+    ok: bool,
+    ledger: MappingLifetimeLedgerV1,
+    failure: MappingLifetimeFailureV1,
+    reason: text,
+) -> MappingLifetimeTransitionV1:
+    MappingLifetimeTransitionV1(
+        ok: ok,
+        ledger: ledger,
+        failure: failure,
+        reason: reason,
+        pin_receipt_present: false,
+        pin_receipt: _mapping_pin_receipt_empty_v1(),
+        close_permit_present: false,
+        close_permit: _mapping_close_permit_empty_v1(),
+    )
+
+fn _mapping_lifetime_transition_with_permit_v1(
+    ledger: MappingLifetimeLedgerV1,
+    permit: MappingClosePermitV1,
+) -> MappingLifetimeTransitionV1:
+    MappingLifetimeTransitionV1(
+        ok: true,
+        ledger: ledger,
+        failure: MappingLifetimeFailureV1.NoFailure,
+        reason: "",
+        pin_receipt_present: false,
+        pin_receipt: _mapping_pin_receipt_empty_v1(),
+        close_permit_present: true,
+        close_permit: permit,
+    )
+
+fn _mapping_lifetime_transition_with_pin_v1(
+    ledger: MappingLifetimeLedgerV1,
+    receipt: MappingPinReceiptV1,
+) -> MappingLifetimeTransitionV1:
+    MappingLifetimeTransitionV1(
+        ok: true,
+        ledger: ledger,
+        failure: MappingLifetimeFailureV1.NoFailure,
+        reason: "",
+        pin_receipt_present: true,
+        pin_receipt: receipt,
+        close_permit_present: false,
+        close_permit: _mapping_close_permit_empty_v1(),
+    )
+
+fn _mapping_lifetime_counter_increment_v1(value: i64) -> i64:
+    # Accounting counters saturate rather than blocking a provider result from
+    # committing the authoritative ownership transition.
+    if value >= MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return MAPPING_LIFETIME_SEQUENCE_MAX_V1
+    value + 1
+
+fn mapping_lifetime_ledger_v1(ledger_owner: text,
+                              ledger_epoch: i64,
+                              max_records: i64,
+                              max_resident_bytes: i64) -> MappingLifetimeLedgerV1:
+    MappingLifetimeLedgerV1(
+        ledger_owner: ledger_owner,
+        ledger_epoch: ledger_epoch,
+        max_records: max_records,
+        max_resident_bytes: max_resident_bytes,
+        next_mapping_sequence: 1,
+        next_pin_token: 1,
+        next_close_token: 1,
+        records: [],
+        resident_bytes: 0,
+        close_attempts: 0,
+        pin_refusals: 0,
+        close_failures: 0,
+        releases_completed: 0,
+    )
+
+fn _mapping_lifetime_find_index_v1(ledger: MappingLifetimeLedgerV1,
+                                   mapping_id: text) -> i64:
+    var i: i64 = 0
+    while i < ledger.records.len():
+        if ledger.records[i].mapping_id == mapping_id:
+            return i
+        i = i + 1
+    -1
+
+fn mapping_lifetime_get_v1(ledger: MappingLifetimeLedgerV1,
+                           mapping_id: text) -> MappingLifetimeRecordV1?:
+    val index = _mapping_lifetime_find_index_v1(ledger, mapping_id)
+    if index < 0:
+        return nil
+    Some(ledger.records[index])
+
+fn _mapping_lifetime_header_check_v1(
+    ledger: MappingLifetimeLedgerV1,
+) -> MappingLifetimeCheckV1:
+    if ledger.ledger_owner.len() == 0 or
+       ledger.ledger_owner.len() > MAPPING_LIFETIME_ID_MAX_BYTES_V1 or
+       ledger.ledger_epoch <= 0:
+        return MappingLifetimeCheckV1(ok: false, reason: "ledger-identity")
+    if ledger.max_records <= 0 or ledger.max_resident_bytes <= 0:
+        return MappingLifetimeCheckV1(ok: false, reason: "invalid-capacity")
+    if ledger.records.len() > ledger.max_records:
+        return MappingLifetimeCheckV1(ok: false, reason: "record-capacity")
+    if ledger.next_mapping_sequence <= 0 or
+       ledger.next_mapping_sequence > MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return MappingLifetimeCheckV1(ok: false, reason: "mapping-sequence")
+    if ledger.next_pin_token <= 0 or
+       ledger.next_pin_token > MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return MappingLifetimeCheckV1(ok: false, reason: "pin-sequence")
+    if ledger.next_close_token <= 0 or
+       ledger.next_close_token > MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return MappingLifetimeCheckV1(ok: false, reason: "close-sequence")
+    if ledger.resident_bytes < 0 or ledger.resident_bytes > ledger.max_resident_bytes:
+        return MappingLifetimeCheckV1(ok: false, reason: "resident-bound")
+    if ledger.close_attempts < 0 or ledger.pin_refusals < 0 or
+       ledger.close_failures < 0 or ledger.releases_completed < 0 or
+       ledger.close_attempts > MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+       ledger.pin_refusals > MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+       ledger.close_failures > MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+        ledger.releases_completed > MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return MappingLifetimeCheckV1(ok: false, reason: "negative-counter")
+    MappingLifetimeCheckV1(ok: true, reason: "")
+
+fn _mapping_lifetime_record_shallow_valid_v1(
+    ledger: MappingLifetimeLedgerV1,
+    record: MappingLifetimeRecordV1,
+) -> bool:
+    if record.mapping_id.len() == 0 or
+       record.mapping_id.len() > MAPPING_LIFETIME_ID_MAX_BYTES_V1:
+        return false
+    if record.mapping_sequence <= 0 or
+       record.mapping_sequence >= ledger.next_mapping_sequence or
+       record.mapped_bytes <= 0:
+        return false
+    if record.phase == MappingLifetimePhaseV1.Closing:
+        return record.live_pin_tokens.len() == 0 and
+            record.active_close_token > 0 and
+            record.active_close_token < ledger.next_close_token
+    if record.active_close_token != 0:
+        return false
+    if record.phase == MappingLifetimePhaseV1.Retryable:
+        return record.live_pin_tokens.len() == 0
+    true
+
+fn mapping_lifetime_pin_count_v1(ledger: MappingLifetimeLedgerV1,
+                                 mapping_id: text) -> i64:
+    val index = _mapping_lifetime_find_index_v1(ledger, mapping_id)
+    if index < 0:
+        return 0
+    ledger.records[index].live_pin_tokens.len()
+
+fn mapping_lifetime_check_v1(ledger: MappingLifetimeLedgerV1) -> MappingLifetimeCheckV1:
+    # This is the diagnostic/full validator. Transitions use only the O(1)
+    # header and selected-record checks, so hot pin/close paths do not pay this
+    # function's duplicate-identity audit.
+    val header = _mapping_lifetime_header_check_v1(ledger)
+    if not header.ok:
+        return header
+
+    var computed_resident: i64 = 0
+    var i: i64 = 0
+    while i < ledger.records.len():
+        val record = ledger.records[i]
+        if not _mapping_lifetime_record_shallow_valid_v1(ledger, record):
+            return MappingLifetimeCheckV1(ok: false, reason: "record-field")
+        if computed_resident > ledger.max_resident_bytes - record.mapped_bytes:
+            return MappingLifetimeCheckV1(ok: false, reason: "resident-overflow")
+        computed_resident = computed_resident + record.mapped_bytes
+        if record.phase == MappingLifetimePhaseV1.Closing:
+            if record.live_pin_tokens.len() != 0 or record.active_close_token <= 0:
+                return MappingLifetimeCheckV1(ok: false, reason: "closing-invariant")
+            if record.active_close_token >= ledger.next_close_token:
+                return MappingLifetimeCheckV1(ok: false, reason: "close-sequence-order")
+        else:
+            if record.active_close_token != 0:
+                return MappingLifetimeCheckV1(ok: false, reason: "inactive-close-token")
+            if record.phase == MappingLifetimePhaseV1.Retryable and
+               record.live_pin_tokens.len() != 0:
+                return MappingLifetimeCheckV1(ok: false, reason: "retryable-pin")
+        var pin_i: i64 = 0
+        while pin_i < record.live_pin_tokens.len():
+            val pin_token = record.live_pin_tokens[pin_i]
+            if pin_token <= 0 or pin_token >= ledger.next_pin_token:
+                return MappingLifetimeCheckV1(ok: false, reason: "pin-token-order")
+            var pin_j: i64 = pin_i + 1
+            while pin_j < record.live_pin_tokens.len():
+                if record.live_pin_tokens[pin_j] == pin_token:
+                    return MappingLifetimeCheckV1(ok: false, reason: "duplicate-pin-token")
+                pin_j = pin_j + 1
+            pin_i = pin_i + 1
+        var j: i64 = i + 1
+        while j < ledger.records.len():
+            if ledger.records[j].mapping_id == record.mapping_id:
+                return MappingLifetimeCheckV1(ok: false, reason: "duplicate-mapping")
+            if ledger.records[j].mapping_sequence == record.mapping_sequence:
+                return MappingLifetimeCheckV1(ok: false, reason: "duplicate-sequence")
+            if record.active_close_token > 0 and
+               ledger.records[j].active_close_token == record.active_close_token:
+                return MappingLifetimeCheckV1(ok: false, reason: "duplicate-close-token")
+            for pin_token in record.live_pin_tokens:
+                for other_pin_token in ledger.records[j].live_pin_tokens:
+                    if pin_token == other_pin_token:
+                        return MappingLifetimeCheckV1(ok: false, reason: "duplicate-pin-token")
+            j = j + 1
+        i = i + 1
+    if computed_resident != ledger.resident_bytes:
+        return MappingLifetimeCheckV1(ok: false, reason: "resident-mismatch")
+    MappingLifetimeCheckV1(ok: true, reason: "")
+
+fn mapping_lifetime_admit_v1(ledger: MappingLifetimeLedgerV1,
+                             mapping_id: text,
+                             mapped_bytes: i64) -> MappingLifetimeTransitionV1:
+    if not _mapping_lifetime_header_check_v1(ledger).ok:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-ledger")
+    if mapping_id.len() == 0 or mapping_id.len() > MAPPING_LIFETIME_ID_MAX_BYTES_V1 or
+       mapped_bytes <= 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidMapping, "invalid-mapping")
+    if _mapping_lifetime_find_index_v1(ledger, mapping_id) >= 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.DuplicateMapping, "duplicate-mapping")
+    if ledger.records.len() >= ledger.max_records or
+       mapped_bytes > ledger.max_resident_bytes - ledger.resident_bytes:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.CapacityExceeded, "capacity-exceeded")
+    if ledger.next_mapping_sequence >= MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.SequenceExhausted, "mapping-sequence-exhausted")
+
+    var next = ledger
+    next.records = next.records.push(MappingLifetimeRecordV1(
+        mapping_id: mapping_id,
+        mapping_sequence: next.next_mapping_sequence,
+        mapped_bytes: mapped_bytes,
+        live_pin_tokens: [],
+        phase: MappingLifetimePhaseV1.Live,
+        active_close_token: 0,
+    ))
+    next.next_mapping_sequence = next.next_mapping_sequence + 1
+    next.resident_bytes = next.resident_bytes + mapped_bytes
+    _mapping_lifetime_transition_v1(true, next,
+        MappingLifetimeFailureV1.NoFailure, "")
+
+fn mapping_lifetime_pin_v1(ledger: MappingLifetimeLedgerV1,
+                           mapping_id: text) -> MappingLifetimeTransitionV1:
+    if not _mapping_lifetime_header_check_v1(ledger).ok:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-ledger")
+    val index = _mapping_lifetime_find_index_v1(ledger, mapping_id)
+    if index < 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingMissing, "mapping-missing")
+    val record = ledger.records[index]
+    if not _mapping_lifetime_record_shallow_valid_v1(ledger, record):
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-record")
+    if record.phase != MappingLifetimePhaseV1.Live:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingNotLive, "mapping-not-live")
+    if ledger.next_pin_token >= MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.SequenceExhausted, "pin-sequence-exhausted")
+    var next = ledger
+    var updated = record
+    val receipt = MappingPinReceiptV1(
+        ledger_owner: next.ledger_owner,
+        ledger_epoch: next.ledger_epoch,
+        mapping_id: updated.mapping_id,
+        mapping_sequence: updated.mapping_sequence,
+        pin_token: next.next_pin_token,
+    )
+    updated.live_pin_tokens = updated.live_pin_tokens.push(receipt.pin_token)
+    next.records[index] = updated
+    next.next_pin_token = next.next_pin_token + 1
+    _mapping_lifetime_transition_with_pin_v1(next, receipt)
+
+fn mapping_lifetime_unpin_v1(ledger: MappingLifetimeLedgerV1,
+                             receipt: MappingPinReceiptV1) -> MappingLifetimeTransitionV1:
+    if not _mapping_lifetime_header_check_v1(ledger).ok:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-ledger")
+    if receipt.ledger_owner != ledger.ledger_owner or
+       receipt.ledger_epoch != ledger.ledger_epoch:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.LedgerIdentityMismatch, "pin-ledger-identity")
+    val index = _mapping_lifetime_find_index_v1(ledger, receipt.mapping_id)
+    if index < 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingMissing, "mapping-missing")
+    val record = ledger.records[index]
+    if not _mapping_lifetime_record_shallow_valid_v1(ledger, record):
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-record")
+    if record.mapping_sequence != receipt.mapping_sequence or receipt.pin_token <= 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.StalePinReceipt, "stale-pin-receipt")
+    if record.phase == MappingLifetimePhaseV1.Closing or
+       record.phase == MappingLifetimePhaseV1.Retryable:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingNotLive, "mapping-has-no-live-pins")
+    var retained_tokens: [i64] = []
+    var consumed = false
+    for pin_token in record.live_pin_tokens:
+        if pin_token == receipt.pin_token:
+            if consumed:
+                return _mapping_lifetime_transition_v1(false, ledger,
+                    MappingLifetimeFailureV1.InvalidLedger, "duplicate-pin-token")
+            consumed = true
+        else:
+            retained_tokens = retained_tokens.push(pin_token)
+    if not consumed:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.StalePinReceipt, "stale-pin-receipt")
+    var next = ledger
+    var updated = record
+    updated.live_pin_tokens = retained_tokens
+    next.records[index] = updated
+    _mapping_lifetime_transition_v1(true, next,
+        MappingLifetimeFailureV1.NoFailure, "")
+
+fn mapping_lifetime_begin_close_v1(ledger: MappingLifetimeLedgerV1,
+                                   mapping_id: text) -> MappingLifetimeTransitionV1:
+    if not _mapping_lifetime_header_check_v1(ledger).ok:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-ledger")
+    val index = _mapping_lifetime_find_index_v1(ledger, mapping_id)
+    if index < 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingMissing, "mapping-missing")
+    val record = ledger.records[index]
+    if not _mapping_lifetime_record_shallow_valid_v1(ledger, record):
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-record")
+    if record.phase == MappingLifetimePhaseV1.Closing:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.CloseAlreadyPending, "close-already-pending")
+
+    var next = ledger
+    var updated = record
+    if updated.phase == MappingLifetimePhaseV1.Live:
+        updated.phase = MappingLifetimePhaseV1.Retiring
+        next.records[index] = updated
+    if updated.live_pin_tokens.len() > 0:
+        next.pin_refusals = _mapping_lifetime_counter_increment_v1(next.pin_refusals)
+        return _mapping_lifetime_transition_v1(false, next,
+            MappingLifetimeFailureV1.MappingPinned, "mapping-pinned")
+    if next.next_close_token >= MAPPING_LIFETIME_SEQUENCE_MAX_V1 or
+       next.close_attempts >= MAPPING_LIFETIME_SEQUENCE_MAX_V1:
+        return _mapping_lifetime_transition_v1(false, next,
+            MappingLifetimeFailureV1.SequenceExhausted, "close-sequence-exhausted")
+
+    val permit = MappingClosePermitV1(
+        ledger_owner: next.ledger_owner,
+        ledger_epoch: next.ledger_epoch,
+        mapping_id: updated.mapping_id,
+        mapping_sequence: updated.mapping_sequence,
+        close_token: next.next_close_token,
+        mapped_bytes: updated.mapped_bytes,
+    )
+    updated.phase = MappingLifetimePhaseV1.Closing
+    updated.active_close_token = permit.close_token
+    next.records[index] = updated
+    next.next_close_token = next.next_close_token + 1
+    next.close_attempts = next.close_attempts + 1
+    _mapping_lifetime_transition_with_permit_v1(next, permit)
+
+fn mapping_lifetime_finish_close_v1(ledger: MappingLifetimeLedgerV1,
+                                    permit: MappingClosePermitV1,
+                                    close_succeeded: bool) -> MappingLifetimeTransitionV1:
+    if not _mapping_lifetime_header_check_v1(ledger).ok:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-ledger")
+    if permit.ledger_owner != ledger.ledger_owner or
+       permit.ledger_epoch != ledger.ledger_epoch:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.LedgerIdentityMismatch, "close-ledger-identity")
+    val index = _mapping_lifetime_find_index_v1(ledger, permit.mapping_id)
+    if index < 0:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.MappingMissing, "mapping-missing")
+    val record = ledger.records[index]
+    if not _mapping_lifetime_record_shallow_valid_v1(ledger, record):
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.InvalidLedger, "invalid-record")
+    if record.phase != MappingLifetimePhaseV1.Closing or
+       record.mapping_sequence != permit.mapping_sequence or
+       record.active_close_token != permit.close_token or
+       record.mapped_bytes != permit.mapped_bytes:
+        return _mapping_lifetime_transition_v1(false, ledger,
+            MappingLifetimeFailureV1.StaleClosePermit, "stale-close-permit")
+
+    var next = ledger
+    if not close_succeeded:
+        var retryable = record
+        retryable.phase = MappingLifetimePhaseV1.Retryable
+        retryable.active_close_token = 0
+        next.records[index] = retryable
+        next.close_failures = _mapping_lifetime_counter_increment_v1(next.close_failures)
+        return _mapping_lifetime_transition_v1(false, next,
+            MappingLifetimeFailureV1.CloseFailed, "close-failed-retained")
+
+    var retained: [MappingLifetimeRecordV1] = []
+    var i: i64 = 0
+    while i < next.records.len():
+        if i != index:
+            retained = retained.push(next.records[i])
+        i = i + 1
+    next.records = retained
+    next.resident_bytes = next.resident_bytes - record.mapped_bytes
+    next.releases_completed = _mapping_lifetime_counter_increment_v1(next.releases_completed)
+    _mapping_lifetime_transition_v1(true, next,
+        MappingLifetimeFailureV1.NoFailure, "")
+
+export MAPPING_LIFETIME_SEQUENCE_MAX_V1, MAPPING_LIFETIME_ID_MAX_BYTES_V1
+export MappingLifetimePhaseV1, MappingLifetimeFailureV1
+export MappingLifetimeRecordV1, MappingPinReceiptV1, MappingClosePermitV1
+export MappingLifetimeLedgerV1
+export MappingLifetimeCheckV1, MappingLifetimeTransitionV1
+export mapping_lifetime_ledger_v1, mapping_lifetime_get_v1
+export mapping_lifetime_check_v1, mapping_lifetime_pin_count_v1
+export mapping_lifetime_admit_v1
+export mapping_lifetime_pin_v1, mapping_lifetime_unpin_v1
+export mapping_lifetime_begin_close_v1, mapping_lifetime_finish_close_v1

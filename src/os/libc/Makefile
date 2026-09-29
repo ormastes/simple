@@ -12,7 +12,6 @@ CFLAGS  = -target x86_64-unknown-none-elf \
           -ffreestanding -nostdlib -fno-builtin \
           -mno-red-zone -fno-stack-protector -fno-exceptions \
           -fno-unwind-tables -fno-asynchronous-unwind-tables \
-          -ffunction-sections -fdata-sections \
           -O2 -Wall -Wextra -Wno-unused-parameter \
           -I include
 
@@ -27,13 +26,13 @@ C_SRCS  = simpleos_libc.c simpleos_cli_args.c \
           simpleos_dlmalloc.c simpleos_signal.c simpleos_libc_ext.c \
           simpleos_poll.c simpleos_process_wait.c \
           simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
-          simpleos_sched.c \
           simpleos_epoll.c simpleos_eventfd.c simpleos_timerfd.c \
           simpleos_signalfd.c simpleos_inotify.c simpleos_fs_walk.c \
           simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c \
           simpleos_fork.c simpleos_ipc.c simpleos_socket.c \
           simpleos_filelock.c simpleos_statvfs.c simpleos_utsname.c \
-          simpleos_termios.c simpleos_netdb.c simpleos_posix_ext.c
+          simpleos_termios.c simpleos_netdb.c simpleos_posix_ext.c \
+          simpleos_sched.c
 ASM_SRCS = simpleos_crt0.S simpleos_syscall.S simpleos_setjmp.S
 
 C_OBJS  = $(C_SRCS:.c=.o)

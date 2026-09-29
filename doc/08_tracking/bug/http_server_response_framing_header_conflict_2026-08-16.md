@@ -1,4 +1,8 @@
 # HTTP server response framing header conflict
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIX PREPARED; ADMITTED STAGE-4 EXECUTION BLOCKED (2026-08-16)
 
@@ -23,3 +27,4 @@ and a complete body through both serialization and a real loopback connection.
 Run the focused web spec, `sspec-maintain scan`, and `spipe-docgen` exactly once
 with the admitted Stage-4 CLI recorded by the secure-server test plan. Rust
 seed and Stage-2/3 output cannot close this record.
+

@@ -1,0 +1,86 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.codec_v1.*
+
+fn frame(body: [u8]) -> [u8]:
+    environment_variant_catalog_record_frame_v1(body).unwrap()
+
+fn join(left: [u8], right: [u8]) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < left.len():
+        result.push(left[i])
+        i = i + 1
+    i = 0
+    while i < right.len():
+        result.push(right[i])
+        i = i + 1
+    result
+
+describe "Environment variant inert catalog envelope":
+    it "round-trips a bounded descriptor payload with its digest":
+        val payload = frame([1u8, 2u8, 3u8, 4u8])
+        val encoded = environment_variant_catalog_encode_v1(payload, 1u32)
+        match encoded:
+            case Ok(bytes):
+                val decoded = environment_variant_catalog_decode_v1(bytes)
+                match decoded:
+                    case Ok(envelope):
+                        expect(envelope.schema_version).to_equal(1u16)
+                        expect(envelope.record_count).to_equal(1u32)
+                        expect(envelope.payload).to_equal(payload)
+                        expect(envelope.payload_digest.len()).to_equal(32)
+                    case Err(_): fail("encoded environment catalog must decode")
+            case Err(_): fail("bounded environment catalog must encode")
+
+    it "rejects empty and excessive record counts":
+        expect(environment_variant_catalog_encode_v1([1u8], 0u32)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.CapacityExceeded))
+        expect(environment_variant_catalog_encode_v1([1u8], ENV_VARIANT_CATALOG_MAX_RECORDS_V1 + 1u32)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.CapacityExceeded))
+
+    it "requires record framing to correlate count with payload":
+        val one = frame([1u8, 2u8])
+        expect(environment_variant_catalog_encode_v1(one, 2u32)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid))
+        val two = join(one, frame([3u8, 4u8]))
+        val encoded = environment_variant_catalog_encode_v1(two, 2u32).unwrap()
+        expect(environment_variant_catalog_decode_v1(encoded).unwrap().record_count).to_equal(2u32)
+        var tampered = encoded
+        tampered[8] = 1u8
+        expect(environment_variant_catalog_decode_v1(tampered)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid))
+
+    it "rejects truncated and overlong record frames":
+        expect(environment_variant_catalog_encode_v1([3u8, 0u8, 0u8], 1u32)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid))
+        val encoded = environment_variant_catalog_encode_v1(frame([7u8, 8u8]), 1u32).unwrap()
+        var overlong = encoded
+        overlong[48] = 9u8
+        expect(environment_variant_catalog_decode_v1(overlong)).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.RecordFramingInvalid))
+
+    it "rejects truncation, unknown magic, and payload tampering":
+        expect(environment_variant_catalog_decode_v1([1u8, 2u8])).to_equal(
+            Err(EnvironmentVariantCodecErrorV1.InputTooShort))
+        val encoded = environment_variant_catalog_encode_v1([8u8, 9u8], 1u32)
+        match encoded:
+            case Ok(original):
+                var unknown_magic = original
+                unknown_magic[0] = 0u8
+                expect(environment_variant_catalog_decode_v1(unknown_magic)).to_equal(
+                    Err(EnvironmentVariantCodecErrorV1.UnsupportedMagic))
+                var tampered = original
+                tampered[tampered.len() - 1] = 10u8
+                expect(environment_variant_catalog_decode_v1(tampered)).to_equal(
+                    Err(EnvironmentVariantCodecErrorV1.DigestMismatch))
+            case Err(_): fail("bounded environment catalog must encode")
+
+    it "rejects a length field that does not cover the complete payload":
+        val encoded = environment_variant_catalog_encode_v1([8u8, 9u8], 1u32)
+        match encoded:
+            case Ok(original):
+                var changed = original
+                changed[12] = 1u8
+                expect(environment_variant_catalog_decode_v1(changed)).to_equal(
+                    Err(EnvironmentVariantCodecErrorV1.LengthMismatch))
+            case Err(_): fail("bounded environment catalog must encode")

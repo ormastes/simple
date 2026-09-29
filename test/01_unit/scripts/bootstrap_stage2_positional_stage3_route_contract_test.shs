@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+gate="$root/scripts/check/check-bootstrap-stage2-struct-receiver.shs"
+checker="$root/src/compiler/35.semantics/any_escape/checker.spl"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+sh -n "$gate" || fail "gate shell syntax"
+block=$(sed -n '/stage2_route_bin=/,/bootstrap_stage2_positional_stage3_route=PASS/p' "$gate")
+
+for required in \
+    'SIMPLE_BOOTSTRAP=1' \
+    'SIMPLE_STAGE3_STREAMING_SURFACES=1' \
+    'SIMPLE_FRONTEND_CACHE=0' \
+    'SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=direct' \
+    'SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=none' \
+    'SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap' \
+    'stage2_route_timeout_bin' \
+    '--mode dynload' \
+    '--runtime-path "$stage2_runtime_dir"' \
+    '"$stage2_route_fixture"'; do
+    printf '%s\n' "$block" | grep -Fq -- "$required" || \
+        fail "exact Stage3 route lost: $required"
+done
+
+printf '%s\n' "$block" | grep -Fq -- '[ "$stage2_route_status" -eq 0 ]' || \
+    fail "clean nonzero route result is not rejected"
+printf '%s\n' "$block" | grep -Fq -- '[ -x "$stage2_route_bin" ]' || \
+    fail "missing-artifact success is not rejected"
+printf '%s\n' "$block" | grep -Fq -- 'stage2_route_output' || \
+    fail "built fixture is not executed"
+if printf '%s\n' "$block" | grep -Eq -- '(^|[[:space:]])--entry([[:space:]]|$)|(^|[[:space:]])--source([[:space:]]|$)'; then
+    fail "Stage3 route probe contains explicit entry/source flags"
+fi
+
+grep -Fq 'if type_ != nil:' "$checker" || fail "flat optional nil guard missing"
+if grep -Fq 'if val declared_type = type_:' "$checker"; then
+    fail "native-crashing flat optional binding returned"
+fi
+
+echo 'bootstrap_stage2_positional_stage3_route_contract_test: PASS'

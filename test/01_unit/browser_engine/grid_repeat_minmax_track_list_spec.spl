@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Prove that `grid-template-columns: repeat(N, minmax(a, b))` produces a
+real N-column grid rather than silently falling back to block layout.
+Audience: browser-engine layout maintainers.
+
+`normalized_grid_track_list` splits the declaration on spaces, so
+`repeat(3, minmax(0, 1fr))` arrived as the three fragments `repeat(3,`,
+`minmax(0,` and `1fr))`. None ends in `fr` or `px`, so the whole list was
+rejected and `st.grid_template_columns` was never set. Layout gates its grid
+branch on `st.display == "grid" and grid_columns.len() > 0`
+(`..._layout.spl:1803`), so the container laid out as a BLOCK: every item took
+the full content width and stacked vertically.
+
+Chrome oracle (headless --dump-dom + getBoundingClientRect on
+test/fixtures/browser_engine/layout/round3_probe.html at 900x20000, body
+margin 0, `.grid { display:grid; grid-template-columns: repeat(3, minmax(0,1fr));
+gap:12px }`):
+  div.grid   x=0   y=48  w=900  h=48   (ONE row, not three)
+  .card #1   x=0   y=48  w=292  h=48
+  .card #2   x=304 y=48  w=292  h=48
+  .card #3   x=608 y=48  w=292  h=48
+(900 - 2*12 gap) / 3 = 292 per column.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-GRID-REPEAT-MINMAX-001 — repeat()/minmax() track lists build a real grid.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl 2%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 20000
+
+val GRID_PAGE: text = (
+    "<html><body style=\"margin:0;font:16px/1.5 sans-serif\">" +
+    "<div id=\"g\" style=\"display:grid;" +
+    "grid-template-columns:repeat(3, minmax(0, 1fr));gap:12px\">" +
+    "<div id=\"c1\">Grid 1</div><div id=\"c2\">Grid 2</div>" +
+    "<div id=\"c3\">Grid 3</div>" +
+    "</div></body></html>"
+)
+
+fn grid_field(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(GRID_PAGE, VW, VH, id, field)
+
+describe "repeat() and minmax() grid track lists":
+    it "AC-1: the three items share ONE row (equal y), not three stacked rows":
+        expect(grid_field("c2", "y")).to_equal(grid_field("c1", "y"))
+        expect(grid_field("c3", "y")).to_equal(grid_field("c1", "y"))
+
+    it "AC-2: each column is 292 px wide, as Chrome reports":
+        expect(grid_field("c1", "w")).to_equal("292")
+        expect(grid_field("c2", "w")).to_equal("292")
+        expect(grid_field("c3", "w")).to_equal("292")
+
+    it "AC-3: columns start at the Chrome-derived x offsets 0 / 304 / 608":
+        expect(grid_field("c1", "x")).to_equal("0")
+        expect(grid_field("c2", "x")).to_equal("304")
+        expect(grid_field("c3", "x")).to_equal("608")
+
+    it "AC-4: no item fills the container width (the block-fallthrough symptom)":
+        assert_true(grid_field("c1", "w") != grid_field("g", "w"))

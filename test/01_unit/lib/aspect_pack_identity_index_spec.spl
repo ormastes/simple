@@ -7,6 +7,8 @@ Each field and the v1 domain tag use a u64 length frame before SHA-256.
 """
 
 use std.spec
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1}
 use std.common.aspect_pack.{
     APK_FC_BOUND, APK_FC_UNLOADED,
     ApkModuleSourceV1, ApkCatalogEntryV1,
@@ -14,10 +16,19 @@ use std.common.aspect_pack.{
     apk_build_pack_v1, apk_build_catalog_v1,
     apk_loader_new, apk_loader_register_pack,
     apk_load_facet, apk_try_facet, apk_unload_facet_v1,
-    apk_facet_state_v1}
+    apk_facet_state_v1, apk_loader_set_host_offer_v1}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 
 val INDEX_PACK_PATH: text = "aspect/index.apk"
+
+# Mandatory pre-load host offer (source contract since the kernel-plugin
+# migration): facet acquisition refuses with PLUG-E-NAME before negotiation
+# unless an offer accepting the facet key is installed. V1 modules carry an
+# empty module_abi_hash, so the offer matches it with an empty digest.
+fn _identity_host() -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0), 0, true, "fixture",
+        [IfaceId("index/A", 1, 0, ""), IfaceId("index/B", 1, 0, ""),
+            IfaceId("index/C", 1, 0, "")], [], [], [])
 
 fn _identity_index_pack() -> [u8]:
     var modules: [ApkModuleSourceV1] = []
@@ -61,6 +72,8 @@ describe "aspect-pack loader/key binding index":
         val right = apk_loader_new()
         expect(apk_loader_register_pack(left, INDEX_PACK_PATH, pack)).to_equal(true)
         expect(apk_loader_register_pack(right, INDEX_PACK_PATH, pack)).to_equal(true)
+        apk_loader_set_host_offer_v1(left, _identity_host())
+        apk_loader_set_host_offer_v1(right, _identity_host())
 
         val left_a = apk_load_facet(left, catalog, "index/A")
         val left_b = apk_load_facet(left, catalog, "index/B")

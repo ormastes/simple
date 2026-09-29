@@ -1,0 +1,117 @@
+#!/bin/sh
+# No compiler bootstrap: bounded live progress/containment regression only.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+cd "$repo_root"
+[ "$(uname -s)" = Darwin ] || { echo 'SKIP: macOS syscall regression'; exit 0; }
+test_dir=$(mktemp -d "${TMPDIR:-/tmp}/progress-no-setuid.XXXXXXXX")
+cleanup() {
+  rc=$?
+  if [ -n "${BOOTSTRAP_PROGRESS_TEST_EVIDENCE:-}" ]; then
+    mkdir -p "$BOOTSTRAP_PROGRESS_TEST_EVIDENCE"
+    cp -R "$test_dir/." "$BOOTSTRAP_PROGRESS_TEST_EVIDENCE/"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: progress regression exited $rc" >&2
+    [ ! -f "$test_dir/watchdog.err" ] || tail -10 "$test_dir/watchdog.err" >&2
+  fi
+  rm -rf "$test_dir"
+}
+trap cleanup EXIT
+watcher=$repo_root/scripts/bootstrap/bootstrap-progress-watch.shs
+observer=$test_dir/observer
+/usr/bin/clang -Wall -Wextra -Werror -O2 scripts/resource/macos-process-observer.c -o "$observer"
+observer_sha=$(shasum -a 256 "$observer" | awk '{print $1}')
+export SIMPLE_BOOTSTRAP_PROCESS_OBSERVER=$observer SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256=$observer_sha
+
+# Refuse setuid/setgid files before exec even when their hash is correct.
+chmod 4500 "$observer"
+if sh "$watcher" --pid="$$" --progress-log="$test_dir/rejected" --once 2>"$test_dir/rejected.err"; then
+  echo 'FAIL: admitted setuid observer' >&2; exit 1
+fi
+grep -q 'identity unavailable' "$test_dir/rejected.err"
+chmod 2500 "$observer"
+if sh "$watcher" --pid="$$" --progress-log="$test_dir/rejected-gid" --once 2>/dev/null; then
+  echo 'FAIL: admitted setgid observer' >&2; exit 1
+fi
+chmod 0500 "$observer"
+if SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256=wrong sh "$watcher" --pid="$$" --progress-log="$test_dir/rejected-sha" --once 2>/dev/null; then
+  echo 'FAIL: admitted changed observer hash' >&2; exit 1
+fi
+
+# A PATH sentinel makes any accidental ps spawn fail, including identity and
+# elapsed calls. The actual watchdog must measure all observer descendants.
+mkdir "$test_dir/bin"
+cat >"$test_dir/bin/ps" <<'EOF'
+#!/bin/sh
+printf 'ps invoked\n' >>"$PROGRESS_PS_SENTINEL"
+exit 99
+EOF
+chmod 0500 "$test_dir/bin/ps"
+export PROGRESS_PS_SENTINEL=$test_dir/ps-invoked
+export PATH="$test_dir/bin:$PATH"
+cat >"$test_dir/workload.sh" <<'EOF'
+#!/bin/sh
+set -eu
+watcher=$1
+out=$2
+# The watcher itself and every transient helper remain inside containment.
+sleep 20 & leaf=$!
+trap 'kill "$leaf" "$busy" "$idle_watch" "$busy_watch" 2>/dev/null || true; wait 2>/dev/null || true' EXIT
+busy= idle_watch= busy_watch=
+awk 'BEGIN {while(1) x++}' & busy=$!
+printf 'abc' >"$out/main.log"
+printf 'milestone=stage2-test\nmain_log=%s/main.log\n' "$out" >"$out/state"
+printf 'event=build_progress phase=parse unit_kind=files done=3 total=5 tasks_done=1 tasks_total=2 failed=0 cached=1 current=fixture terminal=running\n' >"$out/events"
+BOOTSTRAP_WATCH_STALL_SAMPLES=2 sh "$watcher" --pid="$leaf" --state-file="$out/state" --event-file="$out/events" --interval=1 --progress-log="$out/idle" & idle_watch=$!
+BOOTSTRAP_WATCH_STALL_SAMPLES=2 sh "$watcher" --pid="$busy" --interval=1 --progress-log="$out/busy" & busy_watch=$!
+sleep 7
+kill "$idle_watch" "$busy_watch"
+wait "$idle_watch" "$busy_watch" 2>/dev/null || true
+idle_watch= busy_watch=
+kill "$leaf" "$busy"
+wait "$leaf" "$busy" 2>/dev/null || true
+sh "$watcher" --pid="$leaf" --progress-log="$out/exited" --once
+set +e
+sh "$watcher" --pid="$$" --expected-start=wrong --progress-log="$out/stale" --once
+rc=$?
+set -e
+[ "$rc" -eq 3 ]
+EOF
+perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=25 --receipt="$test_dir/receipt" -- \
+  sh "$test_dir/workload.sh" "$watcher" "$test_dir" >"$test_dir/watchdog.out" 2>"$test_dir/watchdog.err"
+[ ! -e "$PROGRESS_PS_SENTINEL" ]
+grep -q '^status=complete$' "$test_dir/receipt"
+grep -q '^observer_errors=0$' "$test_dir/receipt"
+grep -q '^observer_restarts=0$' "$test_dir/receipt"
+grep -q 'status=alive-no-progress' "$test_dir/idle"
+if head -1 "$test_dir/idle" | grep -q 'status=alive-no-progress'; then
+  echo 'FAIL: first idle sample reported a stall' >&2; exit 1
+fi
+if grep -q 'status=alive-no-progress' "$test_dir/busy"; then
+  echo 'FAIL: busy process reported a stall' >&2; exit 1
+fi
+grep -q 'status=exited' "$test_dir/exited"
+grep -q 'status=stale' "$test_dir/stale"
+awk '
+  {for(i=1;i<=NF;i++){split($i,a,"="); f[a[1]]=a[2]}
+   if(f["tree_processes"]!=1 || f["rss_kb"]<=0 || f["tree_rss_kb"]!=f["rss_kb"] ||
+      f["tree_scan_misses"]!=0 || f["process_elapsed"]=="unknown" ||
+      f["done"]!=3 || f["remaining"]!=2 || f["tasks_remaining"]!=1 ||
+      f["milestone"]!="stage2-test" || f["main_log_bytes"]!=3) exit 1;
+   n++} END {if(n<3) exit 1}
+' "$test_dir/idle"
+awk '{for(i=1;i<=NF;i++){split($i,a,"="); if(a[1]=="tree_cpu_pct" && a[2]+0>10) busy++}}
+     END{exit !(busy>=3)}' "$test_dir/busy"
+# Warm native-request overhead excludes the intentional one-second CPU baseline.
+perl -MTime::HiRes=time -e '
+  my ($helper,$pid)=@ARGV; my $start=time;
+  for (1..20) {open(my $p,"-|",$helper,"--progress",$pid) or die $!; my @rows=<$p>; close($p) or die "observer failed"; @rows or die "empty tree"}
+  printf "native_snapshot_mean_ms=%.3f samples=20\n",(time-$start)*50;
+' "$observer" "$$"
+grep -E '^(status|samples|sample_duration_max_ms|sample_gap_max_ms|observer_errors|observer_restarts|peak_rss_kib)=' "$test_dir/receipt"
+if [ -n "${BOOTSTRAP_PROGRESS_TEST_EVIDENCE:-}" ]; then
+  mkdir -p "$BOOTSTRAP_PROGRESS_TEST_EVIDENCE"
+  cp "$test_dir/receipt" "$test_dir/idle" "$test_dir/busy" "$test_dir/stale" "$test_dir/exited" "$test_dir/watchdog.err" "$BOOTSTRAP_PROGRESS_TEST_EVIDENCE/"
+fi
+echo 'PASS: macOS progress is unprivileged, measurable, and preserves stall/event/identity reporting'

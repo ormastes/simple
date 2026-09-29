@@ -62,14 +62,6 @@ that window's content rect at `(offset_x, offset_y)`, clipped, offsets
 accumulating for grandchildren (depth cap 3). Invalid child frames fail
 closed (magenta child rect only).
 
-The canonical Draw IR path emits each reachable child as an IMAGE batch. Its
-embedding is the cumulative ancestor-visible rectangle; a negative local image
-offset preserves the correct source crop. Hosted and SimpleOS executors resolve
-the same validated descendant URIs before Engine2D submission, so nested pixels
-are not represented by unsupported GROUP placeholders.
-Invalid descendant metadata remains in the composition input but never enters
-the resolved-image list; the projector emits its clipped magenta rectangle.
-
 ```spl
 use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 

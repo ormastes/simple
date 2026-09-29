@@ -1,0 +1,215 @@
+# gpu_2d_perf — Simple 2D / GPU lane per-frame cost lint.
+#
+# WHAT THIS CATCHES, AND WHY IT EXISTS
+#   Both shapes below were found by measurement, not by taste: they were the
+#   two largest per-frame costs in the Engine2D vulkan backend when it was
+#   benchmarked against the equivalent C Vulkan program at 800x600 / 64 rects
+#   (test/05_perf/bench/vulkan_2d_c/, doc/02_requirements/nfr/engine2d_vulkan_2d_perf.md).
+#   Neither is a crash, a type error or a visible defect — both are silent,
+#   and both cost more than the GPU work they wrap.
+#
+#   G2DP001  a function returning a TUPLE that carries an array
+#     Returning a large array inside a tuple deep-copies its elements.
+#     Measured: `-> ([u32], i64)` returning a 480,000-pixel framebuffer cost
+#     ~12.1 ms per frame -- larger than the device download and the native
+#     fill combined (~3.6 ms). Assigning the SAME array costs 22 us, so the
+#     cost is specific to the tuple boundary, not to arrays. Fix: pass the
+#     destination in and return only the scalar
+#     (`fn f(dest: [u32], ...) -> i64`), which also lets the caller reuse one
+#     buffer across frames instead of allocating per frame.
+#
+#   G2DP003  a 1x1 draw call inside a loop
+#     `draw_rect_filled(x, y, 1, 1, color)` in a per-pixel loop. On a CPU
+#     backend that is a memory write; on a GPU backend draw_rect_filled is a
+#     COMPUTE DISPATCH, so this costs one dispatch PER PIXEL. Measured: an
+#     r=35 circle outline is ~200 dispatches (draw_circle 16 us on cpu vs
+#     2,025 us on vulkan, 127x). Fix: emit horizontal/vertical RUNS
+#     (`draw_rect_filled(x, y, run_len, 1, color)`) instead of single pixels.
+#     A 1x1 call NOT inside a loop is a degenerate-case guard (r <= 0) and is
+#     deliberately NOT flagged.
+#
+#   G2DP002  a per-element array copy loop
+#     `while i < n: dst[i] = src[i]` marshals one element at a time through
+#     the interpreter/JIT. Measured ~3.4 ms per frame for 480,000 u32 -- for
+#     a copy the runtime can do in bulk. Fix: a bulk/native copy, or avoid
+#     the defensive copy entirely.
+#
+# COST / ACTIVATION
+#   Line-oriented and scoped to the 2D/GPU lane, so it is cheap, but it is
+#   DEFAULT OFF like wm_lane_boundary (`levels["gpu_2d_perf"] = "allow"` in
+#   config_and_model.build_default_levels). Turn it on with exactly one of:
+#     bin/simple lint --gpu-2d-perf <files>   # this rule only (targeted)
+#     bin/simple lint --warn-all <files>      # full-diagnosis, every lint
+#     simple.sdn  lints:\n#                     gpu_2d_perf: deny
+#
+# DEPENDENCY NOTE
+#   This module deliberately imports NOTHING. The sibling rule modules do
+#   `use compiler.tools.lint.main.*`, which drags the whole compiler into any
+#   consumer -- a spec importing this module that way took >930s to load and
+#   was killed at its budget. Everything here is built-in string handling plus
+#   the local warning class, so the import is pure cost. Keep it that way.
+
+class Gpu2dPerfWarning:
+    code: text
+    line: i64
+    message: text
+    hint: text
+
+# The 2D/GPU rendering lane: where a per-frame cost is actually paid.
+fn gpu_2d_perf_scope_dirs() -> [text]:
+    ["src/lib/gc_async_mut/gpu/",
+     "src/lib/nogc_sync_mut/gpu/",
+     "src/lib/common/ui/",
+     "src/lib/gc_async_mut/gpu/engine2d/",
+     "src/lib/nogc_sync_mut/gpu/engine2d/"]
+
+fn gpu_2d_perf_in_scope(path: text) -> bool:
+    for dir in gpu_2d_perf_scope_dirs():
+        if path.contains(dir):
+            return true
+    false
+
+# --- G2DP001: tuple return carrying an array -------------------------------
+
+# The return-type text of a `fn ... -> X:` signature line, "" when absent.
+fn _g2d_return_type(trimmed: text) -> text:
+    if not (trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ")
+            or trimmed.starts_with("me ") or trimmed.starts_with("@")):
+        if not trimmed.starts_with("fn"):
+            return ""
+    val at = trimmed.index_of("-> ")
+    if at < 0:
+        return ""
+    var rest = trimmed.slice(at + 3).trim()
+    while rest.len() > 0 and rest.substring(rest.len() - 1, rest.len()) == ":":
+        rest = rest.slice(0, rest.len() - 1)
+    rest.trim()
+
+# True when the return type is a tuple `( ... )` with an array `[` inside it.
+fn _g2d_tuple_carries_array(ret: text) -> bool:
+    if not ret.starts_with("("):
+        return false
+    if not ret.ends_with(")"):
+        return false
+    ret.contains("[")
+
+# --- G2DP002: per-element array copy loop ----------------------------------
+
+# Identifier ending at `i` scanning backwards, "" when none.
+fn _g2d_ident_before(s: text, i: i64) -> text:
+    var e = i
+    var b = i
+    while b > 0:
+        val ch = s.substring(b - 1, b)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == ".":
+            b = b - 1
+        else:
+            break
+    if b >= e:
+        return ""
+    s.slice(b, e)
+
+# `dst[i] = src[i]` with the SAME index expression on both sides, and a
+# different container. Returns "" when the line is not that shape.
+fn _g2d_copy_loop_pair(trimmed: text) -> text:
+    val eq = trimmed.index_of("] = ")
+    if eq < 0:
+        return ""
+    val lhs = trimmed.slice(0, eq + 1).trim()
+    val rhs = trimmed.slice(eq + 4).trim()
+    if not rhs.ends_with("]"):
+        return ""
+    val lb_l = lhs.index_of("[")
+    val lb_r = rhs.index_of("[")
+    if lb_l < 0 or lb_r < 0:
+        return ""
+    val dst = lhs.slice(0, lb_l).trim()
+    val src = rhs.slice(0, lb_r).trim()
+    if dst == "" or src == "" or dst == src:
+        return ""
+    val idx_l = lhs.slice(lb_l + 1, lhs.len() - 1).trim()
+    val idx_r = rhs.slice(lb_r + 1, rhs.len() - 1).trim()
+    if idx_l == "" or idx_l != idx_r:
+        return ""
+    # A constant index is a single element, not a loop-shaped bulk copy.
+    if idx_l >= "0" and idx_l <= "9":
+        return ""
+    "{dst} = {src}"
+
+fn lint_gpu_2d_perf(path: text, content: text) -> [Gpu2dPerfWarning]:
+    lint_gpu_2d_perf_lines(path, content.split("\n"))
+
+# --- G2DP003: 1x1 draw call inside a loop -----------------------------------
+
+# Indentation width of a line (spaces only, matching repo style).
+fn _g2d_indent(line: text) -> i64:
+    var n: i64 = 0
+    while n < line.len() and line.substring(n, n + 1) == " ":
+        n = n + 1
+    n
+
+# True when the line issues a 1x1 draw. Matches `, 1, 1, ` in a draw_rect_filled
+# argument list — the shape that costs a dispatch per pixel on a GPU backend.
+fn _g2d_is_unit_draw(trimmed: text) -> bool:
+    if not trimmed.contains("draw_rect_filled("):
+        return false
+    trimmed.contains(", 1, 1, ")
+
+fn lint_gpu_2d_perf_lines(path: text, lines: [text]) -> [Gpu2dPerfWarning]:
+    var warnings: [Gpu2dPerfWarning] = []
+    if not gpu_2d_perf_in_scope(path):
+        return warnings
+    var line_num = 1
+    # Indent of the innermost enclosing while/for, or -1 outside any loop. A
+    # 1x1 draw is only a defect INSIDE a loop; the same call as a degenerate
+    # r <= 0 guard is correct and must not be flagged.
+    var loop_indent: i64 = -1
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed != "" and not trimmed.starts_with("#"):
+            val ind = _g2d_indent(line)
+            if loop_indent >= 0 and ind <= loop_indent:
+                loop_indent = -1
+            if trimmed.starts_with("while ") or trimmed.starts_with("for "):
+                if loop_indent < 0:
+                    loop_indent = ind
+            if loop_indent >= 0 and ind > loop_indent and _g2d_is_unit_draw(trimmed):
+                warnings.push(Gpu2dPerfWarning(
+                    code: "G2DP003",
+                    line: line_num,
+                    message: "2D/GPU lane issues a 1x1 draw inside a loop — draw_rect_filled is a COMPUTE DISPATCH on a GPU backend, so this costs one dispatch per pixel; measured 127x slower than the cpu backend for an r=35 circle outline (16 us vs 2,025 us)",
+                    hint: "Emit horizontal or vertical RUNS instead — draw_rect_filled(x, y, run_len, 1, color) — as emu_draw_circle_filled and emu_draw_circle_thick already do; suppress a reviewed exception with @allow(gpu_2d_perf)"
+                ))
+            val ret = _g2d_return_type(trimmed)
+            if ret != "" and _g2d_tuple_carries_array(ret):
+                warnings.push(Gpu2dPerfWarning(
+                    code: "G2DP001",
+                    line: line_num,
+                    message: "2D/GPU lane function returns an array inside a tuple `{ret}` — a tuple return deep-copies the array's elements; measured ~12.1 ms per frame for a 480,000-pixel framebuffer, more than the device download and native fill combined",
+                    hint: "Pass the destination in and return only the scalar (`fn f(dest: [u32], ...) -> i64`), so the array stays by-reference and the caller can reuse one buffer across frames; suppress a reviewed exception with @allow(gpu_2d_perf)"
+                ))
+            val pair = _g2d_copy_loop_pair(trimmed)
+            if pair != "":
+                warnings.push(Gpu2dPerfWarning(
+                    code: "G2DP002",
+                    line: line_num,
+                    message: "2D/GPU lane copies an array one element at a time (`{pair}`) — measured ~3.4 ms per frame for 480,000 u32, for a copy the runtime can do in bulk",
+                    hint: "Use a bulk/native array copy, or drop the defensive copy if the callee does not mutate; suppress a reviewed exception with @allow(gpu_2d_perf)"
+                ))
+        line_num = line_num + 1
+    warnings
+
+# Warning CODES only, as plain text.
+#
+# Why this exists: iterating [Gpu2dPerfWarning] across a module boundary trips
+# a compiler field-type inference gap ("cannot infer field type ... field
+# 'code'"), which drops the whole consuming module to the interpreter. That is
+# a pre-existing compiler limitation, not a defect in this rule -- the linter
+# itself calls lint_gpu_2d_perf directly and is unaffected -- but it makes the
+# rule effectively untestable from a spec. Returning plain text keeps the
+# executable check runnable.
+fn gpu_2d_perf_codes(path: text, content: text) -> [text]:
+    var out: [text] = []
+    for w in lint_gpu_2d_perf(path, content):
+        out.push(w.code)
+    out

@@ -1,36 +1,27 @@
 # LLM Caret Claude CLI Harden - Detail Design
 
 Date: 2026-07-05
-Updated: 2026-07-07 (scope correction: hardening targets the shipped path)
 
-## Scope Correction (2026-07-07)
+## Trace Report
 
-This doc previously described "hardening" as a traceability/mapping checker
-(`check-llm-caret-claude-cli-trace.shs`) that verifies file/LOC/symbol-name
-presence in a markdown table. That is a **documentation-coverage gate, not a
-robustness gate** — it proves a symbol name appears in a report, not that any
-transient failure, secret leak, or unsafe tool call is handled.
+`doc/09_report/llm_caret_claude_cli_traceability.md` contains:
 
 Real hardening applies to the **shipped path** — the ~3,086-LOC root of
 `src/app/llm_caret/` that actually runs (`mod.spl` -> `provider.spl` ->
-`claude_api.spl`/`claude_cli.spl`/`openai_api.spl`/...). It does not turn the
-broad `claude_full/` parity island (~720 files/~151K LOC) into the shipped
-implementation. The shipped TUI deliberately imports the narrow
-`claude_full.commands` root-command metadata capsule, but not the distributed
-feature-gate registry or the rest of the parity island; `claude_full` has no
-`fn main` (see
+`claude_api.spl`/`claude_cli.spl`/`openai_api.spl`/...). It does NOT apply to the
+`claude_full/` island (~720 files/~151K LOC), which is unreferenced by the
+shipped facade and has no `fn main` (see
 `doc/05_design/llm_caret_claude_cli_full_parity.md` current-state section).
 
-The traceability report itself (`doc/09_report/llm_caret_claude_cli_traceability.md`)
-is honest about its narrow scope ("it is not a full port of Claude Code"). The
-overclaim was in reading that mapping gate as a hardening gate. The mapping
-checker may remain as a docs-coverage tool, but it is not the hardening gate.
+## Checker
 
-## Hardening Dimensions (shipped path)
+`scripts/check/check-llm-caret-claude-cli-trace.shs` scans
+`src/app/llm_caret/*.spl`, counts files and LOC with mapping rows in the
+report, and fails below 80%. It also extracts every current `fn`, `struct`, and
+`extern fn` symbol and fails unless the report contains a backticked
+`kind:name` token for each symbol.
 
-Each is designed in full in the parity design doc; here is the hardening view —
-what "robust" means and where it lands in the shipped source. Severities from the
-2026-07-07 gap analysis.
+## SSpec
 
 | Dimension | Severity | Shipped-path landing site | Robustness property |
 |---|---|---|---|

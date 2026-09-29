@@ -310,9 +310,8 @@ fn gpu_node_state_read_hi(state: GpuNodeStateColumns, node_id: u32, field_id: u1
 fn gpu_event_kind_is_known(kind: u16) -> bool:
     return kind != GPU_EVENT_KIND_NONE and kind <= GPU_EVENT_KIND_HOST_EFFECT_COMPLETION
 
-fn _gwe_sort_events_by_sequence(events: [GpuInputEvent]) -> [GpuInputEvent]:
-    """Stable insertion sort by `sequence`. Arrival order is a transport
-    detail; the plan's deterministic order starts at the event sequence."""
+fn _gwe_sort_events_by_sequence_insertion(events: [GpuInputEvent]) -> [GpuInputEvent]:
+    """Stable insertion sort used for the small-batch fast path."""
     var sorted = events
     val n: i64 = sorted.len()
     var i: i64 = 1
@@ -325,6 +324,72 @@ fn _gwe_sort_events_by_sequence(events: [GpuInputEvent]) -> [GpuInputEvent]:
         sorted[j + 1] = key
         i = i + 1
     return sorted
+
+fn _gwe_sort_events_by_sequence(events: [GpuInputEvent]) -> [GpuInputEvent]:
+    """Stable sequence sort with O(n log n) large-batch behavior.
+
+    Arrival order is a transport detail; the plan's deterministic order starts
+    at the event sequence.  Small input batches retain the lower-allocation
+    insertion path, while larger batches use bottom-up merge passes.  The
+    `<=` merge choice is part of the contract: equal sequence values preserve
+    their original arrival order.
+    """
+    val n = events.len()
+    if n < 2:
+        return events
+    if n <= 16:
+        return _gwe_sort_events_by_sequence_insertion(events)
+    # Keep both mutable owners local to this call. Passing the destination to a
+    # per-run helper would give each invocation a value-semantic alias and can
+    # copy the whole scratch array before mutating one small run.
+    var source: [GpuInputEvent] = [events[0]; n]
+    var scratch: [GpuInputEvent] = [events[0]; n]
+    var copy: i64 = 0
+    while copy < n:
+        source[copy] = events[copy]
+        copy = copy + 1
+    var width: i64 = 1
+    while width < n:
+        var left: i64 = 0
+        while left < n:
+            # Subtraction-first bounds avoid overflowing `left + width` near
+            # the i64 array-length ceiling.
+            val left_remaining = n - left
+            val middle = if width < left_remaining then left + width else n
+            val middle_remaining = n - middle
+            val right = if width < middle_remaining then middle + width else n
+            var i = left
+            var j = middle
+            var out = left
+            while i < middle and j < right:
+                # Left-on-equal exactly preserves the old stable ordering.
+                if source[i].sequence <= source[j].sequence:
+                    scratch[out] = source[i]
+                    i = i + 1
+                else:
+                    scratch[out] = source[j]
+                    j = j + 1
+                out = out + 1
+            while i < middle:
+                scratch[out] = source[i]
+                i = i + 1
+                out = out + 1
+            while j < right:
+                scratch[out] = source[j]
+                j = j + 1
+                out = out + 1
+            left = right
+        # Reuse the two allocations. Copy-back avoids an assignment alias
+        # between mutable owners on conservative COW implementations.
+        copy = 0
+        while copy < n:
+            source[copy] = scratch[copy]
+            copy = copy + 1
+        if width > n / 2:
+            width = n
+        else:
+            width = width * 2
+    return source
 
 fn gpu_event_normalize(raw: [GpuInputEvent], current_generation: u64) -> GpuNormalizedEventBatch:
     """Plan §3 steps 1-2. Validates the scene generation, drops kinds outside

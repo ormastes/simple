@@ -1,0 +1,106 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.*
+
+fn digest(value: u64) -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: value, w1: 0u64, w2: 0u64, w3: 0u64)
+
+fn feature_set(offset: u32) -> EnvironmentFeatureSetV1:
+    EnvironmentFeatureSetV1(
+        architecture: ENV_ARCH_X86_64_V1,
+        words: EnvironmentArenaRangeV1(offset: offset, count: 1u32))
+
+fn snapshot_v1() -> EnvironmentSnapshotV1:
+    EnvironmentSnapshotV1(
+        descriptor_size: 232u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        execution_architecture: ENV_ARCH_X86_64_V1,
+        os_id: 1u32, abi_id: 1u32, object_format_id: 1u32,
+        endian_id: 1u16, pointer_width_bits: 64u16,
+        snapshot_identity: digest(1u64), snapshot_generation: 7u64,
+        execution_domain_identity: digest(2u64),
+        hardware_features: feature_set(0u32),
+        os_usable_features: feature_set(1u32),
+        policy_allowed_features: feature_set(2u32),
+        vector_state_mode: ENV_VECTOR_FIXED_V1, vector_length_bits: 256u32,
+        loader_permission_bits: 3u64,
+        allowed_effect_bits: 3u64, numerical_contract_id: 1u32,
+        resource_layout_digest: digest(8u64),
+        gpu_devices: EnvironmentArenaRangeV1(offset: 0u32, count: 0u32))
+
+fn frontend_facet_v1() -> FrontendFacetV1:
+    FrontendFacetV1(
+        descriptor_size: 48u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        interface_major: 1u16, interface_minor: 0u16,
+        create_session_operation: ENV_FRONTEND_CREATE_SESSION_V1,
+        plan_regions_operation: ENV_FRONTEND_PLAN_REGIONS_V1,
+        execute_batch_operation: ENV_FRONTEND_EXECUTE_BATCH_V1,
+        inspect_receipt_operation: ENV_FRONTEND_INSPECT_RECEIPT_V1,
+        release_session_operation: ENV_FRONTEND_RELEASE_SESSION_V1,
+        provider_generation: 9u64, operation_table_handle: 42u64)
+
+fn batch_request_v1() -> FrontendBatchRequestV1:
+    FrontendBatchRequestV1(
+        descriptor_size: 128u32, schema_version: ENV_VARIANT_SCHEMA_V1,
+        operation: ENV_FRONTEND_EXECUTE_BATCH_V1,
+        session: FrontendSessionHandleV1(provider_generation: 9u64, session_id: 5u64),
+        dialect_id: 1u32, grammar_digest: digest(3u64),
+        source_snapshot_digest: digest(4u64), first_region: 0u32,
+        region_count: 4u32,
+        input_bytes: EnvironmentArenaRangeV1(offset: 0u32, count: 64u32),
+        output_reservation: EnvironmentArenaRangeV1(offset: 32u32, count: 64u32),
+        budget_us: 1000u64)
+
+describe "EnvironmentSnapshotV1 contract":
+    it "admits exact nested hardware, OS-usable, and policy feature sets":
+        expect(environment_snapshot_validate_v1(snapshot_v1(), [7u64, 3u64, 1u64], [])).to_equal(Ok(()))
+
+    it "rejects policy features that OS state does not make usable":
+        var snapshot = snapshot_v1()
+        expect(environment_snapshot_validate_v1(snapshot, [7u64, 3u64, 4u64], [])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.FeatureAuthorityViolation))
+
+    it "rejects cross-architecture feature sets and invalid vector state":
+        var snapshot = snapshot_v1()
+        snapshot.policy_allowed_features.architecture = ENV_ARCH_AARCH64_V1
+        expect(environment_snapshot_validate_v1(snapshot, [7u64, 3u64, 1u64], [])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidFeatureSet))
+        snapshot = snapshot_v1()
+        snapshot.vector_length_bits = 0u32
+        expect(environment_snapshot_validate_v1(snapshot, [7u64, 3u64, 1u64], [])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidVectorState))
+
+    it "rejects an undeclared snapshot identity and unbounded device list":
+        var snapshot = snapshot_v1()
+        snapshot.snapshot_identity = digest(0u64)
+        expect(environment_snapshot_validate_v1(snapshot, [7u64, 3u64, 1u64], [])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidIdentity))
+        snapshot = snapshot_v1()
+        snapshot.gpu_devices.count = 17u32
+        expect(environment_snapshot_validate_v1(snapshot, [7u64, 3u64, 1u64], [])).to_equal(
+            Err(EnvironmentVariantContractErrorV1.CapacityExceeded))
+
+describe "FrontendFacetV1 contract":
+    it "admits the frozen coarse session and batch operation table":
+        expect(frontend_facet_validate_v1(frontend_facet_v1())).to_equal(Ok(()))
+
+    it "rejects reordered operation identities and stale generations":
+        var facet = frontend_facet_v1()
+        facet.execute_batch_operation = ENV_FRONTEND_PLAN_REGIONS_V1
+        expect(frontend_facet_validate_v1(facet)).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidFrontendOperation))
+        val request = batch_request_v1()
+        expect(frontend_batch_request_validate_v1(request, 64u32, 96u32, 10u64)).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidGeneration))
+
+    it "admits bounded generation-pinned batch arena ranges":
+        expect(frontend_batch_request_validate_v1(batch_request_v1(), 64u32, 96u32, 9u64)).to_equal(Ok(()))
+
+    it "rejects region arithmetic overflow and output range overflow":
+        var request = batch_request_v1()
+        request.first_region = 4294967295u32
+        expect(frontend_batch_request_validate_v1(request, 64u32, 96u32, 9u64)).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidResourceBounds))
+        request = batch_request_v1()
+        request.output_reservation.offset = 64u32
+        request.output_reservation.count = 64u32
+        expect(frontend_batch_request_validate_v1(request, 64u32, 96u32, 9u64)).to_equal(
+            Err(EnvironmentVariantContractErrorV1.InvalidArena))

@@ -1,0 +1,277 @@
+"""
+## Purpose and audience
+Focused Milestone 4 evidence for the checked dynamic backend provider library
+lease (`compiler.backend_plugin.dynamic_loader`). Audience: the compiler
+plugin-boundary engineer verifying the loader fails closed on a bad provider
+path and that its typed error taxonomy (`LoadFailed`/`MissingSymbol`/
+`Unsupported`) reports the exact stable codes callers dispatch on.
+
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend_plugin/dynamic_loader_spec.spl
+
+## Compatibility and limitations
+The fixture builder compiles two tiny C providers for the current host. On
+Windows it admits only the pinned LLVM 23.1.1 `clang-cl.exe` binary and checks
+its SHA-256 before compiling. The provider entry is resolved but never called.
+
+## Verification guidance and troubleshooting
+Every scenario calls the real staging or loader boundary against a compiled
+shared library. A failure names the returned error code; cross-reference
+`src/compiler/70.backend/backend_plugin/dynamic_loader.spl` for the
+code<->variant mapping.
+"""
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: dynamic-backend-plugin-lease
+
+use std.spec
+use std.spec.step
+use std.io.{env_set, process_run}
+use std.nogc_sync_mut.io_runtime.{
+    dir_exists, dir_list, file_exists, file_hash_sha256_or_empty, file_read,
+    file_write, host_os
+}
+use compiler.backend_plugin.dynamic_loader.*
+use compiler.backend_plugin.loader.{load_backend}
+use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
+    BackendPluginRequestV1}
+use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.mir.mir_data.{MirModule}
+
+val DYNAMIC_LOADER_FIXTURE_BUILDER =
+    "test/fixtures/backend_plugin/build_dynamic_loader_fixtures.shs"
+
+fn fixture_value(output: text, key: text) -> text:
+    val prefix = key + "="
+    for line in output.split("\n"):
+        if line.starts_with(prefix):
+            return line.slice(prefix.len(), line.len())
+    ""
+
+fn fixture_shell() -> text:
+    if host_os() == "windows":
+        return "C:/msys64/usr/bin/sh.exe"
+    "sh"
+
+fn staging_directory_count() -> i64:
+    var count = 0
+    for path in dir_list("."):
+        if path.contains("simple-backend-plugin"):
+            count = count + 1
+    count
+
+describe "dynamic backend provider library lease":
+    it "resolves only the exact v1 entry symbol through canonical DynLib":
+        # @req REQ-DYNLOADER-001
+        step("Read the canonical v1 entry symbol constant")
+        # @capture(statistics): canonical entry symbol name
+        expect(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1).to_equal(
+            "simple_backend_plugin_v1"
+        )
+
+        step("Attempt a checked load against a provider path that cannot exist")
+        val load_result = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease("/nonexistent/dynamic_loader_spec_probe_v1.so")
+        # @capture(statistics): real DynLib.load_checked failure classification
+        step("Verify the loader fails closed with the load-failed error code")
+        val load_code = match load_result:
+            case Ok(_): "unexpected-ok"
+            case Err(error): error.code()
+        expect(load_code).to_equal("BACKEND_PLUGIN_LOAD_FAILED")
+
+    it "stages immutable provider bytes before loading":
+        # @req REQ-DYNLOADER-001
+        step("Compile a real C provider with the admitted host compiler")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "immutable"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        expect(provider_path == "").to_be(false)
+
+        step("Stage and identify the exact provider bytes")
+        var staged = stage_dynamic_backend_plugin_artifact_v1(
+            provider_path).ok().unwrap()
+        expect(staged.staged_path == provider_path).to_be(false)
+        expect(staged.build_id).to_equal(
+            file_hash_sha256_or_empty(staged.staged_path))
+
+        step("Mutate the selected source after staging")
+        expect(file_write(provider_path, "mutated-after-staging")).to_equal(true)
+        expect(file_hash_sha256_or_empty(provider_path) == staged.build_id).to_be(false)
+        expect(file_hash_sha256_or_empty(staged.staged_path)).to_equal(
+            staged.build_id)
+        val staging_dir = staged.staging_dir
+        expect(staged.close()).to_equal(true)
+        expect(dir_exists(staging_dir)).to_be(false)
+
+    it "fails closed and closes the library when the entry symbol is missing":
+        # @req REQ-DYNLOADER-002
+        step("Compile a loadable C provider without the required entry symbol")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "missing"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "MISSING")
+        val before = staging_directory_count()
+
+        step("Load the provider through the real checked DynLib path")
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path)
+        val missing_code = match result:
+            case Ok(_): "unexpected-ok"
+            case Err(load_error): load_error.code()
+        val missing_detail = match result:
+            case Ok(_): ""
+            case Err(load_error): load_error.diagnostic()
+        expect(missing_code).to_equal("BACKEND_PLUGIN_MISSING_SYMBOL")
+        expect(missing_detail).to_contain(DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+        expect(staging_directory_count()).to_equal(before)
+
+    it "retains the raw address only as a lease for the typed bridge":
+        # @req REQ-DYNLOADER-003
+        step("Attempt a checked load with an empty provider path")
+        val empty_path = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease("")
+        # @capture(statistics): empty-path fail-closed classification
+        step("Verify the loader rejects an empty path before any raw FFI call")
+        val empty_path_code = match empty_path:
+            case Err(error): error.code()
+            case Ok(_): "ok"
+        expect(empty_path_code).to_equal("BACKEND_PLUGIN_LOAD_FAILED")
+
+        step("Construct the typed error for an unsupported descriptor ABI")
+        val unsupported = DynamicBackendPluginLoadError.Unsupported(
+            "typed descriptor ABI is unavailable"
+        )
+        # @capture(statistics): unsupported-ABI error taxonomy
+        step("Verify the unsupported variant reports the stable dispatch code")
+        expect(unsupported.code()).to_equal(
+            "BACKEND_PLUGIN_DYNAMIC_ABI_UNSUPPORTED"
+        )
+        step("Verify the unsupported variant retains its diagnostic detail")
+        expect(unsupported.diagnostic()).to_equal("typed descriptor ABI is unavailable")
+
+    it "loads the exact symbol and revokes admitted calls on close":
+        # @req REQ-DYNLOADER-002
+        step("Compile and load a real C provider exporting the exact v1 symbol")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val selected_build_id = file_hash_sha256_or_empty(provider_path)
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        var lease = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path).ok().unwrap()
+        expect(lease.symbol_name()).to_equal(
+            DYNAMIC_BACKEND_PLUGIN_ENTRY_SYMBOL_V1)
+        expect(lease.provider_path == provider_path).to_equal(false)
+        expect(lease.build_id).to_equal(selected_build_id)
+        expect(file_hash_sha256_or_empty(lease.provider_path)).to_equal(
+            lease.build_id)
+        val admitted_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(admitted_handle).to_be_greater_than(0)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            lease.end_admitted_call()
+        expect(dir_exists(lease.staging_dir)).to_equal(true)
+
+        step("Close the admitted lease and remove its private stage")
+        val staging_dir = lease.staging_dir
+        expect(lease.close()).to_equal(true)
+        val stale_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(stale_handle).to_equal(0)
+        expect(dir_exists(staging_dir)).to_be(false)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
+
+    it "retries staging cleanup without unloading a dynamic provider twice":
+        # @req REQ-DYNLOADER-002
+        step("Load a real provider and arrange a cleanup-only failure")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(provider_path)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        var lease = unsafe(capabilities: [ffi, raw_ptr]):
+            load_dynamic_backend_plugin_lease(provider_path).ok().unwrap()
+        val staging_dir = lease.staging_dir
+        lease.staging_dir = provider_path + "/not-a-directory"
+
+        step("Unload once and retain the failed cleanup for retry")
+        expect(lease.close()).to_equal(false)
+        expect(lease.closed).to_equal(false)
+        expect(lease.is_open()).to_equal(false)
+        val stale_handle = unsafe(capabilities: [ffi, raw_ptr]):
+            lease.begin_admitted_call()
+        expect(stale_handle).to_equal(0)
+        expect(lease.library.is_live()).to_be(false)
+        expect(lease.entry_symbol_address).to_equal(0)
+        expect(dir_exists(staging_dir)).to_equal(true)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+
+        step("Retry only the private directory cleanup")
+        lease.staging_dir = staging_dir
+        expect(lease.close()).to_equal(true)
+        expect(lease.close()).to_equal(true)
+        expect(lease.closed).to_equal(true)
+        expect(dir_exists(staging_dir)).to_equal(false)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)
+
+    it "keeps a dynamic session uncallable while cleanup is retryable":
+        # @req REQ-DYNLOADER-002
+        step("Admit a real provider through the dynamic backend session")
+        val (output, error, code) = process_run(
+            fixture_shell(), [DYNAMIC_LOADER_FIXTURE_BUILDER, "lease"])
+        expect(code).to_equal(0)
+        expect(output + error).to_contain("FIXTURE_OK")
+        val provider_path = fixture_value(output, "GOOD")
+        val unload_marker = fixture_value(output, "UNLOAD")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        expect(file_exists(provider_path)).to_equal(true)
+        expect(file_exists(unload_marker)).to_equal(false)
+        val request = BackendPluginRequestV1(BackendRole.CompilerAot,
+            "dynamic-test", "host", "generic", [], "debug",
+            BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            provider_path, true)
+        var session = load_backend(request).ok().unwrap()
+        var adapter = session.dynamic_adapter.unwrap()
+        var retained_lease = adapter.lease
+        val staging_dir = retained_lease.staging_dir
+        retained_lease.staging_dir = provider_path + "/not-a-directory"
+        adapter.lease = retained_lease
+        session.dynamic_adapter = Some(adapter)
+
+        step("Reject calls after unloading while retaining cleanup state")
+        expect(session.close()).to_equal(false)
+        expect(session.closed).to_equal(false)
+        expect(session.is_open()).to_equal(false)
+        expect(session.handle).to_equal(0)
+        expect(session.close_count).to_equal(0)
+        val empty_module = MirModule(name: "closed-dynamic-provider",
+            functions: {}, statics: {}, constants: {}, types: {})
+        expect(session.compile_module(empty_module).is_err()).to_equal(true)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+
+        step("Retry cleanup and keep the closed session safe")
+        adapter = session.dynamic_adapter.unwrap()
+        retained_lease = adapter.lease
+        retained_lease.staging_dir = staging_dir
+        adapter.lease = retained_lease
+        session.dynamic_adapter = Some(adapter)
+        expect(session.close()).to_equal(true)
+        expect(session.close()).to_equal(true)
+        expect(session.closed).to_equal(true)
+        expect(session.close_count).to_equal(1)
+        expect(dir_exists(staging_dir)).to_equal(false)
+        expect(session.compile_module(empty_module).is_err()).to_equal(true)
+        expect(file_read(unload_marker)).to_equal("unloaded\n")
+        expect(env_set("SIMPLE_DYNLOADER_UNLOAD_MARKER", "")).to_equal(true)

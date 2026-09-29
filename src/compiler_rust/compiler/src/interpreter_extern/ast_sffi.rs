@@ -179,6 +179,7 @@ pub fn rt_ast_expr_tag(args: &[Value]) -> Result<Value, CompileError> {
             Expr::Slice { .. } => "Slice",
             Expr::Spread(_) => "Spread",
             Expr::DictSpread(_) => "DictSpread",
+            Expr::StructSpread(_) => "StructSpread",
             Expr::StructInit { .. } => "StructInit",
             Expr::Spawn(_) => "Spawn",
             Expr::Go { .. } => "Go",

@@ -18,6 +18,7 @@ use std.storage.storage_class.{StorageClass}
 use std.storage.nvme_feature_policy.{samsung_mzql2960hcjr_sysfs_facts, nvme_policy_for_class}
 
 val _NVFS_MAX_POSITIONED_OFFSET: i64 = 9223372036854775807
+val _NVFS_MAX_BOUNDED_PREAD_BYTES: i64 = 65536
 
 struct NvfsDriver:
     name: text
@@ -52,6 +53,26 @@ impl NvfsDriver:
         inner.trim_supported = policy.uses_discard
         inner.write_zeroes_supported = policy.uses_write_zeroes
         NvfsDriver(name: name, inner: inner)
+
+    fn device_instance_id() -> i64:
+        """Return the exact DBFS backing instance owned by this NVFS driver."""
+        self.inner.device_instance_id()
+
+    fn durability_serialization_ready() -> bool:
+        """Require the DBFS backing owner before publishing a writable root."""
+        self.inner.durability_serialization_ready()
+
+    fn issue_root_mount_identity() -> Result<(i64, u64, u64), FsError>:
+        """Issue the backing-owner identity used by an exact NVFS root seal."""
+        self.inner.issue_server_data_root_mount_identity()
+
+    fn root_mount_identity_current() -> Result<(i64, u64), FsError>:
+        """Revalidate the backing instance and mutation epoch of a live root."""
+        self.inner.server_data_root_instance_identity()
+
+    fn close_device_backing(expected_inst_id: i64) -> Result<bool, FsError>:
+        """Release only this driver's exact DBFS backing instance."""
+        self.inner.close_device_backing(expected_inst_id)
 
     fn preferred_io_unit_bytes() -> i64:
         self.inner.preferred_io_unit_bytes()
@@ -199,6 +220,23 @@ impl NvfsDriver:
 
     fn pread_handle(handle: FileHandle, offset: i64, length: i64) -> Result<text, FsError>:
         self.inner.pread_handle(handle, offset, length)
+
+    fn pread_bytes_handle(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Return a byte-exact positioned slice with ordinary EOF semantics."""
+        if not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        self.inner.pread_bytes_handle(handle, offset, length)
+
+    fn pread_bounded_bytes_handle(
+        handle: FileHandle, offset: i64, length: i64
+    ) -> Result<[u8], FsError>:
+        """Return an owned positioned chunk bounded to 64 KiB."""
+        if length > _NVFS_MAX_BOUNDED_PREAD_BYTES or
+                not _nvfs_positioned_range_valid(offset, length):
+            return Err(FsError.InvalidArg)
+        self.inner.pread_bounded_bytes_handle(handle, offset, length)
 
     fn close_handle(handle: FileHandle) -> Result<(), FsError>:
         self.inner.close_handle(handle)

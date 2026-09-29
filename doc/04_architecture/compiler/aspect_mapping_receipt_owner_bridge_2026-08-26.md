@@ -10,9 +10,10 @@ change.
 
 `ModuleLoader`'s loader-side aspect owner is the sole canonical mutable owner
 of executable-aspect mapping lifecycle. `SegmentMapper` and
-`SharedExecMapper` remain physical mapping producers/consumers; neither is a
-cross-layer lifecycle authority. Their private address/length records never
-cross into the aspect package or a public receipt.
+`SharedExecMapper` are each the canonical owner of their physical mapping
+record and issue its producer receipt; neither becomes a cross-layer lifecycle
+authority. Their private address/length records never cross into the aspect
+package or a public receipt.
 
 The common, sibling-safe boundary is a new frozen contract module:
 `src/lib/common/structural/parallel_commit/executable_mapping_receipt.spl`.
@@ -23,27 +24,24 @@ common owns receipt words, while a runtime/loader owner commits state.
 
 ## Boundary contract (proposed)
 
-`ExecutableMappingReceiptV1` is a copyable *coordinate*, never direct
-authority. Its fixed fields are:
+`ExecutableMappingReceiptV1` is a copyable mapper-issued *coordinate*, never
+direct authority. Its fixed fields are:
 
 | Field | Meaning |
 | --- | --- |
 | `schema` | Must equal `1`. |
-| `receipt_id` | Positive, process-unique, non-wrapping issuance coordinate. |
-| `owner_identity` | Exact `_ModuleAspectOwnerV1.identity` that admitted it. |
-| `facet_key`, `facet_generation` | Binding identity that may release it. |
+| `owner_id` | Exact mapper-local owner identity supplied at materialization. |
+| `mapping_key` | Opaque mapper-local segment key or symbol key. |
 | `producer_kind` | Closed: `SegmentMapper` or `SharedExecMapper`. |
 | `mapping_generation` | Producer generation observed at materialization. |
 | `mapped_bytes`, `segment_count` | Nonnegative accounting facts. |
-| `artifact_digest` | Immutable artifact correlation; no payload bytes or address. |
 
 `ExecutableMappingReleaseResultV1` is likewise pointer-free and names
 `Released`, `AlreadyReleased`, `NotFound`, `OwnerMismatch`, `GenerationMismatch`,
-`CancellationPending`, or `NativeReleaseFailed`. A receipt alone cannot call
-unmap: the loader owner validates all identity fields against one live registry
-row and consumes the row exactly once. Receipt IDs are never reused; a bounded
-released-ID ring makes duplicate/stale calls observable without retaining an
-unbounded map.
+`FinalUnpinRequired`, or `NativeReleaseFailed`. A receipt alone cannot call
+unmap: no mapper exposes receipt-driven unmap, and the future loader owner
+must bind the producer coordinate to exact aspect identity/final-unpin state
+inside one bounded live registry before it implements the release port.
 
 The proposed common module imports no compiler or mapper code. It is a
 contract leaf, not a virtual capsule and not a new `aspect_pack` dependency.
@@ -60,7 +58,8 @@ ModuleFacetRef.release --final-unpin lease--> same owner --> mapper-private unma
 ```
 
 `ModuleAspectExecutableMappingOwnerV1` is held by `_ModuleAspectOwnerV1`; it
-owns all mutable receipt rows, byte totals, capacity counters, issuer sequence,
+owns all mutable receipt rows, byte totals, capacity counters, and terminal
+history,
 and terminal-result ring. Its registry rows contain the mapper-private release
 delegate and, only inside the loader layer, the native mapping coordinates.
 No raw pointer or `i64` address is placed in a receipt, `ModuleFacetRefV1`,
@@ -72,11 +71,14 @@ Mapping is a parent-owner commit, even if a future worker materializes bytes:
    and cannot be resolved by a facet.
 2. Under the aspect lifecycle gate, the loader validates loader identity, exact
    facet generation, digest, limits, and a producer-specific completion proof.
-3. The loader allocates the receipt ID and commits the registry row and aspect
-   binding association together. If either part cannot commit, it invokes the
+3. The mapper issues the non-wrapping producer coordinate.  The loader commits
+   that coordinate's registry row and aspect binding association together. If
+   either part cannot commit, it invokes the
    same producer-private rollback before returning failure.
-4. Only the parent owner publishes `ExecutableMappingReceiptV1`. Ordering is
-   `(owner_identity, facet_key bytes, facet_generation, receipt_id)`; conflicting
+4. Only the parent owner publishes the aspect association for an
+   `ExecutableMappingReceiptV1`. Ordering is
+   `(owner_identity, facet_key bytes, facet_generation, mapping_generation)`;
+   conflicting
    candidates reject rather than silently replace an active mapping.
 
 This makes cancellation deterministic: cancellation before step 3 rolls back
@@ -128,16 +130,31 @@ receipt is live or `ReleasePending`. `SegmentMapper.unmap_owner` and
 `SharedExecMapper.unmap_owner` remain bulk internal teardown APIs, not proof
 that a particular facet mapping was released.
 
-## Current blockers
+## Implemented mapper prerequisite (2026-08-26)
+
+`std.common.structural.parallel_commit.executable_mapping_receipt` now owns
+the pointer-free `ExecutableMappingReceiptV1` vocabulary and the deliberately
+unimplemented `ExecutableMappingReleasePortV1` boundary.  Both
+`SegmentMapper` and both maintained `SharedExecMapper` surfaces retain their
+address-returning APIs for compatibility and add receipt-returning mapping
+entrypoints.  The mapper itself issues the coordinate immediately after it
+commits a live native record; the coordinate includes only owner-local key,
+non-wrapping mapping generation, byte count, segment count, and producer kind.
+
+No mapper exposes `unmap_receipt`: a copied receipt is therefore not authority
+to free native memory, and release before a final-unpin lease is unavailable by
+construction.  Receipt-producing `SharedExecMapper` calls also reject replace
+requests, so the receipt lane cannot retire an earlier receipt-bearing mapping
+through hot-reload replacement.  The new receipt path adds no registry or payload copy; it is
+O(1) over the record just committed.  Existing record registries remain the
+only mapper-held state and their removal semantics, W^X transitions, and code
+cache behavior are unchanged.  Generation exhaustion fails closed.
+
+## Remaining blockers
 
 Implementation is intentionally blocked because all of these contracts are
 missing on `origin/main` at `63352be37a7`:
 
-- `SegmentMapper.map_segment` returns `Result<i64, text>` and stores `base` in
-  public mapper state; it creates no per-mapping identity or release proof.
-- `SharedExecMapper.map_symbol` returns `Result<i64, text>` and exposes
-  `SharedExecRecord.address`; replacement can free an old mapping before any
-  aspect owner could validate a receipt.
 - `_ModuleAspectOwnerV1` has catalog ownership only; it has no mapping registry,
   capacity accounting, receipt issuer, or producer delegate interface.
 - `ModuleFacetRefV1.release` calls `apk_facet_unpin_v1` directly, whose `bool`
@@ -151,7 +168,10 @@ after final unpin because no executable mapping receipt crosses that boundary.
 
 ## Static performance and memory review
 
-The hot non-final release path remains one lifecycle-gate admission plus one
+The mapper receipt path performs the existing materialization followed by one
+O(1) lookup of the record it just committed; it allocates no second registry,
+copies no payload, adds no W^X transition, and issues no release syscall. The
+hot non-final release path remains one lifecycle-gate admission plus one
 bounded registry lookup; it performs no scan of mapper records, packs, or
 payload bytes. Final release is O(receipts for exact facet generation), with a
 facet-to-receipt adjacency index owned by the loader; it must not call

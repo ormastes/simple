@@ -1,6 +1,11 @@
 # SSpec: `expect(<call returning 0/false/"">).to_equal(...)` false-REDs
 
-**Status:** FIXED in seed source; pending seed rebuild + deploy to default `bin/simple`
+## Closed 2026-09-13 — falsy call result no longer reported red
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's own fence (`fn ret_zero() -> i32: 0` + `expect(ret_zero()).to_equal(0)`) runs green: `1 example, 0 failures`, `outcome=OK declared>=1 executed=1 passed=1`.
+
+**Status:** Closed (fixed + deployed) 2026-09-13
 **Found:** 2026-06-29 (noise sweep — riscv64 target spec failures led here)
 **Area:** test framework / BDD matchers (Rust seed)
 

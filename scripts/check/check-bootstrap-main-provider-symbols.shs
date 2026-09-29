@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: $0 <undefined-symbol-inventory> <provider-archive> [...]" >&2
+    exit 2
+fi
+
+inventory=$1
+[ -f "$inventory" ] || { echo "missing symbol inventory: $inventory" >&2; exit 2; }
+shift
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-provider.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+LC_ALL=C sort -u "$inventory" > "$tmp_dir/required"
+: > "$tmp_dir/defined.unsorted"
+for provider do
+    [ -f "$provider" ] || { echo "missing provider archive: $provider" >&2; exit 2; }
+    nm -g --defined-only "$provider" 2>/dev/null |
+        awk 'NF { print $NF }' |
+        sed 's/^_//' >> "$tmp_dir/defined.unsorted"
+done
+LC_ALL=C sort -u "$tmp_dir/defined.unsorted" > "$tmp_dir/defined"
+LC_ALL=C comm -23 "$tmp_dir/required" "$tmp_dir/defined" > "$tmp_dir/missing"
+
+if [ -s "$tmp_dir/missing" ]; then
+    echo "bootstrap_main provider set is ABI-incomplete" >&2
+    sed 's/^/missing: /' "$tmp_dir/missing" >&2
+    exit 1
+fi
+
+count=$(wc -l < "$tmp_dir/required" | tr -d ' ')
+echo "PASS: provider set owns all $count bootstrap_main provider symbols"

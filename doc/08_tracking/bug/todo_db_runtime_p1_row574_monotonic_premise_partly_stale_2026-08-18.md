@@ -1,4 +1,8 @@
 # todo_db row 574 (area runtime, P1) — premise is partly stale
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Row 574 asks to "provide overflow-safe cross-platform monotonic millisecond
 conversion and split QEMU runner elapsed timing from wall-clock artifact
@@ -56,3 +60,4 @@ Left untouched; no claim made either way.
 
 Narrow row 574 to sub-claims 3 and 4 and drop 1 and 2, so the row stops
 pointing at code that already satisfies it.
+

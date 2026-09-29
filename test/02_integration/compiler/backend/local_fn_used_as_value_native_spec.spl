@@ -1,0 +1,41 @@
+# Regression for P3 (stage2_cli_link_undefined.md): a file-local (non-`pub`)
+# top-level function referenced as a first-class VALUE (assigned into a
+# struct field of function type, or bound to a local, never called directly
+# by name) used to be lowered to a `Const(Int(0))` placeholder instead of a
+# real function-pointer operand naming the function's own linkage symbol.
+# Discriminates the fix: without it, the native binary below calls through a
+# null function pointer (crash, or a printed value that does not match the
+# interpret lane) instead of the real `unavailable_spawn`/`unavailable_join`
+# functions. With the fix, the native binary matches the interpret lane
+# exactly.
+use std.spec
+use std.io_runtime.{process_run, env_get, dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+val PROBE = "test/02_integration/compiler/backend/probe_local_fn_used_as_value.spl"
+
+fn simple_bin() -> text:
+    val b = env_get("SIMPLE_BIN")
+    if b == "": "bin/simple" else: b
+
+describe "a local top-level function referenced as a value (native lane)":
+    slow_it "native-builds, links, and calls the real function -- not a null placeholder":
+        step("interpret lane is the reference")
+        val interp = process_run("sh", ["-c", "SIMPLE_RUST_SEED_WARNING=0 " + simple_bin() + " run " + PROBE + " 2>/dev/null"])
+        expect(interp.0).to_contain("spawn -1")
+        expect(interp.0).to_contain("join -2")
+        expect(interp.0).to_contain("direct -1")
+
+        step("native-build must link cleanly (the private fn's own symbol is referenced)")
+        val root = "build/tmp/local_fn_used_as_value_{getpid()}"
+        expect(dir_create_all(root)).to_equal(true)
+        val out = root + "/probe"
+        val build = process_run("sh", ["-c", simple_bin() + " native-build --runtime-bundle core-c-bootstrap --threads 2 -o " + out + " " + PROBE + " 2>&1"])
+        expect(build.0.contains("undefined")).to_equal(false)
+        expect(build.2).to_equal(0)
+
+        step("the native binary calls the real functions, matching the interpret lane")
+        val run = process_run("sh", ["-c", out + " 2>&1"])
+        expect(run.0).to_contain("spawn -1")
+        expect(run.0).to_contain("join -2")
+        expect(run.0).to_contain("direct -1")

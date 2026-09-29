@@ -1,16 +1,8 @@
 # Skia path_op boolean polygon ops: 2 of 6 examples fail
+## Open 2026-09-16 — needs owner triage
 
-## Status: ALREADY-FIXED (verified by execution 2026-08-17)
-
-`bin/simple run test/unit/lib/skia/path_op_spec.spl` reports
-`declared>=6 executed=6 passed=6 failed=0 dropped=0` -- all six
-point-membership/bbox examples pass, not the 2 failures recorded here.
-
-Incidental finding from the same run, NOT this defect and not fixed here: the
-spec drops out of JIT to the interpreter with
-`MIR lowering error: Unsupported HIR construct: unknown variant or method 'CW'
-on enum SkPathDirection`. The examples pass on the interpreter fallback.
-
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (pure computational geometry, not a rendering/pixel test)
@@ -61,3 +53,4 @@ the pattern used for `math3d_cos_taylor_precision_2026-07-20.md`) printing
 `u.contains(...)`/`u.bounds()` values directly to bisect which 2 of the 6
 actually fail and get concrete expected-vs-actual numbers before touching
 `boolean.spl`.
+

@@ -1,13 +1,10 @@
 # Ed25519 `ed_scalar_mul`/`ed_scalar_mul_basepoint` regressed to a branch-on-secret-bit form (constant-time regression)
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
-
 - **Date:** 2026-07-20
 - **Area:** `src/os/crypto/ed25519_ops.spl` (pure-Simple Ed25519 point arithmetic)
 - **Severity:** high (timing side-channel on the secret-scalar code path — the
   exact class of bug previously fixed and guarded against).
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN — do NOT fix from a test-cluster triage pass; flagging with
   full evidence for a follow-up implementation session.
 
 ## Symptom
@@ -112,44 +109,3 @@ resolves the T_SHA_ABC value mismatch, or whether they are independent.
 ## Affected specs
 
 - `test/unit/lib/crypto/ed25519_ct_property_spec.spl`
-
-## 2026-08-17 content triage (w0001 ZCLAIMED, source-inspection only)
-
-Verdict: STILL-OPEN (corrected line refs)
-
-Both functions still exist in `src/os/crypto/ed25519_ops.spl`:
-
-```
-966: fn ed_scalar_mul_basepoint_simple(scalar: [u8]) -> EdPoint:
-976: fn ed_scalar_mul_basepoint(scalar: [u8]) -> EdPoint:
-```
-
-No constant-time selection primitive is present (`grep -n "ct_select\|conditional_select"`
-returns nothing in this file). The cited line 938 sits inside the `_simple`
-body, which also still carries per-byte `serial_println("[ed25519-scalar] byte8")`
-debug tracing. Use :966 / :976 as the reference points.
-NOT PROVEN: that the constant-time property actually regresses at runtime — that
-needs execution/timing, which this triage did not perform.
-
-## 2026-08-20 canonical common-verifier repair (static only)
-
-At source level, the pure-Simple owner used by release/evidence verification
-now has fixed-work secret-scalar paths.  Its public `ed25519.spl` facade uses a
-fixed 64-window schedule, four doublings and one addition per window, a full
-16-entry table scan, and XOR-mask point selection.  A follow-up review found
-additional secret-dependent branches in scalar reduction and multiplication;
-`ed25519_scalar.spl` now performs every conditional subtraction and multiply
-accumulation through mask selection over fixed loops.  Dormant branch-indexed
-cached selectors were removed.  Field arithmetic lives in the cohesive
-`ed25519_field.spl` module.  The same repair adds strict canonical point
-decoding, square-root revalidation, negative-zero rejection, `S < L`,
-prime-subgroup membership, and small-order rejection.
-
-The original row names `src/os/crypto/ed25519_ops.spl`; that separate owner was
-outside this bounded repair and remains OPEN.  The common-owner fix is also
-STATIC-ONLY: no valid deployed self-hosted Simple runtime was available.  The
-fixed-work statement above describes source control flow only; it is not an
-executable constant-time or compiler-codegen proof.  Neither the RFC signing
-KAT nor timing/codegen evidence has run yet.  Do not enable evidence signature
-admission until the focused common-owner spec passes under the self-hosted
-runtime and the native code path is reviewed.

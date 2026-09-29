@@ -1,0 +1,94 @@
+"""
+# Explicit `use owner.{name}` import wins over a same-named fn elsewhere
+# (pure-Simple interpreter resolver)
+
+Executable pin for the root defect in
+doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md: the
+interpreter's function registry is a flat last-write-wins bare-name table, and
+an explicit import (e.g. `use std.io_runtime.{env_get}`) silently bound to a
+same-named fn from another module with a different contract. Only the crashing
+consumer was guarded; the resolver itself was not fixed.
+
+Root cause (pure-Simple): `func_resolve_for_caller` resolved a caller's import
+binding with a single `func_table_lookup_owned(imported_owner, name)`. When
+the imported module is a facade that re-exports the name (`export use
+owner.{name}`), the owned lookup misses (the definition is registered under
+the real owner's path), the resolver returned -1, and every call evaluator's
+legacy fallback (`func_table_lookup`, flat last-write-wins) dispatched to an
+unrelated same-named fn — observed as the Option-returning `env_get` hijack
+(env_get(unset) == nil instead of "").
+
+Fix (eval_tables.spl): `func_resolve_for_caller` now follows the import
+binding's re-export chain (the facade registered its own binding to the real
+owner when it loaded), so the explicit import resolves to the imported symbol.
+
+This file drives the pure-Simple module loader + evaluator end to end over
+fixture modules (same technique as cross_module_owned_fn_resolution_spec.spl):
+  * io_like.spl       — env_get: (text) -> text, never nil (std.io_runtime shape)
+  * nullable_like.spl — env_get: (text) -> text? returning nil, loaded SECOND
+                        so it wins the flat bare-name table (the hijacker)
+  * consumer.spl             — `use io_like.{env_get}`, calls it in a probe fn
+  * facade_like.spl          — `export use io_like.{env_get}` (re-export)
+  * consumer_via_facade.spl  — `use facade_like.{env_get}`, calls it in a probe
+"""
+
+use compiler.core.ast.{ast_reset}
+use compiler.core.interpreter.value.{val_reset, val_to_text}
+use compiler.core.interpreter.env.{env_init}
+use compiler.core.interpreter.eval.{eval_function_call, eval_get_error}
+use compiler.core.interpreter.eval_tables.{
+    func_table_reset,
+    func_table_lookup,
+    func_table_lookup_owned
+}
+use compiler.core.interpreter.module_loader_core.{module_loader_init, load_module}
+
+val IO_LIKE: text = "test/fixtures/envget_collision/io_like.spl"
+val NULLABLE_LIKE: text = "test/fixtures/envget_collision/nullable_like.spl"
+val SPEC_FILE: text = "test/01_unit/compiler/interpreter/explicit_import_wins_envget_collision_spec.spl"
+
+# Loads io_like, then nullable_like (so nullable wins the flat bare-name
+# race), then the requested consumer module. Returns the consumer probe's
+# decl_id in the pure-Simple interpreter.
+fn load_collision_graph(consumer_module: text, probe_name: text) -> i64:
+    ast_reset()
+    val_reset()
+    env_init()
+    func_table_reset()
+    module_loader_init()
+    val _io = load_module("test.fixtures.envget_collision.io_like", SPEC_FILE)
+    val _nil = load_module("test.fixtures.envget_collision.nullable_like", SPEC_FILE)
+    val _consumer = load_module(consumer_module, SPEC_FILE)
+    if eval_get_error() != "":
+        return -1
+    func_table_lookup(probe_name)
+
+fn probe_text(consumer_module: text, probe_name: text) -> text:
+    val did = load_collision_graph(consumer_module, probe_name)
+    if did < 0:
+        return "PROBE_DECL_NOT_FOUND:{eval_get_error()}"
+    val result = eval_function_call(did, [], [])
+    if eval_get_error() != "":
+        return "EVAL_ERROR:{eval_get_error()}"
+    val_to_text(result)
+
+describe "explicit import wins over a same-named fn elsewhere":
+    it "flat bare-name table is last-write-wins (the hijack hazard is live)":
+        load_collision_graph("test.fixtures.envget_collision.consumer", "probe_via_explicit_import")
+        # nullable_like loaded second: the flat table holds ITS env_get,
+        # not the io_like definition the consumer explicitly imported.
+        expect(func_table_lookup("env_get")).to_equal(func_table_lookup_owned(NULLABLE_LIKE, "env_get"))
+
+    it "an explicit direct import resolves to the imported symbol":
+        expect(probe_text("test.fixtures.envget_collision.consumer", "probe_via_explicit_import")).to_equal("io:HOME")
+
+    it "an explicit import through a re-export facade resolves to the imported symbol":
+        # The actual defect: the binding owner (facade) defines nothing, the
+        # old resolver returned -1, and the flat fallback served nullable_like's
+        # nil-returning env_get. The imported contract is (text) -> text.
+        expect(probe_text("test.fixtures.envget_collision.consumer_via_facade", "probe_via_facade_import")).to_equal("io:HOME")
+
+    it "the colliding module keeps its own definition for its own calls":
+        # Resolution must not overreach: a module calling its own env_get gets
+        # its own body (nil), even though it lost the flat-table race.
+        expect(probe_text("test.fixtures.envget_collision.nullable_like", "probe_own_env_get")).to_equal("nil")

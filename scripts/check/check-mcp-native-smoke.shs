@@ -8,6 +8,24 @@ MCP_NATIVE_SMOKE_TIMEOUT="${MCP_NATIVE_SMOKE_TIMEOUT:-15}"
 MCP_NATIVE_STARTUP_MAX_MS="${MCP_NATIVE_STARTUP_MAX_MS:-5000}"
 MCP_NATIVE_BOOTSTRAP_FRESH="${MCP_NATIVE_BOOTSTRAP_FRESH:-0}"
 
+# `timeout` is GNU coreutils and is NOT part of a stock macOS install; Homebrew
+# installs it as `gtimeout`, and only puts an unsuffixed `timeout` on PATH when
+# coreutils is linked. This gate is invoked live by the Stage-5 MCP lane
+# (bootstrap-from-scratch.sh:3143), so a missing `timeout` would abort the gate
+# under `set -e` rather than report an MCP verdict. Resolve it once into a
+# PREFIX (not a shell function) so the existing `VAR=x timeout ... server`
+# call sites keep working unchanged: the unquoted expansion splits into two
+# words when present and disappears entirely when absent.
+# Mirrors the run_timeout/run_timeout_kill helpers at
+# scripts/bootstrap/bootstrap-from-scratch.sh:876-891.
+if command -v timeout >/dev/null 2>&1; then
+    MCP_TIMEOUT="timeout ${MCP_NATIVE_SMOKE_TIMEOUT}"
+elif command -v gtimeout >/dev/null 2>&1; then
+    MCP_TIMEOUT="gtimeout ${MCP_NATIVE_SMOKE_TIMEOUT}"
+else
+    MCP_TIMEOUT=""
+fi
+
 now_ms() {
     value="$(date +%s%3N 2>/dev/null || true)"
     case "$value" in
@@ -100,7 +118,7 @@ MCP_CORE_RC=0
 MCP_CORE_IDS_OK=true
 if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ]; then
     set +e
-    SIMPLE_MCP_FULL=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_core.in" > "$TMPDIR/mcp_core.out" 2> "$TMPDIR/mcp_core.err"
+    SIMPLE_MCP_FULL=0 $MCP_TIMEOUT "$MCP_SERVER" < "$TMPDIR/mcp_core.in" > "$TMPDIR/mcp_core.out" 2> "$TMPDIR/mcp_core.err"
     MCP_CORE_RC=$?
     set -e
     MCP_CORE_IDS_OK=false
@@ -115,7 +133,7 @@ fi
 
 set +e
 MCP_START_MS="$(now_ms)"
-SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 $MCP_TIMEOUT "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp.jsonl" 2> "$TMPDIR/mcp.err"
 MCP_RC=$?
 MCP_END_MS="$(now_ms)"
 set -e
@@ -132,7 +150,7 @@ lsp_symbols_call='{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"nam
 
 set +e
 LSP_START_MS="$(now_ms)"
-timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$LSP_MCP_SERVER" < "$TMPDIR/lsp.in" > "$TMPDIR/lsp.out" 2> "$TMPDIR/lsp.err"
+$MCP_TIMEOUT "$LSP_MCP_SERVER" < "$TMPDIR/lsp.in" > "$TMPDIR/lsp.out" 2> "$TMPDIR/lsp.err"
 LSP_RC=$?
 LSP_END_MS="$(now_ms)"
 set -e
@@ -144,7 +162,7 @@ set -e
     printf 'Content-Length: %s\r\n\r\n%s' "${#lsp_symbols_call}" "$lsp_symbols_call"
 } > "$TMPDIR/lsp_func.in"
 set +e
-timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$LSP_MCP_SERVER" < "$TMPDIR/lsp_func.in" > "$TMPDIR/lsp_func.out" 2>> "$TMPDIR/lsp.err"
+$MCP_TIMEOUT "$LSP_MCP_SERVER" < "$TMPDIR/lsp_func.in" > "$TMPDIR/lsp_func.out" 2>> "$TMPDIR/lsp.err"
 LSP_FUNC_RC=$?
 set -e
 
@@ -166,7 +184,7 @@ MCP_SECOND_START_MS=0
 if [ "$MCP_NATIVE_BOOTSTRAP_FRESH" != "1" ]; then
     set +e
     MCP_START2_MS="$(now_ms)"
-    SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp2.jsonl" 2>> "$TMPDIR/mcp.err"
+    SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 $MCP_TIMEOUT "$MCP_SERVER" < "$TMPDIR/mcp.in" > "$TMPDIR/mcp2.jsonl" 2>> "$TMPDIR/mcp.err"
     MCP_RC2=$?
     MCP_END2_MS="$(now_ms)"
     set -e
@@ -191,7 +209,7 @@ mcp_pipe_call='{"jsonrpc":"2.0","id":"5","method":"tools/call","params":{"name":
     printf 'Content-Length: %s\r\n\r\n%s' "${#mcp_pipe_call}" "$mcp_pipe_call"
 } > "$TMPDIR/mcp_func.in"
 set +e
-SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_func.jsonl" 2>> "$TMPDIR/mcp.err"
+SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 $MCP_TIMEOUT "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_func.jsonl" 2>> "$TMPDIR/mcp.err"
 MCP_FUNC_RC=$?
 set -e
 
@@ -272,7 +290,7 @@ elif [ -d "${_mcp_probe_cache_dir}" ]; then
     if [ -n "${_stale_stamp}" ]; then
         printf 'corrupted_stamp_for_test\n' > "${_stale_stamp}"
         set +e
-        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 timeout "$MCP_NATIVE_SMOKE_TIMEOUT" "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
+        SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=0 $MCP_TIMEOUT "$MCP_SERVER" < "$TMPDIR/mcp_func.in" > "$TMPDIR/mcp_stale.jsonl" 2>> "$TMPDIR/mcp.err"
         _stale_rc=$?
         set -e
         if [ "$_stale_rc" -eq 0 ] && grep -q '"play_wm_text_status"' "$TMPDIR/mcp_stale.jsonl" 2>/dev/null; then

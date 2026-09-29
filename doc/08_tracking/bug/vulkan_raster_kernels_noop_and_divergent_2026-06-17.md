@@ -1,4 +1,19 @@
 # Vulkan Raster Kernels No-op / Divergent vs CPU Reference - 2026-06-17
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+## Triage 2026-09-13 — STILL OPEN: no GPU/Vulkan lane on this triage host
+- **measured** — the referenced sources still exist
+  (`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs`, `src/runtime/runtime_native.c`,
+  the `browser_engine` renderers), so the "all referenced paths are gone" stale test does
+  not apply.
+- **measured** — the gate's evidence directory `build/gui-web-2d-vulkan-env/` does not
+  exist here, i.e. the Vulkan/Electron/RenderDoc lane has never been run on this machine.
+- **inferred** — confirming or refuting GPU-backend behaviour requires a real Vulkan device
+  and that lane; neither is available from this Windows triage host. Left OPEN,
+  host-blocked — not stale.
 
 ## Severity
 P1 (partially fixed — 6 of 10 kernels wired and verified as of 2026-06-17).
@@ -187,30 +202,6 @@ untouched).
    unrelated to kernel wiring). Apply the same verified gradient wiring once the
    `init_with_session` blocker is resolved.
 
-## NO-OP symptom resolved via emu composition (2026-07-06)
-
-The user-visible **NO-OP** half of this bug — `draw_line`, `draw_circle`
-(outline), and `draw_rounded_rect` dispatching a validated *empty* SPIR-V shader
-and writing ZERO pixels while still setting `dirty=true` — is fixed in
-`backend_vulkan.spl`. Those three methods no longer dispatch their no-op
-pipeline; they now render **real device pixels** by composing GPU
-`draw_rect_filled` dispatches through the bit-exact `emu_draw_line` (Bresenham),
-`emu_draw_circle` (midpoint outline), and `emu_draw_rounded_rect`
-(`backend_emu.spl`). Those emu helpers implement exactly the standard
-Metal-bit-exact algorithms `SoftwareBackend` uses, so the Vulkan output is now
-bit-exact with the CPU reference — no `SoftwareBackend` change, no SPIR-V
-authoring, no runtime/seed rebuild. The `pipe_line`/`pipe_circle_outline`/
-`pipe_rounded_rect`/`pipe_blit` pipelines are still compiled/validated/destroyed
-(uniform lifecycle) but are no longer dispatched.
-
-This does NOT resolve "Still open" #1-3: reconciling the dedicated GPU SPIR-V
-blobs (`spirv_line` truncating-DDA, `spirv_circle_outline` distance-ring,
-`spirv_rounded_rect` fill-vs-outline) with the engine contract — a
-Bresenham-class SPIR-V rewrite or a per-primitive semantics decision — remains
-the open work if single-dispatch GPU raster (vs the current multi-dispatch emu
-composition) is desired for these three primitives. #4 (`blit`) and #5
-(`vulkan_session.spl`) are likewise unchanged.
-
 ## Related
 - `web_render_gpu_backend_provenance_fabricated_2026-06-17.md`
 - `rt_vulkan_only_executes_under_classic_interpret_2026-06-17.md`
@@ -229,3 +220,4 @@ first-failure preservation without fabricating a GPU receipt. The low-level
 dispatch helper only returns the checked status; the primitive owner is the
 single provenance writer, so a rejected dispatch cannot preempt its typed
 reason or falsely mark device readback dirty.
+

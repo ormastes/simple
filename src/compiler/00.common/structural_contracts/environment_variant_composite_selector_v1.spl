@@ -1,0 +1,124 @@
+# codex-impl
+# Atomic cap-then-selection adapter over the existing environment catalog.
+
+use compiler.common.structural_contracts.environment_variant_catalog_policy_bridge_v1.{
+    EnvironmentVariantCatalogPolicyProjectionV1,
+    environment_variant_policy_digest256_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, EnvironmentGpuDeviceV1,
+    VariantDescriptorV1, VariantRejectionV1, ENV_VARIANT_MAX_REJECTIONS_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.catalog_v1.{
+    EnvironmentVariantCatalogV1, EnvironmentVariantCatalogSelectionV1
+}
+use std.nogc_sync_mut.composition.environment_variants.admission.{
+    ENV_ADMISSION_OK_V1, ENV_ADMISSION_DEPENDENCY_INVALID_V1,
+    ENV_ADMISSION_POLICY_REJECTED_V1, ENV_PHASE_POLICY_V1,
+    variant_eligibility_reason_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.policy.{
+    ENV_POLICY_PREFER_V1, ENV_POLICY_REQUIRE_V1, ENV_POLICY_MAX_V1,
+    variant_policy_reason_v1, variant_policy_allows_v1, variant_policy_rank_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.{
+    environment_dependency_resolve_v1
+}
+
+pub struct EnvironmentVariantCompositeSelectionV1:
+    selection: EnvironmentVariantCatalogSelectionV1
+    required_missing: bool
+    preferred_fallback: bool
+    policy_digest: text
+    binding_policy_digest: EnvironmentDigest256V1
+
+pub enum EnvironmentVariantCompositeSelectorErrorV1:
+    InvalidProjection
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _zero() -> EnvironmentDigest256V1:
+    EnvironmentDigest256V1(w0: 0u64, w1: 0u64, w2: 0u64, w3: 0u64)
+fn _less(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    if a.w0 != b.w0: return a.w0 < b.w0
+    if a.w1 != b.w1: return a.w1 < b.w1
+    if a.w2 != b.w2: return a.w2 < b.w2
+    a.w3 < b.w3
+
+pub fn environment_variant_catalog_select_composite_v1(
+    catalog: EnvironmentVariantCatalogV1, snapshot: EnvironmentSnapshotV1,
+    feature_words: [u64], gpu_devices: [EnvironmentGpuDeviceV1],
+    projection: EnvironmentVariantCatalogPolicyProjectionV1
+) -> Result<EnvironmentVariantCompositeSelectionV1, EnvironmentVariantCompositeSelectorErrorV1>:
+    val parsed_policy = environment_variant_policy_digest256_v1(projection.explain_policy_digest)
+    if parsed_policy.is_err() or not _same(parsed_policy.unwrap(), projection.binding_policy_digest) or
+       projection.cap_request.mode != ENV_POLICY_MAX_V1 or
+       (projection.selection_request.mode != ENV_POLICY_PREFER_V1 and
+        projection.selection_request.mode != ENV_POLICY_REQUIRE_V1) or
+       not _declared(projection.cap_request.requested_provider) or
+       not _same(projection.cap_request.requested_provider,
+                 projection.selection_request.requested_provider) or
+       projection.cap_request.max_architecture == 0u16 or
+       projection.selection_request.max_architecture != projection.cap_request.max_architecture:
+        return Err(EnvironmentVariantCompositeSelectorErrorV1.InvalidProjection)
+    var best = -1
+    var best_rank = 9223372036854775807
+    var best_closure = _zero()
+    var rejections: [VariantRejectionV1] = []
+    for i in 0..catalog.descriptors.len():
+        val descriptor = catalog.descriptors[i]
+        if _same(descriptor.provider_identity, projection.cap_request.requested_provider):
+            var reason = variant_eligibility_reason_v1(snapshot, descriptor, feature_words,
+                catalog.dependencies, gpu_devices)
+            var phase = 1u16
+            var closure = _zero()
+            if reason == ENV_ADMISSION_OK_V1:
+                match environment_dependency_resolve_v1(descriptor, catalog.descriptors, catalog.dependencies):
+                    case Ok(resolved): closure = resolved.closure_identity
+                    case Err(_): reason = ENV_ADMISSION_DEPENDENCY_INVALID_V1
+            if reason == ENV_ADMISSION_OK_V1:
+                val cap = projection.cap_request
+                reason = variant_policy_reason_v1(ENV_POLICY_MAX_V1, descriptor, snapshot,
+                    cap.preferred_variant, cap.max_architecture, cap.max_startup_budget_us,
+                    cap.max_placement, cap.max_feature_ceiling, feature_words)
+                phase = ENV_PHASE_POLICY_V1
+            if reason == ENV_ADMISSION_OK_V1:
+                val choose = projection.selection_request
+                reason = variant_policy_reason_v1(choose.mode, descriptor, snapshot,
+                    choose.preferred_variant, choose.max_architecture,
+                    choose.max_startup_budget_us, choose.max_placement,
+                    choose.max_feature_ceiling, feature_words)
+            if reason == ENV_ADMISSION_OK_V1:
+                val choose = projection.selection_request
+                if variant_policy_allows_v1(choose.mode, descriptor, snapshot,
+                    choose.preferred_variant, choose.max_architecture,
+                    choose.max_startup_budget_us, choose.max_placement,
+                    choose.max_feature_ceiling, feature_words):
+                    val rank = variant_policy_rank_v1(choose.mode, descriptor, choose.preferred_variant)
+                    if best < 0 or rank < best_rank or
+                       (rank == best_rank and _less(descriptor.variant_identity,
+                                                   catalog.descriptors[best].variant_identity)):
+                        best = i; best_rank = rank; best_closure = closure
+                else:
+                    reason = ENV_ADMISSION_POLICY_REJECTED_V1
+            if reason != ENV_ADMISSION_OK_V1 and rejections.len() < ENV_VARIANT_MAX_REJECTIONS_V1 as i64:
+                rejections.append(VariantRejectionV1(provider_identity: descriptor.provider_identity,
+                    variant_identity: descriptor.variant_identity, reason_code: reason,
+                    phase_code: phase))
+    val selected_provider = if best >= 0: catalog.descriptors[best].provider_identity else: _zero()
+    val selected_variant = if best >= 0: catalog.descriptors[best].variant_identity else: _zero()
+    val selection = EnvironmentVariantCatalogSelectionV1(selected_index: best,
+        selected_provider_identity: selected_provider, selected_variant_identity: selected_variant,
+        catalog_digest: catalog.catalog_digest, catalog_generation: catalog.catalog_generation,
+        dependency_lock_digest: catalog.dependency_lock_digest,
+        selected_dependency_closure_digest: best_closure, rejections: rejections)
+    val required_missing = projection.selection_request.mode == ENV_POLICY_REQUIRE_V1 and best < 0
+    val preferred_fallback = projection.selection_request.mode == ENV_POLICY_PREFER_V1 and
+        _declared(projection.selection_request.preferred_variant) and best >= 0 and
+        not _same(selected_variant, projection.selection_request.preferred_variant)
+    Ok(EnvironmentVariantCompositeSelectionV1(selection: selection,
+        required_missing: required_missing, preferred_fallback: preferred_fallback,
+        policy_digest: projection.explain_policy_digest,
+        binding_policy_digest: projection.binding_policy_digest))

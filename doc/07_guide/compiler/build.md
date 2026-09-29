@@ -68,12 +68,20 @@ bin/simple build --clean
 bin/simple build --verbose
 ```
 
+Native builds delete private crash/failure staging files by default while
+preserving reusable incremental cache objects. Old staging siblings for the
+same output are reclaimed at the next build after 24 hours. Use
+`--keep-intermediates` (or `SIMPLE_KEEP_BUILD_INTERMEDIATES=1`) to retain
+diagnostic scratch. Use `--print-intermediates` (or
+`SIMPLE_PRINT_BUILD_INTERMEDIATES=1`) to retain and print each exact path.
+The legacy `SIMPLE_KEEP_LLVM_IR=1` remains supported for LLVM IR only.
+
 ### Quality Commands
 
 ```bash
 bin/simple build fmt            # Format all .spl files
-bin/simple lint <changed .spl files> # Run the pure-Simple source linter
-bin/simple build check          # Rust clippy + rustfmt check + Rust tests
+bin/simple build lint           # Run linter
+bin/simple build check          # Format + lint + test
 ```
 
 ---
@@ -127,15 +135,35 @@ The compiler supports multiple code generation backends:
 | Compiler (`build`, `native-build`) | LLVM | Optimized native binary output |
 | Explicit (`--backend=X`) | User choice | No auto-selection |
 
-Bootstrap defaults to `llvm`. `llvm-lib` and `cranelift` remain explicit
-supported selections. A missing LLVM installation fails with a direct setup
-error; the wrapper never silently changes the requested backend.
+**Fallback chain for compiler builds:** `llvm-lib` (if `libLLVM` available) -> `llvm` (if `llc` available) -> `cranelift`.
 
 ### Platform Notes
 
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
-- **macOS:** Needs Homebrew LLVM (`brew install llvm`) for the default LLVM backend. Select `--backend=cranelift` explicitly when desired. Linker: system `ld` (ld64).
-- **Windows:** Install LLVM for the default backend or select `--backend=cranelift` explicitly. Both MSVC and MinGW toolchains remain supported.
+- **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
+- **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
+
+For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
+`LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child
+environment with either the Cranelift or LLVM backend. These exact values are
+also bound into the admission digest and reconstructed from the transcript by
+Stage 3 resume. Validate this boundary without compiling using
+`sh scripts/check/check-stage2-macos-toolchain-env.shs`; it exercises the real
+argument builder and checks execution/admission/replay agreement, including
+tool paths containing spaces and absence of macOS pins on Linux.
+
+The macOS bootstrap authority also freezes `libsimple_runtime.dylib`: Cocoa
+functions belong to this dynamic provider. Canonical generation and legacy
+migration pass the target explicitly, so a macOS tuple missing the dylib is
+refused. Phase 2/3 runtime capsules preserve its bytes, record
+`dynamic_runtime_sha256`, and include that digest in capsule identity. Existing
+capsules without that optional field retain their original identity format;
+they cannot silently carry an unbound dylib. Projection copies use the existing
+bounded streaming path, so provider size does not become a new peak RSS cost.
+Before Stage 2 compilation, macOS audits the frozen dylib/native-all pair with
+the pinned LLVM `nm` and a real offscreen Cocoa probe under a 60-second process
+deadline. See the retained `macos-cocoa-owner.log`; missing or duplicate Cocoa
+providers stop the bootstrap before compilation.
 
 ### SimpleOS Multi-Platform Binaries
 
@@ -162,32 +190,24 @@ The Simple compiler is self-hosted. To build from scratch, a bootstrap process p
 
 ```
 Stage 1: Rust Seed Binary
-  scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
-  # internally rebuilds the Rust seed/runtime only for full bootstrap
+  cargo build --profile bootstrap -p simple-driver
   -> src/compiler_rust/target/bootstrap/simple
-  -> Backend: Cranelift (hardcoded)
+  -> Rust bootstrap authority (not a future stage-default selection)
 
-Stage 2: Pure Simple (compiled by Rust seed)
+Stage 2: Canonical pure-Simple compiler (compiled by Rust seed)
   seed native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage2/<triple>/simple
-  -> Backend: selected backend (LLVM default; Cranelift supported)
+  -> Backend: llvm-lib (default)
 
 Stage 3: Self-Hosted (compiled by Stage 2)
-
-If Stage 2 was already admitted but Stage 3 was externally killed, resume only
-through `scripts/bootstrap/bootstrap-from-scratch.sh
---resume-stage3-from-admitted=OUTPUT --jobs=1`.
-The recovery uses a separate evidence lane, one self-host worker, the frozen
-admitted compiler/runtime, and fails if source, git, tool, or runtime snapshots
-change. It never rebuilds Stage 2.
   stage2 native-build --entry bootstrap_main.spl
   -> build/bootstrap/stage3/<triple>/simple
-  -> Backend: selected backend (LLVM default; Cranelift supported)
+  -> Backend: llvm-lib (default)
 
-Stage 4: Full CLI (compiled by verified stage when available)
+Stage 4: Full CLI (compiled by verified stage)
   stage3 native-build --entry main.spl
   -> build/bootstrap/full/<triple>/simple
-  -> Backend: selected backend (LLVM default; Cranelift supported)
+  -> Backend: llvm-lib (default)
 ```
 
 After the fresh Stage 4 full CLI passes candidate admission, bootstrap runs
@@ -204,6 +224,34 @@ wrapper runs the shared bootstrap compiler sanity: exact bootstrap version,
 fail-closed rejection of unsupported `run`, then strict native-build and
 execution of the canonical `p2_add.spl` fixture. A failed sanity removes that
 stage from consideration on Linux, macOS, Windows/POSIX-shell, and FreeBSD.
+
+Windows frontend sanity uses the host-only
+`scripts/bootstrap/run-process-group-bounded-log-windows.py` adapter through
+the shared frontend capture facade. Native Windows Python is required for this
+verification helper; it is not linked into Simple or required by its runtime.
+The adapter assigns a suspended child to a kill-on-close Job Object before
+resuming it, bounds the combined output stream, and publishes logs and receipts
+to real files without replacing existing evidence. Native descendants remain
+contained after their parent exits. Timeout and overflow terminate the job
+immediately; the configured POSIX signal grace period does not delay that
+Windows termination. Each receipt records the helper SHA-256 and the exact
+Windows exit status alongside the portable shell status. The Linux descriptor
+collector remains the Linux path; its `renameat2` syscall is not used on Windows.
+
+Run `python test/01_unit/scripts/process_group_bounded_log_windows_test.py` on
+Windows to verify native descendant cleanup, output bounds, status preservation,
+publication collisions, assignment failure, and helper mutation. Evidence is
+retained under `build/native_probe/stage2-sanity-windows/collector-regression-*`.
+
+Phase 1 Cargo builds use the same native Windows collector through
+`scripts/bootstrap/bootstrap-logged-process.shs`. It launches the absolute Cargo
+binary with the existing `env -i` environment directly, without an MSYS
+`env.exe` intermediary. The build log names a retained `.process.*` directory
+whose receipt contains the native exit code, shell status, and helper/log/environment
+hashes. An ordinary native exit 0 is required even when Cargo prints `Finished`.
+Cargo capture has a two-hour deadline and a 64 MiB combined output limit; build
+artifacts are unaffected by the stream limit. Other hosts retain their existing
+Cargo launch route.
 
 The `Rust Bootstrap Multiplatform` workflow runs this canonical stage path with
 LLVM on Linux x86_64 and macOS AArch64, and with explicit Cranelift on macOS
@@ -264,61 +312,27 @@ fall back to the Rust seed or launch a fresh bootstrap automatically.
 
 ### Quick Bootstrap
 
-The canonical entrypoint is the host bootstrap wrapper. Normal runs do not
-rebuild Rust; they reuse the existing seed/runtime and rebuild only
-pure-Simple stages.
+The canonical entrypoint in the current tree is the Rust driver command:
 
 ```bash
-# Default fast path: dynload pure-Simple stages, no cargo
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+# Use the default seed compiler discovered by the driver
+bin/simple build bootstrap
 
-# Relink the full pure-Simple CLI without rebuilding Rust
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --full-cli
-
-# Conservative monolithic pure-Simple output, no cargo
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
-
-# Explicit Rust seed/runtime rebuild plus pure-Simple dynload stages
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
-
-# Rebuild Rust seed/runtime and relink the full CLI
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli
-scripts/bootstrap/bootstrap-from-scratch.sh --release
+# Use an explicit seed and output directory
+bin/simple build bootstrap --seed=src/compiler_rust/target/debug/simple --output=build/bootstrap
 ```
 
-### Cranelift Bootstrap Path (2026-07-18)
-
-The Cranelift backend now completes stages 2–3 successfully as an alternative to LLVM:
-
-```bash
-# Bootstrap with Cranelift backend (stages 2–3)
-sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift
-```
-
-**Notes:**
-- Cranelift stages 2–3 complete reliably; full-CLI (`--full-cli`) requires `--full-bootstrap` to avoid stale-backfill rejection (the driver rejects a stage-3 binary built by a pre-fix seed).
-- **LLVM path status:** Stage 2 link has 62 residual undefined symbols blocking LLVM bootstrap. See [doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md](../../08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md).
-- **Stage-4 caveat:** Hours-long spins observed when stage-3 was built by pre-fix seed. Root: InterpCall handicap in Cranelift (symbol lowering delay). See [doc/08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md](../../08_tracking/bug/s68_cranelift_interpcall_boxed_result_generic_return_gap_2026-07-18.md).
-
-`--release` implies deployment and fails unless the deployed self-hosted
-binary passes `simple test test --whole --mode=interpreter`, including long
-specs, source-comment doctests, and Markdown embedded-code tests.
-
-On Windows, use the Windows bootstrap wrapper:
+On Windows, pass the `.exe` seed path:
 
 ```powershell
-.\scripts\bootstrap\bootstrap-windows.cmd --deploy
+.\src\compiler_rust\target\debug\simple.exe build bootstrap --seed=src\compiler_rust\target\debug\simple.exe --output=build\bootstrap
 ```
 
-Windows stage outputs are executable paths (`stage2/<triple>/simple.exe` and
-`stage3/<triple>/simple.exe`). Use `--mingw` or `--msvc` on the Bash wrapper to
-override automatic ABI selection. Normal Windows bootstrap uses the same
-dynload-only default and explicit full-build policy.
-
-The selected ABI is authoritative for the full strict build: Cargo receives
-the matching target triple, Rust artifacts stay under that target directory,
-and compiler, linker, archive name, manifest, and provenance checks must all
-agree. MinGW consumes GNU `.a` archives; MSVC consumes `.lib` archives.
+Windows stage outputs are executable paths (`simple_stage1.exe`,
+`simple_stage2.exe`, `simple_stage3.exe`). The Rust-driver bootstrap lane
+builds those stages with `native-build --strip --threads 1 --timeout 180` so the
+verification step compares release-like binaries and avoids uncontrolled worker
+fan-out during bootstrap.
 
 On Windows, stripped native links normalize volatile PE metadata after the
 hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
@@ -326,68 +340,9 @@ optional-header `CheckSum` fields so repeated stripped native-build and
 bootstrap outputs can be compared by SHA256.
 
 Use `scripts/bootstrap/bootstrap-from-scratch.sh` for the host bootstrap wrapper.
-
-For long runs, enable the permanent low-overhead progress log:
-
-```sh
-sh scripts/bootstrap/bootstrap-from-scratch.sh --progress --progress-interval=30
-```
-
-The default `build/bootstrap/bootstrap-progress.log` is append-only and uses
-`key=value` records. Milestone records identify Stage 2 through Stage 6 when
-reached. Periodic samples report the bootstrap PID, `alive`/`exited`/`stale`
-state, elapsed time, CPU percentage, RSS KiB, and current main-log byte size.
-Set `--progress=/path/to/log` or `SIMPLE_BOOTSTRAP_PROGRESS_LOG`; adjust cadence
-with `SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL`. The watcher reads only process
-metadata, a two-line state file, and file metadata; it performs no repeated
-source/cache tree scans. The wrapper trap stops it and records the exit status.
 Normal runs reuse the existing Rust seed/runtime and rebuild only the
 pure-Simple stages. Rust seed/runtime rebuilds happen only with
 `--full-bootstrap`.
-
-### Bootstrap debug and test modes
-
-The default diagnostics mode is `off` and adds no flags, files, scans, or
-subprocesses. Enable bounded test evidence with:
-
-```sh
-sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=test
-```
-
-This implies `--progress` and enables coarse phase timing without parser-level
-trace. For an investigation that also needs detailed phase trace, successful
-LLVM IR, and memory snapshots, use:
-
-```sh
-sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=debug
-# Bare --diagnostics is the same as --diagnostics=debug.
-```
-
-The equivalent environment selector is
-`SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE=debug|test`. Explicit existing flag values
-still win. Debug artifacts can consume substantial disk space; remove them
-after capturing the failing evidence.
-
-AOP instrumentation is deliberately not implied. Enable it only for a scoped
-compiler-weaving investigation, preferably with a filter:
-
-```sh
-SIMPLE_AOP_DEBUG='module_or_function_pattern' \
-SIMPLE_AOP_LOG_CALLS=1 \
-sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=debug
-```
-
-`SIMPLE_AOP_LOG_ASSIGNMENTS=1` is still more verbose and should be added only
-when assignment join points are required. See
-`doc/07_guide/app/testing/logging.md` for AOP log levels and filters.
-
-For a focused check, `simple check --phase-profile <path>` emits coarse
-source-read, parse, lint, teardown, file-total, and command-total records.
-Phase records are suppressed with `--json` so machine-readable stdout remains
-pure. Diagnostic sweeps bind both `SIMPLE_BINARY` and `SIMPLE_BIN` to an
-absolute admitted child executable. In an isolated worktree, select it with
-`--diagnostic-child-compiler=/absolute/path/to/simple` or
-`SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER`.
 
 ```bash
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
@@ -417,10 +372,8 @@ build/bootstrap/full/<triple>/simple
 
 | Flag | Description |
 |------|-------------|
-| `--backend=X` | Select `llvm` (default), `llvm-lib`, or `cranelift` |
+| `--backend=X` | Override bootstrap backend (`auto` by default) |
 | `--output=DIR` | Write stage outputs to a custom directory |
-| `--diagnostics=MODE` | Select default-off `test` or `debug` observability |
-| `--diagnostic-child-compiler=PATH` | Bind diagnostic checks to an admitted pure-Simple worker |
 | `--seed=PATH` | Seed compiler binary. Use `.exe` on Windows. |
 
 ### Bootstrap Support Files

@@ -1,7 +1,9 @@
 # Kill Monitor Generic RSS Gap - 2026-06-27
 
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+## Closed 2026-09-13 — generic RSS cap is present in the monitor script
+- **measured**: `grep -c KILL_ANY_MEM_MB scripts/resource/kill_simple_monitor.shs` = 5 — the generic non-protected-process cap this entry adds is in the tree.
+- **inferred**: the monitor is a Linux/procfs RSS watchdog and was not executed on this Windows host; the fix is verified present, not verified running.
+- **inferred**: the entry's own status was already "Fixed"; this closure records that the change survived and was not reverted.
 
 ## Status
 

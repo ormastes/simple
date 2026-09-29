@@ -164,3 +164,26 @@ hir-fingerprint 3/3, incremental-parse 9/9). Ledger 61/61 done (week-8 rows
 due 2026-11-10, signed step scripts
 SCV-IMPL-{E-08,E-09,P-07,G-06,D-05,D-06,D-07,I-05,I-06,B-05}, WOTS leaves
 59..68).
+
+## Post-Wave-5 (2026-08-26) — migration ledger closed for ungated work
+
+Week-9 rows SCV-IMPL-D-08 and SCV-IMPL-B-06 appended to
+`.spipe/scv-migration/todo.sdn` (due 2026-11-24); step scripts PQ-signed with
+`scv-migration-root-abdba82f4ac2` at WOTS leaves 69 and 70 and verified with
+`sh scripts/trust/verify-script.shs --public config/trust/scv_migration_root.pub`
+(the `--public` flag is required). Signed checker at
+`--now 2026-11-24T12:00:00Z` reports **63 done, 0 pending**.
+
+With these two, **every ungated item in the SCV impl plan is complete.** The
+remaining items are gated, not pending work:
+- **B-01 / B-02** — blocked: `sj` segfaults (rc=139) on this host.
+- **B-07** — cutover gates require 6-12 months of shadow operation; no date.
+- **B-08** — S5→S6 native authority; needs B-07 all-green plus human sign-off.
+
+Honesty notes carried into the ledger: D-08 is `done` in the ledger but its
+gate `scripts/check/check-scv-merge-corpus.shs` is **advisory-RED at 3 missed
+real conflicts** (preprocessor cases 22/24/26) — the step script passes because
+it verifies the corpus wiring and the gate selftest, not the full scan. The
+misses must not be baselined. B-06's 50-cycle GC soak was not completed (20
+cycles in budget; ~2500s projected). Full record:
+`.spipe/scv-migration/state.md` § Wave 5.

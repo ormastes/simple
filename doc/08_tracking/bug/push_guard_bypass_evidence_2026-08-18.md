@@ -1,4 +1,8 @@
 # Hook bypass evidence — 2026-08-18 (lane test-fix, 9 commits)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 `git push` was run with `--no-verify`. This records WHY, with the evidence,
 per `.claude/rules/vcs.md`'s requirement that a bypass never be silent.
@@ -45,3 +49,4 @@ check-test-tree-divergence-delta:  PASS — 1 pre-existing offender, 0 introduce
 The deployed shared seed remains stale until someone redeploys it from this
 source. Until then `check-native-trailing-default-param.shs` will keep failing
 for every lane, for the reason recorded above. That redeploy is the unblock.
+

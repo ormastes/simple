@@ -1,0 +1,165 @@
+"""
+L06 physical dynload acceptance helpers.
+
+These helpers deliberately contain no synthetic loader, mapping, receipt,
+generation, pin, or close outcome.  They are a narrow bridge from the
+acceptance SSpec to the existing production owners.  Until the loader owns a
+real association from an immutable provider artifact to its mapping receipt,
+lifecycle, and authenticated release endpoint, the association cases fail
+explicitly.  A model-only lifecycle result or source scan is not substituted.
+"""
+
+use std.spec.{expect, fail}
+use os.posix.dynlib.{DynLibError, dynlib_close_checked, dynlib_is_valid, dynlib_open_checked, dynlib_symbol_checked}
+use os.posix.dynlib_sffi.{dynlib_call_0_checked}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    PROVIDER_SESSION_OK,
+    ProviderAdmissionRequestV1,
+    ProviderDynamicAdmissionV1,
+    ProviderLoaderSessionV1,
+    ProviderSessionQueryOwnedResultV1,
+    provider_admit_dynamic_v1,
+    provider_session_query_owned_v1,
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SimpleProviderQueryV1,
+}
+
+pub class L06AuthenticatedNativeFixtureV2:
+    artifact_path: text
+    artifact_digest: text
+    interface_abi_digest: text
+    issuer_receipt: text
+
+pub class L06AuthenticatedPosixFixtureV2:
+    library_path: text
+    issuer_receipt: text
+
+# Fixture acquisition is deliberately an unimplemented production endpoint.
+# This makes MissingEvidence fail before `dlopen`, rather than treating an
+# unproduced local .so or a test-derived digest as an authenticated fixture.
+pub fn l06_require_authenticated_native_fixture_v2() -> L06AuthenticatedNativeFixtureV2:
+    fail("L06 MissingEvidence: no production authenticated native fixture acquisition endpoint exists")
+
+pub fn l06_require_authenticated_posix_fixture_v2() -> L06AuthenticatedPosixFixtureV2:
+    fail("L06 MissingEvidence: no production authenticated POSIX fixture acquisition endpoint exists")
+
+pub fn l06_native_worker_request_v2(
+        fixture: L06AuthenticatedNativeFixtureV2) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: fixture.artifact_path,
+        artifact_kind: "native",
+        expected_artifact_digest: fixture.artifact_digest,
+        granted_capability_bits: 0,
+        required_capability_bits: 0,
+        host_abi: 1,
+        minimum_host_abi: 1,
+        maximum_host_abi: 1,
+        requested_interface_major: 1,
+        requested_interface_minor: 0,
+        provided_interface_major: 1,
+        provided_interface_minor: 0,
+    )
+
+pub fn l06_provider_query_v2() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: 5999723006133093425,
+        minimum_major: 1,
+        minimum_minor: 0,
+        host_abi: 1,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 0,
+    )
+
+pub fn l06_require_admitted_native_worker_v2(
+        fixture: L06AuthenticatedNativeFixtureV2) -> ProviderDynamicAdmissionV1:
+    # Always enter the existing dynamic admission owner.  Its missing or
+    # rejected result is intentionally a failure, not a skip or fake receipt.
+    val dynamic = provider_admit_dynamic_v1(l06_native_worker_request_v2(fixture))
+    if dynamic.admission.status != PROVIDER_ADMISSION_OK or
+            not dynamic.admission.is_admitted():
+        fail("L06 acceptance blocked: no immutable production native worker association; status=" +
+            dynamic.admission.status.to_text() + "; reason=" + dynamic.admission.reason)
+    if dynamic.admission.artifact_digest != fixture.artifact_digest:
+        fail("L06 acceptance blocked: admitted artifact digest differs from the authenticated fixture")
+    dynamic
+
+pub fn l06_require_real_mapped_query_v2(session: ProviderLoaderSessionV1,
+        fixture: L06AuthenticatedNativeFixtureV2
+    ) -> ProviderSessionQueryOwnedResultV1:
+    # The ABI digest is supplied only by the authenticated fixture owner.
+    val result = provider_session_query_owned_v1(
+        session, l06_provider_query_v2(), fixture.interface_abi_digest)
+    if result.query.status != PROVIDER_SESSION_OK:
+        fail("L06 acceptance blocked: mapped provider query has no authenticated worker ABI association; status=" +
+            result.query.status.to_text() + "; reason=" + result.query.reason)
+    result
+
+pub fn l06_require_loader_association_v2(dynamic: ProviderDynamicAdmissionV1,
+        requirement: text):
+    # `provider_admit_dynamic_v1` is invoked first so this is never a
+    # source-only test.  The current tree has no owner that joins its returned
+    # session with executable mapping identity, lifecycle lease, generation,
+    # and a retained authenticated release endpoint.  Do not emulate one here.
+    fail(requirement + ": MissingEvidence: production loader association/mapper worker is not implemented; no model receipt is accepted")
+
+pub fn l06_expect_posix_open_symbol_call_close_v2(
+        fixture: L06AuthenticatedPosixFixtureV2):
+    match dynlib_open_checked(fixture.library_path, 0):
+        Ok(library):
+            # Save the call result, close first, then surface any call error.
+            # No failure path after an open may bypass the matching close.
+            val call = dynlib_call_0_checked(library, "simple_dynlib_return42")
+            val close = dynlib_close_checked(library)
+            match close:
+                Err(error):
+                    fail("L06-A05 blocked: production POSIX close failed: " + dynlib_error_name_v2(error))
+                Ok(status):
+                    expect(status).to_equal(0)
+            match call:
+                Ok(value): expect(value).to_equal(42)
+                Err(error):
+                    fail("L06-A05 blocked: production POSIX symbol call failed: " + dynlib_error_name_v2(error))
+        Err(error):
+            fail("L06-A05 blocked: production POSIX fixture could not open: " +
+                dynlib_error_name_v2(error))
+
+pub fn l06_expect_posix_missing_symbol_retains_owner_v2(
+        fixture: L06AuthenticatedPosixFixtureV2):
+    match dynlib_open_checked(fixture.library_path, 0):
+        Ok(library):
+            val lookup = dynlib_symbol_checked(library, "simple_dynlib_missing")
+            val valid_before_close = dynlib_is_valid(library)
+            val close = dynlib_close_checked(library)
+            match close:
+                Err(error):
+                    fail("L06-A05 blocked: production POSIX close failed: " + dynlib_error_name_v2(error))
+                Ok(status): expect(status).to_equal(0)
+            expect(valid_before_close).to_equal(true)
+            match lookup:
+                Err(DynLibError.MissingSymbol): return
+                Err(error):
+                    fail("L06-A05 expected missing-symbol error, got " + dynlib_error_name_v2(error))
+                Ok(_): fail("L06-A05 missing symbol unexpectedly resolved")
+        Err(error):
+            fail("L06-A05 blocked: production POSIX fixture could not open: " +
+                dynlib_error_name_v2(error))
+
+pub fn l06_require_positive_close_retry_owner_v2():
+    # A fake invalid handle tests only argument validation.  This acceptance
+    # requires the owner to retain an actual positive native handle after a
+    # controlled close/unmap failure and to prove a later retry.  No such
+    # production seam currently exists, so fail rather than manufacture one.
+    fail("L06-A03/L06-A05 MissingEvidence: no safe positive-handle close-failure and retry owner exists")
+
+pub fn dynlib_error_name_v2(error: DynLibError) -> text:
+    match error:
+        DynLibError.UnsupportedFormat: "unsupported-format"
+        DynLibError.InvalidHandle: "invalid-handle"
+        DynLibError.OpenFailure: "open-failure"
+        DynLibError.MissingSymbol: "missing-symbol"
+        DynLibError.CloseFailure: "close-failure"

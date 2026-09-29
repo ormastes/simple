@@ -1,0 +1,474 @@
+# devhub — `gh` compatibility layer.
+#
+# The bidirectional translator that lets a caller speak `gh` to a backend that
+# is not GitHub:
+#
+#   INBOUND   gh argv  ->  devhub bb argv      (gh_pr_to_bb_argv, ...)
+#   OUTBOUND  Bitbucket REST JSON  ->  gh JSON  (bb_pr_to_gh_json, ...)
+#
+# Everything here is PURE — no network, no filesystem, no process spawn — so
+# the whole translation surface is unit-testable against fixtures. That is
+# deliberate: translation bugs are silent (a dropped `--base` opens a PR
+# against the wrong branch and still exits 0), so this is exactly the code
+# that must be provable without a live account.
+#
+# TRANSLATION POLICY: never approximate. A gh flag either has an exact
+# Bitbucket equivalent, or the command fails with a message naming the flag
+# and the backend. A silently-dropped flag is worse than a refusal.
+#
+# Mapping tables and rationale:
+#   doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md §3
+
+use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize}
+
+
+# ============================================================================
+# Small JSON helpers (same shape as adapter_bitbucket.spl's, kept local so
+# this module stays free of adapter dependencies and thus trivially testable)
+# ============================================================================
+
+fn _js(obj: any, key: text) -> text:
+    """String field off a JSON object; "" when missing."""
+    if obj == nil:
+        return ""
+    val value = json_object_get(obj, key)
+    if value == nil:
+        return ""
+    val s = json_serialize(value)
+    if s.starts_with("\"") and s.ends_with("\""):
+        return s[1:s.len() - 1]
+    if s == "null":
+        return ""
+    s
+
+
+fn _jnested(obj: any, path: [text]) -> text:
+    """String field at a nested path, e.g. ["source", "branch", "name"].
+
+    Bitbucket nests almost everything gh keeps flat (`source.branch.name` vs
+    `headRefName`), so this is the workhorse of the outbound mapping.
+    """
+    if path.len() == 0:
+        return ""
+    var current = obj
+    var i: i64 = 0
+    while i < path.len() - 1:
+        if current == nil:
+            return ""
+        val next = json_object_get(current, path[i])
+        if next == nil:
+            return ""
+        current = next
+        i = i + 1
+    _js(current, path[path.len() - 1])
+
+
+fn json_escape(s: text) -> text:
+    """Escape a string for embedding in JSON output."""
+    var out = ""
+    for ch in s:
+        if ch == "\"":
+            out = out + "\\\""
+        else if ch == "\\":
+            out = out + "\\\\"
+        else if ch == "\n":
+            out = out + "\\n"
+        else if ch == "\r":
+            out = out + "\\r"
+        else if ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+    out
+
+
+fn _quoted(s: text) -> text:
+    "\"" + json_escape(s) + "\""
+
+
+fn _lb() -> text:
+    # A brace inside a double-quoted Simple string is interpolation syntax, so
+    # literal JSON braces are composed rather than typed inline. Same reason
+    # adapter_bitbucket.spl has _bb_lbrace/_bb_rbrace.
+    "{"
+
+
+fn _rb() -> text:
+    "}"
+
+
+# ============================================================================
+# State vocabulary
+# ============================================================================
+
+fn gh_state_to_bb(state: text) -> text:
+    """gh's `--state` value -> Bitbucket's. "" means "not a known gh state".
+
+    gh:        open | closed | merged | all
+    bitbucket: OPEN | DECLINED | MERGED | (omit)
+    The interesting cell is closed -> DECLINED: Bitbucket splits gh's
+    "closed" into DECLINED (rejected) and MERGED (landed), so gh's `closed`
+    maps to DECLINED only. A caller wanting landed PRs asks for `merged`,
+    exactly as on GitHub.
+    """
+    match state.trim().lower():
+        "open":
+            "OPEN"
+        "closed":
+            "DECLINED"
+        "merged":
+            "MERGED"
+        "all":
+            "all"
+        _:
+            ""
+
+
+fn bb_state_to_gh(state: text) -> text:
+    """Bitbucket PR state -> the gh vocabulary an LLM expects to read back."""
+    match state.trim().upper():
+        "OPEN":
+            "OPEN"
+        "MERGED":
+            "MERGED"
+        "DECLINED":
+            "CLOSED"
+        "SUPERSEDED":
+            "CLOSED"
+        _:
+            state.upper()
+
+
+# ============================================================================
+# Outbound: Bitbucket JSON -> gh JSON
+# ============================================================================
+
+fn bb_pr_object_to_gh(obj: any) -> text:
+    """One Bitbucket PR object -> one gh-shaped PR JSON object (as text).
+
+    `isDraft` is emitted as a literal false rather than omitted: Bitbucket
+    Cloud has no draft PRs, and a consumer that indexes the field should read
+    an honest `false` instead of tripping over a missing key.
+    """
+    val number = _js(obj, "id")
+    val parts = [
+        "\"number\": " + (if number == "": "0" else: number),
+        "\"title\": " + _quoted(_js(obj, "title")),
+        "\"state\": " + _quoted(bb_state_to_gh(_js(obj, "state"))),
+        "\"url\": " + _quoted(_jnested(obj, ["links", "html", "href"])),
+        "\"headRefName\": " + _quoted(_jnested(obj, ["source", "branch", "name"])),
+        "\"baseRefName\": " + _quoted(_jnested(obj, ["destination", "branch", "name"])),
+        "\"author\": " + _lb() + "\"login\": " + _quoted(_jnested(obj, ["author", "nickname"])) + _rb(),
+        "\"body\": " + _quoted(_js(obj, "description")),
+        "\"createdAt\": " + _quoted(_js(obj, "created_on")),
+        "\"updatedAt\": " + _quoted(_js(obj, "updated_on")),
+        "\"isDraft\": false"
+    ]
+    _lb() + parts.join(", ") + _rb()
+
+
+fn bb_pr_to_gh_json(raw: text) -> text:
+    """Bitbucket PR response text -> gh-shaped JSON text.
+
+    Accepts either a single PR object or a paginated `{"values": [...]}`
+    collection, mirroring what the Bitbucket adapter returns for `pr view`
+    and `pr list` respectively. Unparseable input is returned verbatim rather
+    than swallowed — a caller debugging an API error needs to see the body.
+    """
+    val parsed = json_parse(raw)
+    if parsed == nil:
+        return raw
+    val values = json_object_get(parsed, "values")
+    if values == nil:
+        return bb_pr_object_to_gh(parsed)
+    var out: [text] = []
+    var i: i64 = 0
+    val n = json_array_length(values)
+    while i < n:
+        val item = json_array_get(values, i)
+        if item != nil:
+            out = out + [bb_pr_object_to_gh(item)]
+        i = i + 1
+    "[" + out.join(", ") + "]"
+
+
+# ============================================================================
+# Inbound: gh argv -> devhub bb argv
+# ============================================================================
+
+# Flags each verb can actually translate. Anything else is refused by name —
+# see first_unknown_flag for why an allowlist and not a blocklist. `--backend`
+# appears because a direct caller (not going through cmd_git.spl, which strips
+# it) may legitimately still carry it. Output flags (`--json`, `--jq`,
+# `--no-pager`) and Bitbucket coordinates are accepted everywhere.
+val _COMMON_KNOWN = ["--json", "--jq", "--no-pager", "--workspace", "--repo", "--backend"]
+
+val PR_CREATE_KNOWN = _COMMON_KNOWN + ["--title", "--head", "--base", "--body", "--reviewer"]
+val PR_LIST_KNOWN = _COMMON_KNOWN + ["--state", "--limit"]
+val PR_VIEW_KNOWN = _COMMON_KNOWN
+val PR_REVIEW_KNOWN = _COMMON_KNOWN + ["--approve", "--unapprove"]
+val PR_MERGE_KNOWN = _COMMON_KNOWN + ["--squash", "--rebase", "--merge", "--strategy", "--keep-source"]
+val PR_COMMENT_KNOWN = _COMMON_KNOWN + ["--body", "--content", "--inline-path", "--inline-from", "--inline-to"]
+
+# Flags that consume the NEXT argv element as their value. Everything else is
+# boolean. This distinction is load-bearing, not bookkeeping: a pull-request
+# body is passed as a single argv element, and a body that begins with `--`
+# (a markdown horizontal rule, `---`, is entirely ordinary in a PR
+# description) was otherwise scanned as if it were a flag and refused. Knowing
+# which flags take a value is what lets the scanners skip over VALUES instead
+# of inspecting them.
+val VALUE_TAKING_FLAGS = [
+    "--title", "--head", "--base", "--body", "--reviewer", "--state", "--limit",
+    "--strategy", "--content", "--inline-path", "--inline-from", "--inline-to",
+    "--json", "--jq", "--workspace", "--repo", "--backend",
+    "-t", "-H", "-B", "-b", "-r", "-L"
+]
+
+
+fn _takes_value(name: text) -> bool:
+    for f in VALUE_TAKING_FLAGS:
+        if f == name:
+            return true
+    false
+
+
+fn flag_positions(args: [text]) -> [bool]:
+    """Mark which argv elements are FLAG tokens, as opposed to a preceding
+    flag's value or a positional.
+
+    Exists because every naive `arg.starts_with("--")` scan in this file was
+    wrong for the same reason: it inspected values as though they were flags.
+    Measured 2026-09-06 — `gh pr create --body "---\\nfooter"` was refused with
+    "`gh pr create ---` is not translatable", because the body's own first line
+    looked like a flag.
+    """
+    var out: [bool] = []
+    var skip_next = false
+    for arg in args:
+        if skip_next:
+            out = out + [false]
+            skip_next = false
+        else:
+            val is_flag = arg.starts_with("-") and arg.len() > 1
+            out = out + [is_flag]
+            if is_flag and not arg.contains("="):
+                if _takes_value(arg):
+                    skip_next = true
+    out
+
+
+fn _rename_flags(args: [text], renames: [(text, text)]) -> [text]:
+    """Rename flag tokens, leaving values and positionals untouched.
+
+    Renames only at FLAG positions. Without that guard a PR body whose text
+    happens to be exactly `--base` would itself be rewritten to `--dest`,
+    corrupting the body — the same value-vs-flag confusion that made
+    first_unknown_flag reject a body starting with `---`.
+    """
+    val positions = flag_positions(args)
+    var out: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        var replaced = args[i]
+        if positions[i]:
+            for pair in renames:
+                if args[i] == pair.0:
+                    replaced = pair.1
+        out = out + [replaced]
+        i = i + 1
+    out
+
+
+fn first_unsupported_flag(args: [text], unsupported: [text]) -> text:
+    """First flag present that this backend cannot honour; "" if none.
+
+    Used to refuse rather than approximate — see the translation policy at
+    the top of this file.
+    """
+    for arg in args:
+        for flag in unsupported:
+            if arg == flag:
+                return flag
+    ""
+
+
+fn first_unknown_flag(args: [text], known: [text]) -> text:
+    """First long flag NOT in `known`; "" when every flag is recognised.
+
+    This is the ALLOWLIST half of the translation policy, and it is the half
+    that actually enforces it. The explicit refuse-lists below give better
+    messages for flags we know about and know we cannot honour, but they are
+    a blocklist: anything nobody thought of passes straight through to the
+    Bitbucket command layer, where an unrecognised flag is simply never read.
+
+    That is not hypothetical. `gh pr create --body-file <f>` — the form
+    `.claude/rules/vcs.md` itself prescribes for opening a PR — sailed through
+    the blocklist and the PR body vanished, exit 0. Exactly the silent drop
+    the policy was written to prevent.
+
+    Only FLAG positions are inspected — a preceding flag's value is skipped via
+    flag_positions(), so a PR body beginning with `---` is content, not an
+    unrecognised flag.
+
+    Known limit, stated rather than papered over: only `--long` forms are
+    reported (plus `--long=value`), because a bare `-x` is ambiguous with a
+    negative-number value. Short forms are covered by listing them in the
+    rename tables, which is where they are actually consumed.
+    """
+    val positions = flag_positions(args)
+    var i: i64 = 0
+    while i < args.len():
+        val arg = args[i]
+        if positions[i] and arg.starts_with("--"):
+            val eq = arg.find("=")
+            val name = if eq > 0: arg[0:eq] else: arg
+            var found = false
+            for k in known:
+                if k == name:
+                    found = true
+            if not found:
+                return name
+        i = i + 1
+    ""
+
+
+fn unknown_flag_message(flag: text, verb: text, backend: text) -> text:
+    "`gh {verb} {flag}` is not translatable to the {backend} backend.\n" +
+    "  devhub refuses every flag it cannot map, rather than passing it to a\n" +
+    "  backend that will ignore it — an ignored flag changes what the command\n" +
+    "  does while still exiting 0.\n" +
+    "  drop {flag}, or use --backend github if this repo has a GitHub remote."
+
+
+fn unsupported_flag_message(flag: text, verb: text, backend: text) -> text:
+    "`gh {verb} {flag}` has no equivalent on the {backend} backend.\n" +
+    "  devhub refuses rather than silently dropping the flag, because a dropped\n" +
+    "  flag can change what the command does (a lost --base opens the PR against\n" +
+    "  the wrong branch and still exits 0).\n" +
+    "  re-run without {flag}, or use --backend github if this repo has a GitHub remote."
+
+
+fn _map_state_flag(args: [text]) -> (bool, [text], text):
+    """Translate a `--state` VALUE from gh's vocabulary to Bitbucket's.
+
+    Returns (ok, mapped_args, error). Only the value after `--state` is
+    touched; everything else passes through untouched.
+    """
+    var out: [text] = []
+    var i: i64 = 0
+    while i < args.len():
+        if args[i] == "--state" and i + 1 < args.len():
+            val mapped = gh_state_to_bb(args[i + 1])
+            if mapped == "":
+                return (false, [], "unknown --state value `{args[i + 1]}` (expected open, closed, merged, or all)")
+            out = out + ["--state", mapped]
+            i = i + 2
+        else:
+            out = out + [args[i]]
+            i = i + 1
+    (true, out, "")
+
+
+fn gh_pr_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
+    """Translate `gh pr <verb> [args]` into the argv `handle_bb` expects.
+
+    Returns (ok, bb_argv, error_message). bb_argv includes the leading
+    Bitbucket noun/verb, so the caller hands it straight to handle_bb.
+
+    Bitbucket's command tree is not gh's: `merge`, `approve` and `comment`
+    are top-level there, while gh nests them all under `pr`. Renesting is
+    part of the translation, not a caller concern.
+    """
+    match verb:
+        "create":
+            val bad = first_unsupported_flag(args, ["--draft", "-d", "--fill", "--fill-first", "--web", "-w", "--template", "--no-maintainer-edit", "--project", "--milestone"])
+            if bad != "":
+                return (false, [], unsupported_flag_message(bad, "pr create", "bitbucket"))
+            # --body-file is deliberately NOT accepted here: gh_compat is pure,
+            # and honouring it means reading a file. cmd_git.spl rewrites it to
+            # --body before calling this, so reaching here with one still set
+            # is a real bug and must fail loudly.
+            val unknown = first_unknown_flag(args, PR_CREATE_KNOWN)
+            if unknown != "":
+                return (false, [], unknown_flag_message(unknown, "pr create", "bitbucket"))
+            (true, ["pr", "create"] + _rename_flags(args, [("--head", "--source"), ("-H", "--source"), ("--base", "--dest"), ("-B", "--dest"), ("-t", "--title"), ("-b", "--body"), ("-r", "--reviewer")]), "")
+        "view":
+            val bad_view = first_unsupported_flag(args, ["--web", "-w", "--comments"])
+            if bad_view != "":
+                return (false, [], unsupported_flag_message(bad_view, "pr view", "bitbucket"))
+            val unknown_view = first_unknown_flag(args, PR_VIEW_KNOWN)
+            if unknown_view != "":
+                return (false, [], unknown_flag_message(unknown_view, "pr view", "bitbucket"))
+            (true, ["pr", "view"] + args, "")
+        "list":
+            val bad_list = first_unsupported_flag(args, ["--web", "-w", "--search", "-S", "--label", "-l", "--draft"])
+            if bad_list != "":
+                return (false, [], unsupported_flag_message(bad_list, "pr list", "bitbucket"))
+            val unknown_list = first_unknown_flag(args, PR_LIST_KNOWN)
+            if unknown_list != "":
+                return (false, [], unknown_flag_message(unknown_list, "pr list", "bitbucket"))
+            val (ok, mapped, err) = _map_state_flag(args)
+            if not ok:
+                return (false, [], err)
+            (true, ["pr", "list"] + _rename_flags(mapped, [("-L", "--limit")]), "")
+        "merge":
+            val bad_merge = first_unsupported_flag(args, ["--auto", "--admin", "--delete-branch", "-d", "--match-head-commit"])
+            if bad_merge != "":
+                return (false, [], unsupported_flag_message(bad_merge, "pr merge", "bitbucket"))
+            val unknown_merge = first_unknown_flag(args, PR_MERGE_KNOWN)
+            if unknown_merge != "":
+                return (false, [], unknown_flag_message(unknown_merge, "pr merge", "bitbucket"))
+            # gh spells the strategy as three boolean flags; Bitbucket takes
+            # one --strategy value. gh's default (when none is given) is a
+            # merge commit, so that is the default carried across — NOT
+            # cmd_bb's own "squash" default, which would silently change what
+            # `gh pr merge N` does.
+            var strategy = "merge_commit"
+            for arg in args:
+                if arg == "--squash" or arg == "-s":
+                    strategy = "squash"
+                else if arg == "--rebase" or arg == "-r":
+                    strategy = "fast_forward"
+            var merge_rest: [text] = []
+            for arg in args:
+                if arg != "--squash" and arg != "-s" and arg != "--rebase" and arg != "-r" and arg != "--merge" and arg != "-m":
+                    merge_rest = merge_rest + [arg]
+            (true, ["merge"] + merge_rest + ["--strategy", strategy], "")
+        "review":
+            # gh's `pr review --approve` is Bitbucket's top-level `approve`.
+            # Only the approve verb has an equivalent: Bitbucket has no
+            # request-changes or comment-review state.
+            var approving = false
+            for arg in args:
+                if arg == "--approve" or arg == "-a":
+                    approving = true
+            if not approving:
+                return (false, [], "`gh pr review` on bitbucket supports only --approve (Bitbucket has no request-changes review state).")
+            var review_rest: [text] = []
+            for arg in args:
+                if arg != "--approve" and arg != "-a":
+                    review_rest = review_rest + [arg]
+            val unknown_review = first_unknown_flag(review_rest, PR_REVIEW_KNOWN)
+            if unknown_review != "":
+                return (false, [], unknown_flag_message(unknown_review, "pr review", "bitbucket"))
+            (true, ["approve"] + review_rest, "")
+        "comment":
+            val unknown_comment = first_unknown_flag(args, PR_COMMENT_KNOWN)
+            if unknown_comment != "":
+                return (false, [], unknown_flag_message(unknown_comment, "pr comment", "bitbucket"))
+            (true, ["comment", "post"] + _rename_flags(args, [("--body", "--content"), ("-b", "--content")]), "")
+        "status":
+            (true, ["status"] + args, "")
+        _:
+            (false, [], "`gh pr {verb}` is not supported on the bitbucket backend.\n  supported: create, view, list, merge, review --approve, comment, status")
+
+
+fn gh_repo_to_bb_argv(verb: text, args: [text]) -> (bool, [text], text):
+    """Translate `gh repo <verb>` into `handle_bb` argv."""
+    match verb:
+        "view":
+            (true, ["repo", "view"] + args, "")
+        "list":
+            (true, ["repo", "list"] + args, "")
+        _:
+            (false, [], "`gh repo {verb}` is not supported on the bitbucket backend.\n  supported: view, list")

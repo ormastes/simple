@@ -33,7 +33,7 @@ Argument: `$ARGUMENTS`
 ### Route
 
 **`setup`:**
-Read `tools/claude-plugin/repo-and-pull-req/skills/bug/bug_setup.md` and follow.
+Read `tools/claude-plugin/repo-and-pull-req/skills/bug_setup/SKILL.md` and follow.
 
 **`list`:**
 Run `bin/bug list` with any extra flags passed through.
@@ -45,10 +45,10 @@ Run `bin/bug view <id>`.
 Run `bin/bug search <query>`.
 
 **`triage`:**
-Read and follow `tools/claude-plugin/repo-and-pull-req/skills/bug/bug_review.md` (AI-powered analysis).
+Read and follow `tools/claude-plugin/repo-and-pull-req/skills/bug_review/SKILL.md` (AI-powered analysis).
 
 **`fix <id>`:**
-Read and follow `tools/claude-plugin/repo-and-pull-req/skills/bug/bug_fix.md`.
+Read and follow `tools/claude-plugin/repo-and-pull-req/skills/bug_fix/SKILL.md`.
 
 **`triage loop`:**
 Start scheduled triage: `/schedule 4h /bug_review triage`

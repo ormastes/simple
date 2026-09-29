@@ -1,0 +1,24 @@
+use std.spec
+use std.io_runtime.{file_read}
+
+describe "RV64 PID1 boot contract":
+    it "installs the prepared scheduler before sealing and ring-3 handoff":
+        val source = file_read("src/os/kernel/boot/os_main.spl")
+        val prepare = source.index_of("val prepared = pid1_prepare_into_scheduler(Rv64Interrupt.installed_scheduler())")
+        val install = source.index_of("Rv64Interrupt.install_scheduler(prepared.scheduler)")
+        val seal = source.index_of("pid1_commit_bootstrap_authority()")
+        val handoff = source.index_of("dispatch_enter_user_blocking(prepared.pid as u64, prepared.scheduler)")
+        expect(prepare).to_be_greater_than(-1)
+        expect(install).to_be_greater_than(prepare)
+        expect(seal).to_be_greater_than(install)
+        expect(handoff).to_be_greater_than(seal)
+
+    it "refuses the inline HTTP fallback after a failed RV64 PID1 launch":
+        val source = file_read("src/os/kernel/boot/os_main.spl")
+        val refusal = source.index_of("PID1 did not start; refusing inline HTTP fallback")
+        val legacy_http_branch = source.index_of("if rt_net_stats() == 0:")
+        expect(refusal).to_be_greater_than(-1)
+        expect(legacy_http_branch).to_be_greater_than(refusal)
+        val recovery = source.slice(refusal, legacy_http_branch)
+        expect(recovery).to_contain("return true")
+        expect(recovery.contains("start_http_server_baremetal()")).to_equal(false)

@@ -1,7 +1,9 @@
 # SIMPLE_JIT_STRICT coverage gap (2026-07-30, part 2 of the fail-open fix)
+## Closed 2026-09-16 — rows 2-3 strict tagging fixed with before/after evidence; remaining rows by-design or inherent, tracked elsewhere
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 Follow-up to `doc/08_tracking/bug/jit_strict_fail_open_fix_2026-07-30.md`
 (part 1: the tag reached the catch site but nothing else was tagged). This
@@ -247,13 +249,3 @@ Raw probe fixtures: `/tmp/.../scratchpad/probe_hir_unknown_var.spl` (Fixture A),
   transcripts can, because `simple test` forces interpreter mode
   unconditionally (§4a).
 
-## Re-verified 2026-08-17 (worker s3_rust_other) — LIVE, matching the doc
-
-Strict plumbing is present: `driver/src/exec_core.rs:1357` (unresolved-import
-tag), `:1369` (paren-less accessor), generic helper `:1376-1379`
-(`SIMPLE_JIT_STRICT` read, `is_some_and(|v| v != "0")`), consumed at
-`exec_core.rs:955` (`jit_err.contains("SIMPLE_JIT_STRICT:")`); second reader at
-`compiler/src/codegen/jit.rs:173-175`. The empty-let-pattern path the doc names
-is at `hir/lower/stmt_lowering.rs:199`/`:206` — `} else if self.lenient_types {`
-=> `TypeId::ANY`. It returns no `Err`, so no strict reader can ever observe it:
-it fails open by construction, not by omission. Confirms the doc; no fix made.

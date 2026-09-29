@@ -17,8 +17,12 @@
 
 #### should REQ-NFR012-01 keep admission and execution identities distinct
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- should REQ-NFR012-01 keep admission and execution identities distinct
 - Probe an empty cache with the immutable admission digest
-- var index = X25519MlKem768AcceleratorCacheIndex create
    - Expected: index.probe("cuda", _KEY_A) equals `-1`
    - Expected: index.misses equals `1`
 - Record the warmed device-bound execution digest
@@ -35,10 +39,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-01 keep admission and execution identities distinct")
 step("Probe an empty cache with the immutable admission digest")
 var index = X25519MlKem768AcceleratorCacheIndex.create(2)
 expect(index.probe("cuda", _KEY_A)).to_equal(-1)
@@ -62,8 +68,8 @@ expect(index.hits).to_equal(1)
 
 #### should REQ-NFR012-02 reject execution identity drift on a hit
 
+- should REQ-NFR012-02 reject execution identity drift on a hit
 - Seed one admitted execution identity
-- var index = X25519MlKem768AcceleratorCacheIndex create
    - Expected: index.insert("metal", _KEY_A, _EXEC_A).reason equals ``
 - Present a different post-warmup execution identity
    - Expected: index.hits equals `0`
@@ -72,10 +78,12 @@ expect(index.hits).to_equal(1)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-02 reject execution identity drift on a hit")
 step("Seed one admitted execution identity")
 var index = X25519MlKem768AcceleratorCacheIndex.create(1)
 expect(index.insert("metal", _KEY_A, _EXEC_A).reason).to_equal("")
@@ -91,18 +99,20 @@ expect(index.hits).to_equal(0)
 
 #### should REQ-NFR012-02 reject non-hex index identities
 
+- should REQ-NFR012-02 reject non-hex index identities
 - Present a 64-character value outside the SHA-256 hex alphabet
-- var index = X25519MlKem768AcceleratorCacheIndex create
    - Expected: index.size() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-02 reject non-hex index identities")
 step("Present a 64-character value outside the SHA-256 hex alphabet")
 var index = X25519MlKem768AcceleratorCacheIndex.create(1)
 val not_hex =
@@ -116,8 +126,8 @@ expect(index.size()).to_equal(0)
 
 #### should REQ-NFR012-03 evict globally in deterministic FIFO order
 
+- should REQ-NFR012-03 evict globally in deterministic FIFO order
 - Fill a two-entry cache in CUDA then Metal order
-- var index = X25519MlKem768AcceleratorCacheIndex create
    - Expected: index.insert("cuda", _KEY_A, _EXEC_A).reason equals ``
    - Expected: index.insert("metal", _KEY_B, _EXEC_B).reason equals ``
 - Hit CUDA without changing deterministic insertion order
@@ -135,10 +145,12 @@ expect(index.size()).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-03 evict globally in deterministic FIFO order")
 step("Fill a two-entry cache in CUDA then Metal order")
 var index = X25519MlKem768AcceleratorCacheIndex.create(2)
 expect(index.insert("cuda", _KEY_A, _EXEC_A).reason).to_equal("")
@@ -163,20 +175,22 @@ expect(index.entries.get(1).backend).to_equal("vulkan")
 
 #### should REQ-NFR012-04 reject zero and excessive capacities
 
+- should REQ-NFR012-04 reject zero and excessive capacities
 - Create owners outside the bounded capacity contract
 - Create and deterministically close an empty bounded owner
    - Expected: cache.size() equals `0`
-- cache shutdown
    - Expected: cache.closed is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-04 reject zero and excessive capacities")
 step("Create owners outside the bounded capacity contract")
 match X25519MlKem768AcceleratorCache.create(0):
     case Ok(_): fail("cache accepted zero capacity")
@@ -200,6 +214,7 @@ match X25519MlKem768AcceleratorCache.create(2):
 
 #### should REQ-NFR012-05 warm every backend before retaining or returning it
 
+- should REQ-NFR012-05 warm every backend before retaining or returning it
 - Inspect the pure-Simple feature owner contract
    - Expected: source.count("val warmup_reason = retained.warmup()") equals `3`
    - Expected: source.count("val warmup_reason = executor.warmup()") equals `3`
@@ -212,10 +227,12 @@ match X25519MlKem768AcceleratorCache.create(2):
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-05 warm every backend before retaining or returning it")
 step("Inspect the pure-Simple feature owner contract")
 val source = file_read_text(
     "src/os/crypto/x25519_mlkem768/accelerator_cache.spl")
@@ -238,22 +255,21 @@ expect(source.contains("secret: text")).to_equal(false)
 
 #### should REQ-NFR012-06 reject mismatched typed configs before hardware
 
+- should REQ-NFR012-06 reject mismatched typed configs before hardware
 - Cross-wire typed backend configurations before provider warmup
-- cuda,  cache config
-- metal,  cache config
-- vulkan,  cache config
    - Expected: cache.admission_failures equals `3`
    - Expected: cache.size() equals `0`
-- cache shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 28 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-06 reject mismatched typed configs before hardware")
 step("Cross-wire typed backend configurations before provider warmup")
 val cache = match X25519MlKem768AcceleratorCache.create(2):
     case Ok(value): value
@@ -288,24 +304,25 @@ cache.shutdown()
 
 #### should REQ-NFR012-07 preserve ownership before config resolution and eviction
 
+- should REQ-NFR012-07 preserve ownership before config resolution and eviction
 - Reject an index whose public capacity no longer matches its rows
-- var index = X25519MlKem768AcceleratorCacheIndex create
    - Expected: index.insert("cuda", _KEY_A, _EXEC_A).reason equals ``
    - Expected: index.insert("metal", _KEY_B, _EXEC_B).reason equals ``
    - Expected: index.size() equals `2`
    - Expected: index.evictions equals `0`
 - Inspect ownership guards and eviction preflight ordering
-- " proposal ownership reason
    - Expected: source.count("val _removed_corrupt = self.index.remove(") equals `3`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-07 preserve ownership before config resolution and eviction")
 step("Reject an index whose public capacity no longer matches its rows")
 var index = X25519MlKem768AcceleratorCacheIndex.create(2)
 expect(index.insert("cuda", _KEY_A, _EXEC_A).reason).to_equal("")
@@ -338,27 +355,27 @@ expect(source.count("val _removed_corrupt = self.index.remove(")).to_equal(3)
 
 #### should REQ-NFR012-08 remove typed-index divergence before hardware access
 
+- should REQ-NFR012-08 remove typed-index divergence before hardware access
 - Seed a CUDA index hit without its typed retained executor
    - Expected: cuda_cache.size() equals `0`
    - Expected: cuda_cache.admission_failures equals `1`
-- cuda cache shutdown
 - Seed a Metal index hit without its typed retained executor
    - Expected: metal_cache.size() equals `0`
    - Expected: metal_cache.admission_failures equals `1`
-- metal cache shutdown
 - Seed a Vulkan index hit without its typed retained executor
    - Expected: vulkan_cache.size() equals `0`
    - Expected: vulkan_cache.admission_failures equals `1`
-- vulkan cache shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 75 lines folded for reproduction.
+Runnable source: 77 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-OS
+step("should REQ-NFR012-08 remove typed-index divergence before hardware access")
 step("Seed a CUDA index hit without its typed retained executor")
 val cuda_cache = match X25519MlKem768AcceleratorCache.create(2):
     case Ok(value): value
@@ -445,7 +462,7 @@ vulkan_cache.shutdown()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl` |
-| Updated | 2026-08-05 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -465,3 +482,88 @@ Tests covering X25519MLKEM768 accelerator executor cache.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-NFR012-01`
+- `REQ-SSPEC-OS`
+- `REQ-NFR012-02`
+- `REQ-NFR012-03`
+- `REQ-NFR012-04`
+- `REQ-NFR012-05`
+- `REQ-NFR012-06`
+- `REQ-NFR012-07`
+- `REQ-NFR012-08`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `61ebb9ff728518df2a414786b5192d44ab76aa0b947566cde261863fc65ff140`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `61ebb9ff728518df2a414786b5192d44ab76aa0b947566cde261863fc65ff140`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `61ebb9ff728518df2a414786b5192d44ab76aa0b947566cde261863fc65ff140`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **66/100**; effective score: **49/100**; blockers: **2**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl
+mirror: doc/06_spec/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.md (current)
+findings: 14 blockers: 2
+  narrative=100 structure=70 oracle=20
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=66; blocker cap makes effective=49
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:1:1: blocker SSDOC-ORA-002 [oracle] (-50): scenario relies on source-text inspection as system evidence
+  why: Source presence or self-created arithmetic does not demonstrate production behavior.
+  improve: Observe runtime behavior or a stable generated artifact instead.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 25 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 1 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:56:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-01 keep admission and execution identities distinct' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should REQ-NFR012-01 keep admission and execution identities distinct' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:77:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-02 reject execution identity drift on a hit' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:77:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should REQ-NFR012-02 reject execution identity drift on a hit' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:90:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-02 reject non-hex index identities' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:90:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should REQ-NFR012-02 reject non-hex index identities' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:101:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-03 evict globally in deterministic FIFO order' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:123:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-04 reject zero and excessive capacities' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/01_unit/os/crypto/x25519mlkem768_accelerator_cache_spec.spl:144:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should REQ-NFR012-05 warm every backend before retaining or returning it' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

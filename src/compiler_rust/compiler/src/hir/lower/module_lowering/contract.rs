@@ -57,10 +57,7 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
                 collect_old_expressions(else_expr, results);
             }
         }
-        HirExprKind::Block(stmts)
-        | HirExprKind::UnsafeBlock {
-            statements: stmts, ..
-        } => {
+        HirExprKind::Block(stmts) | HirExprKind::UnsafeBlock { statements: stmts, .. } => {
             for stmt in stmts {
                 collect_old_expressions_from_stmt(stmt, results);
             }

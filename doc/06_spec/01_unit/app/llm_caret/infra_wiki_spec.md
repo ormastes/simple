@@ -20,7 +20,7 @@ Purpose: Prove the LLM Caret wiki tools (wiki_search / wiki_read / wiki_write)
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/infra_wiki_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -38,6 +38,12 @@ Audience: llm_caret maintainers and anyone extending the wiki surface.
 
 #### advertises wiki_search / wiki_read / wiki_write through tool_schemas
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- advertises wiki_search / wiki_read / wiki_write through tool_schemas
+   - Expected: wiki_tool_schemas().len() equals `3`
 - wiki_write is marked MUTATING; the read-only pair is not
    - Expected: search_desc does not contain `MUTATING`
 
@@ -45,10 +51,12 @@ Audience: llm_caret maintainers and anyone extending the wiki surface.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("advertises wiki_search / wiki_read / wiki_write through tool_schemas")
 val names = ["wiki_search", "wiki_read", "wiki_write"]
 expect(wiki_tool_schemas().len()).to_equal(3)
 for name in names:
@@ -77,13 +85,20 @@ expect(search_desc.contains("MUTATING")).to_equal(false)
 
 #### refuses honestly with no [wiki] section
 
+- refuses honestly with no [wiki] section
+   - Expected: wiki_config_error() equals `wiki not configured: set [wiki] in llm_caret.sdn`
+   - Expected: r.is_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("refuses honestly with no [wiki] section")
 reset_config()
 expect(wiki_config_error()).to_equal("wiki not configured: set [wiki] in llm_caret.sdn")
 val r = run_tool(default_policy(_ws()), new_tool_call("s", "wiki_search", _json([_kv("query", "x")])))
@@ -95,16 +110,19 @@ expect(r.content).to_contain("wiki not configured")
 
 #### names the missing confluence pieces without touching the network
 
+- names the missing confluence pieces without touching the network
 - a token_env that is not an identifier is refused before any shell use
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("names the missing confluence pieces without touching the network")
 reset_config()
 parse_config_text("wiki:\n    backend: confluence\n    base_url: https://wiki.invalid\n    user: caret@example.test\n    token_env: LLM_CARET_SPEC_WIKI_TOKEN_UNSET\n")
 val err = wiki_config_error()
@@ -120,13 +138,19 @@ expect(wiki_config_error()).to_contain("not a valid environment variable name")
 
 #### returns a tool error, never an abort, for an unknown backend
 
+- returns a tool error, never an abort, for an unknown backend
+   - Expected: ok is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("returns a tool error, never an abort, for an unknown backend")
 reset_config()
 parse_config_text("wiki:\n    backend: mediawiki\n")
 val (ok, msg) = wiki_read(_ws(), "any")
@@ -141,6 +165,7 @@ reset_config()
 
 #### write -> search finds it -> read returns the exact body
 
+- write -> search finds it -> read returns the exact body
 - wiki_write creates a page from parent + title under the wiki root (explicit grant)
    - Expected: wrote.is_error is false
 - absolute oracle: the file on disk holds the exact body
@@ -161,10 +186,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("write -> search finds it -> read returns the exact body")
 _configure_local()
 val nonce = _nonce()
 val body = "# Caret Wiki " + nonce + "\n\nround-trip body " + nonce + "\n"
@@ -208,6 +235,10 @@ reset_config()
 
 #### rejects path traversal and pages outside the wiki root
 
+- rejects path traversal and pages outside the wiki root
+   - Expected: esc.is_error is true
+   - Expected: wesc.is_error is true
+   - Expected: file_exists(ws + "/escape.md") is false
 - an absolute path outside the root is refused too
    - Expected: abs.is_error is true
 - a missing page is a not-found error, not an empty success
@@ -217,10 +248,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("rejects path traversal and pages outside the wiki root")
 _configure_local()
 val ws = _ws()
 val esc = run_tool(default_policy(ws), new_tool_call("r", "wiki_read", _json([_kv("page_id", "../x.md")])))
@@ -247,6 +280,7 @@ reset_config()
 
 #### denies wiki_write under the default policy and allows it with a grant
 
+- denies wiki_write under the default policy and allows it with a grant
 - default (ask, non-interactive) resolves to DENY and nothing is written
    - Expected: denied.is_error is true
    - Expected: file_exists(ws + "/wiki/" + id) is false
@@ -260,10 +294,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 17 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("denies wiki_write under the default policy and allows it with a grant")
 _configure_local()
 val ws = _ws()
 val nonce = _nonce()
@@ -297,3 +333,60 @@ reset_config()
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-APP-LLM-CARET-INFRA-003`
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c58cc45ccff080db85e8872b4785e8bfc962362a23d919b373db64d865a7fe5d`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c58cc45ccff080db85e8872b4785e8bfc962362a23d919b373db64d865a7fe5d`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c58cc45ccff080db85e8872b4785e8bfc962362a23d919b373db64d865a7fe5d`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/llm_caret/infra_wiki_spec.spl
+mirror: doc/06_spec/01_unit/app/llm_caret/infra_wiki_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=90
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/01_unit/app/llm_caret/infra_wiki_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/llm_caret/infra_wiki_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/llm_caret/infra_wiki_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-10): 1 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/llm_caret/infra_wiki_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/app/llm_caret/infra_wiki_spec.spl:54:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'advertises wiki_search / wiki_read / wiki_write through tool_schemas' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/infra_wiki_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'refuses honestly with no [wiki] section' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/infra_wiki_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'names the missing confluence pieces without touching the network' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

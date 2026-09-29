@@ -1,0 +1,70 @@
+# @tag: unit, gpu, engine2d, software, simd, blend, damage
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 5%
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+fn render_blend(simd: bool) -> ([u32], [i32]):
+    var backend = if simd:
+        SoftwareBackend.create_cpu_simd()
+    else:
+        SoftwareBackend.create()
+    expect(backend.init(8, 4)).to_equal(true)
+    backend.clear(0xff102030u32)
+    # Negative x clips one source pixel; mixed alpha exercises transparent,
+    # translucent, and opaque lanes in the same production row.
+    backend.draw_image_blend(-1, 1, 5, 1, [
+        0xffff00ffu32,
+        0x00000000u32,
+        0x80ff0000u32,
+        0xff00ff00u32,
+        0x400000ffu32
+    ])
+    val pixels = backend.read_pixels()
+    val damage = backend.damage_rects(16)
+    backend.shutdown()
+    (pixels, damage)
+
+fn render_const_blend(simd: bool) -> ([u32], [i32]):
+    var backend = if simd:
+        SoftwareBackend.create_cpu_simd()
+    else:
+        SoftwareBackend.create()
+    expect(backend.init(8, 4)).to_equal(true)
+    backend.clear(0xff102030u32)
+    backend.draw_rect_filled(-1, 1, 5, 2, 0x80ff4000u32)
+    val pixels = backend.read_pixels()
+    val damage = backend.damage_rects(16)
+    backend.shutdown()
+    (pixels, damage)
+
+describe "allocation-free software blend spans":
+    it "matches scalar pixels and damage after negative clipping":
+        val scalar = render_blend(false)
+        val simd = render_blend(true)
+        expect(simd.0).to_equal(scalar.0)
+        expect(simd.1).to_equal(scalar.1)
+        expect(simd.0[0 + 1 * 8]).to_equal(0xff102030u32)
+        expect(simd.0[2 + 1 * 8]).to_equal(0xff00ff00u32)
+
+    it "keeps a fully transparent source row unchanged":
+        var backend = SoftwareBackend.create_cpu_simd()
+        expect(backend.init(4, 2)).to_equal(true)
+        backend.clear(0xff445566u32)
+        val before = backend.read_pixels()
+        backend.present()
+        backend.draw_image_blend(
+            0, 0, 4, 1,
+            [0x00000000u32, 0x00112233u32,
+             0x00000000u32, 0x00ffffffu32])
+        expect(backend.read_pixels()).to_equal(before)
+        # Transparent source is a pixel no-op, though conservative command
+        # damage may still be reported by the backend.
+        backend.shutdown()
+
+    it "matches scalar pixels and damage for clipped translucent rectangles":
+        val scalar = render_const_blend(false)
+        val simd = render_const_blend(true)
+        expect(simd.0).to_equal(scalar.0)
+        expect(simd.1).to_equal(scalar.1)
+        expect(simd.0[0 + 1 * 8]).to_equal(scalar.0[0 + 1 * 8])

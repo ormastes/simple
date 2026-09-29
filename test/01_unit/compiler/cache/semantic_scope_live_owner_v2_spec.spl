@@ -1,0 +1,60 @@
+# codex-system-test
+# Purpose: owner-instance lifecycle evidence for the L7 semantic-scope gateway.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-017 REQ-CSM-027
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{read_file_text}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.driver.cache.gateway.semantic_scope_live_owner_v2.{
+    SemanticScopeLiveOwnerV2,
+    SEMANTIC_SCOPE_LIVE_ISSUERS_V2,
+    SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2,
+    SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2,
+    SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2,
+    SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2,
+}
+
+describe "L7 semantic scope live owner V2":
+    it "should retain one lifecycle behind copied owner references":
+        step("Create one canonical owner and retain a copied reference")
+        val owner = SemanticScopeLiveOwnerV2.create()
+        val copied_reference = owner
+        expect(copied_reference.close_v2()).to_equal(Ok(()))
+        step("Reject the stale reference after the retained owner closes")
+        expect(owner.close_v2()).to_equal(
+            Err(ThreePayloadFallbackV1.AuthorityUnavailable))
+
+    it "should keep independently created owner lifecycles isolated":
+        step("Create two independently owned live scope lifecycles")
+        val first = SemanticScopeLiveOwnerV2.create()
+        val second = SemanticScopeLiveOwnerV2.create()
+        expect(first.close_v2()).to_equal(Ok(()))
+        step("Close the second owner without reviving the first owner")
+        expect(second.close_v2()).to_equal(Ok(()))
+        expect(first.close_v2()).to_equal(
+            Err(ThreePayloadFallbackV1.AuthorityUnavailable))
+
+    it "should expose fixed owner capacities before any scope can be admitted":
+        step("Read the fixed live-owner capacity envelope")
+        expect(SEMANTIC_SCOPE_LIVE_ISSUERS_V2).to_equal(5)
+        expect(SEMANTIC_SCOPE_LIVE_MAX_ATTEMPTS_V2).to_equal(64)
+        expect(SEMANTIC_SCOPE_LIVE_MAX_BODY_OBJECTS_V2).to_equal(1024)
+        expect(SEMANTIC_SCOPE_LIVE_MAX_DEPENDENCY_EDGES_V2).to_equal(65536)
+        expect(SEMANTIC_SCOPE_LIVE_MAX_RETAINED_BYTES_V2).to_equal(134217728)
+
+    it "should expose a fail-closed prospective issuer seam in source":
+        step("Inspect the non-executable installer source contract")
+        val source = read_file_text(
+            "src/compiler/80.driver/cache/gateway/semantic_scope_live_owner_v2.spl")
+        expect(source.contains("pub me issuer_attempt_context_v2")).to_equal(true)
+        expect(source.contains("pub me install_semantic_issuer_v2")).to_equal(true)
+        expect(source.contains("receipt: SemanticScopeIssuerReceiptV2?")).to_equal(true)
+        expect(source.contains("handle: SemanticScopeIssuedHandleV2?")).to_equal(true)
+        expect(source.contains("receipt.validate_issued_scope_v2")).to_equal(true)
+        expect(source.contains("not projection.gateway_install_available")).to_equal(true)
+        expect(source.contains("source_universe: [text]")).to_equal(true)
+        expect(source.contains("simple.cache.direct-pin-id.v2")).to_equal(true)
+        expect(source.contains("simple.cache.process-instance-nonce.v2")).to_equal(true)
+        expect(source.contains("register_candidate")).to_equal(false)
+        expect(source.contains("install_from_digest")).to_equal(false)

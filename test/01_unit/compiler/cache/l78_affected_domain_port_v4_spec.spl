@@ -1,0 +1,181 @@
+# @req: REQ-CSM-003, REQ-CSM-005, REQ-CSM-029
+
+use std.spec.*
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use compiler.driver.cache.reference.reverse_reference_coordinator_v1.{AffectedQueryPlanV1,
+    l78_plan_affected_with_port_v4}
+use .fixtures.l78_scope_rr_ports_v4.{l78_fake_affected_domain_port_v4,
+    l78_expect_affected_plan_v4}
+
+val L78_KIND_SCOPE_V4: L78TokenKindV4 = L78TokenKindV4.Scope
+
+fn l78_affected_digest_v4(value: text) -> text: value.repeat(64)
+
+fn l78_affected_attempt_v4() -> L78AttemptKeyV4:
+    L78AttemptKeyV4(root_digest: l78_affected_digest_v4("a"), generation: 7,
+        manifest_digest: l78_affected_digest_v4("b"), profile_digest: l78_affected_digest_v4("c"),
+        operation_digest: l78_affected_digest_v4("d"))
+
+fn l78_affected_limits_v4() -> L78LimitsV4:
+    L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 3)
+
+fn l78_scope_token_v4() -> L78OwnerTokenV4:
+    L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble, kind: L78_KIND_SCOPE_V4,
+        owner_instance: 41, slot: 1, epoch: 1,
+        attempt_digest: l78_attempt_key_digest_v4(l78_affected_attempt_v4()).unwrap())
+
+fn l78_seed_v4() -> AffectedQueryPlanV1:
+    AffectedQueryPlanV1(accepted: true, rejection_reason: "", ordered_query_ids: [],
+        owner_modules: [], changed_dimensions: [], conservative_domain_receipt: "",
+        scc_group_identities: [])
+
+describe "L78 affected-domain port V4 test double [importance=critical; importance_weight=3]":
+    it "should script a bounded TestDouble plan validate close lifecycle [importance=critical; importance_weight=3]":
+        val port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        val scope = l78_scope_token_v4()
+        val result = port.plan(scope, [], [], [], l78_affected_limits_v4()).unwrap()
+        l78_expect_affected_plan_v4(result, l78_seed_v4())
+        expect(result.token.domain).to_equal(L78AuthorityDomainV4.TestDouble)
+        expect(result.token.kind).to_equal(L78TokenKindV4.AffectedDomain)
+        expect(port.active_slots).to_equal([result.token.slot])
+        expect(port.validate(result, scope).is_ok()).to_be(true)
+        expect(port.close(result.token).is_ok()).to_be(true)
+        expect(port.events).to_equal(["affected.plan", "affected.validate", "affected.close"])
+        expect(port.revoked_slots).to_equal([result.token.slot])
+        expect(port.active_slots.contains(result.token.slot)).to_be(false)
+
+    it "should reject the scripted unavailable TestDouble plan [importance=critical; importance_weight=3]":
+        val scope = l78_scope_token_v4()
+        val unavailable = l78_fake_affected_domain_port_v4("rr_unavailable", 41,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        expect(unavailable.plan(scope, [], [], [], l78_affected_limits_v4())
+        ).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+
+    it "should preserve every scripted RR planning refusal [importance=critical; importance_weight=3]":
+        val scope = l78_scope_token_v4()
+        val attempt = l78_affected_attempt_v4()
+        val limits = l78_affected_limits_v4()
+        val missing_absence = l78_fake_affected_domain_port_v4("rr_missing_absence", 41,
+            attempt, limits, l78_seed_v4())
+        expect(missing_absence.plan(scope, [], [], [], limits)
+        ).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+        val missing_scc = l78_fake_affected_domain_port_v4("rr_missing_scc", 41,
+            attempt, limits, l78_seed_v4())
+        expect(missing_scc.plan(scope, [], [], [], limits)
+        ).to_equal(Err(L78BoundaryErrorV4.Incomplete))
+        val wrong_generation = l78_fake_affected_domain_port_v4("rr_wrong_generation", 41,
+            attempt, limits, l78_seed_v4())
+        expect(wrong_generation.plan(scope, [], [], [], limits)
+        ).to_equal(Err(L78BoundaryErrorV4.InvalidRequest))
+        val unavailable = l78_fake_affected_domain_port_v4("rr_unavailable", 41,
+            attempt, limits, l78_seed_v4())
+        expect(unavailable.plan(scope, [], [], [], limits)
+        ).to_equal(Err(L78BoundaryErrorV4.Unavailable))
+
+    it "should retain four distinct TestDouble tokens for downstream handoff [importance=critical; importance_weight=3]":
+        val port = l78_fake_affected_domain_port_v4("rr_ok", 41,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        val scope = l78_scope_token_v4()
+        val affected = port.plan(scope, [], [], [], l78_affected_limits_v4()).unwrap().token
+        val namespace = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78TokenKindV4.Namespace, owner_instance: 41, slot: 3, epoch: 1,
+            attempt_digest: scope.attempt_digest)
+        val closure = L78OwnerTokenV4(domain: L78AuthorityDomainV4.TestDouble,
+            kind: L78TokenKindV4.Closure, owner_instance: 41, slot: 4, epoch: 1,
+            attempt_digest: scope.attempt_digest)
+        val retained = [scope, affected, namespace, closure]
+        expect(retained.len()).to_equal(4)
+        expect(retained.map(_.kind)).to_equal([L78_KIND_SCOPE_V4,
+            L78TokenKindV4.AffectedDomain, L78TokenKindV4.Namespace,
+            L78TokenKindV4.Closure])
+        expect(port.active_slots.contains(affected.slot)).to_be(true)
+
+    it "should accept an exact external Scope token from a different owner [importance=critical; importance_weight=3]":
+        val port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        val scope = l78_scope_token_v4()
+        val result = port.plan(scope, [], [], [], l78_affected_limits_v4()).unwrap()
+        expect(scope.owner_instance).to_equal(41)
+        expect(result.token.owner_instance).to_equal(91)
+        expect(port.validate(result, scope).is_ok()).to_be(true)
+
+    it "should return the mutated affected-domain owner from planning [importance=critical; importance_weight=3]":
+        val carried = l78_plan_affected_with_port_v4(
+            l78_fake_affected_domain_port_v4("rr_ok", 91,
+                l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4()),
+            l78_scope_token_v4(), [], [], [], l78_affected_limits_v4())
+        expect(carried.outcome.is_ok()).to_be(true)
+        expect(carried.owner.events).to_equal(["affected.plan"])
+        expect(carried.owner.active_slots.len()).to_equal(1)
+
+    it "should validate every external Scope token field [importance=critical; importance_weight=3]":
+        val attempt = l78_affected_attempt_v4()
+        val limits = l78_affected_limits_v4()
+        val seed = l78_seed_v4()
+
+        var wrong_domain = l78_scope_token_v4()
+        wrong_domain.domain = L78AuthorityDomainV4.Live
+        val domain_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(domain_port.plan(wrong_domain, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var wrong_kind = l78_scope_token_v4()
+        wrong_kind.kind = L78TokenKindV4.AffectedDomain
+        val kind_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(kind_port.plan(wrong_kind, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var missing_identity = l78_scope_token_v4()
+        missing_identity.owner_instance = 0
+        val identity_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(identity_port.plan(missing_identity, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var missing_slot = l78_scope_token_v4()
+        missing_slot.slot = 0
+        val slot_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(slot_port.plan(missing_slot, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var missing_epoch = l78_scope_token_v4()
+        missing_epoch.epoch = 0
+        val epoch_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(epoch_port.plan(missing_epoch, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+        var wrong_attempt = l78_scope_token_v4()
+        wrong_attempt.attempt_digest = l78_affected_digest_v4("0")
+        val attempt_port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            attempt, limits, seed)
+        expect(attempt_port.plan(wrong_attempt, [], [], [], limits)).to_equal(
+            Err(L78BoundaryErrorV4.ForeignToken))
+
+    it "should report step exhaustion and reject unexpected affected ordering [importance=critical; importance_weight=3]":
+        val one_step = L78LimitsV4(max_items: 8, max_bytes: 1024, max_steps: 1)
+        val exhausted = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            l78_affected_attempt_v4(), one_step, l78_seed_v4())
+        val scope = l78_scope_token_v4()
+        val result = exhausted.plan(scope, [], [], [], one_step).unwrap()
+        expect(exhausted.validate(result, scope)).to_equal(Err(L78BoundaryErrorV4.Bounds))
+
+        val out_of_order = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        expect(out_of_order.validate(result, scope)).to_equal(
+            Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(out_of_order.close(result.token)).to_equal(
+            Err(L78BoundaryErrorV4.InvalidRequest))
+        expect(out_of_order.events).to_equal([])
+
+    it "should reject a malformed affected-domain result token [importance=critical; importance_weight=3]":
+        val port = l78_fake_affected_domain_port_v4("rr_ok", 91,
+            l78_affected_attempt_v4(), l78_affected_limits_v4(), l78_seed_v4())
+        val scope = l78_scope_token_v4()
+        var result = port.plan(scope, [], [], [], l78_affected_limits_v4()).unwrap()
+        result.token.owner_instance = 0
+        expect(port.validate(result, scope)).to_equal(Err(L78BoundaryErrorV4.ForeignToken))

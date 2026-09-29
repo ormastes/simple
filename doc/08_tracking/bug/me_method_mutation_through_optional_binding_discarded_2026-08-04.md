@@ -1,10 +1,11 @@
 # `me`-method mutation through an OPTION-typed binding is silently discarded
+## Open 2026-09-16 — needs owner triage
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-04
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** OPEN (language/runtime defect). Callers must work around it by
 destructuring; the workaround is applied in `engine2d/engine.spl`.
 **Severity:** High — silent, exit 0, no warning from the compiler or runtime.
 Every state change a mutating method makes is thrown away. Since 2026-08-04 a
@@ -411,3 +412,157 @@ does **not** compile — unrelated `translate_call` trait break, see
 origin tip was not possible and is **not** claimed. All probe and spec runs used
 the pure-Simple self-hosted `bin/simple` in this working copy, interpreter mode
 for the language probes and the default runner for the spec.
+
+---
+
+## Addendum 2026-09-07 — the OPTIONAL-TYPED FIELD variant, and why the documented workaround does not rescue it
+
+Two independent investigations of unrelated WM failures converged on this same
+defect, from different symptoms. Both are broader than what is recorded above,
+in two specific ways.
+
+### 1. The source can be an optional-typed FIELD, not just a local binding
+
+The shape is `class C: backend: SomeTrait?`, then reading that field to call a
+mutating method on the payload. Every advance the method makes is discarded when
+the field is next read, because the read yields a copy.
+
+Isolated with a 30-line reproducer containing no compositor code at all (a
+`Holder` class over a `ScriptedInput`): three pumps of a ONE-event script report
+`seen=3`, not `seen=1`.
+
+### 2. Optionality is the discriminator — not trait-vs-concrete, and not the read form
+
+Measured, one row per variant, all else identical (want 1):
+
+| field type | read form | result |
+|---|---|---|
+| `InputBackend` (trait, plain) | direct | 1 — correct |
+| `ScriptedInput` (concrete, plain) | direct | 1 — correct |
+| `InputBackend?` | `val inp = self.input` | 3 — WRONG |
+| `InputBackend?` | `if val inp = ...` | 3 — WRONG |
+| `InputBackend?` | `if val Some(inp) = ...` | 3 — WRONG |
+| `ScriptedInput?` (concrete, optional) | direct | 3 — WRONG |
+
+This matters for anyone relying on this document: **the `if val Some(x) = opt`
+destructuring recorded above as THE workaround does not fix the field variant.**
+It is row 5 and it is still wrong. A plain concrete optional (row 6) is wrong
+too, so this is not about trait objects or dynamic dispatch.
+
+A free-standing local of the same type, polled twice, advances correctly — so
+the defect is specifically *reading a mutable payload out of an optional-typed
+field*.
+
+Reproduces identically under the default lane and under
+`SIMPLE_EXECUTION_MODE=interpreter`, so it is not JIT-lowering-specific.
+
+### The workaround that DOES work, and the production bug it fixes
+
+Store the mutated payload back into the field explicitly.
+
+This was not academic. `Compositor._drain_input_source`
+(`src/os/compositor/compositor.spl`) read `input: InputBackend?` into a local,
+drained it, and never wrote it back. Within one call the local kept its advance,
+so the queue got exactly one event and looked right; across frames the field
+reset, so **the WM re-delivered every input event on every frame**. A single
+wheel notch scrolled 40, then 80, then 120. This is a real desktop-facing defect,
+not only a test artifact — it was found through a red spec but it affects the
+running compositor.
+
+Fixed by adding `self.input = inp` after the drain loop (and turning the loop's
+early `return` into a `break` so the write-back is not skipped on the common
+path). Pinned by `delivers each scripted event once no matter how many frames
+run` in `test/01_unit/os/compositor/compositor_input_unification_spec.spl`,
+sabotage-verified: removing the write-back flips that example RED.
+
+### Why this stayed hidden
+
+Sibling examples in the same spec are idempotent under replay, or clamp far
+above the doubled value (a wheel test using 1000 x 7 against a 4000 clamp cannot
+see double delivery at all). Only an example whose expected value is small and
+exact exposes it.
+
+### Still open
+
+The underlying language/runtime defect is unchanged and still OPEN. Lint rule
+`OPTME001` flags the local-binding shape; it does **not** flag the field shape
+documented here, which is the more dangerous one because the payload outlives
+the expression. Extending `OPTME001` to optional-typed fields whose payload has
+`me` methods is the natural next step.
+
+## Triage 2026-09-13
+
+Re-ran the "Minimal reproducer" verbatim (`SIMPLE_EXECUTION_MODE=interpreter
+bin/simple run`, `bin/simple` = Rust seed
+`bin/release/aarch64-unknown-linux-gnu/simple`, sha256 `3d120a6f9ab5`):
+
+```
+A n=0     (still wrong -- expected A n=2)
+B n=2     (still correct)
+```
+
+Unchanged from the filed symptom. This is an interpreter/runtime value-copy
+semantics defect on `T?`-typed bindings (the unwrap inside a `me` call appears
+to mutate a temporary rather than the underlying `Some` payload in place),
+not a `src/lib`/`src/app` logic bug — fixing it means changing how the
+interpreter represents/copies `Optional<Class>` payloads across a mutating
+method call, which is core language-runtime work well outside a single-file,
+<45-minute pure-Simple change. Left OPEN; no code change attempted here.
+The underlying language/runtime defect is a compiler-semantics change (silent discard of `me`-method mutation through an Option-typed binding) beyond this pass's budget. The suggested lint-only follow-up (extend `OPTME001` in `src/compiler/35.semantics/lint/option_me_call.spl` to also flag the optional-typed-FIELD shape, not just local bindings) was considered but not attempted this pass: `OPTME001` is a broadly-run lint rule and widening its pattern risks false positives across the whole tree without careful fixture coverage, which needs its own dedicated pass. Leaving OPEN, no code change made.
+
+
+## Re-measurement 2026-09-18 — still live, and it is one defect with its sibling
+
+Binary: `bin/simple` as redeployed 2026-09-18 (`308de6af84db5c26e2c0`, built from
+`origin/main` that day). Measurements taken on this host before 2026-09-18 17:00
+used a binary with its own silent wrong answers, so earlier rows here are not
+comparable.
+
+```simple
+class Counter:
+    n: i64
+    me bump():
+        self.n = self.n + 1
+
+class Holder:
+    inner: Counter
+
+fn find(c: Counter?) -> i64:
+    if val bound = c:
+        bound.bump()
+        return bound.n
+    -1
+
+fn main() -> i64:
+    var c = Counter(n: 0)
+    val seen = find(Some(c))
+    print "opt_binding_callee_saw={seen}"
+    print "opt_binding_caller_n={c.n}"
+
+    var h = Holder(inner: Counter(n: 10))
+    val f = h.inner
+    f.bump()
+    print "field_binding_local={f.n}"
+    print "field_binding_owner={h.inner.n}"
+    0
+```
+
+| row | interpret | JIT | which is right |
+|---|---|---|---|
+| `opt_binding_caller_n` — `me` mutation through an `Option` binding | **0** (mutation lost) | 1 | JIT; the caller holds the same instance |
+| `field_binding_owner` — class-typed field bound to a local | **10** (snapshot) | 11 | JIT; a class binding aliases |
+
+Both rows still reproduce, and they point the same way: **the interpret lane
+copies a class instance where the JIT lane aliases it**, so a mutation through
+the copy is silently discarded. The two records below were filed separately and
+are one job:
+
+- `me_method_mutation_through_optional_binding_discarded_2026-08-04`
+- `interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10`
+
+Worth noting for whoever takes it: the two engines disagree about aliasing in
+BOTH directions, so a fix cannot simply make one engine imitate the other.
+`packed_array_value_semantics` was the mirror image — the JIT aliased a `[u8]`
+where the language specifies value semantics and the interpreter copied
+correctly (fixed 2026-09-18, PR #1090). Arrays are values and classes are
+references; each engine currently gets one of the two wrong.

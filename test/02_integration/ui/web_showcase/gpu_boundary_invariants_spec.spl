@@ -1,0 +1,125 @@
+"""
+# No showcase page walks its pixels on the host
+## Purpose and audience
+For the engineers who own the GPU boundary audit
+(`src/app/ui/chrome_showcase/gpu_boundary_audit.spl`) and the Vulkan web
+lane. The audited goal is that the web renderer keeps frame work on the GPU:
+no host-side loop over the pixels, and at most one readback per frame. The
+shell gate `scripts/check/check-web-vulkan-gpu-boundary-audit.shs` checks this
+over a log it produces; this scenario checks the same counters in-process,
+per catalog page, so a regression is caught without those build artifacts.
+## Operator workflow
+Run: SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \\
+     bin/simple test test/02_integration/ui/web_showcase/gpu_boundary_invariants_spec.spl
+Per page: drain the route-stage and lane counters, render one Vulkan frame,
+read both back, and assert the boundary properties over them.
+## Compatibility and limitations
+Needs a working Vulkan device; on a CPU fallback these counters do not
+describe GPU work, so that case is reported as blocked rather than asserted.
+Two audited quantities are deliberately NOT asserted here.
+`host_pixel_iterations` and the submit/dispatch counts come from vk-timing
+SFFI buckets that exist only when the timing lane is armed with
+`SIMPLE_VK_TIMING=1` in the environment before the process starts, which a
+spec cannot do to itself. And the census line's own `submits=`/`fences=`
+fields are NOT usable as a substitute: `gpu_boundary_audit.spl:154-156`
+records that they read 0 against 112 real dispatches, because the pooled slot
+a probe reaches is not always the instance that drew. Asserting them would
+pass whatever happened. Those halves stay with the shell gate.
+## Verification guidance and troubleshooting
+A failure names the page and the counter that broke the boundary.
+`host_paint_pixels` above zero means the frame was painted by a host loop
+instead of on the device -- the regression this audit exists to stop. A
+readback count above one means the frame was pulled back to the host more
+than once.
+"""
+# Lifecycle: doc/01_research/local/web_renderer_vs_chrome_speed_2026-09-05.md ;
+# doc/03_plan/ui/gpu_scheduler_hardening_gpu_resident_rendering.md ;
+# doc/05_design/chromium_web_renderer_primitive_differential.md
+# @manual_section: web-showcase-gpu-boundary
+# @tag: ui, web, showcase, vulkan, gpu, audit, integration, slow
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    web_vulkan_lane_census_line, web_vulkan_lane_census_drain}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    web_route_stage_drain}
+use app.ui.chrome_showcase.catalog.{
+    chrome_catalog_tabs, chrome_catalog_page, CHROME_CATALOG_SOURCE}
+use app.ui.chrome_showcase.gpu_boundary_audit.{audit_field}
+
+val AUDIT_W: i32 = 320
+val AUDIT_H: i32 = 180
+
+fn count_of(block: text, key: text) -> i64:
+    val raw = audit_field(block, key)
+    if raw == "": -1 else: raw.to_i64()
+
+describe "GPU boundary invariants across the showcase catalog":
+
+    it "paints every showcase page on the device instead of looping over pixels on the host":
+        # @req REQ-UI-WEBSHOWCASE-020
+        # @capture(statistics): per-page host paint pixels, readbacks and fallback flag
+        step("Render each catalog page as one drained Vulkan frame and read its route-stage and lane counters")
+        val tabs = chrome_catalog_tabs()
+        val source = read_file(CHROME_CATALOG_SOURCE)
+        var host_painted: [text] = []
+        var extra_readbacks: [text] = []
+        var fell_back: [text] = []
+        var audited = 0
+        var report = ""
+        for tab in tabs:
+            web_vulkan_lane_census_drain()
+            web_route_stage_drain()
+            simple_web_render_html_to_pixels_with_engine2d_backend(
+                chrome_catalog_page(source, tab), AUDIT_W, AUDIT_H, "vulkan")
+            val stage = web_route_stage_drain()
+            val census = web_vulkan_lane_census_line()
+            val host_px = count_of(stage, "host_paint_pixels")
+            val readbacks = count_of(census, "readbacks")
+            report = report + "{tab} host_paint_pixels={host_px} readbacks={readbacks} cpu_fallback={audit_field(census, \"cpu_fallback\")}\n"
+            if audit_field(census, "cpu_fallback") != "false":
+                fell_back = fell_back + [tab]
+            if host_px > 0:
+                host_painted = host_painted + [tab]
+            if readbacks > 1:
+                extra_readbacks = extra_readbacks + [tab]
+            audited = audited + 1
+        print(report)
+
+        if fell_back.len() > 0:
+            step("blocked: {fell_back.len()} page(s) fell back to the CPU lane, where these counters describe no GPU work")
+        else:
+            step("No page painted pixels on the host, and none exceeded one readback")
+            # oracle: the audited invariants in the gate's header
+            #         (check-web-vulkan-gpu-boundary-audit.shs lines 10-12):
+            #         host_pixel_iterations=0, readbacks <= 1
+            expect(audited).to_equal(8)
+            expect(host_painted).to_equal([])
+            expect(extra_readbacks).to_equal([])
+
+    it "reads counters from a live route-stage report rather than an absent one":
+        # @req REQ-UI-WEBSHOWCASE-021
+        # @capture(statistics): the route-stage report and census line for the overview page
+        step("Render the overview page and confirm the drained reports name real work")
+        # Without this, counters that stopped being emitted would read as absent
+        # and turn the scenario above into a silent pass over nothing.
+        val tabs = chrome_catalog_tabs()
+        web_vulkan_lane_census_drain()
+        web_route_stage_drain()
+        simple_web_render_html_to_pixels_with_engine2d_backend(
+            chrome_catalog_page(read_file(CHROME_CATALOG_SOURCE), tabs[0]),
+            AUDIT_W, AUDIT_H, "vulkan")
+        val stage = web_route_stage_drain()
+        val census = web_vulkan_lane_census_line()
+        print(stage)
+        print(census)
+
+        if audit_field(census, "cpu_fallback") != "false":
+            step("blocked: no usable Vulkan device on this host, the GPU lane never ran")
+        else:
+            step("The reports carry the Vulkan slot, a real dispatch and a present host-paint counter")
+            expect(census.contains("slot=vulkan@{AUDIT_W}x{AUDIT_H}")).to_equal(true)
+            expect(count_of(census, "dispatches_frame") >= 1).to_equal(true)
+            expect(count_of(stage, "host_paint_pixels")).to_equal(0)

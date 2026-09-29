@@ -1,0 +1,128 @@
+#!/bin/sh
+# Red/green contract for executing the physical owners missed by the historical
+# test/-only Phase-3 walk.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+runner=$root/scripts/bootstrap/phase3-expanded-test-runner.shs
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase3-expanded-runner.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { printf 'bootstrap_phase3_expanded_runner_test: FAIL: %s\n' "$*" >&2; exit 1; }
+
+source_root=$tmp/source
+mkdir -p "$source_root/scripts/bootstrap" "$source_root/src/lib/demo" \
+  "$source_root/test/01_unit/lib" "$source_root/tools/demo/tests" \
+  "$source_root/scripts/check" "$tmp/bin" "$tmp/logs"
+cp "$root/scripts/bootstrap/phase3-test-inventory.shs" \
+  "$root/scripts/bootstrap/phase3-test-skip-policy.shs" \
+  "$root/scripts/bootstrap/validate-test-runner-json.pl" \
+  "$root/scripts/bootstrap/validate-jest-json.pl" "$source_root/scripts/bootstrap/"
+cat >"$source_root/scripts/bootstrap/run-process-group-timeout.shs" <<'EOF'
+#!/bin/sh
+shift 2
+exec "$@"
+EOF
+cat >"$source_root/scripts/check/check-sdoctest-bootstrap.shs" <<'EOF'
+#!/bin/sh
+[ "$PWD" = "$FAKE_SOURCE_ROOT" ] || exit 81
+[ "$HOME" = "$FAKE_HOME" ] && [ "$TMPDIR" = "$FAKE_TMP" ] || exit 82
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 83
+if [ "${FAKE_DOC_EMPTY:-0}" = 1 ]; then exit 0; fi
+printf '%s\n' 'Sdoctest: 3 passed, 0 failed, 0 skipped'
+printf '%s\n' 'SPL Doctest: 5 passed, 0 failed, 0 skipped'
+printf 'check-sdoctest-bootstrap: PASS (markdown=1, spl-comment=1)\n'
+EOF
+cat >"$tmp/test-runner" <<'EOF'
+#!/bin/sh
+[ "$PWD" = "$FAKE_SOURCE_ROOT" ] || exit 81
+[ "$HOME" = "$FAKE_HOME" ] && [ "$TMPDIR" = "$FAKE_TMP" ] || exit 82
+[ "${SIMPLE_NO_STUB_FALLBACK:-}" = 1 ] || exit 83
+[ "$SIMPLE_NATIVE_BUILD_CACHE_DIR" = "$FAKE_CACHE" ] || exit 84
+printf '%s\n' "$1" >>"$FAKE_EXECUTIONS"
+printf '%s\n' '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":0,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}'
+EOF
+cat >"$tmp/compiler-cli" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$tmp/mcp-server" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$tmp/bin/npm" <<'EOF'
+#!/bin/sh
+out=
+for arg in "$@"; do case "$arg" in --outputFile=*) out=${arg#*=} ;; esac; done
+[ -n "$out" ] || exit 80
+if [ "${FAKE_NPM_STALE:-0}" = 1 ]; then exit 0; fi
+if [ "${FAKE_NPM_FALSE:-0}" = 1 ]; then success=false; else success=true; fi
+printf '{"success":%s,"numPassedTests":1,"numFailedTests":0,"numPendingTests":0}\n' "$success" >"$out"
+exit 0
+EOF
+chmod +x "$source_root/scripts/bootstrap/run-process-group-timeout.shs" \
+  "$source_root/scripts/check/check-sdoctest-bootstrap.shs" "$tmp/test-runner" \
+  "$tmp/compiler-cli" "$tmp/mcp-server" "$tmp/bin/npm"
+printf '%s\n' 'describe "embedded":' >"$source_root/src/lib/demo/embedded.spl"
+printf '%s\n' 'describe "canonical":' >"$source_root/test/01_unit/lib/canonical_spec.spl"
+printf '%s\n' 'test("tool", () => expect(1).toBe(1));' >"$source_root/tools/demo/tests/tool.test.ts"
+printf '%s\n' '{"scripts":{"test":"jest"}}' >"$source_root/tools/demo/package.json"
+
+cat >"$tmp/inventory.tsv" <<'EOF'
+surface	category	runner	disposition	path	reason
+library	unit	simple-spec	execute	test/01_unit/lib/canonical_spec.spl	-
+library	embedded	simple-spec	execute	src/lib/demo/embedded.spl	-
+tool	demo	npm-test	execute	tools/demo/tests/tool.test.ts	-
+docs	markdown-doctest	doctest-bootstrap	execute	scripts/check/check-sdoctest-bootstrap.shs	-
+docs	spl-comment-doctest	doctest-bootstrap	execute	scripts/check/check-sdoctest-bootstrap.shs	-
+EOF
+cat >"$tmp/repository.tsv" <<'EOF'
+runner	path	result	executed	skipped
+simple-spec	test/01_unit/lib/canonical_spec.spl	PASS	1	0
+EOF
+printf 'path\tpinned_sha\tactual_sha\tpolicy_category\tpolicy_reason\n' >"$tmp/nested.tsv"
+
+cli_sha=$(sha256sum "$tmp/compiler-cli" | awk '{print $1}')
+runner_sha=$(sha256sum "$tmp/test-runner" | awk '{print $1}')
+mcp_sha=$(sha256sum "$tmp/mcp-server" | awk '{print $1}')
+cat >"$tmp/owners.env" <<EOF
+schema=simple-bootstrap-command-owners-v3
+status=frozen
+phase=stage3
+compiler_cli_path=$tmp/compiler-cli
+compiler_cli_sha256=$cli_sha
+test_runner_path=$tmp/test-runner
+test_runner_sha256=$runner_sha
+mcp_server_path=$tmp/mcp-server
+mcp_server_sha256=$mcp_sha
+EOF
+receipt_sha=$(sha256sum "$tmp/owners.env" | awk '{print $1}')
+
+invoke() {
+  PATH="$tmp/bin:$PATH" FAKE_EXECUTIONS="$tmp/executions" FAKE_SOURCE_ROOT="$source_root" \
+  FAKE_HOME="$tmp/home" FAKE_TMP="$tmp/tmp" FAKE_CACHE="$tmp/cache" \
+  PHASE3_COMMAND_OWNER_RECEIPT="$tmp/owners.env" \
+  PHASE3_COMMAND_OWNER_RECEIPT_SHA256="$receipt_sha" \
+  PHASE3_TEST_RUNNER="$tmp/test-runner" PHASE3_COMPILER_CLI="$tmp/compiler-cli" \
+  PHASE3_MCP_SERVER="$tmp/mcp-server" PHASE3_TIMEOUT_SECONDS=10 \
+  PHASE3_HOME="$tmp/home" PHASE3_TMPDIR="$tmp/tmp" PHASE3_CACHE_DIR="$tmp/cache" \
+    sh "$runner" "$source_root" "$tmp/inventory.tsv" "$tmp/repository.tsv" \
+      "$tmp/results.tsv" "$tmp/counts.tsv" "$tmp/logs" "$tmp/nested.tsv"
+}
+
+# Red before: the old test/-only inventory sees one owner and misses all three
+# production owners exercised below.
+find "$source_root/test" -type f \( -name '*_spec.spl' -o -name '*_test.spl' \) >"$tmp/legacy"
+[ "$(wc -l <"$tmp/legacy" | tr -d ' ')" = 1 ] || fail legacy-count
+
+: >"$tmp/executions"
+invoke
+[ "$(cat "$tmp/executions")" = src/lib/demo/embedded.spl ] || fail repository-owner-reran-or-embedded-missed
+grep -Fxq 'docs	2	2	0	8	0' "$tmp/counts.tsv" || fail docs-counts
+grep -Fxq 'library	2	2	0	2	0' "$tmp/counts.tsv" || fail library-counts
+grep -Fxq 'tool	1	1	0	1	0' "$tmp/counts.tsv" || fail tool-counts
+
+if FAKE_NPM_FALSE=1 invoke >/dev/null 2>&1; then fail false-jest-verdict-admitted; fi
+if FAKE_NPM_STALE=1 invoke >/dev/null 2>&1; then fail stale-jest-json-admitted; fi
+if FAKE_DOC_EMPTY=1 invoke >/dev/null 2>&1; then fail vacuous-doctest-owner-admitted; fi
+
+printf 'bootstrap_phase3_expanded_runner_test: PASS (legacy=1, expanded_owners=4)\n'

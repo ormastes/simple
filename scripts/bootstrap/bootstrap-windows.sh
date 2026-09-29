@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Windows bootstrap entrypoint for Git Bash/MSYS2. The shared POSIX wrapper
-# owns the pipeline so Windows follows the same pure-Simple/full-build policy.
+# Windows bootstrap entrypoint for Git Bash/MSYS2. Windows bootstrap uses
+# Clang: clang-cl for the MSVC default and target-qualified clang with llvm-ar
+# for --mingw. Keep each lane bound to its C driver.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-abi="${SIMPLE_WINDOWS_ABI:-}"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
+. "${script_dir}/bootstrap-windows-cl-mode.shs"
+bootstrap_windows_preserve_cl_mode
+abi="${SIMPLE_WINDOWS_ABI:-msvc}"
 forward=()
 
 for arg in "$@"; do
@@ -22,6 +26,27 @@ case "${abi}" in
   *) echo "error: SIMPLE_WINDOWS_ABI must be gnu or msvc" >&2; exit 1 ;;
 esac
 
+# Populate the recorded SPipe gitlink before materializing symlinks.  Several
+# tracked documentation links resolve inside it, so the strict materializer
+# must see the checked-out target rather than classify it as an unexpected
+# pending link.  `git submodule update` uses the superproject's recorded
+# commit; it does not follow a remote branch and leaves a dirty initialized
+# checkout alone when Git refuses an unsafe update.
+git -C "${repo_root}" submodule update --init -- .spipe/spipe || {
+  echo "error: cannot initialize recorded .spipe/spipe gitlink" >&2
+  exit 1
+}
+# Settle the fresh gitlink's index. A just-cloned checkout has unsettled stat
+# data, so the Stage 3 consumer's hermetic `git status` (GIT_CONFIG_NOSYSTEM=1
+# hides Git for Windows' system core.autocrlf=true; GIT_OPTIONAL_LOCKS=0 never
+# writes a refreshed index) compares content, sees every CRLF file as
+# modified (334 entries), and fails preflight with "git.gitlink-dirty". One
+# ordinary status refreshes the stat cache; real content changes still report.
+# The sleep clears Git's racy-clean window: a status in the checkout's own
+# second leaves the entries unverified (measured: 289 dirty without it, 0 with).
+sleep 2
+git -C "${repo_root}/.spipe/spipe" status --porcelain >/dev/null 2>&1 || true
+
 # Materialize git symlinks as NTFS junctions/hardlinks before anything else
 # reads the tree. A checkout done by a Windows session that lacks a
 # fresh-logon SeCreateSymbolicLinkPrivilege token (see
@@ -32,8 +57,25 @@ esac
 # nothing, breaking the loader in confusing ways far from this root cause.
 # No-op, fast, and idempotent on a checkout where symlinks already resolved
 # correctly (e.g. an elevated or Developer-Mode-since-logon session).
-sh "${script_dir}/../setup/materialize-symlinks-windows.shs" "${script_dir}/../.." || {
-  echo "warning: symlink materialization reported failures; continuing, but the build may hit missing-source errors below" >&2
+materialized_receipt_dir="${repo_root}/build/bootstrap/materialized-links"
+materialized_receipt="${materialized_receipt_dir}/windows-materialized-links.$$.env"
+umask 077
+bash "${script_dir}/../setup/materialize-symlinks-windows.shs" \
+  --strict-missing --receipt "${materialized_receipt}" "${repo_root}" || {
+  echo "error: required Windows symlink materialization failed; see ${materialized_receipt}" >&2
+  exit 1
 }
+# Export the receipt ONLY when materialization actually produced one. On a
+# non-Windows host materialize-symlinks-windows.shs is a deliberate no-op that
+# exits 0 before writing any receipt, but this variable used to be exported
+# unconditionally beforehand. bootstrap_stage3_git_state treats a non-empty
+# value as "a materialized-links receipt exists" and routes to
+# bootstrap_stage3_materialized_git_state, which then failed on the absent file
+# -- surfacing only as "could not bind preflight source and git state before
+# checks" after every Rust stage had already built green, i.e. phase 1 could
+# never complete on Linux through this entrypoint.
+if [ -f "${materialized_receipt}" ]; then
+  export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT="${materialized_receipt}"
+fi
 
 exec sh "${script_dir}/bootstrap-from-scratch.sh" "${forward[@]}"

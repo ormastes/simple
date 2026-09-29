@@ -1,4 +1,8 @@
 # Test-tree divergence — sample 9 (15 pairs, `NR%65==40`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Ninth sampling pass over `scripts/check/test_tree_divergence_baseline.txt`
 (956 lines), continuing the reconciliation series (samples 1-8 covered
@@ -75,3 +79,4 @@ fixable within the narrow scope of syncing the test-tree divergence:
 No pre-existing failures identical on both trees were found in this sample —
 every pair in `NR%65==40` reached a fully-green verdict (or was already green
 and cosmetic) after syncing/fixing.
+

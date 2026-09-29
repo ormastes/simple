@@ -1,0 +1,53 @@
+# @cover src/lib/common/ui/render_opt/retained_frame_schedule.spl 95%
+# @tag: unit, ui, render_perf, retained, frame_switch, web, gui, wm
+
+use std.spec
+use common.ui.render_opt.damage_tiles.DirtyTilePyramid
+use common.ui.render_opt.damage_plan.build_damage_frame_plan
+use common.ui.render_opt.retained_damage_plan.RetainedDamagePlanReceipt
+use common.ui.render_opt.retained_frame_schedule.{
+    retained_frame_schedule, RETAINED_SCHEDULE_IDLE,
+    RETAINED_SCHEDULE_EXECUTE, RETAINED_SCHEDULE_REJECT_STATE,
+    RETAINED_SCHEDULE_DEFER_BUDGET, RETAINED_SCHEDULE_REJECT_PROFILE
+}
+
+fn damage(rows: i64, accepted: bool = true) -> RetainedDamagePlanReceipt:
+    val tiles = DirtyTilePyramid.create(7680, 4320, [7680], [1])
+    if rows > 0:
+        tiles.mark_rect(0, 0, 7680, rows)
+    val plan = build_damage_frame_plan(tiles, 0, 8, 100)
+    RetainedDamagePlanReceipt(
+        accepted: accepted, source_rect_count: if rows > 0: 1 else: 0,
+        marked_tile_count: rows, plan: plan)
+
+describe "retained frame correctness and performance scheduling":
+    it "executes an admitted mixed-alpha damage plan":
+        val s = retained_frame_schedule(
+            damage(109), 12500000, 7680, 114549, "x86-mixed-p95")
+        expect(s.status).to_equal(RETAINED_SCHEDULE_EXECUTE)
+        assert_true(s.state_accepted)
+        assert_true(s.execute_now)
+        expect(s.plan_rects).to_equal([0, 0, 7680, 109])
+
+    it "defers a correct frame that exceeds the measured budget":
+        val s = retained_frame_schedule(
+            damage(110), 12500000, 7680, 114549, "x86-mixed-p95")
+        expect(s.status).to_equal(RETAINED_SCHEDULE_DEFER_BUDGET)
+        assert_true(s.state_accepted)
+        assert_false(s.execute_now)
+        expect(s.reason).to_equal("measured-frame-budget-exceeded")
+
+    it "keeps idle distinct from malformed state and invalid profile":
+        val idle = retained_frame_schedule(
+            damage(0), 12500000, 7680, 114549, "x86-mixed-p95")
+        expect(idle.status).to_equal(RETAINED_SCHEDULE_IDLE)
+        assert_false(idle.execute_now)
+        val malformed = retained_frame_schedule(
+            damage(1, false), 12500000, 7680, 114549, "x86-mixed-p95")
+        expect(malformed.status).to_equal(RETAINED_SCHEDULE_REJECT_STATE)
+        assert_false(malformed.state_accepted)
+        val invalid = retained_frame_schedule(
+            damage(1), 12500000, 0, 0, "missing")
+        expect(invalid.status).to_equal(RETAINED_SCHEDULE_REJECT_PROFILE)
+        assert_true(invalid.state_accepted)
+        assert_false(invalid.execute_now)

@@ -41,6 +41,60 @@ main = if thing.value == 7: 0 else: 1
 }
 
 #[test]
+fn named_field_literal_never_calls_matching_static_new() {
+    let source = r#"
+class Token:
+    value: i64
+
+    static fn new(value: i64) -> Token:
+        Token(value: value + 100)
+
+val implicit = Token(value: 7)
+val explicit = Token.new(7)
+main = if implicit.value == 7 and explicit.value == 107: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+#[test]
+fn mixed_field_literal_never_calls_matching_static_new() {
+    let source = r#"
+class Pair:
+    left: i64
+    right: i64
+
+    static fn new(left: i64, right: i64) -> Pair:
+        Pair(left: left + 100, right: right + 100)
+
+val pair = Pair(3, right: 4)
+main = if pair.left == 3 and pair.right == 4: 0 else: 1
+"#;
+
+    assert_eq!(parse_and_eval(source).unwrap(), 0);
+}
+
+#[test]
+fn named_literal_validates_fields_instead_of_matching_static_new() {
+    let source = r#"
+class Thing:
+    value: i64
+
+    static fn new(other: i64) -> Thing:
+        Thing(value: other)
+
+val thing = Thing(other: 7)
+main = 0
+"#;
+
+    let error = parse_and_eval(source).expect_err("unknown named fields must fail construction");
+    assert!(
+        error.to_string().contains("has no field named `other`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn impl_registers_every_static_method() {
     let source = r#"
 struct Config:

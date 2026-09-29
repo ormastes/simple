@@ -1,0 +1,168 @@
+"""Kernel-owned lifecycle ledger for explicit PCI device mappings."""
+
+val MAX_DEVICE_MAPPING_RESOURCES: u64 = 256u64
+val DEVICE_MAPPING_FREE: u8 = 0u8
+val DEVICE_MAPPING_RESERVED: u8 = 1u8
+val DEVICE_MAPPING_LIVE: u8 = 2u8
+val DEVICE_MAPPING_RELEASING: u8 = 3u8
+
+struct DeviceMappingResource:
+    slot: u64
+    state: u8
+    owner_task: u64
+    bdf: u64
+    bar_index: u8
+    requested_len: u64
+    user_addr: u64
+    map_start: u64
+    map_len: u64
+    physical_page: u64
+
+var _device_mapping_state: [u8; 256] = [0u8; 256]
+var _device_mapping_owner: [u64; 256] = [0u64; 256]
+var _device_mapping_bdf: [u64; 256] = [0u64; 256]
+var _device_mapping_bar: [u8; 256] = [0u8; 256]
+var _device_mapping_requested_len: [u64; 256] = [0u64; 256]
+var _device_mapping_user_addr: [u64; 256] = [0u64; 256]
+var _device_mapping_map_start: [u64; 256] = [0u64; 256]
+var _device_mapping_map_len: [u64; 256] = [0u64; 256]
+var _device_mapping_physical_page: [u64; 256] = [0u64; 256]
+
+fn _device_mapping_record(slot: u64) -> DeviceMappingResource:
+    DeviceMappingResource(slot: slot, state: _device_mapping_state[slot],
+        owner_task: _device_mapping_owner[slot], bdf: _device_mapping_bdf[slot],
+        bar_index: _device_mapping_bar[slot],
+        requested_len: _device_mapping_requested_len[slot],
+        user_addr: _device_mapping_user_addr[slot],
+        map_start: _device_mapping_map_start[slot],
+        map_len: _device_mapping_map_len[slot],
+        physical_page: _device_mapping_physical_page[slot])
+
+fn device_mapping_resource_reserve(owner_task: u64, bdf: u64,
+        bar_index: u8, requested_len: u64) -> i64:
+    if requested_len == 0u64 or bar_index >= 6u8:
+        return -1
+    var slot: u64 = 0u64
+    while slot < MAX_DEVICE_MAPPING_RESOURCES:
+        if _device_mapping_state[slot] == DEVICE_MAPPING_FREE:
+            _device_mapping_state[slot] = DEVICE_MAPPING_RESERVED
+            _device_mapping_owner[slot] = owner_task
+            _device_mapping_bdf[slot] = bdf
+            _device_mapping_bar[slot] = bar_index
+            _device_mapping_requested_len[slot] = requested_len
+            return slot.to_i64()
+        slot = slot + 1u64
+    -1
+
+fn device_mapping_resource_commit(slot: u64, owner_task: u64,
+        user_addr: u64, map_start: u64, map_len: u64,
+        physical_page: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_RESERVED or
+            _device_mapping_owner[slot] != owner_task or user_addr == 0u64 or
+            map_start == 0u64 or map_len == 0u64:
+        return false
+    _device_mapping_user_addr[slot] = user_addr
+    _device_mapping_map_start[slot] = map_start
+    _device_mapping_map_len[slot] = map_len
+    _device_mapping_physical_page[slot] = physical_page
+    _device_mapping_state[slot] = DEVICE_MAPPING_LIVE
+    true
+
+fn device_mapping_resource_cancel(slot: u64, owner_task: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_RESERVED or
+            _device_mapping_owner[slot] != owner_task:
+        return false
+    _device_mapping_clear(slot)
+    true
+
+fn device_mapping_resource_find(owner_task: u64, user_addr: u64,
+        requested_len: u64) -> DeviceMappingResource?:
+    var slot: u64 = 0u64
+    while slot < MAX_DEVICE_MAPPING_RESOURCES:
+        if _device_mapping_state[slot] == DEVICE_MAPPING_LIVE and
+                _device_mapping_owner[slot] == owner_task and
+                _device_mapping_user_addr[slot] == user_addr and
+                _device_mapping_requested_len[slot] == requested_len:
+            return _device_mapping_record(slot)
+        slot = slot + 1u64
+    nil
+
+fn device_mapping_resource_at(slot: u64) -> DeviceMappingResource?:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] == DEVICE_MAPPING_FREE:
+        return nil
+    _device_mapping_record(slot)
+
+fn device_mapping_resource_retire(slot: u64, owner_task: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_LIVE or
+            _device_mapping_owner[slot] != owner_task:
+        return false
+    _device_mapping_clear(slot)
+    true
+
+fn device_mapping_resource_begin_release(slot: u64,
+        owner_task: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_LIVE or
+            _device_mapping_owner[slot] != owner_task:
+        return false
+    _device_mapping_state[slot] = DEVICE_MAPPING_RELEASING
+    true
+
+fn device_mapping_resource_abort_release(slot: u64,
+        owner_task: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_RELEASING or
+            _device_mapping_owner[slot] != owner_task:
+        return false
+    _device_mapping_state[slot] = DEVICE_MAPPING_LIVE
+    true
+
+fn device_mapping_resource_finish_release(slot: u64, owner_task: u64) -> bool:
+    if slot >= MAX_DEVICE_MAPPING_RESOURCES or
+            _device_mapping_state[slot] != DEVICE_MAPPING_RELEASING or
+            _device_mapping_owner[slot] != owner_task:
+        return false
+    _device_mapping_clear(slot)
+    true
+
+fn device_mapping_resource_owner_has_any(owner_task: u64) -> bool:
+    var slot: u64 = 0u64
+    while slot < MAX_DEVICE_MAPPING_RESOURCES:
+        if _device_mapping_state[slot] != DEVICE_MAPPING_FREE and
+                _device_mapping_owner[slot] == owner_task:
+            return true
+        slot = slot + 1u64
+    false
+
+fn _device_mapping_clear(slot: u64):
+    _device_mapping_state[slot] = DEVICE_MAPPING_FREE
+    _device_mapping_owner[slot] = 0u64
+    _device_mapping_bdf[slot] = 0u64
+    _device_mapping_bar[slot] = 0u8
+    _device_mapping_requested_len[slot] = 0u64
+    _device_mapping_user_addr[slot] = 0u64
+    _device_mapping_map_start[slot] = 0u64
+    _device_mapping_map_len[slot] = 0u64
+    _device_mapping_physical_page[slot] = 0u64
+
+fn device_mapping_resources_reset_for_test():
+    var slot: u64 = 0u64
+    while slot < MAX_DEVICE_MAPPING_RESOURCES:
+        _device_mapping_clear(slot)
+        slot = slot + 1u64
+
+export DeviceMappingResource, MAX_DEVICE_MAPPING_RESOURCES,
+    DEVICE_MAPPING_FREE, DEVICE_MAPPING_RESERVED, DEVICE_MAPPING_LIVE,
+    DEVICE_MAPPING_RELEASING,
+    device_mapping_resource_reserve, device_mapping_resource_commit,
+    device_mapping_resource_cancel, device_mapping_resource_find,
+    device_mapping_resource_at, device_mapping_resource_retire,
+    device_mapping_resource_begin_release,
+    device_mapping_resource_abort_release,
+    device_mapping_resource_finish_release,
+    device_mapping_resource_owner_has_any,
+    device_mapping_resources_reset_for_test

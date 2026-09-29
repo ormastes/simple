@@ -8,10 +8,10 @@
 #   - test_runner_modes.spl: Execution modes (doctest, combined, parallel, container),
 #                            result parsing, categorization, warnings, database updates
 
-use std.io.{env_set, env_get}
+use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
-use std.io.{dir_create_all}
-use std.io.{file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read, file_exists}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
 use std.io_runtime.{get_args}
 
@@ -20,6 +20,7 @@ use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_erro
 use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
+use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -53,6 +54,7 @@ use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_st
 # GROUP 6: Self-protection imports
 use std.test_runner.checkpoint.{checkpoint_load, checkpoint_exists, checkpoint_skip_completed, checkpoint_save, checkpoint_delete}
 use std.test_runner.system_monitor.{system_exceeds_threshold, ensure_kill_monitor_running, is_linux}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.test_runner.shutdown.{shutdown_graceful}
 # GROUP 7: Parallel execution imports
 use std.test_runner.test_runner_async.{run_tests_parallel_with_monitoring, get_cpu_count}
@@ -344,6 +346,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     if updated_options.sequential:
         updated_options.parallel = false
 
+    # ponytail: parallel spawn_async_test fails closed on Windows (no native
+    # redirected-argv async spawn; see std.test_runner.test_runner_async), so
+    # every file came back "child produced no exit status" in 0 ms
+    # (bootstrap35 stage-2, 2026-09-25). Run the sequential path, whose
+    # bounded process facade works on Windows. Upgrade path: a native
+    # redirected async spawn in the runtime, then drop this branch.
+    if updated_options.parallel and host_is_windows_host():
+        print "WARNING: --parallel is unavailable on Windows (no redirected async spawn); running sequentially."
+        updated_options.parallel = false
+
     # Parallel execution with resource governor
     if updated_options.parallel:
         if not is_linux():
@@ -408,7 +420,16 @@ fn run_tests(options: TestOptions) -> TestRunResult:
 
     for file_path in files:
         # Only check system thresholds every 20 tests (avoids 100ms CPU sleep per check)
-        if updated_options.self_protect and tests_run % 20 == 0:
+        # `tests_run > 0` is load-bearing, not a micro-optimisation. Without it
+        # the very first iteration checks, and a violation there shuts the run
+        # down with `Completed tests: 0` — a checkpoint recording no progress,
+        # so `simple test --resume` re-checks the same still-loaded machine and
+        # shuts down again: a livelock that can never advance. Measured
+        # 2026-09-06: six of eight plan-acceptance sweep shards died exactly
+        # this way ("cpu=82.0%>75.0% AND memory=79.0%>75.0%", "Completed tests:
+        # 0"), emitting no per-spec marker for any of the 28 specs they held.
+        # The periodic-checkpoint branch below already carried this guard.
+        if updated_options.self_protect and tests_run > 0 and tests_run % 20 == 0:
             val (violated, reason) = system_exceeds_threshold(updated_options.cpu_threshold, updated_options.mem_threshold)
             if violated:
                 shutdown_graceful(reason, completed_files, total_passed, total_failed, total_skipped)
@@ -764,8 +785,11 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
 
     # G1: Use safe mode with resource limits when enabled
     if effective_options.safe_mode:
-        return run_test_file_safe_mode(file_path, effective_options)
-    match effective_options.mode:
+        return in_development_adjust(file_path, options, run_test_file_safe_mode(file_path, effective_options))
+    # Bound rather than returned as a tail expression so the in-development
+    # adjustment below sees EVERY execution mode's result.
+    print "[route] mode=" + mode_to_str(effective_options.mode) + " file=" + file_path
+    val raw = match effective_options.mode:
         case TestExecutionMode.Interpreter:
             run_test_file_interpreter(file_path, effective_options)
         case TestExecutionMode.Smf:
@@ -776,6 +800,128 @@ fn run_single_test(file_path: text, options: TestOptions) -> TestFileResult:
             run_test_file_compile(file_path, effective_options)
         case TestExecutionMode.Composite(spec):
             run_test_file_composite(file_path, effective_options, spec)
+    in_development_adjust(file_path, options, raw)
+
+# =========================================================================
+# In-development tag (`# @tag:in-development`)
+# =========================================================================
+#
+# A spec declaring `# @tag:in-development` is WORK IN PROGRESS and is
+# EXPECTED TO FAIL. In a sweep its failure is neutralised -- but it is
+# COUNTED and PRINTED, never silently dropped. Run by explicit path it
+# reports the honest verdict so a developer can actually work on it.
+#
+# Semantics, the rationale for each branch, and why the tag is spelled
+# `in-development` rather than `wip`/`pending`, all live in the module
+# docstring of src/lib/nogc_sync_mut/spec/in_development.spl. The rule
+# itself lives THERE, in `classify_in_development`, and is not re-derived
+# here -- same discipline as `test_file_result_outcome_class`: two
+# spellings of one rule is how two surfaces come to disagree.
+
+fn file_is_in_development(file_path: text) -> bool:
+    """True when the spec SOURCE carries `# @tag:in-development`.
+
+    Reads the file here rather than in the library so the library stays
+    pure (no extern, no new direct `rt_*` call site on the ratchet)."""
+    source_is_in_development(file_read(file_path) ?? "")
+
+fn _requested_paths(options: TestOptions) -> [text]:
+    """Same fallback `discover_all_requested_files` uses: `paths` when the
+    CLI populated it, otherwise the single scalar `path`."""
+    if options.paths.len() > 0: options.paths else: [options.path]
+
+fn in_development_adjust(file_path: text, options: TestOptions, raw: TestFileResult) -> TestFileResult:
+    """Apply the in-development semantics to ONE file's raw result.
+
+    Neutralisation happens here, at the single point every execution mode
+    funnels through, so no mode (interpreter/smf/native/compile/composite/
+    safe) can bypass it.
+
+    The neutralised shape is deliberately RECOVERABLE by a later pass with
+    no new struct field (TestFileResult belongs to another lane and was not
+    touched): a tagged file left with passed=0, failed=0, skipped>0 is an
+    expected failure, and a tagged file with passed>0 is an unexpected
+    pass. `in_development_totals` reads exactly that back."""
+    if not file_is_in_development(file_path):
+        return raw
+    val explicit = in_development_explicitly_targeted(
+        file_path, options.path_explicit, _requested_paths(options))
+    val errored = raw.timed_out or raw.error != ""
+    match classify_in_development(true, explicit, raw.failed, raw.passed, errored):
+        case InDevelopmentOutcome.NotInDevelopment:
+            raw
+        case InDevelopmentOutcome.ExplicitRun:
+            # Honest verdict, untouched. The advisory only explains why this
+            # red is not the red the suite would have shown.
+            print in_development_explicit_line(file_path)
+            raw
+        case InDevelopmentOutcome.ExpectedFailure:
+            # Count at least 1 even when the failure arrived as a timeout or
+            # a crash (failed == 0 on those paths): a neutralised file that
+            # reported skipped=0 would be indistinguishable from a file that
+            # was never in development at all, and would vanish from the
+            # totals -- the exact invisible-debt shape this feature exists
+            # to prevent.
+            val expected = if raw.failed > 0: raw.failed else: 1
+            print in_development_skip_line(file_path, expected)
+            TestFileResult(
+                path: raw.path,
+                passed: 0,
+                failed: 0,
+                skipped: expected,
+                pending: raw.pending,
+                duration_ms: raw.duration_ms,
+                setup_ms: raw.setup_ms,
+                error: "",
+                timed_out: false,
+                cached: raw.cached,
+                # Carried explicitly, not left to be re-inferred from
+                # `skipped > 0`. The verdict line is emitted downstream from
+                # passed/failed alone, so a neutralised file used to print
+                # `outcome=NOT_RUN executed=0` -- byte-identical to a file that
+                # never loaded, which is how all 36 tagged plan-acceptance
+                # specs read as load failures to every sweep that parses that
+                # line. An environment skip must NOT get this field: only a
+                # deliberate in-development neutralisation counts as executed.
+                in_development: expected,
+                # Carried for the same reason: an in-development file that
+                # ALSO failed to compile still ran on the interpreter, and
+                # dropping the record here would make that invisible on the
+                # one class of file most likely to be uncompilable.
+                degraded_reason: raw.degraded_reason
+            )
+        case InDevelopmentOutcome.UnexpectedPass:
+            # Left as a genuine pass -- it did pass -- but announced, and
+            # totalled separately below. Reporting it loudly is the point:
+            # it is ready to be promoted.
+            print in_development_unexpected_pass_line(file_path, raw.passed)
+            raw
+
+fn in_development_totals(results: [TestFileResult]) -> (i64, i64):
+    """(neutralised skips, unexpected passes) across a finished run.
+
+    Re-reads the tag from source rather than trusting a marker in the
+    result, so a result that arrived from the daemon or a cache replay --
+    paths that never went through `in_development_adjust` in THIS process
+    -- is still classified correctly."""
+    var skipped = 0
+    var unexpected = 0
+    for r in results:
+        if file_is_in_development(r.path):
+            if r.failed == 0 and r.passed > 0:
+                unexpected = unexpected + 1
+            elif r.skipped > 0:
+                skipped = skipped + 1
+    (skipped, unexpected)
+
+fn print_in_development_summary(results: [TestFileResult]):
+    """Print the in-development row of the run summary.
+
+    Printed whenever either count is non-zero, on the ordinary summary
+    surface and not behind --verbose: a count nobody sees is not a count."""
+    val (skipped, unexpected) = in_development_totals(results)
+    if skipped > 0 or unexpected > 0:
+        print in_development_summary_line(skipped, unexpected)
 
 # =========================================================================
 # Session Config Propagation
@@ -997,7 +1143,9 @@ fn emit_spec_file_verdicts(results: [TestFileResult]):
             # the file RED under the existing `dropped == 0` greenwash gate.
             print unrun_verdict_line(r.path, unrun_reason(r.error))
         else:
-            print ran_verdict_line(r.path, r.passed, r.failed)
+            # `degraded_reason` is empty for every file that ran the way the
+            # lane intended, so this changes no existing verdict line.
+            print ran_verdict_line(r.path, r.passed, r.failed, r.in_development, r.degraded_reason)
 
 fn summarize_test_results(results: [TestFileResult]) -> TestRunResult:
     var total_passed = 0
@@ -1132,6 +1280,10 @@ fn run_test_cli() -> i64:
         if not json_worker:
             emit_spec_file_verdicts(result_files)
             print_summary(spec_result, options.format)
+            # In-development counts ride on the ordinary summary surface,
+            # right after it, so they are in the block every session pastes
+            # as evidence. Never hidden behind --verbose.
+            print_in_development_summary(result_files)
 
         if options.coverage:
             val coverage = collect_coverage()

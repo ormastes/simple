@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
 # Lane CLSM (class-method-bodies-reachable), mission-critical robustness
 # campaign, lane G2 follow-up.
@@ -36,14 +40,21 @@
 # `me`-methods in one class -- an unrelated, out-of-scope aliasing gap, not
 # this lane's target.
 
+use std.spec.step
+
 use std.spec
+use std.spec.step
 use compiler.common.config.Logger
+
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.items.*
 
 describe "class-embedded method bodies reachable from HirModule.functions":
+    # @manual scenario evidence
     it "makes both HirFunctions of a 2-method class present in module.functions with non-empty bodies":
+        # @req REQ-SSPEC-COMPILER
+        step("makes both HirFunctions of a 2-method class present in module.functions with non-empty bodies")
         val src = "class Box:\n" +
             "    value: i64\n" +
             "    me set_value(next: i64) -> i64:\n" +
@@ -92,6 +103,8 @@ describe "class-embedded method bodies reachable from HirModule.functions":
         expect(found_double).to_equal(true)
 
     it "keeps both a class method and a top-level fn reachable in the same module":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps both a class method and a top-level fn reachable in the same module")
         val src = "fn helper() -> i64:\n" +
             "    99\n" +
             "\n" +
@@ -117,6 +130,8 @@ describe "class-embedded method bodies reachable from HirModule.functions":
         expect(found_method).to_equal(true)
 
     it "keeps an impl-block method reachable too (regression, pre-existing merge path)":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps an impl-block method reachable too (regression, pre-existing merge path)")
         val src = "struct Counter:\n" +
             "    n: i64\n" +
             "\n" +
@@ -134,3 +149,29 @@ describe "class-embedded method bodies reachable from HirModule.functions":
                 found_bump = true
                 expect(fn_.body.stmts.len() > 0).to_equal(true)
         expect(found_bump).to_equal(true)
+
+    it "keeps the ABI receiver on an immutable zero-argument fn method":
+        # This is the smallest callee-signature regression.  `fn` is an
+        # immutable instance method, not a static function: native MIR must
+        # still expose `self` as parameter zero when there are no explicit
+        # arguments.  The old bootstrap path could lose the method bit and
+        # emit a zero-parameter callee, which made the caller's receiver land
+        # in the wrong ABI slot (or be discarded entirely).
+        val src = "class Positive:\n" +
+            "    value: i64\n" +
+            "    fn has_value() -> bool:\n" +
+            "        self.value > 0\n"
+        val parsed = parse_full_frontend(src, "testdata/immutable_fn_receiver.spl", "immutable_fn_receiver", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/immutable_fn_receiver.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+
+        var found = false
+        for fn_ in hir.functions.values():
+            if fn_.name == "has_value":
+                found = true
+                expect(fn_.is_method).to_equal(true)
+                expect(fn_.is_static).to_equal(false)
+                expect(fn_.params.len()).to_equal(1)
+                expect(fn_.params[0].name).to_equal("self")
+        expect(found).to_equal(true)

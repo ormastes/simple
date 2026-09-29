@@ -4,13 +4,17 @@ This document contains the **exact code** to be inserted into two shared files
 by the orchestrator after all parallel agents have committed their own changes.
 
 **DO NOT edit `src/os/qemu_systest_contract.spl` or
-`src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` directly** — two other
+`src/os/port/simpleos_multiplatform_build_part2.spl` directly** — two other
 agents own those files during this parallel work session. This snippet is
 copy-paste ready for the orchestrator's merge step.
 
 ---
 
 ## 1. Insert into `src/os/qemu_systest_contract.spl`
+
+> Refresh 2026-09-05: this section has LANDED — `aarch64_darwin_binary_path` is at
+> `src/os/qemu_systest_contract.spl:398` (`aarch64_darwin_markers` :412,
+> `aarch64_darwin_timeout_ms` :422). Kept as the merge record.
 
 Add the following six functions **after the last existing arch descriptor block**
 (currently after `x86_32_timeout_ms()`), before the `Run helper` section.
@@ -87,7 +91,14 @@ stdout for all 5 markers → returns `"pass"`.
 
 ---
 
-## 2. Insert into `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl`
+## 2. Insert into `src/os/port/simpleos_multiplatform_build_part2.spl`
+
+> Refresh 2026-09-05: the platform-target list now lives in
+> `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` (the
+> `aarch64-darwin-fs-exec` lane is at :666); `_lane_contract` is
+> `src/os/port/_SimpleosMultiplatformBuild/build_target_contracts.spl:255`,
+> `HostedPayload` :28, `HostedCompileSmoke` :42. The part1/part2 line numbers
+> below are historical.
 
 In `simpleos_platform_targets()`, the list currently ends with the riscv32 target
 followed by a closing `]`. Add the aarch64-darwin target as the **7th element**
@@ -223,8 +234,14 @@ All 15 positional args are used in both lane contracts above.
 After the orchestrator merges both snippets:
 
 - [ ] `bin/simple check src/os/qemu_systest_contract.spl` — no errors
-- [ ] `bin/simple check src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl` — no errors
+- [ ] `bin/simple check src/os/port/simpleos_multiplatform_build_part2.spl` — no errors
 - [ ] `bin/simple test test/03_system/os/qemu/sys_qemu_aarch64_darwin_fs_exec_spec.spl` — RED with `missing-media:build/os/darwin-aarch64/simpleos_aarch64_darwin_fs_exec` (expected on Linux)
 - [ ] The missing-media classification contains the binary path, not a nil/crash
 
 The spec is **intentionally RED on Linux** — that is the correct honest result.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/aarch64_darwin_contract_snippet_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

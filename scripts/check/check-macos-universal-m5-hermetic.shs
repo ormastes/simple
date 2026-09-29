@@ -1,0 +1,294 @@
+#!/bin/sh
+set -eu
+
+sha256_file_bootstrap() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+
+if [ "${M5_HERMETIC_SNAPSHOT_DRIVER:-0}" != 1 ]; then
+    driver_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+    original_driver=$driver_dir/$(basename -- "$0")
+    [ -f "$original_driver" ] && [ ! -L "$original_driver" ] || {
+        echo "M5 hermetic wrapper FAIL: driver must be a regular non-symlink file" >&2
+        exit 1
+    }
+    canonical_source_root=$(CDPATH= cd -- "$driver_dir/../.." && pwd -P)
+    if [ -z "${SIMPLE_WORKTREE_STORAGE_ROOT:-}" ]; then
+        STORAGE_ROOTS_REPO_ROOT=$canonical_source_root
+        export STORAGE_ROOTS_REPO_ROOT
+        . "$canonical_source_root/scripts/lib/storage-roots.shs"
+        storage_roots_init || exit 2
+    fi
+    bootstrap_parent="$SIMPLE_WORKTREE_STORAGE_ROOT/tmp/macos-m5-hermetic-driver"
+    mkdir -p "$bootstrap_parent"
+    bootstrap_dir=$(mktemp -d "$bootstrap_parent/run.XXXXXXXX")
+    bootstrap_driver=$bootstrap_dir/driver.shs
+    driver_before=$(sha256_file_bootstrap "$original_driver")
+    cp "$original_driver" "$bootstrap_driver"
+    driver_snapshot=$(sha256_file_bootstrap "$bootstrap_driver")
+    driver_after=$(sha256_file_bootstrap "$original_driver")
+    if [ "$driver_before" != "$driver_snapshot" ] || [ "$driver_before" != "$driver_after" ]; then
+        rm -rf "$bootstrap_dir"
+        echo "M5 hermetic wrapper FAIL: driver changed during self-snapshot" >&2
+        exit 1
+    fi
+    chmod 500 "$bootstrap_driver"
+    exec env \
+        M5_HERMETIC_SNAPSHOT_DRIVER=1 \
+        M5_HERMETIC_ORIGINAL_DRIVER="$original_driver" \
+        M5_HERMETIC_BOOTSTRAP_DIR="$bootstrap_dir" \
+        M5_HERMETIC_BOOTSTRAP_SHA256="$driver_before" \
+        M5_HERMETIC_CANONICAL_SOURCE_ROOT="$canonical_source_root" \
+        sh "$bootstrap_driver" "$@"
+fi
+
+required_files='scripts/check/check-macos-universal-m5-hermetic.shs
+scripts/check/check-macos-universal-m5.shs
+scripts/release/macos-universal-m5.shs'
+
+source_root=${M5_HERMETIC_CANONICAL_SOURCE_ROOT:?}
+: "${SIMPLE_USER_STORAGE_ROOT:?M5 hermetic wrapper requires the centralized user storage root}"
+: "${SIMPLE_WORKTREE_STORAGE_ROOT:?M5 hermetic wrapper requires the centralized worktree storage root}"
+evidence_dir=
+for argument in "$@"; do
+    case "$argument" in
+        --source-root=*) source_root=${argument#*=} ;;
+        --evidence-dir=*) evidence_dir=${argument#*=} ;;
+        --help)
+            echo "usage: $0 [--source-root=PATH] [--evidence-dir=PATH]"
+            exit 0
+            ;;
+        *) echo "M5 hermetic wrapper FAIL: unknown argument: $argument" >&2; exit 2 ;;
+    esac
+done
+
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P)
+if [ "$source_root" != "$M5_HERMETIC_CANONICAL_SOURCE_ROOT" ] && \
+   [ "${M5_HERMETIC_TEST_MODE:-0}" != 1 ]; then
+    echo "M5 hermetic wrapper FAIL: alternate source roots are test-only" >&2
+    exit 1
+fi
+
+if [ -z "$evidence_dir" ]; then
+    evidence_dir="$SIMPLE_WORKTREE_STORAGE_ROOT/evidence/release/m5-portable-hermetic-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+elif [ "${evidence_dir#/}" = "$evidence_dir" ]; then
+    evidence_dir="$source_root/$evidence_dir"
+fi
+evidence_parent=$(dirname -- "$evidence_dir")
+evidence_name=$(basename -- "$evidence_dir")
+mkdir -p "$evidence_parent"
+evidence_parent=$(CDPATH= cd -- "$evidence_parent" && pwd -P)
+evidence_dir=$evidence_parent/$evidence_name
+case "$evidence_dir" in
+    "$SIMPLE_WORKTREE_STORAGE_ROOT"/evidence/release/*) ;;
+    "$source_root"/build/*)
+        [ "${M5_HERMETIC_TEST_MODE:-0}" = 1 ] || {
+            echo "M5 hermetic wrapper FAIL: legacy build evidence path is test-only" >&2
+            exit 1
+        }
+        ;;
+    *) echo "M5 hermetic wrapper FAIL: evidence must stay under the worktree storage root" >&2; exit 1 ;;
+esac
+[ ! -e "$evidence_dir" ] || {
+    echo "M5 hermetic wrapper FAIL: evidence path already exists: $evidence_dir" >&2
+    exit 1
+}
+mkdir -p "$evidence_dir"
+
+snapshot_root=$evidence_dir/snapshot
+runtime_root=$evidence_dir/runtime
+status=FAIL
+reason=initializing
+checker_exit=not-run
+source_drift_before_run=unknown
+source_drift_after_run=unknown
+snapshot_drift_after_run=unknown
+status_written=0
+started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+sha256_file() {
+    sha256_file_bootstrap "$1"
+}
+
+write_inventory() {
+    inventory_root=$1
+    inventory_output=$2
+    inventory_temp=$inventory_output.next
+    : >"$inventory_temp"
+    printf '%s\n' "$required_files" | while IFS= read -r relative_path; do
+        candidate=$inventory_root/$relative_path
+        [ -f "$candidate" ] && [ ! -L "$candidate" ] || exit 31
+        digest=$(sha256_file "$candidate") || exit 32
+        size=$(wc -c <"$candidate" | tr -d ' ')
+        printf '%s\t%s\t%s\n' "$relative_path" "$digest" "$size"
+    done >"$inventory_temp" || {
+        rm -f "$inventory_temp"
+        return 1
+    }
+    mv "$inventory_temp" "$inventory_output"
+}
+
+inventory_value() {
+    inventory=$1
+    relative_path=$2
+    awk -F '\t' -v path="$relative_path" '$1 == path { print $2; exit }' "$inventory"
+}
+
+emit_status() {
+    finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    source_inventory_sha256=unavailable
+    snapshot_inventory_sha256=unavailable
+    [ ! -f "$evidence_dir/source-inventory.before.tsv" ] || \
+        source_inventory_sha256=$(sha256_file "$evidence_dir/source-inventory.before.tsv")
+    [ ! -f "$evidence_dir/snapshot-inventory.before.tsv" ] || \
+        snapshot_inventory_sha256=$(sha256_file "$evidence_dir/snapshot-inventory.before.tsv")
+    source_inventory_pre_run_sha256=unavailable
+    source_inventory_after_sha256=unavailable
+    snapshot_inventory_after_sha256=unavailable
+    checker_stdout_sha256=unavailable
+    checker_stderr_sha256=unavailable
+    [ ! -f "$evidence_dir/source-inventory.pre-run.tsv" ] || \
+        source_inventory_pre_run_sha256=$(sha256_file "$evidence_dir/source-inventory.pre-run.tsv")
+    [ ! -f "$evidence_dir/source-inventory.after.tsv" ] || \
+        source_inventory_after_sha256=$(sha256_file "$evidence_dir/source-inventory.after.tsv")
+    [ ! -f "$evidence_dir/snapshot-inventory.after.tsv" ] || \
+        snapshot_inventory_after_sha256=$(sha256_file "$evidence_dir/snapshot-inventory.after.tsv")
+    [ ! -f "$evidence_dir/checker.stdout" ] || \
+        checker_stdout_sha256=$(sha256_file "$evidence_dir/checker.stdout")
+    [ ! -f "$evidence_dir/checker.stderr" ] || \
+        checker_stderr_sha256=$(sha256_file "$evidence_dir/checker.stderr")
+    cat >"$evidence_dir/status.env.next" <<EOF
+schema=macos-m5-hermetic-portable-qualification-v1
+status=$status
+reason=$reason
+evidence_class=PORTABLE_STRUCTURAL
+required_file_count=3
+source_root=$source_root
+source_inventory_sha256=$source_inventory_sha256
+snapshot_inventory_sha256=$snapshot_inventory_sha256
+source_inventory_pre_run_sha256=$source_inventory_pre_run_sha256
+source_inventory_after_sha256=$source_inventory_after_sha256
+snapshot_inventory_after_sha256=$snapshot_inventory_after_sha256
+checker_stdout_sha256=$checker_stdout_sha256
+checker_stderr_sha256=$checker_stderr_sha256
+driver_bootstrap_sha256=$M5_HERMETIC_BOOTSTRAP_SHA256
+checker_exit_code=$checker_exit
+source_drift_before_run=$source_drift_before_run
+source_drift_after_run=$source_drift_after_run
+snapshot_drift_after_run=$snapshot_drift_after_run
+commit_attempted=false
+deploy_attempted=false
+started_at=$started_at
+finished_at=$finished_at
+EOF
+    mv "$evidence_dir/status.env.next" "$evidence_dir/status.env"
+    find "$evidence_dir" -type f -exec chmod 400 {} \;
+    find "$evidence_dir" -type d -exec chmod 500 {} \;
+    status_written=1
+}
+
+cleanup() {
+    if [ "$status_written" = 0 ]; then emit_status; fi
+    rm -rf "${M5_HERMETIC_BOOTSTRAP_DIR:?}"
+}
+trap cleanup 0
+trap 'exit 130' 1 2 15
+
+fail() {
+    reason=$1
+    echo "M5 hermetic wrapper FAIL: $reason; evidence=$evidence_dir" >&2
+    exit 1
+}
+
+write_inventory "$source_root" "$evidence_dir/source-inventory.before.tsv" || \
+    fail source-inventory-invalid
+driver_inventory_sha=$(inventory_value \
+    "$evidence_dir/source-inventory.before.tsv" \
+    scripts/check/check-macos-universal-m5-hermetic.shs)
+[ "$driver_inventory_sha" = "$M5_HERMETIC_BOOTSTRAP_SHA256" ] || \
+    fail driver-drift-before-snapshot
+
+mkdir -p "$snapshot_root/scripts/check" "$snapshot_root/scripts/release"
+inventory_tab=$(printf '\t')
+while IFS="$inventory_tab" read -r relative_path expected_digest expected_size; do
+    source_path=$source_root/$relative_path
+    snapshot_path=$snapshot_root/$relative_path
+    cp "$source_path" "$snapshot_path"
+    [ "$(sha256_file "$source_path")" = "$expected_digest" ] || \
+        fail source-drift-during-copy
+    [ "$(sha256_file "$snapshot_path")" = "$expected_digest" ] || \
+        fail snapshot-copy-mismatch
+    [ "$(wc -c <"$snapshot_path" | tr -d ' ')" = "$expected_size" ] || \
+        fail snapshot-size-mismatch
+done <"$evidence_dir/source-inventory.before.tsv"
+
+write_inventory "$snapshot_root" "$evidence_dir/snapshot-inventory.before.tsv" || \
+    fail snapshot-inventory-invalid
+cmp -s "$evidence_dir/source-inventory.before.tsv" \
+    "$evidence_dir/snapshot-inventory.before.tsv" || fail snapshot-inventory-mismatch
+find "$snapshot_root" -type f -exec chmod 400 {} \;
+find "$snapshot_root" -type d -exec chmod 500 {} \;
+
+if [ "${M5_HERMETIC_TEST_MODE:-0}" = 1 ] && \
+   [ -n "${M5_HERMETIC_TEST_BARRIER_DIR:-}" ]; then
+    mkdir -p "$M5_HERMETIC_TEST_BARRIER_DIR"
+    : >"$M5_HERMETIC_TEST_BARRIER_DIR/ready"
+    barrier_wait=0
+    while [ ! -e "$M5_HERMETIC_TEST_BARRIER_DIR/continue" ]; do
+        barrier_wait=$((barrier_wait + 1))
+        [ "$barrier_wait" -lt 200 ] || fail test-barrier-timeout
+        sleep 0.05
+    done
+fi
+
+write_inventory "$source_root" "$evidence_dir/source-inventory.pre-run.tsv" || \
+    fail source-inventory-invalid-before-run
+if cmp -s "$evidence_dir/source-inventory.before.tsv" \
+    "$evidence_dir/source-inventory.pre-run.tsv"; then
+    source_drift_before_run=false
+else
+    source_drift_before_run=true
+    fail source-drift-before-run
+fi
+
+mkdir -p "$runtime_root/tmp" "$runtime_root/home"
+set +e
+(
+    cd "$snapshot_root"
+    env -i \
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+        HOME="$runtime_root/home" \
+        TMPDIR="$runtime_root/tmp" \
+        LC_ALL=C LANG=C \
+        sh "$snapshot_root/scripts/check/check-macos-universal-m5.shs"
+) >"$evidence_dir/checker.stdout" 2>"$evidence_dir/checker.stderr"
+checker_exit=$?
+set -e
+
+if write_inventory "$source_root" "$evidence_dir/source-inventory.after.tsv" && \
+   cmp -s "$evidence_dir/source-inventory.before.tsv" \
+       "$evidence_dir/source-inventory.after.tsv"; then
+    source_drift_after_run=false
+else
+    source_drift_after_run=true
+fi
+if write_inventory "$snapshot_root" "$evidence_dir/snapshot-inventory.after.tsv" && \
+   cmp -s "$evidence_dir/snapshot-inventory.before.tsv" \
+       "$evidence_dir/snapshot-inventory.after.tsv"; then
+    snapshot_drift_after_run=false
+else
+    snapshot_drift_after_run=true
+fi
+
+[ "$snapshot_drift_after_run" = false ] || fail snapshot-drift-after-run
+[ "$source_drift_after_run" = false ] || fail source-drift-after-run
+[ "$checker_exit" -eq 0 ] || fail checker-exit-$checker_exit
+
+status=PASS
+reason=hermetic-portable-qualification-complete
+emit_status
+echo "M5 hermetic portable qualification PASS: evidence=$evidence_dir"

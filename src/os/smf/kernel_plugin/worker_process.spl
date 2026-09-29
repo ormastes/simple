@@ -1,0 +1,68 @@
+use os.smf.kernel_plugin.worker_protocol.{KpfWorkerFrameV1, KpfWorkerOutcome, kpf_worker_empty_frame_v1}
+
+# Process facade used by the transport. Platform adapters may implement this
+# contract with the standard process facade; transport code never calls the
+# runtime process primitives or carries host pointers in frames.
+pub class KpfWorkerProcessFacadeV1:
+    capacity: i64
+    inbound: [KpfWorkerFrameV1]
+    outbound: [KpfWorkerFrameV1]
+    inbound_head: i64
+    inbound_count: i64
+    outbound_head: i64
+    outbound_count: i64
+    var alive: bool
+    var terminated: bool
+
+impl KpfWorkerProcessFacadeV1:
+    pub static fn create(capacity: i64) -> KpfWorkerProcessFacadeV1:
+        var inbound: [KpfWorkerFrameV1] = []
+        var outbound: [KpfWorkerFrameV1] = []
+        var index = 0
+        while index < capacity:
+            inbound.push(kpf_worker_empty_frame_v1())
+            outbound.push(kpf_worker_empty_frame_v1())
+            index = index + 1
+        KpfWorkerProcessFacadeV1(capacity: capacity, inbound: inbound, outbound: outbound,
+            inbound_head: 0, inbound_count: 0, outbound_head: 0, outbound_count: 0,
+            alive: true, terminated: false)
+
+    me send(frame: KpfWorkerFrameV1) -> KpfWorkerOutcome:
+        if not self.alive: return KpfWorkerOutcome.WorkerCrashed
+        if self.outbound_count >= self.capacity: return KpfWorkerOutcome.WouldBlock
+        val index = (self.outbound_head + self.outbound_count) % self.capacity
+        self.outbound[index] = frame
+        self.outbound_count = self.outbound_count + 1
+        KpfWorkerOutcome.Accepted
+
+    me receive() -> (KpfWorkerOutcome, KpfWorkerFrameV1):
+        if not self.alive: return (KpfWorkerOutcome.WorkerCrashed, kpf_worker_empty_frame_v1())
+        if self.inbound_count == 0: return (KpfWorkerOutcome.Empty, kpf_worker_empty_frame_v1())
+        val frame = self.inbound[self.inbound_head]
+        self.inbound_head = (self.inbound_head + 1) % self.capacity
+        self.inbound_count = self.inbound_count - 1
+        (KpfWorkerOutcome.Accepted, frame)
+
+    # Adapter/test hook representing the child consuming a host-written frame.
+    me take_sent() -> (KpfWorkerOutcome, KpfWorkerFrameV1):
+        if self.outbound_count == 0:
+            return (KpfWorkerOutcome.Empty, kpf_worker_empty_frame_v1())
+        val frame = self.outbound[self.outbound_head]
+        self.outbound_head = (self.outbound_head + 1) % self.capacity
+        self.outbound_count = self.outbound_count - 1
+        (KpfWorkerOutcome.Accepted, frame)
+
+    # Deterministic test/adapter injection point for frames read from a child.
+    me inject_from_worker(frame: KpfWorkerFrameV1) -> KpfWorkerOutcome:
+        if self.inbound_count >= self.capacity: return KpfWorkerOutcome.WouldBlock
+        val index = (self.inbound_head + self.inbound_count) % self.capacity
+        self.inbound[index] = frame
+        self.inbound_count = self.inbound_count + 1
+        KpfWorkerOutcome.Accepted
+
+    me crash():
+        self.alive = false
+
+    me terminate():
+        self.alive = false
+        self.terminated = true

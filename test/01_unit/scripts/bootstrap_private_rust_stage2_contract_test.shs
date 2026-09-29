@@ -1,0 +1,492 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+publisher="$root/scripts/check/lib/bootstrap-private-rust-publish.pl"
+authority="$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+. "$authority"
+
+sh -n "$wrapper" || fail "wrapper shell syntax"
+/usr/bin/perl -c "$publisher" >/dev/null || fail "publisher Perl syntax"
+awk '
+  /bootstrap_stage3_prepare_seed_generation/ { prepared=1 }
+  prepared && /seed_inputs_hash commit/ && !commit { commit=NR }
+  prepared && /bootstrap_publish_private_rust_authority/ { publish=NR; exit }
+  END { if (!commit || !publish || commit >= publish) exit 1 }
+' "$wrapper" || fail "private publication lacks post-build commit-time input check"
+
+tmp=$(mktemp -d)
+trap 'chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"' \
+  EXIT HUP INT TERM
+fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+make_tuple() {
+  tuple=$1
+  marker=$2
+  mkdir -p "$tuple/deps"
+  printf '#!/bin/sh\necho %s\n' "$marker" >"$tuple/simple"
+  printf 'native-%s\n' "$marker" >"$tuple/libsimple_native_all.a"
+  printf 'backfill-%s\n' "$marker" >"$tuple/libsimple_compiler_backfill.a"
+  printf 'runtime-%s\n' "$marker" >"$tuple/deps/libsimple_runtime.a"
+  seed_sha=$(sha256sum "$tuple/simple" | awk '{ print $1 }')
+  native_sha=$(sha256sum "$tuple/libsimple_native_all.a" | awk '{ print $1 }')
+  backfill_sha=$(sha256sum \
+    "$tuple/libsimple_compiler_backfill.a" | awk '{ print $1 }')
+  printf '%s\n' \
+    'schema=simple-bootstrap-seed-artifact-stamp-v2' \
+    "inputs_fingerprint=$fp" \
+    "seed_sha256=$seed_sha" \
+    "native_all_sha256=$native_sha" \
+    'backfill_status=present' \
+    "backfill_sha256=$backfill_sha" >"$tuple/simple.inputs.sha256"
+  chmod 500 "$tuple/simple" "$tuple" "$tuple/deps"
+  chmod 400 "$tuple/libsimple_native_all.a" \
+    "$tuple/libsimple_compiler_backfill.a" \
+    "$tuple/deps/libsimple_runtime.a" "$tuple/simple.inputs.sha256"
+}
+
+tuple_hash() (
+  snapshot="$tmp/tuple-snapshot.$$"
+  bootstrap_stage3_directory_snapshot "$snapshot" "$1" || exit 1
+  sha256sum "$snapshot" | awk '{ print $1 }'
+  rm -f "$snapshot"
+)
+
+final_for_tuple() {
+  printf '%s/%s-%s\n' "$generations" "$fp" "$(tuple_hash "$1")"
+}
+
+publish() {
+  program=$1
+  staging_path=$2
+  final_path=$3
+  prepared_hash=${4:-$(tuple_hash "$staging_path")}
+  /usr/bin/perl "$program" "$staging_path" "$final_path" \
+    "$final_path/global-publication.env" "$fp" "$prepared_hash" simple \
+    libsimple_native_all.a libsimple_compiler_backfill.a \
+    simple.inputs.sha256 deps/libsimple_runtime.a
+}
+
+assert_unchanged() {
+  actual=$1
+  before=$2
+  expected_mode=$3
+  label=$4
+  diff -r "$before" "$actual" >/dev/null ||
+    fail "$label bytes or entries changed"
+  [ "$(stat -c %a "$actual")" = "$expected_mode" ] ||
+    fail "$label mode changed"
+}
+
+tree_mode_manifest() (
+  CDPATH= cd -- "$1"
+  find . -printf '%P|%y|%m\n' | LC_ALL=C sort
+)
+
+# Route the production wrapper through its real private Rust build, immutable
+# publication, runtime-copy admission, and Stage-4 pinning path.  A fake Rust
+# toolchain emits a deterministic tuple, but the wrapper owns every transition.
+# All shared-authority variables point at a synthetic global tree whose bytes,
+# entries, and root mode must remain unchanged.
+global="$tmp/global-target"
+mkdir -p "$global/bootstrap.generations/generation-a" "$global/bootstrap"
+printf '%s\n' 'generation=original' >"$global/bootstrap.current.env"
+printf '%s\n' 'global-seed' >"$global/bootstrap/simple"
+printf '%s\n' 'immutable-generation' \
+  >"$global/bootstrap.generations/generation-a/simple"
+cp -a "$global" "$tmp/global-before"
+tree_mode_manifest "$global" >"$tmp/global-modes-before"
+
+fake_sysroot="$tmp/fake-rust-sysroot"
+fake_path="$fake_sysroot/bin"
+mkdir -p "$fake_path"
+printf '%s\n' '#!/bin/sh' \
+  'if [ "${1:-}" = --print ] && [ "${2:-}" = sysroot ]; then' \
+  "  printf '%s\\n' '$fake_sysroot'" \
+  'elif [ "${1:-}" = -vV ]; then' \
+  "  printf '%s\\n' 'rustc 1.90.0 (private-wrapper-fixture)'" \
+  'else' \
+  '  exit 64' \
+  'fi' >"$fake_path/rustc"
+printf '%s\n' '#!/bin/sh' \
+  'set -eu' \
+  'if [ "${1:-}" = -V ]; then' \
+  "  printf '%s\\n' 'cargo 1.90.0 (private-wrapper-fixture)'" \
+  '  exit 0' \
+  'fi' \
+  'target=' \
+  'package=' \
+  'while [ "$#" -gt 0 ]; do' \
+  '  case "$1" in' \
+  '    --target) target=$2; shift 2 ;;' \
+  '    -p) package=$2; shift 2 ;;' \
+  '    *) shift ;;' \
+  '  esac' \
+  'done' \
+  'profile="$CARGO_TARGET_DIR/$target/bootstrap"' \
+  'mkdir -p "$profile/deps"' \
+  "printf '%s\\n' \"\$package\" >>'$tmp/fake-cargo.log'" \
+  'case "$package" in' \
+  '  simple-driver)' \
+  "    printf '%s\\n' '#!/bin/sh' 'echo private-wrapper-seed' >\"\$profile/simple\"" \
+  '    chmod 700 "$profile/simple" ;;' \
+  '  simple-native-all)' \
+  "    printf '%s\\n' native-wrapper >\"\$profile/libsimple_native_all.a\" ;;" \
+  '  simple-runtime)' \
+  "    printf '%s\\n' runtime-wrapper >\"\$profile/deps/libsimple_runtime.a\" ;;" \
+  '  simple-compiler-backfill)' \
+  "    printf '%s\\n' backfill-wrapper >\"\$profile/libsimple_compiler_backfill.a\" ;;" \
+  '  *) exit 65 ;;' \
+  'esac' >"$fake_path/cargo"
+chmod 700 "$fake_path/rustc" "$fake_path/cargo"
+
+if ! SIMPLE_BOOTSTRAP_TEST_PRIVATE_RUST_PUBLICATION_FIXTURE=1 \
+  SIMPLE_BOOTSTRAP_TEST_RUST_TARGET_ROOT="$global" \
+  PATH="$fake_path:/usr/bin:/bin" \
+  sh "$wrapper" --full-bootstrap --stop-after-stage2 --backend=cranelift \
+    --output="$tmp/wrapper-output" --jobs=1 \
+    >"$tmp/wrapper.stdout" 2>"$tmp/wrapper.stderr"; then
+  sed -n '1,80p' "$tmp/wrapper.stderr" >&2
+  fail "production wrapper private publication route failed"
+fi
+[ "$(tail -n 1 "$tmp/wrapper.stdout")" = \
+  'Private Rust fixture: build, publication, and admission complete.' ] ||
+  fail "wrapper did not reach private admission completion"
+[ "$(tr '\n' ' ' <"$tmp/fake-cargo.log")" = \
+  'simple-driver simple-native-all simple-runtime simple-compiler-backfill ' ] ||
+  fail "wrapper did not execute the complete private Rust build tuple"
+set -- "$tmp/wrapper-output"/rust-authority-*/private.generations/*
+[ "$#" -eq 1 ] && [ -d "$1" ] ||
+  fail "wrapper did not publish exactly one private generation"
+final=$1
+receipt="$final/global-publication.env"
+[ "$("$final/simple")" = private-wrapper-seed ] ||
+  fail "private generation was not committed intact"
+[ "$(sed -n 's/^global_publication_status=//p' "$receipt")" = \
+  not-requested ] || fail "no-global-publication receipt missing"
+[ "$(sed -n 's/^prepared_tuple_hash=//p' "$receipt")" = \
+  "${final##*-}" ] || fail "receipt does not bind prepared tuple hash"
+[ "$(stat -c %a "$receipt")" = 400 ] || fail "receipt mode is not 0400"
+[ "$(stat -c %a "$final")" = 500 ] || fail "final authority is not frozen"
+[ "$(stat -c %a "$(dirname -- "$final")")" = 500 ] ||
+  fail "private generation namespace is not sealed"
+diff -r "$tmp/global-before" "$global" >/dev/null ||
+  fail "production private route mutated synthetic global authority"
+tree_mode_manifest "$global" >"$tmp/global-modes-after-wrapper"
+cmp -s "$tmp/global-modes-before" "$tmp/global-modes-after-wrapper" ||
+  fail "production private route mutated synthetic global modes"
+
+# Direct publisher fault cases use a compact synthetic prepared tuple.
+private="$tmp/direct-private"
+generations="$private/private.generations"
+mkdir -p "$generations"
+
+# Force the no-O_CLOEXEC branch. The publisher clears any implicit Perl flag,
+# applies F_SETFD, and re-verifies every bound descriptor.
+fallback_staging="$generations/.staging.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+make_tuple "$fallback_staging" fallback
+fallback_final=$(final_for_tuple "$fallback_staging")
+SIMPLE_BOOTSTRAP_PRIVATE_PUBLISH_FORCE_CLOEXEC_FALLBACK=1 \
+  publish "$publisher" "$fallback_staging" "$fallback_final" ||
+  fail "verified close-on-exec fallback failed"
+[ "$(stat -c %a "$generations")" = 500 ] ||
+  fail "direct publisher did not seal generation namespace"
+# Remaining negative cases need fresh staging leaves under this synthetic test
+# parent. Production publishes only once into its per-build private namespace.
+chmod 700 "$generations"
+
+# A pre-existing final must cause zero staging residue or mode/content changes.
+collision_staging="$generations/.staging.cccccccccccccccccccccccccccccccc"
+make_tuple "$collision_staging" collision-candidate
+collision_final=$(final_for_tuple "$collision_staging")
+mkdir -p "$collision_final"
+printf '%s\n' incumbent >"$collision_final/simple"
+cp -a "$collision_staging" "$tmp/collision-before"
+collision_mode=$(stat -c %a "$collision_staging")
+if publish "$publisher" "$collision_staging" "$collision_final" \
+    >"$tmp/collision.stdout" 2>"$tmp/collision.stderr"; then
+  fail "directory collision was accepted"
+fi
+assert_unchanged "$collision_staging" "$tmp/collision-before" \
+  "$collision_mode" "collision staging"
+[ ! -e "$collision_staging/global-publication.env" ] ||
+  fail "directory collision left receipt residue"
+[ "$(cat "$collision_final/simple")" = incumbent ] ||
+  fail "directory collision mutated incumbent"
+
+# A prepared hash is a commit capability, not a naming hint.  Changing an
+# artifact after preparation must fail even when every tuple path remains valid.
+hash_staging="$generations/.staging.hash-binding"
+make_tuple "$hash_staging" hash-binding
+prepared_before=$(tuple_hash "$hash_staging")
+hash_final="$generations/$fp-$prepared_before"
+chmod 700 "$hash_staging"
+chmod 600 "$hash_staging/libsimple_native_all.a"
+printf '%s\n' changed-after-prepare \
+  >>"$hash_staging/libsimple_native_all.a"
+chmod 400 "$hash_staging/libsimple_native_all.a"
+chmod 500 "$hash_staging"
+if publish "$publisher" "$hash_staging" "$hash_final" "$prepared_before" \
+    >"$tmp/hash.stdout" 2>"$tmp/hash.stderr"; then
+  fail "tuple changed after preparation was accepted"
+fi
+[ ! -e "$hash_final" ] || fail "changed prepared tuple was published"
+[ ! -e "$hash_staging/global-publication.env" ] ||
+  fail "changed prepared tuple left receipt residue"
+
+# Even a self-consistent newly named snapshot is rejected when its v2 stamp no
+# longer exactly binds the input fingerprint and the three stamped artifacts.
+stamp_staging="$generations/.staging.stamp-binding"
+make_tuple "$stamp_staging" stamp-binding
+chmod 700 "$stamp_staging"
+chmod 600 "$stamp_staging/simple.inputs.sha256"
+printf '%s\n' unexpected_field=mutated \
+  >>"$stamp_staging/simple.inputs.sha256"
+chmod 400 "$stamp_staging/simple.inputs.sha256"
+chmod 500 "$stamp_staging"
+stamp_hash=$(tuple_hash "$stamp_staging")
+stamp_final="$generations/$fp-$stamp_hash"
+if publish "$publisher" "$stamp_staging" "$stamp_final" "$stamp_hash" \
+    >"$tmp/stamp.stdout" 2>"$tmp/stamp.stderr"; then
+  fail "invalid prepared tuple stamp was accepted"
+fi
+[ ! -e "$stamp_final" ] || fail "invalid tuple stamp was published"
+[ ! -e "$stamp_staging/global-publication.env" ] ||
+  fail "invalid tuple stamp left receipt residue"
+
+# An existing receipt is likewise rolled back to the exact staged candidate.
+receipt_staging="$generations/.staging.dddddddddddddddddddddddddddddddd"
+make_tuple "$receipt_staging" receipt-candidate
+receipt_final=$(final_for_tuple "$receipt_staging")
+chmod 700 "$receipt_staging"
+printf '%s\n' incumbent-receipt >"$receipt_staging/global-publication.env"
+chmod 400 "$receipt_staging/global-publication.env"
+chmod 500 "$receipt_staging"
+cp -a "$receipt_staging" "$tmp/receipt-before"
+receipt_mode=$(stat -c %a "$receipt_staging")
+if publish "$publisher" "$receipt_staging" "$receipt_final" \
+    "${receipt_final##*-}" \
+    >"$tmp/receipt.stdout" 2>"$tmp/receipt.stderr"; then
+  fail "receipt collision was accepted"
+fi
+assert_unchanged "$receipt_staging" "$tmp/receipt-before" \
+  "$receipt_mode" "receipt-collision staging"
+
+# Production mutation: remove the F_SETFD action while retaining its verifier.
+# Forced fallback must then fail before any namespace or receipt mutation.
+cloexec_mutant="$tmp/publisher-no-fd-cloexec.pl"
+/usr/bin/perl -0pe '
+  my $needle = q{defined(fcntl($fh, F_SETFD, $flags | FD_CLOEXEC))};
+  s/\Q$needle\E/defined(1)/ or die "F_SETFD mutation point missing\n";
+' "$publisher" >"$cloexec_mutant"
+cloexec_staging="$generations/.staging.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+make_tuple "$cloexec_staging" cloexec-mutant
+cloexec_final=$(final_for_tuple "$cloexec_staging")
+cp -a "$cloexec_staging" "$tmp/cloexec-before"
+cloexec_mode=$(stat -c %a "$cloexec_staging")
+if SIMPLE_BOOTSTRAP_PRIVATE_PUBLISH_FORCE_CLOEXEC_FALLBACK=1 \
+    publish "$cloexec_mutant" "$cloexec_staging" "$cloexec_final" \
+    >"$tmp/cloexec.stdout" 2>"$tmp/cloexec.stderr"; then
+  fail "missing F_SETFD action escaped close-on-exec verification"
+fi
+assert_unchanged "$cloexec_staging" "$tmp/cloexec-before" \
+  "$cloexec_mode" "close-on-exec mutant staging"
+[ ! -e "$cloexec_final" ] || fail "close-on-exec mutant committed"
+
+# Fault every durability boundary in order: all five tuple members (including
+# the stamp), the nested tuple directory, staged root, receipt, receipt root,
+# frozen authority, generation-parent commit, and sealed-parent commit.  A
+# post-rename sync failure must quarantine the generation; earlier failures
+# leave staging byte-exact.
+sync_position=1
+while [ "$sync_position" -le 12 ]; do
+  sync_staging="$generations/.staging.sync-$sync_position"
+  make_tuple "$sync_staging" "sync-$sync_position"
+  sync_final=$(final_for_tuple "$sync_staging")
+  cp -a "$sync_staging" "$tmp/sync-before-$sync_position"
+  sync_mode=$(stat -c %a "$sync_staging")
+  if SIMPLE_BOOTSTRAP_TEST_PRIVATE_PUBLISH_FAIL_SYNC_AT="$sync_position" \
+      publish "$publisher" "$sync_staging" "$sync_final" \
+      >"$tmp/sync-$sync_position.stdout" \
+      2>"$tmp/sync-$sync_position.stderr"; then
+    fail "sync position $sync_position was accepted"
+  fi
+  [ ! -e "$sync_final" ] ||
+    fail "sync position $sync_position left an admissible final"
+  if [ "$sync_position" -lt 11 ]; then
+    assert_unchanged "$sync_staging" "$tmp/sync-before-$sync_position" \
+      "$sync_mode" "sync position $sync_position staging"
+    [ ! -e "$sync_staging/global-publication.env" ] ||
+      fail "sync position $sync_position left receipt residue"
+  else
+    set -- "$sync_final".rejected.*
+    [ "$#" -eq 1 ] && [ -d "$1" ] ||
+      fail "post-rename sync failure was not quarantined"
+    assert_unchanged "$1" "$tmp/sync-before-$sync_position" \
+      "$sync_mode" "post-rename sync quarantine"
+    [ ! -e "$1/global-publication.env" ] ||
+      fail "post-rename sync quarantine retained receipt residue"
+  fi
+  sync_position=$((sync_position + 1))
+done
+
+# Production mutation: replace the staging leaf after its initial descriptor
+# bind but before the commit-boundary rebind. Identity verification must reject
+# the replacement without committing it.
+swap_mutant="$tmp/publisher-staging-swap.pl"
+awk '
+  /my \$staging_leaf_fh = openat_handle/ && !inserted {
+    print "        if (($ENV{SIMPLE_TEST_SWAP_STAGING_LEAF} // q{}) ne q{}) {"
+    print "            my $bound = $staging . q{.original};"
+    print "            rename($staging, $bound) or die \"swap bound staging: $!\\n\";"
+    print "            mkdir($staging, 0700) or die \"create replacement staging: $!\\n\";"
+    print "            open(my $swap_fh, q{>}, $staging . q{/simple}) or die \"open replacement: $!\\n\";"
+    print "            print {$swap_fh} qq{swapped\\n};"
+    print "            close($swap_fh) or die \"close replacement: $!\\n\";"
+    print "            chmod(0500, $staging) or die \"freeze replacement: $!\\n\";"
+    print "        }"
+    inserted=1
+  }
+  { print }
+  END { if (!inserted) exit 42 }
+' "$publisher" >"$swap_mutant" || fail "staging-swap mutation failed"
+swap_staging="$generations/.staging.11111111111111111111111111111111"
+make_tuple "$swap_staging" swap-original
+swap_final=$(final_for_tuple "$swap_staging")
+if SIMPLE_TEST_SWAP_STAGING_LEAF=1 \
+    publish "$swap_mutant" "$swap_staging" "$swap_final" \
+    >"$tmp/swap.stdout" 2>"$tmp/swap.stderr"; then
+  fail "swapped staging leaf was accepted"
+fi
+[ ! -e "$swap_final" ] || fail "swapped staging leaf was committed"
+[ -d "$swap_staging.original" ] && \
+  [ "$("$swap_staging.original/simple")" = swap-original ] ||
+  fail "bound original staging was not preserved"
+[ ! -e "$swap_staging.original/global-publication.env" ] ||
+  fail "staging-swap rollback left receipt residue"
+[ "$(stat -c %a "$swap_staging.original")" = 500 ] ||
+  fail "staging-swap rollback did not restore mode"
+
+# Replace the source leaf after the commit-boundary descriptor rebind but before
+# renameat2.  The renamed substitute must be rejected and moved away from the
+# final leaf, while descriptor-based rollback restores the prepared original.
+rebind_mutant="$tmp/publisher-post-rebind-swap.pl"
+awk '
+  /^        my \$RENAME_NOREPLACE = 1;/ && !inserted {
+    print "        if (($ENV{SIMPLE_TEST_SWAP_AFTER_REBIND} // q{}) ne q{}) {"
+    print "            my $bound = $staging . q{.original};"
+    print "            rename($staging, $bound) or die \"swap rebound staging: $!\\n\";"
+    print "            mkdir($staging, 0500) or die \"create rebound substitute: $!\\n\";"
+    print "        }"
+    inserted=1
+  }
+  { print }
+  END { if (!inserted) exit 42 }
+' "$publisher" >"$rebind_mutant" || fail "post-rebind mutation failed"
+rebind_staging="$generations/.staging.33333333333333333333333333333333"
+make_tuple "$rebind_staging" rebind-original
+rebind_final=$(final_for_tuple "$rebind_staging")
+if SIMPLE_TEST_SWAP_AFTER_REBIND=1 \
+    publish "$rebind_mutant" "$rebind_staging" "$rebind_final" \
+    >"$tmp/rebind.stdout" 2>"$tmp/rebind.stderr"; then
+  fail "post-rebind staging substitute was accepted"
+fi
+[ ! -e "$rebind_final" ] ||
+  fail "post-rebind substitute remained at the final leaf"
+set -- "$rebind_final".rejected.*
+[ "$#" -eq 1 ] && [ -d "$1" ] ||
+  fail "post-rebind substitute was not quarantined"
+[ -d "$rebind_staging.original" ] && \
+  [ "$("$rebind_staging.original/simple")" = rebind-original ] ||
+  fail "post-rebind original identity was not preserved"
+[ ! -e "$rebind_staging.original/global-publication.env" ] ||
+  fail "post-rebind rollback left receipt residue"
+[ "$(stat -c %a "$rebind_staging.original")" = 500 ] ||
+  fail "post-rebind rollback did not restore mode"
+grep -q 'committed final authority identity changed' "$tmp/rebind.stderr" ||
+  fail "post-rebind substitution was not diagnosed"
+
+# Production mutation: replace the final leaf immediately after rename. The
+# committed-final descriptor/device/inode check must detect the substitution.
+final_mutant="$tmp/publisher-final-swap.pl"
+awk '
+  /# The final namespace leaf/ && !inserted {
+    print "        if (($ENV{SIMPLE_TEST_SWAP_FINAL_LEAF} // q{}) ne q{}) {"
+    print "            my $bound = $final . q{.original};"
+    print "            rename($final, $bound) or die \"swap committed final: $!\\n\";"
+    print "            mkdir($final, 0500) or die \"create replacement final: $!\\n\";"
+    print "        }"
+    inserted=1
+  }
+  { print }
+  END { if (!inserted) exit 42 }
+' "$publisher" >"$final_mutant" || fail "final-swap mutation failed"
+final_staging="$generations/.staging.22222222222222222222222222222222"
+make_tuple "$final_staging" final-original
+final_swap=$(final_for_tuple "$final_staging")
+if SIMPLE_TEST_SWAP_FINAL_LEAF=1 \
+    publish "$final_mutant" "$final_staging" "$final_swap" \
+    >"$tmp/final.stdout" 2>"$tmp/final.stderr"; then
+  fail "swapped committed final leaf was accepted"
+fi
+[ ! -e "$final_swap" ] ||
+  fail "swapped committed final leaf was not removed from admission path"
+set -- "$final_swap".rejected.*
+[ "$#" -eq 1 ] && [ -d "$1" ] ||
+  fail "swapped committed final leaf was not quarantined"
+[ -d "$final_swap.original" ] && \
+  [ "$("$final_swap.original/simple")" = final-original ] ||
+  fail "committed original identity was not retained for diagnosis"
+[ ! -e "$final_swap.original/global-publication.env" ] ||
+  fail "final-swap rollback left receipt residue"
+grep -q 'committed final authority identity changed' "$tmp/final.stderr" ||
+  fail "final device/inode substitution was not diagnosed"
+
+# Replace the final after the publisher has opened and validated it once.  The
+# parent seal plus final rebind must still reject/quarantine this later window.
+after_open_mutant="$tmp/publisher-after-final-open-swap.pl"
+awk '
+  /# Close the last pathname-only success window/ && !inserted {
+    print "        if (($ENV{SIMPLE_TEST_SWAP_AFTER_FINAL_OPEN} // q{}) ne q{}) {"
+    print "            my $bound = $final . q{.after-open-original};"
+    print "            rename($final, $bound) or die \"swap opened final: $!\\n\";"
+    print "            mkdir($final, 0500) or die \"create after-open substitute: $!\\n\";"
+    print "        }"
+    inserted=1
+  }
+  { print }
+  END { if (!inserted) exit 42 }
+' "$publisher" >"$after_open_mutant" ||
+  fail "after-final-open mutation failed"
+after_open_staging="$generations/.staging.44444444444444444444444444444444"
+make_tuple "$after_open_staging" after-open-original
+after_open_final=$(final_for_tuple "$after_open_staging")
+if SIMPLE_TEST_SWAP_AFTER_FINAL_OPEN=1 \
+    publish "$after_open_mutant" "$after_open_staging" "$after_open_final" \
+    >"$tmp/after-open.stdout" 2>"$tmp/after-open.stderr"; then
+  fail "after-final-open substitute was accepted"
+fi
+[ ! -e "$after_open_final" ] ||
+  fail "after-final-open substitute remained at the final leaf"
+set -- "$after_open_final".rejected.*
+[ "$#" -eq 1 ] && [ -d "$1" ] ||
+  fail "after-final-open substitute was not quarantined"
+[ -d "$after_open_final.after-open-original" ] && \
+  [ "$("$after_open_final.after-open-original/simple")" = \
+    after-open-original ] ||
+  fail "after-final-open original identity was not preserved"
+[ ! -e "$after_open_final.after-open-original/global-publication.env" ] ||
+  fail "after-final-open original retained receipt residue"
+grep -q 'sealed final authority identity changed' \
+  "$tmp/after-open.stderr" ||
+  fail "after-final-open substitution was not diagnosed"
+
+diff -r "$tmp/global-before" "$global" >/dev/null ||
+  fail "fault cases mutated synthetic global authority"
+tree_mode_manifest "$global" >"$tmp/global-modes-after-faults"
+cmp -s "$tmp/global-modes-before" "$tmp/global-modes-after-faults" ||
+  fail "fault cases mutated synthetic global modes"
+
+echo 'PASS: private Rust publication is durable, descriptor-bound, collision-safe, and globally immutable'

@@ -1,0 +1,307 @@
+#!/bin/sh
+# check-simpleos-x86-64-linker-alias-derived.shs
+#
+# Reproduce + regression gate for the syscall-shim linker-alias defect that
+# blocked every x86_64 SimpleOS kernel link.
+#
+# THE DEFECT
+#   examples/09_embedded/simple_os/arch/x86_64/linker.ld carried ~65
+#   unconditional assignments of the form
+#       spl_handle_X = kernel__abi__syscall_shim__spl_handle_X;
+#   Those right-hand sides are COMPILER-INTERNAL mangled names. They only ever
+#   existed in a link because the compiler emits a weak alias for an *undefined
+#   reference* it sees in some object (stubs.rs::generate_stub_object_freestanding
+#   harvests undefined symbols with `nm`). A name referenced ONLY by a linker
+#   script is invisible to `nm`, so nothing makes it exist on its own.
+#
+#   When the shims were split into syscall_shim_{process,ipc,file,net,device,...}
+#   the real definitions became src__os__kernel__abi__syscall_shim_ipc__spl_handle_*
+#   and the pre-split references disappeared, so no weak alias was emitted:
+#       ld.lld: error: linker.ld:132: symbol not found:
+#               kernel__abi__syscall_shim__spl_handle_ipc_connect
+#   A plain `foo = missing;` in a linker script is a hard error even when
+#   nothing references `foo`, so this killed every x86_64 kernel link.
+#
+# THE FIX BEING GUARDED
+#   The aliasing is DERIVED at link time, not tabulated by hand:
+#   NativeLinker::freestanding_weak_boot_defsyms
+#   (src/compiler_rust/compiler/src/pipeline/native_project/linker.rs) reads the
+#   boot objects' weak-DEFINED spl_handle_* symbols, finds the unique strongly
+#   defined `*__spl_handle_X` among the Simple objects whatever module it now
+#   lives in, and passes `--defsym=spl_handle_X=<real symbol>` to lld. That is
+#   split-agnostic. The static tables were deleted.
+#
+# CHECKS
+#   1. STATIC (always runs, seconds): no x86_64 SimpleOS linker script may name
+#      a compiler-internal mangled syscall-shim symbol. Fails on the pre-fix
+#      tree, passes after. Covers PROVIDE() forms too -- PROVIDE only softens
+#      the error, it does not stop the table from rotting.
+#   2. LOAD BASE: linker.ld must load at 128MB (0x8000000). The mass merge
+#      e274cd33719 reverted it to 1MB and deleted the comment explaining that
+#      1MB faults GRUB-EFI's multiboot1 relocator under OVMF.
+#   3. LIVE LINK (opt-in with --link, needs the rebuilt seed): actually link an
+#      x86_64 kernel with linker.ld and require BOTH that the ELF appears and
+#      that the derived mechanism positively fired ("Freestanding weak boot
+#      alias override: N symbol(s)", N > 0). The positive proof matters: an
+#      absence of errors is not evidence the mechanism ran.
+#
+# VERDICT is the last line of stdout:
+#   PASS  — <n> check(s) ...            exit 0
+#   FAIL  — ...                          exit 1
+#   ERROR — nothing was checked ...      exit 2   (0 scripts scanned, missing
+#                                                  seed on --link, etc.)
+#
+# --selftest runs first and is fatal.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+LD_DIR="$ROOT/examples/09_embedded/simple_os/arch/x86_64"
+MANGLED_RE='kernel__abi__syscall_shim[a-z_0-9]*__spl_handle_\|__spl_x86_dispatch_installed_syscall_abi'
+DO_LINK=0
+DO_SELFTEST_ONLY=0
+for a in "$@"; do
+    case "$a" in
+        --link) DO_LINK=1 ;;
+        --selftest) DO_SELFTEST_ONLY=1 ;;
+        *) echo "unknown argument: $a" >&2; echo "ERROR — nothing was checked: bad argument"; exit 2 ;;
+    esac
+done
+
+# scan_script FILE -> prints offending lines.
+#
+# C-style comments are blanked first (keeping line numbers) so that the prose
+# explaining WHY the table is gone -- which necessarily quotes the very symbol
+# names the table used to carry -- does not read as the table itself.
+scan_script() {
+    awk '
+        { line = $0; out = ""
+          while (length(line) > 0) {
+              if (inc) { p = index(line, "*/")
+                         if (p == 0) { line = ""; break }
+                         inc = 0; line = substr(line, p + 2); continue }
+              p = index(line, "/*")
+              if (p == 0) { out = out line; line = ""; break }
+              out = out substr(line, 1, p - 1); inc = 1; line = substr(line, p + 2)
+          }
+          print out }
+    ' "$1" 2>/dev/null | grep -n "$MANGLED_RE"
+}
+
+# ---------------------------------------------------------------- selftest ---
+selftest_fail=0
+st_dir=$(mktemp -d) || { echo "ERROR — nothing was checked: mktemp failed"; exit 2; }
+trap 'rm -rf "$st_dir"' EXIT
+
+# fixture 1: a pre-fix style table must be detected (plain assignment)
+cat > "$st_dir/dirty.ld" <<'EOF'
+SECTIONS {
+    spl_handle_exit = kernel__abi__syscall_shim__spl_handle_exit;
+}
+EOF
+if [ -z "$(scan_script "$st_dir/dirty.ld")" ]; then
+    echo "selftest FAIL: plain pre-split alias assignment not detected" >&2
+    selftest_fail=1
+fi
+
+# fixture 2: the PROVIDE()/post-split form must ALSO be detected -- it is the
+# same hand-maintained table, merely with a softer failure mode.
+cat > "$st_dir/dirty_provide.ld" <<'EOF'
+SECTIONS {
+    PROVIDE(spl_handle_ipc_connect = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_connect);
+}
+EOF
+if [ -z "$(scan_script "$st_dir/dirty_provide.ld")" ]; then
+    echo "selftest FAIL: PROVIDE-form alias table not detected" >&2
+    selftest_fail=1
+fi
+
+# fixture 3: a clean script must not false-positive, including prose that
+# merely mentions spl_handle_* without naming a mangled module path.
+cat > "$st_dir/clean.ld" <<'EOF'
+/* Aliases for spl_handle_* are derived by the compiler; see linker.rs. */
+SECTIONS {
+    . = 0x8000000;
+    _kernel_start = .;
+}
+EOF
+if [ -n "$(scan_script "$st_dir/clean.ld")" ]; then
+    echo "selftest FAIL: clean script false-positived" >&2
+    selftest_fail=1
+fi
+
+# fixture 3b: a multi-line comment that QUOTES the old mangled names (exactly
+# what the fix's explanatory note does) must not be mistaken for the table.
+cat > "$st_dir/clean_prose.ld" <<'EOF'
+/*
+ * The table used to say
+ *   spl_handle_exit = kernel__abi__syscall_shim__spl_handle_exit;
+ * and PROVIDE(spl_handle_ipc_connect = src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_connect);
+ * Both are derived now.
+ */
+SECTIONS { . = 0x8000000; }
+EOF
+if [ -n "$(scan_script "$st_dir/clean_prose.ld")" ]; then
+    echo "selftest FAIL: explanatory comment quoting old symbols false-positived" >&2
+    selftest_fail=1
+fi
+
+# fixture 3c: a real assignment on the SAME line as a trailing comment must
+# still be caught -- comment blanking must not swallow live code.
+printf 'SECTIONS {\n  spl_handle_exit = kernel__abi__syscall_shim__spl_handle_exit; /* c */\n}\n' \
+    > "$st_dir/dirty_trailing.ld"
+if [ -z "$(scan_script "$st_dir/dirty_trailing.ld")" ]; then
+    echo "selftest FAIL: assignment with trailing comment not detected" >&2
+    selftest_fail=1
+fi
+
+# fixture 4: load-base detection discriminates 1MB from 128MB
+grep -q '^\s*\. = 0x8000000;' "$st_dir/clean.ld" || {
+    echo "selftest FAIL: 128MB load base not recognised" >&2; selftest_fail=1; }
+printf 'SECTIONS {\n    . = 0x100000;\n}\n' > "$st_dir/lowbase.ld"
+if grep -q '^\s*\. = 0x8000000;' "$st_dir/lowbase.ld"; then
+    echo "selftest FAIL: 1MB load base accepted as 128MB" >&2
+    selftest_fail=1
+fi
+
+# fixture 5: an empty scan set must yield 0 scanned, forcing the caller to ERROR
+empty_dir="$st_dir/empty"; mkdir -p "$empty_dir"
+n=0
+for f in "$empty_dir"/*.ld; do [ -f "$f" ] && n=$((n+1)); done
+if [ "$n" -ne 0 ]; then
+    echo "selftest FAIL: empty directory did not scan 0 scripts" >&2
+    selftest_fail=1
+fi
+
+if [ "$selftest_fail" -ne 0 ]; then
+    echo "ERROR — nothing was checked: selftest failed"
+    exit 2
+fi
+if [ "$DO_SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 7 selftest fixture(s) checked, 0 failures"
+    exit 0
+fi
+
+# ------------------------------------------------------------------ check 1 ---
+scanned=0
+offenders=""
+for f in "$LD_DIR"/*.ld; do
+    [ -f "$f" ] || continue
+    scanned=$((scanned + 1))
+    hits=$(scan_script "$f")
+    if [ -n "$hits" ]; then
+        cnt=$(printf '%s\n' "$hits" | grep -c '')
+        offenders="$offenders $(basename "$f")($cnt)"
+    fi
+done
+
+if [ "$scanned" -eq 0 ]; then
+    echo "ERROR — nothing was checked: no linker scripts found under $LD_DIR"
+    exit 2
+fi
+
+checks=$scanned
+
+if [ -n "$offenders" ]; then
+    echo "FAIL — $checks linker script(s) checked; hand-maintained mangled-symbol alias table(s) present:$offenders"
+    echo "  These name compiler-internal symbols that only exist when some object happens"
+    echo "  to reference them; splitting a module silently deletes them and the link dies."
+    echo "  Delete the table — freestanding_weak_boot_defsyms derives the aliases."
+    exit 1
+fi
+
+# ------------------------------------------------------------------ check 2 ---
+checks=$((checks + 1))
+if ! grep -q '^\s*\. = 0x8000000;' "$LD_DIR/linker.ld"; then
+    echo "FAIL — $checks check(s); linker.ld load base is not 128MB (0x8000000)."
+    echo "  1MB starves GRUB-EFI's multiboot1 relocator under OVMF (#UD at RIP~0x1012)."
+    exit 1
+fi
+
+# ------------------------------------------------------------------ check 3 ---
+if [ "$DO_LINK" -eq 1 ]; then
+    SEED="${SEED:-$ROOT/src/compiler_rust/target/release/simple}"
+    if [ ! -x "$SEED" ]; then
+        echo "ERROR — nothing was checked: seed missing at $SEED (cargo build --release --bin simple)"
+        exit 2
+    fi
+    log=$(mktemp)
+    out="$ROOT/build/os/hello/alias_derived_gate.elf"
+    rm -f "$out"
+    LINKER="$LD_DIR/linker.ld" OUT="$out" \
+        CACHE="$ROOT/build/os/hello/kcache_alias_derived" \
+        SEED="$SEED" \
+        sh "$ROOT/scripts/check/build-simpleos-hello-ovmf-kernel.shs" > "$log" 2>&1
+    rc=$?
+    checks=$((checks + 1))
+    if [ "$rc" -ne 0 ] || [ ! -s "$out" ]; then
+        first=$(grep -m1 'error:' "$log")
+        echo "FAIL — $checks check(s); kernel link with linker.ld failed (rc=$rc): ${first:-no ELF produced}"
+        echo "  full log: $log"
+        exit 1
+    fi
+    # Positive proof the derived mechanism ran, not merely that nothing errored.
+    checks=$((checks + 1))
+    derived=$(grep -o 'Freestanding weak boot alias override: [0-9]*' "$log" | grep -o '[0-9]*$' | head -1)
+    if [ -z "${derived:-}" ] || [ "$derived" -le 0 ]; then
+        echo "FAIL — $checks check(s); kernel linked but the derived alias pass never fired"
+        echo "  (expected 'Freestanding weak boot alias override: N symbol(s)' with N > 0 in $log)"
+        exit 1
+    fi
+    # A GREEN LINK IS NOT ENOUGH. boot/baremetal_stubs.c weak-DEFINES every
+    # spl_handle_X as an error stub, so if no defsym is emitted for a shim the
+    # link still succeeds -- and that syscall silently dispatches to the error
+    # stub forever. Green link, dead kernel: exactly the silent-lie class this
+    # repo keeps getting bitten by. So resolve one shim's ADDRESS in the linked
+    # ELF and require that it is the address of the real split-module
+    # definition, not the boot stub's.
+    checks=$((checks + 1))
+    NM="${NM:-nm}"
+    command -v "$NM" >/dev/null 2>&1 || {
+        echo "ERROR — nothing was checked: no '$NM' to read the linked ELF's symbols"
+        exit 2; }
+    syms=$("$NM" "$out" 2>/dev/null)
+    [ -n "$syms" ] || {
+        echo "ERROR — nothing was checked: '$NM' produced no symbols for $out (stripped?)"
+        exit 2; }
+    probe=spl_handle_ipc_connect
+    real=src__os__kernel__abi__syscall_shim_ipc__spl_handle_ipc_connect
+    a_bare=$(printf '%s\n' "$syms" | awk -v s="$probe" '$3 == s { print $1; exit }')
+    a_real=$(printf '%s\n' "$syms" | awk -v s="$real"  '$3 == s { print $1; exit }')
+    if [ -z "$a_bare" ] || [ -z "$a_real" ]; then
+        echo "FAIL — $checks check(s); cannot resolve both '$probe' ($a_bare) and '$real' ($a_real) in $out"
+        exit 1
+    fi
+    if [ "$a_bare" != "$a_real" ]; then
+        echo "FAIL — $checks check(s); '$probe' resolves to $a_bare but the real shim '$real' is at $a_real."
+        echo "  The kernel linked, but that syscall dispatches to baremetal_stubs.c's weak error stub."
+        exit 1
+    fi
+    # Now the same test across EVERY shim, not just the probe: for each bare
+    # `spl_handle_X` in the ELF that has a `*__spl_handle_X` real definition,
+    # the two addresses must be equal. A mismatch means that syscall resolved
+    # to baremetal_stubs.c's weak error stub instead of the real shim.
+    checks=$((checks + 1))
+    sweep=$(printf '%s\n' "$syms" | awk '
+        $3 ~ /^spl_handle_/            { a[$3] = $1 }
+        $3 ~ /__spl_handle_/           { split($3, p, "__spl_handle_"); r["spl_handle_" p[2]] = $1 }
+        END { n = 0; bad = 0; names = ""
+              for (s in a) { n++
+                  if ((s in r) && a[s] != r[s]) { bad++; names = names " " s } }
+              printf "%d %d%s", n, bad, names }')
+    total=$(printf '%s' "$sweep" | awk '{print $1}')
+    bad=$(printf '%s' "$sweep" | awk '{print $2}')
+    if [ "${total:-0}" -le 0 ]; then
+        echo "ERROR — nothing was checked: no spl_handle_* symbols found in $out"
+        exit 2
+    fi
+    if [ "${bad:-0}" -ne 0 ]; then
+        echo "FAIL — $checks check(s); $bad of $total spl_handle_* symbol(s) resolve to the boot weak error stub instead of their real shim:$(printf '%s' "$sweep" | cut -d' ' -f3-)"
+        exit 1
+    fi
+    rm -f "$log"
+    echo "PASS — $checks check(s), $scanned linker script(s) clean, load base 128MB, kernel links, $derived alias(es) derived at link time, $probe at 0x$a_bare, $total spl_handle_* symbol(s) swept with 0 resolving to the boot error stub"
+    exit 0
+fi
+
+echo "PASS — $checks check(s), $scanned linker script(s) clean of hand-maintained mangled alias tables, load base 128MB (re-run with --link for the live link proof)"
+exit 0

@@ -1,0 +1,64 @@
+"""
+# text.split's numeric limit must reach rt_string_split_limit as raw i64
+
+Regression guard for bug `text-split-limit-ignored`
+(record: doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md).
+
+The text-special MIR lowering arm
+(src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl) emits
+`rt_string_split_limit(value, separator, limit)` for a two-arg `text.split`.
+The runtime ABI takes the receiver and separator as tagged string handles but
+the limit as a RAW i64 (src/runtime/runtime_native.c,
+src/runtime/simple_core/core_string.spl). When the arm tagged EVERY argument
+through `ensure_tagged_str`, the numeric limit arrived as a string handle; the
+runtime read it as a huge integer and the limit was silently ignored:
+"a:b:c".split(":", 2) produced ["a","b","c"] instead of ["a","b:c"].
+
+Fix history: first applied 2026-08-17 (9e78a1b9f9f), reverted the next day by
+the mega-SCC refactor 2050c046ee3, re-applied 2026-09-17.
+
+This is a source-content guard, not a runtime execution spec: the fix lives in
+the pure-Simple self-hosted compiler, which the deployed bin/simple (Rust
+bootstrap seed) does not execute -- the seed has its own independent Rust MIR
+lowering and never reads this file's compiled behavior. Revert the fix ->
+this spec goes RED; restore it -> GREEN. The runtime-level reproducer itself
+runs under the self-hosted binary (native mode), which is T3/CI-only here.
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "text.split limit argument lowering keeps raw i64":
+    it "keeps split argument index one untagged while every other argument stays tagged":
+        val source = rt_file_read_text(
+            "src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl") ?? ""
+        # The defect shape: blanket `ensure_tagged_str` on every argument
+        # with no arg-index distinction anywhere in the arm.
+        expect(source.contains("val ts_arg_tagged = self.ensure_tagged_str(ts_arg_local)")).to_equal(false)
+        expect(source.contains("mir_operand_copy(ts_arg_tagged)")).to_equal(false)
+        expect(source.contains("ts_arg_index")).to_equal(true)
+        # The fixed shape: an arg-index guard routing split's limit (index 1)
+        # around ensure_tagged_str, every other argument still tagged.
+        expect(source).to_contain("var ts_arg_index = 0")
+        expect(source).to_contain("method == \"split\" and ts_arg_index == 1")
+        expect(source).to_contain(": ts_arg_local else: self.ensure_tagged_str(ts_arg_local)")
+        expect(source).to_contain("mir_operand_copy(ts_arg_ready)")
+        expect(source).to_contain("ts_arg_index = ts_arg_index + 1")
+        # The guard must live in the same text-special arm that selects the
+        # bounded-split runtime symbol: guard emitted before symbol select.
+        # (Anchor on the QUOTED symbol: the fix comment names it unquoted.)
+        val guard_pos = source.find("method == \"split\" and ts_arg_index == 1")
+        val sym_pos = source.find("\"rt_string_split_limit\"")
+        val select_pos = source.find("val ts_sym = match method:")
+        expect(guard_pos >= 0).to_equal(true)
+        expect(guard_pos < sym_pos).to_equal(true)
+        expect(guard_pos < select_pos).to_equal(true)
+
+    it "pins the runtime ABI side so an ABI change forces this guard red":
+        val runtime = rt_file_read_text("src/runtime/runtime_native.c") ?? ""
+        expect(runtime).to_contain(
+            "int64_t rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit)")
+        val core = rt_file_read_text("src/runtime/simple_core/core_string.spl") ?? ""
+        expect(core).to_contain(
+            "pub fn rt_string_split_limit(value: i64, delimiter: i64, limit: i64) -> i64")

@@ -2,7 +2,7 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
-watcher="${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs"
+watcher="${BOOTSTRAP_WATCH_SCRIPT:-${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs}"
 test_tmp=$(mktemp -d)
 owned_pids=
 
@@ -28,6 +28,64 @@ field() {
   printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field_name}=//p"
 }
 
+# Deterministic Darwin/BSD process-table provider. The production watcher still
+# uses real ps by default; this injection makes snapshot failures, PID reuse,
+# process-group membership, and exclusion independently reproducible.
+fake_ps="${test_tmp}/fake-ps.sh"
+cat >"${fake_ps}" <<'EOF'
+#!/bin/sh
+set -eu
+count=0
+[ ! -f "${FAKE_PS_COUNT}" ] || count=$(cat "${FAKE_PS_COUNT}")
+count=$((count + 1))
+printf '%s\n' "${count}" >"${FAKE_PS_COUNT}"
+root=${BOOTSTRAP_WATCH_METRICS_ROOT}
+exclude=${BOOTSTRAP_WATCH_METRICS_EXCLUDE}
+row() { printf '%s %s %s %s %s %s %s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7"; }
+birth_a='Sun Sep 21 10:00:00 2026'
+birth_b='Sun Sep 21 10:00:01 2026'
+case "${FAKE_PS_MODE}" in
+  fail) exit 1 ;;
+  fail_first)
+    [ "${count}" -ne 1 ] || exit 1
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    ;;
+  busy)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    [ "${count}" -eq 1 ] && child_time=0:00.10 || child_time=0:00.70
+    row 710 "${root}" 700 200 "${birth_a}" "${child_time}" worker
+    ;;
+  reuse)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    [ "${count}" -eq 1 ] && child_birth=${birth_a} || child_birth=${birth_b}
+    row 711 "${root}" 700 200 "${child_birth}" 0:00.20 recycled
+    ;;
+  pgroup)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    row 712 "${root}" 700 200 "${birth_a}" 0:00.10 child
+    row 713 1 700 400 "${birth_a}" 0:00.10 orphan
+    ;;
+  exclude)
+    row "${root}" 1 700 100 "${birth_a}" 0:00.10 root
+    row 714 "${root}" 700 200 "${birth_a}" 0:00.10 child
+    row "${exclude}" "${root}" 700 500 "${birth_a}" 0:00.10 watcher
+    row 715 "${exclude}" 700 600 "${birth_a}" 0:00.10 watcher_child
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "${fake_ps}"
+
+fake_sample() {
+  fake_mode=$1
+  fake_log="${test_tmp}/fake-${fake_mode}.log"
+  fake_count="${test_tmp}/fake-${fake_mode}.count"
+  FAKE_PS_MODE=${fake_mode} FAKE_PS_COUNT=${fake_count} \
+    BOOTSTRAP_WATCH_PS_COMMAND=${fake_ps} \
+    sh "${watcher}" --pid="${leaf_pid}" --progress-log="${fake_log}" --once
+  tail -n 1 "${fake_log}"
+}
+
 # Exact case: include the watched shell and its child, but not this independent
 # watcher process.
 sh -c 'sleep 30 & wait' &
@@ -36,7 +94,10 @@ owned_pids="${nested_root}"
 nested_child=
 attempt=0
 while [ -z "${nested_child}" ] && [ "${attempt}" -lt 50 ]; do
-  nested_child=$(ps -o pid= --ppid "${nested_root}" 2>/dev/null | awk 'NF {print $1; exit}')
+  # BSD/macOS ps has no --ppid selector.  A single portable table snapshot also
+  # matches the watcher's Darwin backend and avoids a Linux-only false pass.
+  nested_child=$(ps -axo pid=,ppid= 2>/dev/null |
+    awk -v parent="${nested_root}" '$2 == parent {print $1; exit}')
   attempt=$((attempt + 1))
 done
 [ -n "${nested_child}" ] || fail "nested child did not start"
@@ -51,22 +112,91 @@ nested_line=$(tail -n 1 "${nested_log}")
 [ "$(field done "${nested_line}")" = "unknown" ] || fail "missing event did not fall back to unknown"
 [ "$(field terminal "${nested_line}")" = "unknown" ] || fail "missing terminal did not fall back to unknown"
 
-# Second RSS basis must be present and non-vacuous. The parent-chain sum alone
-# silently loses a re-parented worker or an unreadable subtree -- that is how a
-# 67.4 GB stage-3 compile logged tree_rss_kb=34753460 (34.7 GB), a total
-# smaller than one live process. The process-group sum cannot lose a subtree to
-# re-parenting, so it bounds the chain sum from below. NEGATIVE CONTROL: revert
-# the pgrp tracking in bootstrap-progress-watch.shs and all three fields report
-# `unknown`, failing the numeric comparisons below.
-nested_pg=$(field tree_rss_pgroup_kb "${nested_line}")
-nested_misses=$(field tree_scan_misses "${nested_line}")
-case "${nested_pg}" in ''|*[!0-9]*) fail "tree_rss_pgroup_kb is not numeric: ${nested_pg}" ;; esac
-case "${nested_misses}" in ''|*[!0-9]*) fail "tree_scan_misses is not numeric: ${nested_misses}" ;; esac
-case "$(field tree_pgroup_processes "${nested_line}")" in
-  ''|*[!0-9]*) fail "tree_pgroup_processes is not numeric" ;;
-esac
-[ "${nested_pg}" -ge "$(field tree_rss_kb "${nested_line}")" ] ||
-  fail "process-group RSS basis (${nested_pg}) is below the parent-chain sum"
+# FreeBSD/macOS do not expose Linux /proc. Force the portable ps backend on
+# this Linux host so the same parent-tree contract is covered without a VM.
+ps_nested_log="${test_tmp}/nested-ps.log"
+BOOTSTRAP_WATCH_PROCESS_SOURCE=ps sh "${watcher}" --pid="${nested_root}" \
+  --progress-log="${ps_nested_log}" --once
+ps_nested_line=$(tail -n 1 "${ps_nested_log}")
+[ "$(field tree_processes "${ps_nested_line}")" -eq 2 ] ||
+  fail "ps backend tree count is not exactly two"
+[ "$(field tree_cpu_basis "${ps_nested_line}")" = "ps-tree" ] ||
+  fail "ps backend did not publish its tree CPU basis"
+
+# Deterministic two-sample CPU and process-group fixture. The fake ps table
+# keeps the parent and one child at zero CPU, then advances a reparented row in
+# the root's PGID. This proves the fallback sees work after a parent-chain
+# break, derives a delta across samples, and refuses a false stall verdict.
+ps_fixture_dir="${test_tmp}/ps-bin"
+mkdir -p "${ps_fixture_dir}"
+ps_counter="${test_tmp}/ps-counter"
+ps_stub="${ps_fixture_dir}/ps"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'case "$2" in' \
+  '  lstart=) printf "%s\n" "Mon Sep 21 00:00:00 2026"; exit 0 ;;' \
+  '  etime=) printf "%s\n" "00:10"; exit 0 ;;' \
+  'esac' \
+  'case "$2" in' \
+  '  -axo)' \
+  '    count=$(sed -n "1p" "$FIXTURE_COUNTER" 2>/dev/null || printf "0")' \
+  '    case "$count" in ""|*[!0-9]*) count=0 ;; esac' \
+  '    count=$((count + 1))' \
+  '    printf "%s\n" "$count" >"$FIXTURE_COUNTER"' \
+  '    child=987654321' \
+  '    orphan=987654322' \
+  '    printf "%s\n" "PID PPID PGID STATE LSTART TIME RSS COMMAND"' \
+  '    printf "%s %s %s S Mon Sep 21 00:00:00 2026 0:00.00 100 sh\n" "$FIXTURE_ROOT" 1 "$FIXTURE_ROOT"' \
+  '    printf "%s %s %s R Mon Sep 21 00:00:00 2026 0:00.00 100 awk\n" "$child" "$FIXTURE_ROOT" "$FIXTURE_ROOT"' \
+  '    printf "%s %s %s R Mon Sep 21 00:00:00 2026 0:%02d.00 1000 orphan\n" "$orphan" 1 "$FIXTURE_ROOT" "$count"' \
+  '    exit 0 ;;' \
+  'esac' \
+  'exit 1' >"${ps_stub}"
+chmod +x "${ps_stub}"
+ps_fixture_root_pid=
+sleep 30 &
+ps_fixture_root_pid=$!
+owned_pids="${ps_fixture_root_pid} ${owned_pids}"
+printf 'milestone=ps-pgroup\nmain_log=%s\n' "${test_tmp}/ps-pgroup.log" >"${test_tmp}/ps-pgroup.state"
+printf '%s\n' abc >"${test_tmp}/ps-pgroup.log"
+set +e
+FIXTURE_ROOT="${ps_fixture_root_pid}" FIXTURE_COUNTER="${ps_counter}" \
+  PATH="${ps_fixture_dir}:${PATH}" BOOTSTRAP_WATCH_PROCESS_SOURCE=ps \
+  BOOTSTRAP_WATCH_STALL_SAMPLES=2 timeout 5 sh "${watcher}" \
+  --pid="${ps_fixture_root_pid}" --state-file="${test_tmp}/ps-pgroup.state" \
+  --progress-log="${test_tmp}/ps-pgroup.progress" --interval=1 \
+  >/dev/null 2>&1
+ps_fixture_status=$?
+set -e
+[ "${ps_fixture_status}" -eq 124 ] ||
+  fail "two-sample ps fixture exited ${ps_fixture_status}, expected timeout 124"
+ps_pgroup_line=$(tail -n 1 "${test_tmp}/ps-pgroup.progress")
+[ "$(field tree_processes "${ps_pgroup_line}")" -eq 2 ] ||
+  fail "ps fixture parent tree count is not two"
+[ "$(field tree_pgroup_processes "${ps_pgroup_line}")" -eq 3 ] ||
+  fail "ps fixture process-group count is not three"
+[ "$(field tree_cpu_basis "${ps_pgroup_line}")" = "ps-pgroup" ] ||
+  fail "ps fixture did not select process-group CPU basis"
+ps_pgroup_cpu=$(field tree_cpu_pct "${ps_pgroup_line}")
+ps_cpu_samples=0
+while IFS= read -r ps_sample_line; do
+  ps_sample_cpu=$(field tree_cpu_pct "${ps_sample_line}")
+  case "${ps_sample_cpu}" in
+    unknown|'') continue ;;
+  esac
+  ps_cpu_samples=$((ps_cpu_samples + 1))
+  awk -v cpu="${ps_sample_cpu}" 'BEGIN { exit !(cpu + 0 >= 50 && cpu + 0 <= 150) }' ||
+    fail "ps fixture CPU delta was ${ps_sample_cpu}; expected stable 50..150 percent"
+done <"${test_tmp}/ps-pgroup.progress"
+[ "${ps_cpu_samples}" -ge 2 ] ||
+  fail "ps fixture produced ${ps_cpu_samples} numeric CPU samples, expected at least two"
+if grep -Fq 'status=alive-no-progress' "${test_tmp}/ps-pgroup.progress"; then
+  fail "busy ps process-group fixture was reported alive-no-progress"
+fi
+printf 'ps-fixture: tree_cpu_pct=%s basis=%s tree_processes=%s pgroup_processes=%s false_stall=false\n' \
+  "${ps_pgroup_cpu}" "$(field tree_cpu_basis "${ps_pgroup_line}")" \
+  "$(field tree_processes "${ps_pgroup_line}")" \
+  "$(field tree_pgroup_processes "${ps_pgroup_line}")"
 
 # Adjacent leaf case: a process with no descendants has identical root/tree RSS.
 sleep 30 &
@@ -110,6 +240,47 @@ terminal_line=$(tail -n 1 "${leaf_log}")
 [ "$(field tasks_remaining "${terminal_line}")" -eq 0 ] || fail "terminal tasks remaining is not zero"
 [ "$(field terminal "${terminal_line}")" = "succeeded" ] || fail "terminal state missing"
 [ "$(field cached "${terminal_line}")" -eq 7 ] || fail "terminal cached count missing"
+
+# A failed ps snapshot reports unavailable evidence and a scan miss. It must
+# never fabricate a zero-sized live tree.
+failed_snapshot_line=$(fake_sample fail)
+[ "$(field tree_processes "${failed_snapshot_line}")" = unknown ] ||
+  fail "failed ps snapshot fabricated a process count"
+[ "$(field tree_rss_kb "${failed_snapshot_line}")" = unknown ] ||
+  fail "failed ps snapshot fabricated zero RSS"
+[ "$(field tree_scan_misses "${failed_snapshot_line}")" -eq 1 ] ||
+  fail "failed ps snapshot did not report a scan miss"
+
+# A failed warmup must not establish CPU state for the subsequent good sample.
+failed_warmup_line=$(fake_sample fail_first)
+[ "$(field tree_cpu_pct "${failed_warmup_line}")" = unknown ] ||
+  fail "failed warmup established a fabricated CPU baseline"
+
+# CPU is a delta across two snapshots, not lifetime-average ps CPU.
+busy_line=$(fake_sample busy)
+busy_cpu=$(field tree_cpu_pct "${busy_line}")
+awk -v value="${busy_cpu}" 'BEGIN { exit !(value > 0 && value <= 100) }' ||
+  fail "busy child CPU delta was not measured: ${busy_cpu}"
+
+# Reusing a PID with a different lstart identity counts the new process lifetime
+# instead of inheriting or subtracting the dead process's CPU baseline.
+reuse_line=$(fake_sample reuse)
+reuse_cpu=$(field tree_cpu_pct "${reuse_line}")
+awk -v value="${reuse_cpu}" 'BEGIN { exit !(value >= 10 && value <= 20) }' ||
+  fail "recycled PID inherited its predecessor CPU baseline: ${reuse_cpu}"
+
+# Parent-chain totals and process-group totals are deliberately independent.
+pgroup_line=$(fake_sample pgroup)
+[ "$(field tree_processes "${pgroup_line}")" -eq 2 ] || fail "parent tree included orphan"
+[ "$(field tree_pgroup_processes "${pgroup_line}")" -eq 3 ] || fail "process group lost orphan"
+[ "$(field tree_rss_kb "${pgroup_line}")" -eq 300 ] || fail "parent tree RSS is wrong"
+[ "$(field tree_rss_pgroup_kb "${pgroup_line}")" -eq 700 ] || fail "process group RSS is wrong"
+
+# The watcher and every nested watcher child are excluded from both totals.
+exclude_line=$(fake_sample exclude)
+[ "$(field tree_processes "${exclude_line}")" -eq 2 ] || fail "watcher subtree entered parent tree"
+[ "$(field tree_pgroup_processes "${exclude_line}")" -eq 2 ] || fail "watcher subtree entered process group"
+[ "$(field tree_rss_kb "${exclude_line}")" -eq 300 ] || fail "watcher subtree entered tree RSS"
 
 # Adjacent exited case: preserve the existing terminal event without fake metrics.
 sleep 0 &

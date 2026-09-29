@@ -1,0 +1,42 @@
+# Test-only root-catalogue network payload.
+#
+# This entry is never selected by the production catalogue producer. The
+# PID1 QEMU lifecycle scenario selects it explicitly through
+# `--test-net-fault-after-ready`, bakes it at the ordinary `net.smf` path,
+# and thereby exercises the same kernel exit/reap/revoke/restart path as a
+# real service fault. It does not emit any PID1 lifecycle marker itself.
+
+use os.drivers.virtio.virtio_net.{VirtioNetDriver}
+use os.services.netstack.netstack_service.{NetstackService}
+use os.userlib.device.{request_assigned_device_grant}
+use os.userlib.syscall_raw.{syscall}
+
+val SYS_EXIT: u64 = 0u64
+val SYS_YIELD: u64 = 1u64
+val TEST_NET_FAULT_EXIT_CODE: u64 = 86u64
+val TEST_READY_YIELDS: u64 = 8u64
+
+fn main(argv: [text]) -> i32:
+    val _argv = argv
+    val grant_result = request_assigned_device_grant()
+    if grant_result.is_err():
+        return 1
+    var driver = VirtioNetDriver.new()
+    val initialized = driver.init_from_grant(grant_result.unwrap())
+    if initialized.is_err():
+        return 2
+    var service = NetstackService.new(driver)
+    # init_port is the production netstack initialization path without its
+    # infinite work loop. It creates the capability-authorized named `net`
+    # endpoint before this test payload schedules PID1 to observe readiness.
+    service.init_port()
+    if not service.running:
+        return 3
+    var yields: u64 = 0u64
+    while yields < TEST_READY_YIELDS:
+        syscall(SYS_YIELD, 0u64, 0u64, 0u64, 0u64, 0u64)
+        yields = yields + 1u64
+    # Exit via the ordinary task-exit ABI. RV64 routes a managed root-service
+    # child through terminate_direct_child_job before its parent can reap it.
+    syscall(SYS_EXIT, TEST_NET_FAULT_EXIT_CODE, 0u64, 0u64, 0u64, 0u64)
+    TEST_NET_FAULT_EXIT_CODE as i32

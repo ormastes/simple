@@ -1,0 +1,264 @@
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_digest256_equal, kpf_digest256_zero, kpf_id128_zero}
+use common.lint_kernel.model.DiagnosticV1
+use std.editor.kernel_plugin.facade.{EditorKpfDispatchV1, EditorKpfFacadeStatus, EditorKpfFacadeV1}
+use tooling_kernel.contract.model.*
+use tooling_kernel.workspace.workspace.ToolingWorkspaceV1
+
+pub enum EditorToolingClientStatusV1:
+    Ok
+    CapacityExceeded
+    DocumentNotFound
+    RevisionStale
+    SnapshotMismatch
+    LanguageMismatch
+    Cancelled
+    Disconnected
+    CommandFailed
+    TestNotFound
+
+pub struct EditorToolingDocumentHandleV1:
+    slot: i64
+    epoch: u64
+
+pub struct EditorToolingOpenResultV1:
+    status: EditorToolingClientStatusV1
+    handle: EditorToolingDocumentHandleV1
+
+pub struct EditorToolingRequestV1:
+    status: EditorToolingClientStatusV1
+    handle: ToolingRequestHandleV1
+
+pub struct EditorToolingAnchorV1:
+    document: EditorToolingDocumentHandleV1
+    revision: u64
+    content_digest: KpfDigest256
+    start_byte: u64
+    end_byte: u64
+
+pub struct EditorToolingDiagnosticV1:
+    diagnostic: DiagnosticV1
+    anchor: EditorToolingAnchorV1
+
+pub struct EditorToolingTestNodeV1:
+    id: text
+    label: text
+    document: EditorToolingDocumentHandleV1
+    command_id: text
+    payload: text
+
+fn _invalid_editor_document() -> EditorToolingDocumentHandleV1:
+    EditorToolingDocumentHandleV1(slot: -1, epoch: 0)
+
+fn _map_tooling_status(status: ToolingStatusV1) -> EditorToolingClientStatusV1:
+    match status:
+        case ToolingStatusV1.Ok: EditorToolingClientStatusV1.Ok
+        case ToolingStatusV1.CapacityExceeded: EditorToolingClientStatusV1.CapacityExceeded
+        case ToolingStatusV1.DocumentNotFound: EditorToolingClientStatusV1.DocumentNotFound
+        case ToolingStatusV1.SessionNotFound: EditorToolingClientStatusV1.Disconnected
+        case ToolingStatusV1.RevisionStale: EditorToolingClientStatusV1.RevisionStale
+        case ToolingStatusV1.SnapshotMismatch: EditorToolingClientStatusV1.SnapshotMismatch
+        case ToolingStatusV1.LanguageMismatch: EditorToolingClientStatusV1.LanguageMismatch
+        case ToolingStatusV1.GenerationMismatch: EditorToolingClientStatusV1.Disconnected
+        case ToolingStatusV1.Cancelled: EditorToolingClientStatusV1.Cancelled
+        case ToolingStatusV1.Disconnected: EditorToolingClientStatusV1.Disconnected
+
+fn _map_dispatch_status(status: EditorKpfFacadeStatus) -> EditorToolingClientStatusV1:
+    if status == EditorKpfFacadeStatus.Accepted or status == EditorKpfFacadeStatus.Pending:
+        return EditorToolingClientStatusV1.Ok
+    if status == EditorKpfFacadeStatus.NotFound:
+        return EditorToolingClientStatusV1.TestNotFound
+    if status == EditorKpfFacadeStatus.WouldBlock:
+        return EditorToolingClientStatusV1.CapacityExceeded
+    if status == EditorKpfFacadeStatus.Quiescing or status == EditorKpfFacadeStatus.Disabled:
+        return EditorToolingClientStatusV1.Disconnected
+    EditorToolingClientStatusV1.CommandFailed
+
+pub class EditorToolingClientV1:
+    workspace: ToolingWorkspaceV1
+    facade: EditorKpfFacadeV1
+    capacity: i64
+    active: [bool]
+    epochs: [u64]
+    paths: [text]
+    documents: [ToolingDocumentHandleV1]
+    sessions: [ToolingSessionHandleV1]
+    revisions: [u64]
+    digests: [KpfDigest256]
+    diagnostics: [[EditorToolingDiagnosticV1]]
+    test_capacity: i64
+    tests: [EditorToolingTestNodeV1]
+    connected: bool
+
+impl EditorToolingClientV1:
+    pub static fn create(workspace: ToolingWorkspaceV1, facade: EditorKpfFacadeV1, document_capacity: i64, test_capacity: i64) -> EditorToolingClientV1:
+        var active: [bool] = []
+        var epochs: [u64] = []
+        var paths: [text] = []
+        var documents: [ToolingDocumentHandleV1] = []
+        var sessions: [ToolingSessionHandleV1] = []
+        var revisions: [u64] = []
+        var digests: [KpfDigest256] = []
+        var diagnostics: [[EditorToolingDiagnosticV1]] = []
+        var index = 0
+        while index < document_capacity:
+            active.push(false)
+            epochs.push(0)
+            paths.push("")
+            documents.push(tooling_invalid_document_handle_v1())
+            sessions.push(tooling_invalid_session_handle_v1())
+            revisions.push(0)
+            digests.push(kpf_digest256_zero())
+            diagnostics.push([])
+            index = index + 1
+        EditorToolingClientV1(workspace: workspace, facade: facade, capacity: document_capacity, active: active, epochs: epochs, paths: paths, documents: documents, sessions: sessions, revisions: revisions, digests: digests, diagnostics: diagnostics, test_capacity: test_capacity, tests: [], connected: true)
+
+    fn validate_document(handle: EditorToolingDocumentHandleV1) -> EditorToolingClientStatusV1:
+        if not self.connected:
+            return EditorToolingClientStatusV1.Disconnected
+        if handle.slot < 0 or handle.slot >= self.capacity:
+            return EditorToolingClientStatusV1.DocumentNotFound
+        if not self.active[handle.slot] or self.epochs[handle.slot] != handle.epoch:
+            return EditorToolingClientStatusV1.DocumentNotFound
+        EditorToolingClientStatusV1.Ok
+
+    me open_snapshot(path: text, snapshot: ToolingDocumentSnapshotV1, provider_generation: u64) -> EditorToolingOpenResultV1:
+        if not self.connected:
+            return EditorToolingOpenResultV1(status: EditorToolingClientStatusV1.Disconnected, handle: _invalid_editor_document())
+        var slot = -1
+        var index = 0
+        while index < self.capacity:
+            if not self.active[index] and slot < 0:
+                slot = index
+            index = index + 1
+        if slot < 0:
+            return EditorToolingOpenResultV1(status: EditorToolingClientStatusV1.CapacityExceeded, handle: _invalid_editor_document())
+        val opened = self.workspace.documents.open(snapshot)
+        if opened.status != ToolingStatusV1.Ok:
+            return EditorToolingOpenResultV1(status: _map_tooling_status(opened.status), handle: _invalid_editor_document())
+        val session = self.workspace.open_language_session(snapshot.language_id, provider_generation)
+        if session.status != ToolingStatusV1.Ok:
+            self.workspace.documents.close(opened.handle)
+            return EditorToolingOpenResultV1(status: _map_tooling_status(session.status), handle: _invalid_editor_document())
+        self.epochs[slot] = self.epochs[slot] + 1
+        self.active[slot] = true
+        self.paths[slot] = path
+        self.documents[slot] = opened.handle
+        self.sessions[slot] = session.handle
+        self.revisions[slot] = snapshot.revision
+        self.digests[slot] = snapshot.content_digest
+        self.diagnostics[slot] = []
+        EditorToolingOpenResultV1(status: EditorToolingClientStatusV1.Ok, handle: EditorToolingDocumentHandleV1(slot: slot, epoch: self.epochs[slot]))
+
+    me update_snapshot(handle: EditorToolingDocumentHandleV1, snapshot: ToolingDocumentSnapshotV1) -> EditorToolingClientStatusV1:
+        val valid = self.validate_document(handle)
+        if valid != EditorToolingClientStatusV1.Ok:
+            return valid
+        val status = self.workspace.documents.update(self.documents[handle.slot], snapshot)
+        if status != ToolingStatusV1.Ok:
+            return _map_tooling_status(status)
+        self.revisions[handle.slot] = snapshot.revision
+        self.digests[handle.slot] = snapshot.content_digest
+        self.diagnostics[handle.slot] = []
+        EditorToolingClientStatusV1.Ok
+
+    me begin_analysis(handle: EditorToolingDocumentHandleV1) -> EditorToolingRequestV1:
+        val valid = self.validate_document(handle)
+        if valid != EditorToolingClientStatusV1.Ok:
+            return EditorToolingRequestV1(status: valid, handle: tooling_invalid_request_handle_v1())
+        val result = self.workspace.begin_request(self.documents[handle.slot], self.sessions[handle.slot])
+        EditorToolingRequestV1(status: _map_tooling_status(result.status), handle: result.handle)
+
+    fn analysis_is_cancelled(request: ToolingRequestHandleV1) -> bool:
+        self.workspace.is_request_cancelled(request)
+
+    me publish_diagnostics(handle: EditorToolingDocumentHandleV1, request: ToolingRequestHandleV1, digest: KpfDigest256, values: [DiagnosticV1]) -> EditorToolingClientStatusV1:
+        val valid = self.validate_document(handle)
+        if valid != EditorToolingClientStatusV1.Ok:
+            return valid
+        val publication = self.workspace.publish_diagnostics(request, digest, values)
+        if publication.status != ToolingStatusV1.Ok:
+            return _map_tooling_status(publication.status)
+        var projected: [EditorToolingDiagnosticV1] = []
+        for value in values:
+            projected.push(EditorToolingDiagnosticV1(
+                diagnostic: value,
+                anchor: EditorToolingAnchorV1(document: handle, revision: request.document_revision, content_digest: digest, start_byte: value.primary_span.start_byte, end_byte: value.primary_span.end_byte)
+            ))
+        self.diagnostics[handle.slot] = projected
+        EditorToolingClientStatusV1.Ok
+
+    fn diagnostics_for(handle: EditorToolingDocumentHandleV1) -> [EditorToolingDiagnosticV1]:
+        if self.validate_document(handle) != EditorToolingClientStatusV1.Ok:
+            return []
+        self.diagnostics[handle.slot]
+
+    fn anchor_is_current(anchor: EditorToolingAnchorV1) -> bool:
+        if self.validate_document(anchor.document) != EditorToolingClientStatusV1.Ok:
+            return false
+        val slot = anchor.document.slot
+        self.revisions[slot] == anchor.revision and kpf_digest256_equal(self.digests[slot], anchor.content_digest)
+
+    fn quickfix_anchor(handle: EditorToolingDocumentHandleV1, diagnostic_index: i64) -> Result<EditorToolingAnchorV1, EditorToolingClientStatusV1>:
+        val valid = self.validate_document(handle)
+        if valid != EditorToolingClientStatusV1.Ok:
+            return Err(valid)
+        if diagnostic_index < 0 or diagnostic_index >= self.diagnostics[handle.slot].len():
+            return Err(EditorToolingClientStatusV1.DocumentNotFound)
+        val anchor = self.diagnostics[handle.slot][diagnostic_index].anchor
+        if not self.anchor_is_current(anchor):
+            return Err(EditorToolingClientStatusV1.RevisionStale)
+        Ok(anchor)
+
+    me dispatch_command(command_id: text, payload: text, now_ns: i64) -> EditorKpfDispatchV1:
+        self.facade.dispatch_command(command_id, payload, now_ns)
+
+    me register_test(node: EditorToolingTestNodeV1) -> EditorToolingClientStatusV1:
+        if self.validate_document(node.document) != EditorToolingClientStatusV1.Ok:
+            return EditorToolingClientStatusV1.DocumentNotFound
+        if self.tests.len() >= self.test_capacity:
+            return EditorToolingClientStatusV1.CapacityExceeded
+        for existing in self.tests:
+            if existing.id == node.id:
+                return EditorToolingClientStatusV1.CapacityExceeded
+        self.tests.push(node)
+        EditorToolingClientStatusV1.Ok
+
+    me run_test(test_id: text, now_ns: i64) -> EditorToolingClientStatusV1:
+        if not self.connected:
+            return EditorToolingClientStatusV1.Disconnected
+        for node in self.tests:
+            if node.id == test_id:
+                if self.validate_document(node.document) != EditorToolingClientStatusV1.Ok:
+                    return EditorToolingClientStatusV1.DocumentNotFound
+                return _map_dispatch_status(self.facade.dispatch_command(node.command_id, node.payload, now_ns).status)
+        EditorToolingClientStatusV1.TestNotFound
+
+    me close_document(handle: EditorToolingDocumentHandleV1) -> EditorToolingClientStatusV1:
+        val valid = self.validate_document(handle)
+        if valid != EditorToolingClientStatusV1.Ok:
+            return valid
+        self.workspace.disconnect_session(self.sessions[handle.slot])
+        self.workspace.documents.close(self.documents[handle.slot])
+        self.active[handle.slot] = false
+        self.diagnostics[handle.slot] = []
+        var retained_tests: [EditorToolingTestNodeV1] = []
+        for node in self.tests:
+            if node.document.slot != handle.slot or node.document.epoch != handle.epoch:
+                retained_tests.push(node)
+        self.tests = retained_tests
+        EditorToolingClientStatusV1.Ok
+
+    me disconnect() -> EditorToolingClientStatusV1:
+        if not self.connected:
+            return EditorToolingClientStatusV1.Disconnected
+        var index = 0
+        while index < self.capacity:
+            if self.active[index]:
+                self.workspace.disconnect_session(self.sessions[index])
+                self.workspace.documents.close(self.documents[index])
+                self.active[index] = false
+                self.diagnostics[index] = []
+            index = index + 1
+        self.tests = []
+        self.connected = false
+        EditorToolingClientStatusV1.Ok

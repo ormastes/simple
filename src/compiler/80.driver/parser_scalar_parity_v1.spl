@@ -1,0 +1,115 @@
+# codex-impl
+# Frontend-independent scalar parity qualification for REQ-009.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.common.crypto.sha256.{sha256_bytes}
+
+pub const PARSER_SCALAR_PARITY_SCHEMA_V1: u16 = 1u16
+
+pub enum ParserScalarParityErrorV1:
+    InvalidAuthority
+    ImplementationsNotIndependent
+    InvalidCoverage
+    PartialCoverageCannotPromote
+    NormalizedOutputMismatch
+
+pub struct ParserScalarNormalizedOutputV1:
+    token_digest: EnvironmentDigest256V1
+    span_digest: EnvironmentDigest256V1
+    node_digest: EnvironmentDigest256V1
+    diagnostic_digest: EnvironmentDigest256V1
+
+pub struct ParserScalarParityEvidenceV1:
+    source_snapshot_identity: EnvironmentDigest256V1
+    source_snapshot_generation: u64
+    dialect_id: u32
+    grammar_digest: EnvironmentDigest256V1
+    actions_digest: EnvironmentDigest256V1
+    schema_digest: EnvironmentDigest256V1
+    semantic_profile_digest: EnvironmentDigest256V1
+    legacy_implementation_identity: EnvironmentDigest256V1
+    legacy_generation: u64
+    canonical_implementation_identity: EnvironmentDigest256V1
+    canonical_generation: u64
+    legacy_output: ParserScalarNormalizedOutputV1
+    canonical_output: ParserScalarNormalizedOutputV1
+    total_regions: u64
+    covered_regions: u64
+    unsupported_regions: u64
+    coverage_evidence_digest: EnvironmentDigest256V1
+
+pub struct ParserScalarParityReceiptV1:
+    schema_version: u16
+    source_snapshot_identity: EnvironmentDigest256V1
+    dialect_id: u32
+    grammar_digest: EnvironmentDigest256V1
+    semantic_profile_digest: EnvironmentDigest256V1
+    legacy_implementation_identity: EnvironmentDigest256V1
+    canonical_implementation_identity: EnvironmentDigest256V1
+    normalized_output_digest: EnvironmentDigest256V1
+    covered_regions: u64
+    default_promotion_qualified: bool
+    coverage_evidence_digest: EnvironmentDigest256V1
+
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _output_valid(v: ParserScalarNormalizedOutputV1) -> bool:
+    _declared(v.token_digest) and _declared(v.span_digest) and
+        _declared(v.node_digest) and _declared(v.diagnostic_digest)
+fn _output_same(a: ParserScalarNormalizedOutputV1, b: ParserScalarNormalizedOutputV1) -> bool:
+    _same(a.token_digest, b.token_digest) and _same(a.span_digest, b.span_digest) and
+        _same(a.node_digest, b.node_digest) and _same(a.diagnostic_digest, b.diagnostic_digest)
+
+fn _push_u64(out: [i64], value: u64):
+    for shift in 0..8:
+        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+
+fn _push_digest(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64(out, value.w0); _push_u64(out, value.w1)
+    _push_u64(out, value.w2); _push_u64(out, value.w3)
+
+fn _read_u64(bytes: [i64], offset: i64) -> u64:
+    var value = 0u64
+    for index in 0..8:
+        value = value | ((bytes[offset + index] as u64) << ((index as u64) * 8u64))
+    value
+
+fn _normalized_output_digest(value: ParserScalarNormalizedOutputV1) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_digest(material, value.token_digest); _push_digest(material, value.span_digest)
+    _push_digest(material, value.node_digest); _push_digest(material, value.diagnostic_digest)
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(w0: _read_u64(raw, 0), w1: _read_u64(raw, 8),
+        w2: _read_u64(raw, 16), w3: _read_u64(raw, 24))
+
+pub fn parser_scalar_parity_qualify_v1(
+    evidence: ParserScalarParityEvidenceV1
+) -> Result<ParserScalarParityReceiptV1, ParserScalarParityErrorV1>:
+    if not _declared(evidence.source_snapshot_identity) or evidence.source_snapshot_generation == 0u64 or
+       evidence.dialect_id == 0u32 or not _declared(evidence.grammar_digest) or
+       not _declared(evidence.actions_digest) or not _declared(evidence.schema_digest) or
+       not _declared(evidence.semantic_profile_digest) or
+       not _declared(evidence.legacy_implementation_identity) or evidence.legacy_generation == 0u64 or
+       not _declared(evidence.canonical_implementation_identity) or evidence.canonical_generation == 0u64 or
+       not _declared(evidence.coverage_evidence_digest) or
+       not _output_valid(evidence.legacy_output) or not _output_valid(evidence.canonical_output):
+        return Err(ParserScalarParityErrorV1.InvalidAuthority)
+    if _same(evidence.legacy_implementation_identity, evidence.canonical_implementation_identity):
+        return Err(ParserScalarParityErrorV1.ImplementationsNotIndependent)
+    if evidence.total_regions == 0u64 or evidence.covered_regions > evidence.total_regions or
+       evidence.unsupported_regions > evidence.total_regions:
+        return Err(ParserScalarParityErrorV1.InvalidCoverage)
+    if evidence.covered_regions != evidence.total_regions or evidence.unsupported_regions != 0u64:
+        return Err(ParserScalarParityErrorV1.PartialCoverageCannotPromote)
+    if not _output_same(evidence.legacy_output, evidence.canonical_output):
+        return Err(ParserScalarParityErrorV1.NormalizedOutputMismatch)
+    Ok(ParserScalarParityReceiptV1(schema_version: PARSER_SCALAR_PARITY_SCHEMA_V1,
+        source_snapshot_identity: evidence.source_snapshot_identity, dialect_id: evidence.dialect_id,
+        grammar_digest: evidence.grammar_digest, semantic_profile_digest: evidence.semantic_profile_digest,
+        legacy_implementation_identity: evidence.legacy_implementation_identity,
+        canonical_implementation_identity: evidence.canonical_implementation_identity,
+        normalized_output_digest: _normalized_output_digest(evidence.canonical_output),
+        covered_regions: evidence.covered_regions, default_promotion_qualified: true,
+        coverage_evidence_digest: evidence.coverage_evidence_digest))

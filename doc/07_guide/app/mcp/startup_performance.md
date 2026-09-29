@@ -1,23 +1,23 @@
 # MCP / Tool-Server Startup Performance Guide
 
-Date: 2026-06-11. Launch-contract update: 2026-07-26.
+Date: 2026-06-11. Latest re-verification taken on linux x86_64 in the shared
+repo worktree after the rt-forward/interface-cache MCP fixes were pushed on
+2026-06-10.
 
 ## Why this guide
 
-Local `simple-mcp` and `simple-pipe-mcp` registrations now execute
-`bin/simple src/app/mcp/main.spl` directly. A 2026-07-26 macOS probe completed
-initialize, tools/list, and a quoted `node_repl` call in about **1.26 s**.
-Restarting the MCP client is sufficient after source changes; native MCP
-artifact builds are reserved for package/deployment/release lanes.
+`bin/simple_mcp_server` now answers a framed `initialize` + `tools/list`
+handshake in **1366 ms** while `bin/simple_lsp_mcp_server` does it in **50 ms**
+on the current local deploy. Both are native servers behind the same wrapper
+pattern. The remaining gap is not the language or the runtime — it is *how
+much work happens before the first response* and *how many times that work
+happens*.
 
-The native measurements below remain the distribution baseline. Simple LSP
-MCP continues to use its native wrapper.
-
-## Native distribution breakdown (2026-06-11)
+## Measured breakdown (2026-06-11)
 
 | Path | Handshake time | Note |
 |------|---------------|------|
-| `build/bootstrap/mcp-package/simple_mcp_server` (direct) | about 1360 ms | chosen candidate, 151 tools, 38 KB tools/list |
+| `build/bootstrap/mcp-package/simple_mcp_server` (direct) | about 1360 ms | chosen candidate, 176 tools, 67 KB tools/list |
 | `bin/release/<triple>/simple_mcp_server` (direct) | 5 ms | stale: fails probe (missing wm-text tools) |
 | `bin/simple_mcp_server` (wrapper, cold stale-stamp re-probe) | about 2720 ms | = probe handshake + real exec |
 | `bin/simple_mcp_server` (wrapper, warm cached stamp) | 1366 ms | current steady-state local deploy |
@@ -41,8 +41,8 @@ the earlier attribution:
 
 gdb stack samples (0.4/0.8/1.2 s) all land in one function with
 `__memcpy_avx_unaligned_erms` underneath: repeated full-buffer string copies plus a
-per-character loop — the O(n²) concat/escape pattern building the 38 KB tools/list
-JSON. 38 KB should cost ~10 ms, not 1500 ms. "Before the first response" in the
+per-character loop — the O(n²) concat/escape pattern building the 67 KB tools/list
+JSON. 67 KB should cost ~10 ms, not 1500 ms. "Before the first response" in the
 old framing is really "before the first *tools/list* response".
 
 Landed since (plan `doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md`):
@@ -136,8 +136,8 @@ That is the baseline to preserve when touching `src/app/mcp`,
 **Diagnosis knobs:**
 
 ```bash
-SIMPLE_LOADER_TRACE=1 bin/simple src/app/mcp/main.spl       # module load trace
-SIMPLE_PROFILE=1      bin/simple src/app/mcp/main.spl       # interpreter profile
+SIMPLE_LOADER_TRACE=1 bin/simple run src/app/mcp/main.spl   # module load trace
+SIMPLE_PROFILE=1      bin/simple run src/app/mcp/main.spl   # interpreter profile
 bin/simple deps normal src/app/mcp/main.spl                 # exclusive/shared per import
 ```
 
@@ -159,7 +159,7 @@ closure, found and verified with `bin/simple deps deep`:
 Closure: 39 → 38 files, 9,031 → ~8,350 code lines, ~309 → ~276 KB est.
 native. Measured via `scripts/check/check-mcp-native-smoke.shs`:
 `mcp_startup_ms` 2707 → **1309–1314** (warm, exit 0, all six direct-rt
-gates true, framing valid, 151 tools). The pattern generalizes: run
+gates true, framing valid, 176 tools). The pattern generalizes: run
 `bin/simple deps deep <entry>` on any tool-server entry and inline or
 localize single-consumer subtrees before reaching for caching.
 
@@ -171,30 +171,14 @@ add read timeouts to transport reads, and never route script startup through
 compile/JIT as a workaround for a slow fast path — fix the fast path or file
 a bug.
 
-## 2026-07-01 — script-mode parity gate
-
-Codex, Claude, and Gemini should launch the repo MCP scripts, but the scripts
-must not force `SIMPLE_MCP_TOOL_SET=all`; `auto` is the fast default and keeps
-dispatch callable. The focused diagnostic is:
-
-```bash
-sh scripts/check/check-mcp-script-mode-perf.shs
-MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
-```
-
-Current local result is still a fail against Python/Bun cold-stdio comparators:
-`simple_mcp` source/script median ~365 ms, `simple_lsp_mcp` ~60 ms, Python3
-~26 ms, Bun ~34 ms. Track the remaining gap in
-`doc/08_tracking/bug/mcp_script_mode_python_bun_parity_2026-07-01.md`.
-
 ## 2026-06-13 — core-default + dynload upgrade
 
 The tools list now defaults to an `auto` mode that cuts handshake time by
 erasing the tools/list JSON build from the critical path. The initialize
 response declares `"tools":{"listChanged":true}`, then the first tools/list
-serves only the 20-tool core set (~0.07 s), and the server emits a single
+serves only the 19-tool core set (~0.07 s), and the server emits a single
 `notifications/tools/list_changed` once that notification is flushed.
-Clients respecting the notification upgrade to the full 151-tool list on
+Clients respecting the notification upgrade to the full 176-tool list on
 the next tools/list call, which now returns a cached result (built once per
 process in `main_static_tools.spl`).
 
@@ -204,11 +188,11 @@ see `doc/08_tracking/bug/native_env_get_raw_pointer_2026-06-12.md`):
 
 | Mode | First tools/list | Behavior | Use case |
 |------|------------------|----------|----------|
-| `auto` (default) | core 20 tools | upgrades to full 151 after emit list_changed | MCP clients that handle dynamic list updates |
-| `all` | full 151 tools | static; no list_changed | simplifies client stubs, pays full JSON cost upfront |
-| `core` | core 20 tools | never upgrades | minimal surface, e.g., lightweight embedded clients |
+| `auto` (default) | core 19 tools | upgrades to full 176 after emit list_changed | MCP clients that handle dynamic list updates |
+| `all` | full 176 tools | static; no list_changed | simplifies client stubs, pays full JSON cost upfront |
+| `core` | core 19 tools | never upgrades | minimal surface, e.g., lightweight embedded clients |
 
-Dispatch remains unfiltered: all 151 tools stay callable by name in every
+Dispatch remains unfiltered: all 176 tools stay callable by name in every
 mode, so stale clients are still safe. Invalid set values default to `auto`.
 
 Measured on 2026-06-13 (`build/bootstrap/mcp-package/simple_mcp_server`):
@@ -232,23 +216,9 @@ without conflating it with the timing gate:
 - `scripts/check/validate_mcp_native_smoke.spl` selects the **last frame
   containing `"tools":`** (`last_tools_payload`) rather than the final frame, so
   the trailing `list_changed` notification does not hide the full tool list. The
-  full-set assertions (`mcp_tools_count` = 151, schema valid, `play_wm_text_*`
+  full-set assertions (`mcp_tools_count` = 176, schema valid, `play_wm_text_*`
   present) and the stale-stamp re-probe check all read this functional capture.
 
 A validator that assumes the tools/list response is the final frame reports
 `mcp_tools_count=0` against a core-first server even though the output is valid;
 the content-based frame selection above is the robust fix.
-
-## 2026-07-23 — local pure-Simple recovery deployment
-
-The locally deployed
-`bin/release/x86_64-unknown-linux-gnu/simple_mcp_server` passed a bounded framed
-`initialize`/`tools/list` sanity check as a compiled pure-Simple artifact. Its
-SHA-256 is
-`e189b71947d0ceaa29c6a0a2dac65c6e11a75f37403d2fe1ae19577da1a24212`.
-Keep production launch native-first with no silent source or Rust-seed fallback.
-
-The temporarily deployed Stage 2 compiler is recovery-only: it can rebuild
-native artifacts, but it does not provide the Stage 4 `run`, `test`, or SPipe
-docgen surface and is not full-CLI or release evidence. Promotion still requires
-the fresh Stage 4 essential-tools smoke and the bootstrap MCP acceptance gate.

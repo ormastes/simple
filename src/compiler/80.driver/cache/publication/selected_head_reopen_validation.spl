@@ -1,0 +1,224 @@
+"""Descriptor-bound selected-head input codec and reopen validator.
+
+The bytes handled here are diagnostic input read by a future qualified host
+provider. This module neither issues namespace authority nor promotes a
+journal/CAS/catalog state. It preserves the selected-head codec as the inner
+format and deliberately leaves all journal bytes after the selected prefix
+unadmitted.
+"""
+
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.{
+    CacheCooperativeSelectedHeadV1, CacheCooperativeDurabilityTraceV1,
+    CacheCooperativeDurabilityOutcomeV1,
+    cache_cooperative_selected_head_valid_v1,
+    cache_cooperative_selected_head_encode_v1,
+    cache_cooperative_selected_head_decode_v1,
+    cache_cooperative_selected_prefix_v1,
+    cache_cooperative_durability_outcome_v1}
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, action_root_journal_find_operation_v1}
+use compiler.driver.cache.publication.three_payload_selected_head_publisher.{
+    L78PublicationPhaseV4}
+
+val SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1: text =
+    "simple.cache.descriptor-bound-selected-head-input.v1"
+val SELECTED_HEAD_REOPEN_MAX_HEAD_BYTES_V1: i64 = 1024
+val SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1: i64 = 16777216
+val SELECTED_HEAD_REOPEN_MAX_INPUT_BYTES_V1: i64 = 16778432
+
+pub struct SelectedHeadReopenInputV1:
+    selected_head: CacheCooperativeSelectedHeadV1
+    journal: text
+
+pub enum SelectedHeadReopenStatusV1:
+    Selected
+    Indeterminate
+    InvalidDurabilityTrace
+    MalformedInput
+    InvalidSelectedPrefix
+    StaleWriter
+    StaleDescriptor
+    OperationMismatch
+    ClosureMismatch
+    RejectedBeforeHeadReplacement
+
+pub struct SelectedHeadReopenCandidateV1:
+    status: SelectedHeadReopenStatusV1
+    selected_head: CacheCooperativeSelectedHeadV1?
+    selected_journal: text
+    ignored_suffix_bytes: i64
+    suffix_requires_quarantine: bool
+
+fn _reopen_v1(status: SelectedHeadReopenStatusV1,
+              head: CacheCooperativeSelectedHeadV1?, journal: text,
+              suffix_bytes: i64, suffix_requires_quarantine: bool
+) -> SelectedHeadReopenCandidateV1:
+    SelectedHeadReopenCandidateV1(status: status, selected_head: head,
+        selected_journal: journal, ignored_suffix_bytes: suffix_bytes,
+        suffix_requires_quarantine: suffix_requires_quarantine)
+
+fn _canonical_nonnegative_i64_v1(encoded: text) -> Result<i64, text>:
+    if val value = encoded.to_i64():
+        if value < 0 or value.to_string() != encoded:
+            return Err("selected-head input length is not canonical")
+        return Ok(value)
+    Err("selected-head input length is not numeric")
+
+fn _input_body_v1(head: text, journal: text) -> text:
+    SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1 + "\n" + head.len().to_string() +
+        "\n" + journal.len().to_string() + "\n" + head + journal
+
+pub fn selected_head_reopen_input_encode_v1(
+    input: SelectedHeadReopenInputV1,
+) -> Result<text, text>:
+    if (input.journal.len() > SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1 or
+            not cache_cooperative_selected_head_valid_v1(input.selected_head)):
+        return Err("selected-head input fields exceed their bounds")
+    val head = cache_cooperative_selected_head_encode_v1(input.selected_head)?
+    val encoded = _input_body_v1(head, input.journal)
+    if encoded.len() > SELECTED_HEAD_REOPEN_MAX_INPUT_BYTES_V1:
+        return Err("selected-head input exceeds its envelope bound")
+    Ok(encoded)
+
+pub fn selected_head_reopen_input_decode_v1(
+    encoded: text,
+) -> Result<SelectedHeadReopenInputV1, text>:
+    # Bound before splitting, allocating payload slices, or parsing lengths.
+    if encoded.len() > SELECTED_HEAD_REOPEN_MAX_INPUT_BYTES_V1:
+        return Err("selected-head input exceeds its envelope bound")
+    val magic_end = encoded.index_of("\n")
+    if magic_end < 0 or encoded.slice(0, magic_end) != SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1:
+        return Err("selected-head input magic is invalid")
+    val head_length_end = encoded.index_of("\n", magic_end + 1)
+    if head_length_end < 0:
+        return Err("selected-head input head length is absent")
+    val journal_length_end = encoded.index_of("\n", head_length_end + 1)
+    if journal_length_end < 0:
+        return Err("selected-head input journal length is absent")
+    val head_length = _canonical_nonnegative_i64_v1(
+        encoded.slice(magic_end + 1, head_length_end))?
+    val journal_length = _canonical_nonnegative_i64_v1(
+        encoded.slice(head_length_end + 1, journal_length_end))?
+    if (head_length > SELECTED_HEAD_REOPEN_MAX_HEAD_BYTES_V1 or
+            journal_length > SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1):
+        return Err("selected-head input payload length exceeds a bound")
+    # The individual bounds make this sum safely smaller than the bounded
+    # envelope, so this checked-shape comparison cannot wrap.
+    val payload_start = journal_length_end + 1
+    val expected_end = payload_start + head_length + journal_length
+    if expected_end != encoded.len():
+        return Err("selected-head input is torn or has trailing bytes")
+    val head_encoded = encoded.slice(payload_start, payload_start + head_length)
+    val journal = encoded.slice(payload_start + head_length, expected_end)
+    val head = cache_cooperative_selected_head_decode_v1(head_encoded)?
+    val input = SelectedHeadReopenInputV1(selected_head: head, journal: journal)
+    # The re-encode check rejects every tolerated parser normalization and any
+    # alternate envelope spelling, including unexpected suffix data.
+    if selected_head_reopen_input_encode_v1(input)? != encoded:
+        return Err("selected-head input is not canonical")
+    Ok(input)
+
+fn _same_head_v1(left: CacheCooperativeSelectedHeadV1,
+                 right: CacheCooperativeSelectedHeadV1) -> bool:
+    left.revision == right.revision and left.generation == right.generation and
+        left.manifest_digest == right.manifest_digest and
+        left.accepted_journal_bytes == right.accepted_journal_bytes and
+        left.accepted_journal_digest == right.accepted_journal_digest and
+        left.operation_digest == right.operation_digest and
+        left.writer_incarnation == right.writer_incarnation and
+        left.closure_digest == right.closure_digest and
+        left.verifier_registry_digest == right.verifier_registry_digest and
+        left.checksum == right.checksum
+
+# Recompute the operation digest from the exact selected journal record. A
+# matching digest copied into both caller heads is not enough to authorize
+# reopen when those bytes do not contain the bound operation.
+pub fn selected_head_operation_matches_journal_v1(
+    head: CacheCooperativeSelectedHeadV1,
+    journal: text,
+) -> bool:
+    val selected = cache_cooperative_selected_prefix_v1(head, journal)
+    if selected.is_err(): return false
+    val prefix = selected.unwrap()
+    val record = action_root_journal_find_operation_v1(
+        prefix, head.generation, head.operation_digest)
+    record != nil and record?.manifest_digest == head.manifest_digest
+
+# `expected_head` is a comparison value captured by the future live host
+# issuer. Matching it does not create that issuer. Publishing-writer identity
+# is retained in this head, while the restarted owner's live writer receipt is
+# compared independently below.
+pub fn validate_selected_head_reopen_input_v1(
+    encoded_input: text,
+    expected_head: CacheCooperativeSelectedHeadV1,
+    expected_live_writer_incarnation: i64,
+    observed_live_writer_incarnation: i64,
+    trace: CacheCooperativeDurabilityTraceV1,
+) -> SelectedHeadReopenCandidateV1:
+    val outcome = cache_cooperative_durability_outcome_v1(trace)
+    # A possibly started replacement wins over malformed or missing later
+    # evidence. Only the physical owner can resolve it by exact recovery.
+    if outcome == CacheCooperativeDurabilityOutcomeV1.Indeterminate:
+        return _reopen_v1(SelectedHeadReopenStatusV1.Indeterminate, nil, "", 0, false)
+    if outcome == CacheCooperativeDurabilityOutcomeV1.InvalidOrder:
+        return _reopen_v1(SelectedHeadReopenStatusV1.InvalidDurabilityTrace,
+            nil, "", 0, false)
+    if outcome == CacheCooperativeDurabilityOutcomeV1.RejectedBeforeHeadReplacement:
+        return _reopen_v1(SelectedHeadReopenStatusV1.RejectedBeforeHeadReplacement,
+            nil, "", 0, false)
+    if (expected_live_writer_incarnation < 0 or
+            observed_live_writer_incarnation < 0 or
+            not cache_cooperative_selected_head_valid_v1(expected_head)):
+        return _reopen_v1(SelectedHeadReopenStatusV1.MalformedInput,
+            nil, "", 0, false)
+    if observed_live_writer_incarnation != expected_live_writer_incarnation:
+        return _reopen_v1(SelectedHeadReopenStatusV1.StaleWriter,
+            nil, "", 0, false)
+    val decoded = selected_head_reopen_input_decode_v1(encoded_input)
+    if decoded.is_err():
+        return _reopen_v1(SelectedHeadReopenStatusV1.MalformedInput,
+            nil, "", 0, false)
+    val input = decoded.unwrap()
+    val head = input.selected_head
+    if head.operation_digest != expected_head.operation_digest:
+        return _reopen_v1(SelectedHeadReopenStatusV1.OperationMismatch,
+            Some(head), "", 0, false)
+    if (head.closure_digest != expected_head.closure_digest or
+            head.verifier_registry_digest != expected_head.verifier_registry_digest):
+        return _reopen_v1(SelectedHeadReopenStatusV1.ClosureMismatch,
+            Some(head), "", 0, false)
+    if not _same_head_v1(head, expected_head):
+        return _reopen_v1(SelectedHeadReopenStatusV1.StaleDescriptor,
+            Some(head), "", 0, false)
+    val selected = cache_cooperative_selected_prefix_v1(head, input.journal)
+    if selected.is_err():
+        return _reopen_v1(SelectedHeadReopenStatusV1.InvalidSelectedPrefix,
+            Some(head), "", 0, false)
+    val prefix = selected.unwrap()
+    if ActionRootJournalV1.recovered(prefix, head.generation).is_err():
+        return _reopen_v1(SelectedHeadReopenStatusV1.InvalidSelectedPrefix,
+            Some(head), "", 0, false)
+    if not selected_head_operation_matches_journal_v1(head, prefix):
+        return _reopen_v1(SelectedHeadReopenStatusV1.OperationMismatch,
+            Some(head), "", 0, false)
+    val suffix_bytes = input.journal.len() - prefix.len()
+    val suffix_requires_quarantine = if suffix_bytes == 0:
+        false
+    else:
+        ActionRootJournalV1.recovered(input.journal, head.generation).is_err()
+    _reopen_v1(SelectedHeadReopenStatusV1.Selected, Some(head), prefix,
+        suffix_bytes, suffix_requires_quarantine)
+
+# Convert only the validator's status into the owner phase.  This is a
+# diagnostic projection: it never mints a host receipt.  Indeterminate stays
+# Unknown, and there is deliberately no Unknown -> NotStarted path.
+pub fn selected_head_reopen_phase_l78_v4(
+    candidate: SelectedHeadReopenCandidateV1,
+) -> L78PublicationPhaseV4:
+    match candidate.status:
+        case SelectedHeadReopenStatusV1.Selected:
+            L78PublicationPhaseV4.Committed
+        case SelectedHeadReopenStatusV1.RejectedBeforeHeadReplacement:
+            L78PublicationPhaseV4.Unknown
+        case _:
+            L78PublicationPhaseV4.Unknown

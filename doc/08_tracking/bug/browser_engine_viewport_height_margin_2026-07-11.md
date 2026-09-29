@@ -1,7 +1,11 @@
 # browser_engine: `vh` viewport-height units unresolved in margins/lengths
+## Closed 2026-09-16 — Implementation fixed; executable regression compiler-blocked
 
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
+
+- Status: implementation fixed; executable regression is compiler-blocked
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (example.com render comparison vs Chrome headless)
 
@@ -38,15 +42,6 @@ resolved at layout time — e.g. store `vh` margins as a sentinel and resolve
 against `viewport_h` in `layout()` where it is in scope. Mirror the existing
 `resolve_horizontal_margin_px` percentage path.
 
-## Resolution (2026-07-26)
-
-Vertical `vh` margins use a distinct parse-time sentinel and resolve through
-`resolve_vertical_margin_px()` against the viewport height during layout.
-`browser_renderer_spec.spl` now checks the exact 80px top edge and 20px height
-of a `margin-top:40vh` block in a 200px viewport. The focused scenario has not
-been executed because the tracked target compiler failure exhausted its three
-allowed repair cycles.
-
 ## Related, already fixed this session
 - `width: Nvw` was treated as `Npx`; now resolves as a viewport/parent-width
   percentage sentinel (exact for viewport-level elements; nested vw resolves
@@ -55,3 +50,4 @@ allowed repair cycles.
   now resolved against the inherited (em/%) or root (rem) font-size.
 - `margin: <len> auto` shorthand ignored `auto`, so horizontal centering never
   applied; the shorthand is now token-aware and layout distributes free space.
+

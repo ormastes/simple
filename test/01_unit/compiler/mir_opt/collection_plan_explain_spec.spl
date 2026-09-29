@@ -1,0 +1,42 @@
+use std.spec.*
+use compiler.mir_opt.mir_opt.collection_plan_selection.{
+    CollectionPlanAlgorithm, CollectionPlanFacts, collection_plan_select,
+    collection_plan_unproven_facts
+}
+use compiler.mir_opt.mir_opt.collection_plan_explain.collection_plan_explain
+
+describe "collection plan explanation uses the guarded selector result":
+    it "reports admitted workload and the selected physical algorithm":
+        var facts = collection_plan_unproven_facts()
+        facts.collection_kind = "set"
+        facts.equality_pure = true
+        facts.duplicate_semantics_preserved = true
+        facts.order_insensitive = true
+        facts.mutation_epoch_stable = true
+        facts.key_hashable = true
+        facts.target_has_hash = true
+        facts.p0_correctness_ready = true
+        facts.profile_admitted = true
+        facts.profile_size_p95 = 100
+        facts.profile_lookups_p95 = 1000
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Hash)
+        val explanation = collection_plan_explain("ast://module/collection#1", "x86_64-v3", facts, decision)
+        expect(explanation).to_contain("selected=hash")
+        expect(explanation).to_contain("profile.status=admitted")
+        expect(explanation).to_contain("profile.size_p95=100")
+        expect(explanation).to_contain("rejected.linear=size-exceeds-linear-limit")
+        expect(explanation).to_contain("extra_memory_bytes=unproven")
+
+    it "reports a failed correctness gate without claiming profile evidence":
+        var facts = collection_plan_unproven_facts()
+        facts.collection_kind = "map"
+        facts.attribute = "ordered"
+        val decision = collection_plan_select(facts)
+        expect(decision.selected).to_equal(CollectionPlanAlgorithm.Original)
+        val explanation = collection_plan_explain("ast://module/map#2", "generic", facts, decision)
+        expect(explanation).to_contain("reason=p0-correctness-gate")
+        expect(explanation).to_contain("profile.status=not-admitted")
+        expect(explanation).to_contain("rejected.linear=p0-correctness-gate")
+        expect(explanation).to_contain("rejected.ordered=p0-correctness-gate")
+        expect(explanation).to_contain("fallback=original-on-rejection")

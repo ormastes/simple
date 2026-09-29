@@ -1,30 +1,7 @@
 # Bug: `GenericClass<T>.static_method()` unresolved under `simple test` (non-generic classes work fine)
 
 - **Date:** 2026-07-20
-- Status: **RESOLVED 2026-08-17** (re-verified by direct repro execution, not source inspection)
-- Was: DUPLICATE of generic_class_static_method_unresolved_2026-08-01.md
-
-## Resolution evidence (2026-08-17)
-
-Binary identity:
-```
-$ readlink -f bin/simple
-/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
-$ stat -c '%s %y' "$(readlink -f bin/simple)"
-59537240 2026-08-17 12:58:51.339525019 +0000
-```
-
-The "Minimal repro" below (verbatim `class Box<T>` + `static fn wrap`) was run
-unchanged:
-```
-$ bin/simple test <repro>.spl --no-session-daemon
-  ✓ calls generic static method
-1 example, 0 failures
-Results: 1 total, 1 passed, 0 failed
-(exit 0)
-```
-`Box.wrap(42)` now resolves; the `unknown static method wrap on class Box`
-error no longer occurs.
+- **Status:** open (found triaging `test/feature/usage/futures_promises_spec.spl`)
 - **Area:** interpreter method-call dispatch for generic classes (likely
   `src/compiler_rust/compiler/src/interpreter_method/mod.rs`, same family as
   `doc/08_tracking/bug/enum_impl_static_fn_method_call_path_skips_impl_methods_2026-07-20.md`),

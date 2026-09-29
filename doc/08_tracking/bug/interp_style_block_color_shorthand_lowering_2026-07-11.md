@@ -1,7 +1,8 @@
 # Interpreter HIR-Lowering Flake on `<style>`-Block `background`/`color` During Software Paint
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Summary
 
@@ -73,8 +74,3 @@ only from the block cascade). Likely the same class as other "variable X not
 found while lowering" lazy-JIT resolution gaps. A compiled (non-interpreter)
 build should be checked to confirm it is interpreter-only.
 
-## Triage 2026-08-17 (lane m7c_lib_async) — UNVERIFIED on this host
-
-Requires a software-paint render through the HIR lowering path plus bitmap comparison; the cited renderer and the iframe-embedding integration spec are both still in tree, but no per-file spec run can settle a lowering flake. Not reproduced and not closed: this lane could neither exercise the path nor
-find content-level evidence of a fix. Recording UNVERIFIED explicitly so it is
-not mistaken for either a live confirmation or a close.

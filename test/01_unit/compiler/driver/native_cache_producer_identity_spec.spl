@@ -1,22 +1,138 @@
+# @req MBH-REQ-002 MBH-REQ-009
 use std.spec
-use compiler.driver.driver_build.incremental.{native_build_producer_identity}
+use compiler.driver.driver_build.incremental.{
+    native_build_admitted_abi_identity, native_build_producer_identity}
+
+val FIXTURE_EXECUTABLE_SHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val FIXTURE_SOURCE_SHA256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val FIXTURE_RUNTIME_SHA256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val FIXTURE_TOOL_SHA256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+val FIXTURE_ARGS_SHA256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+val FIXTURE_SANITY_SHA256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+val FIXTURE_RECEIVER_SHA256 = "1111111111111111111111111111111111111111111111111111111111111111"
+val FIXTURE_HOSTED_SHA256 = "2222222222222222222222222222222222222222222222222222222222222222"
+val FIXTURE_ADMISSION_IDENTITY = "ae661ebe6376952f507e240d3d3c1d9cf86cf251cb33ca0b24ae109f13d68c54"
+
+fn admitted_receipt(policy: text, version: i64, deferred: bool) -> text:
+    "schema=simple-bootstrap-stage2-admission-v2\n" +
+    "status=admitted\n" +
+    "candidate_sha256={FIXTURE_EXECUTABLE_SHA256}\n" +
+    "source_snapshot_sha256={FIXTURE_SOURCE_SHA256}\n" +
+    "runtime_snapshot_sha256={FIXTURE_RUNTIME_SHA256}\n" +
+    "tool_authority_sha256={FIXTURE_TOOL_SHA256}\n" +
+    "build_args_sha256={FIXTURE_ARGS_SHA256}\n" +
+    "sanity_evidence_sha256={FIXTURE_SANITY_SHA256}\n" +
+    "receiver_evidence_sha256={FIXTURE_RECEIVER_SHA256}\n" +
+    "hosted_runtime_relative_path=deps/libspl_hosted_runtime-fixture.rlib\n" +
+    "hosted_runtime_sha256={FIXTURE_HOSTED_SHA256}\n" +
+    "simple_abi_policy={policy}\n" +
+    "simple_abi_version={version}\n" +
+    "simple_abi_deferred={if deferred: 1 else: 0}\n" +
+    "checks_executed_at_admission=1\n" +
+    "checks_replayed_during_stage3=0\n" +
+    "admission_identity={FIXTURE_ADMISSION_IDENTITY}\n"
+
+fn producer(executable: text, compiler: text, runtime: text, bundle: text) -> text:
+    native_build_producer_identity(
+        executable, compiler, runtime, bundle, 1, false, "v1", "receipt-a")
 
 describe "native cache producer identity":
     it "binds executable compiler runtime and bundle authorities":
-        val baseline = native_build_producer_identity(
-            "exe-a", "compiler-a", "runtime-a", "hosted")
-        expect(native_build_producer_identity(
-            "exe-b", "compiler-a", "runtime-a", "hosted") == baseline).to_equal(false)
-        expect(native_build_producer_identity(
-            "exe-a", "compiler-b", "runtime-a", "hosted") == baseline).to_equal(false)
-        expect(native_build_producer_identity(
-            "exe-a", "compiler-a", "runtime-b", "hosted") == baseline).to_equal(false)
-        expect(native_build_producer_identity(
-            "exe-a", "compiler-a", "runtime-a", "stage4") == baseline).to_equal(false)
+        val baseline = producer("exe-a", "compiler-a", "runtime-a", "hosted")
+        expect(producer("exe-b", "compiler-a", "runtime-a", "hosted") == baseline).to_equal(false)
+        expect(producer("exe-a", "compiler-b", "runtime-a", "hosted") == baseline).to_equal(false)
+        expect(producer("exe-a", "compiler-a", "runtime-b", "hosted") == baseline).to_equal(false)
+        expect(producer("exe-a", "compiler-a", "runtime-a", "stage4") == baseline).to_equal(false)
 
     it "is stable when every producer authority is unchanged":
-        val first = native_build_producer_identity(
-            "exe-a", "compiler-a", "runtime-a", "hosted")
-        val second = native_build_producer_identity(
-            "exe-a", "compiler-a", "runtime-a", "hosted")
+        val first = producer("exe-a", "compiler-a", "runtime-a", "hosted")
+        val second = producer("exe-a", "compiler-a", "runtime-a", "hosted")
         expect(second).to_equal(first)
+
+    it "binds the selected ABI v1 epoch":
+        val epoch_one = native_build_producer_identity(
+            "exe-a", "compiler-a", "runtime-a", "hosted", 1, false,
+            "v1", "receipt-b")
+        expect(epoch_one).to_contain("simple-abi=v1")
+        expect(epoch_one).to_contain("simple-abi-policy=v1")
+
+    it "binds the selected ABI admission identity":
+        val first = native_build_producer_identity(
+            "exe-a", "compiler-a", "runtime-a", "hosted", 1, false,
+            "v1", "receipt-a")
+        val second = native_build_producer_identity(
+            "exe-a", "compiler-a", "runtime-a", "hosted", 1, false,
+            "v1", "receipt-b")
+        expect(first == second).to_equal(false)
+
+    it "requires an explicit admitted receipt and rejects absent policy":
+        val absent_policy = native_build_admitted_abi_identity(
+            "", admitted_receipt("v1", 1, false), 1, false,
+            FIXTURE_EXECUTABLE_SHA256)
+        val absent_receipt = native_build_admitted_abi_identity(
+            "v1", "", 1, false, FIXTURE_EXECUTABLE_SHA256)
+        expect(absent_policy.is_err()).to_equal(true)
+        expect(absent_policy.unwrap_err()).to_contain("policy-absent")
+        expect(absent_receipt.is_err()).to_equal(true)
+        expect(absent_receipt.unwrap_err()).to_contain("missing-field:schema")
+
+    it "rejects receipt policy and runtime mismatches":
+        val policy_mismatch = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("deferred", 0, true), 1, false,
+            FIXTURE_EXECUTABLE_SHA256)
+        val runtime_mismatch = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("v1", 1, false), 0, true,
+            FIXTURE_EXECUTABLE_SHA256)
+        expect(policy_mismatch.is_err()).to_equal(true)
+        expect(runtime_mismatch.is_err()).to_equal(true)
+
+    it "rejects duplicate admission fields rather than choosing one":
+        val receipt = admitted_receipt("v1", 1, false) +
+            "simple_abi_policy=v1\n"
+        val result = native_build_admitted_abi_identity(
+            "v1", receipt, 1, false, FIXTURE_EXECUTABLE_SHA256)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("duplicate-field:simple_abi_policy")
+
+    it "binds a matching admitted receipt digest into producer identity":
+        val first = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("v1", 1, false), 1, false,
+            FIXTURE_EXECUTABLE_SHA256)
+        val second = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("v1", 1, false) + "audit_nonce=2\n",
+            1, false, FIXTURE_EXECUTABLE_SHA256)
+        expect(first.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        expect(first.unwrap() == second.unwrap()).to_equal(false)
+
+    it "rejects a valid-looking receipt admitted for a different compiler":
+        val result = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("v1", 1, false), 1, false,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("field-mismatch:candidate_sha256")
+
+    it "rejects a mutated admission identity instead of trusting receipt text":
+        val mutated = admitted_receipt("v1", 1, false).replace(
+            FIXTURE_ADMISSION_IDENTITY,
+            "3333333333333333333333333333333333333333333333333333333333333333")
+        val result = native_build_admitted_abi_identity(
+            "v1", mutated, 1, false, FIXTURE_EXECUTABLE_SHA256)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("field-mismatch:admission_identity")
+
+    it "rejects a mutated evidence digest even when the compiler digest still matches":
+        val mutated = admitted_receipt("v1", 1, false).replace(
+            "source_snapshot_sha256={FIXTURE_SOURCE_SHA256}",
+            "source_snapshot_sha256=3333333333333333333333333333333333333333333333333333333333333333")
+        val result = native_build_admitted_abi_identity(
+            "v1", mutated, 1, false, FIXTURE_EXECUTABLE_SHA256)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("field-mismatch:admission_identity")
+
+    it "rejects a non-canonical compiler digest before receipt admission":
+        val result = native_build_admitted_abi_identity(
+            "v1", admitted_receipt("v1", 1, false), 1, false,
+            "not-a-sha256")
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("compiler-executable-digest-not-canonical")

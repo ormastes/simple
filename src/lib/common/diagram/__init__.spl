@@ -438,6 +438,27 @@ fn generate_class_diagram(rec: CallEventRecorder, config: DiagramConfig) -> text
         for m in methods:
             lines.push("        +{m}()")
         lines.push("    }")
+    # Uses relationships along the recorded call chain: a call whose class
+    # differs from the previous call's class uses that previous class.
+    # Self-relationships are skipped; duplicates collapse to one edge.
+    var relations: [text] = []
+    var prev_cls = ""
+    for event in events:
+        if event.is_return:
+            continue
+        val cur_cls = match event.callee_class:
+            case Some(cls): cls
+            case nil: ""
+        if cur_cls != "":
+            if prev_cls != "" and prev_cls != cur_cls:
+                val rel = "    {prev_cls} --> {cur_cls} : uses"
+                if not relations.contains(rel):
+                    relations = relations.push(rel)
+            prev_cls = cur_cls
+        else:
+            prev_cls = ""
+    for rel in relations:
+        lines.push(rel)
     lines.push("```")
     lines.join("\n")
 
@@ -453,6 +474,9 @@ class ArchDiagramGenerator:
 
     static fn new(config: DiagramConfig) -> ArchDiagramGenerator:
         ArchDiagramGenerator(_config: config)
+
+fn _sanitize_id(entity: text) -> text:
+    entity.replace("::", "_").replace(".", "_").replace("-", "_")
 
 fn generate_arch_diagram(rec: CallEventRecorder, config: DiagramConfig) -> text:
     var lines = ["```mermaid", "flowchart TD"]
@@ -472,21 +496,55 @@ fn generate_arch_diagram(rec: CallEventRecorder, config: DiagramConfig) -> text:
                     if is_package and not arch_entities.contains(cls):
                         arch_entities.push(cls)
                 case nil: pass_dn
+    var standalone_nodes: [text] = []
+    var pkg_nodes: {text: [text]} = {}
     for entity in arch_entities:
         if entity.contains("."):
             val parts = entity.split(".")
             val pkg = parts[0]
-            if not lines.contains("    subgraph {pkg}"):
-                lines.push("    subgraph {pkg}")
-                lines.push("    end")
+            if not pkg_nodes.has(pkg):
+                pkg_nodes[pkg] = []
+            var nodes: [text] = pkg_nodes[pkg]
+            nodes = nodes.push(entity)
+            pkg_nodes[pkg] = nodes
         elif entity.contains("::"):
             val parts = entity.split("::")
             val pkg = parts[0]
-            if not lines.contains("    subgraph {pkg}"):
-                lines.push("    subgraph {pkg}")
-                lines.push("    end")
+            if not pkg_nodes.has(pkg):
+                pkg_nodes[pkg] = []
+            var nodes: [text] = pkg_nodes[pkg]
+            nodes = nodes.push(entity)
+            pkg_nodes[pkg] = nodes
         else:
-            lines.push("    {entity}[{entity}]")
+            standalone_nodes = standalone_nodes.push(entity)
+    for entity in standalone_nodes:
+        lines.push("    {entity}[{entity}]")
+    for (pkg, nodes) in pkg_nodes.items():
+        lines.push("    subgraph {pkg}")
+        for entity in nodes:
+            lines.push("        {_sanitize_id(entity)}[{entity}]")
+        lines.push("    end")
+    # Dependency edges along the recorded call chain: a call whose class is
+    # architectural depends on the previous architectural caller's class.
+    # Self-dependencies are skipped; non-architectural targets break the chain.
+    var edges: [text] = []
+    var prev_entity = ""
+    for event in events:
+        if event.is_return:
+            continue
+        val cur = match event.callee_class:
+            case Some(cls): cls
+            case nil: ""
+        if cur != "" and arch_entities.contains(cur):
+            if prev_entity != "" and prev_entity != cur:
+                val edge = "    {_sanitize_id(prev_entity)} --> {_sanitize_id(cur)}"
+                if not edges.contains(edge):
+                    edges = edges.push(edge)
+            prev_entity = cur
+        else:
+            prev_entity = ""
+    for edge in edges:
+        lines.push(edge)
     lines.push("```")
     lines.join("\n")
 

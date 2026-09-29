@@ -1,4 +1,9 @@
 # Unlimited Stage4 profile disables structural streaming ownership
+## Closed 2026-09-16 — ...rship - Date: 2026-08-03 - Status: fixed — `/root/option_native_codegen_rootcause` - Bug I
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Date: 2026-08-03
 - Status: fixed — `/root/option_native_codegen_rootcause`
@@ -29,3 +34,4 @@ while also retaining the per-file ownership/reclamation path.
   workflow restoration assertion.
 
 No Stage4 build was run for this focused configuration fix.
+

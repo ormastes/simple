@@ -8,6 +8,7 @@ use compiler.common.attributes.{parse_layout_attrs, parse_export_attrs, parse_pl
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields}
 
 impl HirLowering:
     me lower_param(p: Param) -> HirParam:
@@ -47,8 +48,19 @@ impl HirLowering:
         val class_doc_comment: text = class_.doc_comment
         val class_span: Span = class_.span
 
-        val symbol = self.symbols.lookup_or_invalid(class_name)
+        # A preceding import may own the bare name.  The declaration's own
+        # module-qualified binding is authoritative for class lowering, Self,
+        # constructors, and method ownership.
+        val local_class_id = self.symbols.lookup_qualified_type_raw(
+            self.module_filename, class_name)
+        val symbol = if local_class_id >= 0:
+            SymbolId(id: local_class_id)
+        else:
+            self.symbols.lookup_or_invalid(class_name)
         self.symbols.push_scope(ScopeKind.Class)
+        # A same-spelled import in the outer scope must not redirect an
+        # owning class's constructor references inside its own methods.
+        self.symbols.bind_local_type_if_free(class_name, symbol)
 
         var type_params: [HirTypeParam] = []
         for tp in class_type_params:
@@ -59,9 +71,9 @@ impl HirLowering:
         # recorded as `is_generic_template` below, its methods are flagged
         # the same way, and 50.mir/_MirLowering/module_lowering.spl skips
         # every flagged function. Loudness is preserved downstream, not here:
-        # Unrewritten generic calls remain errors in 40.mono (E-MONO-030/032).
-        # Postmono invariants remain enforced under robust/critical profiles;
-        # HWIR-E-GENERIC applies separately to hardware lowering.
+        # Unrewritten reachable generic calls remain errors in 40.mono (E-MONO-030/032).
+        # Postmono invariants still reject retained templates under robust/critical
+        # profiles; HWIR-E-GENERIC applies separately to hardware lowering.
         # Declaring the template is not the defect; emitting it is.
 
         var fields: [HirField] = []
@@ -93,7 +105,7 @@ impl HirLowering:
         val has_layout = layout.layout_kind != TypeLayoutKind.Simple or layout.has_explicit_align or layout.is_packed
         val parsed_export_attr: ExportAttr? = parse_export_attrs(class_attributes)
         val platform: PlatformParseResult = parse_platform_attrs(class_attributes)
-        val platform_fields = platform_attr_fields_for(platform)
+        val platform_fields: PlatformAttrFields = platform_attr_fields_for(platform)
 
         HirClass(
             symbol: symbol,

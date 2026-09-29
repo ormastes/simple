@@ -1,0 +1,290 @@
+#!/bin/sh
+# check-rust-duplicate-reexport.shs — no Rust file in the seed re-exports the
+# same name twice (rustc E0252 "the name X is defined multiple times").
+#
+# WHY THIS EXISTS
+# ---------------
+# Incident 2026-09-23: origin/main was unbuildable — `cargo check` failed with
+# E0252 because src/compiler_rust/runtime/src/lib.rs carried two
+# `pub use ...::rt_collection_set;` lines (f6327dc1e34, fixed by b41a738ba5e).
+# Nothing in the push tier compiles Rust: check-seed-builds-push.shs exists but
+# a warm `cargo check` is 1-2 minutes, far outside the 60 s push budget, and
+# every other guard checks trees, ranges, symbol SETS (a duplicate re-export
+# adds no symbol) or C. This guard is the static, sub-second half of that
+# class; the full compile belongs in CI. Stated limit: it proves the absence of
+# duplicate explicit re-exports, not that the crate builds.
+#
+# MECHANISM
+# ---------
+# Committed content only. Every non-vendored *.rs under src/compiler_rust at
+# --rev that contains a `pub use` (or `pub(crate) use`) is read with `git show`.
+# Each `pub use` item — single path, `{a, b as c, d}` groups, multi-line groups —
+# contributes its bound name (the last path segment, or the `as` alias). A name
+# bound twice in the same file is an offender. `#[cfg(...)]`-guarded `pub use`
+# lines are excluded, since mutually exclusive cfgs legitimately bind one name
+# twice. Globs (`*`) and `self` bind no name here. Plain (non-pub) `use` is out
+# of scope: it is per-scope, and function/test-module bodies reuse names
+# constantly (measured: 1512 false hits on origin/main with plain `use`
+# included, 0 with `pub use` only).
+#
+# Verdict, always the last line of stdout:
+#   PASS  — <n> file(s) scanned at <rev>, 0 duplicate re-export(s)   exit 0
+#   FAIL  — <n> file(s) scanned at <rev>, <k> duplicate(s): ...      exit 1
+#   ERROR — nothing was checked (<reason>)                          exit 2
+# Non-vacuous: n > 0 always; a revision with no `pub use` at all is ERROR.
+# --selftest runs before every scan and is fatal.
+#
+# Usage:
+#   sh scripts/check/check-rust-duplicate-reexport.shs --rev <sha> [--root <repo>] [--scope <dir>]
+#   sh scripts/check/check-rust-duplicate-reexport.shs --selftest
+
+set -u
+
+REV=""
+RANGE=""
+ROOT=""
+SCOPE="src/compiler_rust"
+SELFTEST_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rev) REV=${2:-}; shift 2 ;;
+        --range) RANGE=${2:-}; shift 2 ;;
+        --root) ROOT=${2:-}; shift 2 ;;
+        --scope) SCOPE=${2:-}; shift 2 ;;
+        --selftest) SELFTEST_ONLY=1; shift ;;
+        *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+done
+
+# dup_names <file-content on stdin> <label> -> prints "<label>: <name>" per duplicate
+dup_names() {
+    awk -v F="$1" '
+        /^[[:space:]]*#\[cfg/ { cfg = 1; next }
+        /^[[:space:]]*pub(\([a-z]+\))?[[:space:]]+use[[:space:]]/ {
+            if (cfg) { cfg = 0; inuse = 0; buf = ""; next }
+            inuse = 1; buf = ""
+        }
+        inuse {
+            sub(/\/\/.*$/, "")
+            buf = buf " " $0
+            if (index($0, ";")) {
+                inuse = 0
+                s = buf; sub(/^.*use[[:space:]]+/, "", s); sub(/;.*$/, "", s)
+                gsub(/[[:space:]]+/, " ", s)
+                n = 0; depth = 0; item = ""
+                for (i = 1; i <= length(s); i++) {
+                    c = substr(s, i, 1)
+                    if (c == "{") { depth++; if (depth == 1) { item = ""; continue } }
+                    if (c == "}") { depth--; if (depth == 0) { items[++n] = item; item = ""; continue } }
+                    if (c == "," && depth == 1) { items[++n] = item; item = ""; continue }
+                    if (depth >= 1) item = item c
+                }
+                if (n == 0) items[++n] = s
+                for (i = 1; i <= n; i++) {
+                    t = items[i]; gsub(/^ +| +$/, "", t)
+                    if (t == "") continue
+                    if (t ~ / as /) { sub(/^.* as /, "", t) } else { sub(/^.*::/, "", t) }
+                    gsub(/[{} ]/, "", t)
+                    if (t == "*" || t == "self" || t == "") continue
+                    if (t in seen) print F ": " t
+                    seen[t] = 1
+                }
+                delete items
+            }
+            next
+        }
+        { cfg = 0 }
+    '
+}
+
+# scan <root> <rev> <scope> [<listfile> <note>] -> verdict on stdout, returns 0/1/2
+# With <listfile> only those paths (at <rev>) are scanned and <note> is appended
+# to the verdict; without it every non-vendored *.rs under <scope> carrying a
+# `pub use` is scanned.
+scan() {
+    _root=$1; _rev=$2; _scope=$3; _list=${4:-}; _note=${5:-}
+    git -C "$_root" rev-parse --verify --quiet "$_rev^{commit}" >/dev/null 2>&1 ||
+        { echo "ERROR — nothing was checked ($_rev is not a commit in $_root)"; return 2; }
+    _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    if [ -n "$_list" ]; then
+        cp "$_list" "$_work/files.txt"
+    else
+        git -C "$_root" grep -l -E '^[[:space:]]*pub(\([a-z]+\))?[[:space:]]+use[[:space:]]' "$_rev" \
+            -- "$_scope/*.rs" ":!$_scope/vendor" ":!$_scope/*/vendor" 2>/dev/null \
+            | sed 's/^[^:]*://' > "$_work/files.txt"
+    fi
+    _n=0
+    : > "$_work/dups.txt"
+    while IFS= read -r _f; do
+        [ -n "$_f" ] || continue
+        _n=$((_n + 1))
+        git -C "$_root" show "$_rev:$_f" 2>/dev/null | dup_names "$_f" >> "$_work/dups.txt"
+    done < "$_work/files.txt"
+    _k=$(grep -c . "$_work/dups.txt")
+    if [ "$_n" -eq 0 ] && [ -z "$_list" ]; then
+        rm -rf "$_work"
+        echo "ERROR — nothing was checked (no Rust file with a pub use under $_scope at $_rev)"
+        return 2
+    fi
+    if [ "$_k" -ne 0 ]; then
+        echo "duplicate explicit re-export(s) — rustc rejects these with E0252, so the seed cannot build:"
+        sed 's/^/  /' "$_work/dups.txt"
+        _names=$(tr '\n' ' ' < "$_work/dups.txt")
+        rm -rf "$_work"
+        echo "FAIL — $_n file(s) scanned at $_rev, $_k duplicate re-export(s): $_names$_note"
+        return 1
+    fi
+    rm -rf "$_work"
+    echo "PASS — $_n file(s) scanned at $_rev, 0 duplicate re-export(s)$_note"
+    return 0
+}
+
+# scan_range <root> <base>..<tip> <scope>: diff-scoped push mode. Only the
+# Rust files the range ADDS/MODIFIES/RENAMES under <scope> are scanned, at the
+# tip. A duplicate is a per-file property, so an unchanged file's verdict is
+# unchanged by this range by construction; a duplicate already on the base is
+# the base's debt and the whole-scope --rev scan in CI owns it. Non-vacuous:
+# the range must change at least one file (of any kind), else ERROR.
+scan_range() {
+    _root=$1; _range=$2; _scope=$3
+    case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (need <base>..<tip>, got '$_range')"; return 2 ;; esac
+    _base=${_range%%..*}; _tip=${_range#*..}
+    git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
+        { echo "ERROR — nothing was checked (base $_base is not a commit)"; return 2; }
+    _rwork=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    git -C "$_root" diff --name-only --diff-filter=AMRC "$_base" "$_tip" > "$_rwork/all.txt" 2>/dev/null ||
+        { rm -rf "$_rwork"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
+    _total=$(grep -c . "$_rwork/all.txt")
+    if [ "$_total" -eq 0 ]; then
+        rm -rf "$_rwork"
+        echo "ERROR — nothing was checked (no file changed in $_range)"
+        return 2
+    fi
+    grep "^$_scope/" "$_rwork/all.txt" | grep '\.rs$' | grep -v '/vendor/' > "$_rwork/files.txt"
+    scan "$_root" "$_tip" "$_scope" "$_rwork/files.txt" " ($_total file(s) changed in $_range, $(grep -c . "$_rwork/files.txt") Rust)"
+    _rc=$?
+    rm -rf "$_rwork"
+    return $_rc
+}
+
+selftest() {
+    _t=$(mktemp -d) || return 1
+    _fails=0
+    _mk() { mkdir -p "$1/src/compiler_rust/x/src" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest; }
+    _commit() { git -C "$1" add -A && git -C "$1" commit -q -m fixture; }
+
+    # 1 the incident shape: the same name re-exported twice -> FAIL naming it
+    _mk "$_t/r1"
+    cat > "$_t/r1/src/compiler_rust/x/src/lib.rs" <<'EOF'
+pub use value::collections::rt_collection_set;
+pub use value::rt_value_len;
+pub use value::sffi::rt_collection_set;
+EOF
+    _commit "$_t/r1"
+    _out=$(scan "$_t/r1" HEAD src/compiler_rust); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        1:"FAIL — 1 file(s) scanned at HEAD, 1 duplicate re-export(s): "*rt_collection_set*) ;;
+        *) echo "selftest FAIL 1: duplicate re-export not rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 2 clean file with a multi-line group, an alias and a glob -> PASS
+    _mk "$_t/r2"
+    cat > "$_t/r2/src/compiler_rust/x/src/lib.rs" <<'EOF'
+pub use executor::{
+    rt_exec_a,
+    rt_exec_b as rt_exec_alias, // trailing comment
+};
+pub use value::*;
+pub(crate) use value::{self, rt_exec_c};
+pub use other::rt_exec_b;
+EOF
+    _commit "$_t/r2"
+    _out=$(scan "$_t/r2" HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 2: clean file rejected ($(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)); }
+
+    # 3 cfg-guarded pair binding one name twice is legitimate -> PASS
+    _mk "$_t/r3"
+    cat > "$_t/r3/src/compiler_rust/x/src/lib.rs" <<'EOF'
+#[cfg(unix)]
+pub use unix_impl::rt_platform_open;
+#[cfg(windows)]
+pub use win_impl::rt_platform_open;
+pub use common::rt_platform_close;
+EOF
+    _commit "$_t/r3"
+    _out=$(scan "$_t/r3" HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 3: cfg-guarded pair rejected ($(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)); }
+
+    # 4 a duplicate inside a multi-line group is still found
+    _mk "$_t/r4"
+    cat > "$_t/r4/src/compiler_rust/x/src/lib.rs" <<'EOF'
+pub use executor::{
+    rt_exec_a, rt_exec_b,
+    rt_exec_a,
+};
+EOF
+    _commit "$_t/r4"
+    _out=$(scan "$_t/r4" HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 1 ] || { echo "selftest FAIL 4: duplicate inside a group not rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    # 5 the working copy must not decide: an uncommitted duplicate is invisible
+    cat > "$_t/r2/src/compiler_rust/x/src/lib.rs" <<'EOF'
+pub use a::rt_x;
+pub use b::rt_x;
+EOF
+    _out=$(scan "$_t/r2" HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 5: uncommitted working-copy edit changed the verdict"; _fails=$((_fails + 1)); }
+
+    # 6 vendored code is out of scope; a tree with no pub use at all is ERROR
+    _mk "$_t/r6"; mkdir -p "$_t/r6/src/compiler_rust/vendor/dep/src"
+    printf 'pub use a::x;\npub use b::x;\n' > "$_t/r6/src/compiler_rust/vendor/dep/src/lib.rs"
+    printf 'fn main() {}\n' > "$_t/r6/src/compiler_rust/x/src/main.rs"
+    _commit "$_t/r6"
+    _out=$(scan "$_t/r6" HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 6: vendored-only tree did not ERROR (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)); }
+
+    # 7 --range scans only the Rust files the range touched, at the tip:
+    #    commit 2 adds a duplicate in one file -> FAIL; a later docs-only
+    #    commit -> PASS with 0 Rust scanned; an empty range -> ERROR.
+    _mk "$_t/r7"
+    printf 'pub use a::rt_one;\n' > "$_t/r7/src/compiler_rust/x/src/lib.rs"
+    printf 'notes\n' > "$_t/r7/README.md"
+    _commit "$_t/r7"
+    printf 'pub use a::rt_one;\npub use b::rt_one;\n' > "$_t/r7/src/compiler_rust/x/src/lib.rs"
+    _commit "$_t/r7"
+    _out=$(scan_range "$_t/r7" HEAD~1..HEAD src/compiler_rust); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        1:"FAIL — 1 file(s) scanned at HEAD, 1 duplicate re-export(s): "*"(1 file(s) changed in HEAD~1..HEAD, 1 Rust)") ;;
+        *) echo "selftest FAIL 7a: range mode missed the duplicate (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+    printf 'more\n' >> "$_t/r7/README.md"
+    _commit "$_t/r7"
+    _out=$(scan_range "$_t/r7" HEAD~1..HEAD src/compiler_rust); _rc=$?
+    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
+        0:"PASS — 0 file(s) scanned at HEAD, 0 duplicate re-export(s) (1 file(s) changed in HEAD~1..HEAD, 0 Rust)") ;;
+        *) echo "selftest FAIL 7b: docs-only range not accepted (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
+    esac
+    _out=$(scan_range "$_t/r7" HEAD..HEAD src/compiler_rust); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 7c: empty range did not ERROR (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    rm -rf "$_t"
+    [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
+    echo "selftest: 7 fixtures passed"
+}
+
+selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS — 7 fixture(s) checked, selftest only"
+    exit 0
+fi
+[ -n "$REV" ] || [ -n "$RANGE" ] || { echo "ERROR — nothing was checked (--rev <sha> or --range <base>..<tip> is required)"; exit 2; }
+if [ -z "$ROOT" ]; then
+    ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+    [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
+fi
+if [ -n "$RANGE" ]; then
+    scan_range "$ROOT" "$RANGE" "$SCOPE"
+else
+    scan "$ROOT" "$REV" "$SCOPE"
+fi
+exit $?

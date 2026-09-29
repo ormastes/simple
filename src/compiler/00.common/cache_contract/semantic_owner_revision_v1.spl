@@ -1,0 +1,230 @@
+#![allow(primitive_api)]
+
+# Canonical, data-only revision values for the five L7 semantic owners.
+#
+# This module deliberately does not retain an owner, issue a receipt, or
+# validate liveness.  It freezes the copied identity that a future live owner
+# may retain.  The declaration-derived schema drift gate lives with the
+# compiler-schema extractor: a duplicated runtime field inventory cannot prove
+# that these actual declarations have remained frozen.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1,
+    three_payload_contract_text_valid_v1
+}
+
+pub const SEMANTIC_OWNER_REVISION_SCHEMA_V1: i64 = 1
+pub const SEMANTIC_OWNER_REVISION_OWNER_COUNT_V1: i64 = 5
+pub const SEMANTIC_OWNER_REVISION_MAX_MAP_ENTRIES_V1: i64 = 1024
+
+pub fn semantic_owner_revision_map_limit_v1() -> i64:
+    SEMANTIC_OWNER_REVISION_MAX_MAP_ENTRIES_V1
+
+pub enum SemanticOwnerRevisionOwnerV1:
+    DeclarationsReexports
+    TraitCandidatesCoherence
+    AspectCandidatesOrdering
+    MacroCtfeLookup
+    BodyDependencyClosure
+
+pub struct SemanticOwnerRevisionV1:
+    owner: SemanticOwnerRevisionOwnerV1
+    owner_instance_digest: text
+    owner_generation: i64
+    revision_digest: text
+    authority_serial: i64
+
+pub struct SemanticOwnerRevisionSetV1:
+    schema: i64
+    revisions: [SemanticOwnerRevisionV1]
+
+pub struct SemanticOwnerRevisionMapEntryV1:
+    key: text
+    value: text
+
+# A map entry is framed before ordering.  The key frame is the sort key, so
+# ordering is byte-stable and does not depend on a host dictionary or locale.
+struct SemanticOwnerRevisionMapEncodedEntryV1:
+    key_frame: text
+    value_frame: text
+
+pub fn semantic_owner_revision_owner_tag_v1(
+    value: SemanticOwnerRevisionOwnerV1,
+) -> i64:
+    match value:
+        case DeclarationsReexports: 1
+        case TraitCandidatesCoherence: 2
+        case AspectCandidatesOrdering: 3
+        case MacroCtfeLookup: 4
+        case BodyDependencyClosure: 5
+
+pub fn semantic_owner_revision_owner_name_v1(
+    value: SemanticOwnerRevisionOwnerV1,
+) -> text:
+    match value:
+        case DeclarationsReexports: "declarations_reexports"
+        case TraitCandidatesCoherence: "trait_candidates_coherence"
+        case AspectCandidatesOrdering: "aspect_candidates_ordering"
+        case MacroCtfeLookup: "macro_ctfe_lookup"
+        case BodyDependencyClosure: "body_dependency_closure"
+
+pub fn semantic_owner_revision_owner_from_tag_v1(
+    tag: i64,
+) -> SemanticOwnerRevisionOwnerV1?:
+    if tag == 1: return Some(SemanticOwnerRevisionOwnerV1.DeclarationsReexports)
+    if tag == 2: return Some(SemanticOwnerRevisionOwnerV1.TraitCandidatesCoherence)
+    if tag == 3: return Some(SemanticOwnerRevisionOwnerV1.AspectCandidatesOrdering)
+    if tag == 4: return Some(SemanticOwnerRevisionOwnerV1.MacroCtfeLookup)
+    if tag == 5: return Some(SemanticOwnerRevisionOwnerV1.BodyDependencyClosure)
+    nil
+
+pub fn semantic_owner_revision_frame_v1(value: text) -> text:
+    text_to_bytes(value).len().to_string() + ":" + value
+
+pub fn semantic_owner_revision_optional_text_canonical_v1(value: text?) -> text:
+    match value:
+        case Some(text_value): "1:" + semantic_owner_revision_frame_v1(text_value)
+        case nil: "0:"
+
+pub fn semantic_owner_revision_signed_canonical_v1(value: i64) -> text:
+    semantic_owner_revision_frame_v1(value.to_string())
+
+pub fn semantic_owner_revision_ordered_texts_canonical_v1(values: [text]) -> text:
+    var parts: [text] = ["seq",
+        semantic_owner_revision_frame_v1(values.len().to_string())]
+    for value in values:
+        parts.push(semantic_owner_revision_frame_v1(value))
+    parts.join("")
+
+fn _semantic_owner_revision_map_merge_v1(
+    entries: [SemanticOwnerRevisionMapEncodedEntryV1], start: i64,
+    middle: i64, end: i64,
+) -> [SemanticOwnerRevisionMapEncodedEntryV1]:
+    var merged: [SemanticOwnerRevisionMapEncodedEntryV1] = []
+    var left = start
+    var right = middle
+    # `<=` selects the left run on equal keys, which makes the merge stable.
+    while left < middle and right < end:
+        if entries[left].key_frame <= entries[right].key_frame:
+            merged.push(entries[left])
+            left = left + 1
+        else:
+            merged.push(entries[right])
+            right = right + 1
+    while left < middle:
+        merged.push(entries[left])
+        left = left + 1
+    while right < end:
+        merged.push(entries[right])
+        right = right + 1
+    merged
+
+# Bottom-up merge sort keeps the bound explicit and avoids recursion, a
+# dictionary side channel, and the quadratic library-sort path.  At most 1024
+# entries reach this function; each pass preserves the encoded entry payload.
+fn _semantic_owner_revision_map_stable_merge_sort_v1(
+    entries: [SemanticOwnerRevisionMapEncodedEntryV1],
+) -> [SemanticOwnerRevisionMapEncodedEntryV1]:
+    var ordered = entries
+    var width: i64 = 1
+    while width < ordered.len():
+        var next: [SemanticOwnerRevisionMapEncodedEntryV1] = []
+        var start: i64 = 0
+        while start < ordered.len():
+            var middle = start + width
+            if middle > ordered.len(): middle = ordered.len()
+            var end = middle + width
+            if end > ordered.len(): end = ordered.len()
+            for entry in _semantic_owner_revision_map_merge_v1(
+                    ordered, start, middle, end):
+                next.push(entry)
+            start = end
+        ordered = next
+        if width > ordered.len() / 2:
+            width = ordered.len()
+        else:
+            width = width * 2
+    ordered
+
+pub fn semantic_owner_revision_map_canonical_v1(
+    entries: [SemanticOwnerRevisionMapEntryV1],
+) -> text:
+    if entries.len() > SEMANTIC_OWNER_REVISION_MAX_MAP_ENTRIES_V1: return ""
+    var encoded: [SemanticOwnerRevisionMapEncodedEntryV1] = []
+    for entry in entries:
+        if (not three_payload_contract_text_valid_v1(entry.key, true) or
+                not three_payload_contract_text_valid_v1(entry.value, true)):
+            return ""
+        encoded.push(SemanticOwnerRevisionMapEncodedEntryV1(
+            key_frame: semantic_owner_revision_frame_v1(entry.key),
+            value_frame: semantic_owner_revision_frame_v1(entry.value)))
+    val ordered = _semantic_owner_revision_map_stable_merge_sort_v1(encoded)
+    var parts: [text] = ["map",
+        semantic_owner_revision_frame_v1(ordered.len().to_string())]
+    var index: i64 = 0
+    while index < ordered.len():
+        # Equal framed keys are adjacent after the stable encoded-key merge.
+        if index > 0 and ordered[index - 1].key_frame == ordered[index].key_frame:
+            return ""
+        parts.push(ordered[index].key_frame)
+        # Emit this sorted entry's already-framed value directly; there is no
+        # key-to-value relookup that could hide duplicate or mutation behavior.
+        parts.push(ordered[index].value_frame)
+        index = index + 1
+    parts.join("")
+
+fn _revision_valid_v1(value: SemanticOwnerRevisionV1) -> bool:
+    (three_payload_contract_digest_valid_v1(value.owner_instance_digest) and
+        value.owner_generation >= 0 and
+        three_payload_contract_digest_valid_v1(value.revision_digest) and
+        value.authority_serial > 0)
+
+pub fn semantic_owner_revision_valid_v1(
+    value: SemanticOwnerRevisionV1,
+) -> bool:
+    _revision_valid_v1(value)
+
+pub fn semantic_owner_revision_set_valid_v1(
+    value: SemanticOwnerRevisionSetV1,
+) -> bool:
+    if (value.schema != SEMANTIC_OWNER_REVISION_SCHEMA_V1 or
+            value.revisions.len() != SEMANTIC_OWNER_REVISION_OWNER_COUNT_V1):
+        return false
+    var index: i64 = 0
+    for revision in value.revisions:
+        if (not _revision_valid_v1(revision) or
+                semantic_owner_revision_owner_tag_v1(revision.owner) != index + 1):
+            return false
+        index = index + 1
+    true
+
+pub fn semantic_owner_revision_canonical_v1(
+    value: SemanticOwnerRevisionV1,
+) -> text:
+    if not _revision_valid_v1(value): return ""
+    var encoded = "revision"
+    encoded = encoded + semantic_owner_revision_frame_v1(
+        semantic_owner_revision_owner_tag_v1(value.owner).to_string())
+    encoded = encoded + semantic_owner_revision_frame_v1(value.owner_instance_digest)
+    encoded = encoded + semantic_owner_revision_signed_canonical_v1(value.owner_generation)
+    encoded = encoded + semantic_owner_revision_frame_v1(value.revision_digest)
+    encoded = encoded + semantic_owner_revision_signed_canonical_v1(value.authority_serial)
+    encoded
+
+pub fn semantic_owner_revision_set_digest_v1(
+    value: SemanticOwnerRevisionSetV1,
+) -> text:
+    if not semantic_owner_revision_set_valid_v1(value): return ""
+    var parts: [text] = ["simple.semantic-owner-revisions.v1",
+        semantic_owner_revision_frame_v1(value.schema.to_string())]
+    for revision in value.revisions:
+        parts.push(semantic_owner_revision_frame_v1(
+            semantic_owner_revision_canonical_v1(revision)))
+    sha256_text(parts.join(""))
+
+export SemanticOwnerRevisionOwnerV1, SemanticOwnerRevisionV1,
+    SemanticOwnerRevisionSetV1, SemanticOwnerRevisionMapEntryV1,
+    semantic_owner_revision_owner_name_v1,
+    semantic_owner_revision_map_limit_v1

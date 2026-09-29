@@ -1,4 +1,8 @@
 # Root cause: native `.get()` on nil Dict receiver returns phantom Some; `.len()` returns -1
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-27
 **Status:** Root-caused (analysis only — no src/ change in this lane)
@@ -162,3 +166,4 @@ Run: `bin/simple test test/01_unit/compiler/hir/nil_dict_receiver_phantom_option
 (native lane; the "Results:" line is authoritative). Once green, the two
 `functions.len() < 0` mitigation guards in `module_lowering.spl` become
 defense-in-depth and can be relaxed on their own schedule.
+

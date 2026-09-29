@@ -3,13 +3,17 @@
 // C ABI entry points, all i64-in / i64-out. The loaded face is process-global;
 // each rasterized glyph is an owned snapshot released by rt_fonts_glyph_free.
 
+#[cfg(feature = "freetype")]
 use std::ffi::CString;
+#[cfg(feature = "freetype")]
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex;
 
 use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
-use fontdue::{Font, FontSettings, Metrics, OutlineBounds};
+use fontdue::{Font, FontSettings, Metrics};
+#[cfg(feature = "freetype")]
+use fontdue::OutlineBounds;
 use sha2::{Digest, Sha256};
 
 struct GlyphSlot {
@@ -34,11 +38,16 @@ static FONT_GENERATION: AtomicI64 = AtomicI64::new(0);
 // concurrent distinct-font rendering becomes a selected requirement.
 
 struct FreetypeSlot {
+    // Read only by the `freetype` backend; kept unconditionally so the
+    // FREETYPE_SLOT static and its plumbing stay feature-independent.
+    #[cfg_attr(not(feature = "freetype"), allow(dead_code))]
     library: usize,
+    #[cfg_attr(not(feature = "freetype"), allow(dead_code))]
     face: usize,
     _bytes: Vec<u8>,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FtVector {
@@ -46,6 +55,7 @@ struct FtVector {
     y: c_long,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FtGeneric {
@@ -53,6 +63,7 @@ struct FtGeneric {
     finalizer: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FtBBox {
@@ -62,6 +73,7 @@ struct FtBBox {
     y_max: c_long,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FtBitmap {
@@ -75,6 +87,7 @@ struct FtBitmap {
     palette: *mut c_void,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 struct FtGlyphMetrics {
@@ -88,6 +101,7 @@ struct FtGlyphMetrics {
     vert_advance: c_long,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 struct FtGlyphSlotRec {
     library: *mut c_void,
@@ -105,6 +119,7 @@ struct FtGlyphSlotRec {
     bitmap_top: c_int,
 }
 
+#[cfg(feature = "freetype")]
 #[repr(C)]
 struct FtFaceRec {
     num_faces: c_long,
@@ -131,6 +146,10 @@ struct FtFaceRec {
     glyph: *mut FtGlyphSlotRec,
 }
 
+// Optional native backend. Gated behind the `freetype` feature (default off):
+// an unconditional `#[link]` forced every consumer of this crate to have a
+// system freetype on the link path. See Cargo.toml for the full rationale.
+#[cfg(feature = "freetype")]
 #[link(name = "freetype")]
 extern "C" {
     fn FT_Init_FreeType(alibrary: *mut *mut c_void) -> c_int;
@@ -154,11 +173,16 @@ extern "C" {
     fn FT_Library_SetLcdFilter(library: *mut c_void, filter: c_uint) -> c_int;
 }
 
+#[cfg(feature = "freetype")]
 type CUlong = std::os::raw::c_ulong;
 
+#[cfg(feature = "freetype")]
 const FT_LOAD_RENDER: c_int = 0x4;
+#[cfg(feature = "freetype")]
 const FT_LOAD_TARGET_NORMAL: c_int = 0x0;
+#[cfg(feature = "freetype")]
 const FT_LOAD_TARGET_LCD: c_int = 3 << 16;
+#[cfg(feature = "freetype")]
 const FT_LCD_FILTER_DEFAULT: c_uint = 1;
 const MAX_VERIFIED_FONT_BYTES: i64 = 256 * 1024 * 1024;
 
@@ -184,6 +208,10 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
+#[cfg(not(feature = "freetype"))]
+fn destroy_freetype_slot(_slot: FreetypeSlot) {}
+
+#[cfg(feature = "freetype")]
 fn destroy_freetype_slot(slot: FreetypeSlot) {
     unsafe {
         let _ = FT_Done_Face(slot.face as *mut FtFaceRec);
@@ -223,15 +251,22 @@ pub extern "C" fn rt_fonts_init_verified_bytes(
         Ok(font) => font,
         Err(_) => return 0,
     };
-    let freetype = match load_freetype_memory_face(font_bytes) {
-        Some(slot) => slot,
-        None => return 0,
-    };
+    // With the `freetype` feature on, FreeType is a second rasterizer and the
+    // doc contract above ("only after both rasterizers are ready") applies. With
+    // it off there is only one rasterizer -- fontdue -- so a `None` face is the
+    // normal state, not a failure.
+    let freetype = load_freetype_memory_face(font_bytes);
+    #[cfg(feature = "freetype")]
+    if freetype.is_none() {
+        return 0;
+    }
 
     let mut font_slot = match FONT_SLOT.lock() {
         Ok(slot) => slot,
         Err(_) => {
-            destroy_freetype_slot(freetype);
+            if let Some(slot) = freetype {
+                destroy_freetype_slot(slot);
+            }
             return 0;
         }
     };
@@ -239,11 +274,13 @@ pub extern "C" fn rt_fonts_init_verified_bytes(
         Ok(slot) => slot,
         Err(_) => {
             drop(font_slot);
-            destroy_freetype_slot(freetype);
+            if let Some(slot) = freetype {
+                destroy_freetype_slot(slot);
+            }
             return 0;
         }
     };
-    let old_freetype = freetype_slot.replace(freetype);
+    let old_freetype = std::mem::replace(&mut *freetype_slot, freetype);
     *font_slot = Some(font);
     FONT_GENERATION.fetch_add(1, Ordering::SeqCst);
     drop(freetype_slot);
@@ -279,10 +316,7 @@ pub extern "C" fn rt_fonts_init(path_ptr: i64, path_len: i64) -> i64 {
             *slot = Some(font);
             if let Ok(mut ft_slot) = FREETYPE_SLOT.lock() {
                 if let Some(old) = ft_slot.take() {
-                    unsafe {
-                        let _ = FT_Done_Face(old.face as *mut FtFaceRec);
-                        let _ = FT_Done_FreeType(old.library as *mut c_void);
-                    }
+                    destroy_freetype_slot(old);
                 }
                 *ft_slot = freetype;
             }
@@ -314,6 +348,12 @@ pub extern "C" fn rt_fonts_has_glyph(codepoint: i64) -> i64 {
     }
 }
 
+#[cfg(not(feature = "freetype"))]
+fn load_freetype_face(_path: &str) -> Option<FreetypeSlot> {
+    None
+}
+
+#[cfg(feature = "freetype")]
 fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
     let c_path = CString::new(path).ok()?;
     unsafe {
@@ -335,6 +375,12 @@ fn load_freetype_face(path: &str) -> Option<FreetypeSlot> {
     }
 }
 
+#[cfg(not(feature = "freetype"))]
+fn load_freetype_memory_face(_bytes: Vec<u8>) -> Option<FreetypeSlot> {
+    None
+}
+
+#[cfg(feature = "freetype")]
 fn load_freetype_memory_face(bytes: Vec<u8>) -> Option<FreetypeSlot> {
     unsafe {
         let mut library: *mut c_void = std::ptr::null_mut();
@@ -443,6 +489,12 @@ pub extern "C" fn rt_fonts_glyph_free(handle: i64) -> i64 {
     1
 }
 
+#[cfg(not(feature = "freetype"))]
+fn rasterize_with_freetype(_ch: char, _font_size_px: i64) -> Option<GlyphSlot> {
+    None
+}
+
+#[cfg(feature = "freetype")]
 fn rasterize_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
     let ft_guard = FREETYPE_SLOT.lock().ok()?;
     let ft = ft_guard.as_ref()?;
@@ -528,6 +580,12 @@ pub extern "C" fn rt_fonts_rasterize_glyph_subpixel(codepoint: i64, font_size_px
     Box::into_raw(Box::new(glyph)) as i64
 }
 
+#[cfg(not(feature = "freetype"))]
+fn rasterize_subpixel_with_freetype(_ch: char, _font_size_px: i64) -> Option<GlyphSlot> {
+    None
+}
+
+#[cfg(feature = "freetype")]
 fn rasterize_subpixel_with_freetype(ch: char, font_size_px: i64) -> Option<GlyphSlot> {
     let ft_guard = FREETYPE_SLOT.lock().ok()?;
     let ft = ft_guard.as_ref()?;

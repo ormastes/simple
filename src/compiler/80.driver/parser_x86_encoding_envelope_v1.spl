@@ -1,0 +1,69 @@
+# Exact x86-64 VEX/EVEX envelope decoder for already separated instruction
+# bytes. This proves only encoding family and encoded vector length. It does
+# not identify an opcode's complete ISA-extension requirements.
+
+pub enum ParserX86EncodingEnvelopeErrorV1:
+    EmptyInstruction
+    InstructionTooLong
+    TruncatedPrefix
+    InvalidVectorPrefix
+    ReservedVectorLength
+
+pub enum ParserX86EncodingFamilyV1:
+    Legacy
+    Vex2
+    Vex3
+    Evex
+
+pub struct ParserX86EncodingEnvelopeV1:
+    family: ParserX86EncodingFamilyV1
+    prefix_offset: i64
+    opcode_offset: i64
+    encoded_vector_bits: i64
+    requires_extended_vector_state: bool
+
+fn _legacy_prefix_pxe(byte: u8) -> bool:
+    byte == 0xf0 or byte == 0xf2 or byte == 0xf3 or byte == 0x2e or
+    byte == 0x36 or byte == 0x3e or byte == 0x26 or byte == 0x64 or
+    byte == 0x65 or byte == 0x66 or byte == 0x67 or
+    (byte >= 0x40 and byte <= 0x4f)
+
+pub fn parser_x86_encoding_envelope_v1(bytes: [u8]
+) -> Result<ParserX86EncodingEnvelopeV1, ParserX86EncodingEnvelopeErrorV1>:
+    if bytes.len() == 0: return Err(ParserX86EncodingEnvelopeErrorV1.EmptyInstruction)
+    if bytes.len() > 15: return Err(ParserX86EncodingEnvelopeErrorV1.InstructionTooLong)
+    var at = 0
+    while at < bytes.len() and _legacy_prefix_pxe(bytes[at]): at = at + 1
+    if at >= bytes.len(): return Err(ParserX86EncodingEnvelopeErrorV1.TruncatedPrefix)
+    val lead = bytes[at]
+    if lead == 0xc5:
+        if bytes.len() - at < 3: return Err(ParserX86EncodingEnvelopeErrorV1.TruncatedPrefix)
+        if at != 0: return Err(ParserX86EncodingEnvelopeErrorV1.InvalidVectorPrefix)
+        val bits = if bytes[at + 1] & 4 != 0: 256 else: 128
+        return Ok(ParserX86EncodingEnvelopeV1(family: ParserX86EncodingFamilyV1.Vex2,
+            prefix_offset: at, opcode_offset: at + 2, encoded_vector_bits: bits,
+            requires_extended_vector_state: true))
+    if lead == 0xc4:
+        if bytes.len() - at < 4: return Err(ParserX86EncodingEnvelopeErrorV1.TruncatedPrefix)
+        if at != 0 or bytes[at + 1] & 0x1f == 0:
+            return Err(ParserX86EncodingEnvelopeErrorV1.InvalidVectorPrefix)
+        val bits = if bytes[at + 2] & 4 != 0: 256 else: 128
+        return Ok(ParserX86EncodingEnvelopeV1(family: ParserX86EncodingFamilyV1.Vex3,
+            prefix_offset: at, opcode_offset: at + 3, encoded_vector_bits: bits,
+            requires_extended_vector_state: true))
+    if lead == 0x62:
+        if bytes.len() - at < 5: return Err(ParserX86EncodingEnvelopeErrorV1.TruncatedPrefix)
+        if (at != 0 or bytes[at + 1] & 0x0c != 0 or bytes[at + 1] & 3 == 0 or
+            bytes[at + 2] & 4 == 0):
+            return Err(ParserX86EncodingEnvelopeErrorV1.InvalidVectorPrefix)
+        val length_code = (bytes[at + 3] >> 5) & 3
+        if length_code == 3: return Err(ParserX86EncodingEnvelopeErrorV1.ReservedVectorLength)
+        var bits = 128
+        if length_code == 1: bits = 256
+        elif length_code == 2: bits = 512
+        return Ok(ParserX86EncodingEnvelopeV1(family: ParserX86EncodingFamilyV1.Evex,
+            prefix_offset: at, opcode_offset: at + 4, encoded_vector_bits: bits,
+            requires_extended_vector_state: true))
+    Ok(ParserX86EncodingEnvelopeV1(family: ParserX86EncodingFamilyV1.Legacy,
+        prefix_offset: at, opcode_offset: at, encoded_vector_bits: 0,
+        requires_extended_vector_state: false))

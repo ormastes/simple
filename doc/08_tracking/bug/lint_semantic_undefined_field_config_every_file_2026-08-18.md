@@ -1,4 +1,8 @@
 # bug: `lint-cached.shs` FAILs every file with `undefined field 'config'` — non-discriminating
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-18
 - Lane: lane-aspect-dynload
@@ -83,3 +87,4 @@ Lane lint status for `src/lib/common/aspect_pack.spl`,
 `src/compiler/99.loader/module_loader_compat.spl` is **INCONCLUSIVE** —
 blocked by this tool defect. Explicitly NOT recorded as pass or fail. No lane
 source file was modified to appease this diagnostic.
+

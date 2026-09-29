@@ -1,0 +1,106 @@
+# Native-only retained parser evidence for the 2026-07-20 Stage-4 memory row.
+# Build this program from each compared source revision, then run each case in
+# a fresh process. Interpreting this file is not native ownership evidence.
+use compiler.common.driver_core_types.{SourceFile, driver_core_compile_options_default}
+use compiler.driver.driver.{CompilerDriver}
+use compiler.driver.driver_types.{CompileMode}
+use compiler.frontend.parser_types_expr.{StmtKind, ExprKind}
+use compiler.frontend.flat_ast_bridge.{flat_parse_module_body_calls}
+
+extern fn sys_get_args() -> [text]
+extern fn rt_env_set(key: text, value: text) -> bool
+
+const FUNCTIONS_PER_MODULE: i64 = 128
+
+fn source_text(module_index: i64) -> text:
+    var content = ""
+    var index: i64 = 0
+    while index < FUNCTIONS_PER_MODULE:
+        val expected = module_index * FUNCTIONS_PER_MODULE + index
+        content = content + "pub fn value_" + index.to_text() + "() -> i64:\n"
+        content = content + "    return " + expected.to_text() + "\n"
+        index = index + 1
+    content
+
+fn main() -> i32:
+    val args = sys_get_args()
+    if args.len() != 2:
+        print "usage: stage4_parse_memory_scale_probe --baseline|--scaled|--invalid"
+        return 2
+    val invalid = args[1] == "--invalid"
+    val count: i64 = if args[1] == "--baseline" or invalid: 2
+        elif args[1] == "--scaled": 16
+        else: 0
+    if count == 0:
+        return 2
+    if not rt_env_set("SIMPLE_FRONTEND_CACHE", "0") or
+            not rt_env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "0"):
+        return 2
+    var options = driver_core_compile_options_default()
+    options.mode = CompileMode.Check
+    options.low_memory = true
+    var driver = CompilerDriver.create(options)
+    var sources: [SourceFile] = []
+    var source_bytes: i64 = 0
+    var index: i64 = 0
+    while index < count:
+        val name = "parse.memory.module_" + index.to_text()
+        val content = if invalid and index == 0: "pub fn broken(\n"
+            else: source_text(index)
+        source_bytes = source_bytes + content.len()
+        sources.push(SourceFile(path: "build/parse-memory/module_" + index.to_text() + ".spl",
+            content: content, module_name: name))
+        index = index + 1
+    driver.ctx.sources = sources
+    driver.ctx.config["compiler_source_entry"] = "build/parse-memory/module_0.spl"
+    val parses_before = flat_parse_module_body_calls()
+    val parsed_ok = driver.parse_all_committing_impl()
+    val parse_work = flat_parse_module_body_calls() - parses_before
+    if invalid:
+        if parsed_ok or driver.ctx.error_count_value == 0 or parse_work == 0:
+            return 1
+        print "stage4_parse_memory_invalid_rejected=true"
+        return 0
+    if not parsed_ok or driver.ctx.modules.keys().len() != count or parse_work < count:
+        return 1
+    # Read every retained body after all later modules have reused parser arenas.
+    # Counts alone would admit empty bodies or values aliased to the final file.
+    var checksum: i64 = 0
+    index = 0
+    while index < count:
+        val name = "parse.memory.module_" + index.to_text()
+        if not driver.ctx.modules.contains_key(name):
+            return 1
+        val module = driver.ctx.modules[name]
+        if module.functions.keys().len() != FUNCTIONS_PER_MODULE:
+            return 1
+        var function_index: i64 = 0
+        while function_index < FUNCTIONS_PER_MODULE:
+            val function_name = "value_" + function_index.to_text()
+            if not module.functions.contains_key(function_name):
+                return 1
+            val function = module.functions[function_name]
+            if function.name != function_name or function.params.len() != 0 or
+                    function.body.stmts.len() != 1:
+                return 1
+            val expected = index * FUNCTIONS_PER_MODULE + function_index
+            match function.body.stmts[0].kind:
+                case StmtKind.Return(value):
+                    if value == nil:
+                        return 1
+                    match value.unwrap().kind:
+                        case ExprKind.IntLit(actual):
+                            if actual != expected:
+                                return 1
+                            checksum = checksum + actual
+                        case _:
+                            return 1
+                case _:
+                    return 1
+            function_index = function_index + 1
+        index = index + 1
+    val values = count * FUNCTIONS_PER_MODULE
+    if checksum != values * (values - 1) / 2:
+        return 1
+    print "stage4_parse_memory_modules={count} source_bytes={source_bytes} parse_work={parse_work} checksum={checksum} semantic_ok=true"
+    0

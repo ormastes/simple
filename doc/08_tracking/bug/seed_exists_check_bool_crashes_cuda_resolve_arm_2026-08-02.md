@@ -1,4 +1,8 @@
 # Seed `.?` bool-lowering crashes the CUDA arm of engine2d backend resolution
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-02 · **Severity:** medium · **Area:** seed lowering of `.?` / engine2d CUDA probe
 
@@ -28,3 +32,4 @@ probe render round-trip result instead of an existence check.
 
 The lowering defect itself remains open (family bug); the resolution path no
 longer depends on it.
+

@@ -94,22 +94,40 @@ ports or parent-applied deltas.
 `AuthorizationPort` is an authenticating composition-root service, not a
 shape-compatible object accepted from a handler. The composition root creates a
 branded `AuthorizationPortV1` only after loading its signature verifier,
-issuer/algorithm/key allowlist, and key/revocation epoch. It alone exposes:
+issuer/algorithm/key allowlist, and durable key/revocation policy. The following
+is the **required** cursor/read extension of that same port (not a description
+of the currently admitted Trust/Edge-only implementation):
 
 ```text
 verifyCanonicalReadReceiptV1(receipt, expected_binding, clock_now_ms)
   -> Result<VerifiedReadGrantV1, AdmissionFailure>
-signCursorReceiptV1(binding, page_position, expiry) -> CursorReceiptV1
+issueCursorReceiptV1(verified_read_grant, expected_cursor_binding, page_position, requested_expires_at_ms, clock_now_ms)
+  -> Result<CursorReceiptV1, AdmissionFailure>
 verifyCursorReceiptV1(receipt, expected_binding, clock_now_ms)
   -> Result<VerifiedCursorGrantV1, AdmissionFailure>
+rotateCursorReceiptKeyV1(rotation_request, clock_now_ms)
+  -> Result<CursorReceiptKeyPolicyV1, AdmissionFailure>
+applyDueCursorReceiptKeyTransitionsV1(clock_now_ms)
+  -> Result<CursorReceiptKeyPolicyV1, AdmissionFailure>
 ```
 
-`expected_binding` is a closed tuple of authority key/epoch, workspace UID,
-project UID-or-null, snapshot ID, revision ID, view kind, normalized logical
-path, normalized selector/filter digest, effective scope digest, ordering
-version, and page limit. A parser/projection module receives only verified
-grants; it cannot create a receipt, widen a selector, or choose a replacement
-workspace/snapshot. The root URI grammar is likewise closed: only
+`ExpectedReadBindingV1` (`expected_binding`) is an authority-created closed
+tuple of authority key/epoch, **authority instance UID**, **authority manifest
+digest**, normalized alias URI-or-null, canonical URI, workspace UID, project
+UID-or-null, **worktree UID**, target kind/UID, immutable **base snapshot UID**,
+content-addressed **authority snapshot UID**, revision ID, view kind,
+normalized logical path, normalized selector/filter digest, effective scope
+digest, ordering version, page limit, and policy version. The signed legacy
+`CanonicalReadReceiptV1` deliberately lacks a worktree field for compatibility;
+on successful verification the port copies the sealed expected binding into the
+opaque `VerifiedReadGrantV1`. That grant's trusted base-snapshot,
+authority-snapshot, worktree, authority-instance, and authority-manifest claims
+are therefore not derived by cursor, URI, or
+projection code. The complete receipt, grant,
+cursor, and durable-rotation schemas are frozen in §21. A parser/projection
+module receives only verified grants; it cannot create a receipt, widen a
+selector, or choose a replacement workspace/snapshot. The root URI grammar is
+likewise closed: only
 `spipe://workspace/{workspace}/` denotes a workspace directory; the un-slashed
 form is malformed rather than normalized.
 
@@ -279,11 +297,11 @@ fatal. `Behavior`, `TestRun`, `TestResult`,
 
 New canonical namespaces are `RQ-` for requirements, `NFR-` for non-functional
 requirements, `SS-` for scenarios, `SY-` for source symbols, `WS-` for
-workspaces, and `WT-` for new worktree identities. Schema-v1 `W-` values are
+workspaces, and `W-` for new worktree identities. Schema-v1 `W-` values are
 decoded by record type (`workspace` or `worktree`) and never compared across
-types. Schema v2 writes only `WS-`/`WT-` and records a tracked
+types. Schema v2 writes only `WS-`/`W-` and records a tracked
 `IdentityMigrationRecord(old_uid, old_record_type, new_uid, migrated_in_snapshot_uid)`.
-The new UID is derived, not randomly allocated: `WS-` or `WT-` plus the first
+The new UID is derived, not randomly allocated: `WS-` or `W-` plus the first
 26 Crockford characters under the encoding above of SHA-256 over UTF-8
 `spipe-identity-migration-v1\0`, the target record type, a NUL byte, and the
 legacy `W-` UID bytes. Mutable record content is excluded. Identical
@@ -501,8 +519,8 @@ directory flush, validation, manifest publish, and receipt publish boundary.
 
 The authoritative URI space is `spipe://workspace/...` and
 `spipe://project/.../artifact/{uid}`. Directory reads are bounded generated
-indexes; pages contain at most 100 entries, 200 Markdown lines, and an
-approximately 6,000-token payload. Collision suffixes use a deterministic short
+indexes; pages contain at most 100 entries, 200 Markdown lines, and at most
+6,000 `spipe-markdown-token-v1@1` tokens. Collision suffixes use a deterministic short
 UID and every generated entry declares canonical UID/path.
 
 Every virtual entry/page has `ProjectionUid = spkp1-<lowercase sha256>`, where
@@ -544,6 +562,65 @@ expiry, workspace/project, and operations. Responses default to `Cache-Control:
 private, no-store` plus `Vary: Authorization`; public caching requires proven
 public immutable content and snapshot/content ETag. CORS denies by default,
 logs redact credentials, and mutations require an authenticated anti-replay ID.
+
+### 7.2 Wave 5 delivery capsule and adapter order
+
+Wave 5 is a read-only delivery capsule, not a second authority path.  It may
+start only after the production `KnowledgeCompilerCommitPublisherV1` has
+published a sealed inventory (W5A) and the branded canonical-read/cursor
+extension has passed W5C.  The accepted pure `ProjectionKernelV1` and its
+unsigned local continuation are useful internal algorithms, but are expressly
+not an MCP resolver, receipt issuer, materializer authorization, or substitute
+for either prerequisite.
+
+The only admitted dependency direction is:
+
+```text
+legacy-stdio | mcp-2026-http | editor-vfs | materialize CLI
+                         -> McpDeliveryFacadeV1
+                         -> ResourceResolverV1
+                         -> SnapshotAuthorityPortV1 + AuthorizationPortV1
+                         -> ProjectionPortV1
+                         -> immutable published authority view
+```
+
+`McpDeliveryFacadeV1` owns protocol-envelope conversion only.  It receives a
+normalized `ReadRequestV1` and returns a normalized `ReadResponseV1`; it has no
+store, filesystem, inventory-builder, signer, cursor-key, or snapshot-refresh
+import.  `ResourceResolverV1` performs exactly: parse/normalize URI; open the
+receipt-named sealed view; prove canonical target or directory membership; make
+the expected binding; verify the read receipt; verify an inbound cursor for a
+list; call the projection port once; and issue the next cursor only after a
+successful list.  Any failure before render/list makes zero projection calls;
+outbound cursor issue failure discards the page.  The same resolver path serves
+resources, tools, materialization planning, and editor reads, so transport
+adapters cannot disagree about authorization, ordering, URI acceptance, or
+privacy response shape.
+
+There are four separately gated adapters.  (1) Legacy stdio preserves existing
+tools and `spipe://skill`, then exposes newly implemented resources/tools only
+after initialization.  (2) Stateless MCP 2026 is added only after the same
+normalized response transcript passes under HTTP authentication; it never
+inherits stdio trust.  (3) Materialization obtains a separate
+`SafeFilesystem.Materializer` capability after the read has been resolved and
+uses only `MaterializerSafeFilesystemPort`; a successful MCP read neither
+creates nor implies this capability.  (4) An editor provider implements
+read/stat/readDirectory from `ReadResponseV1`, rejects write/delete/rename, and
+routes any requested canonical mutation to the separately authorized refactor
+plan/apply flow.  FUSE/ProjFS remains outside this capsule.
+
+The public wire mapping is frozen as follows.  `resources/list`,
+`resources/templates/list`, `resources/read`, `spipe_list`, and `spipe_read`
+use the resolver; `spipe_search`, `spipe_resolve`, `spipe_trace`, and
+`spipe_diagnostics` may be advertised only after their respective sealed,
+authorized providers exist.  A capability is absent rather than advertised
+early.  Read-admission denials map to the one bounded public
+`not_found_or_unauthorized` result in every adapter.  JSON-RPC envelope errors
+remain protocol errors, while invalid HTTP authentication, headers, origin,
+rate/budget, or TLS policy stop before resolver invocation.  Cache policy is
+derived after authorization from the normalized response: only a proved public
+immutable projection can be shared; all other responses, including denial,
+are private/no-store.
 
 ## 8. Search and Provider Boundary
 
@@ -1306,19 +1383,24 @@ that candidate's target membership, and only then authorizes. It calls
 only `AuthorizationPort.verifyCanonicalReadReceiptV1`, which allowlists the
 version/key, verifies the signed `D-` payload (`spipe-uri-read-v1\0` plus
 canonical JSON), requires `decision=allow`, a live clock window, and the
-current revocation epoch, then compares every field with the direct resolved
-target and pinned `KnowledgeSnapshot`; any difference causes fresh
-authorization or a closed failure. Thus `spipe://skill` cannot be read under
-an alias-only grant.
+current revocation epoch, then returns the trusted read grant. A non-paginated
+read calls `ProjectionPortV1.render` with that grant. A directory list verifies
+an inbound cursor against that same grant before `ProjectionPortV1.list`, then
+issues an outbound cursor from the returned next position. Any difference
+causes fresh authorization or a closed failure. Thus `spipe://skill` cannot be
+read under an alias-only grant.
 
 `CanonicalReadReceiptV1` has exactly `{receiptVersion, authorityKeyId,
 authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+projectUidOrNull, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, viewKind,
 normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
 pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
-issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` has that same
-binding plus `lastSortKey`; both use the sole verifier method names frozen in
-§3.1 and no `verifyCanonicalTargetReceiptV1` alias exists.
+issuerKeyId, revocationEpoch, signature}`. `CursorReceiptV1` is exactly the
+complete schema in §21: it retains canonical alias/URI/target binding, includes
+the verified worktree, and uses validated `pagePosition` (never `lastSortKey`).
+Both use only the sole verifier method names frozen in §3.1; no
+`verifyCanonicalTargetReceiptV1` alias exists.
 
 Before authorization and rendering, the resolver directly verifies that the
 snapshot exists, is immutable, belongs to the selected workspace/project, has
@@ -1366,15 +1448,25 @@ ResourceResolver
   -> SnapshotAuthorityPortV1.openBoundSnapshot(binding)
   -> SnapshotAuthorityPortV1.resolveCanonicalAlias(...) -> resolveCanonicalTarget(...)
      (or resolveCanonicalTarget(...) directly for canonical URIs)
-  -> AuthorizationPortV1.verifyCanonicalReadReceiptV1(...)
-  -> ProjectionPortV1.render/list(authorityView, canonicalTarget)
+  -> SnapshotAuthorityPortV1.createExpectedReadBindingV1(authorityView,
+       canonicalTargetOrDirectory, normalizedRequest)
+       -> ExpectedReadBindingV1
+  -> AuthorizationPortV1.verifyCanonicalReadReceiptV1(..., ExpectedReadBindingV1, ...)
+       -> verifiedReadGrant
+  -> direct: ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+     list: AuthorizationPortV1.verifyCursorReceiptV1(..., verifiedReadGrant, ...)
+           -> verifiedCursorGrant
+           -> ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant,
+                                    verifiedCursorGrantOrNull)
+           -> AuthorizationPortV1.issueCursorReceiptV1(verifiedReadGrant,
+                                                       {pagePosition: nextPosition, requestedExpiresAtMs}, ...)
 ```
 
 The binding is exactly `{workspaceUid, projectUidOrNull, worktreeUid,
-snapshotUid, revisionId}`. `openBoundSnapshot` verifies all five fields against
+baseSnapshotUid, authoritySnapshotUid, revisionId, registryRevisionId}`.
+`openBoundSnapshot` verifies all seven fields against
 the registry and immutable manifest, validates the manifest digest, and
-returns an opaque view. `resolveCanonicalAlias` returns only an unrenderable
-canonical candidate; `resolveCanonicalTarget` then proves
+returns an opaque view. `resolveCanonicalTarget` then proves
 `{targetKind,targetUid}` membership in its indexed artifact/section/aggregate
 inventory. `listDirectoryTarget` proves an allowed virtual directory mapping
 from normalized view/path/selector data. Each result carries the manifest
@@ -1403,23 +1495,348 @@ Missing, swapped, or tampered inventory is therefore a denial, not a
 recoverable index miss.
 
 Workspace aggregates are a separate manifest scope: `projectUidOrNull=null`
-is valid only for `workspace_aggregate`, which requires and seals the complete
-`contributingProjectRoots` schema field. It is a canonical project-UID-ordered
-list of `{projectUid, baseSnapshotUid, authoritySnapshotUid,
-targetInventoryRoot}` records, committed by both inventory and authority
-manifest bytes. A missing, extra, substituted, or reordered contributor changes
-the seal and denies; the field is forbidden for project scope, which requires
-its non-null project UID. This bridges existing project-owned snapshots without
-letting a URI assert a null-project read.
+is valid only for `workspace_aggregate`, which commits the sorted contributing
+project snapshot roots. A project scope requires its non-null project UID.
+This bridges existing project-owned snapshots without letting a URI assert a
+null-project read.
 
 The precise call order is: parse; exact registry workspace/worktree lookup;
 open the receipt-named authority snapshot/revision as an *untrusted candidate*
 and verify its sealed inventory; a legacy alias yields only a canonical
 candidate, then `resolveCanonicalTarget` proves that candidate wholly inside
-the view (canonical URIs prove their target directly); derive expected receipt
-binding from the proved view/target/request; verify the receipt; render through
-ProjectionPort. Thus alias lookup is neither proof nor authorization, and
-receipt verification cannot precede target proof. `worktreeUid` is intentionally not a
-receipt field: it is transitively proved by the verified snapshot/aggregate
-tuple selected by the registry. No receipt, alias, URI, or projection adapter
-can fabricate a target before that proof.
+the view (canonical URIs prove their target directly); derive the closed
+`ExpectedReadBindingV1` from the proved view/target/request, including
+`authorityInstanceUid` and `authorityManifestDigest`; verify the canonical-read
+receipt;
+for a list, verify the inbound cursor against the resulting read grant, list,
+and issue the next cursor; for a direct read, render with the read grant. Thus
+alias lookup is neither proof nor authorization, and
+receipt verification cannot precede target proof. `worktreeUid` is intentionally
+absent from the legacy read receipt but is a trusted claim in the verified read
+grant and a signed field of the cursor receipt, as §21.1 defines. No receipt,
+alias, URI, or projection adapter can fabricate a target before that proof.
+
+## 21. Cursor-receipt authority extension prerequisite (2026-08-26)
+
+<!-- codex-architecture -->
+
+The concrete `AuthorizationPortV1` currently verifies only distinct Trust and
+Edge receipt families (`verifyTrustReceipt` and `verifyEdgeAcceptanceReceipt`).
+It cannot issue or verify a fully bound `CursorReceiptV1`; §3.1 is target
+architecture, not current capability. Wave 5 URI v3 is non-admitted until the
+following extension exists and is independently accepted. A handler must never
+sign a cursor or adapt a Trust/Edge receipt into one.
+
+Extend the existing branded composition-root port, never a parallel signer:
+
+`CanonicalReadReceiptV1` remains exactly `{receiptVersion, authorityKeyId,
+authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
+projectUidOrNull, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, viewKind,
+normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
+pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
+issuerKeyId, revocationEpoch, signature}`. Its only verification result is the
+opaque, branded `VerifiedReadGrantV1`. Its canonical claims are exactly the
+verified receipt binding **plus** `{worktreeUid, authorityInstanceUid,
+authorityManifestDigest}` copied from the sealed `ExpectedReadBindingV1` passed
+to verification. Its complete closed tuple is the §3.1 authority key/epoch,
+authority instance UID, authority manifest digest, normalized alias URI-or-null,
+canonical URI, workspace/project/worktree UIDs, target kind/UID, snapshot/revision,
+view kind, normalized logical path, selector/effective-scope digests, ordering,
+page limit, and policy version. Its base/authority snapshot claims are retained
+only after their exact receipt-to-binding equality check. `ExpectedReadBindingV1`
+is created only from the proven
+`SnapshotAuthorityViewV1`, canonical target/directory, and normalized request;
+it is not an adapter-owned object. Thus the grant's `worktreeUid` is trusted
+authority input even though it is intentionally not serialized in the legacy
+read receipt.
+
+`CursorReceiptV1` is exactly `{receiptVersion, receiptKind, authorityKeyId,
+authorityKeyEpoch, authorityInstanceUid, authorityManifestDigest,
+normalizedAliasUriOrNull, canonicalUri, workspaceUid, projectUidOrNull,
+worktreeUid, targetKind, targetUid, baseSnapshotUid, authoritySnapshotUid, revisionId,
+viewKind, normalizedLogicalPath, selectorDigest, effectiveScopeDigest,
+orderingVersion, pageLimit, pagePosition, policyVersion, issuedAtMs,
+expiresAtMs, receiptUid, issuerKeyId, algorithm, revocationEpoch, signature}`;
+`receiptVersion="v1"` and `receiptKind="cursor"` are fixed. `pagePosition` is
+a canonical JSON array of one to eight scalar sort-key values (NFC text or
+bounded safe integers); objects, paths, controls, NaN, and ambiguous numeric
+forms are rejected. `issueCursorReceiptV1` derives every non-position binding
+field from `VerifiedReadGrantV1`; callers cannot supply a cursor binding. It
+sets `issuedAtMs=clockNowMs` and accepts an integer expiry only when
+`issuedAtMs < requestedExpiresAtMs <= min(readGrant.expiresAtMs,
+issuedAtMs + policy.maxTtlMs)` without overflow.
+
+Receipt fields are exactly `{receiptVersion,receiptKind,authorityKeyId,
+authorityKeyEpoch,normalizedAliasUriOrNull,canonicalUri,workspaceUid,
+projectUidOrNull,worktreeUid,targetKind,targetUid,snapshotUid,revisionId,
+viewKind,normalizedLogicalPath,selectorDigest,effectiveScopeDigest,
+orderingVersion,pageLimit,pagePosition,policyVersion,issuedAtMs,expiresAtMs,
+receiptUid,issuerKeyId,algorithm,revocationEpoch,signature}`, with
+`v1`/`cursor` fixed. `pagePosition` is a canonical JSON array of 1..8 scalar
+sort-key values (NFC text or bounded safe integers); no object, path separator,
+control character, NaN, or ambiguous numeric representation is valid.
+Identity-preimage fields are every listed field except `receiptUid` and
+`signature`; `receiptUid` is lowercase SHA-256 of UTF-8
+`spipe-cursor-receipt-id-v1\0` followed by its canonical JSON. The signing
+payload is every field except `signature`, including that derived receipt UID;
+signing bytes are UTF-8 `spipe-cursor-receipt-v1\0` followed by canonical JSON
+and `signature` is unpadded base64url. Canonical JSON uses lexicographic field
+ordering, NFC strings, base-10 integers, and no omitted/null-equivalent fields.
+This domain separation prevents Trust, Edge, and canonical-read signatures from
+being accepted as cursors.
+
+The sole `ProjectionPortV1` ABI is:
+
+```text
+ProjectionPortV1.render(authorityView, canonicalTarget, verifiedReadGrant)
+  -> Result<ProjectionDocumentV1, ProjectionError>
+ProjectionPortV1.list(authorityView, directoryTarget, verifiedReadGrant, verifiedCursorGrantOrNull)
+  -> Result<ProjectionPageV1, ProjectionError>
+```
+
+It accepts only mutually matched opaque branded values from the same authority
+instance and repeats binding/manifest equality checks. The resolver verifies an
+inbound cursor before `list`; after a deterministic page returns its next
+position, the authorization port issues the outbound cursor. End-of-list emits
+none. On outbound issue failure the page is discarded. No URI, projection, or
+materializer adapter may reconstruct a grant, infer a target, refresh a
+snapshot, or call a raw store.
+
+### 21.2 Durable cursor key policy and rotation
+
+`CursorReceiptKeyPolicyV1` is the one durable canonical record:
+`{policyVersion, currentReceiptRevocationEpoch, currentAuthorityKeyId,
+keyRecords, rotationRecords}`. `keyRecords` are canonically ordered by
+`authorityKeyEpoch` then key ID and contain exactly `{authorityKeyId, algorithm,
+authorityKeyEpoch, issuerKeyId, publicVerificationKey, status, activateAtMs,
+graceUntilMsOrNull, revokedAtMsOrNull, revocationEpochAtRevocationOrNull}`.
+`status` is one of `pending`, `current`, `grace`, or `revoked`.
+`rotationRecords` are canonically ordered by `rotationUid` and contain the
+immutable accepted request and committed policy version; a duplicate
+`rotationUid` with different bytes fails, while an identical replay returns the
+already recorded policy.
+
+The sole logical `CursorReceiptKeyPolicyV1` is persisted as one transactional,
+append-only record family: initial `policy`, then `key`, `issuer`, `rotation`,
+and `revocation` operations. Every operation carries its monotonic policy
+version and immutable operation UID and folds to exactly the canonical record
+above; this is not a second policy schema. Initial policy-directory creation
+and every operation write, rename, and required parent/file fsync complete
+before acknowledgement. Recovery accepts only the longest contiguous
+consistent chain; equal UID/bytes replay returns the prior result while altered
+bytes or stale version fail closed.
+
+`rotateCursorReceiptKeyV1` atomically appends one `pending` record after a
+compare-and-swap of `policyVersion`; its request is exactly `{rotationUid,
+expectedPolicyVersion, newAuthorityKeyId, newAlgorithm, newAuthorityKeyEpoch,
+newIssuerKeyId, newPublicVerificationKey, activateAtMs, priorGraceUntilMs,
+revocationEpochAtPriorRevocation}`. Epochs and the revocation epoch are
+strictly monotonic, one key ID maps to one algorithm, and
+`clockNowMs <= activateAtMs < priorGraceUntilMs` is required. Only the
+composition-root administrator invokes rotation or due transitions.
+
+`applyDueCursorReceiptKeyTransitionsV1` is the only state-transition writer.
+At `activateAtMs`, it atomically changes the pending record to `current` and
+the former current record to verification-only `grace`; at `priorGraceUntilMs`,
+it changes that grace record to `revoked`, records its revocation time and
+epoch, and advances `currentReceiptRevocationEpoch` to the recorded monotonic
+value. It durably commits each transition before use, is restart-idempotent,
+and fails closed if time and durable state disagree. A pending key signs or
+verifies nothing; current signs and verifies; grace verifies only; revoked
+neither signs nor verifies. Verification requires a permitted record and the
+receipt's exact current revocation epoch, so the durable revocation transition
+invalidates pre-revocation receipts without changing their bindings. Private
+signing handles are non-exportable, purpose/environment-scoped `KeyProvider`
+material; only public verification policy is portable. Restart reloads the
+policy and provider, and issuance fails closed without the current private
+handle.
+
+The required call order is sealed authority view and target proof; creation of
+the closed `ExpectedReadBindingV1`, including `authorityInstanceUid` and
+`authorityManifestDigest`; canonical-read verification; inbound cursor
+verification against that read grant; ProjectionPort call; then outbound issue.
+Every pre-projection failure has zero ProjectionPort calls and the bounded
+public `not_found_or_unauthorized` response. A post-list issue failure discards
+the page and uses that same response; telemetry may retain only a closed reason
+such as `stale_cursor`.
+
+### 21.3 Production authority/store admission correction
+
+Every authority binding uses `W-<opaque-base32>` worktree UIDs only. The
+composition root owns branded `WorkspaceRegistryV1`, `SnapshotStoreV1`, and
+`TargetInventoryStoreV1`, exposing exactly
+`resolveExactWorkspaceWorktreeV1`, `openExactSnapshotV1`,
+`publishAuthorityInventoryV1`, and `openPublishedAuthorityInventoryV1`.
+Their immutable records bind registry revision, snapshot revision, base
+snapshot UID, inventory root, authority snapshot UID, and manifest digest.
+`openBoundSnapshot` reads registry -> snapshot -> published inventory and then
+re-reads both exact revisions before returning a view; changed revisions deny.
+
+Only KnowledgeCompiler's production snapshot-commit transaction publishes
+inventories. It selects all and only complete project roots for the exact
+registry revision, atomically makes the project and aggregate inventories
+reader-visible, then publishes authority manifests. Its publisher argument is
+a branded, non-forgeable `AuthorityInventoryPublishPermitV1` minted only by
+that transaction; strings, structural substitutes, and caller-selected
+aggregate roots deny. `listDirectoryTarget`
+permits request limits `1..100`, with <=100 entries, <=200 Markdown lines, and
+<=6,000 `spipe-markdown-token-v1@1` tokens; continuation is authenticated and no unbounded
+directory projection exists. Authorization's child policy store fsyncs the
+initial directory, uses monotonic CAS policy versions and immutable operation
+UIDs for policy/key/issuer/rotation/revocation records, and recovers only contiguous durable
+state. Mock stores, old `WT-*` fixtures, or in-memory fault-free evidence are
+non-admitted; production clean/incremental parity, revision revalidation, and
+create/write/fsync/rename/CAS crash evidence are required.
+
+### 21.4 Sealed publication and durable-ledger invariants
+
+`openPublishedAuthorityInventoryV1` recomputes canonical manifest/inventory
+digests and proves all fields against the loaded live registry and exact
+snapshot, then rereads the same registry and snapshot revisions after inventory
+open. Substituted bytes, copied registry records, or revision changes deny
+before target lookup.
+
+`AuthorityInventoryPublishPermitV1` is a closure brand owned only by the
+KnowledgeCompiler commit root, never data accepted through an adapter. The only
+publish ABI is `publishAuthorityInventoryV1({permit, build})`, where `permit`
+is minted within the transaction that fixes `registryRevisionId`. That
+transaction selects and publishes all-and-only registry-complete,
+schema-complete ordered roots, aggregate root, and authority manifest. Readers
+reject missing, extra, reordered, substituted, or incomplete roots.
+
+Each directory record commits ordered unique children, ordering version, page
+bound, and `tokenBudget`. After `AuthorityManifestV1` and
+`TargetInventoryManifestV1` verification, `continuationDomain` is derived but
+is never a committed entry, root, digest input, or new grant/cursor field: it
+is SHA-256 of canonical `{authorityManifestDigest,targetUid,orderingVersion,
+maxPageLimit,tokenBudget}`. Existing signed manifest/target/ordering/limit
+claims must rederive the same domain at cursor issuance and verification. Thus
+no manifest or inventory digest commits a value depending on itself.
+`tokenBudget` fixes `spipe-markdown-token-v1@1`, Unicode 15.1.0, at 6,000
+tokens: reject invalid UTF-8, normalize CRLF/bare CR to LF, then split scalar
+runs on ASCII `U+0009..U+000D,U+0020`, Unicode-15.1 White_Space
+`U+0085,U+00A0,U+1680,U+2000..U+200A,U+2028,U+2029,U+202F,U+205F,U+3000`, and
+ASCII punctuation `U+0021..U+002F,U+003A..U+0040,U+005B..U+0060,U+007B..U+007E`.
+Listing cannot add/reorder/widen or accept a continuation outside that domain.
+Policy persistence is atomic replacement plus file and parent-directory fsync
+under cross-process monotonic CAS. Loading validates schemas and only a
+contiguous durable operation sequence; equal operation UID/payload replays,
+altered payloads and stale CAS fail.
+
+### 21.5 KnowledgeCompiler commit publisher: prerequisite ownership
+
+The reader ports above do not create the production publication they trust.
+Current immutable metadata and graph snapshot stores lack one transaction that
+materializes complete artifact/section/directory/project/aggregate inventories.
+`SnapshotAuthorityPortV1` is therefore non-admitted until parent-owned
+`KnowledgeCompilerCommitPublisherV1` exists.
+
+Construct it only at the composition root from branded `WorkspaceRegistryV1`,
+`SnapshotStoreV1`, `TargetInventoryStoreV1`, and
+`AuthorityPublicationJournalV1`. Its only input is closed
+`CommitInputV1 {commitId, workspaceUid, projectUidOrNull, worktreeUid,
+revisionId, expectedRegistryRevisionId, expectedBaseSnapshotUidOrNull,
+expectedPublicationUidOrNull, inputDeltas}`. Expected IDs are null only for an
+initial publication; otherwise the publisher opens that exact prior tuple. The one
+transaction normalizes deltas; materializes an immutable base snapshot; fixes
+the exact registry revision; materializes sealed project target/section/
+directory inventories; derives the registry-complete aggregate; seals the
+paired manifests; mints a closure `AuthorityInventoryPublishPermitV1`; then
+publishes both scopes through durable revision CAS.
+
+```text
+KnowledgeCompilerCommitPublisherV1.commit(CommitInputV1) -> PublishedAuthorityCommitV1
+TargetInventoryMaterializerV1.materialize(baseSnapshot, registryRevision, deltas)
+  -> ProductionInventoryBuildV1
+PublisherPermitIssuerV1.mintForCommit(transaction) -> AuthorityInventoryPublishPermitV1
+TargetInventoryStoreV1.publishAuthorityInventoryV1({permit, build})
+  -> PublishedAuthorityInventoryV1
+AuthorityPublicationJournalV1.recoverAuthorityPublicationV1() -> RecoveryResultV1
+```
+
+`ProductionInventoryBuildV1` is private until publication. Its contributor list is
+ordered, schema-complete, and all-and-only registry-selected; all content and
+directory data precedes sealing. The closure permit cannot be serialized or
+provided by adapters. The journal stages immutable objects and the complete
+`AuthorityPublicationRecordV1`, fsyncs every staged file and parent directory,
+then invokes the sole atomic durable current-pointer revision-CAS. That CAS
+does not expose the new head until its pointer write/fsync boundary completes;
+`openPublishedAuthorityInventoryV1` observes old or new complete records only.
+The pointer contains its publication UID, exact registry/base tuple, ordered
+project roots, aggregate root, paired authority snapshot UIDs, and both manifest
+digests. Journal-owned recovery validates this state before acknowledgement.
+Equal canonical commit replay
+is idempotent; changed replay/stale revision fail; recovery exposes old complete
+or new complete state only. W5A-18/19/21/22 require real all-kind parity,
+forged-permit/contributor/substitution negatives and crash/restart/CAS proof;
+authority/projection/cursor claims remain non-admitted before that evidence.
+
+### 21.6 Publisher admission invariants
+
+The rejected publisher is `NON-ADMITTED`; the following are architecture
+invariants, not implementation suggestions. `TargetInventoryStoreV1` owns the
+non-forgeable publication boundary. It recognizes only the closure brand minted
+by `PublisherPermitIssuerV1` inside the composition-root transaction; neither a
+public `AuthorityPublicationJournalV1`, `instanceof`, object shape, nor a
+caller-selected project/aggregate root can confer authority.
+
+`CommitInputV1` is reduced once to a versioned canonical replay envelope hash
+covering `commitId`, exact workspace/project/worktree/revision tuple, expected
+registry/base/publication IDs, and normalized deltas. The journal stores this
+hash in `AuthorityPublicationRecordV1`; same hash returns the exact durable
+result, while changed bytes deny before any write. The record contains the exact
+workspace/project/worktree/revision/base-and-authority-snapshot tuple, ordered
+project roots, aggregate root, manifest digests, and content hashes for every
+journal-owned inventory/manifest object.
+
+`AuthorityPublicationJournalV1` is the sole durable state-machine and recovery
+owner: `staging`, `objects_durable`, `record_durable`, `current_cas`, and
+`acknowledged`. It writes immutable content-addressed objects and record before
+one atomic rename/CAS current pointer, fsyncing files and parent directories;
+it recovers stale writer locks and process interruption deterministically.
+`openPublishedAuthorityInventoryV1` and recovery deep-verify record schema,
+all object hashes, both manifests, project/aggregate roots, exact binding, and
+sealed page roots before returning. Once a head exists, reads return only its
+complete predecessor or its complete successor—never `null`, staging, or a
+partially checked record.
+
+### 21.7 Wave 5 sealed-boundary re-admission order
+
+`KnowledgeCompilerCommitPublisherV1` P2 is the first unresolved authority
+boundary. Its closure permit and canonical replay envelope are necessary but
+not sufficient: the current candidate is non-admitted because first-use nested
+ledger creation can race with `EEXIST`. `AuthorityPublicationJournalV1` must
+therefore create/fsync every new ancestor, publish a durable owner receipt,
+compare/revalidate the observed stale owner before unlink, and demonstrate
+competing-process and SIGKILL recovery. An in-process lock, path-blind unlink,
+or test-only scheduler is forbidden evidence.
+
+Only P2's independently reviewed production oracle may feed the second
+boundary: `SnapshotAuthorityPortV1.openBoundSnapshot(binding)` creates an opaque
+`SnapshotAuthorityViewV1` and closed `ExpectedReadBindingV1` from the exact
+published dual-snapshot tuple. It uses real registry/snapshot owners and the
+branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1` boundary,
+deep-verifies roots and manifests, and rejects swapped worktree,
+revision, snapshot, instance, manifest, target, or brand before authorization
+or `ProjectionPortV1`. A raw manifest, cache, caller map, or structural object
+cannot implement this port.
+
+The third boundary is URI/projection: the resolver returns a canonical target
+*candidate* only; after sealed membership and real `AuthorizationPortV1`
+verification, the composition root compares the entire frozen
+`CanonicalReadReceiptV1`/`ExpectedReadBindingV1` before ProjectionPort. Legacy
+aliases, including `spipe://skill`, never confer authority. The rejected URI
+candidate is not reusable; raw path resolution, local signing, duck-typed
+grants, and alias-only output are forbidden.
+
+Cursor, MCP, and materializer adapters are fourth and read-only. They consume
+only the admitted closed binding, preserve the sealed bounded directory domain,
+and make zero projection calls before admission. Each boundary needs real
+production tests, exact-scope review, and an independent highest-capability
+PASS; failure leaves all successors `NON-ADMITTED`.
+
+This is an additive boundary order, not a replacement of §21's normative
+authority/cursor ABI, raw snapshot APIs, or the exact
+`spipe-markdown-token-v1@1` <=6,000 token gate. Rejected cursor work is
+forensic evidence only and cannot weaken or delete those contracts.

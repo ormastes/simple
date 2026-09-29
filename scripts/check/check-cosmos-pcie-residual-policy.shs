@@ -1,0 +1,248 @@
+#!/bin/sh
+# Stage-4-only oracle, decision-coverage, transport, and ABI/object gate.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SOURCE_DIR="$ROOT/src/os/kernel/arch/arm32/cosmos"
+POLICY_SOURCE="$SOURCE_DIR/cosmos_pcie_residual_policy.spl"
+POLICY_HEADER="$SOURCE_DIR/cosmos_pcie_residual_policy.h"
+PCIE_SOURCE="$SOURCE_DIR/cosmos_pcie.c"
+QUEUE_BRIDGE="$SOURCE_DIR/cosmos_nvme_pcie_policy_bridge.c"
+TEST_DIR="$ROOT/test/02_integration/os/cosmos"
+ORACLE_SOURCE="$TEST_DIR/cosmos_pcie_residual_policy_oracle.c"
+ORACLE_TEST="$TEST_DIR/cosmos_pcie_residual_policy_oracle_test.c"
+TRANSPORT_TEST="$TEST_DIR/cosmos_pcie_contract_test.c"
+QUEUE_ORACLE="$TEST_DIR/cosmos_nvme_pcie_policy_oracle.c"
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-pcie-residual.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-pcie-residual.*|${TMPDIR:-/tmp}/cosmos-pcie-residual.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-pcie-residual: $*" >&2
+    exit 1
+}
+
+blocked() {
+    echo "BLOCKED cosmos-pcie-residual: $*" >&2
+    exit 2
+}
+
+for path in "$POLICY_SOURCE" "$POLICY_HEADER" "$PCIE_SOURCE" \
+    "$QUEUE_BRIDGE" "$ORACLE_SOURCE" "$ORACLE_TEST" \
+    "$TRANSPORT_TEST" "$QUEUE_ORACLE"; do
+    [ -f "$path" ] || fail "missing input: $path"
+done
+
+POLICY_EXPORTS='cosmos_pcie_residual_policy_snapshot_status
+cosmos_pcie_residual_policy_snapshots_equal
+cosmos_pcie_residual_policy_nvme_cmd_word_status
+cosmos_pcie_residual_policy_nvme_completion_fields_valid
+cosmos_pcie_residual_policy_host_dma_device_buffer_status
+cosmos_pcie_residual_policy_host_dma_direct_status
+cosmos_pcie_residual_policy_host_dma_counter_shift
+cosmos_pcie_residual_policy_host_dma_counter_index
+cosmos_pcie_residual_policy_host_dma_direct_word3
+cosmos_pcie_residual_policy_host_dma_auto_status
+cosmos_pcie_residual_policy_host_dma_auto_word3
+cosmos_pcie_residual_policy_nvme_completion_word2'
+META_EXPORTS='cosmos_pcie_residual_policy_coverage_reset
+cosmos_pcie_residual_policy_coverage_mask
+cosmos_pcie_residual_policy_coverage_required
+cosmos_pcie_residual_policy_coverage_decisions
+cosmos_pcie_residual_policy_function_count'
+PCIE_DEPENDENCIES='cosmos_pcie_residual_policy_host_dma_auto_status
+cosmos_pcie_residual_policy_host_dma_auto_word3
+cosmos_pcie_residual_policy_host_dma_counter_index
+cosmos_pcie_residual_policy_host_dma_counter_shift
+cosmos_pcie_residual_policy_host_dma_direct_status
+cosmos_pcie_residual_policy_host_dma_direct_word3
+cosmos_pcie_residual_policy_nvme_cmd_word_status
+cosmos_pcie_residual_policy_nvme_completion_fields_valid
+cosmos_pcie_residual_policy_nvme_completion_word2
+cosmos_pcie_residual_policy_snapshots_equal
+cosmos_pcie_residual_policy_snapshot_status'
+
+POLICY_COUNT=$(grep -c '^@export("C", name: "cosmos_pcie_residual_policy_' \
+    "$POLICY_SOURCE")
+[ "$POLICY_COUNT" -eq 17 ] ||
+    fail "policy ABI is not exactly 12 policy plus 5 audit exports"
+DECISION_COUNT=$(grep -c '^val D_[A-Z0-9_]*: u32 = ' "$POLICY_SOURCE")
+[ "$DECISION_COUNT" -eq 19 ] ||
+    fail "actual decision audit is not exactly 19 sites"
+grep -F 'val COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_LOW: u32 = 0xFFFFFFFFu32' \
+    "$POLICY_SOURCE" >/dev/null || fail "low outcome mask is not pinned"
+grep -F 'val COSMOS_PCIE_RESIDUAL_POLICY_OUTCOMES_REQUIRED_HIGH: u32 = 0x0000003Fu32' \
+    "$POLICY_SOURCE" >/dev/null || fail "high outcome mask is not pinned"
+if grep -Eq '(: text|\[(u|i|f|bool|text)|Array<|Map<|Dict<|String)' \
+    "$POLICY_SOURCE"; then
+    fail "allocation-shaped type escaped into the hot scalar policy"
+fi
+for legacy in cosmos_pcie_snapshot_status cosmos_pcie_snapshots_equal \
+    cosmos_pcie_nvme_cmd_word_valid cosmos_pcie_host_dma_device_buffer_valid \
+    cosmos_pcie_host_dma_direct_valid cosmos_pcie_host_dma_counter_shift \
+    cosmos_pcie_host_dma_counter_index; do
+    if grep -Eq "^static (int|unsigned int) $legacy\\(" "$PCIE_SOURCE"; then
+        fail "C still defines migrated policy: $legacy"
+    fi
+done
+grep -F 'cosmos_pcie_residual_policy_nvme_completion_word2(' \
+    "$PCIE_SOURCE" >/dev/null || fail "completion packing bypasses Simple"
+grep -F 'cosmos_pcie_residual_policy_host_dma_direct_word3(' \
+    "$PCIE_SOURCE" >/dev/null || fail "direct DMA packing bypasses Simple"
+grep -F 'cosmos_pcie_residual_policy_host_dma_auto_word3(' \
+    "$PCIE_SOURCE" >/dev/null || fail "AUTO DMA packing bypasses Simple"
+
+# No admitted Stage 4 means no executable or object evidence.  There is no
+# seed, static C, or stale-object fallback in this gate.
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/bin/simple}
+[ -x "$SIMPLE_BIN" ] || blocked "missing executable pure-Simple compiler"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_CANONICAL=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") ||
+    blocked "cannot resolve pure-Simple compiler canonically"
+SIMPLE_PROVENANCE=${SIMPLE_PROVENANCE:-${SIMPLE_CANONICAL}.provenance.env}
+stage4_verify_candidate_provenance \
+    "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+    blocked "admitted Stage-4 provenance is required"
+case $($SIMPLE_CANONICAL --version 2>&1 || true) in
+    *"Rust-built Simple binary is a bootstrap seed"*)
+        blocked "a bootstrap seed cannot prove residual PCIe policy" ;;
+esac
+SIMPLE_SHA256=$(sha256sum "$SIMPLE_CANONICAL" | awk '{print $1}')
+PROVENANCE_SHA256=$(sha256sum "$SIMPLE_PROVENANCE" | awk '{print $1}')
+
+CLANG=${CLANG:-clang}
+LLD=${LLD:-ld.lld}
+READELF=${READELF:-readelf}
+for tool in "$CLANG" "$LLD" "$READELF" awk grep sed sort sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || fail "missing tool: $tool"
+done
+
+check_simple_object() {
+    object=$1
+    class=$2
+    machine=$3
+    symbols=$($READELF -sW "$object")
+    header=$($READELF -hW "$object")
+
+    printf '%s\n' "$header" | grep -Eq "Class:[[:space:]]+$class" ||
+        fail "$object has wrong ELF class"
+    printf '%s\n' "$header" | grep -Eq 'Type:[[:space:]]+REL' ||
+        fail "$object is not relocatable"
+    printf '%s\n' "$header" | grep -Eq "Machine:[[:space:]]+$machine" ||
+        fail "$object has wrong machine"
+    printf '%s\n%s\n' "$POLICY_EXPORTS" "$META_EXPORTS" |
+        while IFS= read -r symbol; do
+            printf '%s\n' "$symbols" |
+                awk -v symbol="$symbol" \
+                    '$4 == "FUNC" && $5 == "GLOBAL" && $6 == "DEFAULT" &&
+                     $7 != "UND" && $8 == symbol { count++ }
+                     END { exit count != 1 }' ||
+                fail "missing or duplicate Simple export: $symbol"
+        done
+    undefined=$(printf '%s\n' "$symbols" |
+        awk '$7 == "UND" && $8 != "" { print $8 }' | LC_ALL=C sort -u)
+    [ -z "$undefined" ] ||
+        fail "unexpected Simple policy object dependency: $undefined"
+    printf '%s\n' "$symbols" |
+        awk '$7 != "UND" && ($8 == "main" || $8 == "_start" ||
+             $8 == "__simple_main" || $8 ~ /^rt_/ ||
+             $8 ~ /^(malloc|calloc|realloc|free)$/) { bad = 1 }
+             END { exit bad }' ||
+        fail "Simple policy defines a forbidden entry/runtime/allocation symbol"
+}
+
+build_simple_object() {
+    target=$1
+    cache=$2
+    output=$3
+    SIMPLE_LIB="$ROOT/src" SIMPLE_NO_STUB_FALLBACK=1 \
+        "$SIMPLE_CANONICAL" native-build \
+        --backend llvm \
+        --source "$SOURCE_DIR" \
+        --entry-closure \
+        --entry "$POLICY_SOURCE" \
+        --target "$target" \
+        --emit-object \
+        --no-mangle \
+        --cache-dir "$cache" \
+        -o "$output"
+    stage4_verify_candidate_provenance \
+        "$SIMPLE_PROVENANCE" "$SIMPLE_CANONICAL" "$ROOT" ||
+        fail "compiler provenance changed during policy emission"
+    [ "$(sha256sum "$SIMPLE_CANONICAL" | awk '{print $1}')" = \
+        "$SIMPLE_SHA256" ] || fail "compiler changed during policy emission"
+    [ "$(sha256sum "$SIMPLE_PROVENANCE" | awk '{print $1}')" = \
+        "$PROVENANCE_SHA256" ] ||
+        fail "provenance changed during policy emission"
+}
+
+build_simple_object x86_64-unknown-linux-gnu \
+    "$SCRATCH/host-cache" "$SCRATCH/cosmos_pcie_residual_policy.host.o"
+check_simple_object "$SCRATCH/cosmos_pcie_residual_policy.host.o" \
+    ELF64 'Advanced Micro Devices X86-64'
+
+COMMON_FLAGS='-std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2'
+"$CLANG" $COMMON_FLAGS -I"$SOURCE_DIR" -I"$TEST_DIR" \
+    "$ORACLE_SOURCE" "$ORACLE_TEST" \
+    "$SCRATCH/cosmos_pcie_residual_policy.host.o" \
+    -o "$SCRATCH/cosmos_pcie_residual_policy_oracle_test"
+"$SCRATCH/cosmos_pcie_residual_policy_oracle_test" |
+    tee "$SCRATCH/oracle-output.txt"
+grep -Fx 'COSMOS_PCIE_RESIDUAL_ORACLE_FUNCTIONS 12/12' \
+    "$SCRATCH/oracle-output.txt" >/dev/null || fail "12-function parity failed"
+grep -Fx 'COSMOS_PCIE_RESIDUAL_SIMPLE_DECISIONS 19/19' \
+    "$SCRATCH/oracle-output.txt" >/dev/null || fail "decision audit failed"
+grep -Fx 'COSMOS_PCIE_RESIDUAL_SIMPLE_OUTCOMES 38/38' \
+    "$SCRATCH/oracle-output.txt" >/dev/null || fail "outcome coverage failed"
+
+# Run the existing MMIO transport contract against the real new Simple owner.
+# This protects volatile ordering, status propagation, queue bounds, and the
+# last-write commit rules without changing the shared runner or its receipts.
+"$CLANG" $COMMON_FLAGS -DCOSMOS_SILICON=1 -DCOSMOS_MMIO_TEST=1 \
+    -DCOSMOS_POLL_LIMIT=4U \
+    -DCOSMOS_PCIE_BITSTREAM_CONTRACT=0x030000U \
+    -include "$SOURCE_DIR/cosmos_profile_openssd2_8ch8way_v300.h" \
+    -I"$SOURCE_DIR" \
+    "$TRANSPORT_TEST" "$PCIE_SOURCE" "$QUEUE_BRIDGE" "$QUEUE_ORACLE" \
+    "$SCRATCH/cosmos_pcie_residual_policy.host.o" \
+    -o "$SCRATCH/cosmos_pcie_transport_test"
+"$SCRATCH/cosmos_pcie_transport_test"
+
+build_simple_object armv7-unknown-none-eabi \
+    "$SCRATCH/arm-cache" "$SCRATCH/cosmos_pcie_residual_policy.arm.o"
+check_simple_object "$SCRATCH/cosmos_pcie_residual_policy.arm.o" ELF32 ARM
+"$CLANG" --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib -fno-builtin $COMMON_FLAGS \
+    -DCOSMOS_SILICON=1 -DCOSMOS_PCIE_BITSTREAM_CONTRACT=0x030000U \
+    -include "$SOURCE_DIR/cosmos_profile_openssd2_8ch8way_v300.h" \
+    -I"$SOURCE_DIR" -c "$PCIE_SOURCE" -o "$SCRATCH/cosmos_pcie.arm.o"
+PCIE_SYMBOLS=$($READELF -sW "$SCRATCH/cosmos_pcie.arm.o")
+PCIE_RESIDUAL_UNDEFINED=$(printf '%s\n' "$PCIE_SYMBOLS" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_pcie_residual_policy_/ { print $8 }' |
+    LC_ALL=C sort -u)
+[ "$PCIE_RESIDUAL_UNDEFINED" = "$PCIE_DEPENDENCIES" ] ||
+    fail "C bridge residual dependency closure changed: $PCIE_RESIDUAL_UNDEFINED"
+printf '%s\n' "$PCIE_SYMBOLS" |
+    awk '$7 != "UND" && $8 ~ /^cosmos_pcie_residual_policy_/ { bad = 1 }
+         END { exit bad }' || fail "C bridge redefines a Simple policy owner"
+
+"$LLD" -r "$SCRATCH/cosmos_pcie.arm.o" \
+    "$SCRATCH/cosmos_pcie_residual_policy.arm.o" \
+    -o "$SCRATCH/cosmos_pcie_residual_combined.arm.o"
+COMBINED_RESIDUAL_UNDEFINED=$(
+    "$READELF" -sW "$SCRATCH/cosmos_pcie_residual_combined.arm.o" |
+    awk '$7 == "UND" && $8 ~ /^cosmos_pcie_residual_policy_/ { print $8 }' |
+    LC_ALL=C sort -u)
+[ -z "$COMBINED_RESIDUAL_UNDEFINED" ] ||
+    fail "combined ARM object leaves residual policy unresolved"
+
+echo 'cosmos_pcie_residual_policy_functions=12/12'
+echo 'cosmos_pcie_residual_policy_decisions=19/19'
+echo 'cosmos_pcie_residual_policy_outcomes=38/38'
+echo 'cosmos_pcie_residual_policy_hot_allocations=0'
+echo 'cosmos_pcie_residual_policy_arm_closure=resolved'
+echo 'cosmos_pcie_residual_transport_contract=PASS'
+echo 'STATUS: PASS cosmos-pcie residual pure-Simple policy'

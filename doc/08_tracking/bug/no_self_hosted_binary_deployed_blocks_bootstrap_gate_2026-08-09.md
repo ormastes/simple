@@ -1,4 +1,8 @@
 # No self-hosted binary deployed — bootstrap smoke cannot run, stage gate blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-09
 **Status:** OPEN
@@ -187,4 +191,28 @@ persists: `test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl`
 staged artifact; argv read through `rt_cli_get_args` rather than a same-named
 import). Ablation-verified: neutralising the native_build_main.spl guard takes
 that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
+
+## Update 2026-09-09 — current Windows Phase 1 verdict is FAIL
+
+The deployed Windows tool selected by `bin/simple.cmd` is
+`bin/release/x86_64-pc-windows-msvc/simple.exe`, 16,347,136 bytes, SHA-256
+`6094dcae291aa984973ccd681f956e67a7a60543ab99f76a29313fbbfdee96d1`.
+It is byte-identical to `bin/simple.exe`, self-identifies as the Rust bootstrap
+seed, and has no repository deployment/provenance receipt admitting that digest
+as a pure-Simple Stage 4 CLI.
+
+Accordingly the current Phase 1 essential-tools result is **FAIL**, not skipped
+and not seed-qualified: test, native-build, fmt, lint, and query evidence from
+this deployment cannot satisfy the self-hosted-tool requirement. The abnormal
+help/dispatch exits observed in the same smoke run are retained under
+`deployed_bin_simple_still_seed_2026-08-05.md` until command-specific logs can
+establish a common cause. The gate remains correct to reject the artifact.
+
+## Triage 2026-09-13
+Reconfirmed: `bin/simple --version` still identifies as the Rust bootstrap
+seed on this worktree (symlinked in from the shared main worktree, which is
+also still the seed). No self-hosted binary deployed. This is the same
+root-state referenced throughout many other records in this pass. Needs a
+full bootstrap run to deploy a self-hosted binary, out of a single-bug
+budget / this lane's no-bootstrap constraint. Left OPEN, no code change.
 

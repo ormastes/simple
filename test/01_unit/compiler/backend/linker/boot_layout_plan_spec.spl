@@ -1,0 +1,182 @@
+# BootLayoutPlan Unit Tests (lane A9, design §9 rung 2)
+#
+# Builds the typed BootLayoutPlan from the real SimpleOS kernel scripts and
+# checks each construct against expectations derived by hand from
+# src/os/kernel/arch/{x86_64,arm64,riscv64}/linker.ld.
+#
+# @cover src/compiler/70.backend/linker/boot_layout/boot_layout_plan.spl
+
+use compiler.backend.linker.boot_layout.boot_layout_plan.{
+    BootLayoutPlan, BootSectionPlan,
+    boot_layout_from_text, boot_layout_find_section, boot_layout_start_address,
+    boot_eval, boot_eval_ctx, boot_eval_bind, boot_align_up
+}
+use std.io_runtime.{file_read}
+
+# 0xFFFFFFFF80000000 as a two's-complement i64 (the x86_64 higher-half base).
+val HIGHER_HALF: i64 = -2147483648
+
+fn _plan(arch: text) -> BootLayoutPlan:
+    boot_layout_from_text(file_read("src/os/kernel/arch/{arch}/linker.ld")).unwrap()
+
+fn _sec(plan: BootLayoutPlan, name: text) -> BootSectionPlan:
+    boot_layout_find_section(plan, name).unwrap()
+
+describe "boot_layout - expression evaluator":
+    it "evaluates hex + hex":
+        expect(boot_eval("0x1000 + 0x20", boot_eval_ctx(0)).unwrap()).to_equal(4128)
+
+    it "evaluates K/M suffixes":
+        expect(boot_eval("64K", boot_eval_ctx(0)).unwrap()).to_equal(65536)
+        expect(boot_eval("16M", boot_eval_ctx(0)).unwrap()).to_equal(16777216)
+
+    it "ALIGN rounds the location counter up":
+        expect(boot_eval("ALIGN(4096)", boot_eval_ctx(4097)).unwrap()).to_equal(8192)
+        expect(boot_align_up(8192, 4096)).to_equal(8192)
+
+    it "ADDR(sec) resolves through bound names":
+        val ctx = boot_eval_bind(boot_eval_ctx(0), "ADDR(.text)", 12288)
+        expect(boot_eval("ADDR(.text) - 0x1000", ctx).unwrap()).to_equal(8192)
+
+    it "unknown symbol is an error":
+        expect(boot_eval("nosuch + 1", boot_eval_ctx(0)).is_err()).to_equal(true)
+
+describe "boot_layout - x86_64 higher-half plan":
+    it "entry and three PT_LOAD segments with R-X / R-- / RW- flags":
+        val plan = _plan("x86_64")
+        expect(plan.entry).to_equal("kernel_main")
+        expect(plan.segments.len()).to_equal(3)
+        expect(plan.segments[0].name).to_equal("text")
+        expect(plan.segments[0].phdr_type).to_equal("PT_LOAD")
+        expect(plan.segments[0].flags).to_equal(5)
+        expect(plan.segments[1].flags).to_equal(4)
+        expect(plan.segments[2].name).to_equal("data")
+        expect(plan.segments[2].flags).to_equal(6)
+
+    it "start address is 0xFFFFFFFF80000000 + 0x100000":
+        val plan = _plan("x86_64")
+        expect(boot_layout_start_address(plan).unwrap()).to_equal(HIGHER_HALF + 1048576)
+
+    it "every allocated section has lma bias 0xFFFFFFFF80000000":
+        val plan = _plan("x86_64")
+        for name in [".limine_reqs", ".text", ".rodata", ".simple_sandbox", ".data", ".bss"]:
+            val s = _sec(plan, name)
+            expect(s.has_lma_bias).to_equal(true)
+            expect(s.lma_bias).to_equal(HIGHER_HALF)
+            expect(s.align_expr).to_equal("")
+        expect(_sec(plan, ".text").vma_expr).to_equal("ALIGN(4096)")
+
+    it "sections map to segments text/text/rodata/rodata/data/data":
+        val plan = _plan("x86_64")
+        expect(_sec(plan, ".limine_reqs").segment).to_equal("text")
+        expect(_sec(plan, ".text").segment).to_equal("text")
+        expect(_sec(plan, ".rodata").segment).to_equal("rodata")
+        expect(_sec(plan, ".simple_sandbox").segment).to_equal("rodata")
+        expect(_sec(plan, ".data").segment).to_equal("data")
+        expect(_sec(plan, ".bss").segment).to_equal("data")
+
+    it "KEEP patterns become GC roots":
+        val plan = _plan("x86_64")
+        expect(_sec(plan, ".limine_reqs").keep_patterns).to_equal([".limine_reqs", ".limine_reqs.*"])
+        expect(plan.gc_roots).to_equal([".limine_reqs", ".limine_reqs.*", ".simple.sandbox*", ".simple.mpu*"])
+
+    it "debug sections are non-alloc at address 0 with no segment":
+        val plan = _plan("x86_64")
+        val dbg = _sec(plan, ".debug_info")
+        expect(dbg.vma_expr).to_equal("0")
+        expect(dbg.segment).to_equal("")
+
+    it "/DISCARD/ patterns and symbols":
+        val plan = _plan("x86_64")
+        expect(plan.discard_patterns).to_equal([".note*", ".eh_frame*", ".comment", ".gnu.hash"])
+        expect(_sec(plan, ".bss").defined_symbols).to_equal(["__bss_start", "__bss_end"])
+        val last = plan.symbols[plan.symbols.len() - 1]
+        expect(last.name).to_equal("_kernel_end")
+        expect(last.section).to_equal("")
+
+describe "boot_layout - arm64 MEMORY/NOLOAD plan":
+    it "output format, arch, entry and RAM region":
+        val plan = _plan("arm64")
+        expect(plan.output_format).to_equal("elf64-littleaarch64")
+        expect(plan.output_arch).to_equal("aarch64")
+        expect(plan.entry).to_equal("_start")
+        expect(plan.regions.len()).to_equal(1)
+        expect(plan.regions[0].name).to_equal("RAM")
+        expect(plan.regions[0].attrs).to_equal("rwx")
+        expect(plan.regions[0].origin).to_equal(1073741824)
+        expect(plan.regions[0].length).to_equal(134217728)
+        expect(plan.segments.len()).to_equal(0)
+        expect(boot_layout_start_address(plan).unwrap()).to_equal(1073741824)
+
+    it ".text keeps .text.entry first and aligns vectors to 2K":
+        val plan = _plan("arm64")
+        val t = _sec(plan, ".text")
+        expect(t.align_expr).to_equal("4K")
+        expect(t.region).to_equal("RAM")
+        expect(t.keep_patterns).to_equal([".text.entry"])
+        expect(t.input_patterns).to_equal([".text.entry", ".text.vectors", ".text*"])
+        expect(t.inner_aligns).to_equal([2048])
+        expect(t.has_lma_bias).to_equal(false)
+
+    it ".bss/.stack/.heap are NOLOAD with 64K and 16M padding":
+        val plan = _plan("arm64")
+        expect(_sec(plan, ".bss").noload).to_equal(true)
+        expect(_sec(plan, ".bss").pad_bytes).to_equal(0)
+        expect(_sec(plan, ".stack").noload).to_equal(true)
+        expect(_sec(plan, ".stack").align_expr).to_equal("16")
+        expect(_sec(plan, ".stack").pad_bytes).to_equal(65536)
+        expect(_sec(plan, ".stack").defined_symbols).to_equal(["_stack_bottom", "_stack_top"])
+        expect(_sec(plan, ".heap").pad_bytes).to_equal(16777216)
+        expect(_sec(plan, ".data").noload).to_equal(false)
+
+    it "GC roots and discard list":
+        val plan = _plan("arm64")
+        expect(plan.gc_roots).to_equal([".text.entry", ".simple.sandbox*", ".simple.mpu*"])
+        expect(plan.discard_patterns).to_equal([".note*", ".eh_frame*", ".comment", ".ARM.attributes", ".ARM.exidx*"])
+
+describe "boot_layout - PROVIDE and fail-closed validation":
+    it "riscv64 PROVIDE(__global_pointer$) is a provide symbol in .data":
+        val plan = _plan("riscv64")
+        var found = false
+        for s in plan.symbols:
+            if s.name == "__global_pointer$":
+                found = true
+                expect(s.provide).to_equal(true)
+                expect(s.section).to_equal(".data")
+                expect(s.expr).to_equal(". + 0x800")
+        expect(found).to_equal(true)
+
+    it "all six real scripts produce a plan":
+        for arch in ["x86_64", "arm64", "riscv64", "riscv32", "arm32", "x86_32"]:
+            val r = boot_layout_from_text(file_read("src/os/kernel/arch/{arch}/linker.ld"))
+            expect(r.is_ok()).to_equal(true)
+
+    it "rejects an undeclared :phdr":
+        val r = boot_layout_from_text("ENTRY(_start) PHDRS { text PT_LOAD FLAGS(5); } SECTIONS { .text : { *(.text) } :code }")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects an undeclared > region":
+        val r = boot_layout_from_text("ENTRY(_start) MEMORY { RAM (rwx) : ORIGIN = 0x1000, LENGTH = 4K } SECTIONS { .text : { *(.text) } > ROM }")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects a script without ENTRY":
+        expect(boot_layout_from_text("SECTIONS { .text : { *(.text) } }").is_err()).to_equal(true)
+
+    it "rejects an allocated section with no segment when PHDRS is used":
+        val r = boot_layout_from_text("ENTRY(_start) PHDRS { text PT_LOAD; } SECTIONS { .text : { *(.text) } }")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects an unresolved INCLUDE instead of planning a partial script":
+        val r = boot_layout_from_text("ENTRY(_start) INCLUDE \"common.ld\"")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("INCLUDE")).to_equal(true)
+
+    it "rejects a SECTIONS-tail fragment":
+        val r = boot_layout_from_text(file_read("examples/09_embedded/simple_os/arch/common/linker_arm_common.ld"))
+        expect(r.is_err()).to_equal(true)
+
+    it "records EXTERN symbols (up_squared)":
+        val plan = boot_layout_from_text(file_read("src/os/kernel/arch/x86_64/up_squared/linker.ld")).unwrap()
+        expect(plan.extern_symbols).to_equal(["_entry32"])
+        expect(_sec(plan, ".debug_staging").dot_expr).to_equal("0x0A000000")
+        expect(_sec(plan, ".debug_staging").noload).to_equal(true)

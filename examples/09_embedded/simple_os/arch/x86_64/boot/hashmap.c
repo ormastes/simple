@@ -206,7 +206,7 @@ RuntimeValue __rt_hashmap_new(void)
     HashMap *m = (HashMap *)malloc(sizeof(HashMap));
     if (!m) return NIL_VALUE;
 
-    m->hdr.type = HEAP_HASHMAP;
+    runtime_heap_header_init(&m->hdr, HEAP_HASHMAP);
     m->hdr.size = (uint32_t)sizeof(HashMap);
     m->len      = 0;
     m->cap      = HASH_INITIAL_CAP;
@@ -339,7 +339,7 @@ RuntimeValue __rt_hashset_new(void)
     HashMap *m = (HashMap *)malloc(sizeof(HashMap));
     if (!m) return NIL_VALUE;
 
-    m->hdr.type = HEAP_HASHSET;
+    runtime_heap_header_init(&m->hdr, HEAP_HASHSET);
     m->hdr.size = (uint32_t)sizeof(HashMap);
     m->len      = 0;
     m->cap      = HASH_INITIAL_CAP;

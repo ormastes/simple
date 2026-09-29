@@ -11,7 +11,11 @@ scrolling, fonts, Simple 2D, WM, GUI, Web, or SimpleOS/QEMU rendering.
 4. QEMU/GPU contract: `doc/04_architecture/simpleos_qemu_host_gpu_2d.md`,
    `doc/05_design/simpleos_qemu_host_gpu_2d.md`, and
    `doc/03_plan/sys_test/simpleos_qemu_host_gpu_2d.md`
-5. SPipe guidance: `.codex/skills/system_test/SKILL.md` and
+5. Cross-platform interface freeze:
+   `doc/04_architecture/simple_2d_multiplatform_vulkan_hardening.md`,
+   `doc/05_design/simple_2d_multiplatform_vulkan_hardening.md`, and
+   `doc/03_plan/agent_tasks/simple_2d_multiplatform_vulkan_hardening.md`
+6. SPipe guidance: `.codex/skills/system_test/SKILL.md` and
    `doc/00_llm_process/llm_wiki.md` (spec verdict/evidence rules).
 
 ## Routing table
@@ -23,6 +27,7 @@ scrolling, fonts, Simple 2D, WM, GUI, Web, or SimpleOS/QEMU rendering.
 | WM drag/scroll | WM action, capture, and layout owners | WM compositor owner |
 | 2D drawing/animation/font | `DrawIrComposition`, Engine2D, showcase | 2D executor owner |
 | SimpleOS/QEMU | canonical host-GPU wrapper and receipt parser | QEMU transport owner |
+| Cross-platform Vulkan/interface work | interface freeze before implementation | `/root` merge owner |
 
 ## Non-negotiable evidence
 

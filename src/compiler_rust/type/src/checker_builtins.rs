@@ -116,6 +116,12 @@ impl TypeChecker {
         self.env.insert("eprint".to_string(), generic_fn.clone());
         self.env.insert("eprintln".to_string(), generic_fn.clone());
         self.env.insert("input".to_string(), generic_fn.clone());
+        // `panic(msg)` abort builtin: known to the interpreter extern table, HIR
+        // lowering (`lower_abort_builtin`) and the C runtime, but never to this
+        // checker, so any compiled unit calling it failed with
+        // `Undefined("undefined identifier: panic")` -- every directory-mode
+        // spec does, via the MC/DC preamble the test runner prepends.
+        self.env.insert("panic".to_string(), generic_fn.clone());
         // Channel type constructor
         self.env.insert("Channel".to_string(), generic_fn.clone());
         // ThreadPool constructor

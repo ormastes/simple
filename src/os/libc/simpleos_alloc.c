@@ -2,19 +2,28 @@
  * SimpleOS Libc Shim — Aligned memory allocation
  *
  * Provides posix_memalign, aligned_alloc, memalign, valloc, pvalloc.
- * Page-aligned (or larger) requests use mmap directly via syscall 10.
- * Smaller alignments over-allocate from malloc and align the pointer.
+ * This facade must never return an allocation that the primary allocator does
+ * not own: callers are entitled to pass every successful result to free().
+ * The current dlmalloc owner guarantees 16-byte payload alignment, but it has
+ * no registered over-aligned allocation format.  Requests above that proven
+ * contract therefore fail closed until the allocator grows an owned aligned
+ * block representation.
  */
 
 #include "include/stdlib.h"
 #include "include/errno.h"
 #include "include/string.h"
 
-extern int64_t simpleos_syscall(int64_t, int64_t, int64_t, int64_t,
-                                 int64_t, int64_t);
 extern int errno;
 
-#define PAGE_SIZE 4096
+#ifndef SIMPLEOS_MALLOC_ALIGNMENT
+#define SIMPLEOS_MALLOC_ALIGNMENT 16
+#endif
+
+static int _valid_alignment(size_t alignment) {
+    return alignment >= sizeof(void *) &&
+           (alignment & (alignment - 1)) == 0;
+}
 
 /* ====================================================================
  * posix_memalign — aligned allocation (POSIX)
@@ -22,7 +31,7 @@ extern int errno;
 
 int posix_memalign(void **memptr, size_t alignment, size_t size) {
     /* alignment must be a power of two and >= sizeof(void *) */
-    if (alignment < sizeof(void *) || (alignment & (alignment - 1)) != 0)
+    if (!_valid_alignment(alignment))
         return EINVAL;
 
     if (size == 0) {
@@ -30,22 +39,18 @@ int posix_memalign(void **memptr, size_t alignment, size_t size) {
         return 0;
     }
 
-    /* For page-aligned or larger, use mmap directly */
-    if (alignment >= PAGE_SIZE) {
-        size_t alloc_size = (size + alignment - 1) & ~(alignment - 1);
-        alloc_size = (alloc_size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-        /* syscall 10 = Mmap: addr=0, len, prot=3 (RW), flags=0, fd=0 */
-        int64_t addr = simpleos_syscall(10, 0, alloc_size, 3, 0, 0);
-        if (addr <= 0) return ENOMEM;
-        *memptr = (void *)addr;
-        return 0;
-    }
+    /*
+     * Do not use an anonymous mmap or return an interior over-allocation.
+     * Neither has an ownership record understood by simpleos_dlmalloc free()
+     * and both make a valid free() silently leak.  The allocator's payload
+     * layout is explicitly rounded to this alignment.
+     */
+    if (alignment > SIMPLEOS_MALLOC_ALIGNMENT)
+        return ENOMEM;
 
-    /* For small alignments, over-allocate and align */
-    void *raw = malloc(size + alignment);
+    void *raw = malloc(size);
     if (!raw) return ENOMEM;
-    uintptr_t aligned = ((uintptr_t)raw + alignment - 1) & ~(alignment - 1);
-    *memptr = (void *)aligned;
+    *memptr = raw;
     return 0;
 }
 
@@ -55,7 +60,15 @@ int posix_memalign(void **memptr, size_t alignment, size_t size) {
 
 void *aligned_alloc(size_t alignment, size_t size) {
     void *ptr = NULL;
-    if (posix_memalign(&ptr, alignment, size) != 0) return NULL;
+    if (!_valid_alignment(alignment) || size % alignment != 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int result = posix_memalign(&ptr, alignment, size);
+    if (result != 0) {
+        errno = result;
+        return NULL;
+    }
     return ptr;
 }
 
@@ -64,10 +77,13 @@ void *memalign(size_t alignment, size_t size) {
 }
 
 void *valloc(size_t size) {
-    return aligned_alloc(PAGE_SIZE, size);
+    (void)size;
+    errno = ENOMEM;
+    return NULL;
 }
 
 void *pvalloc(size_t size) {
-    size_t aligned_size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-    return aligned_alloc(PAGE_SIZE, aligned_size);
+    (void)size;
+    errno = ENOMEM;
+    return NULL;
 }

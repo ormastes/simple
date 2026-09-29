@@ -1,0 +1,121 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+use compiler.core.parser.{parser_prepare_persistent_globals, parser_persistent_globals_ready, parser_release_parse_globals}
+
+fn function_body(source: text, start_marker: text, next_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    if start < 0:
+        return ""
+    val tail = source.substring(start, source.len())
+    val next = tail.index_of(next_marker)
+    if next < 0:
+        return tail
+    tail.substring(0, next)
+
+describe "persistent frontend parse ownership contract":
+    it "detaches lexer and parser payloads without replacing durable shells":
+        val lexer = file_read("src/compiler/10.frontend/core/lexer.spl")
+        val parser = file_read("src/compiler/10.frontend/core/parser.spl")
+        val lexer_release = function_body(
+            lexer,
+            "pub fn lexer_release_parse_source_globals():",
+            "fn lex_source_char_at")
+        val parser_release = function_body(
+            parser,
+            "fn parser_release_parse_globals():",
+            "fn parser_init_with_path")
+
+        expect(lexer).to_contain("fn lexer_prepare_persistent_globals():")
+        expect(lexer).to_contain("current_core_lexer_slot[0] = make_core_lexer(core_source)")
+        expect(lexer_release).to_contain("current_core_lexer_slot[0] = detached_core_lexer_slot[0]")
+        expect(lexer_release).to_contain("lex_inline_source_slot[0] = \"\"")
+        expect(lexer_release).to_contain("lex_source_codes.clear()")
+        expect(lexer_release).to_contain("lex_source_char_count_slot[0] = 0")
+        expect(lexer_release).to_not_contain("current_core_lexer_slot =")
+        expect(lexer_release).to_not_contain("lex_inline_source_slot =")
+        expect(lexer_release).to_not_contain("lex_source_codes =")
+
+        expect(parser).to_contain("fn parser_prepare_persistent_globals():")
+        val parser_ready = function_body(
+            parser,
+            "fn parser_persistent_globals_ready() -> bool:",
+            "fn parser_release_parse_globals")
+        expect(parser).to_contain("var par_persistent_prepared_slot: [text] = [\"\"]")
+        expect(parser).to_contain("par_persistent_prepared_slot[0] = \"prepared\"")
+        expect(parser_ready).to_contain("par_persistent_prepared_slot[0] == \"prepared\"")
+        expect(parser_ready).to_contain("par_kind_slot.len() > 0")
+        expect(parser_ready).to_not_contain("par_errors")
+        expect(parser_ready).to_not_contain("par_warnings")
+        expect(parser_ready).to_not_contain("par_struct_names")
+        expect(parser_release).to_contain("par_errors.clear()")
+        expect(parser_release).to_contain("par_kind_slot[0] = 0")
+        expect(parser_release).to_contain("par_text_slot[0] = \"\"")
+        expect(parser_release).to_not_contain("par_errors =")
+        expect(parser_release).to_not_contain("par_kind_slot =")
+
+    it "keeps prepared state after empty parser scratch is released":
+        parser_prepare_persistent_globals()
+        expect(parser_persistent_globals_ready()).to_equal(true)
+        parser_release_parse_globals()
+        # release clears errors/warnings/struct names in place; those empty
+        # dynamic containers must not make the persistent owner look missing.
+        expect(parser_persistent_globals_ready()).to_equal(true)
+
+    it "prepares AST sentinels and clears every declaration-parallel row":
+        val decls = file_read("src/compiler/10.frontend/core/_Ast/decl_nodes.spl")
+        val state = file_read("src/compiler/10.frontend/core/_Ast/module_state.spl")
+        val core_exports = file_read("src/compiler/10.frontend/core/__init__.spl")
+
+        expect(decls).to_contain("fn ast_decl_prepare_persistent_globals():")
+        expect(decls).to_contain("if decl_empty_i64 == nil:")
+        expect(decls).to_contain("if decl_empty_text == nil:")
+        expect(decls).to_contain("if decl_empty_text_lists == nil:")
+        expect(state).to_contain("if decl_facet_impl_name == nil:")
+        expect(state).to_contain("decl_facet_impl_name.clear()")
+        expect(state).to_contain("if decl_param_default_text == nil:")
+        expect(state).to_contain("decl_param_default_text.clear()")
+        expect(decls).to_contain("module_decl_slots.clear()")
+        expect(decls).to_not_contain("ast_module_decl_slots = []")
+        expect(core_exports).to_contain("export ast_reset, ast_decl_prepare_persistent_globals, ast_promote_transient_owner_globals")
+
+    it "rolls back failed registry rows in place and promotes retained graphs":
+        val owner = file_read("src/compiler/10.frontend/frontend_parse_ownership.spl")
+        val layer = file_read("src/compiler/10.frontend/layer_eq_registry.spl")
+        val effect = file_read("src/compiler/10.frontend/effect_registry.spl")
+        val aspect = file_read("src/compiler/10.frontend/aspect_registry.spl")
+
+        expect(owner).to_contain("fn frontend_prepare_persistent_registry_globals():")
+        expect(owner).to_contain("resource_registry_prepare_persistent_globals()")
+        expect(owner).to_contain("facet_static_prepare_persistent_globals()")
+        expect(owner).to_contain("fn frontend_promote_compilation_registries() -> bool:")
+        expect(owner).to_contain("layer_eq_registry_promote_transient_graph()")
+        expect(owner).to_contain("effect_registry_promote_transient_graph()")
+        expect(owner).to_contain("aspect_registry_promote_transient_graph()")
+        expect(owner).to_contain("facet_static_promote_transient_graph()")
+        expect(layer).to_contain("layer_eq_registry_targets.remove(key)")
+        expect(layer).to_contain("layer_eq_registry_renames.remove(key)")
+        expect(effect).to_contain("effect_registry_budgets.remove(key)")
+        expect(effect).to_contain("effect_registry_bounded.remove(key)")
+        expect(aspect).to_contain("aspect_registry_kinds.remove(key)")
+        expect(aspect).to_contain("aspect_registry_bounded_time.remove(key)")
+
+    it "promotes before every production scope end and fails cleanup closed":
+        val bridge = file_read("src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl")
+        val driver = file_read("src/compiler/80.driver/driver_source_pipeline_parsing.spl")
+        val hir_driver = file_read("src/compiler/80.driver/driver_hir_pipeline_lowering.spl")
+        val driver_end = function_body(
+            driver,
+            "pub fn driver_end_transient_parse_scope() -> bool:",
+            "impl CompilerDriver:")
+        val pause_pos = driver_end.index_of("rt_transient_array_scope_pause()")
+        val promote_pos = driver_end.index_of("frontend_promote_compilation_registries()")
+        val end_pos = driver_end.index_of("rt_transient_array_scope_end()")
+
+        expect(pause_pos).to_be_greater_than(-1)
+        expect(promote_pos).to_be_greater_than(pause_pos)
+        expect(end_pos).to_be_greater_than(promote_pos)
+        expect(bridge).to_contain("if not frontend_promote_compilation_registries():")
+        expect(bridge).to_contain("transient parser registry promotion failed for ")
+        expect(driver).to_contain("transient parser cleanup failed after parse error for {{source.path}}")
+        expect(driver).to_contain("transient parser cleanup failed after surface extraction error for {{source.path}}")
+        expect(hir_driver).to_contain("transient parser cleanup failed after HIR ownership error for {{source.path}}")

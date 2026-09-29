@@ -4,21 +4,18 @@ How to boot SimpleOS on the **Simple-generated RISC-V soft-core** (rv32 / rv64) 
 first in GHDL simulation (the early-bug-finding gate), then on the Kria KV260
 (xck26) board. QEMU proves the *kernel*; the soft-core proves the *hardware*.
 
-> Status (2026-07-26): **rv32 SimpleOS boots to `TEST PASSED` on REAL KV260
-> silicon on TWO paths** — PS-DDR4 (`747c27de111`) and BRAM-only tiny config
-> (`0331115d223`, no DDR / no block design / no FSBL). All four sim cores
-> (rv32/rv64 × flat/AXI) pass in GHDL. rv64 silicon bring-up in progress.
+> Status (2026-07-25): **rv32 SimpleOS boots to `TEST PASSED` in GHDL** on
+> `rv32_exec_core_flat.vhd`, difftest-clean vs QEMU. rv64 bring-up is in progress
+> (M-mode-direct, no MMU). On-silicon boot needs the DDR/AXI RAM bridge below.
 
 ## 1. What runs where
 
 | Lane | Core | State |
 |------|------|-------|
 | QEMU rv32/rv64 | (emulated) | SimpleOS boot + ls + launch **green** |
-| GHDL rv32 | `rv32_exec_core_flat.vhd` / `rv32_exec_core_axi.vhd` | **full boot → `TEST PASSED`** |
-| GHDL rv64 | `rv64_exec_core_flat.vhd` / `rv64_exec_core_axi.vhd` | **full boot → `TEST PASSED`** |
-| **Silicon KV260, DDR** | `soc_top_rv32_k26_ddr.vhd` → PS-DDR4 via AXI-HP | **`TEST PASSED`** (446-byte chain, byte-matching GHDL) |
-| **Silicon KV260, BRAM** | `soc_top_rv32_tiny_bram.vhd`, 125.5/144 BRAM36 | **`TEST PASSED`** (568 bytes, soft-reset re-run passes) |
-| Silicon KV260, rv64 | `soc_top_rv64_k26_ddr.vhd` | bring-up in progress (bitstream timing MET) |
+| **GHDL rv32** | `rv32_exec_core_flat.vhd` | **full boot → `SIMPLEOS_RISCV_SMF_FS_PASS` / `TEST PASSED`** |
+| GHDL rv64 | `rv64_exec_core_flat.vhd` | bring-up (RV64C decoder port + 74 MB RAM) |
+| Silicon (KV260) | flat core → PS-DDR/AXI | roadmap (§6) |
 
 The rv32 core itself was first hardened by running the **minimal NVMe firmware**
 against it under a QEMU↔GHDL per-instruction difftest, which found and fixed
@@ -125,111 +122,21 @@ examples/09_embedded/simple_os/arch/riscv32/smoke_entry.spl --target
 riscv32-unknown-none`, and force-clean with
 `rm -f build/os/simpleos_riscv32_smf_fs.elf{,.build_stamp}`.
 
-## 6. Launching SimpleOS on KV260 silicon (both paths PROVEN 2026-07-26)
+## 6. Path to silicon (KV260, xck26)
 
-Both lanes end at the same bar: full UART marker chain to `TEST PASSED`,
-byte-matching the GHDL rehearsal, from a persisted log.
+The GHDL RAM is a behavioral array; on-silicon it must become real memory:
 
-### 6a. DDR lane (full 8 MB kernel from PS-DDR4)
-
-```bash
-# 1. GHDL rehearsal of the EXACT silicon SoC — run BOTH plain and garbage-fill:
-sh scripts/fpga/ghdl_rv32_k26_ddr_boot.shs                 # ~125 ms sim time
-GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_k26_ddr_boot.shs  # unmasks .bss-class bugs
-
-# 2. Bitstream (Vivado 2025.2; ONE heavy build machine-wide):
-sh scripts/fpga/build_k26_rv32_ddr_bitstream.shs
-
-# 3. Board bring-up — MUST run with bash (sources settings64.sh):
-bash scripts/fpga/bringup_kv260_rv32_ddr.shs > run.log 2>&1
-```
-
-The bring-up script does, in order — every step is load-bearing:
-1. **Full `psu_init` from the XSA BEFORE `fpga -file`** — without it the S_AXI_HP
-   ports are dead and every AXI read returns `0x00000000` (even hardwired regs).
-2. Reset all four A53s, program the PL, remove PS-PL isolation.
-3. `dow -data` kernel → DDR `0x1000_0000` (core sees `0x8000_0000` via the
-   adapter's address translation) and ramdisk → `0x1800_0000` (core
-   `0x8800_0000`); verify words back (`DDR_KERNEL_WORD0`, `DDR_BANNER_WORD`).
-4. **Zero `.bss`** (`ZEROING_BSS`, with `BSS_HEAPOFF_PRE/POST` readback). Real
-   DDR powers up as garbage; GHDL RAM powers up zeroed and MASKS this. Un-zeroed
-   `.bss` ⇒ `g_heap_off` trash ⇒ every alloc fails ⇒ only the canary prints
-   (exactly 71 bytes) then the core parks in the `_start` wfi loop.
-   **Note (2026-07-26): this loader-side zeroing is now redundant-but-kept.**
-   The kernels self-zero `.bss` in `_start` (crt0) before any C runs — rv32 `sw`
-   loop / rv64 `sd` loop over `[_sbss, _ebss)` in
-   `examples/09_embedded/simple_os/arch/riscv{32,64}/boot/baremetal_stubs.c`,
-   with `_ebss` padded to `ALIGN(8)` in `common/linker_riscv_common.ld` — so
-   the image no longer depends on loader cooperation (board-runnable rule).
-   Keep the script step as belt-and-suspenders; verify the crt0 path with
-   `GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_k26_ddr_boot.shs` (the rv32 tb
-   never zeroes .bss, so garbage-fill alone exercises the crt0 loop) and
-   `GARBAGE_FILL=1 SKIP_BSS_ZERO=1 sh scripts/fpga/ghdl_rv64_k26_ddr_boot.shs`
-   (the rv64 tb emulates board step 5b zeroing; `SKIP_BSS_ZERO=1` disables it
-   via the tb's `G_SKIP_BSS_ZERO` generic). The tiny BRAM gate gained the same
-   knob: `GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_tiny_bram_soc.shs` pads the
-   `.mem` image with garbage beyond the kernel (loader-side, synthesizable RTL
-   untouched).
-5. Release the core via the ctrl slave (`0xA000_0000`, magic `0x52563332`
-   "RV32"), then poll UART-capture obs regs over JTAG (`hw_server`, NOT openocd)
-   and dump the transcript.
-
-### 6b. Tiny-BRAM lane (no DDR, no block design, no FSBL)
-
-A 200 KB-RAM SimpleOS config (`linker_tiny64.ld`, 64 KB stack — measured
-high-water is only 344 bytes) + 304 KB ramdisk fits on-fabric:
-125.5/144 BRAM36 @ 25 MHz (STARTUPE3 CFGMCLK/2), WNS +20 ns.
-
-```bash
-sh scripts/fpga/ghdl_rv32_tiny_bram_soc.shs           # rehearsal (also GARBAGE_FILL=1)
-sh scripts/fpga/build_rv32_tiny_bram_bitstream.shs    # bitstream, .mem-initialized BRAM
-# program, then read markers via the BSCANE2 USER4 JTAG tunnel:
-bash scripts/fpga/read_rv32_tiny_bram_obs.shs transcript > run.log 2>&1
-```
-
-**Console transport ("jtagterminal") is configurable.** The readout above is
-the cable-free path: the soft-UART bytes are captured on-chip and read back
-over the same FT4232H JTAG chain that programs the board — no PMOD wiring at
-all. `CONSOLE_MODE=uart` instead points you at the PMOD J2 pins (H12 tx / E10
-rx, LVCMOS33, 115200 8N1), which need a **3.3V USB-TTL cable** (never a 5V or
-RS-232 one). `BUF_WORDS` must match the bitstream's `UARTBUF_WORDS` generic.
-
-Decoding and the completeness verdict are pure Simple
-(`src/lib/hardware/fpga_k26/jtag_console.spl`, spec in `test/`), so the script
-now ends with a `COMPLETE:`/`INCOMPLETE:` line and a matching exit code instead
-of a hand-compared byte count. The capture buffer is finite (2048 words = 8 KB)
-while the core's byte counter keeps running past the end, so an overrun is
-reported as `INCOMPLETE ... N bytes LOST` rather than printing a capped prefix
-that reads like a whole boot log.
-
-Vivado BRAM landmines: non-pow2 depth pads to the next power of two
-(77824 → 131072 words!) — split arrays into ≤3 pow2 banks; shared case-select
-writes break BRAM inference (Synth 8-3391); `.mem` INIT needs the elaboration
-loop-limit pre-hook. All handled inside the build script.
-
-### 6c. Evidence bar (both lanes)
-
-Persist every run (`> log 2>&1`). A PASS claim needs: IDCODE (`0x04724093`
-xck26), program-done marker, and the UART transcript text. Grep verdicts ONLY
-from transcript text — binary kernel images contain both `TEST PASSED` and
-`TEST FAILED` in their string tables. Compare byte count against the GHDL
-baseline (DDR: 446, tiny: 568).
-
-## 6.5 NVMe firmware on the core
-
-The RV32 NVMe controller-policy firmware passes three pre-board GHDL lanes:
-behavioral core, exact synthesizable BRAM SoC (clean and `GARBAGE_FILL=1`), and
-full AXI4 with wait-state-injected RAM. Run the AXI NAND gate first:
-
-```sh
-sh scripts/fpga/ghdl_rv32_nvme_axi_ram.shs
-```
-
-It derives `.nandram` from the ELF and proves nonzero AXI reads/writes plus
-prevention and recovery. A prior KV260 run recovered all 229 UART bytes through
-the tiny-BRAM SoC's USER4 JTAG path, but that is historical evidence until a
-fresh source-matched ELF/bitstream/transcript bundle is retained. USER4 is not
-host-driven NVMe MMIO.
+1. **RAM → PS-DDR via AXI HP.** ~2.8 MB on-chip BRAM ≪ the 8 MB stack; route the
+   flat core's load/store port to the Zynq PS DDR4 through an AXI-HP bridge.
+   Place the ramdisk image in DDR at `0x8800_0000` (the auto-detect is unchanged).
+2. **Synthesize** one bitstream (Vivado 2025.2, `scripts/fpga/build_k26_rv32.shs`
+   pattern). One critical-path build at a time — see
+   [vivado_device_setup.md](vivado_device_setup.md).
+3. **Boot + read markers** over JTAG-MMIO — the PL UART is not routed to a host
+   port on the KV260 carrier (see
+   [simple_riscv_jtag_debugging.md](simple_riscv_jtag_debugging.md)); read the
+   boot/FS markers via `scripts/fpga/read_rv32_core_jtag.shs`, or wire an
+   external 3.3 V UART to PMOD J2 (TX=H12, RX=E10).
 
 ## 7. rv64
 
@@ -243,14 +150,6 @@ port** (the main new work; RV64C differs: `C.JAL`→`C.ADDIW`, `C.FLW/FSW`→`C.
 6-bit shamt) + ~74 MB flat RAM (0x8020_0000 → ~0x84a1_f000 incl. 64 MB heap) +
 the same ramdisk bank. FPU is a *false* gap (the `fld` bytes are misdisassembled
 address constants). See `doc/09_report/rv64_simpleos_ghdl_soc_scope_2026-07-25.md`.
-
-Status 2026-07-26: rv64 passes GHDL on both `rv64_exec_core_flat.vhd` and the
-synthesizable `rv64_exec_core_axi.vhd` (incl. GARBAGE_FILL). Silicon: bitstream
-built (`soc_top_rv64_k26_ddr.vhd`, timing MET), bring-up via
-`bash scripts/fpga/bringup_kv260_rv64_ddr.shs` — same psu_init + `.bss`-zero
-flow; kernel loads at DDR `0x1020_0000`. First run: core released but zero AXI
-fetches — debug in progress. Note the rv64 top reuses the rv32 ctrl slave, so
-`CTRL_MAGIC` reads "RV32" on BOTH bitstreams and cannot identify which is loaded.
 
 ## Related
 

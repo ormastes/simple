@@ -1,0 +1,41 @@
+#!/bin/sh
+# Isolated actual command-builder test; no seed or Stage2 compilation.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+[ "$(uname -s)" = Darwin ] || { echo 'SKIP: Darwin command builder'; exit 0; }
+: "${CC:?explicit Clang required}" "${CXX:?explicit Clang++ required}"
+: "${LD:?explicit ld64.lld required}" "${SIMPLE_LLVM_REQUIRED_VERSION:?exact LLVM version required}"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-pins.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+python3 - "$root" "$tmp" <<'PY'
+from pathlib import Path
+import sys
+root, temp = map(Path, sys.argv[1:])
+source=(root/'src/compiler_rust/compiler/src/pipeline/native_project/linker.rs').read_text()
+start=source.index('#[cfg(target_os = "macos")]\nfn verify_macos_llvm_tool')
+end=source.index('#[cfg(target_os = "macos")]\nfn add_macos_runtime_host_support',start)
+(temp/'probe.rs').write_text('use std::path::Path;\n'+source[start:end]+'''fn main() {
+ let mut command = std::process::Command::new(std::env::args_os().nth(1).unwrap());
+ match add_macos_base_link_args(&mut command) {
+  Ok(()) => println!("{:?}", command),
+  Err(error) => { eprintln!("{error}"); std::process::exit(1); }
+ }
+}
+''')
+PY
+rustc "$tmp/probe.rs" -C "linker=$CC" -C "link-arg=--ld-path=$LD" -o "$tmp/probe"
+"$tmp/probe" "$CXX" > "$tmp/strict"
+grep -F -- "--ld-path=$LD" "$tmp/strict" > /dev/null
+if grep -q ld_classic "$tmp/strict"; then exit 1; fi
+env -u SIMPLE_LLVM_REQUIRED_VERSION "$tmp/probe" "$CXX" > "$tmp/default"
+grep -F -- '-Wl,-ld_classic' "$tmp/default" > /dev/null
+if SIMPLE_LLVM_REQUIRED_VERSION=0.0.0 "$tmp/probe" "$CXX" > /dev/null 2>&1; then exit 1; fi
+if "$tmp/probe" clang++ > /dev/null 2>&1; then exit 1; fi
+if LD=/usr/bin/ld "$tmp/probe" "$CXX" > /dev/null 2>&1; then exit 1; fi
+if env -u LD "$tmp/probe" "$CXX" > /dev/null 2>&1; then exit 1; fi
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+bootstrap_stage3_stage2_canonical_env_names aarch64-apple-darwin > "$tmp/mac-env"
+grep -F 'CC CXX AR LD LLVM_CONFIG SIMPLE_LLVM_REQUIRED_VERSION' "$tmp/mac-env" > /dev/null
+bootstrap_stage3_stage2_canonical_env_names x86_64-unknown-linux-gnu > "$tmp/linux-env"
+if grep -q SIMPLE_LLVM_REQUIRED_VERSION "$tmp/linux-env"; then exit 1; fi
+printf '%s\n' 'PASS: strict Mach-O LLVM selection, legacy default, invalid pin rejection, and Darwin-only forwarding'

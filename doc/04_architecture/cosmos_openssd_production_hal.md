@@ -8,6 +8,13 @@ same modules, but make optional PL access impossible unless the selected
 bitstream contract is verified. Retain a single boot coordinator and a single
 five-value status model.
 
+The explicit compiler target `armv7-unknown-none-eabi` is the Cosmos Cortex-A9
+soft-float profile. The compiler must emit CPU `cortex-a9`, reject Cortex-A7,
+VFPv4, or VFP-register ABI attributes, and retain the exact two production
+exports/two-C-bridge FSBL dependency closure before the object may enter the
+firmware link. Internal outcome accessors are not HAL APIs; only coverage-test
+C builds expose reset/snapshot wrappers for them.
+
 This avoids a runtime device-discovery abstraction that the upstream PL does
 not support: neither Tiger4NSC nor NVMeHostController exposes a trustworthy IP
 identity register. Identity therefore belongs to the build/package trust
@@ -39,12 +46,17 @@ RTL/software compatibility are reviewed.
    SCU/`ACTLR.SMP`, per-core MMU/L1, CPU0-owned PL310.
 4. **Interrupt/SMP layer - `cosmos_smp_gic.c`:** CPU0-owned GIC distributor,
    per-core GIC CPU interface, generation-tagged secondary mailbox.
-5. **Handoff layer - `cosmos_fsbl.c`:** read-only validation of the state the
+5. **Handoff layer - `cosmos_fsbl.spl`:** Pure-Simple read-only validation of the state the
    FSBL must establish. It does not duplicate clock, DDR, reset, or PL loading.
 6. **PL drivers - `cosmos_nfc.c`, `cosmos_pcie.c`:** exact upstream register
    contracts, bounded state machines, no generic discovery.
-7. **Integration - `cosmos_uart.c`:** dependency order, one status per lane,
-   QEMU versus silicon terminal verdict, bounded diagnostics.
+7. **Boot policy/integration - `cosmos_boot_policy.spl` with
+   `cosmos_uart.c` bridge:** pure Simple owns UART enable-mask transitions,
+   first-exception capture/message selection, stage and handoff admission,
+   aggregate software readiness, QEMU/silicon terminal verdicts, IRQ enable,
+   and storage-poll state transitions. C retains UART MMIO and bounded polling,
+   volatile exception publication, assembly halt/WFI, status-string pointer
+   rendering, HAL calls, and their side-effect sequencing.
 8. **Artifact boundary - `build.shs`, `package_boot.shs`:** strict ELF build,
    Bootgen partition order, input/output identity, manifest and hashes.
 
@@ -84,6 +96,14 @@ reset -> VBAR/stacks/UART -> runtime self-test
 Every arrow is conditional. Runtime, MMU/cache, or GIC failure suppresses all
 dependent work. QEMU intentionally stops the hardware lanes at
 `UNAVAILABLE`. Silicon requires all mandatory lanes to be `OK`.
+
+The boot extraction slice contains 15 scalar exports and 38 named semantic
+predicate sites. Its Simple execution mask has two outcomes per predicate, so
+the owner denominator is 76 outcomes. The independent frozen C oracle lowers
+to 34 compiler branch sites and therefore 68 LLVM branch edges. Those are two
+different scoped measurements: 38/76 describes named production semantics;
+34/68 describes compiler-instrumented oracle control flow. Neither is
+whole-HAL or physical-board coverage.
 
 ## NFC Concurrency and Failure Model
 
@@ -151,9 +171,12 @@ Production uses three independent evidence layers:
 2. H1 executable QEMU, pure-logic, package, and host mock-MMIO tests.
 3. H2 retained board evidence.
 
-The current H1 entry points are runtime ABI, MMIO, ARM abort, PCIe, NVMe IO,
-PCIe bridge, NVMe admin, and SMP/cache runners, plus the package self-test and
-QEMU boot.
+The H1 entry points are runtime ABI, MMIO, ARM abort, PCIe, NVMe IO, PCIe
+bridge, NVMe admin, and SMP/cache runners, plus the package self-test and QEMU
+boot. Receipts predating the pure-Simple FSBL migration remain historical
+C-only evidence. The migrated MMIO runner, package self-test, QEMU build, and
+silicon build require a current provenance-qualified Stage-4 compiler and must
+be rerun before they are current H1 evidence.
 Static source guards are supplementary, not behavioral proof. Synthetic Bootgen
 output proves rejection logic, not BootROM compatibility. No H0/H1 result may
 satisfy an H2 requirement.
@@ -180,13 +203,16 @@ pending.
 
 ## Current Production Gate
 
-H1 runtime, MMIO, PCIe, IO, corrected bridge/admin, QEMU/silicon, package, and
-MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
+H1 runtime, PCIe, IO, corrected bridge/admin, and MMU small-page W^X contracts
+passed in scoped runs. The earlier MMIO, QEMU/silicon, and package passes used
+the former C-owned FSBL and are retained only as historical evidence; migrated
+mixed-object reruns are pending. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
 post-start non-retry, and PRP edges. Official Bootgen v2026.1, the pinned
-upstream HDF/`OpenSSD2.bit`, vendor-generated FSBL, and real silicon package
-now have retained host hashes. Manifest v3 software provenance and standalone
-artifact verification pass; identified-board execution still does not.
+upstream HDF/`OpenSSD2.bit`, vendor-generated FSBL, and the pre-migration
+silicon package have retained host hashes. Their Manifest v3 provenance and
+standalone artifact checks are historical; the migrated package rerun and
+identified-board execution remain pending.
 
 The unchanged-tree bootstrap rebuilt authority and passed Stage 2/3 sanity.
 Stage 4 cleared the prior parser/HIR crashes, then failed on unresolved names
@@ -196,3 +222,54 @@ was produced or deployed. The active compiler defect is tracked in
 No current pure-Simple runner exists for final SSpec/doc generation.
 Production status is **BLOCKED/FAIL**. Fresh SSpec/docgen and H2 board proof
 remain required.
+
+## Pure-Simple PCIe/NVMe Queue Policy Slice (2026-08-19)
+
+`cosmos_nvme_pcie_policy.spl` is now the sole production owner of completion
+status validation/encoding and I/O SQ/CQ descriptor validation and control-word
+derivation. `cosmos_nvme_pcie_policy_bridge.c` retains only the unavoidable C
+pointer ABI: it rejects null output pointers, delegates every decision, and
+publishes the two 32-bit words. `cosmos_pcie.c` continues to own volatile MMIO,
+barriers, FIFO commit ordering, IRQ service, and transport quiescence; it no
+longer owns this queue policy.
+
+The existing public firmware symbols are unchanged. The clean build emits a
+separate Cortex-A9 pure-Simple object, admits exactly six policy exports with
+an empty undefined-symbol closure, links the C bridge, and binds all inputs in
+the firmware receipt. Host evidence compares exhaustive bounded vectors to an
+independent frozen C oracle and reports LLVM-instrumented C bridge branches
+plus named Simple production-predicate outcomes. This evidence is scoped to
+the migrated slice and does not represent whole-HAL, QEMU, or board coverage.
+
+## NFC ECC Pure-Policy Boundary (2026-08-19)
+
+`cosmos_nfc_ecc.spl` now owns Tiger4NSC CRC/spare/page validity, worst-chunk
+extraction, the strict `>20` refresh threshold, and `OK`/`HW_ERROR` mapping.
+`cosmos_nfc_ecc_bridge.c` is limited to two volatile DMA-word acquisitions,
+null-boundary validation, and marshalling the unchanged
+`cosmos_nfc_decode_ecc` C struct ABI. The scalar Simple object has six explicit
+C exports and must have an empty undefined-symbol closure; production and every
+focused `cosmos_nfc.c` link must include both the object and acquisition bridge.
+
+Host evidence is deliberately scoped to exhaustive legacy-C oracle parity,
+compiler-instrumented acquisition-bridge branches, and owner-derived Simple
+policy decisions. It is not NAND media, ECC correction-margin, DMA-coherency,
+or physical-board evidence.
+
+## Residual Freestanding Runtime Boundary (2026-08-20)
+
+`cosmos_runtime_residual.spl` owns the deterministic traversal, overlap,
+comparison, terminator, scan-bound, and padding decisions for `memmove`,
+`memcmp`, `strlen`, `strcmp`, `strncmp`, and `strncpy`. `cosmos_runtime.c`
+retains the public libc, `rt_*`, and ARM EABI names as ABI forwarding shims.
+The previously extracted `cosmos_runtime_core.spl` remains the unchanged owner
+of copy/fill/unsigned-division and division-by-zero policy; weak div0 hooks,
+runtime initialization, traps, and the boot self-test remain in C.
+
+The residual object is allocation-free, exports only six internal operations
+and four coverage queries, has an empty undefined closure, and is admitted as
+Cortex-A9 soft-float ELF32 before production linking. This slice has 27 named
+Simple decisions/54 outcomes. Its frozen six-function C oracle has exactly 68
+LLVM branch edges and 40 pinned evidence rows. Those source/static results do
+not imply executable C-vs-Simple parity: that claim fails closed without an
+admitted provenance-qualified Stage-4 compiler.

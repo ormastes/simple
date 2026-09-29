@@ -1,7 +1,7 @@
 # slang Master Plan
 
 - **Status:** v0 — derived from user-supplied research doc (2026-04-17) and the approved plan at `~/.claude/plans/to-make-good-file-virtual-stardust.md`
-- **Last-updated:** 2026-04-18
+- **Last-updated:** 2026-09-08
 - **Related docs:**
   - `../nvfs/slang_requirements.md` — upfront fs requirements for the parallel nvfs track
   - `./fs_requests/README.md` — reactive fs feature-request capture
@@ -57,6 +57,15 @@ Product binary + integration tests live in a separate GitHub repo (`ormastes/sla
 | A7 | Sleep/wake | `engine/llm_engine.sleep(level)` / `wake_up()` | R3 atomic manifest swap |
 | A8 | LoRA adapter hot-load | `lora/` tree, per-request adapter routing | R1 `adapter` class, R8 async listing |
 
+### Current cache capability
+
+The ggml compatibility backend now implements S3 bounded independent request
+ownership and serial multi-entry exact-prefix snapshots. This is not A4: opaque
+sequence blobs are not physical KV pages. The selected S4 contract requires a
+provider whose attention kernels consume Slang-owned page tables; stock llama
+shared sequences may be explored only as separately reported precursor work.
+See `doc/04_architecture/ml/slang_paged_kv_backend.md`.
+
 Details for each phase (including per-phase fs-request triggers) are in the approved plan file.
 
 ## Key design invariants
@@ -100,4 +109,18 @@ See the "Risks & Mitigations" section of the approved plan; summarized here:
 
 ## Change log
 
+- **2026-09-08 (S4 contract):** Astra review established that opaque llama
+  snapshots cannot implement physical paging. Selected a backend page-pool,
+  immutable-page, private-tail COW, transactional publication, and numerical/
+  physical-memory evidence contract while retaining S3 fallback.
+- **2026-09-08 (S3 implementation):** Added bounded independent request-owned
+  contexts/samplers/buffers, generation-checked opaque handles, immutable-prefix
+  leases, atomic shrink/admission behavior, cooperative cancellation, atomic
+  optional-ABI negotiation, and busy-safe unload. Execution remains one serial
+  owner; paged KV, batching, spill, transport, and parallel advancement remain open.
+- **2026-09-08 (S2):** Added bounded serial multi-entry snapshots, longest exact
+  prefix selection, deterministic LRU, configurable byte/count limits, and
+  optional S2 ABI gauges. Paged/concurrent A4 remains open.
+- **2026-09-08 (S1):** Added serial exact-token prefix restore behind explicit
+  backend capabilities, request-isolation fallback, and observable counters.
 - **2026-04-18 (v0):** Initial doc. Pivoted from "fs_requests reactive only" to "upfront nvfs requirements in parallel track." Module layout confirmed as vLLM-mirrored. Repo split: library in main simple repo, product in `ormastes/slang` submodule.

@@ -1,7 +1,8 @@
 # Interpreted-lane semantics defects on macOS — present in BOTH deployed and stage4-candidate binaries
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-25
 **Area:** compiler / interpreter lane (aarch64-apple-darwin)
@@ -61,13 +62,3 @@ handles; conversely the incumbent breaks plain-nil-return + `??` (prints "nil"
 instead of the default), which the candidate handles. Root-cause in progress in
 the stage4 deploy arc (see memory project_stage4_macos_deploy_ladder_2026-07-25).
 
-## UNVERIFIABLE_HERE — re-verified 2026-08-17 (P2 triage, compiler lane)
-
-This lane runs on Linux x86_64. The claim is scoped to
-`bin/release/aarch64-apple-darwin/simple` and a 2026-07-25 stage4
-aarch64-apple-darwin candidate, and the doc itself states the raw Rust seed
-evaluates all three probes correctly — so there is no Linux-observable signal and
-no honest verdict is available from this host. Of the recorded evidence only
-`scripts/check/cert/redeploy_gate/fixtures/struct_copy_isolation.spl` is
-inspectable here, and it cannot discriminate the macOS lane. Leaving OPEN;
-requires a macOS runner to settle. Do not close this on Linux evidence.

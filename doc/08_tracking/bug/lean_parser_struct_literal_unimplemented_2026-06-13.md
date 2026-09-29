@@ -1,5 +1,12 @@
 # Lean parser: struct-literal `Name { field: value }` is unimplemented
 
+## Closed 2026-09-13 — Fixed: the lean parser now emits struct literals
+
+- **measured** (grep of current source): the root cause is gone. `expr_struct_lit(` had "zero callers in the parser" when filed; it now has one — `src/compiler/10.frontend/core/parser_expr.spl:997` `return expr_struct_lit(sl_type, sl_entries, [], 0)`, with the constructor still at `_AstExpr/nodes.spl:909`.
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): both failing shapes now work end to end — `g(Name { x: 1, y: 2 })` prints `3` (positional call arg, the `expected ), got {` case) and `val d = Name { x: 5, y: 6 }` yields `11`, i.e. a real struct literal rather than the old lenient misparse.
+- **inferred**: the seed run exercises the Rust parser, so it corroborates the semantics rather than the lean parser directly; the lean-parser evidence is the call site above plus the entry's own "FIXED 2026-06-13 (commit 1cfdeae4f789)".
+- `src/lib/common/json.spl` cited in the entry no longer exists at that path (json moved under `src/lib/common/`'s restructured tree) — incidental, not load-bearing here.
+
 - **ID:** lean_parser_struct_literal_unimplemented
 - **Severity:** P1 (parser gap class; ~50 direct sites / 19 src/lib files, but
   IMPORT-AMPLIFIED: a struct-literal in a shared imported module errors for every
@@ -11,8 +18,7 @@
   never produced it before.)
 - **Date:** 2026-06-13
 - **Component:** `src/compiler/10.frontend/core/` lean parser
-- Status: FIXED
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** CLOSED 2026-09-13 (re-verified). Originally: FIXED 2026-06-13 (commit 1cfdeae4f789) — see "Fix landed" below.
 
 ## Symptom
 Struct-literal brace syntax `Name { x: 1, y: 2 }` is not parsed into a struct
@@ -39,7 +45,7 @@ that has no `{`-struct-literal rule — so the `{` is left and the caller report
 
 ## Fix sketch (its own task — do NOT rush; brace-ambiguity hazard)
 Implement `ident {` → `expr_struct_lit` in the primary/postfix parser, reusing the
-field-parsing shape of the dict path (`_ParserPrimary/primary_expr.spl:563`). MUST
+field-parsing shape of the dict path (`parser_primary_part2.spl:563`). MUST
 disambiguate `{` carefully — dict literal (`{ k: v }`), struct literal (`Name { k: v }`),
 and block bodies all use `{`/indentation. Per memory `feedback_struct_literal_brace_syntax`:
 allowlist the `ident {` struct form, never "any ident + `{`". After the primary-level
@@ -58,7 +64,7 @@ literal (dict literals start with a bare `{`). The tail loop tolerates comma- an
 newline-separated fields (multi-line), empty `{}`, trailing comma, keyword field
 names (G25 keyword-as-name), dotted type paths, and nesting. Field entries are
 built as `expr_field_access(value, name, 0)` carriers — str=field name, left=value
-— which is exactly the layout `_FlatAstBridge/convert_nodes.spl:355` reads (it ignores the
+— which is exactly the layout `flat_ast_bridge_part1.spl:355` reads (it ignores the
 parallel field_values/STMTS list that `expr_struct_lit` also stores; the two were
 written inconsistently and never exercised). `parse_call_arg_raw`'s manual ident
 path inherits the rule through `parse_postfix_on`.

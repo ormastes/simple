@@ -346,7 +346,14 @@ pub unsafe extern "C" fn rt_package_create_symlink(
     #[cfg(windows)]
     {
         use std::os::windows::fs::symlink_file;
-        match symlink_file(target_str, link_str) {
+        // Windows stores the target verbatim in the reparse point and does not
+        // translate '/' when following it: a target written as
+        // "/tmp/x/real.spl" creates fine but every open/canonicalize through
+        // the link then fails with ERROR_INVALID_NAME (123). Store native
+        // separators. (Separator built from its code point: backslash
+        // literals do not survive this repository's tooling reliably.)
+        let native_target = target_str.replace('/', &char::from(92u8).to_string());
+        match symlink_file(&native_target, link_str) {
             Ok(_) => 0,
             Err(_) => -1,
         }
@@ -467,5 +474,31 @@ mod tests {
         assert!(extracted_file.exists());
         let content = fs::read_to_string(extracted_file).unwrap();
         assert_eq!(content, "test content");
+    }
+
+    /// A '/'-separated relative target must produce a link Windows can follow
+    /// (drive-absolute "C:/..." targets happen to resolve; relative and
+    /// drive-rooted "/tmp/..." ones do not unless stored with '\').
+    #[test]
+    fn test_create_symlink_forward_slash_target_resolves() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::create_dir(temp_dir.path().join("real")).unwrap();
+        let real = temp_dir.path().join("real").join("shared.spl");
+        fs::write(&real, "fn shared() -> i64: 1\n").unwrap();
+        let link = temp_dir.path().join("via_link.spl");
+        let target = "real/shared.spl".to_string();
+        let link_str = link.to_str().unwrap();
+        let status = unsafe {
+            rt_package_create_symlink(target.as_ptr(), target.len(), link_str.as_ptr(), link_str.len())
+        };
+        if status != 0 {
+            // Symlink creation needs Developer Mode / privilege on Windows.
+            eprintln!("skip: symlink creation unavailable (status={})", status);
+            return;
+        }
+        assert_eq!(
+            fs::canonicalize(&link).unwrap(),
+            fs::canonicalize(&real).unwrap()
+        );
     }
 }

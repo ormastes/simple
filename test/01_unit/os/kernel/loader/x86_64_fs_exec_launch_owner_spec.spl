@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect}
+use std.fs_driver.mount_table.{MountTable}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_executable_adoption_state.{
+    SchedulerExecutableAdoptionOwnerStateV1
+}
+use os.kernel.loader.executable_authority_registry.{
+    ExecutableAuthorityRegistryV1, ExecutableAuthorityTokenV1
+}
+use os.kernel.loader.executable_load_consumer.{executable_load_consumer_new_v1}
+use os.kernel.loader.executable_launch_arguments_v1.{
+    executable_launch_arguments_v1_errno, executable_launch_arguments_v1_validate
+}
+use os.kernel.loader.x86_64_fs_exec_spawn.{
+    x86_64_fs_exec_spawn_authenticated_with_launch_v1
+}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+fn _unusable_registry() -> ExecutableAuthorityRegistryV1:
+    ExecutableAuthorityRegistryV1(owner_epoch: 1u64)
+
+fn _unusable_token() -> ExecutableAuthorityTokenV1:
+    ExecutableAuthorityTokenV1(slot_index: 7, generation: 9u64, nonce: 11u64)
+
+describe "x86_64 authenticated launch owner":
+    it "rejects an invalid argv before adoption and returns no evidence":
+        val expected = executable_launch_arguments_v1_validate(
+            "/bin/tool", ["tool\0hidden"], [])
+        expect(expected.is_err()).to_be_true()
+        val result = x86_64_fs_exec_spawn_authenticated_with_launch_v1(
+            Scheduler.new_bootstrap(), MountTable.new(),
+            _unusable_registry(), _unusable_token(),
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            0x400000u64, 0, CapabilitySet.empty(),
+            "/bin/tool", ["tool\0hidden"], [], 0)
+        expect(result.exit_code).to_equal(
+            executable_launch_arguments_v1_errno(expected.unwrap_err()) as i64)
+        expect(result.evidence.?).to_be_false()
+        var owner = result.scheduler
+        val snapshot = owner.authenticated_executable_adoption_snapshot_v1()
+        expect(snapshot.state).to_equal(SchedulerExecutableAdoptionOwnerStateV1.Idle)
+        expect(snapshot.pid).to_equal(0u64)
+        expect(snapshot.token_slot).to_equal(-1)
+
+    it "rejects a null entry point before consuming authority":
+        val result = x86_64_fs_exec_spawn_authenticated_with_launch_v1(
+            Scheduler.new_bootstrap(), MountTable.new(),
+            _unusable_registry(), _unusable_token(),
+            executable_load_consumer_new_v1("simpleos", "x86_64", "simpleos"),
+            0u64, 0, CapabilitySet.empty(),
+            "/bin/tool", ["/bin/tool"], [], 0)
+        expect(result.exit_code).to_equal(-8)
+        expect(result.evidence.?).to_be_false()
+        var owner = result.scheduler
+        val snapshot = owner.authenticated_executable_adoption_snapshot_v1()
+        expect(snapshot.state).to_equal(SchedulerExecutableAdoptionOwnerStateV1.Idle)
+        expect(snapshot.token_slot).to_equal(-1)

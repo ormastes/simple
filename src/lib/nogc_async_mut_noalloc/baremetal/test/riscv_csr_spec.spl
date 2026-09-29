@@ -24,6 +24,7 @@ use std.nogc_async_mut_noalloc.baremetal.riscv.csr.{
     CAUSE_ECALL_U, CAUSE_ECALL_S, CAUSE_ECALL_M,
     CAUSE_INSN_PAGE_FAULT, CAUSE_LOAD_PAGE_FAULT, CAUSE_STORE_PAGE_FAULT,
     csr_read, csr_write, csr_set_bits, csr_clear_bits, csr_read_write,
+    csr_test_shim, csr_test_shim_clear,
     mstatus_get_mpp, mstatus_set_mpp, mstatus_get_spp, mstatus_set_spp,
     mtvec_encode, mtvec_base, mtvec_mode,
     mcause_is_interrupt, mcause_code,
@@ -233,9 +234,16 @@ describe "CSR Address Classification":
         expect csr_privilege_level(CSR_SSTATUS) == 1   # Supervisor (0x100 bits 9:8 = 01)
         expect csr_privilege_level(CSR_CYCLE) == 0     # User (0xC00 bits 9:8 = 00)
 
-describe "CSR Read Write Stubs":
-    it "read returns zero in interpreter mode":
-        expect csr_read(CSR_MSTATUS) == 0
+describe "CSR Read Write intrinsics on the host (csr_test_shim)":
+    # Design A.7 F1: on the host the asm is skipped, so a spec installs a
+    # shim; the old "returns zero" stub contract is gone (it was the drop bug).
+    it "read returns the scripted value":
+        csr_test_shim([CSR_MSTATUS], [0x1800])
+        expect csr_read(CSR_MSTATUS) == 0x1800
+        csr_test_shim_clear()
 
-    it "read_write returns zero in interpreter mode":
-        expect csr_read_write(CSR_MSTATUS, 0xFF) == 0
+    it "read_write swaps and returns the old value":
+        csr_test_shim([CSR_MSTATUS], [0x8])
+        expect csr_read_write(CSR_MSTATUS, 0xFF) == 0x8
+        expect csr_read(CSR_MSTATUS) == 0xFF
+        csr_test_shim_clear()

@@ -7,9 +7,13 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
+#[cfg(windows)]
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
+#[cfg(windows)]
+use std::sync::Arc;
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
@@ -18,6 +22,20 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::FromRawFd;
 #[cfg(windows)]
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+
+#[cfg(windows)]
+static RAW_WINDOWS_FILES: LazyLock<Mutex<(i64, HashMap<i64, Arc<File>>)>> =
+    LazyLock::new(|| Mutex::new((1, HashMap::new())));
+
+#[cfg(windows)]
+pub(crate) fn windows_raw_fd_file(fd: i64) -> Option<Arc<File>> {
+    RAW_WINDOWS_FILES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .1
+        .get(&fd)
+        .cloned()
+}
 
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
@@ -287,15 +305,47 @@ pub fn rt_file_is_dir(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(Path::new(&path).is_dir()))
 }
 
-/// Get file stat info (simplified - returns size or -1)
+/// Get a file's MODIFICATION TIME, in seconds since the Unix epoch.
+///
+/// The contract is set by the C runtime, where both implementations
+/// (`src/runtime/runtime.c` and `src/runtime/runtime_core_host_services.c`)
+/// `return (int64_t)st.st_mtime`, and both return **0** -- not -1 -- when
+/// `stat` fails. The pure-Simple caller agrees: `file_modified_time` in
+/// `src/lib/nogc_sync_mut/io/file_ops.spl` calls this and documents "A zero
+/// result fails closed: cache users must treat it as unavailable."
+///
+/// This used to return `meta.len()` -- the file SIZE -- behind the comment
+/// "simplified - returns size or -1", which made it a byte-for-byte duplicate
+/// of `rt_file_size` right down to a copy-pasted "rt_file_size exceeds i64
+/// range" error string. Nothing reported it, because it is only wrong on the
+/// INTERPRET lane: the JIT/native lanes link the C function and answered
+/// correctly, so the two lanes silently disagreed.
+///
+/// Measured on the deployed seed before this fix, for a 10-byte file:
+///
+///   default (JIT) lane   file_modified_time -> 1789803583   (correct epoch)
+///   interpret lane       file_modified_time -> 10           (the size)
+///
+/// The casualty was the test manifest. `bin/simple test` runs on the interpret
+/// route, so every row of `.simple/test-manifest.idx` was written with
+/// `mtime == size` -- 11,629 of 11,629 -- degrading the cache's invalidation
+/// fingerprint to size-only. A same-size edit to a spec then never invalidates
+/// test discovery.
+/// See doc/08_tracking/bug/rt_file_stat_returns_size_on_interpret_lane_2026-09-19.md
 pub fn rt_file_stat(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    match fs::metadata(&path) {
-        Ok(meta) => i64::try_from(meta.len())
-            .map(Value::Int)
-            .map_err(|_| CompileError::runtime("rt_file_size exceeds i64 range")),
-        Err(_) => Ok(Value::Int(-1)),
-    }
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return Ok(Value::Int(0)),
+    };
+    use std::time::UNIX_EPOCH;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(Value::Int(mtime))
 }
 
 /// Get file size in bytes
@@ -317,18 +367,47 @@ pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
         return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
     }
     let path = match &args[0] {
-        Value::Str(path) => CString::new(path.as_bytes()).map_err(|_| {
-            CompileError::runtime("rt_open_fd path contains an interior NUL byte")
-        })?,
+        Value::Str(path) => CString::new(path.as_bytes())
+            .map_err(|_| CompileError::runtime("rt_open_fd path contains an interior NUL byte"))?,
         _ => return Err(CompileError::runtime("rt_open_fd path must be text")),
     };
     let flags = args[1].as_int()? as libc::c_int;
+    // `open` is variadic, so the mode argument undergoes C default argument
+    // promotion. `libc::mode_t` is `u32` on Linux but `u16` on macOS/*BSD, and
+    // Rust rejects passing a sub-`int` type to a variadic function (E0617).
+    // Promote explicitly to `c_uint`, which is what C would do implicitly.
     let mode = args[2].as_int()? as libc::mode_t as libc::c_uint;
     let fd = unsafe { libc::open(path.as_ptr(), flags, mode) };
     Ok(Value::Int(i64::from(fd)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_open_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::runtime("rt_open_fd requires 3 arguments"));
+    }
+    let path = extract_path(args, 0)?;
+    let flags = args[1].as_int()?;
+    let access = flags & 0x3;
+    let mut options = OpenOptions::new();
+    options
+        .read(access != 1)
+        .write(access != 0)
+        .create((flags & 0x40) != 0)
+        .truncate((flags & 0x200) != 0)
+        .append((flags & 0x400) != 0);
+    let file = match options.open(path) {
+        Ok(file) => Arc::new(file),
+        Err(_) => return Ok(Value::Int(-1)),
+    };
+    let mut files = RAW_WINDOWS_FILES.lock().unwrap_or_else(|error| error.into_inner());
+    let token = files.0;
+    files.0 = files.0.checked_add(1).unwrap_or(1);
+    files.1.insert(token, file);
+    Ok(Value::Int(token))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_open_fd(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_open_fd is unavailable on this host"))
 }
@@ -347,7 +426,21 @@ pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(i64::from(status)))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn rt_close_fd(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::runtime("rt_close_fd requires 1 argument"));
+    }
+    let fd = args[0].as_int()?;
+    let removed = RAW_WINDOWS_FILES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .1
+        .remove(&fd);
+    Ok(Value::Int(if removed.is_some() { 0 } else { -1 }))
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn rt_close_fd(_args: &[Value]) -> Result<Value, CompileError> {
     Err(CompileError::runtime("rt_close_fd is unavailable on this host"))
 }
@@ -377,7 +470,9 @@ pub fn rt_file_hash_sha256(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::canonicalize(&path) {
-        Ok(canonical) => Ok(Value::text(canonical.to_string_lossy().to_string())),
+        Ok(canonical) => Ok(Value::text(strip_verbatim_prefix(
+            canonical.to_string_lossy().to_string(),
+        ))),
         Err(_) => {
             // Fallback: make absolute
             match std::env::current_dir() {
@@ -388,6 +483,59 @@ pub fn rt_file_canonicalize(args: &[Value]) -> Result<Value, CompileError> {
                 Err(_) => Ok(Value::text(path)),
             }
         }
+    }
+}
+
+/// Drop the Windows verbatim prefix (`\\?\C:\...` -> `C:\...`,
+/// `\\?\UNC\srv\share` -> `\\srv\share`) that `fs::canonicalize` returns, so
+/// the interpreter lane agrees with the runtime's `rt_path_absolute`
+/// (`runtime/src/value/sffi/file_io/path.rs`) and a canonicalized path compares
+/// equal to the same path produced by the cwd-join fallback. Backslash built
+/// from its code point, as in that file.
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: String) -> String {
+    let sep = char::from(92u8);
+    let verbatim: String = [sep, sep, '?', sep].iter().collect();
+    let unc: String = format!("{}UNC{}", verbatim, sep);
+    if let Some(rest) = path.strip_prefix(&unc) {
+        let mut out = String::with_capacity(rest.len() + 2);
+        out.push(sep);
+        out.push(sep);
+        out.push_str(rest);
+        return out;
+    }
+    match path.strip_prefix(&verbatim) {
+        Some(rest) => rest.to_string(),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: String) -> String {
+    path
+}
+
+#[cfg(test)]
+mod canonicalize_tests {
+    use super::*;
+
+    /// Canonicalizing an existing file must not leak the Windows `\\?\`
+    /// verbatim prefix (the runtime lane strips it; the lanes must agree).
+    #[test]
+    fn canonicalize_returns_plain_absolute_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("probe.spl");
+        std::fs::write(&file, "x").expect("write probe");
+        let got = rt_file_canonicalize(&[Value::text(file.to_string_lossy().to_string())])
+            .expect("canonicalize call");
+        let text = match got {
+            Value::Str(s) => s.to_string(),
+            other => panic!("expected text, got {}", other.type_name()),
+        };
+        let verbatim: String = [char::from(92u8), char::from(92u8), '?'].iter().collect();
+        assert!(!text.starts_with(&verbatim), "verbatim prefix leaked: {}", text);
+        assert!(std::path::Path::new(&text).is_absolute(), "not absolute: {}", text);
+        assert!(text.ends_with("probe.spl"), "wrong target: {}", text);
     }
 }
 
@@ -435,41 +583,128 @@ fn open_regular_no_follow(path: &Path) -> Option<std::fs::File> {
     }
 }
 
+// Failure-arm codes for the interpreter twin of
+// rt_file_read_regular_no_follow_bounded. Mirrors the runtime crate's
+// READ_NF_* codes (runtime/src/value/sffi/file_io/file_ops.rs): the Simple
+// caller reads the arm through rt_file_read_regular_no_follow_last_failure
+// when the reader returns NIL, and a non-zero "never called" sentinel keeps
+// the readout unambiguous (0 would mean the diagnostic extern itself is
+// unresolved). Without this twin, the interpreted native-build worker dies at
+// semantic time with "unknown extern function:
+// rt_file_read_regular_no_follow_last_failure" the moment it typechecks
+// src/lib/nogc_sync_mut/io/file_ops.spl (beta.10 windows-x86_64 leg).
+thread_local! {
+    static INTERP_READ_NF_LAST_FAILURE: std::cell::Cell<i64> =
+        const { std::cell::Cell::new(INTERP_READ_NF_NEVER_CALLED) };
+}
+
+const INTERP_READ_NF_NEVER_CALLED: i64 = 77;
+const INTERP_READ_NF_OK: i64 = 100;
+const INTERP_READ_NF_BAD_ARGS: i64 = 2;
+const INTERP_READ_NF_OPEN: i64 = 4;
+const INTERP_READ_NF_METADATA: i64 = 5;
+const INTERP_READ_NF_NOT_REGULAR: i64 = 6;
+const INTERP_READ_NF_TOO_LARGE: i64 = 7;
+const INTERP_READ_NF_REPARSE: i64 = 8;
+const INTERP_READ_NF_READ: i64 = 9;
+const INTERP_READ_NF_BAD_UTF8_CONTENT: i64 = 10;
+
+fn interp_read_no_follow_fail(code: i64) -> Value {
+    INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(code));
+    Value::Nil
+}
+
+/// Arm code recorded by the most recent interpreter bounded no-follow read.
+pub fn rt_file_read_regular_no_follow_last_failure(
+    _args: &[Value],
+) -> Result<Value, CompileError> {
+    Ok(Value::Int(
+        INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.get()),
+    ))
+}
+
 /// Read one regular file from one no-follow handle with a hard byte bound.
 pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let max_bytes = match args.get(1) {
         Some(Value::Int(value)) if *value >= 0 => *value,
-        _ => return Ok(Value::Nil),
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
     };
     let mut file = match open_regular_no_follow(Path::new(&path)) {
         Some(file) => file,
-        None => return Ok(Value::Nil),
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_OPEN)),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(Value::Nil),
+        Err(_) => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_METADATA)),
     };
-    if !metadata.is_file() || metadata.len() > max_bytes as u64 {
-        return Ok(Value::Nil);
+    if !metadata.is_file() {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_NOT_REGULAR));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE));
     }
     #[cfg(windows)]
     if metadata.file_attributes() & 0x0000_0400 != 0 {
-        return Ok(Value::Nil);
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_REPARSE));
     }
     let limit = match (max_bytes as u64).checked_add(1) {
         Some(limit) => limit,
-        None => return Ok(Value::Nil),
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE)),
     };
     let mut bytes = Vec::new();
     let mut bounded = file.take(limit);
     if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
-        return Ok(Value::Nil);
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_READ));
     }
     match String::from_utf8(bytes) {
-        Ok(content) => Ok(Value::text(content)),
-        Err(_) => Ok(Value::Nil),
+        Ok(content) => {
+            INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+            Ok(Value::text(content))
+        }
+        Err(_) => Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_UTF8_CONTENT)),
     }
+}
+
+/// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
+/// payloads (images, archives). Identical admission arms and bound; the
+/// content is returned as a `[u8]` value instead of being UTF-8 decoded,
+/// which the text form must reject.
+pub fn rt_file_read_regular_no_follow_bounded_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let max_bytes = match args.get(1) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
+    };
+    let mut file = match open_regular_no_follow(Path::new(&path)) {
+        Some(file) => file,
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_OPEN)),
+    };
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_METADATA)),
+    };
+    if !metadata.is_file() {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_NOT_REGULAR));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE));
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x0000_0400 != 0 {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_REPARSE));
+    }
+    let limit = match (max_bytes as u64).checked_add(1) {
+        Some(limit) => limit,
+        None => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_TOO_LARGE)),
+    };
+    let mut bytes = Vec::new();
+    let mut bounded = file.take(limit);
+    if bounded.read_to_end(&mut bytes).is_err() || bytes.len() as i64 > max_bytes {
+        return Ok(interp_read_no_follow_fail(INTERP_READ_NF_READ));
+    }
+    INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+    Ok(Value::byte_array(bytes))
 }
 
 /// Read file through the mmap-named API.
@@ -499,7 +734,6 @@ pub fn rt_file_fsync(args: &[Value]) -> Result<Value, CompileError> {
         Err(_) => Ok(Value::Bool(false)),
     }
 }
-
 
 /// Interpreter fallback for the runtime cached fsync entrypoint.
 pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
@@ -549,75 +783,76 @@ pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
     }
     #[cfg(unix)]
     {
-    let file = {
-        let parent = match target.parent() {
-            Some(value) => value,
-            None => Path::new("."),
-        };
-        let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
-        let mut parent_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if parent_fd < 0 {
-            return Ok(Value::Int(-1));
-        }
-        for component in parent.components() {
-            use std::path::Component;
-            let name = match component {
-                Component::RootDir | Component::CurDir => continue,
-                Component::Normal(value) => value,
-                Component::ParentDir | Component::Prefix(_) => {
+        let file = {
+            let parent = match target.parent() {
+                Some(value) => value,
+                None => Path::new("."),
+            };
+            let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
+            let mut parent_fd =
+                unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+            if parent_fd < 0 {
+                return Ok(Value::Int(-1));
+            }
+            for component in parent.components() {
+                use std::path::Component;
+                let name = match component {
+                    Component::RootDir | Component::CurDir => continue,
+                    Component::Normal(value) => value,
+                    Component::ParentDir | Component::Prefix(_) => {
+                        unsafe { libc::close(parent_fd) };
+                        return Ok(Value::Int(-1));
+                    }
+                };
+                let name = match CString::new(name.as_bytes()) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        unsafe { libc::close(parent_fd) };
+                        return Ok(Value::Int(-1));
+                    }
+                };
+                let next = unsafe {
+                    libc::openat(
+                        parent_fd,
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    )
+                };
+                unsafe { libc::close(parent_fd) };
+                if next < 0 {
+                    return Ok(Value::Int(-1));
+                }
+                parent_fd = next;
+            }
+            let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
+                Some(value) => value,
+                None => {
                     unsafe { libc::close(parent_fd) };
                     return Ok(Value::Int(-1));
                 }
             };
-            let name = match CString::new(name.as_bytes()) {
-                Ok(value) => value,
-                Err(_) => {
-                    unsafe { libc::close(parent_fd) };
-                    return Ok(Value::Int(-1));
-                }
-            };
-            let next = unsafe {
+            let fd = unsafe {
                 libc::openat(
                     parent_fd,
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    leaf.as_ptr(),
+                    libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                    0o600,
                 )
             };
             unsafe { libc::close(parent_fd) };
-            if next < 0 {
+            if fd < 0 {
                 return Ok(Value::Int(-1));
             }
-            parent_fd = next;
-        }
-        let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
-            Some(value) => value,
-            None => {
-                unsafe { libc::close(parent_fd) };
-                return Ok(Value::Int(-1));
-            }
+            unsafe { std::fs::File::from_raw_fd(fd) }
         };
-        let fd = unsafe {
-            libc::openat(
-                parent_fd,
-                leaf.as_ptr(),
-                libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        unsafe { libc::close(parent_fd) };
-        if fd < 0 {
+        if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
             return Ok(Value::Int(-1));
         }
-        unsafe { std::fs::File::from_raw_fd(fd) }
-    };
-    if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
-        return Ok(Value::Int(-1));
-    }
-    let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
-    let handle = files.0;
-    files.0 += 1;
-    files.1.insert(handle, file);
-    Ok(Value::Int(handle))
+        let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
+        let handle = files.0;
+        files.0 += 1;
+        files.1.insert(handle, file);
+        Ok(Value::Int(handle))
     }
 }
 
@@ -1041,14 +1276,11 @@ pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
 /// Read file bytes through the mmap-named API in interpreter mode.
 pub fn rt_file_mmap_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 1 {
-        return Err(CompileError::runtime(
-            "rt_file_mmap_read_bytes requires 1 argument",
-        ));
+        return Err(CompileError::runtime("rt_file_mmap_read_bytes requires 1 argument"));
     }
     let path = extract_path(args, 0)?;
-    let bytes = fs::read(&path).map_err(|error| {
-        CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}"))
-    })?;
+    let bytes =
+        fs::read(&path).map_err(|error| CompileError::runtime(format!("rt_file_mmap_read_bytes failed: {error}")))?;
     Ok(Value::byte_array(bytes))
 }
 
@@ -1693,9 +1925,229 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(false))
 }
 
+/// Path-argument guard mirroring the C runtime's `secure_copy_path`
+/// (`src/runtime/runtime_secure_staging.c`): a path must be non-empty, shorter
+/// than the runtime's 4096-byte buffer, and free of embedded NUL bytes. The C
+/// lane rejects these before touching the filesystem and so must this one, or
+/// the interpreter would accept inputs the native lane refuses.
+fn secure_path_ok(value: &str) -> bool {
+    !value.is_empty() && value.len() < 4096 && !value.as_bytes().contains(&0)
+}
+
+/// Create a fresh, private (0700) staging directory under `parent`.
+///
+/// Interpreter twin of the native `rt_secure_temp_dir`
+/// (`src/runtime/runtime_secure_staging.c`, `runtime.c`, `runtime_native.c`).
+/// The native lane uses `mkdtemp(3)` plus an explicit `chmod(0700)`; this lane
+/// uses `tempfile`'s `mkdtemp`-equivalent and applies the same explicit
+/// narrowing, so both lanes agree that the directory is unguessable, freshly
+/// created (never pre-existing), and unreadable by other users.
+///
+/// Args: (parent, prefix). The prefix may not contain a path separator — that
+/// would let a caller escape `parent`. Returns the new directory's path, or the
+/// EMPTY STRING on any failure, which is the failure signal the native lane
+/// uses (`rt_string_new(NULL, 0)`).
+pub fn rt_secure_temp_dir(args: &[Value]) -> Result<Value, CompileError> {
+    let parent = extract_path(args, 0)?;
+    let prefix = extract_path(args, 1)?;
+    let failed = || Ok(Value::text(String::new()));
+
+    if !secure_path_ok(&parent) || !secure_path_ok(&prefix) || prefix.len() >= 128 {
+        return failed();
+    }
+    // A separator in the prefix would escape `parent`; the C lane rejects both
+    // separators regardless of host, so this one does too.
+    if prefix.contains('/') || prefix.contains('\\') {
+        return failed();
+    }
+
+    let Ok(dir) = tempfile::Builder::new()
+        .prefix(&format!("{}-", prefix))
+        .tempdir_in(&parent)
+    else {
+        return failed();
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mkdtemp` already creates at 0700, but the native lane chmods
+        // explicitly rather than trusting the umask-independent default, and a
+        // silent widening here would be exactly the class of defect this
+        // extern exists to prevent. On failure the directory is removed so a
+        // caller never receives a path to a too-permissive directory.
+        if fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).is_err() {
+            let _ = fs::remove_dir(dir.path());
+            return failed();
+        }
+    }
+
+    // The caller owns the directory's lifetime from here, exactly as with the
+    // native lane; dropping the `TempDir` guard must not delete it.
+    let path = dir.keep();
+    Ok(Value::text(path.to_string_lossy().to_string()))
+}
+
+/// Publish `staged` to `destination` atomically, REFUSING to replace an
+/// existing destination.
+///
+/// Interpreter twin of the native `rt_file_publish_noreplace`. The no-replace
+/// guarantee is the entire point of this extern: a plain rename would silently
+/// clobber a destination another process had already published, so it is never
+/// used on any lane. On Linux this is `renameat2(RENAME_NOREPLACE)`; where that
+/// syscall is unavailable (older kernels return ENOSYS, some filesystems
+/// EINVAL) it falls back to `link(2)` + `unlink(2)`, which PRESERVES the
+/// guarantee because `link` fails with EEXIST rather than replacing.
+///
+/// Returns the native lane's status convention:
+///   *  1 — published; `staged` no longer exists
+///   *  0 — refused; `destination` already exists and is untouched
+///   * -1 — error (bad arguments, missing staged file, unwritable directory)
+pub fn rt_file_publish_noreplace(args: &[Value]) -> Result<Value, CompileError> {
+    let staged = extract_path(args, 0)?;
+    let destination = extract_path(args, 1)?;
+    if !secure_path_ok(&staged) || !secure_path_ok(&destination) {
+        return Ok(Value::Int(-1));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        const RENAME_NOREPLACE: libc::c_uint = 1;
+        // Built through CString so a path that cannot be represented as a
+        // C string is an error rather than a silently truncated publish.
+        if let (Ok(from), Ok(to)) = (CString::new(staged.as_str()), CString::new(destination.as_str())) {
+            // `renameat2` is not exposed by every libc flavor this seed builds
+            // against, so it is issued as a raw syscall exactly as the C
+            // runtime does.
+            let rc = unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    from.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                    RENAME_NOREPLACE,
+                )
+            };
+            if rc == 0 {
+                return Ok(Value::Int(1));
+            }
+            let err = std::io::Error::last_os_error();
+            let raw = err.raw_os_error().unwrap_or(0);
+            if raw == libc::EEXIST {
+                return Ok(Value::Int(0));
+            }
+            // Anything other than "this kernel/filesystem lacks the syscall"
+            // is a real error; only ENOSYS/EINVAL fall through to the link
+            // fallback, matching the C lane.
+            if raw != libc::ENOSYS && raw != libc::EINVAL {
+                return Ok(Value::Int(-1));
+            }
+        } else {
+            return Ok(Value::Int(-1));
+        }
+    }
+
+    // Fallback (and the non-Linux path). `hard_link` refuses an existing
+    // destination on every supported platform, so the no-replace guarantee
+    // survives; `fs::rename` would NOT and must never be substituted here.
+    match fs::hard_link(&staged, &destination) {
+        Ok(()) => {
+            let _ = fs::remove_file(&staged);
+            Ok(Value::Int(1))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(Value::Int(0)),
+        Err(_) => Ok(Value::Int(-1)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The no-replace guarantee, exercised against the INTERPRETER lane.
+    ///
+    /// This is the check that a symbol-resolution test cannot stand in for: a
+    /// registered extern that silently replaced the destination would resolve
+    /// fine and still destroy a published artifact. The C lane has its own
+    /// twin of this in `test/01_unit/runtime/secure_staging_runtime_test.c`.
+    #[cfg(unix)]
+    #[test]
+    fn publish_noreplace_refuses_to_overwrite_and_temp_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = tempfile::tempdir().expect("parent temp dir");
+        let parent_path = parent.path().to_string_lossy().to_string();
+
+        // --- rt_secure_temp_dir returns a fresh 0700 directory ---------------
+        let staging = rt_secure_temp_dir(&[Value::text(parent_path.clone()), Value::text("stage".to_string())])
+            .expect("secure_temp_dir call");
+        let Value::Str(staging_path) = staging else {
+            panic!("rt_secure_temp_dir must return text, got {:?}", staging);
+        };
+        let staging_path = staging_path.as_ref().clone();
+        assert!(!staging_path.is_empty(), "empty string is the failure signal");
+        let meta = fs::metadata(&staging_path).expect("staging dir exists");
+        assert!(meta.is_dir(), "staging path must be a directory");
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o700,
+            "staging dir must be private to the owner"
+        );
+        assert!(
+            staging_path.starts_with(&parent_path),
+            "staging dir must live under the requested parent"
+        );
+
+        // A prefix carrying a separator must be refused, not allowed to escape.
+        assert_eq!(
+            rt_secure_temp_dir(&[Value::text(parent_path.clone()), Value::text("../evil".to_string())]).unwrap(),
+            Value::text(String::new())
+        );
+
+        // --- publish onto a free destination succeeds ------------------------
+        let staged = format!("{}/module.o", staging_path);
+        let destination = format!("{}/module.o", parent_path);
+        fs::write(&staged, b"first").expect("write staged");
+        assert_eq!(
+            rt_file_publish_noreplace(&[Value::text(staged.clone()), Value::text(destination.clone())]).unwrap(),
+            Value::Int(1),
+            "publishing onto a free destination must report 1"
+        );
+        assert!(!Path::new(&staged).exists(), "staged file is consumed on publish");
+        assert_eq!(fs::read(&destination).unwrap(), b"first");
+
+        // --- THE GUARANTEE: a second publish must REFUSE, not replace --------
+        fs::write(&staged, b"second").expect("write second staged");
+        assert_eq!(
+            rt_file_publish_noreplace(&[Value::text(staged.clone()), Value::text(destination.clone())]).unwrap(),
+            Value::Int(0),
+            "publishing onto an existing destination must refuse with 0"
+        );
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"first",
+            "the existing destination must be byte-for-byte untouched"
+        );
+        assert!(
+            Path::new(&staged).exists(),
+            "a refused publish must leave the staged file in place"
+        );
+
+        // --- a missing staged file is an error, not a silent success ---------
+        assert_eq!(
+            rt_file_publish_noreplace(&[
+                Value::text(format!("{}/absent.o", staging_path)),
+                Value::text(format!("{}/absent-dest.o", parent_path)),
+            ])
+            .unwrap(),
+            Value::Int(-1)
+        );
+
+        fs::remove_file(&staged).ok();
+        fs::remove_dir_all(&staging_path).ok();
+    }
 
     static FILE_EXISTS_PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -2138,12 +2590,11 @@ mod tests {
         }
 
         let missing = dir.path().join("missing.bin").to_string_lossy().to_string();
-        let error = rt_file_mmap_read_bytes(&[Value::text(missing)])
-            .expect_err("missing mmap input must not become Nil");
+        let error =
+            rt_file_mmap_read_bytes(&[Value::text(missing)]).expect_err("missing mmap input must not become Nil");
         assert!(error.to_string().contains("rt_file_mmap_read_bytes failed"));
 
-        let arity = rt_file_mmap_read_bytes(&[])
-            .expect_err("mmap byte reader must reject missing arguments");
+        let arity = rt_file_mmap_read_bytes(&[]).expect_err("mmap byte reader must reject missing arguments");
         assert!(arity.to_string().contains("requires 1 argument"));
     }
 
@@ -2450,11 +2901,33 @@ pub fn rt_dir_remove_all(args: &[Value]) -> Result<Value, CompileError> {
 // File Descriptor Operations
 // ============================================================================
 
-/// Open file
+/// Open file and return a real descriptor (-1 on error), mirroring the
+/// runtime's `rt_file_open` (mode 0=ReadOnly, 1=ReadWrite, 2=WriteOnly).
 pub fn rt_file_open(args: &[Value]) -> Result<Value, CompileError> {
-    let _path = extract_path(args, 0)?;
-    // Simplified - return -1 (not implemented for interpreter)
-    Ok(Value::Int(-1))
+    let path = extract_path(args, 0)?;
+    let mode = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::IntoRawFd;
+        let result = match mode {
+            0 => OpenOptions::new().read(true).open(&path),
+            1 => OpenOptions::new().read(true).write(true).open(&path),
+            2 => OpenOptions::new().write(true).open(&path),
+            _ => return Ok(Value::Int(-1)),
+        };
+        match result {
+            Ok(file) => Ok(Value::Int(i64::from(file.into_raw_fd()))),
+            Err(_) => Ok(Value::Int(-1)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Ok(Value::Int(-1))
+    }
 }
 
 /// Get file size
@@ -2462,9 +2935,99 @@ pub fn rt_file_get_size(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(-1))
 }
 
-/// Close file
-pub fn rt_file_close(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(false))
+/// Close a descriptor opened by `rt_file_open`; true when close(2) succeeded.
+pub fn rt_file_close(args: &[Value]) -> Result<Value, CompileError> {
+    let fd = match args.first() {
+        Some(Value::Int(n)) if *n >= 0 && *n <= i64::from(i32::MAX) => *n as i32,
+        _ => return Ok(Value::Bool(false)),
+    };
+    #[cfg(unix)]
+    {
+        Ok(Value::Bool(unsafe { libc::close(fd) } == 0))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Ok(Value::Bool(false))
+    }
+}
+
+/// `EINVAL`, spelled literally rather than as `libc::EINVAL`.
+///
+/// The argument-validation failure below is on the SHARED path, not inside a
+/// `#[cfg(unix)]` block, so it is compiled on Windows too -- where the `libc`
+/// crate is not linked at all (`compiler/Cargo.toml` gates it to
+/// `[target.'cfg(unix)'.dependencies]`). Same reasoning as the literal
+/// `ENOSYS` returns in the `#[cfg(not(unix))]` branches further down.
+///
+/// The `const` assertion below is the proof that this changes nothing on unix:
+/// it fails the build if the platform's `libc::EINVAL` is ever not 22.
+const EINVAL: i32 = 22;
+#[cfg(unix)]
+const _: () = assert!(EINVAL == libc::EINVAL);
+
+fn fd_positioned_args(name: &str, args: &[Value]) -> Result<Option<(i32, i64, i64, i64)>, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::runtime(&format!(
+            "{name} requires 4 arguments (fd, buffer, len, offset)"
+        )));
+    }
+    let fd = args[0].as_int()?;
+    let buffer = args[1].as_int()?;
+    let len = args[2].as_int()?;
+    let offset = args[3].as_int()?;
+    if fd < 0 || fd > i64::from(i32::MAX) || buffer <= 0 || len < 0 || offset < 0 {
+        return Ok(None);
+    }
+    Ok(Some((fd as i32, buffer, len, offset)))
+}
+
+/// Exact `pread(2)` into a caller-owned buffer address; bytes read or `-errno`.
+pub fn rt_fd_pread(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pread", args)? else {
+        return Ok(Value::Int(-i64::from(EINVAL)));
+    };
+    #[cfg(unix)]
+    {
+        let n = unsafe { libc::pread(fd, buffer as *mut libc::c_void, len as usize, offset as libc::off_t) };
+        if n < 0 {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            return Ok(Value::Int(-i64::from(code)));
+        }
+        Ok(Value::Int(n as i64))
+    }
+    #[cfg(not(unix))]
+    {
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        Ok(Value::Int(-38))
+    }
+}
+
+/// Exact `pwrite(2)` from a caller-owned buffer address; bytes written or `-errno`.
+pub fn rt_fd_pwrite(args: &[Value]) -> Result<Value, CompileError> {
+    let Some((fd, buffer, len, offset)) = fd_positioned_args("rt_fd_pwrite", args)? else {
+        return Ok(Value::Int(-i64::from(EINVAL)));
+    };
+    #[cfg(unix)]
+    {
+        let n = unsafe { libc::pwrite(fd, buffer as *const libc::c_void, len as usize, offset as libc::off_t) };
+        if n < 0 {
+            let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
+            return Ok(Value::Int(-i64::from(code)));
+        }
+        Ok(Value::Int(n as i64))
+    }
+    #[cfg(not(unix))]
+    {
+        // ENOSYS. Spelled literally rather than as `libc::ENOSYS` so this
+        // non-unix branch does not depend on the libc crate exposing that
+        // constant for Windows targets, which cannot be verified on the
+        // aarch64 Linux host this landed from.
+        Ok(Value::Int(-38))
+    }
 }
 
 // ============================================================================
@@ -2556,6 +3119,29 @@ pub fn rt_file_lock(args: &[Value]) -> Result<Value, CompileError> {
     let hostname = get_hostname();
     let lock_content = format!("{}:{}", pid, hostname);
 
+    // Re-entrant same-process acquisition: the seed fires both unsafe lanes
+    // of process helpers, so a compiled file_lock executes twice and the
+    // second attempt previously deadlocked against the first (create_new
+    // sees our own lock file, waits out the timeout, returns -1 -- e.g.
+    // every env create on Windows). If this process already holds the lock
+    // for this path, hand out another handle to the same lock instead.
+    {
+        let mut state = LOCK_HANDLES.lock().unwrap();
+        let state = state.get_or_insert_with(LockState::new);
+        let existing = state
+            .active
+            .values()
+            .any(|p| p == &std::path::PathBuf::from(&lock_path));
+        if existing {
+            let handle = state.next_id;
+            state.next_id += 1;
+            state
+                .active
+                .insert(handle, std::path::PathBuf::from(&lock_path));
+            return Ok(Value::Int(handle));
+        }
+    }
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs as u64);
     let mut backoff_ms = 10u64;
 
@@ -2606,7 +3192,12 @@ pub fn rt_file_unlock(args: &[Value]) -> Result<Value, CompileError> {
     let mut state = LOCK_HANDLES.lock().unwrap();
     if let Some(state) = state.as_mut() {
         if let Some(lock_path) = state.active.remove(&handle) {
-            let _ = fs::remove_file(&lock_path);
+            // Only delete the lock file when no other handle (re-entrant
+            // same-process acquisition) still references it.
+            let still_held = state.active.values().any(|p| p == &lock_path);
+            if !still_held {
+                let _ = fs::remove_file(&lock_path);
+            }
             return Ok(Value::Bool(true));
         }
     }
@@ -2920,25 +3511,48 @@ fn safe_artifact_open_root(root: &str) -> Option<i32> {
         return None;
     }
     let components: Vec<&str> = root.split('/').skip(1).filter(|part| !part.is_empty()).collect();
-    if components.iter().any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0)) {
+    if components
+        .iter()
+        .any(|part| *part == "." || *part == ".." || part.len() > 255 || part.as_bytes().contains(&0))
+    {
         return None;
     }
     let slash = CString::new("/").ok()?;
-    let mut current = unsafe { libc::open(slash.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-    if current < 0 { return None }
+    let mut current = unsafe {
+        libc::open(
+            slash.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if current < 0 {
+        return None;
+    }
     for component in components {
         let component = match CString::new(component.as_bytes()) {
             Ok(value) => value,
-            Err(_) => { unsafe { libc::close(current) }; return None; }
+            Err(_) => {
+                unsafe { libc::close(current) };
+                return None;
+            }
         };
         let mut retries = 0;
         let next = loop {
-            let fd = unsafe { libc::openat(current, component.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 { break fd }
+            let fd = unsafe {
+                libc::openat(
+                    current,
+                    component.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) || retries >= 31 {
+                break fd;
+            }
             retries += 1;
         };
         if next < 0 || unsafe { libc::close(current) } != 0 {
-            if next >= 0 { unsafe { libc::close(next) }; }
+            if next >= 0 {
+                unsafe { libc::close(next) };
+            }
             return None;
         }
         current = next;
@@ -2956,7 +3570,9 @@ struct SafeArtifactOpenHow {
 
 #[cfg(target_os = "linux")]
 fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u32) -> i32 {
-    let Ok(relative) = CString::new(relative.as_bytes()) else { return -1 };
+    let Ok(relative) = CString::new(relative.as_bytes()) else {
+        return -1;
+    };
     let how = SafeArtifactOpenHow {
         flags: flags as u64,
         mode: mode as u64,
@@ -2966,7 +3582,10 @@ fn safe_artifact_open_beneath(root_fd: i32, relative: &str, flags: i32, mode: u3
     loop {
         let fd = unsafe {
             libc::syscall(
-                libc::SYS_openat2, root_fd, relative.as_ptr(), &how,
+                libc::SYS_openat2,
+                root_fd,
+                relative.as_ptr(),
+                &how,
                 std::mem::size_of::<SafeArtifactOpenHow>(),
             ) as i32
         };
@@ -2982,7 +3601,10 @@ pub fn rt_hosted_safe_artifact_root_open_v1(args: &[Value]) -> Result<Value, Com
     #[cfg(target_os = "linux")]
     let handle = safe_artifact_open_root(&root).map(i64::from).unwrap_or(-1);
     #[cfg(not(target_os = "linux"))]
-    let handle = { let _ = root; -1 };
+    let handle = {
+        let _ = root;
+        -1
+    };
     Ok(Value::Int(handle))
 }
 
@@ -3014,26 +3636,41 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
     }
     #[cfg(unix)]
     {
-        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Nil) }
+        if root_handle < 0 || root_handle > i32::MAX as i64 {
+            return Ok(Value::Nil);
+        }
         let root_fd = root_handle as i32;
         let mut retries = 0;
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 { return Ok(Value::Nil) }
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 {
+            return Ok(Value::Nil);
+        }
         #[cfg(target_os = "linux")]
         let fd = safe_artifact_open_beneath(root_fd, &relative, libc::O_RDONLY | libc::O_CLOEXEC, 0);
         #[cfg(not(target_os = "linux"))]
         let fd = -1;
         let mut ok = fd >= 0;
         let mut before: libc::stat = unsafe { std::mem::zeroed() };
-        if ok { ok = unsafe { libc::fstat(fd, &mut before) } == 0 }
-        if ok { ok = before.st_dev == root_identity.st_dev && (before.st_mode & libc::S_IFMT) == libc::S_IFREG && before.st_size >= 0 && before.st_size <= max_bytes }
+        if ok {
+            ok = unsafe { libc::fstat(fd, &mut before) } == 0
+        }
+        if ok {
+            ok = before.st_dev == root_identity.st_dev
+                && (before.st_mode & libc::S_IFMT) == libc::S_IFREG
+                && before.st_size >= 0
+                && before.st_size <= max_bytes
+        }
         let wanted = if ok { before.st_size as usize } else { 0 };
         let mut bytes = vec![0u8; wanted];
         let mut used = 0usize;
         retries = 0;
         while ok && used < wanted {
             let count = unsafe { libc::read(fd, bytes[used..].as_mut_ptr().cast(), wanted - used) };
-            if count > 0 { used += count as usize; retries = 0; continue; }
+            if count > 0 {
+                used += count as usize;
+                retries = 0;
+                continue;
+            }
             if count < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
                 retries += 1;
                 continue;
@@ -3041,15 +3678,28 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
             ok = false;
         }
         let mut after: libc::stat = unsafe { std::mem::zeroed() };
-        if ok { ok = unsafe { libc::fstat(fd, &mut after) } == 0 }
         if ok {
-            ok = before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-                before.st_mode == after.st_mode && before.st_size == after.st_size &&
-                before.st_mtime == after.st_mtime && before.st_ctime == after.st_ctime;
-            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
-            { ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec; }
+            ok = unsafe { libc::fstat(fd, &mut after) } == 0
         }
-        if fd >= 0 && unsafe { libc::close(fd) } != 0 { ok = false }
+        if ok {
+            ok = before.st_dev == after.st_dev
+                && before.st_ino == after.st_ino
+                && before.st_mode == after.st_mode
+                && before.st_size == after.st_size
+                && before.st_mtime == after.st_mtime
+                && before.st_ctime == after.st_ctime;
+            // The `libc` crate exposes the sub-second stamps under the same
+            // `st_{m,c}time_nsec` names on Apple targets as on Linux/Android --
+            // Apple's native `st_mtimespec`/`st_ctimespec` `timespec` fields are
+            // flattened by the crate and are NOT reachable by those names.
+            #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios"))]
+            {
+                ok = ok && before.st_mtime_nsec == after.st_mtime_nsec && before.st_ctime_nsec == after.st_ctime_nsec;
+            }
+        }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 {
+            ok = false
+        }
         if ok {
             Ok(Value::byte_array(bytes))
         } else {
@@ -3065,7 +3715,9 @@ pub fn rt_hosted_safe_artifact_read_v1(args: &[Value]) -> Result<Value, CompileE
 pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, CompileError> {
     let root_handle = args.first().map(Value::as_int).transpose()?.unwrap_or(-1);
     let relative = extract_path(args, 1)?;
-    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else { return Ok(Value::Int(-1)) };
+    let Some(payload) = args.get(2).and_then(Value::byte_array_view) else {
+        return Ok(Value::Int(-1));
+    };
     let max_bytes = match args.get(3) {
         Some(value) => value.as_int()?,
         None => -1,
@@ -3080,34 +3732,58 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
     }
     #[cfg(target_os = "linux")]
     {
-        if root_handle < 0 || root_handle > i32::MAX as i64 { return Ok(Value::Int(-1)) }
+        if root_handle < 0 || root_handle > i32::MAX as i64 {
+            return Ok(Value::Int(-1));
+        }
         let root_fd = root_handle as i32;
         let (parent_path, leaf_text) = match relative.rsplit_once('/') {
             Some((parent, leaf)) if !parent.is_empty() && !leaf.is_empty() => (parent, leaf),
             None => (".", relative.as_str()),
             _ => return Ok(Value::Int(-1)),
         };
-        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else { return Ok(Value::Int(-1)) };
+        let Ok(leaf) = CString::new(leaf_text.as_bytes()) else {
+            return Ok(Value::Int(-1));
+        };
         let parent_fd = safe_artifact_open_beneath(
-            root_fd, parent_path, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC, 0);
-        if parent_fd < 0 { return Ok(Value::Int(-1)) }
+            root_fd,
+            parent_path,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            0,
+        );
+        if parent_fd < 0 {
+            return Ok(Value::Int(-1));
+        }
         let mut root_identity: libc::stat = unsafe { std::mem::zeroed() };
         let mut parent_identity: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0 ||
-            unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0 ||
-            root_identity.st_dev != parent_identity.st_dev {
-            unsafe { libc::close(parent_fd); }
+        if unsafe { libc::fstat(root_fd, &mut root_identity) } != 0
+            || unsafe { libc::fstat(parent_fd, &mut parent_identity) } != 0
+            || root_identity.st_dev != parent_identity.st_dev
+        {
+            unsafe {
+                libc::close(parent_fd);
+            }
             return Ok(Value::Int(-1));
         }
         let dot = CString::new(".").expect("literal has no NUL");
-        let fd = unsafe { libc::openat(parent_fd, dot.as_ptr(), libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC, 0o600) };
+        let fd = unsafe {
+            libc::openat(
+                parent_fd,
+                dot.as_ptr(),
+                libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
         let mut status = if fd < 0 { -3 } else { -1 };
         let mut published = false;
         let mut used = 0usize;
         let mut retries = 0;
         while fd >= 0 && used < payload.len() {
             let written = unsafe { libc::write(fd, payload[used..].as_ptr().cast(), payload.len() - used) };
-            if written > 0 { used += written as usize; retries = 0; continue; }
+            if written > 0 {
+                used += written as usize;
+                retries = 0;
+                continue;
+            }
             if written < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) && retries < 31 {
                 retries += 1;
                 continue;
@@ -3115,9 +3791,15 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
             break;
         }
         let mut identity: libc::stat = unsafe { std::mem::zeroed() };
-        if fd >= 0 && used == payload.len() && unsafe { libc::fdatasync(fd) } == 0 &&
-            unsafe { libc::fsync(fd) } == 0 && unsafe { libc::fstat(fd, &mut identity) } == 0 &&
-            identity.st_dev == root_identity.st_dev && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG && identity.st_size == payload.len() as i64 {
+        if fd >= 0
+            && used == payload.len()
+            && unsafe { libc::fdatasync(fd) } == 0
+            && unsafe { libc::fsync(fd) } == 0
+            && unsafe { libc::fstat(fd, &mut identity) } == 0
+            && identity.st_dev == root_identity.st_dev
+            && (identity.st_mode & libc::S_IFMT) == libc::S_IFREG
+            && identity.st_size == payload.len() as i64
+        {
             let empty = CString::new("").expect("literal has no NUL");
             if unsafe { libc::linkat(fd, empty.as_ptr(), parent_fd, leaf.as_ptr(), libc::AT_EMPTY_PATH) } == 0 {
                 status = if unsafe { libc::fsync(parent_fd) } == 0 { 0 } else { -4 };
@@ -3126,8 +3808,12 @@ pub fn rt_hosted_safe_artifact_publish_v1(args: &[Value]) -> Result<Value, Compi
                 status = -2;
             }
         }
-        if fd >= 0 && unsafe { libc::close(fd) } != 0 { status = if published { -4 } else { -5 } }
-        if unsafe { libc::close(parent_fd) } != 0 { status = if published { -4 } else { -5 } }
+        if fd >= 0 && unsafe { libc::close(fd) } != 0 {
+            status = if published { -4 } else { -5 }
+        }
+        if unsafe { libc::close(parent_fd) } != 0 {
+            status = if published { -4 } else { -5 }
+        }
         Ok(Value::Int(status))
     }
 }

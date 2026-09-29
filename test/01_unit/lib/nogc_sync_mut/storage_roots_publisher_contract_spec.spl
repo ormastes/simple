@@ -1,0 +1,59 @@
+use std.common.storage_roots.*
+use std.nogc_sync_mut.storage_roots.publisher.*
+use std.io_runtime.{cwd_process, dir_create_all, dir_remove_all, file_exists, file_read_result, file_write_exact}
+
+fn fixture_roots(base: text) -> StorageRoots:
+    StorageRoots(
+        user_root: CanonicalPath(value: base + "/user"),
+        worktree_root: CanonicalPath(value: base + "/worktree"),
+        user_source: RootSource.Explicit,
+        worktree_source: RootSource.Explicit,
+        policy_version: STORAGE_ROOT_POLICY_VERSION_V1,
+        worktree_identity: Digest256(w0: 1u64, w1: 2u64, w2: 3u64, w3: 4u64),
+    )
+
+describe "destination-local storage publisher contract":
+    it "keeps staging beside the destination and orders durable publication":
+        val source = read_file("src/lib/nogc_sync_mut/storage_roots/publisher.spl")
+        expect(source).to_contain("parent! + \"/.simple-stage-\"")
+        expect(source).to_contain("rt_file_copy_create_excl_no_follow")
+        expect(source).to_contain("_evidence_matches(staged, evidence)")
+        expect(source.find("rt_file_fsync(staged)")).to_be_less_than(source.find("rt_file_rename(staged, lease.destination.value)"))
+        expect(source.find("rt_file_rename(staged, lease.destination.value)")).to_be_less_than(source.find("rt_file_fsync(parent!)"))
+
+    it "requires both source and destination to belong to frozen roots":
+        val source = read_file("src/lib/nogc_sync_mut/storage_roots/publisher.spl")
+        expect(source).to_contain("storage_root_for_path(roots, source)")
+        expect(source).to_contain("storage_root_for_path(roots, lease.destination)")
+        expect(source).to_contain("DestinationChanged")
+
+    it "copies across frozen roots verifies and atomically publishes locally":
+        val base = cwd_process() + "/build/test/storage-roots-publisher"
+        val roots = fixture_roots(base)
+        dir_remove_all(base)
+        expect(dir_create_all(roots.user_root.value + "/cache/compiler/v1/aa")).to_equal(true)
+        expect(dir_create_all(roots.worktree_root.value + "/build/compiler/release")).to_equal(true)
+        val source = CanonicalPath(value: roots.user_root.value + "/cache/compiler/v1/aa/artifact")
+        val destination = CanonicalPath(value: roots.worktree_root.value + "/build/compiler/release/simple")
+        expect(file_write_exact(source.value, "verified-artifact")).to_equal(true)
+        val evidence = artifact_evidence_for_storage_file(source).unwrap()
+        val lease = begin_storage_publish(roots, destination, OperationId(value: "native-build"), 7u64).unwrap()
+        expect(lease.staging_root.value).to_start_with(roots.worktree_root.value)
+        expect(lease.staging_root.value).to_contain("/build/compiler/release/.simple-stage-")
+        expect(stage_storage_publish_source(roots, lease, source, evidence).is_ok()).to_equal(true)
+        val receipt = commit_storage_publish(roots, lease, evidence).unwrap()
+        expect(receipt.destination.value).to_equal(destination.value)
+        expect(file_exists(destination.value)).to_equal(true)
+        expect(file_read_result(destination.value).unwrap()).to_equal("verified-artifact")
+        expect(file_exists(lease.staging_root.value)).to_equal(false)
+        dir_remove_all(base)
+
+    it "rejects destinations outside both frozen roots":
+        val base = cwd_process() + "/build/test/storage-roots-publisher-outside"
+        val roots = fixture_roots(base)
+        dir_remove_all(base)
+        expect(dir_create_all(roots.user_root.value)).to_equal(true)
+        expect(dir_create_all(roots.worktree_root.value)).to_equal(true)
+        val outside = CanonicalPath(value: cwd_process() + "/build/test/not-owned/artifact")
+        expect(begin_storage_publish(roots, outside, OperationId(value: "native-build"), 8u64).is_err()).to_equal(true)
+        dir_remove_all(base)

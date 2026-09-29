@@ -1,5 +1,48 @@
-# @req: REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
-"""RV64 allocator preserves incoming nonvolatile registers before argument definitions."""
+# Lifecycle: research: doc/01_research/compiler/backend/backend_completeness_summary.md ; plan: doc/03_plan/compiler/backend/arm32_x86_32_native_backend_plan.md ; architecture: doc/04_architecture/compiler/backend/unified_backend_architecture.md ; design: doc/05_design/compiler/backend/backend_architecture.md
+"""
+## Purpose and audience
+This spec is for RV64 native backend maintainers working on the RISC-V64
+register allocator and instruction selector. It pins the ordering the
+allocator must produce around callee-saved (nonvolatile) registers: an
+incoming argument that lands in an allocated nonvolatile register must be
+saved to the stack before it is overwritten, and restored before the return
+address is restored on the way out. It also pins the frame layout the
+allocator derives for outgoing call arguments that spill past the eight
+integer argument registers (a nine-argument call), and the ordering of the
+stack-pointer extension teardown relative to a large-offset epilogue that
+must materialize its address in a scratch register (x31).
+
+## Operator workflow
+Run this file directly (`bin/simple run <this spec>`) after touching
+`compiler.backend.backend.native.regalloc` (regalloc_module_riscv64) or
+`compiler.backend.backend.native.isel_riscv64` (isel_module_riscv64). Each
+scenario builds a small hand-assembled `MachModule` or `MirModule` fixture,
+runs it through instruction selection and/or register allocation, and then
+walks the resulting instruction stream by opcode/operand pattern to confirm
+save/restore/teardown ordering and disjoint stack offsets.
+
+## Compatibility and limitations
+Traceability: REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001. These
+scenarios inspect instruction streams by matching opcodes (RV_OP_SD,
+RV_OP_LD, RV_OP_ADDI, RV_OP_LI) and structural operand shapes (physical
+register base plus a numeric offset), not by disassembling to text, so they
+stay stable across encoding changes but are specific to the riscv64 backend
+module and its `MachInst`/`MirModule` shapes. They do not exercise a real
+end-to-end native build; that is intentional so failures localize to
+allocator/selector logic rather than the whole codegen pipeline.
+
+## Verification guidance and troubleshooting
+If the ordering scenarios fail, check whether the allocator changed the
+relative emission order of the callee-save spill vs. the argument-register
+move in the prologue, or the callee-save restore vs. the return-address
+restore in the epilogue. If the frame-layout scenarios fail, check whether
+`isel_module_riscv64` still reserves 8 bytes of outgoing argument space for
+a nine-argument call, and whether `regalloc_module_riscv64` still keeps that
+outgoing slot at offset zero while placing the first allocated
+callee-saved register at offset eight. If the large-epilogue scenario
+fails, check the x31 scratch-register address materialization order
+relative to the stack-pointer extension teardown.
+"""
 
 use std.spec.*
 use compiler.backend.backend.native.regalloc.{regalloc_module_riscv64}
@@ -112,12 +155,12 @@ fn mir_call_frame_module(call_kind: text) -> MirModule:
 
 fn assert_real_call_frame_layout(call_kind: text):
     val selected = isel_module_riscv64(mir_call_frame_module(call_kind))
-    expect(selected.functions[0].outgoing_arg_size).to_equal(8)
+    expect(selected.functions[0].outgoing_arg_size).to_equal(8)  # oracle: 8 bytes reserved for the ninth (spilled) integer call argument
     val function = regalloc_module_riscv64(selected).functions[0]
-    expect(function.frame_size % 16).to_equal(0)
+    expect(function.frame_size % 16).to_equal(0)  # oracle: RV64 stack-pointer alignment requires a 16-byte-aligned frame
     expect(function.used_callee_saved.len() > 0).to_equal(true)
     val extension_size = function.frame_size - selected.functions[0].frame_size
-    expect(extension_size % 16).to_equal(0)
+    expect(extension_size % 16).to_equal(0)  # oracle: the allocator's callee-save extension must itself stay 16-byte aligned
     val allocated_reg = function.used_callee_saved[0]
     var outgoing_at_zero = false
     var save_at_eight = false
@@ -158,11 +201,14 @@ fn assert_real_call_frame_layout(call_kind: text):
     expect(restore_at_eight).to_equal(true)
     expect(teardown_before_ra).to_equal(true)
 
+# @manual_section: RV64 callee-save prologue ordering
 describe "RV64 callee-save prologue ordering":
     it "saves an allocated argument destination before defining it":
         step("Allocate an incoming argument to the first nonvolatile register")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): prologue/body instruction indices for the callee-save spill, argument move, restore, and return-address restore
         val function = regalloc_module_riscv64(argument_move_module()).functions[0]
-        expect(function.used_callee_saved.len()).to_equal(1)
+        expect(function.used_callee_saved.len()).to_equal(1)  # oracle: this fixture allocates exactly one nonvolatile register
         val allocated_reg = function.used_callee_saved[0]
 
         var save_index = -1
@@ -192,16 +238,27 @@ describe "RV64 callee-save prologue ordering":
         expect(restore_index < ra_restore_index).to_equal(true)
 
     it "derives a disjoint outgoing frame for a nine-argument direct call":
+        step("Select and allocate a direct-call fixture with nine integer arguments")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): outgoing-argument slot offset, callee-save slot offset, and extension/teardown-vs-return-address ordering
         assert_real_call_frame_layout("call")
 
     it "derives a disjoint outgoing frame for a nine-argument indirect call":
+        step("Select and allocate an indirect-call fixture with nine integer arguments")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): outgoing-argument slot offset, callee-save slot offset, and extension/teardown-vs-return-address ordering
         assert_real_call_frame_layout("indirect")
 
     it "derives a disjoint outgoing frame for a nine-argument call terminator":
+        step("Select and allocate a call-terminator fixture with nine integer arguments")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): outgoing-argument slot offset, callee-save slot offset, and extension/teardown-vs-return-address ordering
         assert_real_call_frame_layout("terminator")
 
     it "keeps stack argument zero disjoint from allocator save slots":
         step("Reserve one outgoing stack word and allocate one nonvolatile register")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): outgoing-argument slot offset alongside the allocated callee-save slot offset
         val function = regalloc_module_riscv64(frame_layout_module(32, 8, false)).functions[0]
         val allocated_reg = function.used_callee_saved[0]
         var outgoing_at_zero = false
@@ -222,6 +279,8 @@ describe "RV64 callee-save prologue ordering":
 
     it "restores the allocator extension before an x31-expanded epilogue":
         step("Match the large selector epilogue at its address-materialization boundary")
+        # @req REQ-COMPILER-NATIVE-RV64-CALLEE-SAVE-ORDER-001
+        # @capture(bit_table): extension-restore instruction index versus x31 selector address-materialization instruction index
         val function = regalloc_module_riscv64(frame_layout_module(4096, 8, true)).functions[0]
         val body = function.blocks[1]
         var extension_restore_index = -1

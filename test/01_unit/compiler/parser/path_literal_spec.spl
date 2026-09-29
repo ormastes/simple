@@ -1,0 +1,64 @@
+"""
+## Purpose and audience
+Purpose: Prove that `_path` literals produce the canonical `std.fs.path.Path`.
+Audience: compiler and standard-library maintainers.
+"""
+# @req: REQ-COMPILER-PATH-LITERAL-001
+
+use std.fs.path.{Path, File}
+use std.spec.step
+use compiler.core.parser.{
+    parse_module, parser_get_errors, parser_has_errors, parser_set_had_error
+}
+
+fn path_source_parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+fn path_source_errors(name: text, source: text) -> text:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    parser_get_errors().join("\n")
+
+describe "path literals":
+    it "construct a Path with the literal value":
+        step("construct a Path with the literal value")
+        # @req: REQ-COMPILER-PATH-LITERAL-001
+        val path = "config/app.toml"_path
+        expect(path.file_name()).to_equal("app.toml")
+        expect(path.extension()).to_equal("toml")
+
+    it "compose with the typed File API":
+        step("compose with the typed File API")
+        val file = File.new("tmp/path-literal.txt"_path)
+        expect(file.path.file_name()).to_equal("path-literal.txt")
+
+    it "require exact suffix adjacency and accept raw literal text":
+        step("require exact suffix adjacency and accept raw literal text")
+        expect(path_source_parses_clean(
+            "path_adjacent.spl", "val p = \"config/app.toml\"_path\n"
+        )).to_equal(true)
+        expect(path_source_parses_clean(
+            "path_raw_adjacent.spl", "val p = r\"raw\\\\path\"_path\n"
+        )).to_equal(true)
+        expect(path_source_parses_clean(
+            "path_spaced_suffix.spl", "val p = \"config/app.toml\" _path\n"
+        )).to_equal(false)
+
+    it "reject interpolated and triple quoted path suffixes explicitly":
+        step("reject interpolated and triple quoted path suffixes explicitly")
+        val interpolated = 'val name = "app"' + "\n" +
+            'val p = "config/{name}"_path' + "\n"
+        val interpolation_errors = path_source_errors("path_interpolated.spl", interpolated)
+        expect(interpolation_errors).to_contain("_path does not support interpolated strings")
+
+        val triple = 'val p = """config/app.toml"""_path' + "\n"
+        val triple_errors = path_source_errors("path_triple.spl", triple)
+        expect(triple_errors).to_contain("_path does not support triple-quoted strings")
+
+    it "accept escaped literal braces without treating them as interpolation":
+        step("accept escaped literal braces without treating them as interpolation")
+        expect(path_source_parses_clean(
+            "path_literal_braces.spl", 'val p = "{{config}}/app.toml"_path' + "\n"
+        )).to_equal(true)

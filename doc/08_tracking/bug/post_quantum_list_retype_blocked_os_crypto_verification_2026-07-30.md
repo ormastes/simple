@@ -1,4 +1,8 @@
 # Post-quantum sig/KEM `list` retype batch — documented, not landed (2026-07-30)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Assignment (part 2): next crypto retype batch per the pass-9 fix order —
 post-quantum sig/KEM files (`ml_dsa*`, `ml_kem*`, `slh_dsa_wots.spl`), same
@@ -125,3 +129,4 @@ landmine applies" clause, generalized to the verification blocker found
 here. The site-fix order from pass 9 is otherwise unchanged; this doc
 narrows it with the specific `os.crypto` blocker any future pass needs to
 clear first.
+

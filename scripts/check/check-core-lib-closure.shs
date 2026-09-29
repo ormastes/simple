@@ -1,0 +1,382 @@
+#!/bin/sh
+# WP-09 (kernel/plugin audit plan): define the "core lib" — the subset of
+# src/lib/** that the compiler KERNEL (K0, optionally K0+K1) actually reaches
+# at compile time — by MEASUREMENT, and ratchet it so it cannot silently grow.
+#
+# Mechanism: seed a BFS from every K0 (and, with --kernel-binary, K1) file
+# under src/compiler, follow `use std.<path>` imports transitively through
+# src/lib/**, and classify every REACHED lib file against the CORE glob rows
+# in doc/04_architecture/compiler/plugin_arch/core_lib_closure.sdn. A reached
+# file outside every CORE row is a ratchet violation (a NEW non-core file
+# reached grows the kernel's real dependency footprint). A baselined file
+# that is no longer reached is a STALE baseline (same convention as the
+# test-tree-divergence guard) — but per the kernel/plugin audit plan §8,
+# until OD-4 formally accepts the core-lib set, stale-baseline is a WARN
+# line, not a FAIL, so the ratchet only ever blocks GROWTH while the
+# accepted set is still provisional.
+#
+# `core_lib_closure_baseline.txt` is evidence of today's measured closure,
+# NOT an allowlist to keep pushing edges into — see kernel_closure_phase0
+# baseline for the same posture. Per the audit plan §8, this baseline file
+# is regenerated ONLY by the merge owner at the end of each wave; a package
+# that shrinks the closure states its expected removals in the PR body
+# instead of editing it directly.
+set -eu
+
+usage() {
+    echo "usage: $0 [--root DIR] [--manifest FILE] [--kernel-manifest FILE] [--kernel-binary] [--baseline FILE] [--generate-baseline] [--selftest]" >&2
+    exit 2
+}
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+root=$repo_root
+manifest=doc/04_architecture/compiler/plugin_arch/core_lib_closure.sdn
+kernel_manifest=doc/04_architecture/compiler/plugin_arch/kernel_closure.sdn
+baseline=$repo_root/scripts/check/core_lib_closure_baseline.txt
+classify_lib="$repo_root/scripts/lib/kernel-closure-classify.awk"
+include_k1=0
+generate_baseline=0
+selftest=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --root) [ "$#" -ge 2 ] || usage; root=$2; shift 2 ;;
+        --manifest) [ "$#" -ge 2 ] || usage; manifest=$2; shift 2 ;;
+        --kernel-manifest) [ "$#" -ge 2 ] || usage; kernel_manifest=$2; shift 2 ;;
+        --kernel-binary) include_k1=1; shift ;;
+        --baseline) [ "$#" -ge 2 ] || usage; baseline=$2; shift 2 ;;
+        --generate-baseline) generate_baseline=1; shift ;;
+        --selftest|--self-test) selftest=1; shift ;;
+        *) usage ;;
+    esac
+done
+[ -f "$classify_lib" ] || { echo "ERROR — missing shared classifier: $classify_lib"; exit 2; }
+
+core_rows() { sed -E -n 's/^[[:space:]]*-[[:space:]]*CORE\|(.*)$/\1/p' "$1"; }
+kernel_rows() { sed -E -n 's/^[[:space:]]*-[[:space:]]*(K0|K1|P_STATIC|P_DYN)\|/\1|/p' "$1"; }
+
+# run_check is a SUBSHELL function ( ... ), not a plain { ... } one: it runs
+# ~5 times inside --selftest, and a `trap ... EXIT` set inside a plain
+# function is process-global, so each invocation's trap silently overwrote
+# the previous one's without it ever firing (leaked temp dirs from every
+# earlier invocation until the whole process exited) — same defect class WP-05
+# fixed in check-kernel-closure.shs. A subshell's trap table is independent
+# per invocation. `return` becomes `exit`; stdout/exit-status still propagate
+# to the caller exactly as a normal function's would.
+run_check() (
+    check_root=$1; check_manifest=$2; check_kernel_manifest=$3
+    case "$check_manifest" in /*) ;; *) check_manifest=$check_root/$check_manifest ;; esac
+    case "$check_kernel_manifest" in /*) ;; *) check_kernel_manifest=$check_root/$check_kernel_manifest ;; esac
+    [ -f "$check_manifest" ] || { echo "ERROR — core-lib manifest missing: $check_manifest"; exit 2; }
+    [ -f "$check_kernel_manifest" ] || { echo "ERROR — kernel manifest missing: $check_kernel_manifest"; exit 2; }
+    grep -q '^schema: simple/compiler/core-lib-closure/v1$' "$check_manifest" || { echo "ERROR — unsupported or missing core-lib closure schema"; exit 2; }
+    grep -q '^schema: simple/compiler/kernel-closure/v1$' "$check_kernel_manifest" || { echo "ERROR — unsupported or missing kernel closure schema"; exit 2; }
+
+    temp_dir=$(mktemp -d); trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+    krows=$temp_dir/krows; cfiles=$temp_dir/cfiles; kindex=$temp_dir/kindex
+    seeds=$temp_dir/seeds; libfiles=$temp_dir/libfiles; crows=$temp_dir/crows
+    reached=$temp_dir/reached
+
+    kernel_rows "$check_kernel_manifest" > "$krows"
+    [ -s "$krows" ] || { echo "ERROR — no kernel classification rows"; exit 2; }
+    (cd "$check_root" && find src/compiler -type f -name '*.spl' -print | LC_ALL=C sort) > "$cfiles"
+    [ -s "$cfiles" ] || { echo "ERROR — nothing was checked (no compiler files)"; exit 2; }
+
+    classify_main=$temp_dir/classify_main.awk
+    cat > "$classify_main" <<'AWKEOF'
+        NR == FNR { classes[++rules] = $1; regex[rules] = pattern_regex($2); next }
+        {
+            class = ""
+            for (i = 1; i <= rules; i++) if ($0 ~ regex[i]) { class = classes[i]; break }
+            if (class != "") print class "|" $0
+        }
+AWKEOF
+    awk -f "$classify_lib" -f "$classify_main" -F '|' "$krows" "$cfiles" > "$kindex"
+    [ -s "$kindex" ] || { echo "ERROR — no compiler file classified as K0/K1"; exit 2; }
+    if [ "$include_k1" -eq 1 ]; then
+        awk -F '|' '$1 == "K0" || $1 == "K1" { print $2 }' "$kindex" > "$seeds"
+    else
+        awk -F '|' '$1 == "K0" { print $2 }' "$kindex" > "$seeds"
+    fi
+    [ -s "$seeds" ] || { echo "ERROR — no K0 seed files"; exit 2; }
+
+    (cd "$check_root" && find src/lib -type f -name '*.spl' -print | LC_ALL=C sort) > "$libfiles"
+    [ -s "$libfiles" ] || { echo "ERROR — nothing was checked (no src/lib files)"; exit 2; }
+    core_rows "$check_manifest" > "$crows"
+    [ -s "$crows" ] || { echo "ERROR — no CORE rows in core-lib manifest"; exit 2; }
+
+    bfs_main=$temp_dir/bfs_main.awk
+    cat > "$bfs_main" <<'AWKEOF'
+        BEGIN { root_dir = ROOT_DIR }
+        FNR == 1 { filearg++ }
+        filearg == 1 { lib_by_path[$0] = 1
+            dotted = $0
+            sub(/^src\/lib\//, "", dotted)
+            sub(/[.]spl$/, "", dotted)
+            gsub(/\//, ".", dotted)
+            # Barrel package: a directory's own package name is its
+            # __init__.spl, so `dir/__init__.spl` must resolve for BOTH
+            # `use std.dir.__init__...` (never actually written) and
+            # `use std.dir...` (the real barrel import, e.g.
+            # `use std.file_system.{file_move}` naming
+            # nogc_sync_mut/file_system/__init__.spl) — mirrors
+            # module_for()'s identical `.__init__` stripping in
+            # kernel-closure-classify.awk.
+            sub(/[.]__init__$/, "", dotted)
+            if (dotted == "") next  # a bare top-level __init__.spl; nothing to key it by
+            if (dotted in dotted_owner) dotted_owner[dotted] = dotted_owner[dotted] ";" $0
+            else dotted_owner[dotted] = $0
+            all_dotted[dotted] = 1
+            next
+        }
+        filearg == 2 { core_patterns[++n_core] = pattern_regex($0); next }
+        filearg == 3 { seed_files[$0] = 1; next }
+
+        # suffix_match: collect EVERY all_dotted candidate whose name equals
+        # or ends with ".<needle>" and union their owners, deterministically
+        # (candidates are sorted before joining) rather than returning
+        # whichever `for (cand in all_dotted)` visits first — awk's
+        # iteration order over an array is unspecified, so the old
+        # first-match-wins version could non-deterministically resolve the
+        # same ambiguous import to a different one of several real files
+        # across runs. Unioning ALL matches (instead of picking one, or
+        # erroring) is deliberate: e.g. `use std.file_system` genuinely
+        # names three distinct real barrels (nogc_sync_mut/gc_async_mut/
+        # nogc_async_mut file_system/__init__.spl) and the BFS's job is
+        # over-approximate reachability, not picking the one composition
+        # selects at build time — a shell classifier cannot do that, and
+        # marking all candidates reached is the conservative direction for
+        # a ratchet that only cares about GROWTH past the measured set.
+        function suffix_match(needle,    cand, matches, n, i, j, key, result, owner) {
+            n = 0
+            for (cand in all_dotted) {
+                if (cand == needle || cand ~ ("(^|[.])" needle "$")) matches[++n] = cand
+            }
+            if (n == 0) return ""
+            for (i = 2; i <= n; i++) {
+                key = matches[i]; j = i - 1
+                while (j >= 1 && matches[j] > key) { matches[j + 1] = matches[j]; j-- }
+                matches[j + 1] = key
+            }
+            result = dotted_owner[matches[1]]
+            for (i = 2; i <= n; i++) {
+                owner = dotted_owner[matches[i]]
+                if (index(";" result ";", ";" owner ";") == 0) result = result ";" owner
+            }
+            return result
+        }
+
+        function resolve(imp,    shortened, hit) {
+            if (imp in dotted_owner) return dotted_owner[imp]
+            # Trailing component may be a bare symbol name rather than a
+            # submodule (`use std.a.b.Symbol`); retry one level shorter.
+            shortened = imp
+            sub(/[.][^.]*$/, "", shortened)
+            if (shortened != imp && (shortened in dotted_owner)) return dotted_owner[shortened]
+            # Suffix match: some real files live at a shorter or differently
+            # rooted dotted path than the literal import (mirrors the
+            # kernel-closure checker's parent/basename fallback — a shell
+            # classifier cannot re-implement the real module resolver).
+            hit = suffix_match(imp)
+            if (hit != "") return hit
+            if (shortened != imp) return suffix_match(shortened)
+            return ""
+        }
+
+        function scan_file(path,    line, m, imp, targets, n, i, t) {
+            if (path in scanned) return
+            scanned[path] = 1
+            full = root_dir "/" path
+            while ((getline line < full) > 0) {
+                if (line ~ /^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\.[A-Za-z0-9_.]+/) {
+                    imp = line
+                    sub(/^[[:space:]]*(pub[[:space:]]+|export[[:space:]]+)?use[[:space:]]+std\./, "", imp)
+                    sub(/[^A-Za-z0-9_.].*$/, "", imp)
+                    sub(/[.]$/, "", imp)
+                    if (imp == "") continue
+                    targets = resolve(imp)
+                    if (targets == "") { unresolved[path "|" imp] = 1; continue }
+                    n = split(targets, parts, ";")
+                    for (i = 1; i <= n; i++) {
+                        t = parts[i]
+                        if (!(t in reached)) {
+                            reached[t] = 1
+                            frontier[++fn] = t
+                        }
+                    }
+                }
+            }
+            close(full)
+        }
+
+        END {
+            for (s in seed_files) scan_file(s)
+            round = 0
+            while (fn > 0 && round < 200) {
+                round++
+                cur = fn; fn = 0
+                for (i = 1; i <= cur; i++) scan_file(frontier[i])
+                delete frontier
+            }
+            for (t in reached) {
+                class = ""
+                for (i = 1; i <= n_core; i++) if (t ~ core_patterns[i]) { class = "CORE"; break }
+                print (class == "CORE" ? "CORE" : "HOST") "|" t
+            }
+            # Unresolved `use std.*` imports were silently dropped before —
+            # printed to stderr (never stdout, so it cannot contaminate the
+            # CORE/HOST rows the shell wrapper parses) for the caller to fold
+            # into the verdict line instead of losing the count entirely.
+            print "unresolved_count=" length(unresolved) > "/dev/stderr"
+        }
+AWKEOF
+    bfs_stderr=$temp_dir/bfs_stderr
+    awk -v ROOT_DIR="$check_root" -f "$classify_lib" -f "$bfs_main" "$libfiles" "$crows" "$seeds" \
+        > "$reached" 2>"$bfs_stderr"
+    unresolved_count=$(sed -n 's/^unresolved_count=//p' "$bfs_stderr" | tail -1)
+    case "$unresolved_count" in ''|*[!0-9]*) unresolved_count=0 ;; esac
+    reached_count=$(wc -l < "$reached" | tr -d ' ')
+    [ "$reached_count" -gt 0 ] || { echo "ERROR — nothing was checked (BFS reached 0 files)"; exit 2; }
+    host_count=$(awk -F '|' '$1 == "HOST"' "$reached" | wc -l | tr -d ' ')
+
+    # Baseline and comparison MUST use the SAME set. Until 2026-09-24 the
+    # baseline was written from ALL reached files (CORE+HOST) but compared
+    # only against the HOST subset, so every CORE-classified file in the
+    # baseline was permanently reported "stale" (49 of 155 on the real tree)
+    # and a file moving from CORE to HOST (or vice versa) was invisible to
+    # both the growth and staleness checks, since neither ever compared
+    # like-for-like sets.
+    awk -F '|' '$1 == "HOST" { print $2 }' "$reached" | LC_ALL=C sort > "$temp_dir/host_sorted"
+
+    if [ "$generate_baseline" -eq 1 ]; then
+        cp "$temp_dir/host_sorted" "$baseline"
+        echo "PASS — baseline regenerated: $reached_count file(s) reached, $host_count outside CORE (baseline holds the outside-CORE set), $unresolved_count unresolved import(s), written to $baseline"
+        exit 0
+    fi
+
+    if [ ! -f "$baseline" ]; then
+        echo "FAIL — $reached_count reached, $host_count package(s) outside CORE, $unresolved_count unresolved import(s), no baseline file at $baseline (run --generate-baseline)"
+        exit 1
+    fi
+    LC_ALL=C sort "$baseline" > "$temp_dir/baseline_sorted"
+
+    # NEW non-core file reached = growth = FAIL, always. `comm` needs
+    # correctly-sorted input (guaranteed above) and normally never fails on
+    # it; `grep -Fxvf` is the fallback for a host with no `comm`. Either
+    # fallback path failing OUTRIGHT (exit >=2, a real tool error — file
+    # permission problems, missing binary, corrupt locale, etc.) must be
+    # reported as ERROR rather than silently treated as "0 differences",
+    # which used to be indistinguishable from a genuinely clean comparison.
+    new_files=$temp_dir/new_files
+    diff_failed=0
+    if ! comm -23 "$temp_dir/host_sorted" "$temp_dir/baseline_sorted" > "$new_files" 2>"$temp_dir/comm_err_new"; then
+        if [ -s "$temp_dir/comm_err_new" ]; then
+            grep -Fxvf "$temp_dir/baseline_sorted" "$temp_dir/host_sorted" > "$new_files" 2>"$temp_dir/grep_err_new"
+            grep_rc=$?
+            [ "$grep_rc" -ge 2 ] && diff_failed=1
+        fi
+    fi
+    [ "$diff_failed" -eq 0 ] || { echo "ERROR — could not compute the new-file diff (both comm and grep -Fxvf failed)"; exit 2; }
+    new_count=$(wc -l < "$new_files" | tr -d ' ')
+
+    # Baselined-but-no-longer-reached-as-HOST = stale. Until OD-4 accepts the
+    # core-lib set this is a WARN, not a FAIL (see file header). Same
+    # tool-failure handling as above.
+    stale_files=$temp_dir/stale_files
+    diff_failed=0
+    if ! comm -13 "$temp_dir/host_sorted" "$temp_dir/baseline_sorted" > "$stale_files" 2>"$temp_dir/comm_err_stale"; then
+        if [ -s "$temp_dir/comm_err_stale" ]; then
+            grep -Fxvf "$temp_dir/host_sorted" "$temp_dir/baseline_sorted" > "$stale_files" 2>"$temp_dir/grep_err_stale"
+            grep_rc=$?
+            [ "$grep_rc" -ge 2 ] && diff_failed=1
+        fi
+    fi
+    [ "$diff_failed" -eq 0 ] || { echo "ERROR — could not compute the stale-baseline diff (both comm and grep -Fxvf failed)"; exit 2; }
+    stale_count=$(wc -l < "$stale_files" | tr -d ' ')
+
+    if [ "$stale_count" -gt 0 ]; then
+        echo "WARN — $stale_count baselined file(s) no longer reached (stale baseline, not failing pre-OD-4):"
+        sed 's/^/  /' "$stale_files"
+    fi
+    if [ "$new_count" -gt 0 ]; then
+        echo "FAIL KERNEL-CORE-LIB-001 new non-core file(s) reached:"
+        sed 's/^/  /' "$new_files"
+        echo "FAIL — $reached_count reached, $host_count outside CORE, $new_count NEW, $unresolved_count unresolved import(s) (baseline had $(wc -l < "$temp_dir/baseline_sorted" | tr -d ' '))"
+        exit 1
+    fi
+    echo "PASS — $reached_count reached, $host_count outside CORE, 0 new, $unresolved_count unresolved import(s) (baseline $(wc -l < "$temp_dir/baseline_sorted" | tr -d ' '))"
+)
+
+run_selftest() {
+    fixture=$(mktemp -d); trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+    mkdir -p "$fixture/src/compiler/10.frontend" "$fixture/src/lib/common" "$fixture/src/lib/database"
+    printf '%s\n' 'schema: simple/compiler/kernel-closure/v1' 'entries:' '  - K0|src/compiler/10.frontend/**' > "$fixture/kernel.sdn"
+    printf '%s\n' 'schema: simple/compiler/core-lib-closure/v1' 'entries:' '  - CORE|src/lib/common/**' > "$fixture/core.sdn"
+
+    reset_fixture() {
+        printf 'fn go() -> i64:\n    1\n' > "$fixture/src/compiler/10.frontend/entry.spl"
+        printf 'fn util() -> i64:\n    2\n' > "$fixture/src/lib/common/util.spl"
+        printf 'fn q() -> i64:\n    3\n' > "$fixture/src/lib/database/query.spl"
+    }
+    reset_fixture
+    baseline=$fixture/baseline.txt
+
+    # --- clean: reaches only common/util (CORE), never database/query; also
+    # exercises the unresolved-import counter (a nonexistent target must be
+    # counted, not silently dropped). Assert the EXACT verdict counts, not
+    # merely the PASS/FAIL prefix -- a checker that always prints "PASS"
+    # with wrong numbers would slip past a bare `grep -q '^PASS'`. ---
+    printf 'use std.common.util.{util}\nuse std.nonexistent_pkg.ghost.{x}\n' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    generate_baseline=1
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1)
+    generate_baseline=0
+    printf '%s\n' "$out" | grep -qE '^PASS — baseline regenerated: 1 file\(s\) reached, 0 outside CORE.*1 unresolved import' || { echo "self-test: generate-baseline verdict wrong: $out"; return 1; }
+    [ "$(cat "$baseline")" = "" ] || { echo "self-test: baseline should hold the empty outside-CORE set here, got: $(cat "$baseline")"; return 1; }
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1)
+    printf '%s\n' "$out" | grep -qE '^PASS — 1 reached, 0 outside CORE, 0 new, 1 unresolved import\(s\) \(baseline 0\)$' || { echo "self-test: clean fixture verdict wrong: $out"; return 1; }
+
+    # --- growth: K0 now also reaches database/query (HOST, not CORE) -> FAIL,
+    # with the exact new-count and the offending path named. ---
+    printf 'use std.database.query.{q}\n' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1) && { echo "self-test: growth into non-core lib went undetected"; return 1; }
+    printf '%s\n' "$out" | grep -q 'KERNEL-CORE-LIB-001' || { echo "self-test: growth violation not reported: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'src/lib/database/query.spl' || { echo "self-test: growth violation did not name the offending path: $out"; return 1; }
+    printf '%s\n' "$out" | grep -qE '^FAIL — 2 reached, 1 outside CORE, 1 NEW, 1 unresolved import\(s\) \(baseline had 0\)$' || { echo "self-test: growth verdict wrong: $out"; return 1; }
+
+    # --- baseline+comparison use the SAME (outside-CORE) set: regenerating
+    # here must capture database/query.spl, not the full reached set. ---
+    generate_baseline=1
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1)
+    generate_baseline=0
+    [ "$(cat "$baseline")" = "src/lib/database/query.spl" ] || { echo "self-test: baseline should hold exactly the outside-CORE set, got: $(cat "$baseline")"; return 1; }
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1)
+    printf '%s\n' "$out" | grep -qE '^PASS — 2 reached, 1 outside CORE, 0 new, 1 unresolved import\(s\) \(baseline 1\)$' || { echo "self-test: post-regeneration verdict wrong: $out"; return 1; }
+
+    # --- stale baseline: revert the database.query import; the baseline
+    # still names it, so it must WARN (not FAIL) and the overall verdict
+    # must still be PASS -- this actually reaches the WARN branch, unlike
+    # the previous version's "stale" test which reverted to a state where
+    # the baseline (wrongly, pre-fix) never named the reverted file at all
+    # and so could never have exercised the WARN path. ---
+    reset_fixture
+    printf 'use std.common.util.{util}\n' >> "$fixture/src/compiler/10.frontend/entry.spl"
+    out=$(run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" 2>&1)
+    printf '%s\n' "$out" | grep -q '^WARN — 1 baselined file(s) no longer reached' || { echo "self-test: stale baseline did not WARN: $out"; return 1; }
+    printf '%s\n' "$out" | grep -q 'src/lib/database/query.spl' || { echo "self-test: stale WARN did not name the file: $out"; return 1; }
+    printf '%s\n' "$out" | grep -qE '^PASS — 1 reached, 0 outside CORE, 0 new, 0 unresolved import\(s\) \(baseline 1\)$' || { echo "self-test: stale-baseline overall verdict wrong (must still PASS pre-OD-4): $out"; return 1; }
+
+    # --- empty tree must not vacuously pass ---
+    rm -f "$fixture/src/compiler/10.frontend/entry.spl"
+    if run_check "$fixture" "$fixture/core.sdn" "$fixture/kernel.sdn" >/dev/null 2>&1; then echo "self-test: empty fixture unexpectedly passed"; return 1; fi
+
+    echo "core-lib closure self-test OK (6 fixtures)"
+}
+
+# The selftest runs fatally before EVERY scan, not only under --selftest --
+# same convention as check-kernel-closure.shs and the repo's other push-tier
+# checkers: only --selftest itself skips the production scan.
+if [ "$selftest" -eq 1 ]; then
+    run_selftest
+else
+    selftest_out=$(run_selftest 2>&1) || { echo "ERROR — selftest failed, refusing to run production scan:"; printf '%s\n' "$selftest_out" >&2; exit 2; }
+    run_check "$root" "$manifest" "$kernel_manifest"
+fi

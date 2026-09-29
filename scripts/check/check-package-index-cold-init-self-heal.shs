@@ -1,0 +1,103 @@
+#!/bin/sh
+# Contract: package_index_cold_init must self-heal when the persistent
+# package index's compatibility markers (SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST,
+# SIMPLE_PACKAGE_INDEX_ROOT_GENERATION, SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST)
+# are absent, instead of hard-failing native-build phase 1 with:
+#
+#   error: persistent package index admission failed: index-compatibility-missing;
+#   run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+#
+# WHY. Nothing in this repo ever computes or sets those three env vars
+# (unlike SIMPLE_SCV_REVISION_ID/TREE_ID/INVENTORY_DIGEST, which
+# native_build_closure.spl sets programmatically before phase 1 runs) — a
+# caller either exports them itself, or package_index_route_current_v1's
+# warm path can never be admitted. The sanctioned bootstrap
+# (scripts/bootstrap/bootstrap-from-scratch.sh) always passes
+# SIMPLE_PACKAGE_INDEX_COLD_INIT=1 explicitly and so never hits this. The
+# Windows MSVC/MinGW lane's Stage 2 compile step
+# (.github/workflows/windows-build.yml) invokes native-build directly and
+# never set it, so it was the one caller in the repo that hit the hard
+# failure — see run 35477026840, which reproduced it verbatim as a red
+# `main`, and
+# doc/08_tracking/bug/windows_native_build_index_compatibility_missing_2026-09-20.md.
+#
+# Verdict line is the LAST line of stdout:
+#   PASS  — <n> check(s) passed              exit 0
+#   FAIL  — <reason>                         exit 1
+#   ERROR — nothing was checked (<reason>)   exit 2
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || exit 2
+driver="$root/src/compiler/80.driver/driver_source_pipeline_loading.spl"
+
+check_fixture() {
+    # $1 = fixture file (a minimal fenced excerpt of the cold-init decision)
+    # $2 = expected self-heal outcome for that fixture ("heal" or "fail")
+    fixture="$1"
+    expect="$2"
+    cold_init_env=$(sed -n 's/.*SIMPLE_PACKAGE_INDEX_COLD_INIT\s*=\s*//p' "$fixture")
+    markers_present=$(sed -n 's/.*markers_present\s*=\s*//p' "$fixture")
+    if [ "$cold_init_env" = "1" ] || [ "$markers_present" = "false" ]; then
+        outcome="heal"
+    else
+        outcome="fail"
+    fi
+    if [ "$outcome" != "$expect" ]; then
+        echo "FAIL — fixture $fixture: expected $expect, computed $outcome" >&2
+        exit 1
+    fi
+}
+
+if [ "${1:-}" = "--selftest" ]; then
+    tmp=$(mktemp -d) || exit 2
+    trap 'rm -rf "$tmp"' EXIT
+    printf 'SIMPLE_PACKAGE_INDEX_COLD_INIT=0\nmarkers_present=false\n' >"$tmp/absent_markers_no_explicit_cold_init.txt"
+    check_fixture "$tmp/absent_markers_no_explicit_cold_init.txt" heal
+    printf 'SIMPLE_PACKAGE_INDEX_COLD_INIT=1\nmarkers_present=false\n' >"$tmp/explicit_cold_init.txt"
+    check_fixture "$tmp/explicit_cold_init.txt" heal
+    printf 'SIMPLE_PACKAGE_INDEX_COLD_INIT=0\nmarkers_present=true\n' >"$tmp/warm_path.txt"
+    check_fixture "$tmp/warm_path.txt" fail
+    rm -rf "$tmp"
+    trap - EXIT
+    echo "PASS — 3 selftest fixture(s) checked, self-heal decision logic correct"
+    exit 0
+fi
+
+if [ ! -f "$driver" ]; then
+    echo "ERROR — nothing was checked (missing $driver)" >&2
+    exit 2
+fi
+
+n=0
+if ! grep -q 'package_index_compat_markers_present' "$driver"; then
+    echo "FAIL — $driver does not compute package_index_compat_markers_present" >&2
+    exit 1
+fi
+n=$((n + 1))
+
+if ! grep -q 'SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != ""' "$driver"; then
+    echo "FAIL — $driver does not test SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST for presence" >&2
+    exit 1
+fi
+n=$((n + 1))
+
+if ! grep -q 'SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != ""' "$driver"; then
+    echo "FAIL — $driver does not test SIMPLE_PACKAGE_INDEX_ROOT_GENERATION for presence" >&2
+    exit 1
+fi
+n=$((n + 1))
+
+if ! grep -q 'SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""' "$driver"; then
+    echo "FAIL — $driver does not test SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST for presence" >&2
+    exit 1
+fi
+n=$((n + 1))
+
+if ! grep -q 'not package_index_compat_markers_present' "$driver"; then
+    echo "FAIL — $driver does not fold compat-marker absence into package_index_cold_init" >&2
+    exit 1
+fi
+n=$((n + 1))
+
+echo "PASS — $n check(s) passed, package_index_cold_init self-heals when compat markers are absent"
+exit 0

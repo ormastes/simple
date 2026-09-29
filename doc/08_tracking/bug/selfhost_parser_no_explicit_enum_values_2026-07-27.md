@@ -1,4 +1,8 @@
 # Self-hosted parser has no `Variant = value` enum support — seed-only language feature
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-27 (bootstrap Stage 4 phase-2 parse, after device.spl entered the CLI closure)
@@ -45,3 +49,4 @@ explicit-value enums.
   `seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md` — same
   seed/self-hosted divergence family, all detonating at bootstrap Stage 4
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
+

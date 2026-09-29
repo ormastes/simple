@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: Fixed in pure Simple interpreter path
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Mutations Lost When `self` / `self.field` Is Passed to a Free Function
 
 Status: Fixed in pure Simple interpreter path
@@ -25,7 +39,7 @@ a *field read of the receiver*.
 ## 2026-05-29 Repair
 
 Worker B fixed the pure Simple tree-walking interpreter in
-`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl`.
+`src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl`.
 `eval_function_call` now records mutable aggregate parameters after the callee
 body and writes them back to the original caller argument when that argument is
 an identifier or field access. This covers both regression forms:
@@ -34,7 +48,7 @@ an identifier or field access. This covers both regression forms:
 Focused verification passed:
 
 ```bash
-SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter
+SIMPLE_LIB=src bin/simple check src/compiler/10.frontend/core/interpreter/eval_ops_part1.spl test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter
 SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --mode=interpreter --clean
 SIMPLE_LIB=src bin/simple test test/01_unit/compiler/interpreter/self_field_assign_spec.spl --clean
 ```

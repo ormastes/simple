@@ -1,10 +1,71 @@
 # A mutating method chained directly off a static constructor call silently does nothing
 
-> **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
+## Closed 2026-09-13 — FIXED; the ORIGINAL probe was replayed and all three forms are now correct
+
+**Status: CLOSED (fixed).** This is a replay of the entry's own probe against
+the real `MirToWat` / `WatBuilder`, not a reconstruction.
+
+Binary: Rust seed `build/vt4/bootstrap/simple.exe` (Windows), 16,453,120 bytes,
+sha256 `dc138d50276d…`.
+
+```
+use plugins.backend_wasm.wasm.wat_codegen.{MirToWat}
+use plugins.backend_wasm.wasm_backend.{WatBuilder}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
+
+fn mk() -> MirToWat:
+    MirToWat.create("m")
+
+fn main():
+    val op = mir_operand_const_int(7)
+    val a = WatBuilder.create()
+    MirToWat.create("m").emit_operand(a, op)   # A
+    val b = WatBuilder.create()
+    mk().emit_operand(b, op)                   # B
+    val c = WatBuilder.create()
+    val t = MirToWat.create("m")
+    t.emit_operand(c, op)                      # C
+```
+
+| form | reported | measured 2026-09-13 |
+|---|---|---|
+| A static-ctor chained | `[]` | `[i64.const 7]` |
+| B plain-fn chained | `[i64.const 7]` | `[i64.const 7]` |
+| C bound receiver | `[i64.const 7]` | `[i64.const 7]` |
+
+The reported asymmetry is gone: how the receiver is obtained no longer changes
+whether the mutation lands. `me emit_operand` still lives at
+`src/plugins/backend_wasm/wasm/wat_codegen.spl:798` and its `Const(value,
+type_)` -> `Int(n)` -> `i64.const {n}` arm now fires, and `WatBuilder.emit`
+(`wasm_backend.spl:256`) still mutates through `self.lines = self.lines.push(...)`
+— the same shapes as when the bug was filed. Corroborated by an independent
+minimal reconstruction (a static-ctor-chained method pushing into a `Sink`
+passed as an argument): `A=1 B=1 C=1` on both the default JIT lane and
+`SIMPLE_EXECUTION_MODE=interpret`.
+
+### Trap for the next person: run the probe INSIDE a function
+
+Running the identical probe as **top-level statements** instead of inside
+`fn main()` prints `[]` for **all three** forms, which looks like a worse
+version of this bug and is not this bug at all. It is the module-scope
+mutation defect tracked in
+`top_level_array_index_assign_in_loop_silently_dropped_2026-08-25.md` — at
+module scope the seed runs statements against a discarded copy of the scope, so
+every mutation vanishes regardless of receiver form. That entry was
+re-characterised the same day and is still OPEN. Any future probe of
+receiver-form semantics must be wrapped in a function or it measures that defect
+instead.
+
+### One correction to the report
+
+The original entry recorded the mechanism as **NOT proven** and noted the module
+"drops to the interpreter" on `unresolved external symbol 'MirToWat_dot_create'`.
+That unresolved-symbol fallback is the more likely original cause of the empty
+`[]` than any receiver-form defect in the language — the probe above resolves
+`MirToWat.create` cleanly today.
 
 **Date:** 2026-08-01
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+**Status:** OPEN — reproduced and measured, mechanism NOT yet proven
 **Severity:** Silent no-op. No diagnostic, no error, no warning. Generates
 false-green tests.
 **Found while:** verifying the WASM float-arithmetic fix,
@@ -102,31 +163,54 @@ lowered to a distinct temporary that argument mutations are applied to and then
 discarded. Until then, **never chain a mutating method off `Class.create(...)`**
 — bind the receiver to a `val` first.
 
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
 
-## Re-measurement 2026-08-17 (P0-core silent-wrong lane) — BOUND form is correct; the CHAINED form was not tested
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), run with
+`SIMPLE_EXECUTION_MODE=interpret`. The original measurement used
+`src/compiler_rust/target/bootstrap/simple` on x86_64.
+
+The record's fixture is MirToWat-specific, so a minimal one was written with
+the same three shapes it isolates — A: receiver is a static constructor call,
+chained; B: receiver is a plain fn returning that same static ctor call;
+C: receiver bound to a `val` first. The mutating method takes a `mut` argument
+and pushes to it, exactly like `emit_operand` mutating a `WatBuilder`
+(`build/wi/r_ctor.spl`):
+
+```simple
+class Sink:
+    var items: [i64] = []
+    static fn create() -> Sink: Sink(items: [])
+
+class Emitter:
+    var tag: text = ""
+    static fn create(t: text) -> Emitter: Emitter(tag: t)
+    fn emit(mut s: Sink, v: i64) -> void: s.items.push(v)
+
+fn mk() -> Emitter: Emitter.create("m")
+```
+
+Observed:
 
 ```
-class P:
-    var n: i64
-    static fn make() -> P:
-        P(n: 0)
-    fn bump(mut self):
-        self.n = self.n + 1
-fn main():
-    var q = P.make()
-    q.bump()
-    print q.n        # -> 1 on interpreter AND jit
+A static-ctor chained : 1
+B plain-fn chained    : 1
+C bound receiver      : 1
 ```
 
-Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
-2026-08-16 22:59:37 UTC (Rust seed).
+All three agree. The record's signature — A produces nothing while B and C are
+correct — does not occur; the varying factor it identified (whether the
+receiver expression is *syntactically* a static-method call) no longer changes
+the outcome.
 
-**Explicitly NOT a close.** This doc's subject is a mutating method chained
-DIRECTLY off the static constructor call — `P.make().bump()` — where the
-receiver is a temporary with no binding to write back into. The probe above
-binds the constructor result to a variable first, which is a different
-expression shape and is the shape that works. The chained form was not
-constructed and remains untested; so does the doc's note that the affected
-module drops to the interpreter on an unresolved external symbol. Recorded here
-only so the next lane does not repeat the bound-form measurement and mistake it
-for evidence.
+Caveat worth stating rather than hiding: this is a REBUILT minimal fixture, not
+the original MirToWat one, so it reproduces the shape and not the exact
+program. If the defect turns out to depend on something MirToWat-specific
+(e.g. a receiver whose class also has a `translate_module`, or the
+`unresolved external symbol 'MirToWat_dot_create'` interpreter drop the record
+mentions), this note does not rule that out. What it does establish is that the
+plain "mutating method chained off a static constructor" shape is correct on
+this binary and this lane.
+
+Scope: the **Rust seed's** interpreter lane only. The pure-Simple interpreter
+under `src/compiler/10.frontend/core/interpreter/` was not exercised.

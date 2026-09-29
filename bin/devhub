@@ -2,15 +2,43 @@
 set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)
+. "${REPO_ROOT}/scripts/lib/host-executable.shs"
+. "${REPO_ROOT}/scripts/lib/simple-runtime-provenance.shs"
+host_family=$(simple_host_family)
+launch_mode=${DEVHUB_MODE:-ordinary}
+# Wrapper controls are leading arguments; remaining application arguments keep
+# their original quoting and order. An explicit option overrides DEVHUB_MODE.
+case "${1:-}" in
+  --mode)
+    [ "$#" -ge 2 ] || { printf '%s\n' 'error: --mode requires ordinary or loading' >&2; exit 2; }
+    launch_mode=$2
+    shift 2
+    ;;
+  --mode=*) launch_mode=${1#--mode=}; shift ;;
+esac
+case "${launch_mode}" in
+  ordinary) ;;
+  loading)
+    printf '%s\n' 'error: DevHub mode=loading is unsupported: no admitted in-tree loader implements this launch path' >&2
+    printf '%s\n' 'No runtime was launched. Use --mode ordinary with an admitted runnable runtime.' >&2
+    exit 78
+    ;;
+  *) printf '%s\n' "error: unsupported DevHub launch mode: ${launch_mode}; choose ordinary or loading" >&2; exit 2 ;;
+esac
 runtime=""
+checked_candidates=""
 runtime_usable() {
   candidate="$1"
   [ -n "${candidate}" ] || return 1
-  [ -x "${candidate}" ] || return 1
+  simple_host_executable_compatible "${candidate}" "${host_family}" || return 1
+  # Provenance is the admission boundary.  A Rust seed can expose the full
+  # `simple test` help text, so capability text alone is not sufficient.
+  simple_runtime_provenance_admits "${candidate}" "${REPO_ROOT}" || return 1
+  launch_path=$(simple_native_exec_path "${candidate}" "${host_family}") || return 1
   # A bootstrap compiler can answer --version while rejecting the `run`
   # command that this wrapper needs. Require the deployed CLI's test command
   # in its help surface so an identity-only bootstrap cannot be selected.
-  "${candidate}" --help 2>&1 | grep -q 'simple test' || return 1
+  "${launch_path}" --help 2>&1 | grep -q 'simple test' || return 1
 }
 
 for candidate in \
@@ -21,8 +49,13 @@ for candidate in \
   "${REPO_ROOT}/bin/release/aarch64-apple-darwin-macho/simple" \
   "${REPO_ROOT}/bin/release/macos-arm64/simple" \
   "${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple" \
-  "${REPO_ROOT}/bin/release/linux-x86_64/simple"
+  "${REPO_ROOT}/bin/release/linux-x86_64/simple" \
+  "${REPO_ROOT}/bin/release/x86_64-pc-windows-msvc/simple.exe" \
+  "${REPO_ROOT}/bin/release/x86_64-pc-windows-gnu/simple.exe" \
+  "${REPO_ROOT}/bin/release/aarch64-pc-windows-msvc/simple.exe"
 do
+  checked_candidates="${checked_candidates}  ${candidate:-SIMPLE_BINARY (unset)}
+"
   if runtime_usable "${candidate}"; then
     runtime="${candidate}"
     break
@@ -31,15 +64,13 @@ done
 if [ -z "${runtime}" ]; then
   {
     printf '%s\n' "error: no Simple runtime found for devhub"
+    printf '%s\n' 'mode=ordinary; no fallback was attempted; deploy an admitted runnable runtime'
     printf '%s\n' "checked:"
-    printf '%s\n' "  SIMPLE_BINARY"
-    printf '%s\n' "  ${REPO_ROOT}/bin/simple"
-    printf '%s\n' "  ${REPO_ROOT}/bin/release/simple"
-    printf '%s\n' "  ${REPO_ROOT}/bin/release/x86_64-unknown-linux-gnu/simple"
-    printf '%s\n' "  ${REPO_ROOT}/bin/release/linux-x86_64/simple"
+    printf '%s' "${checked_candidates}"
   } >&2
   exit 127
 fi
+printf '%s\n' "[devhub] mode=ordinary runtime=${SIMPLE_RUNTIME_REAL} receipt=${SIMPLE_RUNTIME_PROVENANCE} version=${SIMPLE_RUNTIME_VERSION}" >&2
 
 # Source-hosted launches can emit compiler migration diagnostics before DevHub
 # writes its own output. Keep successful operator output clean by default;
@@ -55,7 +86,7 @@ do
 done
 
 if [ "${show_diagnostics}" -eq 1 ]; then
-  exec env SIMPLE_RUST_SEED_WARNING=0 "${runtime}" run "${REPO_ROOT}/src/app/devhub/main.spl" "$@"
+  exec env SIMPLE_RUST_SEED_WARNING=0 "$(simple_native_exec_path "${runtime}" "${host_family}")" run "${REPO_ROOT}/src/app/devhub/main.spl" "$@"
 fi
 
 diagnostic_file=$(mktemp "${TMPDIR:-/tmp}/devhub-diagnostics.XXXXXX")
@@ -64,7 +95,7 @@ cleanup_diagnostics() {
 }
 trap cleanup_diagnostics EXIT HUP INT TERM
 set +e
-env SIMPLE_RUST_SEED_WARNING=0 "${runtime}" run "${REPO_ROOT}/src/app/devhub/main.spl" "$@" 2>"${diagnostic_file}"
+env SIMPLE_RUST_SEED_WARNING=0 "$(simple_native_exec_path "${runtime}" "${host_family}")" run "${REPO_ROOT}/src/app/devhub/main.spl" "$@" 2>"${diagnostic_file}"
 status=$?
 set -e
 if [ "${status}" -ne 0 ]; then

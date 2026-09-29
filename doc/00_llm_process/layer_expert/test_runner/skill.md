@@ -441,3 +441,85 @@ sessions queued behind each other. The client now bypasses the daemon rather tha
 
 **Verify:** `bin/simple test test/01_unit/app/compiler_schema/` — read the `Results: N total,
 N passed, 0 failed` line, and confirm the process exit code separately (see the exit-zero bug above).
+
+## A directory target aborts before executing anything; a file target does not (2026-08-27)
+
+`bin/simple test <dir>` dies right after `Session setup: Nms` with **no `Results:` line and no
+`ABORTED BEFORE EXECUTION` banner** — so every file in it is UNKNOWN, not failed. `bin/simple test
+<one_file.spl>` runs fine. **The discriminator is not file count**: a single-file target never takes
+the wrapper-generation path, so it never reaches either blocker below. A two-file directory
+reproduces in ~15s, which is the cheap iteration substrate — do not debug this on the full suite.
+
+Two stacked blockers, both mechanism-level. Fixing the first only surfaces the second.
+
+### 1. The generated MC/DC prelude is compiled IN MEMORY, so its `use` lines cannot load files
+
+`build_coverage_wrapper` (`test_executor_parsing.spl:771`) emits a prelude when `mcdc_enabled`.
+**No wrapper file is ever written** — `strace -f -e trace=openat` shows no `.sspec_wrapped_*` path
+opened for reading *or* writing, and the last source opened is `src/app/test_runner_new/main.spl`.
+The wrapper text is compiled in-process from memory.
+
+Consequence: a prelude `use` resolves **only against modules the runner's own graph already
+loaded**. The short-form siblings (`std.io`, `std.spec`, `std.test_runner.…`) work for that reason
+alone. The odd-one-out long form at `:814`,
+`use std.nogc_sync_mut.mcdc.dynamic_probe.{…}`, matches nothing already loaded — `strace` shows
+**zero opens** of `src/lib/nogc_sync_mut/mcdc/dynamic_probe.spl`, and there is no `__init__.spl` in
+that package to re-export it. The `use` **binds nothing and raises no error**; the failure appears
+later and generically as
+`variable mcdc_dynamic_probe_controller_load_builtin_current_owner not found`.
+
+**This is why every probe of that import "works".** In a real on-disk file the `use` triggers a
+file load and the symbol resolves. Only the in-memory wrapper context fails. Do not conclude from a
+passing standalone probe that the import is fine.
+
+Fix that is confirmed to clear it: one real top-level import in `test_executor_parsing.spl` so the
+module is genuinely loaded. Writing the wrapper to disk also works but is far larger and masks the
+general defect — **an unresolvable `use` in an in-memory unit fails silently**, which is worth
+fixing at the `use` rather than at the eventual identifier.
+
+### 2. `runtime_symbols.rs` and `interpreter_extern/` are DIFFERENT registries
+
+With blocker 1 cleared the run dies differently:
+`error: semantic: unknown extern function: rt_process_run_owned_observed_bounded_value`.
+
+That symbol **is** registered at `src/compiler_rust/common/src/runtime_symbols.rs:1901`, and its
+string **is** present in the deployed binary — so this is neither a missing registration nor binary
+staleness. `runtime_symbols.rs` serves **native codegen**. The tree-walk interpreter that
+`bin/simple test` uses dispatches through `src/compiler_rust/compiler/src/interpreter_extern/`,
+which has **no `rt_process_run_owned_*` handler at all**. `src/lib/nogc_sync_mut/io/resource_scope.spl:17`
+declares the extern and `:21` calls it.
+
+**Carry this distinction into any "registered but unknown" investigation** — it is the single fact
+that made this one look impossible. Registration in one registry says nothing about the other, and
+the width of the gap between them has not been audited.
+
+### Evidence discipline this cost
+
+Both symbols grep to **zero hits** in a stale working tree, which briefly supported a wrong "these
+names are synthesized at runtime" theory. Grep `origin/main` content (`git grep <pat> origin/main`),
+not the shared tree — see `.claude/memory/gate-fail-needs-clean-worktree.md`. Related: a probe
+worktree under `/mnt/data/worktrees/` was reaped mid-investigation by another session's cleanup;
+put throwaway probe trees outside that directory.
+
+Record: `doc/08_tracking/bug/full_suite_aborts_mcdc_dynamic_probe_symbol_2026-08-26.md`.
+
+## The sspec documentization score gate, and how to measure it here (2026-09-05)
+
+`src/app/test_runner_new/sspec_score_gate.spl` scores every `*_spec.spl` the
+runner is handed with `analyze_sspec_text` (source only — the GATE surface) and
+turns any score below `SIMPLE_SSPEC_MIN_SCORE` (default **80**, `0` disables)
+into an ERROR line and exit 1. Scores are cached under
+`.simple/cache/sspec-score-gate/` keyed on path + source hash + schema string;
+a scorer change with an unchanged schema string is NOT invalidated by the cache
+key (the real rule/tool versions are only written as a comment in the cache
+file) — after editing `src/app/sspec_maintain/`, delete that directory.
+
+`simple sspec-maintain scan` reports a stricter SCAN surface (adds MNT-002 for a
+missing `doc/06_spec` mirror and MNT-009 for stale lifecycle links); the
+rule-by-rule recipe that reaches 90+ on it, with measured numbers, is
+[`.claude/skills/spipe.md` § "Scoring 90+"](../../../../.claude/skills/spipe.md).
+On this host neither `bin/simple test` nor `sspec-maintain` runs (bootstrap-only
+CLI, seed parser behind main); measure with
+`sh scripts/check/sspec-score-seed-lane.shs <spec|dir>`, which prints both
+surfaces per spec from proven copies of the real scorer modules. Feature
+expert: [modern_sspec](../../feature_expert/modern_sspec/skill.md).

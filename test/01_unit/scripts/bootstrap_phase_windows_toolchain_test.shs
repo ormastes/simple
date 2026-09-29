@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-windows-cl-mode.shs"
+. "$root/scripts/bootstrap/bootstrap-phase-toolchain.shs"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 77 ;; esac
+: "${LLVM_SYS_231_PREFIX:?set the LLVM 23.1.1 Windows prefix}"
+work=$(mktemp -d "${TMPDIR:-/tmp}/phase-toolchain.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+mkdir "$work/poison"
+for name in gcc g++ cl.exe; do
+    printf '#!/bin/sh\necho forbidden-tool >>"$PHASE_TOOLCHAIN_POISON"\nexit 91\n' >"$work/poison/$name"
+    chmod +x "$work/poison/$name"
+done
+PHASE_TOOLCHAIN_POISON=$work/poison.log
+export PHASE_TOOLCHAIN_POISON
+PATH="$work/poison:$PATH"
+MSYSTEM=MINGW64
+export PATH MSYSTEM
+unset CC CXX SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR CL
+expected_cc=$(cygpath -am "$LLVM_SYS_231_PREFIX/bin/clang-cl.exe")
+run_direct() { "$@"; }
+compiler_probe() {
+    [ "${CC:-gcc}" = "$expected_cc" ] || { echo 'FAIL: native build selected ambient compiler'; return 1; }
+    [ "${SIMPLE_WINDOWS_ABI:-}" = msvc ] && [ "${SIMPLE_LINKER_FLAVOR:-}" = msvc ] || return 1
+    [ "${CL:-}" = /TC ] || return 1
+    [ "$1" = native-build ] && [ "$2" = --target ] && [ "$3" = x86_64-pc-windows-msvc ] || return 1
+    # A .cpp suffix normally enables C++; /TC must survive the native boundary.
+    printf '#ifdef __cplusplus\n#error C mode was lost\n#endif\nint probe(void) { return 7; }\n' >"$work/probe.cpp"
+    MSYS2_ARG_CONV_EXCL='*' "$CC" -nologo -c "$(cygpath -am "$work/probe.cpp")" "-Fo$(cygpath -am "$work/probe.obj")"
+    [ -s "$work/probe.obj" ]
+}
+bootstrap_phase_run_command run_direct compiler_probe native-build
+[ ! -e "$PHASE_TOOLCHAIN_POISON" ]
+[ "${CC-unset}" = unset ] && [ "${CL-unset}" = unset ]
+reject() {
+    if "$@" >"$work/refusal.log" 2>&1; then
+        echo 'FAIL: unsupported phase toolchain was admitted'; exit 1
+    fi
+    grep -q '^bootstrap-phase-toolchain:' "$work/refusal.log"
+}
+for bad in gcc g++ cl.exe clang-cl; do
+    (CC=$bad; export CC; reject bootstrap_phase_run_command run_direct compiler_probe native-build)
+done
+(SIMPLE_WINDOWS_ABI=gnu; export SIMPLE_WINDOWS_ABI; reject bootstrap_phase_run_command run_direct compiler_probe native-build)
+(SIMPLE_LINKER_FLAVOR=gnu; export SIMPLE_LINKER_FLAVOR; reject bootstrap_phase_run_command run_direct compiler_probe native-build)
+(CL=/TP; export CL; reject bootstrap_phase_run_command run_direct compiler_probe native-build)
+(unset LLVM_SYS_231_PREFIX; reject bootstrap_phase_run_command run_direct compiler_probe native-build)
+reject bootstrap_phase_run_command run_direct compiler_probe native-build --target x86_64-w64-windows-gnu
+reject bootstrap_phase_run_command run_direct compiler_probe native-build --target=x86_64-w64-windows-gnu
+reject bootstrap_phase_run_command run_direct compiler_probe native-build --target
+wrong_version_executor() { printf '%s\n' 'clang version 22.1.0'; }
+reject bootstrap_phase_run_command wrong_version_executor compiler_probe native-build
+[ ! -e "$PHASE_TOOLCHAIN_POISON" ]
+# Non-build commands retain their arguments and ambient environment.
+no_build_probe() { [ "$1" = --version ] && [ "$CC" = gcc ]; }
+(CC=gcc; export CC; bootstrap_phase_run_command run_direct no_build_probe --version)
+# Simulate Unix dispatch; this is policy coverage, not a native Unix build.
+printf '#!/bin/sh\nexit 0\n' >"$work/poison/clang"
+printf '#!/bin/sh\nexit 0\n' >"$work/poison/clang++"
+chmod +x "$work/poison/clang" "$work/poison/clang++"
+unix_probe() {
+    [ "$CC" = "$work/poison/clang" ] && [ "$#" = 3 ] &&
+        [ "$1" = native-build ] && [ "$2" = --target ] && [ "$3" = aarch64-unknown-linux-gnu ] &&
+        [ "${SIMPLE_WINDOWS_ABI-unset}" = unset ] && [ "${CL-unset}" = unset ]
+}
+for host in Linux Darwin FreeBSD SimpleOS; do
+    (uname() { printf '%s\n' "$host"; }; bootstrap_phase_run_command run_direct unix_probe native-build --target aarch64-unknown-linux-gnu)
+done
+(uname() { echo Linux; }; CC=gcc; export CC; reject bootstrap_phase_run_command run_direct unix_probe native-build)
+# Keep the real matrix wired to the tested boundary in both dispatch branches.
+[ "$(grep -c 'bootstrap_phase_run_command run_with_timeout "\$@"' "$root/scripts/bootstrap/bootstrap-phase-verification.shs")" = 2 ]
+echo 'PASS: Windows clang-cl C/MSVC selection, fail-closed overrides, and Unix clang policy'

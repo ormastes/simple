@@ -1,0 +1,145 @@
+"""
+nand_slot_drift_check — invariants over the `.nandram` slot map.
+
+Host-only, and deliberately NOT part of the boot-linked import graph (same
+rule as const_drift_check.spl / ipc_drift_check.spl): entry.spl never
+`use`s this, so the freestanding rv32 boot path stays no-alloc and decoupled.
+
+  bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/nand_slot_drift_check.spl
+
+SCOPE, STATED HONESTLY. This proves invariants over the MAP:
+  - every slot index is unique (no two names share a word);
+  - every live slot is inside the region and below NAND_SLOT_COUNT;
+  - the OOB probe really is out of region (the bounds test is non-vacuous);
+  - every index in [0, NAND_SLOT_COUNT) has a name.
+
+It does NOT yet prove that entry.spl, the VHDL testbench, and the QEMU script
+agree with this map. That cross-check is a text scan over three files in two
+other languages, so it belongs in a scripts/check/*.shs gate, and its
+regression proof ("all existing markers still pass byte-identically") needs the
+GHDL/QEMU lanes — which are currently blocked on the bootstrap redeploy.
+See doc/03_plan/hardware/nvme_emu_first_increment_plan.md §0.5 and §4 task 3.
+Until that lands, this file is a partial gate and must not be described as
+closing the drift hole.
+"""
+
+use nand_test_slots.*
+
+fn _slot_at(i: i64) -> i64:
+    # Positional mirror of the map. A slot added to nand_test_slots.spl without
+    # a row here is caught by _check_all_named below.
+    if i == 0: return NAND_SLOT_SIGNATURE
+    if i == 1: return NAND_SLOT_LIFECYCLE
+    if i == 2: return NAND_SLOT_PAGE_PROGRAMMED
+    if i == 3: return NAND_SLOT_PAGE_DATA
+    if i == 4: return NAND_SLOT_CELL_LEVEL
+    if i == 5: return NAND_SLOT_READ_REFERENCE
+    if i == 6: return NAND_SLOT_READS_SINCE_PROG
+    if i == 7: return NAND_SLOT_REFRESHES
+    if i == 8: return NAND_SLOT_RECOVERIES
+    if i == 9: return NAND_SLOT_STATUS
+    if i == 10: return NAND_SLOT_ADMINQ_ID
+    if i == 11: return NAND_SLOT_ADMINQ_DEPTH
+    if i == 12: return NAND_SLOT_IOQ_ID
+    if i == 13: return NAND_SLOT_IOQ_DEPTH
+    if i == 14: return NAND_SLOT_ADMINQ_STATE
+    if i == 15: return NAND_SLOT_IOQ_STATE
+    if i == 16: return NAND_SLOT_SQ_TAIL
+    if i == 17: return NAND_SLOT_SQ_HEAD
+    if i == 18: return NAND_SLOT_CQ_TAIL
+    if i == 19: return NAND_SLOT_CQ_HEAD
+    if i == 20: return NAND_SLOT_COMPLETIONS
+    if i == 21: return NAND_SLOT_READ_COUNT
+    if i == 22: return NAND_SLOT_NEIGHBOR_LEVEL
+    if i == 23: return NAND_SLOT_FCR_COUNT
+    if i == 24: return NAND_SLOT_REMAPS
+    if i == 25: return NAND_SLOT_FORCE_VERIFY_FAIL
+    if i == 26: return NAND_SLOT_RECOVER_DIRECTION
+    if i == 27: return NAND_SLOT_RECOVER_INDEX
+    if i == 28: return NAND_SLOT_ERROR_BITS
+    if i == 29: return NAND_SLOT_ECC_STRENGTH
+    if i == 30: return NAND_SLOT_MEDIA_PHASE
+    if i == 31: return NAND_SLOT_EVIDENCE_ONE
+    if i == 32: return NAND_SLOT_PROGRAMMED_LEVEL
+    if i == 33: return NAND_SLOT_NEIGHBOR_DATA
+    if i == 34: return NAND_SLOT_NEIGHBOR_PROG
+    if i == 35: return NAND_SLOT_RETRY_INDEX_DOWN
+    if i == 36: return NAND_SLOT_RETRY_INDEX_UP
+    if i == 37: return NAND_SLOT_ECC_SYNDROME_PAGE
+    if i == 38: return NAND_SLOT_ECC_SYNDROME_NBR
+    if i == 39: return NAND_SLOT_REMAP_STAGED
+    if i == 40: return NAND_SLOT_REMAP_DATA
+    if i == 41: return NAND_SLOT_REMAP_LEVEL
+    if i == 42: return NAND_SLOT_REMAP_ECC
+    if i == 43: return NAND_SLOT_REMAP_PROGRAMMED
+    if i == 44: return NAND_SLOT_REMAPPED_FLAG
+    if i == 45: return NAND_SLOT_LAST_CORRECTED
+    if i == 46: return NAND_SLOT_QUEUE_FULL_EVENTS
+    if i == 47: return NAND_SLOT_SERVICE_COOKIE
+    if i == 48: return NAND_SLOT_ADMINQ_READY
+    -1
+
+fn _check_positional() -> i32:
+    # Each constant must equal its own position: the map is dense 0..COUNT-1.
+    var i: i64 = 0
+    while i < NAND_SLOT_COUNT:
+        if _slot_at(i) != i:
+            print("FAIL: slot " + i.to_text() + " (" + nand_slot_name(i) + ") is not positional")
+            return 1
+        i = i + 1
+    0
+
+fn _check_in_region() -> i32:
+    var i: i64 = 0
+    while i < NAND_SLOT_COUNT:
+        if _slot_at(i) < 0 or _slot_at(i) >= NAND_RAM_WORDS:
+            print("FAIL: slot " + nand_slot_name(i) + " outside the 64-word region")
+            return 1
+        i = i + 1
+    0
+
+fn _check_all_named() -> i32:
+    var i: i64 = 0
+    while i < NAND_SLOT_COUNT:
+        if nand_slot_name(i) == "UNKNOWN":
+            print("FAIL: slot " + i.to_text() + " has no name")
+            return 1
+        i = i + 1
+    0
+
+fn _check_oob_probe_is_oob() -> i32:
+    # entry.spl:564-566 writes NAND_SLOT_OOB_PROBE and requires readback 0, to
+    # prove the bounds check rejects it. If the probe ever fell INSIDE the
+    # region that test would silently become vacuous.
+    if NAND_SLOT_OOB_PROBE < NAND_RAM_WORDS:
+        print("FAIL: OOB probe is inside the region — the bounds test is vacuous")
+        return 1
+    if NAND_SLOT_COUNT > NAND_RAM_WORDS:
+        print("FAIL: live slot count exceeds the region")
+        return 1
+    0
+
+fn _self_test() -> i32:
+    # Prove the checker discriminates: a duplicated / out-of-region index must
+    # be rejected by the same predicates used above.
+    if nand_slot_name(999) != "UNKNOWN":
+        print("FAIL: self-test — unnamed slot was not reported UNKNOWN")
+        return 1
+    if _slot_at(NAND_SLOT_COUNT) != -1:
+        print("FAIL: self-test — slot past COUNT was not reported absent")
+        return 1
+    0
+
+fn main():
+    var rc: i32 = 0
+    if _self_test() != 0: rc = 1
+    if _check_positional() != 0: rc = 1
+    if _check_in_region() != 0: rc = 1
+    if _check_all_named() != 0: rc = 1
+    if _check_oob_probe_is_oob() != 0: rc = 1
+    if rc != 0:
+        print("STATUS: FAIL nand_slot_drift_check")
+        return ()
+    print("checked " + NAND_SLOT_COUNT.to_text() + " slots in a " + NAND_RAM_WORDS.to_text() + "-word region, 0 drift")
+    print("NAND SLOT MAP OK")
+    return ()

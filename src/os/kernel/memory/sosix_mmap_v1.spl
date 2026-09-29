@@ -1,0 +1,95 @@
+"""SOSIX mmap kernel-side owner, v1 — real page-source ops + syscall handlers.
+
+Pairs with the pure arena core (os.services.sosix.mmap_v1): this module is
+the ONLY kernel-facing half. It implements the SosixMmapOpsV1 vtable over
+the live VMM/PMM and exposes SyscallResult-shaped handlers for the id-10
+family, ready for the dispatch case arm:
+
+    case 10: sosix_mmap_handle_v1(args, <current-AS arena>)
+    case 11: sosix_munmap_handle_v1(args, <current-AS arena>)
+    case 12: sosix_mprotect_handle_v1(args, <current-AS arena>)
+
+DISPATCH STATUS (interface slice 3, 2026-09-26): NOT YET WIRED. The id-10
+case arms still run the legacy paths — the Simple-kernel bump in
+os.kernel.ipc.syscall_memory._handle_memory_map on the hosted lanes, and
+arm64_user_mmap (per-launch bump) in the R4 lane's C layer on the arm64
+guest. Flipping either case arm is the next integration step and is
+deliberately deferred until the arena is verified in-guest on the QEMU boot
+cycle (owned by the R4 lane); the host-side proof is
+test/01_unit/os/services/sosix_mmap_v1_spec.spl. The per-AS arena instance
+is created at guest launch (window constants in mmap_v1.spl:
+SOSIX_MMAP_ARM64_WINDOW_*); resolving "the current guest's arena" inside the
+case arm is part of that flip.
+
+Page-source mapping (W^X parity with _prot_to_vmflags in syscall_memory.spl):
+pages are PRESENT+USER always, WRITABLE per the writable bit, and NX unless
+(executable and not writable). Anonymous pages are owned pages:
+memory_map_owned_pages on map, memory_release_owned_pages on unmap, so the
+PMM ownership accounting stays balanced. mprotect flips through
+vmm_read_pte + vmm_map_page exactly like _handle_memory_protect.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE}
+use os.kernel.memory.vmm.{vmm_map_page, vmm_read_pte, PTE_ADDR_MASK}
+use os.kernel.memory.memory_owned_pages.{memory_map_owned_pages, memory_release_owned_pages}
+use os.services.sosix.mmap_v1.{SosixMmapOpsV1, SosixMmapArenaV1}
+
+fn _sosix_mmap_vmflags_v1(writable: bool, executable: bool) -> VmFlags:
+    """(writable, executable) -> VmFlags with the W^X rule: NX unless
+    (executable and not writable) — parity with _prot_to_vmflags."""
+    var bits: u32 = VM_PRESENT | VM_USER
+    if writable:
+        bits = bits | VM_WRITABLE
+    if not executable or writable:
+        bits = bits | VM_NO_EXECUTE
+    VmFlags(bits: bits)
+
+fn _sosix_mmap_map_v1(page_va: u64, writable: bool, executable: bool) -> i64:
+    if memory_map_owned_pages(page_va, 1, _sosix_mmap_vmflags_v1(writable, executable)):
+        return 0
+    -12
+
+fn _sosix_mmap_unmap_v1(page_va: u64) -> i64:
+    memory_release_owned_pages(page_va, 1)
+    0
+
+fn _sosix_mmap_protect_v1(page_va: u64, writable: bool, executable: bool) -> i64:
+    val virt = VirtAddr(addr: page_va)
+    val existing = vmm_read_pte(virt)
+    if existing == 0:
+        return -14
+    if vmm_map_page(virt, PhysAddr(addr: existing & PTE_ADDR_MASK), _sosix_mmap_vmflags_v1(writable, executable)):
+        return 0
+    -14
+
+fn _sosix_mmap_is_mapped_v1(page_va: u64) -> bool:
+    vmm_read_pte(VirtAddr(addr: page_va)) != 0
+
+pub fn sosix_mmap_kernel_ops_v1() -> SosixMmapOpsV1:
+    """The vtable instance wiring the arena to the live VMM/PMM."""
+    SosixMmapOpsV1(
+        map: _sosix_mmap_map_v1,
+        unmap: _sosix_mmap_unmap_v1,
+        protect: _sosix_mmap_protect_v1,
+        is_mapped: _sosix_mmap_is_mapped_v1)
+
+pub fn sosix_mmap_handle_v1(args: SyscallArgs, arena: SosixMmapArenaV1) -> SyscallResult:
+    """Syscall 10 (mmap): arg0 hint, arg1 len, arg2 prot, arg3 flags."""
+    SyscallResult(value: arena.alloc(args.arg0, args.arg1, args.arg2, args.arg3))
+
+pub fn sosix_munmap_handle_v1(args: SyscallArgs, arena: SosixMmapArenaV1) -> SyscallResult:
+    """Syscall 11 (munmap): arg0 addr, arg1 len."""
+    SyscallResult(value: arena.release(args.arg0, args.arg1))
+
+pub fn sosix_mprotect_handle_v1(args: SyscallArgs, arena: SosixMmapArenaV1) -> SyscallResult:
+    """Syscall 12 (mprotect): arg0 addr, arg1 len, arg2 prot."""
+    SyscallResult(value: arena.protect(args.arg0, args.arg1, args.arg2))
+
+pub fn sosix_msync_handle_v1(args: SyscallArgs, arena: SosixMmapArenaV1) -> SyscallResult:
+    """msync (no id allocated yet): no-op success over the arena API."""
+    SyscallResult(value: arena.sync(args.arg0, args.arg1, args.arg2))
+
+export sosix_mmap_kernel_ops_v1
+export sosix_mmap_handle_v1, sosix_munmap_handle_v1
+export sosix_mprotect_handle_v1, sosix_msync_handle_v1

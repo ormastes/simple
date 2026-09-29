@@ -1,0 +1,356 @@
+#!/bin/sh
+# check-rv64-unwrap-or-trap-unwraps.shs
+#
+# Pins the fix for the riscv64 in-guest BUILD-AND-RUN row's blocker,
+# doc/08_tracking/bug/riscv64_in_guest_interp_resets_on_cross_function_call_2026-09-01.md
+#
+# THE DEFECT
+# ----------
+# The riscv64 freestanding `rt_unwrap_or_trap` checked ONLY `value ==
+# NIL_VALUE` and then `return value;`. A boxed `Some(x)` was therefore returned
+# VERBATIM: the caller got the 24-byte RuntimeEnum WRAPPER where the payload
+# belonged, and `None`/`Err` passed through silently instead of trapping.
+#
+# In-guest that hands a Some-box where a struct receiver is expected. The
+# interpreter resolves a CALLEE via `resolve_function_by_name(...) ->
+# HirFunction?` then `cf_target_hit.unwrap()`
+# (src/compiler/70.backend/backend/interpreter_calls.spl:138,181), so
+# `call_hir_function` received the box, and its by-value COW copy of the
+# 248-byte `fn_` parameter read offset 32 of a 32-byte allocation slot. It found
+# 0x0000003200000001, which through that TU's own
+# `HeapHeader {uint32_t type; uint32_t size;}` is type=1 (HEAP_STRING) size=50 --
+# the NEXT bump allocation's header. That word carries TAG_HEAP in its low bits,
+# so the clone's tag test accepted it and dereferenced size<<32 as an address:
+# scause=5 load access fault, stval=0x3200000000.
+#
+# The identical defect was already diagnosed and fixed on the x86_64
+# freestanding sibling
+# (examples/09_embedded/simple_os/arch/common/boot/freestanding_value_registry_impl.h:149,
+# doc/08_tracking/bug/vfs_l5_fat32core_open_faults_on_new_file_write_2026-08-31.md),
+# whose comment describes this failure in the same words. riscv64 carries its
+# OWN duplicate definition, which shadows that sibling for this lane and was
+# never brought along -- so a tree-wide grep for rt_unwrap_or_trap finds the
+# GOOD sibling and looks green. That duplicate-definition trap is exactly why
+# this guard reads ONE named file and never greps the tree.
+#
+# WHY THIS GUARD RUNS THE CODE INSTEAD OF MATCHING ITS SHAPE
+# ---------------------------------------------------------
+# Its sibling check-rv64-rt-contains-has-dict-arm.shs is an honest SOURCE-SHAPE
+# ratchet and says so. A shape ratchet cannot tell a correct unwrap from one
+# that finds the HEAP_ENUM arm and still returns the wrapper, and this defect is
+# precisely "the arm is reachable but the value handed back is wrong". So this
+# guard EXTRACTS the real function body from the real file, compiles it on the
+# HOST against a faithful transcription of that TU's value layout, and asserts
+# BEHAVIOUR: a Some-box must yield its PAYLOAD, not itself.
+#
+# It is still not the acceptance test. The boot in
+# scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs is, and
+# nothing here substitutes for it.
+#
+# Both discriminant forms are exercised on purpose: simple-core builds canonical
+# Options with ORDINAL discriminants (Some=0, None=1) while native lowering uses
+# the stable 32-bit variant-name hashes, and the hosted C definition
+# (src/runtime/runtime_native.c:12972) accepts both. A fix that handled only the
+# hashes would still return the wrapper for an ordinal-built Option, so a guard
+# that tested only one form could pass over a half-fix.
+#
+# VERDICT CONVENTION (last line of stdout):
+#   PASS — <n> case(s) executed, ...   exit 0   (n is always > 0)
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked        exit 2
+# `--selftest` runs before every scan and is fatal. 0 cases executed is an
+# ERROR, never a PASS, and a missing host compiler is an ERROR too: absence of a
+# compiler is absence of evidence.
+
+set -e
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
+
+TARGET_REL="examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c"
+
+HOSTCC=""
+for c in "${CC:-}" clang cc gcc; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then HOSTCC=$c; break; fi
+done
+
+# extract_fn <file> -- body of `RuntimeValue rt_unwrap_or_trap(` through the
+# closing brace at column 0. Nested blocks inside the body are indented, so a
+# column-0 `}` is unambiguously the end of the function.
+# TARGET-ONLY INLINE ASM is neutralised, and only that. The body parks the hart
+# with `__asm__ volatile("wfi")`, a RISC-V instruction the host assembler cannot
+# encode. `wfi` is a park, not a value computation: it is only ever reached
+# AFTER rt_qemu_exit_failure(), which this harness intercepts, so removing it
+# cannot change any value this guard observes. Nothing else is rewritten -- the
+# tag tests, the header check, the enum_id/discriminant arms and every `return`
+# are compiled and executed exactly as written in the file.
+extract_fn() {
+    awk '
+        /^RuntimeValue rt_unwrap_or_trap\(/ { inside=1; print; next }
+        inside { print; if ($0 == "}") exit }
+    ' "$1" | sed 's/__asm__ volatile("wfi");/((void)0);/g'
+}
+
+# run_cases <file> -> one of:
+#   ABSENT           no such file, or no rt_unwrap_or_trap in it
+#   BUILD_ERROR      the extracted body would not compile on the host
+#   <result string>  e.g. "some_ord=payload some_hash=payload plain=verbatim none=trapped"
+run_cases() {
+    _f=$1
+    [ -f "$_f" ] || { echo "ABSENT"; return; }
+    _body=$(extract_fn "$_f" || true)
+    [ -n "$_body" ] || { echo "ABSENT"; return; }
+
+    _d=$(mktemp -d)
+    {
+        cat <<'HARNESS'
+/* Faithful transcription of the riscv64 boot TU's value layout. If this ever
+ * drifts from baremetal_runtime_core.inc.c the guard is testing a fiction, so
+ * the field offsets are asserted below rather than assumed. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <setjmp.h>
+
+typedef uint64_t RuntimeValue;
+#define TAG_MASK    ((uintptr_t)0x7)
+#define TAG_HEAP    ((uintptr_t)0x1)
+#define TAG_SPECIAL ((uintptr_t)0x3)
+#define NIL_VALUE   ((RuntimeValue)TAG_SPECIAL)
+#define ENCODE_PTR(p) ((RuntimeValue)((uintptr_t)(p) | TAG_HEAP))
+#define DECODE_PTR(v) ((void *)((uintptr_t)(v) & ~TAG_MASK))
+#define IS_HEAP(v)    (((uintptr_t)(v) & TAG_MASK) == TAG_HEAP)
+#define HEAP_STRING 1U
+#define HEAP_ENUM   7U
+
+typedef struct { uint32_t type; uint32_t size; } HeapHeader;
+typedef struct {
+    HeapHeader hdr;
+    uint32_t enum_id;
+    uint32_t discriminant;
+    RuntimeValue payload;
+} RuntimeEnum;
+_Static_assert(sizeof(HeapHeader) == 8, "HeapHeader must be 8 bytes");
+_Static_assert(offsetof(RuntimeEnum, payload) == 16, "RuntimeEnum.payload at 16");
+
+static jmp_buf g_trap;
+static int g_trapped;
+static void serial_puts(const char *s) { (void)s; }
+static void rt_qemu_exit_failure(void) { g_trapped = 1; longjmp(g_trap, 1); }
+
+HARNESS
+        printf '%s\n' "$_body"
+        cat <<'MAIN'
+
+static RuntimeValue make_enum(uint32_t id, uint32_t disc, RuntimeValue payload)
+{
+    RuntimeEnum *e = (RuntimeEnum *)calloc(1, sizeof(RuntimeEnum));
+    e->hdr.type = HEAP_ENUM;
+    e->hdr.size = (uint32_t)sizeof(RuntimeEnum);
+    e->enum_id = id;
+    e->discriminant = disc;
+    e->payload = payload;
+    return ENCODE_PTR(e);
+}
+
+/* Calls the extracted body under a trap catcher. Prints "trapped", "payload",
+ * "verbatim", or "other" -- never a boolean comparison, so a wrong value is
+ * distinguishable from a right one rather than collapsing to false. */
+static const char *probe(RuntimeValue boxed, RuntimeValue want_payload)
+{
+    RuntimeValue got;
+    g_trapped = 0;
+    if (setjmp(g_trap) != 0) return "trapped";
+    got = rt_unwrap_or_trap(boxed);
+    if (got == want_payload) return "payload";
+    if (got == boxed) return "verbatim";
+    return "other";
+}
+
+int main(void)
+{
+    /* A plausible non-enum payload: a heap-tagged pointer to a 50-byte string
+     * header, the very object the in-guest fault walked into. */
+    HeapHeader *str = (HeapHeader *)calloc(1, 64);
+    str->type = HEAP_STRING; str->size = 50U;
+    RuntimeValue payload = ENCODE_PTR(str);
+
+    RuntimeValue some_ord  = make_enum(1u, 0u, payload);
+    RuntimeValue some_hash = make_enum(1u, 4053299545u, payload);
+    RuntimeValue none_ord  = make_enum(1u, 1u, NIL_VALUE);
+    RuntimeValue ok_hash   = make_enum(2u, 2405352012u, payload);
+
+    printf("some_ord=%s", probe(some_ord, payload));
+    printf(" some_hash=%s", probe(some_hash, payload));
+    printf(" ok_hash=%s", probe(ok_hash, payload));
+    printf(" plain=%s", probe(payload, 0));
+    printf(" none=%s\n", probe(none_ord, payload));
+    return 0;
+}
+MAIN
+    } > "$_d/probe.c"
+
+    if ! "$HOSTCC" -std=c11 -O0 -o "$_d/probe" "$_d/probe.c" >"$_d/cc.log" 2>&1; then
+        rm -rf "$_d"; echo "BUILD_ERROR"; return
+    fi
+    _out=$("$_d/probe" 2>/dev/null || true)
+    rm -rf "$_d"
+    [ -n "$_out" ] || { echo "BUILD_ERROR"; return; }
+    echo "$_out"
+}
+
+WANT="some_ord=payload some_hash=payload ok_hash=payload plain=verbatim none=trapped"
+
+selftest() {
+    _tmp=$(mktemp -d)
+    _fail=0
+    _n=0
+    _expect() {
+        _n=$((_n + 1))
+        if [ "$2" != "$3" ]; then
+            echo "selftest FAIL: $1 -> got '$2', want '$3'" >&2
+            _fail=1
+        fi
+    }
+
+    # 1. MUST-FAIL fixture: the PRE-FIX body verbatim. It trapped only on a
+    #    literal NIL and otherwise returned the value unchanged, so a Some-box
+    #    comes back as ITSELF. This is the incident, replayed.
+    cat > "$_tmp/prefix.c" <<'EOF'
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (value == NIL_VALUE) {
+        serial_puts("nil");
+        rt_qemu_exit_failure();
+        for (;;) { }
+    }
+    return value;
+}
+EOF
+    _expect "pre-fix body must return the WRAPPER for Some" \
+        "$(run_cases "$_tmp/prefix.c")" \
+        "some_ord=verbatim some_hash=verbatim ok_hash=verbatim plain=verbatim none=verbatim"
+
+    # 2. must-PASS: the canonical semantics.
+    cat > "$_tmp/fixed.c" <<'EOF'
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (value == NIL_VALUE) { serial_puts("nil"); rt_qemu_exit_failure(); for (;;) { } }
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return value;
+    {
+        const uint32_t some_hash = 4053299545u, none_hash = 2371748697u;
+        const uint32_t ok_hash = 2405352012u, err_hash = 4200179024u;
+        if (e->enum_id == 1u) {
+            if (e->discriminant == 0u || e->discriminant == some_hash) return e->payload;
+            if (e->discriminant == 1u || e->discriminant == none_hash) {
+                serial_puts("none"); rt_qemu_exit_failure(); for (;;) { }
+            }
+            return value;
+        }
+        if (e->discriminant == ok_hash) return e->payload;
+        if (e->discriminant == err_hash) { serial_puts("err"); rt_qemu_exit_failure(); for (;;) { } }
+    }
+    return value;
+}
+EOF
+    _expect "fixed body must unwrap" "$(run_cases "$_tmp/fixed.c")" "$WANT"
+
+    # 3. HALF-FIX must-FAIL: hashes only, no ordinal arm. This is the specific
+    #    wrong fix a hash-only reading of the sibling header would produce, and
+    #    a guard that tested one discriminant form would wave it through.
+    cat > "$_tmp/halffix.c" <<'EOF'
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    if (value == NIL_VALUE) { serial_puts("nil"); rt_qemu_exit_failure(); for (;;) { } }
+    if (!IS_HEAP(value)) return value;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return value;
+    if (e->discriminant == 4053299545u) return e->payload;
+    if (e->discriminant == 2405352012u) return e->payload;
+    return value;
+}
+EOF
+    _expect "hash-only half-fix must still return the wrapper for an ordinal Some" \
+        "$(run_cases "$_tmp/halffix.c")" \
+        "some_ord=verbatim some_hash=payload ok_hash=payload plain=verbatim none=verbatim"
+
+    # 4. an unwrap in some OTHER function must not be scanned -- extraction is
+    #    scoped to rt_unwrap_or_trap's own body.
+    cat > "$_tmp/wrongfn.c" <<'EOF'
+RuntimeValue rt_enum_payload(RuntimeValue value)
+{
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    return e->payload;
+}
+EOF
+    _expect "missing rt_unwrap_or_trap must be ABSENT" "$(run_cases "$_tmp/wrongfn.c")" "ABSENT"
+
+    # 5. a missing FILE must also be ABSENT so the caller is forced to ERROR.
+    _expect "missing file must be ABSENT" "$(run_cases "$_tmp/nope.c")" "ABSENT"
+
+    # 6. a body that does not compile must be BUILD_ERROR, never a pass.
+    cat > "$_tmp/broken.c" <<'EOF'
+RuntimeValue rt_unwrap_or_trap(RuntimeValue value)
+{
+    return no_such_symbol_anywhere(value)
+}
+EOF
+    _expect "uncompilable body must be BUILD_ERROR" "$(run_cases "$_tmp/broken.c")" "BUILD_ERROR"
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-rv64-unwrap-or-trap-unwraps: ERROR — nothing was checked: selftest failed ($_n fixtures)"
+        exit 2
+    fi
+    echo "check-rv64-unwrap-or-trap-unwraps: selftest OK ($_n fixtures)"
+}
+
+ROOT="$REPO_ROOT"
+ONLY_SELFTEST=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --selftest) ONLY_SELFTEST=1 ;;
+        --root) ROOT=$2; shift ;;
+        -h|--help) echo "usage: $0 [--selftest] [--root DIR]"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+if [ -z "$HOSTCC" ]; then
+    echo "check-rv64-unwrap-or-trap-unwraps: ERROR — nothing was checked: no host C compiler (clang/cc/gcc)"
+    exit 2
+fi
+
+selftest
+[ "$ONLY_SELFTEST" -eq 1 ] && exit 0
+
+FILE="$ROOT/$TARGET_REL"
+GOT=$(run_cases "$FILE")
+case $GOT in
+    ABSENT)
+        echo "check-rv64-unwrap-or-trap-unwraps: ERROR — nothing was checked: no rt_unwrap_or_trap in $TARGET_REL"
+        exit 2 ;;
+    BUILD_ERROR)
+        echo "check-rv64-unwrap-or-trap-unwraps: ERROR — nothing was checked: rt_unwrap_or_trap body did not compile on the host"
+        exit 2 ;;
+esac
+
+if [ "$GOT" = "$WANT" ]; then
+    echo "check-rv64-unwrap-or-trap-unwraps: PASS — 5 case(s) executed, rt_unwrap_or_trap yields payloads and traps on None ($GOT)"
+    exit 0
+fi
+
+echo "offender=$TARGET_REL:rt_unwrap_or_trap"
+echo "  got:  $GOT"
+echo "  want: $WANT"
+echo ""
+echo "'verbatim' for a Some/Ok case means .unwrap() handed back the WRAPPER"
+echo "instead of the payload. In-guest that becomes a Some-box used as a struct"
+echo "receiver, and the first field load past its 32-byte slot faults."
+echo "check-rv64-unwrap-or-trap-unwraps: FAIL — 5 case(s) executed, rt_unwrap_or_trap does not unwrap correctly"
+exit 1

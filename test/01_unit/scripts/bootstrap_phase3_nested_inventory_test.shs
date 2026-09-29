@@ -1,0 +1,148 @@
+#!/bin/sh
+# Canonical regression for Phase 3 nested Git-module discovery.  It proves the
+# old root-only walk misses tests, then proves missing, mis-pinned, and untagged
+# nested states fail closed before the complete recursive inventory is admitted.
+
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper=$root/scripts/bootstrap/phase3-nested-test-inventory.shs
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/phase3-nested-inventory-test.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+fail() {
+  printf 'bootstrap_phase3_nested_inventory_test: FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+init_repo() {
+  git -C "$1" init -q
+  git -C "$1" config user.name phase3-nested-test
+  git -C "$1" config user.email phase3-nested-test@example.invalid
+}
+
+grand=$tmp/grand
+mkdir -p "$grand/test"
+init_repo "$grand"
+printf '# grand shell fixture\n' >"$grand/test/grand_test.shs"
+git -C "$grand" add test/grand_test.shs
+git -C "$grand" commit -qm 'add grand test'
+grand_pin=$(git -C "$grand" rev-parse HEAD)
+
+child=$tmp/child
+mkdir -p "$child/test"
+init_repo "$child"
+printf '# child Simple fixture\n' >"$child/test/child_spec.spl"
+git -C "$child" add test/child_spec.spl
+git -C "$child" commit -qm 'add child test'
+git -C "$child" -c protocol.file.allow=always submodule add -q \
+  "$grand" deps/grand
+git -C "$child" commit -qam 'add nested test module'
+printf 'pinned child fixture\n' >"$child/README.md"
+git -C "$child" add README.md
+git -C "$child" commit -qm 'advance child pin'
+child_pin=$(git -C "$child" rev-parse HEAD)
+
+source_root=$tmp/source
+mkdir -p "$source_root/test"
+init_repo "$source_root"
+printf '# root fixture\n' >"$source_root/test/root_spec.spl"
+git -C "$source_root" add test/root_spec.spl
+git -C "$source_root" commit -qm 'add root test'
+git -C "$source_root" -c protocol.file.allow=always submodule add -q \
+  "$child" modules/child
+
+policy=$tmp/policy.tsv
+receipt=$tmp/nested-preflight.tsv
+printf 'category\tpath\treason\n' >"$policy"
+
+# Red before: the historical root/test walk sees one row and silently misses
+# both nested tests.  Canonical discovery must reject the uninitialized grand
+# module instead of admitting that partial inventory.
+[ "$(find "$source_root/test" -type f \( -name '*_spec.spl' -o -name '*_test.spl' \) | wc -l | tr -d ' ')" = 1 ] ||
+  fail root-only-precondition
+if sh "$helper" discover "$source_root" "$policy" "$receipt" \
+    >"$tmp/missing.tsv" 2>"$tmp/missing.err"; then
+  fail uninitialized-recursive-module-was-admitted
+fi
+[ ! -e "$receipt" ] || fail uninitialized-module-emitted-receipt
+grep -Fq 'nested-module-uninitialized: modules/child/deps/grand' \
+  "$tmp/missing.err" || {
+    cat "$tmp/missing.err" >&2
+    fail uninitialized-module-diagnostic-missing
+  }
+
+# Green after: materializing the exact pinned recursive closure discovers both
+# rows, including a shell test, in stable relative-path order.
+git -C "$source_root" -c protocol.file.allow=always submodule update \
+  --init --recursive -q
+sh "$helper" discover "$source_root" "$policy" "$receipt" >"$tmp/green.tsv"
+grep -Fxq 'nested	simple-spec	nested	execute	modules/child/test/child_spec.spl	-' \
+  "$tmp/green.tsv" || fail child-simple-spec-not-executed
+grep -Fxq 'nested	shell-unit	nested	execute	modules/child/deps/grand/test/grand_test.shs	-' \
+  "$tmp/green.tsv" || fail recursive-shell-test-not-executed
+[ "$(tail -n +2 "$tmp/green.tsv" | wc -l | tr -d ' ')" = 2 ] ||
+  fail recursive-inventory-count-not-exact
+{
+  printf 'path\tpinned_sha\tactual_sha\tpolicy_category\tpolicy_reason\n'
+  printf 'modules/child\t%s\t%s\t-\t-\n' "$child_pin" "$child_pin"
+  printf 'modules/child/deps/grand\t%s\t%s\t-\t-\n' "$grand_pin" "$grand_pin"
+} >"$tmp/expected-receipt.tsv"
+cmp -s "$tmp/expected-receipt.tsv" "$receipt" ||
+  fail recursive-pin-receipt-not-exact
+
+# A populated checkout at a different commit is ambiguous authority, even if
+# its own tests happen to look equivalent.
+git -C "$source_root/modules/child" checkout -q HEAD^
+if sh "$helper" discover "$source_root" "$policy" "$receipt" \
+    >"$tmp/mismatch.tsv" 2>"$tmp/mismatch.err"; then
+  fail mismatched-pin-was-admitted
+fi
+[ ! -e "$receipt" ] || fail mismatched-pin-left-admitted-receipt
+grep -Fq 'nested-module-pin-mismatch: modules/child' "$tmp/mismatch.err" ||
+  fail mismatched-pin-diagnostic-missing
+git -C "$source_root/modules/child" checkout -q "$child_pin"
+
+# Empty nested modules cannot create an implicit skip.  A required no-test
+# module remains an executable exact-pin contract; only explicitly optional or
+# platform-ineligible modules can produce a skip row.
+empty=$tmp/empty
+mkdir -p "$empty"
+init_repo "$empty"
+printf 'fixture\n' >"$empty/README.md"
+git -C "$empty" add README.md
+git -C "$empty" commit -qm 'empty test surface'
+empty_pin=$(git -C "$empty" rev-parse HEAD)
+git -C "$source_root" -c protocol.file.allow=always submodule add -q \
+  "$empty" modules/empty
+if sh "$helper" discover "$source_root" "$policy" \
+    >"$tmp/untagged.tsv" 2>"$tmp/untagged.err"; then
+  fail untagged-empty-module-was-skipped
+fi
+grep -Fq 'nested-module-empty-without-policy: modules/empty' \
+  "$tmp/untagged.err" || fail untagged-empty-diagnostic-missing
+
+printf 'category\tpath\treason\nrequired-no-tests\tmodules/empty\tdocumentation-only-module\n' \
+  >"$policy"
+sh "$helper" discover "$source_root" "$policy" "$receipt" >"$tmp/policy-green.tsv"
+grep -Fxq 'nested	required-no-tests	nested	execute	modules/empty	-' \
+  "$tmp/policy-green.tsv" || fail required-no-tests-execution-contract-missing
+awk -F '\t' -v pin="$empty_pin" \
+  '$1 == "modules/empty" && $2 == pin && $3 == pin && \
+   $4 == "required-no-tests" && $5 == "documentation-only-module" { found=1 } \
+   END { exit !found }' "$receipt" || fail required-no-tests-receipt-policy-missing
+
+# A stale skip is another false negative: it must fail when it no longer maps
+# to an authoritative gitlink.
+printf '%s\n' \
+  'category	path	reason' \
+  'required-no-tests	modules/empty	documentation-only-module' \
+  'optional-no-tests	modules/ghost	documentation-only-module' >"$policy"
+if sh "$helper" discover "$source_root" "$policy" \
+    >"$tmp/stale.tsv" 2>"$tmp/stale.err"; then
+  fail stale-skip-was-admitted
+fi
+grep -Fq 'policy-stale-or-unused: modules/ghost' "$tmp/stale.err" ||
+  fail stale-skip-diagnostic-missing
+
+printf 'bootstrap_phase3_nested_inventory_test: PASS\n'

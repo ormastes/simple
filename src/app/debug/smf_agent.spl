@@ -2,13 +2,17 @@
 # Implements DebugBackend for debugging SMF (Simple Module Format) bytecode.
 # Uses ptrace SFFI for process control and SMF source maps for line mapping.
 
-use compiler.core.{String, Result, Nil, Bool}
 use app.debug.coordinator.{DebugBackend, FrameInfo, VarInfo, LocationInfo}
-use std.sffi.debug.{
-    rt_ptrace_attach, rt_ptrace_detach, rt_ptrace_continue,
-    rt_ptrace_single_step, rt_ptrace_read_memory, rt_ptrace_write_memory,
-    rt_ptrace_get_registers, rt_ptrace_wait_stop
-}
+
+# Ptrace SFFI declarations (platform-abstracted in Rust)
+extern fn rt_ptrace_attach(pid: i64) -> i64
+extern fn rt_ptrace_detach(pid: i64) -> i64
+extern fn rt_ptrace_continue(pid: i64) -> i64
+extern fn rt_ptrace_single_step(pid: i64) -> i64
+extern fn rt_ptrace_read_memory(pid: i64, addr: i64, size: i64) -> [i64]
+extern fn rt_ptrace_write_memory(pid: i64, addr: i64, data: i64) -> i64
+extern fn rt_ptrace_get_registers(pid: i64) -> Dict<String, i64>
+extern fn rt_ptrace_wait_stop(pid: i64) -> i64
 
 # SMF source map entry
 class SourceMapEntry:
@@ -114,18 +118,18 @@ impl DebugBackend for SmfBackend:
 
     fn remove_breakpoint(file: String, line: Int) -> Result<Nil, String>:
         val key = "{file}:{line}"
-        # NOTE: Dict.get() returns a still-boxed value for i64 dicts under native
-        # codegen — see doc/07_guide/language/dict_native_pitfalls.md
-        if self.breakpoint_addrs.contains_key(key):
-            val addr = self.breakpoint_addrs[key]
-            # Restore original byte
-            if self.original_bytes.contains_key(addr):
-                val orig = self.original_bytes[addr]
-                rt_ptrace_write_memory(self.pid, addr, orig)
-            self.breakpoint_addrs.remove(key)
-            Ok(nil)
-        else:
-            Err("No breakpoint at {key}")
+        match self.breakpoint_addrs.get(key):
+            case Some(addr):
+                # Restore original byte
+                match self.original_bytes.get(addr):
+                    case Some(orig):
+                        rt_ptrace_write_memory(self.pid, addr, orig)
+                    case nil:
+                        pass
+                self.breakpoint_addrs.remove(key)
+                Ok(nil)
+            case nil:
+                Err("No breakpoint at {key}")
 
     fn stack_trace() -> Result<[FrameInfo], String>:
         # Read registers, walk stack frames using SMF frame layout

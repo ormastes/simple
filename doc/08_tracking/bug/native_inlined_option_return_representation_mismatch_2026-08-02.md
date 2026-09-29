@@ -211,3 +211,7 @@ The `??` Some-arm exhibits the same symptom but was not pinned to a line.
 NOT PATCHED DELIBERATELY: this is the Rust seed, a bootstrap is live, and every
 `if val` in the compiler goes through this arm. Reproduction + localization only.
 Probe: scratchpad `p_opt3.spl` (see CRIT C4 report).
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Record explicitly marks this TRACKED, NOT PARALLEL-CLAIMABLE with a named fix owner. No change made.

@@ -1,7 +1,6 @@
 # Scoping: Cranelift JIT lambda/closure ABI defect
 
-Status: DUPLICATE of jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Status: **scoping only — not fixed**. This document enumerates the work a real
 fix requires; it does not change any source file.
 
 Baseline: `src/compiler_rust/compiler/src/codegen/jit.rs` and

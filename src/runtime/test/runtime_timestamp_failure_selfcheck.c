@@ -1,3 +1,11 @@
+/* Windows: runtime_timestamp.c takes its `#ifdef _WIN32` branch and never calls clock_gettime,
+ * so the behaviour exercised below does not exist on this platform.  The file is
+ * still fed to the compiler by scripts/check/check-c-runtime-compiles-push.shs and
+ * still proves it parses; it compiles to a well-formed no-op rather than being
+ * excluded from the scan.  The POSIX body below is unchanged. */
+#if defined(_WIN32)
+int main(void) { return 0; }
+#else
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
@@ -25,3 +33,4 @@ int main(void) {
     if (rt_progress_tls_is_initialized()) return 5;
     return 0;
 }
+#endif /* !_WIN32 */

@@ -1,4 +1,8 @@
 # Interpreter: `if val <name> = ...` local binding misresolved to a co-compiled global `fn <name>`
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-19
 - Status: WORKED AROUND (rename at one site); interpreter defect OPEN
@@ -37,3 +41,4 @@ Locals (including `if val` pattern bindings) must always win name resolution
 over co-compiled globals from other modules. This is the same resolution bug
 family as the CSSValue enum collision
 (`doc/08_tracking/bug/cross_module_cssvalue_enum_collision_2026-08-19.md`).
+

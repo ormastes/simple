@@ -1,0 +1,306 @@
+"""Adversarial value checks for executable mapping identity v1.
+
+These cases exercise only pointer-free common vocabulary.  They do not claim a
+mapper allocation, final-unpin reservation, native release, registry commit,
+concurrent race, or activation result.
+"""
+
+use std.spec.*
+use std.common.structural.parallel_commit.executable_mapping_receipt.{
+    EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1,
+    EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES,
+    EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES,
+    EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES,
+    ExecutableMappingProducerKindV1,
+    ExecutableMappingReleaseOutcomeV1,
+    ExecutableMappingReceiptV1,
+    executable_mapping_receipt_v1,
+    executable_mapping_receipt_v1_well_formed,
+    executable_mapping_receipt_v1_same_identity,
+    executable_mapping_release_result_v1,
+    executable_mapping_release_result_v1_well_formed,
+    executable_mapping_release_result_v1_matches,
+}
+
+fn mapping_receipt() -> ExecutableMappingReceiptV1:
+    executable_mapping_receipt_v1(
+        ExecutableMappingProducerKindV1.SegmentMapper,
+        "segment-mapper-instance-17",
+        "module-owner-a",
+        "text-segment-0",
+        7,
+        4096,
+        1,
+    )
+
+fn repeated_identity_byte(count: i64) -> text:
+    var value = ""
+    var i: i64 = 0
+    while i < count:
+        value = value + "x"
+        i = i + 1
+    value
+
+fn receipt_with(
+        producer_kind: ExecutableMappingProducerKindV1,
+        mapper_instance_id: text,
+        owner_id: text,
+        mapping_key: text,
+        generation: i64,
+        mapped_bytes: i64,
+        segment_count: i64) -> ExecutableMappingReceiptV1:
+    executable_mapping_receipt_v1(
+        producer_kind,
+        mapper_instance_id,
+        owner_id,
+        mapping_key,
+        generation,
+        mapped_bytes,
+        segment_count,
+    )
+
+describe "executable mapping identity v1":
+    it "accepts one complete pointer-free producer coordinate":
+        val receipt = mapping_receipt()
+        expect(receipt.schema).to_equal(EXECUTABLE_MAPPING_RECEIPT_SCHEMA_V1)
+        expect(receipt.mapper_instance_id).to_equal("segment-mapper-instance-17")
+        expect(receipt.owner_id).to_equal("module-owner-a")
+        expect(receipt.mapping_key).to_equal("text-segment-0")
+        expect(executable_mapping_receipt_v1_well_formed(receipt)).to_equal(true)
+        expect(executable_mapping_receipt_v1_same_identity(
+            receipt, receipt)).to_equal(true)
+
+    it "rejects an equal owner key and generation from another mapper instance":
+        val expected = mapping_receipt()
+        val foreign_instance = receipt_with(
+            ExecutableMappingProducerKindV1.SegmentMapper,
+            "segment-mapper-instance-18",
+            expected.owner_id,
+            expected.mapping_key,
+            expected.mapping_generation,
+            expected.mapped_bytes,
+            expected.segment_count,
+        )
+        expect(executable_mapping_receipt_v1_well_formed(
+            foreign_instance)).to_equal(true)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, foreign_instance)).to_equal(false)
+
+    it "rejects every forged producer or owner coordinate":
+        val expected = mapping_receipt()
+        val producer = receipt_with(
+            ExecutableMappingProducerKindV1.SharedExecMapper,
+            expected.mapper_instance_id, expected.owner_id,
+            expected.mapping_key, expected.mapping_generation,
+            expected.mapped_bytes, expected.segment_count)
+        val owner = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            "module-owner-b", expected.mapping_key,
+            expected.mapping_generation, expected.mapped_bytes,
+            expected.segment_count)
+        val key = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, "text-segment-1",
+            expected.mapping_generation, expected.mapped_bytes,
+            expected.segment_count)
+        val generation = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation + 1, expected.mapped_bytes,
+            expected.segment_count)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, producer)).to_equal(false)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, owner)).to_equal(false)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, key)).to_equal(false)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, generation)).to_equal(false)
+
+    it "rejects malformed schema identity and accounting words":
+        val expected = mapping_receipt()
+        val schema = ExecutableMappingReceiptV1(
+            schema: 2,
+            producer_kind: expected.producer_kind,
+            mapper_instance_id: expected.mapper_instance_id,
+            owner_id: expected.owner_id,
+            mapping_key: expected.mapping_key,
+            mapping_generation: expected.mapping_generation,
+            mapped_bytes: expected.mapped_bytes,
+            segment_count: expected.segment_count)
+        val empty_instance = receipt_with(
+            expected.producer_kind, "", expected.owner_id,
+            expected.mapping_key, expected.mapping_generation,
+            expected.mapped_bytes, expected.segment_count)
+        val empty_owner = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id, "",
+            expected.mapping_key, expected.mapping_generation,
+            expected.mapped_bytes, expected.segment_count)
+        val empty_key = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, "", expected.mapping_generation,
+            expected.mapped_bytes, expected.segment_count)
+        val zero_generation = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key, 0,
+            expected.mapped_bytes, expected.segment_count)
+        val zero_bytes = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation, 0, expected.segment_count)
+        val zero_segments = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation, expected.mapped_bytes, 0)
+        expect(executable_mapping_receipt_v1_well_formed(schema)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(
+            empty_instance)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(empty_owner)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(empty_key)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(
+            zero_generation)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(zero_bytes)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(
+            zero_segments)).to_equal(false)
+
+    it "rejects identities and keys beyond their frozen byte limits":
+        val expected = mapping_receipt()
+        val long_instance = receipt_with(
+            expected.producer_kind,
+            repeated_identity_byte(
+                EXECUTABLE_MAPPING_RECEIPT_MAX_INSTANCE_BYTES + 1),
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation, expected.mapped_bytes,
+            expected.segment_count)
+        val long_owner = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            repeated_identity_byte(
+                EXECUTABLE_MAPPING_RECEIPT_MAX_OWNER_BYTES + 1),
+            expected.mapping_key, expected.mapping_generation,
+            expected.mapped_bytes, expected.segment_count)
+        val long_key = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id,
+            repeated_identity_byte(
+                EXECUTABLE_MAPPING_RECEIPT_MAX_KEY_BYTES + 1),
+            expected.mapping_generation, expected.mapped_bytes,
+            expected.segment_count)
+        expect(executable_mapping_receipt_v1_well_formed(
+            long_instance)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(
+            long_owner)).to_equal(false)
+        expect(executable_mapping_receipt_v1_well_formed(
+            long_key)).to_equal(false)
+
+    it "treats accounting extents as part of exact receipt identity":
+        val expected = mapping_receipt()
+        val forged_bytes = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation, expected.mapped_bytes + 1,
+            expected.segment_count)
+        val forged_segments = receipt_with(
+            expected.producer_kind, expected.mapper_instance_id,
+            expected.owner_id, expected.mapping_key,
+            expected.mapping_generation, expected.mapped_bytes,
+            expected.segment_count + 1)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, forged_bytes)).to_equal(false)
+        expect(executable_mapping_receipt_v1_same_identity(
+            expected, forged_segments)).to_equal(false)
+
+    it "accepts exact released accounting and a positive attempt identity":
+        val receipt = mapping_receipt()
+        val result = executable_mapping_release_result_v1(
+            receipt,
+            ExecutableMappingReleaseOutcomeV1.Released,
+            receipt.mapped_bytes,
+            receipt.segment_count,
+            31,
+        )
+        expect(executable_mapping_release_result_v1_well_formed(
+            result)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            result, receipt, 31)).to_equal(true)
+        expect(executable_mapping_release_result_v1_matches(
+            result, receipt, 32)).to_equal(false)
+
+    it "rejects forged release accounting and foreign receipt identity":
+        val receipt = mapping_receipt()
+        val short_release = executable_mapping_release_result_v1(
+            receipt,
+            ExecutableMappingReleaseOutcomeV1.Released,
+            receipt.mapped_bytes - 1,
+            receipt.segment_count,
+            41)
+        val failure_with_release = executable_mapping_release_result_v1(
+            receipt,
+            ExecutableMappingReleaseOutcomeV1.NativeReleaseFailed,
+            receipt.mapped_bytes,
+            receipt.segment_count,
+            41)
+        val zero_attempt = executable_mapping_release_result_v1(
+            receipt,
+            ExecutableMappingReleaseOutcomeV1.NotFound,
+            0,
+            0,
+            0)
+        val foreign = receipt_with(
+            receipt.producer_kind,
+            "segment-mapper-instance-18",
+            receipt.owner_id,
+            receipt.mapping_key,
+            receipt.mapping_generation,
+            receipt.mapped_bytes,
+            receipt.segment_count)
+        val foreign_result = executable_mapping_release_result_v1(
+            foreign,
+            ExecutableMappingReleaseOutcomeV1.NotFound,
+            0,
+            0,
+            41)
+        expect(executable_mapping_release_result_v1_well_formed(
+            short_release)).to_equal(false)
+        expect(executable_mapping_release_result_v1_well_formed(
+            failure_with_release)).to_equal(false)
+        expect(executable_mapping_release_result_v1_well_formed(
+            zero_attempt)).to_equal(false)
+        expect(executable_mapping_release_result_v1_matches(
+            foreign_result, receipt, 41)).to_equal(false)
+
+    it "keeps AlreadyReleased structural and reports no newly released bytes":
+        val receipt = mapping_receipt()
+        val replay_shape = executable_mapping_release_result_v1(
+            receipt,
+            ExecutableMappingReleaseOutcomeV1.AlreadyReleased,
+            0,
+            0,
+            51)
+        val replay_with_duplicate_accounting =
+            executable_mapping_release_result_v1(
+                receipt,
+                ExecutableMappingReleaseOutcomeV1.AlreadyReleased,
+                receipt.mapped_bytes,
+                receipt.segment_count,
+                51)
+        expect(executable_mapping_release_result_v1_well_formed(
+            replay_shape)).to_equal(true)
+        expect(executable_mapping_release_result_v1_well_formed(
+            replay_with_duplicate_accounting)).to_equal(false)
+
+    it "keeps every rejection outcome zero-accounting and structurally distinct":
+        val receipt = mapping_receipt()
+        val outcomes = [
+            ExecutableMappingReleaseOutcomeV1.NotFound,
+            ExecutableMappingReleaseOutcomeV1.OwnerMismatch,
+            ExecutableMappingReleaseOutcomeV1.GenerationMismatch,
+            ExecutableMappingReleaseOutcomeV1.FinalUnpinRequired,
+            ExecutableMappingReleaseOutcomeV1.NativeReleaseFailed,
+        ]
+        for outcome in outcomes:
+            val result = executable_mapping_release_result_v1(
+                receipt, outcome, 0, 0, 61)
+            expect(executable_mapping_release_result_v1_well_formed(
+                result)).to_equal(true)
+            expect(executable_mapping_release_result_v1_matches(
+                result, receipt, 61)).to_equal(true)

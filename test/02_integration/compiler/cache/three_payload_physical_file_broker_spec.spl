@@ -1,0 +1,221 @@
+# Purpose: actual physical-file evidence for the inactive L7/G5 broker slice.
+# REQ-CSM-006 REQ-CSM-017 REQ-CSM-027 NFR-CSM-010
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use compiler.common.cache_contract.physical_tld_v1.{
+    TldPayloadRoleV1, TldSectionRefV1, PhysicalTldHeaderV1,
+    physical_tld_section_table_digest_v1
+}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{encode_physical_tld_v1}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadFallbackV1, ThreePayloadSemanticRefV2,
+    closure_coverage_dimension_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, PreparedThreePayloadV2, seal_three_payload_closure_v2
+}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{ThreePayloadWorkerPolicyV1}
+use compiler.driver.cache.worker.three_payload_physical_file_broker_v1.{
+    ThreePayloadPhysicalFileSetV1, ThreePayloadControlIoObservationV1,
+    read_three_payload_physical_files_v1,
+    validate_three_payload_control_io_observation_v1,
+    three_payload_physical_worker_activation_available_v1,
+    three_payload_physical_parse_preflight_available_v1
+}
+
+val FIXTURE_ROOT = "build/test/three_payload_physical_file_broker"
+
+fn physical_broker_digest(label: text) -> text: sha256_text(label)
+
+fn physical_broker_coverage_roots() -> [ClosureCoverageRootV1]:
+    var roots: [ClosureCoverageRootV1] = []
+    var index: i64 = 0
+    while index < 9:
+        roots.push(ClosureCoverageRootV1(dimension: closure_coverage_dimension_v1(index),
+            root_digest: physical_broker_digest("physical-coverage-{index}"),
+            coverage: SemanticCoverageV1.Complete))
+        index = index + 1
+    roots
+
+fn physical_broker_tld(role: TldPayloadRoleV1, label: text,
+                       body: [u8]) -> (PhysicalTldHeaderV1, [u8]):
+    val section = TldSectionRefV1(role: role, section_index: 0,
+        kind: "semantic-body", semantic_object_digest: sha256_u8_hex(body),
+        offset: 0, stored_bytes: body.len(), decoded_bytes: body.len(),
+        encoding_profile: "raw-v1")
+    val sections = [section]
+    val header = PhysicalTldHeaderV1(schema: 1, role: role,
+        semantic_record_digest: physical_broker_digest(label),
+        section_table_digest: physical_tld_section_table_digest_v1(sections),
+        payload_bytes: body.len(), sections: sections)
+    (header, encode_physical_tld_v1(header, [body]).unwrap())
+
+fn physical_broker_semantic_refs(init_header: PhysicalTldHeaderV1) -> [ThreePayloadSemanticRefV2]:
+    val section = init_header.sections[0]
+    # Canonical order is stable_entity_id followed by semantic-kind rank.
+    [ThreePayloadSemanticRefV2(kind: ThreePayloadSemanticRefKindV1.AspectCallable,
+         stable_entity_id: "aspect.before", callable_signature_digest: physical_broker_digest("aspect-signature"),
+         effect_digest: physical_broker_digest("aspect-effects"), body_or_object_digest: physical_broker_digest("aspect-object"),
+         embedded: nil, selection_contract_digest: physical_broker_digest("aspect-order-selection")),
+     ThreePayloadSemanticRefV2(kind: ThreePayloadSemanticRefKindV1.MacroExpansion,
+         stable_entity_id: "macro.expanded", callable_signature_digest: physical_broker_digest("macro-signature"),
+         effect_digest: physical_broker_digest("macro-effects"), body_or_object_digest: section.semantic_object_digest,
+         embedded: Some(section), selection_contract_digest: physical_broker_digest("macro-selection")),
+     ThreePayloadSemanticRefV2(kind: ThreePayloadSemanticRefKindV1.TraitCallable,
+         stable_entity_id: "trait.call", callable_signature_digest: physical_broker_digest("trait-signature"),
+         effect_digest: physical_broker_digest("trait-effects"), body_or_object_digest: physical_broker_digest("trait-object"),
+         embedded: nil, selection_contract_digest: physical_broker_digest("trait-selection"))]
+
+fn physical_broker_prepared(warm: bool) -> PreparedThreePayloadV2:
+    val source = text_to_bytes("fn value() -> i64: 7\n")
+    val init_body = text_to_bytes("verified macro expansion")
+    val (init_header, init_bytes) = physical_broker_tld(
+        TldPayloadRoleV1.PackageInitTld, "physical-init", init_body)
+    var prior_digest: text? = nil
+    var prior_bytes: [u8]? = nil
+    var prior_header: PhysicalTldHeaderV1? = nil
+    if warm:
+        val (header, bytes) = physical_broker_tld(TldPayloadRoleV1.PriorModuleTld,
+            "physical-prior", text_to_bytes("prior module summary"))
+        prior_digest = Some(sha256_u8_hex(bytes))
+        prior_bytes = Some(bytes)
+        prior_header = Some(header)
+    val references = physical_broker_semantic_refs(init_header)
+    seal_three_payload_closure_v2(
+        ThreePayloadSnapshotV2(snapshot_digest: physical_broker_digest("physical-snapshot"),
+            source_digest: sha256_u8_hex(source), source_bytes: source),
+        ThreePayloadParentGenerationV2(generation_digest: physical_broker_digest("physical-parent"),
+            prior_tld_digest: prior_digest, prior_tld_bytes: prior_bytes,
+            prior_tld_header: prior_header),
+        ThreePayloadModuleClosureV2(module_id: "physical-fixture",
+            init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+            init_tld_header: init_header, semantic_refs: references,
+            coverage_roots: physical_broker_coverage_roots()),
+        ThreePayloadVerifiedObjectsV2(compiler_semantics_digest: physical_broker_digest("physical-semantics"),
+            consumed_inputs_digest: physical_broker_digest("physical-inputs"),
+            verified_semantic_object_digests: [init_header.sections[0].semantic_object_digest,
+                physical_broker_digest("trait-object"), physical_broker_digest("aspect-object")]),
+        ThreePayloadPackBoundsV2(max_sections: 8, max_payload_bytes: 1048576,
+            max_decode_bytes: 1048576)).unwrap()
+
+fn physical_broker_policy() -> ThreePayloadWorkerPolicyV1:
+    ThreePayloadWorkerPolicyV1(executor_digest: physical_broker_digest("physical-broker"),
+        max_read_bytes: 1048576, max_decode_bytes: 1048576,
+        max_decoded_sections: 8, request_external_input: false,
+        request_reverse_reference: false)
+
+fn physical_broker_write_files(value: PreparedThreePayloadV2) -> ThreePayloadPhysicalFileSetV1:
+    if not dir_create_all(FIXTURE_ROOT): fail("fixture directory unavailable")
+    val source_path = FIXTURE_ROOT + "/module.spl"
+    val prior_path = FIXTURE_ROOT + "/module.tld"
+    val init_path = FIXTURE_ROOT + "/__init__.tld"
+    if not file_write_bytes(source_path, value.source_bytes): fail("source fixture write failed")
+    match value.prior_tld_bytes:
+        case Some(bytes):
+            if not file_write_bytes(prior_path, bytes): fail("prior TLD fixture write failed")
+        case nil: pass
+    if not file_write_bytes(init_path, value.init_tld_bytes): fail("init TLD fixture write failed")
+    ThreePayloadPhysicalFileSetV1(source_path: source_path,
+        prior_tld_path: if value.prior_tld_bytes.is_some(): Some(prior_path) else: nil,
+        effective_init_tld_path: init_path)
+
+describe "Three-payload physical-file broker":
+    it "performs exactly cold-two and warm-three bounded facade reads":
+        step("Read source and effective initializer for cold, then add the matching prior TLD for warm")
+        val cold = physical_broker_prepared(false)
+        val warm = physical_broker_prepared(true)
+        val cold_evidence = read_three_payload_physical_files_v1(
+            physical_broker_write_files(cold), cold, cold.seal, physical_broker_policy()).unwrap()
+        val warm_evidence = read_three_payload_physical_files_v1(
+            physical_broker_write_files(warm), warm, warm.seal, physical_broker_policy()).unwrap()
+        expect(cold_evidence.physical.ordinary_input_count).to_equal(2)
+        expect(cold_evidence.physical.successful_bounded_facade_read_operations).to_equal(2)
+        expect(cold_evidence.physical.successful_file_read_bytes).to_equal(cold.seal.payload_bytes)
+        expect(cold_evidence.physical.distinct_prior).to_equal(0)
+        expect(cold_evidence.prepared_snapshot).to_equal(cold)
+        expect(warm_evidence.physical.ordinary_input_count).to_equal(3)
+        expect(warm_evidence.physical.successful_bounded_facade_read_operations).to_equal(3)
+        expect(warm_evidence.physical.successful_file_read_bytes).to_equal(warm.seal.payload_bytes)
+        expect(warm_evidence.physical.distinct_prior).to_equal(1)
+        expect(warm_evidence.physical.rr_file_reads).to_equal(0)
+        expect(warm_evidence.prepared_snapshot).to_equal(warm)
+
+    it "keeps untrusted catalog and pin observations outside payload evidence [importance=critical; importance_weight=3]":
+        step("Keep diagnostic control counts separate from semantic payload evidence")
+        val cold = physical_broker_prepared(false)
+        val control = ThreePayloadControlIoObservationV1(catalog_read_operations: 1,
+            generation_pin_read_operations: 1, catalog_read_bytes: 128,
+            generation_pin_read_bytes: 64,
+            owner_receipt_digest: physical_broker_digest("control-owner"))
+        val payload = read_three_payload_physical_files_v1(
+            physical_broker_write_files(cold), cold, cold.seal,
+            physical_broker_policy()).unwrap()
+        expect(payload.physical.ordinary_input_count).to_equal(2)
+        expect(payload.physical.rr_file_reads).to_equal(0)
+        expect(validate_three_payload_control_io_observation_v1(control)).to_be(true)
+
+        var forged = control
+        forged.catalog_read_operations = 0
+        expect(validate_three_payload_control_io_observation_v1(forged)).to_be(false)
+        expect(three_payload_physical_worker_activation_available_v1()).to_be(false)
+
+    it "keeps macro bodies and typed trait/aspect calls inside sealed lazy references":
+        step("Count semantic references separately without opening implementation files")
+        val warm = physical_broker_prepared(true)
+        val evidence = read_three_payload_physical_files_v1(
+            physical_broker_write_files(warm), warm, warm.seal, physical_broker_policy()).unwrap()
+        expect(evidence.semantic.macro_body_refs).to_equal(1)
+        expect(evidence.semantic.generic_body_refs).to_equal(0)
+        expect(evidence.semantic.trait_default_body_refs).to_equal(0)
+        expect(evidence.semantic.trait_callable_refs).to_equal(1)
+        expect(evidence.semantic.aspect_callable_refs).to_equal(1)
+        expect(evidence.semantic.semantic_object_file_reads).to_equal(0)
+        expect(warm.seal.semantic_refs[0].embedded.is_none()).to_equal(true)
+        expect(warm.seal.semantic_refs[2].embedded.is_none()).to_equal(true)
+        expect(warm.seal.semantic_refs[0].callable_signature_digest.len()).to_equal(64)
+        expect(warm.seal.semantic_refs[0].effect_digest.len()).to_equal(64)
+        expect(warm.seal.semantic_refs[0].selection_contract_digest.len()).to_equal(64)
+        expect(evidence.physical.successful_bounded_facade_read_operations).to_equal(3)
+
+    it "rejects RR role confusion and keeps ordinary activation closed":
+        step("Offer an RR path as source and request reverse-reference access")
+        val cold = physical_broker_prepared(false)
+        val valid_files = physical_broker_write_files(cold)
+        val rr_path = FIXTURE_ROOT + "/module.rr"
+        if not file_write_bytes(rr_path, text_to_bytes("coordinator-only")):
+            fail("RR fixture write failed")
+        val disguised = ThreePayloadPhysicalFileSetV1(source_path: rr_path,
+            prior_tld_path: nil, effective_init_tld_path: valid_files.effective_init_tld_path)
+        match read_three_payload_physical_files_v1(disguised, cold, cold.seal, physical_broker_policy()):
+            case Err(ThreePayloadFallbackV1.ExternalFacetRequired): pass
+            case _: fail("RR path crossed the ordinary payload role gate")
+        var rr_policy = physical_broker_policy()
+        rr_policy.request_reverse_reference = true
+        match read_three_payload_physical_files_v1(valid_files, cold, cold.seal, rr_policy):
+            case Err(ThreePayloadFallbackV1.ExternalFacetRequired): pass
+            case _: fail("worker accepted coordinator-only RR access")
+        var bounded = physical_broker_policy()
+        bounded.max_read_bytes = cold.seal.payload_bytes - 1
+        match read_three_payload_physical_files_v1(valid_files, cold, cold.seal, bounded):
+            case Err(ThreePayloadFallbackV1.BoundsExceeded): pass
+            case _: fail("aggregate physical input budget did not fail closed")
+        val warm = physical_broker_prepared(true)
+        val warm_files = physical_broker_write_files(warm)
+        val role_confused = ThreePayloadPhysicalFileSetV1(
+            source_path: warm_files.source_path,
+            prior_tld_path: Some(warm_files.effective_init_tld_path),
+            effective_init_tld_path: warm_files.effective_init_tld_path)
+        match read_three_payload_physical_files_v1(
+                role_confused, warm, warm.seal, physical_broker_policy()):
+            case Err(ThreePayloadFallbackV1.ExternalFacetRequired): pass
+            case _: fail("initializer path was accepted as the prior module TLD role")
+        expect(three_payload_physical_worker_activation_available_v1()).to_equal(false)
+        expect(three_payload_physical_parse_preflight_available_v1()).to_equal(true)

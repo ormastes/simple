@@ -1,0 +1,276 @@
+#!/bin/sh
+# Class-prevention contract for bootstrap-from-scratch.sh argument parsing.
+#
+# Every option is DERIVED from the script's own option loop, so an option added
+# later is covered without editing this test:
+#   - a case label `--x=*)` with no bare `--x)` sibling is a REQUIRED-value
+#     option: `--x=V` and `--x V` must parse to identical state, and `--x`
+#     with no value (end of argv, or followed by another option) must exit 2;
+#   - a label `--x=*)` WITH a bare `--x)` sibling is an OPTIONAL-value option:
+#     `--x=V` must take V, and `--x word` must NOT swallow `word` (it is then a
+#     stray argument and must be rejected);
+#   - every other label is a flag and must parse on its own;
+#   - unknown flags and stray words exit 2 with `error: unknown argument:` on
+#     stderr, never a usage dump;
+#   - the --help text must advertise exactly the derived required (--x=<v>) and
+#     optional (--x[=<v>]) value options, and `--help` exits 0.
+#
+# The option matrix runs in-process on an extracted copy of the parser, so no
+# build can start. Two black-box probes of the real script exit at parsing
+# (`--help`, and an unknown flag paired with --stop-after-stage2 so the
+# strategy supervisor is bypassed). `--selftest` proves the checker detects
+# the bug class on fixture parsers; it runs before every real scan and is
+# fatal.
+set -u
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+driver=$root/scripts/bootstrap/bootstrap-from-scratch.sh
+work=$(mktemp -d "${TMPDIR:-/tmp}/bfs-arg-contract.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+# check_parser FILE DIR: run the derived contract over FILE, using DIR as
+# scratch. Prints diagnostics on stderr; sets cp_checked and cp_failures.
+check_parser() {
+  cp_file=$1 cp_dir=$2
+  cp_checked=0 cp_failures=0
+  mkdir -p "$cp_dir"
+  awk '/^# -- argv-normalize begin/ {c=1} c {print} /^# -- argv-normalize end/ {c=0}' \
+    "$cp_file" >"$cp_dir/normalize.shs"
+  awk '/^# -- argv-parse begin/ {c=1} c {print} /^# -- argv-parse end/ {c=0}' \
+    "$cp_file" >"$cp_dir/parse.shs"
+  awk '/^usage\(\) \{/ {c=1; next} c && /^EOF$/ {exit} c {print}' \
+    "$cp_file" >"$cp_dir/usage.txt"
+  if [ ! -s "$cp_dir/normalize.shs" ] || [ ! -s "$cp_dir/parse.shs" ]; then
+    echo "  $cp_file: argv-normalize / argv-parse markers missing" >&2
+    cp_failures=1
+    return
+  fi
+  cp_labels=$(awk '/^    -[^ ]*\)$/ { sub(/\)$/, ""); n = split($0, a, "|");
+      for (i = 1; i <= n; i++) { gsub(/ /, "", a[i]); print a[i] } }' "$cp_dir/parse.shs")
+  cp_vars=$(sed -n 's/^\([a-z_][a-z_0-9]*\)=.*/\1/p' "$cp_dir/parse.shs" | sort -u)
+  cp_flags= cp_required= cp_optional=
+  for l in $cp_labels; do
+    case "$l" in *=\*) ;; *) cp_flags="$cp_flags $l" ;; esac
+  done
+  for l in $cp_labels; do
+    case "$l" in
+      *=\*)
+        n=${l%=\*}
+        case " $cp_flags " in
+          *" $n "*) cp_optional="$cp_optional $n" ;;
+          *) cp_required="$cp_required $n" ;;
+        esac
+        ;;
+    esac
+  done
+  [ -n "$cp_required$cp_optional" ] || { echo "  $cp_file: no value options derived" >&2; cp_failures=1; return; }
+
+  cp_bad() { echo "  $cp_file: $1" >&2; cp_failures=$((cp_failures + 1)); }
+  # cp_parse NAME ARGS...: parse ARGS in a subshell; state -> NAME.state,
+  # stderr -> NAME.err, exit status -> cp_rc.
+  cp_parse() {
+    cp_name=$1
+    shift
+    (
+      usage() { echo usage-dumped; }
+      SIMPLE_BOOTSTRAP_BUILD_ROOT=$cp_dir/build
+      . "$cp_dir/normalize.shs"
+      . "$cp_dir/parse.shs"
+      for v in $cp_vars; do eval "printf '%s=%s\n' \"\$v\" \"\${$v-}\""; done
+    ) >"$cp_dir/$cp_name.state" 2>"$cp_dir/$cp_name.err" </dev/null
+    cp_rc=$?
+  }
+  cp_expect_rejected() {
+    label=$1 want=$2
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 2 ] || cp_bad "$label: exit $cp_rc, want 2"
+    grep -Fq -- "$want" "$cp_dir/cur.err" || cp_bad "$label: stderr lacks '$want'"
+    ! grep -q usage-dumped "$cp_dir/cur.state" "$cp_dir/cur.err" ||
+      cp_bad "$label: usage dumped on an error path"
+  }
+
+  cp_parse base
+  cp_first_flag=
+  for f in $cp_flags; do
+    case "$f" in --help|-h) continue ;; esac
+    [ -n "$cp_first_flag" ] || cp_first_flag=$f
+    cp_parse cur "$f"
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "flag $f rejected (exit $cp_rc): $(head -1 "$cp_dir/cur.err")"
+  done
+  for o in $cp_required; do
+    cp_parse eq "$o=probe-value"
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "$o=probe-value rejected (exit $cp_rc)"
+    ! cmp -s "$cp_dir/eq.state" "$cp_dir/base.state" || cp_bad "$o=probe-value changed no parser state"
+    cp_parse sp "$o" probe-value
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "$o probe-value (space form) rejected (exit $cp_rc): $(head -1 "$cp_dir/sp.err")"
+    cmp -s "$cp_dir/eq.state" "$cp_dir/sp.state" || cp_bad "$o probe-value parses differently from $o=probe-value"
+    cp_parse cur "$o"
+    cp_expect_rejected "$o without a value" "$o requires a value"
+    if [ -n "$cp_first_flag" ]; then
+      cp_parse cur "$o" "$cp_first_flag"
+      cp_expect_rejected "$o followed by $cp_first_flag" "$o requires a value"
+    fi
+  done
+  for o in $cp_optional; do
+    cp_parse bare "$o"
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "bare $o rejected (exit $cp_rc)"
+    cp_parse eq "$o=probe-value"
+    cp_checked=$((cp_checked + 1))
+    [ "$cp_rc" -eq 0 ] || cp_bad "$o=probe-value rejected (exit $cp_rc)"
+    ! cmp -s "$cp_dir/eq.state" "$cp_dir/bare.state" || cp_bad "$o=probe-value did not take its value"
+    cp_parse cur "$o" probe-word
+    cp_expect_rejected "$o probe-word (optional value must not swallow the next word)" \
+      'error: unknown argument: probe-word'
+  done
+  for u in --definitely-not-an-option --jbos=full stray-word; do
+    cp_parse cur "$u"
+    cp_expect_rejected "unknown argument $u" "error: unknown argument: $u"
+  done
+  cp_parse cur --help
+  cp_checked=$((cp_checked + 1))
+  [ "$cp_rc" -eq 0 ] || cp_bad "--help exits $cp_rc, want 0"
+
+  # The help text must advertise exactly the derived value-option shapes.
+  help_required=$(sed -n 's/^  \(--[a-z0-9-]*\)=<.*/\1/p' "$cp_dir/usage.txt" | sort -u | tr '\n' ' ')
+  help_optional=$(sed -n 's/^  \(--[a-z0-9-]*\)\[=.*/\1/p' "$cp_dir/usage.txt" | sort -u | tr '\n' ' ')
+  derived_required=$(printf '%s\n' $cp_required | sort -u | tr '\n' ' ')
+  derived_optional=$(printf '%s\n' $cp_optional | sort -u | tr '\n' ' ')
+  cp_checked=$((cp_checked + 2))
+  [ "$help_required" = "$derived_required" ] ||
+    cp_bad "help --x=<v> options [$help_required] != parser required-value options [$derived_required]"
+  [ "$help_optional" = "$derived_optional" ] ||
+    cp_bad "help --x[=<v>] options [$help_optional] != parser optional-value options [$derived_optional]"
+  cp_req_count=$(printf '%s\n' $cp_required | wc -l | tr -d ' ')
+  cp_opt_count=$(printf '%s\n' $cp_optional | wc -l | tr -d ' ')
+  cp_flag_count=$(printf '%s\n' $cp_flags | wc -l | tr -d ' ')
+}
+
+write_fixture() {
+  cat >"$1" <<'FIXTURE'
+#!/bin/sh
+# -- argv-normalize begin
+fx_argc=$#
+while [ "$fx_argc" -gt 0 ]; do
+  fx_arg=$1; shift; fx_argc=$((fx_argc - 1))
+  case "$fx_arg" in
+    --jobs)
+      fx_missing=1
+      if [ "$fx_argc" -gt 0 ]; then case "$1" in -*) ;; *) fx_missing=0 ;; esac; fi
+      [ "$fx_missing" -eq 0 ] || { echo "error: $fx_arg requires a value" >&2; exit 2; }
+      set -- "$@" "$fx_arg=$1"; shift; fx_argc=$((fx_argc - 1))
+      ;;
+    *) set -- "$@" "$fx_arg" ;;
+  esac
+done
+# -- argv-normalize end
+usage() {
+  cat <<'EOF'
+Options:
+  --jobs=<n>         Workers
+  --progress[=<path>]
+                     Progress log
+  --verbose          Verbose
+  --help             Help
+EOF
+}
+# -- argv-parse begin
+jobs=""
+progress_log=off
+verbose=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --jobs=*)
+      jobs=${1#*=}
+      ;;
+    --progress)
+      progress_log=default
+      ;;
+    --progress=*)
+      progress_log=${1#*=}
+      ;;
+    --verbose)
+      verbose=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1" >&2
+      echo "Run --help for usage." >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+# -- argv-parse end
+FIXTURE
+}
+
+selftest() {
+  st=$work/selftest
+  mkdir -p "$st"
+  write_fixture "$st/good.sh"
+  check_parser "$st/good.sh" "$st/good" 2>"$st/good.log"
+  [ "$cp_failures" -eq 0 ] && [ "$cp_checked" -gt 0 ] || {
+    echo "selftest: the conforming fixture was rejected:" >&2
+    cat "$st/good.log" >&2
+    return 1
+  }
+  # Each variant replays one member of the bug class and must be DETECTED.
+  sed '/^    \*)$/,/^      ;;$/c\
+    *)\
+      usage\
+      exit 0\
+      ;;' "$st/good.sh" >"$st/unknown-exits-0.sh"
+  sed '/^    --progress)$/,/^      ;;$/c\
+    --progress)\
+      shift\
+      progress_log=$1\
+      ;;' "$st/good.sh" >"$st/optional-swallows.sh"
+  sed 's/^    --jobs)$/    --jobs-unlisted)/' "$st/good.sh" >"$st/no-space-form.sh"
+  sed 's/^  --jobs=<n>  /  --jobs <n>  /' "$st/good.sh" >"$st/help-drift.sh"
+  for bad in unknown-exits-0 optional-swallows no-space-form help-drift; do
+    ! cmp -s "$st/good.sh" "$st/$bad.sh" || { echo "selftest: fixture $bad was not mutated" >&2; return 1; }
+    check_parser "$st/$bad.sh" "$st/$bad" 2>"$st/$bad.log"
+    [ "$cp_failures" -gt 0 ] || {
+      echo "selftest: fixture $bad (a real instance of the bug class) was NOT detected" >&2
+      return 1
+    }
+  done
+  return 0
+}
+
+if ! selftest; then
+  echo "ERROR — nothing was checked (selftest failed: the checker cannot detect the bug class)"
+  exit 2
+fi
+[ "${1:-}" = --selftest ] && { echo "PASS — 5 selftest fixture(s) checked (1 conforming, 4 bug-class variants detected)"; exit 0; }
+
+[ -f "$driver" ] || { echo "ERROR — nothing was checked (missing $driver)"; exit 2; }
+check_parser "$driver" "$work/real"
+failures=$cp_failures checked=$cp_checked
+
+# Black-box probes of the real script; both exit at argument parsing.
+env -u SIMPLE_BOOTSTRAP_REASON_RECEIPT -u SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED \
+  sh "$driver" --help >"$work/help.out" 2>"$work/help.err" </dev/null
+rc=$?
+checked=$((checked + 1))
+{ [ "$rc" -eq 0 ] && grep -q '^Usage:' "$work/help.out"; } ||
+  { echo "  real --help: exit $rc or no Usage on stdout" >&2; failures=$((failures + 1)); }
+env -u SIMPLE_BOOTSTRAP_REASON_RECEIPT -u SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED \
+  sh "$driver" --full-bootstrap --stop-after-stage2 --jbos=full >"$work/bad.out" 2>"$work/bad.err" </dev/null
+rc=$?
+checked=$((checked + 1))
+{ [ "$rc" -eq 2 ] && grep -Fq 'error: unknown argument: --jbos=full' "$work/bad.err" &&
+  [ "$(wc -l <"$work/bad.err")" -le 3 ] && [ ! -s "$work/bad.out" ]; } ||
+  { echo "  real unknown flag: exit $rc, $(wc -l <"$work/bad.err") stderr line(s)" >&2; failures=$((failures + 1)); }
+
+if [ "$failures" -ne 0 ]; then
+  echo "FAIL — $failures failure(s) across $checked check(s) of $driver"
+  exit 1
+fi
+echo "PASS — $checked check(s) checked over $cp_req_count required-value, $cp_opt_count optional-value and $cp_flag_count flag option(s) derived from the parser"

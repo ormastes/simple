@@ -1,0 +1,316 @@
+"""Canonical native-build payload, provenance and full-ABI vectors."""
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.composition.native_build_payload_types_v1.*
+use std.nogc_sync_mut.composition.native_build_payload_codec_v1.*
+use std.nogc_sync_mut.composition.native_build_argv_v1.*
+use std.nogc_sync_mut.composition.native_build_full_abi_v1.*
+use std.nogc_sync_mut.composition.abi_digest.{simple_abi_digest_to_hex_v1}
+
+fn digest(ch: text) -> text: ch.repeat(64)
+
+fn hex(bytes: [u8]) -> text:
+    val alphabet = "0123456789abcdef"
+    var out = ""
+    for byte in bytes:
+        val high = ((byte as i64) >> 4) & 15
+        val low = (byte as i64) & 15
+        out = out + alphabet.substring(high, high + 1)
+        out = out + alphabet.substring(low, low + 1)
+    out
+
+fn read_u32(bytes: [u8], offset: i64) -> u32:
+    var value: u32 = 0u32
+    var index: i64 = 0
+    while index < 4:
+        value = value | ((bytes[offset + index] as u32) << ((index * 8) as u32))
+        index = index + 1
+    value
+
+fn field_value_offset(bytes: [u8], wanted: i64) -> i64:
+    var position: i64 = 16
+    while position <= bytes.len() - 8:
+        val tag = (bytes[position] as i64) | ((bytes[position + 1] as i64) << 8)
+        val length = read_u32(bytes, position + 4) as i64
+        if tag == wanted: return position + 8
+        position = position + 8 + length
+    -1
+
+fn overwrite_ascii(bytes: [u8], offset: i64, value: text) -> [u8]:
+    var out = bytes.copy()
+    val replacement = value.bytes()
+    var index: i64 = 0
+    while index < replacement.len():
+        out[offset + index] = replacement[index]
+        index = index + 1
+    out
+
+fn driver_o0() -> NativeBuildDriverOptionsV1:
+    NativeBuildDriverOptionsV1(input_files: ["a.spl"], output_file: "build/a",
+        output_format: NativeBuildOutputFormatV1.Native, optimize: false, opt_level: 0u32, release: false,
+        debug_info: true, verbose: false, log_level: 4u32, profile: "dev",
+        no_borrow_check: false, backend: "llvm", native_target: "host",
+        backend_plugin_path: "", interpreter_mode: "optimized", gc_off: false,
+        smf_output_mode: "code_only", low_memory: false, debug_trace_level: "",
+        coverage_enabled: false, mcdc_mode_text: "", mcdc_owner_bytes: 0u64,
+        mcdc_global_bytes: 0u64, allowed_families: [], build_mode: "debug",
+        riscv_gen2_target: "")
+
+fn controls() -> NativeBuildControlsV1:
+    NativeBuildControlsV1(native_link_mode: NativeBuildLinkModeV1.Dynload, runtime_bundle: "default",
+        runtime_path: "", cpu_tuning: "", linker_script: "",
+        cache_directory: "build/cache", cache_scope: "", worker_threads: 0u32,
+        per_file_timeout_ms: 300000u64, control_bits: 0u64,
+        explicit_field_bits: 1u64, runtime_policy_digest: digest("a"))
+
+fn payload_base(cli_digest: text) -> NativeBuildPayloadV1:
+    NativeBuildPayloadV1(request_identity: digest("0"), route: NativeBuildRouteV1.NormalPure,
+        source_profile: NativeBuildSourceProfileV1.FrozenSnapshot,
+        effective_entry: "a.spl", source_roots: ["src"],
+        driver_options: driver_o0(), native_controls: controls(),
+        authority: NativeBuildAuthorityReferenceV1(
+            input_broker_token: [1u8; 32], output_scope_token: [2u8; 32],
+            snapshot_schema: 1u32, snapshot_digest: digest("b")),
+        dependencies: [NativeBuildReferenceV1(role: "toolchain", name: "compiler",
+            kind: "compile_snapshot", schema: 1u32, digest: digest("c"))],
+        declared_context: [NativeBuildTextMapEntryV1(key: "MODE", value: "")],
+        cli_provenance_digest: cli_digest,
+        rich_diagnostics_codec_digest: SIMPLE_NATIVE_BUILD_FIXTURE_DIAGNOSTICS_DIGEST_V1)
+
+describe "NBAV provenance vectors":
+    it "matches all four frozen byte and digest fixtures":
+        val vectors = [
+            ["native-build","a.spl","--backend=llvm","--opt-level=none","-o","build/a"],
+            ["native-build","a.spl","--backend=llvm","--opt-level","0","-o","build/a"],
+            ["native-build","--entry","src/app/cli/main.spl","--source","src/app","--mode","one-binary","--opt-level=none","--output","build/f"],
+            ["native-build","--help"]]
+        val expected_hex = [
+            "4e42415601000000060000000c0000006e61746976652d6275696c6405000000612e73706c0e0000002d2d6261636b656e643d6c6c766d100000002d2d6f70742d6c6576656c3d6e6f6e65020000002d6f070000006275696c642f61",
+            "4e42415601000000070000000c0000006e61746976652d6275696c6405000000612e73706c0e0000002d2d6261636b656e643d6c6c766d0b0000002d2d6f70742d6c6576656c0100000030020000002d6f070000006275696c642f61",
+            "4e424156010000000a0000000c0000006e61746976652d6275696c64070000002d2d656e747279140000007372632f6170702f636c692f6d61696e2e73706c080000002d2d736f75726365070000007372632f617070060000002d2d6d6f64650a0000006f6e652d62696e617279100000002d2d6f70742d6c6576656c3d6e6f6e65080000002d2d6f7574707574070000006275696c642f66",
+            "4e42415601000000020000000c0000006e61746976652d6275696c64060000002d2d68656c70"]
+        val expected_digest = [
+            "1adeb36de2013f2da830cf946741b14d9b6bd060f45b7eb00292fbb43030bcb6",
+            "9c0c19b231d6fbe23d44ad6d53bc1e272c9930a84c97a6535a9a1a4bc3d5745a",
+            "401822863758475a7addf4a27b83f6e3d61fefc5fa3c7302efbbc6382ffc7e46",
+            "93d6be3ec6ce78c204d3e2ee21ce715e073a4ba8d6337322af995b797e022b77"]
+        for index in 0..vectors.len():
+            val encoded = native_build_argv_encode_v1(vectors[index])
+            expect(hex(encoded)).to_equal(expected_hex[index])
+            expect(native_build_cli_provenance_digest_v1(encoded)).to_equal(expected_digest[index])
+            expect(native_build_cli_provenance_digest_v1(encoded) ==
+                sha256_u8_hex(encoded)).to_equal(false)
+            val decoded = native_build_argv_decode_v1(encoded)
+            expect(decoded.ok).to_equal(true)
+            expect(decoded.executable).to_equal(false)
+
+    it "rejects version reserved count range NUL and malformed UTF-8":
+        val encoded = native_build_argv_encode_v1(["x"])
+        var invalid = encoded.copy()
+        invalid[4] = 2u8
+        expect(native_build_argv_decode_v1(invalid).error).to_equal("nbav_identity")
+        invalid = encoded.copy()
+        invalid[6] = 1u8
+        expect(native_build_argv_decode_v1(invalid).error).to_equal("nbav_identity")
+        invalid = encoded.copy()
+        invalid[8] = 2u8
+        expect(native_build_argv_decode_v1(invalid).ok).to_equal(false)
+        invalid = encoded.copy()
+        invalid[16] = 0u8
+        expect(native_build_argv_decode_v1(invalid).error).to_equal("nbav_nul")
+        invalid[16] = 255u8
+        expect(native_build_argv_decode_v1(invalid).error).to_equal("nbav_utf8")
+
+    it "preflights impossible counts and lengths before producing arguments":
+        val encoded = native_build_argv_encode_v1(["x"])
+        var invalid_count = encoded.copy()
+        for index in 8..12: invalid_count[index] = 255u8
+        val count_result = native_build_argv_decode_v1(invalid_count)
+        expect(count_result.ok).to_equal(false)
+        expect(count_result.arguments.len()).to_equal(0)
+        expect(count_result.arguments_materialized).to_equal(0)
+        var invalid_length = encoded.copy()
+        for index in 12..16: invalid_length[index] = 255u8
+        val length_result = native_build_argv_decode_v1(invalid_length)
+        expect(length_result.ok).to_equal(false)
+        expect(length_result.arguments.len()).to_equal(0)
+        expect(length_result.arguments_materialized).to_equal(0)
+
+describe "NBO1 NBC1 and NBP1 records":
+    it "roundtrips typed effective O0 without changing release or optimize":
+        val encoded = native_build_driver_options_encode_v1(driver_o0())
+        val decoded = native_build_driver_options_decode_v1(encoded)
+        expect(decoded.ok).to_equal(true)
+        val value = match decoded.value:
+            case Some(options): options
+            case nil: fail("missing NBO1")
+        expect(value.opt_level).to_equal(0u32)
+        expect(value.optimize).to_equal(false)
+        expect(value.release).to_equal(false)
+        expect(value.output_file).to_equal("build/a")
+
+    it "rejects invalid bools control bits versions counts types and trailing bytes":
+        var driver = native_build_driver_options_encode_v1(driver_o0())
+        driver[field_value_offset(driver, 4)] = 2u8
+        expect(native_build_driver_options_decode_v1(driver).error).to_equal("nbo1_field_value")
+        driver = native_build_driver_options_encode_v1(driver_o0())
+        driver[field_value_offset(driver, 2)] = 255u8
+        expect(native_build_driver_options_decode_v1(driver).error).to_equal("nbo1_field_value")
+        var native = native_build_controls_encode_v1(controls())
+        val control_offset = field_value_offset(native, 10)
+        native[control_offset] = 0u8
+        native[control_offset + 1] = 2u8
+        expect(native_build_controls_decode_v1(native).error).to_equal("nbc1_field_value")
+        native = native_build_controls_encode_v1(controls())
+        native[4] = 2u8
+        expect(native_build_controls_decode_v1(native).error).to_equal("record_identity")
+        native = native_build_controls_encode_v1(controls())
+        native[12] = 11u8
+        expect(native_build_controls_decode_v1(native).error).to_equal("record_count")
+        native = native_build_controls_encode_v1(controls())
+        native[18] = 1u8
+        expect(native_build_controls_decode_v1(native).error).to_equal("field_contract")
+        native = native_build_controls_encode_v1(controls())
+        native[16] = 99u8
+        expect(native_build_controls_decode_v1(native).error).to_equal("field_contract")
+        native = native_build_controls_encode_v1(controls())
+        native.push(0u8)
+        expect(native_build_controls_decode_v1(native).ok).to_equal(false)
+
+    it "preserves present-empty optional text and rejects NUL instead of encoding it as empty":
+        var driver = driver_o0()
+        val empty_driver = native_build_driver_options_encode_v1(driver)
+        expect(empty_driver.len() > 0).to_equal(true)
+        driver.backend_plugin_path = "\0"
+        expect(native_build_driver_options_encode_v1(driver).len()).to_equal(0)
+        var native = controls()
+        val empty_controls = native_build_controls_encode_v1(native)
+        expect(empty_controls.len() > 0).to_equal(true)
+        native.runtime_path = "\0"
+        expect(native_build_controls_encode_v1(native).len()).to_equal(0)
+
+    it "fails closed on unknown output link route and source-profile values":
+        var driver = native_build_driver_options_encode_v1(driver_o0())
+        driver = overwrite_ascii(driver, field_value_offset(driver, 3), "bogus!")
+        expect(native_build_driver_options_decode_v1(driver).error).to_equal("nbo1_field_value")
+        var native = native_build_controls_encode_v1(controls())
+        native = overwrite_ascii(native, field_value_offset(native, 1), "unknown")
+        expect(native_build_controls_decode_v1(native).error).to_equal("nbc1_field_value")
+        val argv_digest = native_build_cli_provenance_digest_v1(
+            native_build_argv_encode_v1(["native-build","--help"]))
+        val finalized = match native_build_payload_with_identity_v1(payload_base(argv_digest)):
+            case Some(value): value
+            case nil: fail("could not finalize enum fixture")
+        var payload = native_build_payload_encode_v1(finalized)
+        payload[field_value_offset(payload, 2)] = 9u8
+        val unknown_route = native_build_payload_decode_v1(payload)
+        expect(unknown_route.error).to_equal("nbp1_field_value")
+        expect(unknown_route.collection_items_materialized).to_equal(0)
+        payload = native_build_payload_encode_v1(finalized)
+        payload[field_value_offset(payload, 3)] = 9u8
+        expect(native_build_payload_decode_v1(payload).error).to_equal("nbp1_field_value")
+
+    it "finalizes and verifies NBP1 identity but grants no decoded authority":
+        val argv = native_build_argv_encode_v1(
+            ["native-build","a.spl","--backend=llvm","--opt-level=none","-o","build/a"])
+        val finalized = match native_build_payload_with_identity_v1(
+                payload_base(native_build_cli_provenance_digest_v1(argv))):
+            case Some(value): value
+            case nil: fail("could not finalize NBP1")
+        val encoded = native_build_payload_encode_v1(finalized)
+        val decoded = native_build_payload_decode_v1(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.authority_available).to_equal(false)
+        expect(decoded.execution_available).to_equal(false)
+        val restored = match decoded.value:
+            case Some(value): value
+            case nil: fail("missing NBP1")
+        expect(restored.driver_options.opt_level).to_equal(0u32)
+        expect(restored.declared_context[0].value).to_equal("")
+        var wrong_identity = encoded.copy()
+        wrong_identity[field_value_offset(wrong_identity, 1)] = 1u8
+        expect(native_build_payload_decode_v1(wrong_identity).error).to_equal(
+            "nbp1_identity_or_canonical")
+
+    it "rejects duplicate refs maps wrong authority and cumulative budgets":
+        val argv_digest = native_build_cli_provenance_digest_v1(
+            native_build_argv_encode_v1(["native-build","--help"]))
+        var value = payload_base(argv_digest)
+        value.dependencies.push(value.dependencies[0])
+        expect(native_build_payload_with_identity_v1(value)).to_be_nil()
+        value = payload_base(argv_digest)
+        value.declared_context.push(value.declared_context[0])
+        expect(native_build_payload_with_identity_v1(value)).to_be_nil()
+        value = payload_base(argv_digest)
+        value.authority.snapshot_schema = 0u32
+        expect(native_build_payload_with_identity_v1(value)).to_be_nil()
+        value = payload_base(argv_digest)
+        val finalized = match native_build_payload_with_identity_v1(value):
+            case Some(payload): payload
+            case nil: fail("could not finalize budget fixture")
+        val encoded = native_build_payload_encode_v1(finalized)
+        expect(native_build_payload_decode_bounded_v1(encoded, 12, 1048576, 32).ok).to_equal(false)
+        expect(native_build_payload_decode_bounded_v1(encoded, 1048576, 1, 32).ok).to_equal(false)
+        expect(native_build_payload_decode_bounded_v1(encoded, 1048576, 1048576, 1).ok).to_equal(false)
+
+    it "requires already canonical reference and map order in one pass":
+        val argv_digest = native_build_cli_provenance_digest_v1(
+            native_build_argv_encode_v1(["native-build","--help"]))
+        var value = payload_base(argv_digest)
+        value.dependencies = [
+            NativeBuildReferenceV1(role: "toolchain", name: "z", kind: "compile_snapshot",
+                schema: 1u32, digest: digest("d")),
+            NativeBuildReferenceV1(role: "toolchain", name: "a", kind: "compile_snapshot",
+                schema: 1u32, digest: digest("c"))]
+        expect(native_build_payload_with_identity_v1(value)).to_be_nil()
+        value = payload_base(argv_digest)
+        value.declared_context = [
+            NativeBuildTextMapEntryV1(key: "Z", value: ""),
+            NativeBuildTextMapEntryV1(key: "A", value: "")]
+        expect(native_build_payload_with_identity_v1(value)).to_be_nil()
+
+    it "rejects overflowing field lengths before nested decode":
+        val argv_digest = native_build_cli_provenance_digest_v1(
+            native_build_argv_encode_v1(["native-build","--help"]))
+        val finalized = match native_build_payload_with_identity_v1(payload_base(argv_digest)):
+            case Some(value): value
+            case nil: fail("could not finalize length fixture")
+        var encoded = native_build_payload_encode_v1(finalized)
+        val entry_offset = field_value_offset(encoded, 4)
+        val field_header = entry_offset - 8
+        for index in 4..8: encoded[field_header + index] = 255u8
+        val rejected = native_build_payload_decode_v1(encoded)
+        expect(rejected.error).to_equal("field_range")
+        expect(rejected.collection_items_materialized).to_equal(0)
+
+describe "full ABI digest vectors":
+    it "matches the exact registry image and both host vectors":
+        expect(simple_native_build_registry_image_v1().bytes().len()).to_equal(2510)
+        expect(simple_native_build_schema_digest_v1()).to_equal(SIMPLE_NATIVE_BUILD_SCHEMA_DIGEST_V1)
+        val linux = simple_native_build_full_abi_digest_v1(
+            "x86_64-unknown-linux-gnu/sysv64/ptr64/little",
+            SIMPLE_NATIVE_BUILD_FIXTURE_DIAGNOSTICS_DIGEST_V1)
+        expect(linux.ok).to_equal(true)
+        expect(linux.host_digest).to_equal(
+            "3c14c3a2d1774d08391da33724628cd40673795c9494249788ad7369f3e8461f")
+        expect(linux.full_digest).to_equal(
+            "b432cfca55d1d3ea2e6b209c219ec0dbd9764d427d3eab960fb372d35788f047")
+        expect(linux.full_digest == linux.host_digest).to_equal(false)
+        expect(linux.full_digest == linux.schema_digest).to_equal(false)
+        expect(linux.full_digest == SIMPLE_NATIVE_BUILD_FIXTURE_DIAGNOSTICS_DIGEST_V1).to_equal(false)
+        expect(simple_abi_digest_to_hex_v1(linux.words)).to_equal(linux.full_digest)
+        expect(linux.preimage_bytes).to_equal(159)
+        expect(linux.execution_authority).to_equal(false)
+        val apple = simple_native_build_full_abi_digest_v1(
+            "aarch64-apple-darwin/aapcs64/ptr64/little",
+            SIMPLE_NATIVE_BUILD_FIXTURE_DIAGNOSTICS_DIGEST_V1)
+        expect(apple.host_digest).to_equal(
+            "d1aa49dbdd35a326c8fa35eb5ed8e3372267a2828c0ba2cba9370a8f2fbb2d05")
+        expect(apple.full_digest).to_equal(
+            "61306ea2a4dc72b9cf368357f949e026ed8dc70ad36773a46bd04d2fe19c40c1")
+
+    it "rejects malformed host and diagnostics digest inputs":
+        expect(simple_native_build_full_abi_digest_v1("",
+            SIMPLE_NATIVE_BUILD_FIXTURE_DIAGNOSTICS_DIGEST_V1).ok).to_equal(false)
+        expect(simple_native_build_full_abi_digest_v1("host", "bad").ok).to_equal(false)

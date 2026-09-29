@@ -1,6 +1,29 @@
-# BrowserSession HTML grouping text projection
+# Browser Session Html Grouping Tags Specification
 
-> Projects the supported grouping and list semantics to visible text. This is
+> <details>
+
+<!-- sdn-diagram:id=browser_session_html_grouping_tags_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=browser_session_html_grouping_tags_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+browser_session_html_grouping_tags_spec -> std
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=browser_session_html_grouping_tags_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +32,56 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# BrowserSession HTML grouping text projection
+# Browser Session Html Grouping Tags Specification
 
-Projects the supported grouping and list semantics to visible text. This is
+## Scenarios
+
+### BrowserSession HTML grouping tag text semantics
+
+#### preserves paragraph pre blockquote figure and div text
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<div><p>Paragraph</p><hr><pre> Pre text </pre><blockquote>Quote</blockquote><figure><div>Figure body</div><figcaption>Caption</figcaption></figure></div>"
+expect(html_to_text(html)).to_equal("Paragraph\n Pre text QuoteFigure bodyCaption")
+```
+
+</details>
+
+#### separates ordered unordered and menu list items
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<ol><li>One</li><li>Two</li></ol><ul><li>Alpha</li><li>Beta</li></ul><menu><li>Action</li><li>More</li></menu>"
+expect(html_to_text(html)).to_equal("One\nTwo\nAlpha\nBeta\nAction\nMore")
+```
+
+</details>
+
+#### separates definition list terms and descriptions
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<dl><dt>Term</dt><dd>Description</dd><dt>Next</dt><dd>More</dd></dl>"
+expect(html_to_text(html)).to_equal("Term: Description\nNext: More")
+```
+
+</details>
 
 ## At a Glance
 
@@ -20,75 +90,13 @@ Projects the supported grouping and list semantics to visible text. This is
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_html_grouping_tags_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
-Projects the supported grouping and list semantics to visible text. This is
-focused text-projection evidence, not complete HTML parsing or rendering.
+## Overview
 
-## Scenarios
-
-### BrowserSession HTML grouping tag text semantics
-
-#### should preserve paragraph pre blockquote figure and div text
-
-- Project supported HTML semantics to visible text
-   - Expected: html_to_text(html) equals `Paragraph\n Pre text QuoteFigure bodyCaption`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Project supported HTML semantics to visible text")
-val html = "<div><p>Paragraph</p><hr><pre> Pre text </pre><blockquote>Quote</blockquote><figure><div>Figure body</div><figcaption>Caption</figcaption></figure></div>"
-expect(html_to_text(html)).to_equal("Paragraph\n Pre text QuoteFigure bodyCaption")
-```
-
-</details>
-
-#### should separate ordered unordered and menu list items
-
-- Project supported HTML semantics to visible text
-   - Expected: html_to_text(html) equals `One\nTwo\nAlpha\nBeta\nAction\nMore`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Project supported HTML semantics to visible text")
-val html = "<ol><li>One</li><li>Two</li></ol><ul><li>Alpha</li><li>Beta</li></ul><menu><li>Action</li><li>More</li></menu>"
-expect(html_to_text(html)).to_equal("One\nTwo\nAlpha\nBeta\nAction\nMore")
-```
-
-</details>
-
-#### should separate definition list terms and descriptions
-
-- Project supported HTML semantics to visible text
-   - Expected: html_to_text(html) equals `Term: Description\nNext: More`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Project supported HTML semantics to visible text")
-val html = "<dl><dt>Term</dt><dd>Description</dd><dt>Next</dt><dd>More</dd></dl>"
-expect(html_to_text(html)).to_equal("Term: Description\nNext: More")
-```
-
-</details>
+Tests covering:
+- BrowserSession HTML grouping tag text semantics
 
 ## Scenario Summary
 

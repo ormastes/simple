@@ -1,0 +1,40 @@
+# @req NFR-004 NFR-006 NFR-009 NFR-011
+use std.spec.{describe, it, expect}
+use std.common.debug.capability.{CapLevel}
+use std.common.debug.contracts_v1.{
+    DebugCapabilityV1, DebugVerificationV1, DebugPerturbationV1,
+    DebugTargetNodeV1, debug_policy_development_v1,
+}
+use std.common.debug.service_v1.{DebugServiceV1}
+use app.debug_adapter_host_v1.{
+    DebugAdapterLimitsV1, debug_adapter_default_limits_v1,
+    validate_debug_adapter_limits_v1,
+}
+
+describe "DebugServiceV1 adapter isolation contract":
+    it "updates only the failed target capability and receipts the transition":
+        var service = DebugServiceV1.create()
+        val failed_session = service.open_session("sha256:failed", debug_policy_development_v1())?
+        val healthy_session = service.open_session("sha256:healthy", debug_policy_development_v1())?
+        service.add_target(
+            failed_session,
+            DebugTargetNodeV1("adapter-a", "", "adapter.process", "adapter A"),
+            DebugCapabilityV1("adapter-a", CapLevel.Native, DebugVerificationV1.LiveVerified, DebugPerturbationV1.Cooperative, "reachable"),
+        )?
+        service.update_target_capability(
+            failed_session,
+            DebugCapabilityV1("adapter-a", CapLevel.Unavailable, DebugVerificationV1.Blocked, DebugPerturbationV1.Passive, "adapter crashed"),
+        )?
+        val graph = service.graph(failed_session)?
+        expect(graph.capabilities[0].support).to_equal(CapLevel.Unavailable)
+        expect(graph.capabilities[0].verification).to_equal(DebugVerificationV1.Blocked)
+        expect(service.session(healthy_session)?.open).to_equal(true)
+        expect(service.receipts_for(failed_session).last().action).to_equal("target.capability.update")
+
+    it "rejects unbounded adapter execution limits before process launch":
+        val defaults = debug_adapter_default_limits_v1()
+        expect(defaults.timeout_ms).to_be_greater_than(0)
+        val invalid = DebugAdapterLimitsV1(0, 1, 1, 1, 1, 1)
+        match validate_debug_adapter_limits_v1(invalid):
+            case Ok(_): expect(false).to_equal(true)
+            case Err(reason): expect(reason).to_contain("timeout")

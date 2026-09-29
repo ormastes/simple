@@ -19,6 +19,18 @@ val SIMPLEOS_NVME_ADMIN_QUEUE_ID: u16 = 0
 val SIMPLEOS_NVME_SYSTEM_QUEUE_ID: u16 = 1
 val SIMPLEOS_NVME_FIRST_DATA_QUEUE_ID: u16 = 2
 
+fn capability_ipv4_address(a: u8, b: u8, c: u8, d: u8) -> u32:
+    """Pack IPv4 octets in the repository's canonical SockaddrIn layout.
+
+    SockaddrIn.addr stores the first dotted-decimal octet in the low byte:
+    `a | b<<8 | c<<16 | d<<24`.  NetBindIpv4 uses exactly that representation,
+    so callers can compare a copied sockaddr address without byte swapping.
+    """
+    (a as u32) |
+        ((b as u32) << 8) |
+        ((c as u32) << 16) |
+        ((d as u32) << 24)
+
 struct CapabilityToken:
     """Typed capability token with generation counter for revocation.
 
@@ -88,6 +100,12 @@ enum CapabilityKind:
     SystemTime
     SystemPrivilege         # Gate for sys_privctl — only SYSTEM tasks may call
 
+    # Append-only network authority foundation. Keep these after all existing
+    # variants so established enum ordering remains stable. They deliberately
+    # do not imply NetConnect, NetListen, or each other.
+    NetSocketCreate
+    NetBindIpv4(address: u32, port: u16)
+
 struct CapabilitySet:
     """Set of capabilities held by a task.
 
@@ -138,6 +156,21 @@ impl CapabilitySet:
                     new_caps.push(cap)
         self.caps = new_caps
         self.is_pledged = true
+
+pub fn capability_set_bind_owner(caps: CapabilitySet, owner: u64) -> CapabilitySet:
+    """Bind a freshly minted pouch to its scheduler-issued task identity.
+
+    Kinds, provenance, generations, and delegation depths are preserved.  The
+    operation is linear in the small pouch and occurs once before publication;
+    no token remains callable under the spawning task's identity.
+    """
+    var bound: [CapabilityToken] = []
+    for cap in caps.caps:
+        bound.push(CapabilityToken(
+            kind: cap.kind, generation: cap.generation, owner: owner,
+            token_id: cap.token_id, parent_token_id: cap.parent_token_id,
+            depth: cap.depth))
+    CapabilitySet(caps: bound, is_pledged: caps.is_pledged)
 
 fn capability_kind_allows(held: CapabilityKind, required: CapabilityKind) -> bool:
     """Return true when `held` authorizes `required`.

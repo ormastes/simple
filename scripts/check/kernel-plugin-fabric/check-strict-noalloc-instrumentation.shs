@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+fixture_dir="$root/test/01_unit/lib/nogc_async_mut_noalloc/kernel_plugin"
+build_dir="${TMPDIR:-/tmp}/simple-kpf-noalloc-proof.$$"
+binary="$build_dir/kpf-noalloc-proof"
+
+cleanup() {
+    rm -rf "$build_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$build_dir"
+cc=${CC:-cc}
+case "$(uname -s)" in
+    Darwin)
+        probe="$build_dir/libkpf_noalloc_probe.dylib"
+        "$cc" -std=c11 -O0 -Wall -Wextra -Werror -dynamiclib \
+            "$fixture_dir/native_allocator_probe.c" -o "$probe"
+        "$cc" -std=c11 -O0 -Wall -Wextra -Werror \
+            "$fixture_dir/native_allocator_probe_fixture.c" \
+            -L"$build_dir" -lkpf_noalloc_probe \
+            -Wl,-rpath,"$build_dir" -o "$binary"
+        run_binary() {
+            DYLD_INSERT_LIBRARIES="$probe" "$binary" "$@"
+        }
+        ;;
+    *)
+        "$cc" -std=c11 -O0 -Wall -Wextra -Werror \
+            -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc \
+            "$fixture_dir/native_allocator_probe.c" \
+            "$fixture_dir/native_allocator_probe_fixture.c" \
+            -o "$binary"
+        run_binary() {
+            "$binary" "$@"
+        }
+        ;;
+esac
+
+run_binary
+
+set +e
+run_binary --mutate
+mutation_status=$?
+set -e
+if [ "$mutation_status" -ne 23 ]; then
+    echo "KPF_STRICT_NOALLOC: FAIL mutation_status=$mutation_status expected=23" >&2
+    exit 1
+fi
+
+echo "KPF_STRICT_NOALLOC: PASS clean=0 mutation=23 allocator=malloc,calloc,realloc"

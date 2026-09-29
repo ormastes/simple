@@ -395,8 +395,18 @@ of truth for all 16 remote execution lanes.
 - **Connection:** OpenOCD telnet on port 27444 + GDB on port 27333
 - **Available Probes:** FT4232H (FTDI, `interface/ftdi/ft4232h-swd.cfg`) or Lauterbach Power Debug II; no ST-Link present on host
 - **Note:** No built-in debug interface for MCU (unlike R4 WiFi which has CMSIS-DAP); TrustZone deferred; DFU bootloader available
-- **Verified:** 2026-05-23 — board connected, ttyACM1 confirmed, ADB visible but needs udev rules
-- **Status:** SRAM adapter implemented (`adapter_uno_q.spl`), ADB access pending udev fix, MCU debug gated on SWD probe wiring to JCTL
+- **Verified history:** 2026-05-23 — board connected, ttyACM1 confirmed,
+  ADB visible but needing udev rules. On 2026-07-27, x86_64 SimpleOS booted
+  three times through QEMU TCG + OVMF/GRUB running on the UNO Q QRB2210 Debian
+  host (ADB serial `3655308719`); the retained evidence chain is summarized in
+  `doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md`.
+  The user reconfirmed the successful board load/boot test on 2026-08-04.
+  This proves a SimpleOS guest boot hosted by physical UNO Q hardware, not a
+  native/bare-metal QRB2210 boot, STM32U585 boot, or Adreno GPU path.
+- **Current status (2026-08-04):** SRAM adapter implemented
+  (`adapter_uno_q.spl`). Current discovery has no `2341:0078`, ADB, or fastboot
+  device. The visible `0403:6011` adapter identifies as a Xilinx ML Carrier,
+  not UNO Q; MCU debug remains gated on powered SWD wiring to JCTL.
 
 ### GHDL Simulated RV32
 - **Target:** VHDL-simulated RISC-V 32-bit core

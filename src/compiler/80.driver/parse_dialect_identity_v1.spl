@@ -1,0 +1,178 @@
+# Computed dialect identity for the parse-result provider seam (EGL package 4
+# follow-up).
+#
+# Package 4 shipped the seam with grammar/actions/schema/semantic digests as
+# DECLARED labels derived from the dialect id, and said so. This module replaces
+# the label with a value computed from the tables a provider actually executes,
+# so a provider whose tables differ cannot claim the same dialect.
+#
+# A dialect's identity material has four independent components:
+#   * grammar  -- the lexical/keyword table itself: the kind -> name -> kind
+#                 round trip over the whole kind domain, plus the kind each
+#                 probe unit classifies to.
+#   * actions  -- the decisions that table drives in the parser (for the Simple
+#                 dialect: precedence, associativity, and the rhs / end-of-
+#                 expression predicates), packed per kind by the adapter.
+#   * schema   -- the shape of the normalized record this dialect's projection
+#                 emits, pinned by the token and span digests it produces for a
+#                 fixed probe source.
+#   * semantic -- the same projection's node and diagnostic digests for that
+#                 probe source.
+#
+# The probe DOMAIN is derived from the tables themselves (`kind_name` over
+# 0..kind_limit), not from a name list declared here, so a table entry that
+# changes moves the digest with nothing else edited. Schema and semantic are
+# taken from an ALREADY-COMPUTED projection output carried on the tables rather
+# than from a callable: verifying identity must not re-enter the parser, whose
+# error channel is global and is reset by the next `parser_init_with_path`.
+#
+# The material helpers below are exported, and the dialect adapters import them
+# rather than keeping copies. Agent V's seam keeps its own private copies only
+# because rewriting 40 call sites in his file is not what "extend it" means.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.string_core.{text_to_utf8_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+
+use compiler.driver.parser_scalar_parity_v1.{ParserScalarNormalizedOutputV1}
+
+pub const PARSE_DIALECT_IDENTITY_SCHEMA_V1: u16 = 1u16
+
+# One dialect's executable tables, as the adapter that owns them exposes them.
+# `classify` is the dialect's real lexical classifier; `kind_name` its inverse
+# naming; `action_bits` the per-kind parse decisions packed into one integer.
+pub struct DialectTablesV1:
+    dialect_id: u32
+    kind_limit: i64
+    kind_name: fn(i64) -> text
+    classify: fn(text) -> i64
+    action_bits: fn(i64) -> i64
+    probe_units: [text]
+    probe_output: ParserScalarNormalizedOutputV1
+
+pub struct ParseDialectIdentityV1:
+    schema_version: u16
+    dialect_id: u32
+    grammar_digest: EnvironmentDigest256V1
+    actions_digest: EnvironmentDigest256V1
+    schema_digest: EnvironmentDigest256V1
+    semantic_profile_digest: EnvironmentDigest256V1
+
+pub fn parse_digest_push_u64_v1(out: [i64], value: u64):
+    for shift in 0..8:
+        out.append(((value >> ((shift as u64) * 8u64)) & 255u64) as i64)
+
+# Length-prefixed so "ab" + "c" and "a" + "bc" cannot collide.
+pub fn parse_digest_push_text_v1(out: [i64], value: text):
+    val bytes = text_to_utf8_bytes(value)
+    parse_digest_push_u64_v1(out, bytes.len() as u64)
+    for b in bytes:
+        out.append(b as i64)
+
+pub fn parse_digest_read_u64_v1(bytes: [i64], offset: i64) -> u64:
+    var value = 0u64
+    for index in 0..8:
+        value = value | ((bytes[offset + index] as u64) << ((index as u64) * 8u64))
+    value
+
+pub fn parse_digest_of_v1(material: [i64]) -> EnvironmentDigest256V1:
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(w0: parse_digest_read_u64_v1(raw, 0), w1: parse_digest_read_u64_v1(raw, 8),
+        w2: parse_digest_read_u64_v1(raw, 16), w3: parse_digest_read_u64_v1(raw, 24))
+
+pub fn parse_digest_push_digest_v1(out: [i64], value: EnvironmentDigest256V1):
+    parse_digest_push_u64_v1(out, value.w0)
+    parse_digest_push_u64_v1(out, value.w1)
+    parse_digest_push_u64_v1(out, value.w2)
+    parse_digest_push_u64_v1(out, value.w3)
+
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+
+# The kind domain is walked in full, so a renamed or re-numbered kind moves the
+# digest. The round trip `kind -> name -> classify(name)` is what binds the two
+# halves of a lexical table together: renaming a kind without updating the
+# classifier, or the reverse, both show up here.
+pub fn parse_dialect_grammar_digest_v1(tables: DialectTablesV1) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "simple/dialect-grammar/computed-v1")
+    parse_digest_push_u64_v1(material, tables.dialect_id as u64)
+    parse_digest_push_u64_v1(material, tables.kind_limit as u64)
+    for kind in 0..tables.kind_limit:
+        val name = tables.kind_name(kind)
+        parse_digest_push_u64_v1(material, kind as u64)
+        parse_digest_push_text_v1(material, name)
+        parse_digest_push_u64_v1(material, tables.classify(name) as u64)
+    parse_digest_push_u64_v1(material, tables.probe_units.len() as u64)
+    for unit in tables.probe_units:
+        parse_digest_push_text_v1(material, unit)
+        parse_digest_push_u64_v1(material, tables.classify(unit) as u64)
+    parse_digest_of_v1(material)
+
+pub fn parse_dialect_actions_digest_v1(tables: DialectTablesV1) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "simple/dialect-actions/computed-v1")
+    parse_digest_push_u64_v1(material, tables.dialect_id as u64)
+    parse_digest_push_u64_v1(material, tables.kind_limit as u64)
+    for kind in 0..tables.kind_limit:
+        parse_digest_push_u64_v1(material, kind as u64)
+        parse_digest_push_u64_v1(material, tables.action_bits(kind) as u64)
+    parse_digest_of_v1(material)
+
+# Schema and semantic are split across the four normalized components the
+# parity owner compares separately: token+span describe the record's shape,
+# node+diagnostic what the dialect understood the source to mean.
+pub fn parse_dialect_schema_digest_v1(tables: DialectTablesV1) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "simple/dialect-schema/computed-v1")
+    parse_digest_push_u64_v1(material, tables.dialect_id as u64)
+    parse_digest_push_u64_v1(material, PARSE_DIALECT_IDENTITY_SCHEMA_V1 as u64)
+    parse_digest_push_digest_v1(material, tables.probe_output.token_digest)
+    parse_digest_push_digest_v1(material, tables.probe_output.span_digest)
+    parse_digest_of_v1(material)
+
+pub fn parse_dialect_semantic_digest_v1(tables: DialectTablesV1) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    parse_digest_push_text_v1(material, "simple/dialect-semantic-profile/computed-v1")
+    parse_digest_push_u64_v1(material, tables.dialect_id as u64)
+    parse_digest_push_digest_v1(material, tables.probe_output.node_digest)
+    parse_digest_push_digest_v1(material, tables.probe_output.diagnostic_digest)
+    parse_digest_of_v1(material)
+
+pub fn parse_dialect_identity_of_v1(tables: DialectTablesV1) -> ParseDialectIdentityV1:
+    ParseDialectIdentityV1(
+        schema_version: PARSE_DIALECT_IDENTITY_SCHEMA_V1,
+        dialect_id: tables.dialect_id,
+        grammar_digest: parse_dialect_grammar_digest_v1(tables),
+        actions_digest: parse_dialect_actions_digest_v1(tables),
+        schema_digest: parse_dialect_schema_digest_v1(tables),
+        semantic_profile_digest: parse_dialect_semantic_digest_v1(tables))
+
+# Probe units for a word-oriented dialect, derived from its probe source rather
+# than from a keyword list declared here: the interesting property is that the
+# classifier maps each word the dialect's own probe contains to the right kind,
+# including the ones that must come back as plain identifiers.
+pub fn parse_dialect_probe_words_v1(source: text) -> [text]:
+    var words: [text] = []
+    var current = ""
+    for index in 0..source.len():
+        val ch = source.slice(index, index + 1)
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+           (ch >= "0" and ch <= "9") or ch == "_":
+            current = current + ch
+        else:
+            if current != "":
+                words.append(current)
+                current = ""
+    if current != "":
+        words.append(current)
+    words
+
+pub fn parse_dialect_identity_same_v1(
+    a: ParseDialectIdentityV1, b: ParseDialectIdentityV1
+) -> bool:
+    a.schema_version == b.schema_version and a.dialect_id == b.dialect_id and
+        _same(a.grammar_digest, b.grammar_digest) and
+        _same(a.actions_digest, b.actions_digest) and
+        _same(a.schema_digest, b.schema_digest) and
+        _same(a.semantic_profile_digest, b.semantic_profile_digest)

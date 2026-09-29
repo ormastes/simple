@@ -24,7 +24,7 @@ Lane `.spipe/simple_enterprise_suite` W8-C: the enterprise web app grows the emp
 | Design | N/A |
 | Research | doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md |
 | Source | `test/03_system/app/enterprise/back_office_web_spec.spl` |
-| Updated | 2026-08-16 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -86,6 +86,11 @@ Lane: .spipe/simple_enterprise_suite (v2, W8-C).
 
 #### hires, clocks a shift, decides leave, and renders the payroll INPUT export
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- hires, clocks a shift, decides leave, and renders the payroll INPUT export
 - Open an hcm-role session on a clean store
 - Hire emp-1 — POST /hcm/hire (digit-checked start, wage, hours)
    - Expected: http_status_code(hire.status) equals `200`
@@ -111,10 +116,12 @@ Lane: .spipe/simple_enterprise_suite (v2, W8-C).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("hires, clocks a shift, decides leave, and renders the payroll INPUT export")
 step("Open an hcm-role session on a clean store")
 val store = fresh_back_office("hcm")
 val t = tenant_a()
@@ -181,6 +188,7 @@ store_close(store)
 
 #### requisitions, approves, raises a PO, receives, invoices, and reconciles
 
+- requisitions, approves, raises a PO, receives, invoices, and reconciles
 - Seed a supplier as admin, then act as a procurement-role session
 - Create requisition rq-1 for 10 units — POST /proc/requisition
    - Expected: http_status_code(rq.status) equals `200`
@@ -212,10 +220,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 70 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("requisitions, approves, raises a PO, receives, invoices, and reconciles")
 step("Seed a supplier as admin, then act as a procurement-role session")
 val store = fresh_back_office("proc")
 val t = tenant_a()
@@ -294,6 +304,7 @@ store_close(store)
 
 #### reports the trial balance, AR, AP, then closes and reports a period
 
+- reports the trial balance, AR, AP, then closes and reports a period
 - Seed one balanced payable pair through the procurement routes
    - Expected: http_status_code(rcv.status) equals `200`
 - GET /fin/trial-balance shows both accounts and the balanced flag
@@ -314,10 +325,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 56 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("reports the trial balance, AR, AP, then closes and reports a period")
 step("Seed one balanced payable pair through the procurement routes")
 val store = fresh_back_office("fin")
 val t = tenant_a()
@@ -380,6 +393,7 @@ store_close(store)
 
 #### an inactive session gets 401 before any route logic runs
 
+- an inactive session gets 401 before any route logic runs
 - HCM family — GET /hcm/employees is 401
    - Expected: http_status_code(h.status) equals `401`
 - HCM family — POST /hcm/hire is 401
@@ -397,10 +411,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("an inactive session gets 401 before any route logic runs")
 val store = fresh_back_office("unauth")
 val t = tenant_a()
 val admin = admin_a()
@@ -441,6 +457,7 @@ store_close(store)
 
 #### a sales-role session is forbidden on every new family, read and write
 
+- a sales-role session is forbidden on every new family, read and write
 - HCM read and write are both 403 for the sales role
    - Expected: http_status_code(hr_read.status) equals `403`
    - Expected: http_status_code(hr_write.status) equals `403`
@@ -456,10 +473,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 33 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("a sales-role session is forbidden on every new family, read and write")
 val store = fresh_back_office("rbac")
 val t = tenant_a()
 val clerk = ActorContext(actor_id: "clerk-1", role: "sales")
@@ -499,6 +518,7 @@ store_close(store)
 
 #### a script-tag employee name and supplier name come back escaped
 
+- a script-tag employee name and supplier name come back escaped
 - Hire an employee whose NAME is a script tag
    - Expected: http_status_code(hire.status) equals `200`
 - GET /hcm/employees escapes it — no raw tag survives
@@ -512,10 +532,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("a script-tag employee name and supplier name come back escaped")
 val store = fresh_back_office("escape")
 val t = tenant_a()
 val admin = admin_a()
@@ -556,6 +578,7 @@ store_close(store)
 
 #### matches the absolute hand-computed oracle: 2 employees, 1 open PO, 1000 payable, balanced
 
+- matches the absolute hand-computed oracle: 2 employees, 1 open PO, 1000 payable, balanced
 - Seed exactly the oracle scenario (see the spec header)
    - Expected: http_status_code(h1.status) equals `200`
    - Expected: http_status_code(h2.status) equals `200`
@@ -572,10 +595,12 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 40 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("matches the absolute hand-computed oracle: 2 employees, 1 open PO, 1000 payable, balanced")
 step("Seed exactly the oracle scenario (see the spec header)")
 val store = fresh_back_office("rollup")
 val t = tenant_a()
@@ -638,3 +663,54 @@ store_close(store)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `cb15669723942b1312eed7871419110e79bdba556b889b1b8cdc94747bbaffc9`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `cb15669723942b1312eed7871419110e79bdba556b889b1b8cdc94747bbaffc9`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `cb15669723942b1312eed7871419110e79bdba556b889b1b8cdc94747bbaffc9`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/03_system/app/enterprise/back_office_web_spec.spl
+mirror: doc/06_spec/03_system/app/enterprise/back_office_web_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/enterprise/back_office_web_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/enterprise/back_office_web_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/enterprise/back_office_web_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 54 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/enterprise/back_office_web_spec.spl:117:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'hires, clocks a shift, decides leave, and renders the payroll INPUT export' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/back_office_web_spec.spl:180:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'requisitions, approves, raises a PO, receives, invoices, and reconciles' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/enterprise/back_office_web_spec.spl:255:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'reports the trial balance, AR, AP, then closes and reports a period' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

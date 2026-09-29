@@ -64,16 +64,6 @@ char *strerror(int errnum) {
     }
 }
 
-int strerror_r(int errnum, char *buf, size_t buflen) {
-    if (!buf || buflen == 0) return 22;
-    const char *msg = strerror(errnum);
-    size_t len = strlen(msg);
-    size_t copy = len < buflen - 1 ? len : buflen - 1;
-    memcpy(buf, msg, copy);
-    buf[copy] = '\0';
-    return len < buflen ? 0 : 34;
-}
-
 /* ====================================================================
  * 2. String concatenation / span
  * ==================================================================== */
@@ -113,17 +103,6 @@ size_t strcspn(const char *s, const char *reject) {
         count++;
     }
     return count;
-}
-
-char *strpbrk(const char *s, const char *accept) {
-    for (; *s; s++) {
-        const char *a = accept;
-        while (*a) {
-            if (*s == *a) return (char *)s;
-            a++;
-        }
-    }
-    return NULL;
 }
 
 /* ====================================================================
@@ -200,15 +179,6 @@ void *memrchr(const void *s, int c, size_t n) {
         if (*p == uc) return (void *)p;
     }
     return NULL;
-}
-
-int wmemcmp(const wchar_t *s1, const wchar_t *s2, size_t n) {
-    while (n--) {
-        if (*s1 != *s2) return *s1 < *s2 ? -1 : 1;
-        s1++;
-        s2++;
-    }
-    return 0;
 }
 
 /* ====================================================================

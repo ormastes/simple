@@ -1,0 +1,48 @@
+use lib.common.crypto.x25519_mlkem768.protocol_profile.{
+    X25519MlKem768ProtocolPolicy,
+    x25519_mlkem768_tls13_protocol_profile}
+use os.tls13.hybrid_negotiation_policy.{
+    tls13_admit_x25519_mlkem768_selection,
+    tls13_reject_retry_after_x25519_mlkem768_failure,
+    tls13_hybrid_offer_enabled, tls13_hybrid_mode_admit_selection}
+use os.tls13.server_types.{Tls13HybridMode}
+
+fn _tls_required_policy() -> X25519MlKem768ProtocolPolicy:
+    X25519MlKem768ProtocolPolicy(
+        require_hybrid: true,
+        authentication_enabled: true,
+        aead_enabled: true,
+        allow_classical_retry_after_hybrid_failure: false)
+
+describe "TLS 1.3 required hybrid negotiation policy":
+    it "admits only the pinned X25519MLKEM768 named group":
+        val profile = x25519_mlkem768_tls13_protocol_profile()
+        expect(tls13_admit_x25519_mlkem768_selection(
+            profile, _tls_required_policy(), 0x11ECu16) ?? false).to_be(true)
+        match tls13_admit_x25519_mlkem768_selection(
+                profile, _tls_required_policy(), 0x001Du16):
+            case Ok(_): fail("required hybrid admitted classical X25519")
+            case Err(reason): expect(reason).to_contain("different named group")
+
+    it "makes a selected hybrid failure terminal":
+        match tls13_reject_retry_after_x25519_mlkem768_failure(
+                x25519_mlkem768_tls13_protocol_profile(),
+                _tls_required_policy(), "decapsulation rejected"):
+            case Ok(_): fail("hybrid failure admitted a classical retry")
+            case Err(reason): expect(reason).to_contain("classical retry is forbidden")
+
+    it "supports disabled preferred and required connection policies":
+        expect(tls13_hybrid_offer_enabled(
+            Tls13HybridMode.Disabled)).to_be(false)
+        expect(tls13_hybrid_offer_enabled(
+            Tls13HybridMode.Preferred)).to_be(true)
+        expect(tls13_hybrid_offer_enabled(
+            Tls13HybridMode.Required)).to_be(true)
+        expect(tls13_hybrid_mode_admit_selection(
+            Tls13HybridMode.Preferred, 0x001Du16).is_ok()).to_be(true)
+        expect(tls13_hybrid_mode_admit_selection(
+            Tls13HybridMode.Required, 0x001Du16).is_err()).to_be(true)
+        expect(tls13_hybrid_mode_admit_selection(
+            Tls13HybridMode.Required, 0x11ECu16).is_ok()).to_be(true)
+        expect(tls13_hybrid_mode_admit_selection(
+            Tls13HybridMode.Disabled, 0x11ECu16).is_err()).to_be(true)

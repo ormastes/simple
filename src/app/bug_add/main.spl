@@ -4,12 +4,14 @@
 use std.cli.cli_util (get_cli_args)
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use nogc_sync_mut.database.bug.{Bug, BugSeverity, BugStatus, load_bug_database, create_bug_database}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, timestamp_year, timestamp_month, timestamp_day}
+use common.time_utils.{days_in_month}
 use std.log.{error}
 
 val BUG_DB_PATH = "doc/08_tracking/bug/bug_db.sdn"
 
 fn print_help():
-    print "Usage: simple bug-add --id=<id> --severity=<p0|p1|p2|p3> --title=<t> --file=<path>"
+    print "Usage: simple bug-add --id=<id> --severity=<p0|p1|p2|p3> --title=<t> --file=<path> [--date=<YYYY-MM-DD>]"
     print ""
     print "Add a new open bug to the bug database."
     print ""
@@ -20,6 +22,7 @@ fn print_help():
     print "  --file=<path>       Source file path where bug occurs"
     print "  --line=<n>          Line number (default: 0)"
     print "  --repro=<test>      Reproducible-by test (default: N/A)"
+    print "  --date=<date>        Creation date (YYYY-MM-DD; default: current UTC date)"
     print "  --json              Output as JSON"
     for line in log_options_help():
         print "  {line}"
@@ -51,6 +54,32 @@ fn _parse_cli_severity(s: text) -> BugSeverity:
         return BugSeverity.P3
     BugSeverity.P2
 
+fn _pad2(value: i64) -> text:
+    if value < 10: "0{value}" else: "{value}"
+
+fn _valid_date(raw: text) -> bool:
+    if raw.len() != 10 or raw[4:5] != "-" or raw[7:8] != "-":
+        return false
+    val year = raw[0:4].parse_i64()
+    val month = raw[5:7].parse_i64()
+    val day = raw[8:10].parse_i64()
+    if not year.? or not month.? or not day.?:
+        return false
+    year! >= 1970 and month! >= 1 and month! <= 12 and
+        day! >= 1 and day! <= days_in_month(year!, month!)
+
+fn _current_utc_date() -> Result<text, text>:
+    val micros = time_now_unix_micros()
+    if micros <= 0:
+        return Err("current UTC date is unavailable; provide --date=YYYY-MM-DD")
+    val year = timestamp_year(micros)
+    val month = timestamp_month(micros)
+    val day = timestamp_day(micros)
+    val date = "{year}-{_pad2(month)}-{_pad2(day)}"
+    if not _valid_date(date):
+        return Err("current UTC date is invalid; provide --date=YYYY-MM-DD")
+    Ok(date)
+
 fn main() -> i64:
     val args = get_cli_args()
     val log_opts = parse_log_options(args)
@@ -79,6 +108,7 @@ fn main() -> i64:
     val file = parse_flag(args, "--file=")
     val line_str = parse_flag(args, "--line=")
     val repro = parse_flag(args, "--repro=")
+    val date_arg = parse_flag(args, "--date=")
 
     if id == "":
         print "Error: --id is required"
@@ -94,6 +124,18 @@ fn main() -> i64:
     val repro_val = if repro != "": repro else: "N/A"
     val file_val = if file != "": file else: "unknown"
     val severity = _parse_cli_severity(severity_str)
+
+    if date_arg != "" and not _valid_date(date_arg):
+        print "Error: --date must use a valid YYYY-MM-DD calendar date"
+        return 1
+    val created_date = if date_arg != "":
+        date_arg
+    else:
+        match _current_utc_date():
+            case Ok(value): value
+            case Err(reason):
+                print "Error: {reason}"
+                return 1
 
     val db_opt = load_bug_database(BUG_DB_PATH)
     var db = match db_opt:
@@ -111,8 +153,8 @@ fn main() -> i64:
         reproducible_by: repro_val,
         fix_strategy: [""],
         investigation_log: [""],
-        created_at: "2026-04-14",
-        updated_at: "2026-04-14",
+        created_at: created_date,
+        updated_at: created_date,
         valid: true
     )
 

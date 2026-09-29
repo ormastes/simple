@@ -1,0 +1,118 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# WASM backend: `WasmCompileResult.write_to_files` durability contract.
+#
+# DEFECT (found and fixed by this spec, src/plugins/backend_wasm/
+# wasm_backend.spl:702): `write_to_files` was a silent no-op -- its body was
+# a comment describing what it "Would write" followed by a bare `Ok(())` --
+# so every caller believed its `.wat`/`.wasm`/`.js` outputs had been written
+# to disk when NOTHING had been written at all. This is the exact durability
+# hole `LeanExportResult.write_to_file` (backend_lean/lean_backend.spl:905)
+# documents having been fixed for already, in the sibling backend; the WASM
+# backend had regressed to (or never left) the pre-fix shape.
+#
+# Also pins two properties that matter specifically on Windows/CRLF hosts:
+# content written through this path must be byte-identical on read-back (no
+# accidental \n -> \r\n text-mode translation on top of already-CRLF source
+# text, which would corrupt embedded line endings by doubling them), and a
+# write failure (directory occupying the target file's path) must surface as
+# `Err`, not a silently-swallowed success.
+
+use std.spec
+use plugins.backend_wasm.wasm_backend.{WasmCompileResult}
+use std.common.string_core.{bytes_to_text}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_dir_remove_all(path: text) -> bool
+
+fn read_text_exact(path: text) -> text:
+    """Read a file's RAW bytes and decode as text, deliberately bypassing
+    `rt_file_read_text`, which was measured (probe script, not committed) to
+    strip `\r` from `\r\n` on read on this host -- a runtime/std text-mode
+    concern outside `src/plugins/**` and not what this spec targets. Reading
+    raw bytes is what actually proves the plugin's WRITE path is not
+    corrupting content."""
+    bytes_to_text(rt_file_read_bytes(path))
+
+fn wat_with_lf() -> text:
+    "(module\n  (func $add (param i32 i32) (result i32)\n    local.get 0\n    local.get 1\n    i32.add))\n"
+
+fn js_glue_with_crlf() -> text:
+    # Deliberately CRLF already, as a JS-glue generator running on a
+    # Windows-hosted toolchain might produce. The write path must not
+    # translate this further.
+    "function add(a, b) {\r\n  return __wasm.exports.add(a, b);\r\n}\r\n"
+
+fn result_without_wasm_or_js(module_name: text) -> WasmCompileResult:
+    WasmCompileResult(module_name: module_name, wat: wat_with_lf(),
+        wasm: nil, js_glue: nil, compile_time_ms: 0)
+
+fn result_with_wasm_and_js(module_name: text) -> WasmCompileResult:
+    WasmCompileResult(module_name: module_name, wat: wat_with_lf(),
+        wasm: Some([0u8, 0x61u8, 0x73u8, 0x6du8, 1u8, 0u8, 0u8, 0u8]),
+        js_glue: Some(js_glue_with_crlf()), compile_time_ms: 0)
+
+describe "WasmCompileResult.write_to_files - actually writes (regression: was a no-op)":
+
+    it "writes the .wat file with byte-identical LF content":
+        step("writes the .wat file with byte-identical LF content")
+        val root = "build/wasm_write_to_files_wat_only"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val base = root + "/mod"
+        val result = result_without_wasm_or_js("mod")
+        expect(result.write_to_files(base).is_ok()).to_equal(true)
+        expect(rt_file_exists(base + ".wat")).to_equal(true)
+        expect(read_text_exact(base + ".wat")).to_equal(wat_with_lf())
+        rt_dir_remove_all(root)
+
+    it "does not write a .wasm or .js file when neither is present on the result":
+        step("does not write a .wasm or .js file when neither is present on the result")
+        val root = "build/wasm_write_to_files_no_extras"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val base = root + "/mod"
+        val result = result_without_wasm_or_js("mod")
+        expect(result.write_to_files(base).is_ok()).to_equal(true)
+        expect(rt_file_exists(base + ".wasm")).to_equal(false)
+        expect(rt_file_exists(base + ".js")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "writes .wasm binary and .js glue with CRLF content preserved byte-for-byte":
+        step("writes .wasm binary and .js glue with CRLF content preserved byte-for-byte")
+        val root = "build/wasm_write_to_files_full"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val base = root + "/mod"
+        val result = result_with_wasm_and_js("mod")
+        expect(result.write_to_files(base).is_ok()).to_equal(true)
+        expect(rt_file_exists(base + ".wat")).to_equal(true)
+        expect(rt_file_exists(base + ".wasm")).to_equal(true)
+        expect(rt_file_exists(base + ".js")).to_equal(true)
+        expect(read_text_exact(base + ".wat")).to_equal(wat_with_lf())
+        # Exact CRLF round-trip: no \n -> \r\n re-translation on top of the
+        # already-CRLF glue text (which would corrupt it to \r\r\n).
+        val js_read_back = read_text_exact(base + ".js")
+        expect(js_read_back).to_equal(js_glue_with_crlf())
+        expect(js_read_back.contains("\r\r\n")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "reports Err, not silent success, when the .wat target path is unwritable":
+        step("reports Err, not silent success, when the .wat target path is unwritable")
+        val root = "build/wasm_write_to_files_failure"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val base = root + "/mod"
+        # A directory occupying the exact target file path deterministically
+        # rejects the write, mirroring the sibling VHDL artifact write-failure
+        # contract (vhdl_artifact_manifest_spec.spl).
+        expect(rt_dir_create(base + ".wat", true)).to_equal(true)
+        val result = result_without_wasm_or_js("mod")
+        val outcome = result.write_to_files(base)
+        expect(outcome.is_err()).to_equal(true)
+        expect(outcome.unwrap_err()).to_contain("mod")
+        rt_dir_remove_all(root)

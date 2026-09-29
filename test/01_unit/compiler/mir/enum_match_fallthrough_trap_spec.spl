@@ -1,0 +1,215 @@
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# Runtime-enforcement lane of BUG-2026-08-01-match-fallthrough (record:
+# doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md).
+#
+# The record's accepted semantics: the RUNTIME report is primary (it observes
+# the actual falling-through value, so it is immune to the bare-name enum
+# collision that defeats every compile-time checker); compile-time stays a
+# warn-only backstop. The total-match half landed 2026-08-24 (rt_panic +
+# Abort on the fall-through block when the arms textually cover every
+# variant). The partial half was deferred: a no-default match whose arms OMIT
+# at least one variant still let the last `next_block` goto merge_block and
+# yield the placeholder `const 0` -- a silent wrong value on the JIT lane in
+# expression form, a silent no-op in statement form. That is the enforcement
+# this spec pins: any no-default enum match whose scrutinee matches no arm
+# now lowers the fall-through path to rt_panic + MirTerminator.Abort, so
+# control can no longer run on with a fabricated 0.
+#
+# Soundness gates (mirrored from the 2026-08-24 total trap and pinned here as
+# negative controls): the trap is NOT emitted when a default arm exists (the
+# explicit `case _:` opt-out) or when any arm carries a guard (a false guard
+# makes the fall-through reachable and correct). The compile-time warn
+# ("non-exhaustive enum match ...") must also keep firing: the runtime trap
+# replaces the silent VALUE, not the compile-time backstop.
+#
+# HARNESS NOTE: the parse->HIR->MIR pipeline is inlined in each `it` block ON
+# PURPOSE (same discrimination as enum_match_unknown_variant_diagnostic_spec:
+# module-level helpers lose recorded state across the struct-mutation
+# visibility family). Only pure projections on the returned MirModule live at
+# module level.
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn any_contains(messages: [text], needle: text) -> bool:
+    for m in messages:
+        if m.contains(needle):
+            return true
+    false
+
+fn find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name:
+            return Some(function)
+    nil
+
+fn abort_trap_messages(function: MirFunction) -> [text]:
+    var msgs: [text] = []
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Abort(m):
+                msgs = msgs.push(m)
+            case _:
+                pass
+    msgs
+
+fn every_abort_block_panics(function: MirFunction) -> bool:
+    # The two-halves enforcement shape `lower_bootstrap_panic_call`
+    # documents: the rt_panic call makes the message survive; the Abort
+    # terminator makes the block diverge so control cannot run on even if
+    # rt_panic is stubbed. Either half alone is defeatable, so assert both.
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Abort(_):
+                var saw_panic = false
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_panic":
+                                        saw_panic = true
+                                case _:
+                                    pass
+                        case _:
+                            pass
+                if not saw_panic:
+                    return false
+            case _:
+                pass
+    true
+
+fn lowering_messages(lowering: MirLowering) -> [text]:
+    var messages: [text] = []
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    messages
+
+describe "enum match fall-through: partial no-default match traps at runtime":
+    it "lowers the fall-through path to rt_panic + Abort instead of a silent goto-merge placeholder 0":
+        val src = "enum Color:\n" +
+            "    Red\n" +
+            "    Green\n" +
+            "    Blue\n" +
+            "\n" +
+            "fn describe(c: Color) -> text:\n" +
+            "    match c:\n" +
+            "        case Color.Red: \"red\"\n" +
+            "        case Color.Green: \"green\"\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_partial_fallthrough.spl", "fixture_partial_fallthrough", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_partial_fallthrough.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        # Compile-time warn-only backstop is untouched.
+        expect(any_contains(lowering_messages(lowering), "non-exhaustive enum match on 'Color'")).to_equal(true)
+        val describe_fn = find_function(mir, "describe")
+        assert_true(describe_fn.?)
+        val f = describe_fn.unwrap()
+        val traps = abort_trap_messages(f)
+        expect(traps.len()).to_equal(1)
+        expect(any_contains(traps, "fell through")).to_equal(true)
+        expect(any_contains(traps, "'Color'")).to_equal(true)
+        expect(any_contains(traps, "Blue")).to_equal(true)
+        assert_true(every_abort_block_panics(f))
+
+    it "pins the statement form too: a unit-context match traps instead of falling through silently":
+        val src = "enum Shade:\n" +
+            "    Dim\n" +
+            "    Bright\n" +
+            "    Strobe\n" +
+            "\n" +
+            "fn apply(s: Shade):\n" +
+            "    var out = \"\"\n" +
+            "    match s:\n" +
+            "        case Shade.Dim: out = \"dim\"\n" +
+            "        case Shade.Bright: out = \"bright\"\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_stmt_fallthrough.spl", "fixture_stmt_fallthrough", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_stmt_fallthrough.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        val apply_fn = find_function(mir, "apply")
+        assert_true(apply_fn.?)
+        val f = apply_fn.unwrap()
+        val traps = abort_trap_messages(f)
+        expect(traps.len()).to_equal(1)
+        expect(any_contains(traps, "fell through")).to_equal(true)
+        expect(any_contains(traps, "'Shade'")).to_equal(true)
+        expect(any_contains(traps, "Strobe")).to_equal(true)
+        assert_true(every_abort_block_panics(f))
+
+describe "enum match fall-through: legality gates keep legitimate matches untouched":
+    it "emits no trap when an explicit default arm exists (the 'case _:' opt-out)":
+        val src = "enum Color:\n" +
+            "    Red\n" +
+            "    Green\n" +
+            "    Blue\n" +
+            "\n" +
+            "fn describe(c: Color) -> text:\n" +
+            "    match c:\n" +
+            "        case Color.Red: \"red\"\n" +
+            "        case Color.Green: \"green\"\n" +
+            "        case _: \"other\"\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_default_arm.spl", "fixture_default_arm", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_default_arm.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        expect(any_contains(lowering_messages(lowering), "non-exhaustive enum match")).to_equal(false)
+        val f = find_function(mir, "describe").unwrap()
+        expect(abort_trap_messages(f).len()).to_equal(0)
+
+    it "emits no trap when any arm carries a guard: a false guard's fall-through is reachable and correct":
+        val src = "enum Mode:\n" +
+            "    Fast(i64)\n" +
+            "    Slow\n" +
+            "    Idle\n" +
+            "\n" +
+            "fn pick(m: Mode, b: bool) -> i64:\n" +
+            "    match m:\n" +
+            "        case Mode.Fast(v) if v > 0 and b:\n" +
+            "            v\n" +
+            "        case Mode.Slow:\n" +
+            "            2\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_guarded_arm.spl", "fixture_guarded_arm", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_guarded_arm.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        val f = find_function(mir, "pick").unwrap()
+        expect(abort_trap_messages(f).len()).to_equal(0)
+
+    it "keeps the 2026-08-24 total-match trap intact through the restructured shared gates":
+        val src = "enum Color:\n" +
+            "    Red\n" +
+            "    Green\n" +
+            "    Blue\n" +
+            "\n" +
+            "fn describe(c: Color) -> text:\n" +
+            "    match c:\n" +
+            "        case Color.Red: \"red\"\n" +
+            "        case Color.Green: \"green\"\n" +
+            "        case Color.Blue: \"blue\"\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_total_fallthrough.spl", "fixture_total_fallthrough", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("testdata/fixture_total_fallthrough.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        val target_context = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+        val mir = lowering.lower_module(hir)
+        val f = find_function(mir, "describe").unwrap()
+        val traps = abort_trap_messages(f)
+        expect(traps.len()).to_equal(1)
+        expect(any_contains(traps, "total enum match fell through")).to_equal(true)
+        expect(any_contains(traps, "'Color'")).to_equal(true)
+        assert_true(every_abort_block_panics(f))

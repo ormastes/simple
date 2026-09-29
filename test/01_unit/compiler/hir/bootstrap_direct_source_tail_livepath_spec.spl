@@ -1,0 +1,88 @@
+"""Live coverage for direct final source-expression HIR lowering."""
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_definitions.{HirExprKind, HirStmtKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+describe "bootstrap direct source tail live path":
+    it "preserves implicit scalar text and call tails without rewriting statements":
+        step("Lower representative rich parser functions in bootstrap mode")
+        val prior_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val source =
+            "fn tail_i64() -> i64:\n    7\n\n" +
+            "fn tail_text() -> text:\n    \"ready\"\n\n" +
+            "fn tail_call() -> i64:\n    tail_i64()\n\n" +
+            "fn explicit_return() -> i64:\n    return 9\n\n" +
+            "fn assignment_tail() -> i64:\n    var x = 0\n    x = 1\n\n" +
+            "fn non_tail_expr() -> i64:\n    1\n    2\n"
+        val parsed = parse_full_frontend(
+            source, "bootstrap_direct_source_tail.spl",
+            "bootstrap_direct_source_tail", Logger(level: 0))
+        var lowering = HirLowering.with_filename(
+            "bootstrap_direct_source_tail.spl")
+        val hir = lowering.lower_module(parsed)
+
+        var saw_i64 = false
+        var saw_text = false
+        var saw_call = false
+        var saw_explicit = false
+        var saw_assignment = false
+        var saw_non_tail = false
+        for function_ in hir.functions.values():
+            if function_.name == "tail_i64":
+                saw_i64 = function_.body.has and function_.body.stmts.len() == 0
+                match function_.body.value.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(7)
+                    case _: saw_i64 = false
+            elif function_.name == "tail_text":
+                saw_text = function_.body.has and function_.body.stmts.len() == 0
+                match function_.body.value.kind:
+                    case HirExprKind.StringLit(value, _): expect(value).to_equal("ready")
+                    case _: saw_text = false
+            elif function_.name == "tail_call":
+                saw_call = function_.body.has and function_.body.stmts.len() == 0
+                match function_.body.value.kind:
+                    case HirExprKind.Call(_, args, _): expect(args.len()).to_equal(0)
+                    case _: saw_call = false
+            elif function_.name == "explicit_return":
+                saw_explicit = not function_.body.has and function_.body.stmts.len() == 1
+                if function_.body.stmts.len() == 1:
+                    match function_.body.stmts[0].kind:
+                        case HirStmtKind.Expr(expr):
+                            match expr.kind:
+                                case HirExprKind.Return(_): pass
+                                case _: saw_explicit = false
+                        case _: saw_explicit = false
+            elif function_.name == "assignment_tail":
+                saw_assignment = not function_.body.has and function_.body.stmts.len() == 2
+                if function_.body.stmts.len() == 2:
+                    match function_.body.stmts[1].kind:
+                        case HirStmtKind.Assign(_, _, _): pass
+                        case _: saw_assignment = false
+            elif function_.name == "non_tail_expr":
+                saw_non_tail = function_.body.has and function_.body.stmts.len() == 1
+                match function_.body.value.kind:
+                    case HirExprKind.IntLit(value, _): expect(value).to_equal(2)
+                    case _: saw_non_tail = false
+
+        if val prior_value = prior_bootstrap:
+            rt_env_set("SIMPLE_BOOTSTRAP", prior_value)
+        else:
+            rt_env_remove("SIMPLE_BOOTSTRAP")
+
+        step("Require every tail and statement parity case")
+        expect(lowering.errors.len()).to_equal(0)
+        expect(saw_i64).to_equal(true)
+        expect(saw_text).to_equal(true)
+        expect(saw_call).to_equal(true)
+        expect(saw_explicit).to_equal(true)
+        expect(saw_assignment).to_equal(true)
+        expect(saw_non_tail).to_equal(true)

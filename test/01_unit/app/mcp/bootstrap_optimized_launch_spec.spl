@@ -1,0 +1,37 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-FEATURE
+"""
+# Optimized MCP bootstrap launches and answers stdio JSON-RPC
+
+Regression guard for known-bug C19. `src/app/mcp/bootstrap/main_optimized.spl`
+carried three dead module namespaces (`app.mcp.session`, `mcp_lib.*`,
+`app.mcp.diag_*_tools`) so it failed semantic analysis before running, and its
+`main()` gated on `args[0] == "server"` while `get_clean_args` leaves the
+script's own path in `args[0]` — so even an explicit `server` printed usage and
+exited 1. Both faults are launch-time, so a single launch probe pins them.
+"""
+
+use std.spec.step
+use app.io.mod (file_write, shell)
+
+describe "optimized MCP bootstrap":
+    it "starts from a bare `simple run` and answers an initialize request":
+        # @req REQ-SSPEC-FEATURE
+        step("feed one JSON-RPC initialize frame on stdin")
+        val frame = """Content-Length: 123
+
+{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}
+"""
+        file_write("/tmp/mcp_bootstrap_launch_spec.txt", frame)
+        val result = shell("bin/simple run src/app/mcp/bootstrap/main_optimized.spl < /tmp/mcp_bootstrap_launch_spec.txt 2>&1")
+        val output = result.stdout ?? ""
+        val exit_code = result.exit_code ?? 1
+
+        step("the process must not die on module resolution or usage gating")
+        expect(output.contains("Cannot resolve module")).to_equal(false)
+        expect(output.contains("simple mcp server (optimized)")).to_equal(false)
+        expect(exit_code).to_equal(0)
+
+        step("and must answer the initialize request")
+        expect(output.contains("protocolVersion")).to_equal(true)
+        expect(output.contains("capabilities")).to_equal(true)

@@ -1,7 +1,20 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: # FIXED 2026-05-10 — rt_array_extend_i64 bulk-append extern added (Option B workaround); xxHash64 ch
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Bug: SIMD Bulk Copy (J3 Rec 1) Blocked by SplArray<SplValue> Layout
 
-Status: CLOSED (not reproducible)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: # FIXED 2026-05-10 — rt_array_extend_i64 bulk-append extern added (Option B workaround); xxHash64 ch
 # **Status:** FIXED 2026-05-10 — rt_array_extend_i64 bulk-append extern added (Option B workaround); xxHash64 chunk_width fixed in zstd.spl
 
 **Date:** 2026-05-02

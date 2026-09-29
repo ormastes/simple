@@ -1,0 +1,54 @@
+use std.spec.{describe, it, expect}
+use compiler.backend.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset, llvm_bootstrap_string_globals_add, llvm_bootstrap_string_globals_text}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_process_hwm_kib() -> i64
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn occurrences(text_: text, needle: text) -> i64:
+    var count = 0
+    var offset = 0
+    while offset < text_.len():
+        val hit = text_.index_of(needle, offset) ?? -1
+        if hit < 0: break
+        count = count + 1
+        offset = hit + needle.len()
+    count
+
+describe "bootstrap LLVM string global accumulation":
+    it "keeps a 4096-declaration fixture within elapsed and peak RSS budgets":
+        llvm_bootstrap_string_globals_reset()
+        val started = rt_time_now_monotonic_ms()
+        val hwm_before = rt_process_hwm_kib()
+        var i = 0
+        while i < 4096:
+            llvm_bootstrap_string_globals_add("@.perf.{i} = private constant [1 x i8] c\"x\\00\"")
+            i = i + 1
+        val ir = llvm_bootstrap_string_globals_text()
+        val ir_again = llvm_bootstrap_string_globals_text()
+        val elapsed = rt_time_now_monotonic_ms() - started
+        val hwm_after = rt_process_hwm_kib()
+        expect(occurrences(ir, "= private constant")).to_equal(4096)
+        expect(ir_again).to_equal(ir)
+        llvm_bootstrap_string_globals_add("@.after_text = private constant [1 x i8] c\"x\\00\"")
+        val ir_after_text = llvm_bootstrap_string_globals_text()
+        expect(occurrences(ir_after_text, "= private constant")).to_equal(4097)
+        expect(ir_after_text).to_contain("@.perf.0")
+        expect(ir_after_text).to_contain("@.after_text")
+        expect(ir).to_contain("@.perf.0")
+        expect(ir).to_contain("@.perf.4095")
+        expect(ir.len()).to_be_less_than(262145)
+        expect(elapsed).to_be_less_than(10001)
+        if hwm_before > 0 and hwm_after > 0:
+            expect(hwm_after - hwm_before).to_be_less_than(65537)
+
+    it "frees an aborted module and retains explicit-target globals locally":
+        llvm_bootstrap_string_globals_reset()
+        llvm_bootstrap_string_globals_add("@.aborted = private constant [1 x i8] c\"x\\00\"")
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        val explicit = MirToLlvm.create_explicit_target("perf.explicit", CodegenTarget.X86_64, "x86_64", "pc", "linux", "gnu", true, "", false)
+        expect(llvm_bootstrap_string_globals_text()).to_equal("")
+        explicit.add_string_global("instance-fallback")
+        expect(explicit.string_globals.len()).to_equal(1)

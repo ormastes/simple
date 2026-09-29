@@ -1,0 +1,105 @@
+# codex-impl
+# Authenticated artifact admission boundary.
+#
+# A content digest establishes exact-byte identity only; it does not establish
+# who authorized those bytes.  This module consumes an externally-authoritative
+# verification receipt and never claims to verify a signature or trust chain.
+# Mapping/loading code may proceed only when artifact_map_load_eligible_v1
+# returns true.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    ENV_VARIANT_SCHEMA_V1, EnvironmentDigest256V1, VariantDescriptorV1
+}
+
+pub const ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1: u32 = 184u32
+
+pub const ENV_ARTIFACT_TRUST_UNKNOWN_V1: u16 = 0u16
+pub const ENV_ARTIFACT_TRUST_AUTHENTICATED_V1: u16 = 1u16
+pub const ENV_ARTIFACT_TRUST_REJECTED_V1: u16 = 2u16
+
+pub const ENV_ARTIFACT_ADMISSION_OK_V1: u32 = 0u32
+pub const ENV_ARTIFACT_ADMISSION_INVALID_RECEIPT_V1: u32 = 1u32
+pub const ENV_ARTIFACT_ADMISSION_BYTE_DIGEST_MISMATCH_V1: u32 = 2u32
+pub const ENV_ARTIFACT_ADMISSION_RECEIPT_IDENTITY_MISMATCH_V1: u32 = 3u32
+pub const ENV_ARTIFACT_ADMISSION_RECEIPT_ARTIFACT_MISMATCH_V1: u32 = 4u32
+pub const ENV_ARTIFACT_ADMISSION_TRUST_POLICY_MISMATCH_V1: u32 = 5u32
+pub const ENV_ARTIFACT_ADMISSION_VERIFIER_MISMATCH_V1: u32 = 6u32
+pub const ENV_ARTIFACT_ADMISSION_NOT_AUTHENTICATED_V1: u32 = 7u32
+
+pub struct ArtifactTrustVerificationReceiptV1:
+    descriptor_size: u32
+    schema_version: u16
+    authentication_status: u16
+    receipt_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    trust_policy_digest: EnvironmentDigest256V1
+    verifier_identity: EnvironmentDigest256V1
+    verifier_generation: u64
+    verification_evidence_digest: EnvironmentDigest256V1
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+pub fn artifact_exact_bytes_match_v1(
+    declared_artifact_digest: EnvironmentDigest256V1,
+    observed_artifact_digest: EnvironmentDigest256V1
+) -> bool:
+    _digest_declared_v1(declared_artifact_digest) and
+        _digest_declared_v1(observed_artifact_digest) and
+        _digest_equal_v1(declared_artifact_digest, observed_artifact_digest)
+
+pub fn artifact_trust_receipt_valid_v1(receipt: ArtifactTrustVerificationReceiptV1) -> bool:
+    receipt.schema_version == ENV_VARIANT_SCHEMA_V1 and
+        receipt.descriptor_size >= ENV_ARTIFACT_TRUST_RECEIPT_BYTES_V1 and
+        (receipt.authentication_status == ENV_ARTIFACT_TRUST_UNKNOWN_V1 or
+         receipt.authentication_status == ENV_ARTIFACT_TRUST_AUTHENTICATED_V1 or
+         receipt.authentication_status == ENV_ARTIFACT_TRUST_REJECTED_V1) and
+        _digest_declared_v1(receipt.receipt_identity) and
+        _digest_declared_v1(receipt.artifact_digest) and
+        _digest_declared_v1(receipt.trust_policy_digest) and
+        _digest_declared_v1(receipt.verifier_identity) and
+        receipt.verifier_generation > 0u64 and
+        _digest_declared_v1(receipt.verification_evidence_digest)
+
+pub fn artifact_admission_reason_v1(
+    descriptor: VariantDescriptorV1,
+    observed_artifact_digest: EnvironmentDigest256V1,
+    required_trust_policy_digest: EnvironmentDigest256V1,
+    required_verifier_identity: EnvironmentDigest256V1,
+    minimum_verifier_generation: u64,
+    receipt: ArtifactTrustVerificationReceiptV1
+) -> u32:
+    if not artifact_trust_receipt_valid_v1(receipt) or
+       not _digest_declared_v1(required_trust_policy_digest) or
+       not _digest_declared_v1(required_verifier_identity) or minimum_verifier_generation == 0u64:
+        return ENV_ARTIFACT_ADMISSION_INVALID_RECEIPT_V1
+    if not artifact_exact_bytes_match_v1(descriptor.artifact_digest, observed_artifact_digest):
+        return ENV_ARTIFACT_ADMISSION_BYTE_DIGEST_MISMATCH_V1
+    if not _digest_equal_v1(descriptor.assurance_receipt_digest, receipt.receipt_identity):
+        return ENV_ARTIFACT_ADMISSION_RECEIPT_IDENTITY_MISMATCH_V1
+    if not _digest_equal_v1(observed_artifact_digest, receipt.artifact_digest):
+        return ENV_ARTIFACT_ADMISSION_RECEIPT_ARTIFACT_MISMATCH_V1
+    if not _digest_equal_v1(required_trust_policy_digest, receipt.trust_policy_digest):
+        return ENV_ARTIFACT_ADMISSION_TRUST_POLICY_MISMATCH_V1
+    if not _digest_equal_v1(required_verifier_identity, receipt.verifier_identity) or
+       receipt.verifier_generation < minimum_verifier_generation:
+        return ENV_ARTIFACT_ADMISSION_VERIFIER_MISMATCH_V1
+    if receipt.authentication_status != ENV_ARTIFACT_TRUST_AUTHENTICATED_V1:
+        return ENV_ARTIFACT_ADMISSION_NOT_AUTHENTICATED_V1
+    ENV_ARTIFACT_ADMISSION_OK_V1
+
+pub fn artifact_map_load_eligible_v1(
+    descriptor: VariantDescriptorV1,
+    observed_artifact_digest: EnvironmentDigest256V1,
+    required_trust_policy_digest: EnvironmentDigest256V1,
+    required_verifier_identity: EnvironmentDigest256V1,
+    minimum_verifier_generation: u64,
+    receipt: ArtifactTrustVerificationReceiptV1
+) -> bool:
+    artifact_admission_reason_v1(
+        descriptor, observed_artifact_digest, required_trust_policy_digest,
+        required_verifier_identity, minimum_verifier_generation, receipt
+    ) == ENV_ARTIFACT_ADMISSION_OK_V1

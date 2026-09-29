@@ -1,0 +1,154 @@
+# Compiler-owned execution/capture stage only. Pinned identity is NOT tool
+# admission: image release, dependency closure and version authentication are
+# still required by parser_external_inspection_tool_owner_join_v1.
+use std.io.process_inspection_v1.{OwnedExecutablePin, OwnedCwdPinV4,
+    ProcessInspectionLeaseV1, process_inspection_start_pinned_v1}
+use std.io.process_observation_v4.process_observation_capabilities_v4
+use std.common.process.observation_v4.*
+use std.common.crypto.sha256.sha256_u8_hex
+use compiler.driver.parser_external_inspection_tool_owner_v1.ParserExternalInspectionToolKindV1
+
+# Native V4 has one 16 MiB budget shared by both capture streams.
+pub const PARSER_INSPECTION_STDOUT_LIMIT_V1: i64 = 15728640
+pub const PARSER_INSPECTION_STDERR_LIMIT_V1: i64 = 1048576
+
+pub enum ParserInspectionProcessStateV1:
+    Idle
+    Running
+    Captured
+    CleanupRequired
+    Acknowledged
+    Failed
+
+# Read-only policy description; start always rebuilds it internally.
+pub fn parser_inspection_process_argv_v1(kind: ParserExternalInspectionToolKindV1) -> [text]:
+    match kind:
+        case ParserExternalInspectionToolKindV1.Readobj:
+            ["llvm-readobj", "--elf-output-style=JSON", "--file-headers",
+                "--sections", "--section-data", "--symbols", "--relocations", "--expand-relocs", "-"]
+        case ParserExternalInspectionToolKindV1.Objdump:
+            ["llvm-objdump", "-d", "-"]
+
+fn _input_digest_peip_v1(input: [u8]) -> [u8]:
+    val hex = sha256_u8_hex(input)
+    val alphabet = "0123456789abcdef"
+    var digest: [u8] = []
+    for index in 0..32:
+        var high = 0
+        var low = 0
+        for digit in 0..16:
+            if hex.char_at(index * 2) == alphabet.char_at(digit): high = digit
+            if hex.char_at(index * 2 + 1) == alphabet.char_at(digit): low = digit
+        digest.push((high * 16 + low) as u8)
+    digest
+
+pub class ParserExternalInspectionProcessV1:
+    var phase: ParserInspectionProcessStateV1
+    var lease: ProcessInspectionLeaseV1?
+    var capture: ProcessObservationFrozenReceiptV4?
+
+    pub static fn create() -> ParserExternalInspectionProcessV1:
+        ParserExternalInspectionProcessV1(phase: ParserInspectionProcessStateV1.Idle,
+            lease: nil, capture: nil)
+
+    pub fn state(self) -> ParserInspectionProcessStateV1: self.phase
+
+    # Pins are borrowed; their caller retains responsibility for closing them.
+    # No caller-supplied policy digest, argv, environment or terminal is trusted.
+    pub me fn start(self, executable: OwnedExecutablePin, cwd: OwnedCwdPinV4,
+        kind: ParserExternalInspectionToolKindV1, input: [u8]
+    ) -> Result<(), text>:
+        if self.phase != ParserInspectionProcessStateV1.Idle:
+            return Err("inspection process stage is single-use")
+        if input.len() <= 0 or input.len() > 16777216:
+            return Err("inspection process input exceeds the bounded policy")
+        val capabilities = process_observation_capabilities_v4()?
+        if not capabilities.available or capabilities.runtime_error != 0 or
+                capabilities.capability_bits <= 0 or
+                capabilities.max_capture_bytes <
+                    PARSER_INSPECTION_STDOUT_LIMIT_V1 + PARSER_INSPECTION_STDERR_LIMIT_V1:
+            return Err("inspection process provider cannot satisfy the capture policy")
+        val request = ProcessObservationRequestV4(
+            argv: parser_inspection_process_argv_v1(kind),
+            environment: [ProcessObservationEnvironmentV4(key: "LANG", value: "C"),
+                ProcessObservationEnvironmentV4(key: "LC_ALL", value: "C")],
+            # The pinned facade replaces these unbound identity fields.
+            canonical_cwd: "", canonical_pinned_directory: "", executable_pin: 0,
+            executable_digest: [], cwd_pin_claim: 0, cwd_identity_digest: [],
+            capability_bits: capabilities.capability_bits,
+            wall_budget_ns: 30000000000, term_grace_ns: 100000000,
+            cleanup_budget_ns: 2000000000, stdout_limit_bytes: PARSER_INSPECTION_STDOUT_LIMIT_V1,
+            stderr_limit_bytes: PARSER_INSPECTION_STDERR_LIMIT_V1, memory_limit_bytes: 0,
+            enforcement_kind: ProcessObservationEnforcementKindV4.None,
+            # Required for stage 6A. Current V4 providers reject this policy;
+            # preserve that fail-closed boundary until group retirement exists.
+            descendant_policy: ProcessObservationDescendantPolicyV4.ProcessGroup,
+            max_clock_resolution_ns: 1000000)
+        val started = process_inspection_start_pinned_v1(executable, cwd,
+            request, input, _input_digest_peip_v1(input))
+        if started.is_err():
+            self.phase = ParserInspectionProcessStateV1.Failed
+            return Err(started.unwrap_err())
+        val owned = started.unwrap()
+        if owned.receipt.packet.status == ProcessObservationStatusV4.Rejected:
+            self.phase = ParserInspectionProcessStateV1.Failed
+            return Err("inspection process was rejected before execution")
+        self.lease = Some(owned.lease)
+        self.phase = ParserInspectionProcessStateV1.Running
+        if owned.receipt.packet.status != ProcessObservationStatusV4.Running:
+            self.phase = ParserInspectionProcessStateV1.CleanupRequired
+            val cleanup = self.cleanup()
+            if cleanup.is_err(): return Err(cleanup.unwrap_err())
+            return Err("inspection process failed during start")
+        Ok(())
+
+    # Nonblocking caller progression. The provider enforces the fixed deadlines.
+    # Returned state is progress only, never admission authority.
+    pub me fn collect(self) -> Result<ParserInspectionProcessStateV1, text>:
+        if self.phase != ParserInspectionProcessStateV1.Running:
+            return Err("inspection process is not running")
+        var owned = self.lease.unwrap()
+        val result = owned.terminal_capture(0)
+        self.lease = Some(owned)
+        if result.is_err():
+            self.phase = ParserInspectionProcessStateV1.CleanupRequired
+            val cleanup = self.cleanup()
+            if cleanup.is_err(): return Err(cleanup.unwrap_err())
+            return Err(result.unwrap_err())
+        val frozen = result.unwrap()
+        if not frozen.?: return Ok(ParserInspectionProcessStateV1.Running)
+        self.capture = frozen
+        self.phase = ParserInspectionProcessStateV1.Captured
+        Ok(ParserInspectionProcessStateV1.Captured)
+
+    # Returns the real retained capture only after native acknowledgement.
+    # This is process evidence, never ParserExternalInspectionTokenV1.
+    pub me fn acknowledge(self) -> Result<ProcessObservationFrozenReceiptV4, text>:
+        if self.phase != ParserInspectionProcessStateV1.Captured:
+            return Err("inspection process has no successful capture")
+        var owned = self.lease.unwrap()
+        val acknowledged = owned.acknowledge_current()
+        self.lease = Some(owned)
+        if acknowledged.is_err(): return Err(acknowledged.unwrap_err())
+        val retained = self.capture.unwrap()
+        self.capture = nil
+        self.lease = nil
+        self.phase = ParserInspectionProcessStateV1.Acknowledged
+        Ok(retained)
+
+    # On failure keep the lease until an exact frozen snapshot is acknowledged.
+    # Caller may retry cleanup after CleanupPending; no implicit polling loop.
+    pub me fn cleanup(self) -> Result<(), text>:
+        if not self.lease.?: return Err("inspection process has no cleanup lease")
+        self.phase = ParserInspectionProcessStateV1.CleanupRequired
+        self.capture = nil
+        var owned = self.lease.unwrap()
+        val cancelled = owned.cancel(0)
+        self.lease = Some(owned)
+        if cancelled.is_err(): return Err(cancelled.unwrap_err())
+        val acknowledged = owned.acknowledge_current()
+        self.lease = Some(owned)
+        if acknowledged.is_err(): return Err(acknowledged.unwrap_err())
+        self.lease = nil
+        self.phase = ParserInspectionProcessStateV1.Failed
+        Ok(())

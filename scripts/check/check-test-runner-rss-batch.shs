@@ -9,8 +9,16 @@ FIXTURE="test/fixtures/pure_simple_tooling/sibling_describe_green_spec.spl"
 
 case "$FILE_COUNT:$BATCH_SIZE" in *[!0-9:]*) echo "error=invalid_count"; exit 2 ;; esac
 [ "$FILE_COUNT" -gt 0 ] && [ "$BATCH_SIZE" -gt 0 ] || { echo "error=invalid_count"; exit 2; }
-[ -x /usr/bin/time ] || { echo "error=gnu_time_required"; exit 2; }
-command -v timeout >/dev/null 2>&1 || { echo "error=timeout_required"; exit 2; }
+[ -x /usr/bin/time ] || { echo "error=time_required"; exit 2; }
+if command -v timeout >/dev/null 2>&1; then
+  timeout_bin=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  timeout_bin=gtimeout
+else
+  echo "error=timeout_required"
+  exit 2
+fi
+host_os=$(uname -s)
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/specs"
@@ -21,17 +29,32 @@ while [ "$i" -le "$FILE_COUNT" ]; do
 done
 
 set +e
-/usr/bin/time -f %M -o "$ROOT/parent-rss-kib" \
-  timeout 300 bin/simple test "$ROOT/specs" --batch-size="$BATCH_SIZE" \
-    --no-session-daemon --assert-ran --no-db >"$ROOT/output.log" 2>"$ROOT/error.log"
+if [ "$host_os" = Darwin ]; then
+  # Apple time reports maximum RSS in bytes. Keep its report separate from
+  # runner stderr so a diagnostic cannot be mistaken for a measurement.
+  LC_ALL=C /usr/bin/time -l -o "$ROOT/parent-rss-raw" \
+    "$timeout_bin" 300 bin/simple test "$ROOT/specs" --batch-size="$BATCH_SIZE" \
+      --no-session-daemon --assert-ran --no-db >"$ROOT/output.log" 2>"$ROOT/error.log"
+else
+  LC_ALL=C /usr/bin/time -f %M -o "$ROOT/parent-rss-kib" \
+    "$timeout_bin" 300 bin/simple test "$ROOT/specs" --batch-size="$BATCH_SIZE" \
+      --no-session-daemon --assert-ran --no-db >"$ROOT/output.log" 2>"$ROOT/error.log"
+fi
 status=$?
 set -e
 [ "$status" -eq 0 ] || { echo "error=runner_failed:$status"; exit 1; }
+if [ "$host_os" = Darwin ]; then
+  awk '/^[[:space:]]*[0-9]+[[:space:]]+maximum resident set size[[:space:]]*$/ {
+    printf "%.0f\n", int(($1 + 1023) / 1024)
+  }' "$ROOT/parent-rss-raw" >"$ROOT/parent-rss-kib"
+fi
 
 expected_batches=$(( (FILE_COUNT + BATCH_SIZE - 1) / BATCH_SIZE ))
 worker_count="$(grep 'Batch worker: pid=' "$ROOT/output.log" | sed 's/^.*pid=//; s/ .*$//' | sort -u | wc -l | tr -d ' ')"
 boundary_count="$(grep -c 'Batch boundary:' "$ROOT/output.log" || true)"
 parent_rss_kib="$(sed -n '1p' "$ROOT/parent-rss-kib")"
+case "$parent_rss_kib" in ''|*[!0-9]*) echo "error=invalid_rss_measurement"; exit 1 ;; esac
+[ "$parent_rss_kib" -gt 0 ] || { echo "error=invalid_rss_measurement"; exit 1; }
 expected_examples=$(( FILE_COUNT * 2 ))
 
 [ "$worker_count" -eq "$expected_batches" ] || { echo "error=worker_reexec_count:$worker_count"; exit 1; }

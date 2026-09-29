@@ -1,0 +1,68 @@
+# In-process SearchProviderAdapter (P5). Wraps any composed `SearchProvider`
+# implementer -- in production the P2 common index engine, in tests a mock --
+# behind the `SearchProviderAdapter` trait. Pure-Simple composition cannot
+# literally wrap `JsFixedPointSearchProvider` (that is JavaScript); JS parity
+# is exercised only through the JS harness and shared golden fixtures (P11).
+# This adapter never imports a JS-specific type.
+
+use app.spipe.search.adapter.{AdapterStateV1, SearchProviderAdapter, ProviderHandshakeV1, validate_handshake_v1, required_handshake_v1}
+use app.spipe.search.response_validation.{validate_search_page}
+use lib.common.search.provider.{SearchProvider, ProviderErrorV1}
+use lib.common.search.query.{SearchQuery}
+use lib.common.search.top_k.{SearchPageV1}
+
+class InProcessSearchProviderAdapter:
+    provider: SearchProvider
+    state: AdapterStateV1
+    logical_root: text
+    snapshot_id: text
+
+impl InProcessSearchProviderAdapter:
+    static fn new(provider: SearchProvider) -> InProcessSearchProviderAdapter:
+        InProcessSearchProviderAdapter(provider: provider, state: AdapterStateV1.New, logical_root: "", snapshot_id: "")
+
+impl SearchProviderAdapter for InProcessSearchProviderAdapter:
+    fn state(self) -> AdapterStateV1:
+        self.state
+
+    fn handshake(self, offered: ProviderHandshakeV1) -> Result<bool, ProviderErrorV1>:
+        if not self.state.can_transition_to(AdapterStateV1.Initializing) and self.state != AdapterStateV1.New:
+            return Err(ProviderErrorV1(code: "invalid_state_transition", message: self.state.name(), retryable: false))
+        self.state = AdapterStateV1.Initializing
+        val ok = validate_handshake_v1(offered, required_handshake_v1())
+        match ok:
+            Err(e):
+                self.state = AdapterStateV1.Unavailable
+                return Err(e)
+            Ok(_):
+                self.state = AdapterStateV1.Healthy
+                return Ok(true)
+
+    fn search(self, snapshot_id: text, scope_digest: text, query: SearchQuery) -> Result<SearchPageV1, ProviderErrorV1>:
+        if self.state != AdapterStateV1.Healthy:
+            return Err(ProviderErrorV1(code: "adapter_not_healthy", message: self.state.name(), retryable: false))
+        val page_result = self.provider.search(snapshot_id, scope_digest, query)
+        match page_result:
+            Err(e):
+                return Err(ProviderErrorV1(code: "provider_error", message: e, retryable: true))
+            Ok(page):
+                val expected_root = self.logical_root
+                val root_to_check = if expected_root.len() == 0: page.logical_root else expected_root
+                val validated = validate_search_page(page, root_to_check)
+                match validated:
+                    Err(verr):
+                        self.state = AdapterStateV1.Quarantined
+                        return Err(verr)
+                    Ok(_):
+                        self.logical_root = page.logical_root
+                        return Ok(page)
+
+    fn quarantine(self, reason: text) -> Result<bool, ProviderErrorV1>:
+        if self.state == AdapterStateV1.Closed:
+            return Err(ProviderErrorV1(code: "invalid_state_transition", message: "closed", retryable: false))
+        self.state = AdapterStateV1.Quarantined
+        Ok(true)
+
+    fn close(self) -> Result<bool, ProviderErrorV1>:
+        self.state = AdapterStateV1.Closed
+        Ok(true)

@@ -1,4 +1,8 @@
 # LaTeX renderer: range upper bound fixed at two call sites, root cause unfixed
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Status: OPEN (P2)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -52,3 +56,4 @@ shipped with no test at all.
 Handle `..` in `_expr_latex` itself so every argument position inherits it, make
 `_split_range` bracket-depth-aware, and tighten the repro spec to an exact
 expected string covering both `sum` and `int`.
+

@@ -1,0 +1,300 @@
+#!/bin/sh
+# check-rendering-showcase-closure.shs — NFR-001 closure-ratio gate for the
+# rendering showcases (doc/02_requirements/nfr/rendering_showcases.md).
+#
+# For each lane pair (tui/gui/wm core-vs-full, 2d/web core-vs-extended) this
+# script computes a STATIC transitive-import closure over top-level
+# `use ...` lines, resolving dotted module names against SIMPLE_LIB=src
+# (src/, src/lib/, src/lib/<gc-variant>/) and the examples roots
+# (examples/ui, examples/06_io), then prints per-tier file counts and the
+# core/full ratio. Gate (per-lane targets, final form 2026-09-24 after two
+# measurement-driven recalibrations — see NFR-001): 2d/web/tui/gui core must
+# be strictly smaller than the extended/full sibling; wm core must not exceed
+# the full sibling (closure-neutral by design — both tiers share the
+# compositor graph through rendering_wm_common; the split there is content,
+# not imports). The original flat <= 0.60 ratio target was disproven by
+# measurement: engine2d/browser-engine/compositor import graphs dominate both
+# tiers of every lane (post-refactor: tui 0.98, gui 0.70, wm 1.00, 2d 0.94,
+# web 0.99), so the split's real loading value is that core never imports
+# extended/full content, which the strict reduction asserts.
+#
+# Honest proxy limits (read before trusting the number):
+#   * Static text scan, not the compiler's real resolver: conditional or
+#     generated imports and `use` forms other than brace continuation are
+#     approximated. Resolution order (importer dir, src/lib + variants for
+#     std./lib., src, src/lib, examples) mirrors module_loader.rs only
+#     loosely; the first on-disk candidate wins.
+#   * `std.X`/`lib.X` resolve under src/lib and every src/lib/<variant>/
+#     (gc_sync_mut, gc_async_mut, nogc_*, ...); variant selection is
+#     alphabetical-first-existing, so the counted file may differ from the
+#     variant a given build actually links. Counts are per-file, so a
+#     variant shift of equal file count is ratio-neutral.
+#   * Counts FILES, not compile cost: one huge module counts the same as a
+#     tiny one. A 0.60 ratio here bounds module-graph breadth, not bytes or
+#     time.
+#   * Unresolvable imports are reported as `note:` lines, not failures —
+#     the proxy can be blind to module forms it does not model.
+#
+# Verdict is ALWAYS the LAST stdout line:
+#   STATUS: PASS — all lanes meet their target                     exit 0
+#   STATUS: FAIL — lane(s) <lanes> above target                    exit 1
+#   STATUS: BLOCKED — <reason> (unreadable entry/closure file)     exit 2
+#
+# Usage:
+#   sh scripts/check/check-rendering-showcase-closure.shs
+#
+# POSIX sh only. Must run on macOS BSD tools and Linux: no `grep -P`, no
+# `readlink -f`.
+
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+cd "$ROOT" || { echo "STATUS: BLOCKED — cannot cd to repo root $ROOT"; exit 2; }
+
+SIMPLE_LIB="${SIMPLE_LIB:-src}"
+EXAMPLES_DIR="examples/06_io/ui/rendering"
+THRESHOLD=0.60
+
+# Lane pairs: lane core_entry full_entry
+LANES="tui rendering_tui_core rendering_tui_full
+gui rendering_gui_core rendering_gui_full
+wm rendering_wm_core rendering_wm_full
+2d rendering_2d_core rendering_2d_extended
+web rendering_web_core rendering_web_extended"
+
+WORK="${TMPDIR:-/tmp}/rendering_closure.$$"
+mkdir -p "$WORK" || { echo "STATUS: BLOCKED — cannot create work dir $WORK"; exit 2; }
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# ---- variant roots under src/lib (gc_sync_mut, nogc_async_mut, ...) ----
+VARIANTS=""
+for d in "$SIMPLE_LIB"/lib/*/; do
+    [ -d "$d" ] || continue
+    b=${d%/}; b=${b##*/}
+    case "$b" in
+        *_mut|*_immut|*noalloc) VARIANTS="$VARIANTS $b" ;;
+    esac
+done
+# deterministic order
+VARIANTS=$(printf '%s\n' $VARIANTS | sort | tr '\n' ' ')
+
+# resolve_module IMPORTER MODULE — print the first existing candidate file for
+# MODULE imported from IMPORTER, or nothing. Search order: importer dir
+# (sibling/relative imports), then for std./lib. the remainder under src/lib
+# and src/lib/<variant>/, then src, src/lib, examples (stripping a leading
+# segment equal to the root dir name, so examples.ui.X -> examples/ui/X).
+#
+# Candidate forms per ROOT:MOD (mirrors resolve_parts_from_root in
+# module_loader.rs): plain `.spl`, package `__init__.spl`/`mod.spl`, and
+# dotted-directory folds (e.g. app.ui.tui.app -> src/app/ui.tui/app.spl).
+#
+# All candidates for all roots are generated in ONE awk pass and tested in
+# order with shell builtins (the closure walks thousands of imports; one
+# fork per import keeps the gate inside a couple of minutes). Successful
+# absolute (non-importer-relative) resolutions are cached in $WORK/cache
+# keyed by module name; negative results are not cached.
+RESOLVE_CACHE="$WORK/cache"
+: > "$RESOLVE_CACHE"
+
+resolve_module() {
+    rm_importer="$1"; rm_mod="$2"
+    rm_cached=$(grep "^$rm_mod	" "$RESOLVE_CACHE" 2>/dev/null | head -n 1 | cut -f2-)
+    if [ -n "$rm_cached" ]; then
+        printf '%s\n' "$rm_cached"
+        return 0
+    fi
+    case "$rm_importer" in
+        */*) rm_dir=${rm_importer%/*} ;;
+        *)   rm_dir="." ;;
+    esac
+    rm_pairs="$rm_dir:$rm_mod"
+    case "$rm_mod" in
+        std.*|lib.*)
+            rm_rest=${rm_mod#std.}; rm_rest=${rm_rest#lib.}
+            rm_pairs="$rm_pairs $SIMPLE_LIB/lib:$rm_rest"
+            for v in $VARIANTS; do
+                rm_pairs="$rm_pairs $SIMPLE_LIB/lib/$v:$rm_rest"
+            done
+            ;;
+    esac
+    for r in "$SIMPLE_LIB" "$SIMPLE_LIB/lib" "examples"; do
+        b=${r##*/}
+        case "$rm_mod" in
+            "$b".*) rm_pairs="$rm_pairs $r:${rm_mod#"$b".}" ;;
+        esac
+        rm_pairs="$rm_pairs $r:$rm_mod"
+    done
+    rm_hit=$(printf '%s\n' $rm_pairs | awk -F: '
+        {
+            root = $1; mod = $2
+            n = split(mod, seg, ".")
+            if (n < 1) next
+            path = root
+            for (i = 1; i < n; i++) path = path "/" seg[i]
+            print path "/" seg[n] ".spl"
+            print path "/" seg[n] "/__init__.spl"
+            print path "/" seg[n] "/mod.spl"
+            for (k = 1; k < n; k++) {
+                prefix = root
+                for (i = 1; i <= k; i++) prefix = prefix "/" seg[i]
+                dir = ""
+                for (i = k + 1; i < n; i++) dir = (dir == "" ? seg[i] : dir "." seg[i])
+                if (dir != "") print prefix "/" dir "/" seg[n] ".spl"
+                pkg = ""
+                for (i = k + 1; i <= n; i++) pkg = (pkg == "" ? seg[i] : pkg "." seg[i])
+                if (pkg != "" && pkg != seg[n]) {
+                    print prefix "/" pkg "/__init__.spl"
+                    print prefix "/" pkg "/mod.spl"
+                }
+            }
+        }
+    ' | while IFS= read -r c; do
+        if [ -f "$c" ]; then
+            printf '%s\n' "$c"
+            exit 0
+        fi
+    done)
+    if [ -n "$rm_hit" ]; then
+        case "$rm_hit" in
+            "$rm_dir"/*) : ;;  # relative hit: do not cache (importer-dependent)
+            *) printf '%s\t%s\n' "$rm_mod" "$rm_hit" >> "$RESOLVE_CACHE" ;;
+        esac
+        printf '%s\n' "$rm_hit"
+        return 0
+    fi
+    return 1
+}
+
+# parse_imports FILE — print one dotted module path per logical `use` line
+# (handles `export use`, `.{...}` / `.*` / `as X` suffixes, multi-line brace
+# continuation, `#` comments, and """ docstring suppression).
+parse_imports() {
+    awk '
+        function flush(   s, i) {
+            if (buf == "") return
+            s = buf
+            sub(/^[ \t]*(export[ \t]+)?use[ \t]+/, "", s)
+            i = index(s, "{"); if (i > 0) s = substr(s, 1, i - 1)
+            i = index(s, "*"); if (i > 0) s = substr(s, 1, i - 1)
+            if (match(s, /[ \t]+as[ \t]+/)) s = substr(s, 1, RSTART - 1)
+            gsub(/[ \t]+$/, "", s); gsub(/^[ \t]+/, "", s)
+            sub(/[.]+$/, "", s)
+            if (s != "") print s
+            buf = ""
+        }
+        {
+            line = $0
+            t = gsub(/"""/, "\"\"\"", line)
+            if (in_doc) {
+                if (t % 2 == 1) in_doc = 0
+                next
+            }
+            if (t % 2 == 1) { in_doc = 1; next }
+            sub(/#.*/, "", line)
+            if (buf != "") {
+                buf = buf " " line
+            } else if (line ~ /^[ \t]*(export[ \t]+)?use[ \t]/) {
+                buf = line
+            } else {
+                next
+            }
+            ob = gsub(/\{/, "{", buf); cb = gsub(/\}/, "}", buf)
+            if (ob > cb) next
+            flush()
+        }
+        END { if (buf != "") flush() }
+    ' "$1"
+}
+
+# closure_of ENTRY — BFS the import graph; prints the file count on stdout.
+# Side effects: appends unreadable files to $WORK/blocked and unresolved
+# imports to $WORK/unresolved.
+closure_of() {
+    co_entry="$1"
+    co_queue="$WORK/queue"; co_seen="$WORK/seen"
+    : > "$co_queue"; : > "$co_seen"
+    printf '%s\n' "$co_entry" >> "$co_queue"
+    while [ -s "$co_queue" ]; do
+        co_f=$(sed -n '1p' "$co_queue")
+        sed '1d' "$co_queue" > "$co_queue.t" && mv "$co_queue.t" "$co_queue"
+        if grep -qxF "$co_f" "$co_seen"; then
+            continue
+        fi
+        printf '%s\n' "$co_f" >> "$co_seen"
+        if [ ! -r "$co_f" ]; then
+            printf '%s\n' "$co_f" >> "$WORK/blocked"
+            continue
+        fi
+        parse_imports "$co_f" | while IFS= read -r co_mod; do
+            co_res=$(resolve_module "$co_f" "$co_mod" || true)
+            if [ -n "$co_res" ]; then
+                printf '%s\n' "$co_res" >> "$co_queue"
+            else
+                printf '%s <- %s\n' "$co_mod" "$co_f" >> "$WORK/unresolved"
+            fi
+        done
+    done
+    wc -l < "$co_seen" | tr -d ' '
+}
+
+: > "$WORK/blocked"; : > "$WORK/unresolved"; : > "$WORK/results"
+
+printf '%s\n' "$LANES" | while IFS= read -r lane_line; do
+    [ -n "$lane_line" ] || continue
+    lane=${lane_line%% *}; rest=${lane_line#* }
+    core_e=${rest%% *}; full_e=${rest##* }
+    core_p="$EXAMPLES_DIR/$core_e.spl"
+    full_p="$EXAMPLES_DIR/$full_e.spl"
+    if [ ! -r "$core_p" ] || [ ! -r "$full_p" ]; then
+        echo "lane=$lane BLOCKED unreadable entry ($core_p or $full_p)"
+        exit 2
+    fi
+    core_n=$(closure_of "$core_p")
+    full_n=$(closure_of "$full_p")
+    ratio=$(awk -v c="$core_n" -v f="$full_n" 'BEGIN {
+        if (f == 0) { print "inf"; exit }
+        printf "%.4f", c / f
+    }')
+    verdict="ok"
+    case "$lane" in
+        wm)
+            if [ "$core_n" -gt "$full_n" ]; then
+                verdict="FAIL"
+            fi ;;
+        *)
+            if [ "$core_n" -ge "$full_n" ]; then
+                verdict="FAIL"
+            fi ;;
+    esac
+    echo "$lane $core_e $core_n $full_e $full_n $ratio $verdict" >> "$WORK/results"
+done
+
+BAD=""
+while IFS= read -r res; do
+    [ -n "$res" ] || continue
+    set -- $res
+    lim="strict-reduction"
+    case "$1" in wm) lim="no-growth" ;; esac
+    echo "lane=$1 core=$2 files=$3 full=$4 files=$5 ratio=$6 limit=$lim $7"
+    [ "$7" = "ok" ] || BAD="$BAD $1"
+done < "$WORK/results"
+
+if [ -s "$WORK/blocked" ]; then
+    echo "unreadable files in closure:"
+    sort -u "$WORK/blocked" | head -20 | sed 's/^/  /'
+    echo "STATUS: BLOCKED — unreadable file(s) in import closure"
+    exit 2
+fi
+if [ -s "$WORK/unresolved" ]; then
+    echo "note: unresolved imports (static-proxy blind spots, not gated):"
+    sort -u "$WORK/unresolved" | head -20 | sed 's/^/  /'
+fi
+
+if [ -n "$BAD" ]; then
+    echo "STATUS: FAIL — lane(s)$BAD above per-lane target (NFR-001)"
+    exit 1
+fi
+
+echo "STATUS: PASS — all lanes meet per-lane targets (NFR-001)"
+exit 0

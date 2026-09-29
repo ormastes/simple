@@ -82,10 +82,8 @@ Evidence:
   analysis specs.
 - `simple check` passed for `src/app/ponytail/audit.spl` and both mirrored
   ponytail audit specs.
-- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 27/27
-  after aligning the canonical mirror with the SQL `db` / `source_filter`
-  schema, source-less SQL routing, and lower-MCP context route assertions.
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
 - `test/01_unit/app/tooling/context_generate_spec.spl` and
   `test/unit/app/tooling/context_generate_spec.spl` both pass 13/13 cleanly
   after narrowing fixture imports away from broad `app.io.mod`, adding local
@@ -119,57 +117,6 @@ Normal-review fixes:
 - Removed the contradictory runner diagnostic from context/ponytail unit specs
   by importing `app.io.context_ops` and `std.io_runtime` directly instead of
   the broad `app.io.mod` compatibility shim.
-
-## Lane 3: Repo-Local Full Replacement Evidence
-
-Owner: Codex
-
-Status: implemented on 2026-06-28.
-
-Files:
-
-- `scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
-- `scripts/check/check-llm-goal-evidence.shs`
-- `doc/07_guide/app/llm/llm_tooling_context_ponytail_mimic.md`
-- `doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md`
-
-Tasks:
-
-1. Add a focused env producer for
-   `llm_tooling_context_ponytail_full_replacement_status=pass`. Status: done.
-2. Wire strict aggregate evidence to generate that env before running the
-   strict context/Ponytail mimic lane. Status: done.
-3. Document the scope as repo-local Simple-owned replacement surfaces, not
-   internet fetch, external vector store, or third-party plugin parity.
-   Status: done.
-
-## Lane 3A: Codebase Memory MCP Usage
-
-Owner: Codex
-
-Status: documented on 2026-07-01.
-
-Scope:
-
-- Treat the production codebase-memory MCP feature as the existing MCP
-  resource/context surface, not a new external memory server.
-- Document `simple_codebase` / "simple codebase" as operator shorthand for
-  this existing surface, not as a separate tool implementation.
-- Use `src/lib/nogc_async_mut/mcp/resources.spl` for read-only codebase
-  resources and `simple_context` for bounded file, local-index, and
-  embedded-SQL context queries.
-- Keep `simple_search`, `simple_workspace_symbols`, `simple_references`,
-  `simple_hover`, `simple_api`, and `simple_dependencies` as supporting lookup
-  tools.
-- Do not plan a separate current/external MCP memory path unless these
-  Simple-owned surfaces are proven insufficient.
-
-Usage check:
-
-- `scripts/check/check-llm-tooling-context-ponytail-full-replacement.shs`
-  remains the focused replacement-surface check because it proves app MCP,
-  lower MCP, `simple_context`, and source-less SQL context dispatch.
-- `doc/07_guide/app/mcp/mcp.md` is the operator source for production usage.
 
 ## Sidecars
 
@@ -213,10 +160,8 @@ Evidence:
 - `simple check` passed for changed ponytail and MCP source/spec files.
 - `test/01_unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
 - `test/unit/app/tooling/ponytail_audit_spec.spl` passed with 6/6.
-- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 34/34.
-- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 27/27
-  after aligning the canonical mirror with the SQL `db` / `source_filter`
-  schema, source-less SQL routing, and lower-MCP context route assertions.
+- `test/01_unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 32/32.
+- `test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl` passed with 22/22.
 
 ## Lane 5: Local Pack Index/Query
 
@@ -303,18 +248,6 @@ Tasks:
     `bootstrap/stage3/simple` in addition to existing `bin/` and Rust target
     fallbacks, so `simple_context` can execute the context CLI in this release
     workspace without requiring `SIMPLE_BINARY`.
-11. Harden SQL row rendering for checked/JIT context-mode execution. Status:
-    done on 2026-06-28; `_context_sql_render_rows_filtered(...)` and its
-    wrapper now carry explicit `[SqliteRow]` parameter types so checked
-    execution no longer falls back on an untyped row parameter in the embedded
-    SQL context renderer.
-12. Publish context-mode runtime symbols and conversion aliases to the JIT
-    registration path. Status: done on 2026-06-28; `RUNTIME_SYMBOL_NAMES` now
-    includes `rt_len`, `rt_sleep_ms`, `rt_get_args`, and concrete
-    `rt_time_now_*` entries, and bare conversion calls such as `to_int`,
-    `to_float`, and `to_string` lower through the shared SFFI alias table before
-    cross-module import. Checked/JIT context-mode code no longer binds those
-    names as NULL imports.
 
 Evidence:
 
@@ -342,11 +275,6 @@ Evidence:
 - `release/x86_64-unknown-linux-gnu/simple test
   test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter` passed
   with 23/23 after adding app MCP source-less SQL context contracts.
-- `release/x86_64-unknown-linux-gnu/simple test
-  test/unit/app/mcp_unit/mcp_analysis_tools_spec.spl --mode=interpreter --clean`
-  passed with 27/27 after adding the missing canonical mirror assertions for
-  SQL `db`, `source_filter`, source-less SQL routing, and lower-MCP
-  `simple_context` schema/dispatch.
 - 2026-06-26 persisted CLI SQL evidence: interpreter-mode `rt_sqlite_open` /
   `rt_sqlite_close` now load and store the facade database at `--db=<path>`,
   so a separate `context --sql --query=<text> --db=<path> --source-filter=<text>`
@@ -355,20 +283,6 @@ Evidence:
 - 2026-06-26 MCP binary discovery hardening: focused MCP analysis specs assert
   app and lower MCP check repo-root release and bootstrap binaries before
   falling back to `bin/simple`, matching the actual release workspace layout.
-- 2026-06-28 JIT symbol publication: the focused Rust JIT provider test
-  `cargo test -p simple-compiler test_jit_static_provider_resolves_generic_rt_len --lib`
-  passed and proves the static provider resolves `rt_len` plus
-  `rt_time_now_unix_micros`. The focused alias test
-  `cargo test -p simple-compiler conversion_aliases_resolve_to_runtime_symbols --lib`
-  passed and proves `to_int`/`to_i64`/`parse_int`,
-  `to_float`/`to_f64`/`parse_float`, and `to_string`/`to_text` resolve to
-  canonical runtime SFFI names before JIT import declaration. A rebuilt
-  bootstrap-profile seed no longer reports unresolved `rt_len`, `rt_sleep_ms`,
-  `rt_get_args`, or `to_int` for the focused context spec; it now stops in the
-  Simple test-runner path with `Array.merge` plus `test daemon unavailable`.
-  Full `bin/simple` deploy remains blocked because
-  `sh scripts/bootstrap/bootstrap-from-scratch.sh --deploy --no-mcp` failed in
-  Stage 2 before copying a new `release/x86_64-unknown-linux-gnu/simple`.
 
 ## Lane 3: Dashboard Tooling Artifact Panel
 
@@ -394,18 +308,6 @@ Tasks:
 3. Render text and HTML panel summaries with explicit absence text. Status:
    done.
 4. Add focused mirrored unit coverage. Status: done.
-
-## 2026-06-26 Source-less SQL Replacement Contract Hardening
-
-Status: implemented for app MCP and lower MCP metadata/source-contract
-coverage.
-
-The replacement surface now states the same file-optional rule in both MCP
-schemas: `file` is required except when `sql=true` and `query` is non-empty.
-The focused system spec asserts the matching handler guard, missing-file error,
-schema text, operator guide text, design text, and architecture replacement
-language so future context-mode or Ponytail compatibility work cannot drift back
-to an underspecified coexistence path.
 5. Update the MCP operator guide for `simple_context` and `simple_ponytail`.
    Status: done; `doc/07_guide/app/mcp/mcp.md` documents context index/query,
    SQL/`--db`, absence statuses, and Ponytail `audit`/`simplification` modes.
@@ -443,10 +345,6 @@ Dedicated dashboard view evidence:
 - 2026-06-26 public manual hardening: Ponytail audit specs now route internal
   absence-marker checks through a helper so generated public manuals do not
   display the marker literal in expected-code snippets.
-- 2026-06-26 diagnostics JSONL hardening: the LLM dashboard diagnostics
-  collector now decodes escaped JSON string fields before rendering vLLM status
-  and reason text. Both mirrored collector specs cover quoted/backslash JSONL
-  fields, pass 9/9 scenarios, and the generated manuals were refreshed.
 
 ## Lane 7: MCP Context Index/Query Options
 
@@ -470,58 +368,3 @@ Tasks:
    importing the context implementation into source-mode MCP. Status: done.
 3. Advertise `mode` on app MCP `simple_ponytail`. Status: done.
 4. Add focused mirrored unit coverage. Status: done.
-5. Keep app MCP `simple_context` schema wording aligned with the source-less SQL
-   contract. Status: done on 2026-06-26; both mirrored MCP analysis specs now
-   assert `file` is "required except when sql=true and query is non-empty",
-   matching the handler, tool table, lower MCP schema, system spec, and guide.
-6. Add Ponytail compatibility mode aliases. Status: done on 2026-06-28; app
-   MCP and lower MCP accept `review` as `audit` and `simplify` as
-   `simplification`, advertise the aliases, and keep JSON/markdown output on
-   the canonical mode names.
-7. Add context format alias compatibility. Status: done on 2026-06-28; app MCP
-   and lower MCP accept `format=md` as `markdown`, advertise `markdown/md`, and
-   keep the subprocess/rendering path on canonical `markdown`.
-8. Harden vLLM dashboard control evidence. Status: done on 2026-06-28; the
-   authenticated `/api/vllm/control` route now emits
-   `llm_runtime_vllm_dashboard_live_boundary` before panel/execution JSONL so
-   operators can distinguish intent-only, executor-required, and blocked
-   dashboard evidence from live process/HTTP proof.
-9. Harden vLLM/Torch readiness spec runtime boundary. Status: done on
-   2026-06-28; the system spec now uses the `std.io_runtime`
-   `time_now_unix_micros` facade instead of declaring raw
-   `rt_time_now_unix_micros`, keeps the internal absence marker out of public
-   generated manuals, and refreshes both mirrored SPipe docs.
-10. Harden retry7 fine-tune app handoff acceptance. Status: done on
-    2026-06-28; the retry7 gate now emits `app_handoff_doc_ready`, treats
-    missing local handoff docs or `do not deploy` usage as non-acceptance
-    evidence, and requires that field before release handoff review can pass.
-11. Harden agent dashboard shared-store evidence. Status: done on 2026-06-28;
-    the `/agents` web dashboard system spec now creates a local assistant
-    store fixture and proves authenticated rendering of selected session,
-    objective, timeline count, read-only replay notice, and absence-marker-free
-    output.
-12. Correct embedded SQL context row typing. Status: done on 2026-06-28;
-    `src/app/io/context_ops.spl` now imports `SqliteRow` and annotates
-    `_context_sql_render_rows_filtered(...)` plus its wrapper with `[SqliteRow]`,
-    removing the focused HIR lowering warning for that function from mirrored
-    context specs. The later runtime-symbol follow-up now tracks the remaining
-    JIT/deploy evidence separately from row-inference behavior.
-13. Harden daemon launcher array argument assembly and startup mode. Status:
-    done on 2026-06-28; `process_run_timeout` now appends timeout wrapper
-    arguments via `push` instead of `Array.merge`, removing the launcher-side
-    `Runtime error: Function 'Array.merge' not found`. Test daemon/client
-    Pure Simple app dispatch now runs under scoped `SIMPLE_EXECUTION_MODE=interpret`,
-    and daemon child launch uses the process facade with the same mode to avoid
-    the JIT `rt_len`/segfault path. Focused bootstrap evidence:
-    `src/compiler_rust/target/bootstrap/simple test test/01_unit/app/tooling/context_generate_spec.spl --mode=interpreter --clean`
-    passed 15/15.
-14. Harden lower MCP context/Ponytail parity evidence. Status: done on
-    2026-06-29; the system spec now distinguishes live app MCP JSONL execution
-    from lower MCP source-contract parity. Shared assertions lock both handlers
-    to the same source-less SQL routing, `--db`, `--source-filter`, and
-    Ponytail `review`/`simplify` alias contracts without overstating noisy
-    lower-server startup as live evidence.
-15. Harden full replacement evidence counts. Status: done on 2026-06-29; the
-    full-replacement checker now records surface and failure counts in its env,
-    and it checks lower-MCP source-less SQL plus `--source-filter` forwarding
-    directly in the strict replacement surface, not only through app MCP.

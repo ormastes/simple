@@ -1,0 +1,173 @@
+# Purpose: intensive CPU AVX-512 + GPU Vulkan exercise for the SIMD kernels.
+#
+# The parity specs elsewhere use small, hand-chosen inputs. This one sweeps
+# sizes across the lane boundaries that matter (16 u32 = one ZMM, 64 u8 = one
+# ZMM byte chunk) and up to sizes where the vector body dominates the tail, so a
+# kernel that is correct only for short spans, or only for exact multiples of
+# the lane count, is caught.
+#
+# It also pins the thing a parity test structurally CANNOT: a scalar kernel
+# returns identical answers, so correctness alone never reveals that a kernel
+# advertising AVX-512 compiled to scalar. That is checked by
+# scripts/check/check-simd-kernels-vectorized.shs against the disassembly; this
+# spec is its runtime counterpart, reporting measured throughput so a silent
+# de-vectorization shows up as a timing cliff.
+# @req REQ-SIMD-002 REQ-SIMD-004
+
+use std.spec.step
+use std.spec.{describe, it, assert_equal}
+use std.common.string_core.{text_to_bytes}
+use std.common.simd_scan.{simd_find_byte, scalar_find_byte, simd_bytes_equal, scalar_bytes_equal}
+use std.nogc_sync_mut.db.accel.{
+    row_bitmap_and_words, _scalar_row_bitmap_and_words,
+    row_bitmap_or_words, _scalar_row_bitmap_or_words,
+    row_bitmap_andnot_words, _scalar_row_bitmap_andnot_words
+}
+
+@unsafe(reason: "benchmark timer", capabilities: [ffi])
+extern fn rt_time_now_nanos() -> i64
+
+fn ms() -> i64:
+    rt_time_now_nanos() / 1000000
+
+fn words_of(n: i64, seed: i64) -> [u32]:
+    var w: [u32] = []
+    var i: i64 = 0
+    while i < n:
+        w.push(((i * 2654435761 + seed * 40503) & 0xFFFFFFFF) as u32)
+        i = i + 1
+    w
+
+fn same_words(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i.to_i32()] != b[i.to_i32()]:
+            return false
+        i = i + 1
+    true
+
+fn bytes_of(n: i64, needle_at: i64) -> [u8]:
+    var t = ""
+    var i: i64 = 0
+    while i < n:
+        if i == needle_at:
+            t = t + "Z"
+        else:
+            t = t + "A"
+        i = i + 1
+    text_to_bytes(t)
+
+# Sizes chosen to straddle both ZMM boundaries and to reach a regime where the
+# vector body, not the scalar tail, dominates.
+val WORD_SIZES: [i64] = [1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 255, 256, 1024, 4096]
+val BYTE_SIZES: [i64] = [1, 63, 64, 65, 127, 128, 255, 256, 1023, 1024, 8192]
+
+describe "intensive CPU AVX-512 — DB row-bitmap kernels across lane boundaries":
+    it "matches the scalar twin for AND at every size, 1..4096 words":
+        step("16 u32 is one ZMM; sizes straddle it and its multiples")
+        var bad = 0
+        for n in WORD_SIZES:
+            val l = words_of(n, 1)
+            val r = words_of(n, 2)
+            if not same_words(row_bitmap_and_words(l, r, n), _scalar_row_bitmap_and_words(l, r, n)):
+                bad = bad + 1
+        assert_equal(bad, 0)
+
+    it "matches the scalar twin for OR with every mismatched-length combination":
+        step("past the shorter operand the kernel must read ZERO, not clamp the span")
+        step("a clamped result silently drops up to 32 matching rows per missing word")
+        var bad = 0
+        for n in WORD_SIZES:
+            var short_by: i64 = 0
+            while short_by <= 3:
+                val lw = if n > short_by: n - short_by else: n
+                val rw = if n > (short_by * 2): n - (short_by * 2) else: n
+                val l = words_of(lw, 3)
+                val r = words_of(rw, 4)
+                if not same_words(row_bitmap_or_words(l, r, n, lw, rw),
+                                  _scalar_row_bitmap_or_words(l, r, n, lw, rw)):
+                    bad = bad + 1
+                short_by = short_by + 1
+        assert_equal(bad, 0)
+
+    it "matches the scalar twin for AND-NOT, including a short right operand":
+        step("past rhs_words the right side reads zero, so and-not degenerates to a copy")
+        var bad = 0
+        for n in WORD_SIZES:
+            val rw = if n > 5: n - 5 else: n
+            val l = words_of(n, 6)
+            val r = words_of(rw, 7)
+            if not same_words(row_bitmap_andnot_words(l, r, n, rw),
+                              _scalar_row_bitmap_andnot_words(l, r, n, rw)):
+                bad = bad + 1
+        assert_equal(bad, 0)
+
+    it "reports AND throughput at 4096 words so a de-vectorization shows as a cliff":
+        step("correctness alone cannot reveal that a kernel compiled to scalar")
+        val n: i64 = 4096
+        val l = words_of(n, 8)
+        val r = words_of(n, 9)
+        val t0 = ms()
+        var k: i64 = 0
+        while k < 50:
+            val _ = row_bitmap_and_words(l, r, n)
+            k = k + 1
+        print("INTENSIVE cpu_bitmap_and words={n} iters=50 ms={ms() - t0}")
+        assert_equal(true, true)
+
+describe "intensive CPU AVX-512 — byte scan across chunk boundaries":
+    it "finds the needle at EVERY position for sizes straddling the 64-byte chunk":
+        step("the chunked scan must return the FIRST match, not any match")
+        var bad = 0
+        for n in BYTE_SIZES:
+            var at: i64 = 0
+            while at < n:
+                val b = bytes_of(n, at)
+                if simd_find_byte(b, 0, 90u8) != scalar_find_byte(b, 0, 90u8):
+                    bad = bad + 1
+                # only sweep every position for small n; sample for large
+                at = if n <= 128: at + 1 else: at + 97
+        assert_equal(bad, 0)
+
+    it "honours a non-zero start at every offset on a multi-chunk buffer":
+        step("a result before `start` makes a forward scan loop forever")
+        val b = bytes_of(1024, 0)
+        var bad = 0
+        var from: i64 = 0
+        while from <= 1024:
+            val got = simd_find_byte(b, from, 90u8)
+            if got != scalar_find_byte(b, from, 90u8):
+                bad = bad + 1
+            if got >= 0 and got < from:
+                bad = bad + 1
+            from = from + 7
+        assert_equal(bad, 0)
+
+    it "matches the scalar oracle on span equality at every size":
+        step("including a difference in the first chunk, a middle chunk, and the tail")
+        var bad = 0
+        for n in BYTE_SIZES:
+            val a = bytes_of(n, -1)
+            if simd_bytes_equal(a, 0, a, 0, n) != scalar_bytes_equal(a, 0, a, 0, n):
+                bad = bad + 1
+            var at: i64 = 0
+            while at < n:
+                val d = bytes_of(n, at)
+                if simd_bytes_equal(a, 0, d, 0, n) != scalar_bytes_equal(a, 0, d, 0, n):
+                    bad = bad + 1
+                at = at + (if n <= 128: 1 else: 131)
+        assert_equal(bad, 0)
+
+    it "reports byte-scan throughput at 8192 bytes":
+        step("a timing cliff here means the chunked fold stopped vectorizing")
+        val b = bytes_of(8192, 8191)
+        val t0 = ms()
+        var k: i64 = 0
+        var acc: i64 = 0
+        while k < 200:
+            acc = acc + simd_find_byte(b, 0, 90u8)
+            k = k + 1
+        print("INTENSIVE cpu_find_byte bytes=8192 iters=200 ms={ms() - t0} checksum={acc}")
+        assert_equal(acc, 8191 * 200)

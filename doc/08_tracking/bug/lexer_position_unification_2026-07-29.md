@@ -1,9 +1,12 @@
 # Bug/audit: two lexer position states coexist; three live mixing sites fixed, one whole cluster found fully dead
+## Closed 2026-09-16 — partially fixed then completed; dead cluster + orphaned accessors deleted; specs green
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-29
-**Status:** ALREADY-FIXED (re-verified 2026-08-17: `lexer_scanners.spl` no longer exists and `lexer.spl:522-529` / `:615-628` record the deletion of `lex_scan_token_local`/`lex_peek*`/`lex_advance` and the legacy `lex_pos_get/set` wrappers — the position duality is gone)
-
-Historical status: partially fixed (lane LEX1) — the three real MIXING sites found in
+**Status:** partially fixed (lane LEX1) — the three real MIXING sites found in
 `_ParserDecls/fn_struct_decls.spl` (domain-block raw-brace parsing) now use
 the live CoreLexer-backed accessors. The pre-existing legacy free-function
 scanner cluster (`lexer_scanners.spl` + `lex_scan_token_local()` in
@@ -371,3 +374,4 @@ bin/simple test --no-session-daemon <spec>`, seed binary
 
 All eight specs green, matching the mandated counts exactly. No defects
 found.
+

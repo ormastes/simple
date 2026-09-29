@@ -25,8 +25,7 @@ pub struct AggregateFieldCopy {
     /// resolved post-lowering by `qualify_native_struct_layouts` from
     /// `type_name` (mirrors `MirInst::FieldGet`/`FieldSet::owner_has_vtable`).
     /// `None` until that pass runs (e.g. single-file/non-native-project
-    /// compiles). Cranelift may infer unresolved layouts from its local
-    /// vtable map; an explicit true or false decision is authoritative.
+    /// compiles); codegen must treat `None` the same as `Some(false)`.
     pub owner_has_vtable: Option<bool>,
     pub nested: Vec<AggregateFieldCopy>,
 }
@@ -120,8 +119,19 @@ pub enum MirInst {
         args: Vec<VReg>,
     },
 
-    /// Raw inline assembly with no operands.
-    InlineAsm { instructions: Vec<String>, volatile: bool },
+    /// Inline assembly. `constraints` is the finished LLVM constraint string
+    /// (outputs first, then inputs, then `~{clobber}` entries) and
+    /// `instructions` already has `{name}` placeholders rewritten to `$N`.
+    /// `outputs` are the vregs the asm defines (in constraint order, with the
+    /// declared type of the bound place); `inputs` are the vregs it reads.
+    /// A raw block has empty operands and an empty constraint string.
+    InlineAsm {
+        instructions: Vec<String>,
+        volatile: bool,
+        constraints: String,
+        inputs: Vec<VReg>,
+        outputs: Vec<(VReg, TypeId)>,
+    },
 
     /// Load from memory
     Load { dest: VReg, addr: VReg, ty: TypeId },

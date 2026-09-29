@@ -5,9 +5,9 @@
 #   - build_claude_args: maps config to CLI flags
 #   - parse_claude_json_response: parses JSON output
 # One impure function (integration):
-#   - claude_cli_send: calls process_run
+#   - claude_cli_send: calls process_run_script (shebang-aware rt_process_run)
 
-use app.io.mod.{process_run}
+use std.nogc_async_mut.env.shebang.{process_run_script}
 use app.llm_caret.redact.{redact}
 use std.common.json.parser.{json_parse}
 use std.common.json.object_ops.{json_object_get, json_object_has}
@@ -217,14 +217,15 @@ pub fn build_claude_args(prompt: text, model: text, output_format: text, system_
     # JSON schema
     if json_schema != "":
         args = args + ["--json-schema", json_schema]
-    # Tools: Claude Code exposes one variadic option, so emit the flag once
-    # followed by every configured tool.
-    var emitted_tools = false
+    # Tools: Claude Code takes ONE variadic --allowedTools option. Emitting the
+    # flag per tool makes the CLI keep only the last one.
+    var named_tools: [text] = []
     for tool in tools:
         if tool != "":
-            if not emitted_tools:
-                args = args + ["--allowedTools"]
-                emitted_tools = true
+            named_tools = named_tools + [tool]
+    if named_tools.len() > 0:
+        args = args + ["--allowedTools"]
+        for tool in named_tools:
             args = args + [tool]
     # Verbose
     if verbose:
@@ -485,7 +486,7 @@ pub fn parse_claude_stream_line(line: text) -> CliStreamEvent:
 
 pub fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64, max_tokens: i64, json_schema: text, tools: [text], extra_args: [text]) -> CliResponse:
     val args = build_claude_args(prompt, model, "json", system_prompt, session_id, max_turns, max_tokens, json_schema, tools, extra_args, false)
-    val result = process_run(cli_path, args)
+    val result = process_run_script(cli_path, args)
     val stdout = result.0 ?? ""
     val stderr = result.1 ?? ""
     val exit_code = result.2
@@ -511,7 +512,7 @@ pub fn claude_cli_send(cli_path: text, prompt: text, model: text, system_prompt:
 # Stream execution: returns list of parsed NDJSON events
 pub fn claude_cli_stream(cli_path: text, prompt: text, model: text, system_prompt: text, session_id: text, max_turns: i64) -> [CliStreamEvent]:
     val args = build_claude_stream_args(prompt, model, system_prompt, session_id, max_turns)
-    val result = process_run(cli_path, args)
+    val result = process_run_script(cli_path, args)
     val stdout = result.0 ?? ""
     val stderr = result.1 ?? ""
     val exit_code = result.2

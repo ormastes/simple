@@ -118,7 +118,8 @@ queued double emission, or `event_queue_full`.
 - Protocol operations: `spipe_list`, `spipe_read`, `spipe_search`, `spipe_resolve`, `spipe_trace`, `spipe_diagnostics`.
 - URI admission: `AuthorizationPortV1`, `CanonicalReadReceiptV1`, and
   `CursorReceiptV1`. Both receipt contracts bind authority key/epoch,
-  workspace, project-or-null, snapshot, revision, view, normalized path and
+  workspace, project-or-null, `baseSnapshotUid`, `authoritySnapshotUid`,
+  revision, view, normalized path and
   selector/filter digest, effective scope, ordering version, and page limit.
   The composition root alone creates the branded signed verifier and opaque
   verified grants; handlers may not use structural verifier objects, remap a
@@ -186,6 +187,26 @@ result nodes remain Wave 7 work.
 **Depends on:** Waves 2–3 contracts. **Owners:** C owns only the common search/scorer paths; D owns only the dependency-free SPipe fallback provider, `InProcessSearchProviderAdapter`, and SPipe command integration; E owns only the DBFS compatibility-facade paths for this wave.
 **Deliverables:** C publishes shared documents/analyzer/corpus stats/scorer/top-k/explanations/provider protocol and exact + BM25 + graph candidate fusion using deterministic Reciprocal Rank Fusion; D implements the dependency-free fixed-point JavaScript fallback as an in-process `SearchProvider`, always wraps it with `InProcessSearchProviderAdapter` before satisfying internal search ports, and adds initial search/resolve/read commands; E migrates the DBFS scorer compatibility facade to the canonical common scorer without editing C's paths. The shared golden corpus and adapter conformance kit cross-check all three owned outputs. Remaining textual, embedded, and server database adapters consume this contract but are implemented only in Wave 10.
 **Exit gates:** provider ordering/ties and RRF explanations match golden results; real document lengths are used by the DBFS path; DBFS legacy entry points preserve compatibility while producing canonical-scorer golden parity; embeddings are optional; incremental index equals clean rebuild; the adapter conformance kit is frozen for Wave 10.
+
+#### W4A — provider-conformance closure (merge-owner sequence)
+
+`doc/05_design/infra/spipe/spipe_knowledge_compiler_search_providers.md`
+Section 13.1 is the authoritative W4A sequence.  It closes Wave 4 in this
+order: (1) frozen common oracle/fixture, (2) JS in-process baseline, (3) native
+Simple lexical parity, (4) long-lived framed process adapter, (5) fail-closed
+same-root JS degradation, and (6) independently reviewed admission evidence.
+It is not permission to broaden `bm25-fixed-v1`, reimplement RRF in Simple, or
+call a micro-corpus probe a provider PASS.
+
+The merge owner accepts a target only with a closed
+`ProviderConformanceRecordV1`, recomputed fixture/root/statistics/score/
+explanation evidence, the exact applicability matrix, and the security cells
+applicable to its transport.  Native process work additionally requires all
+streaming/control rows W4-SRCH-28–39 and a verified binary/provenance binding.
+W4-SRCH-09 is separate qualified performance evidence; lack of that receipt
+keeps NFR performance open even if functional conformance succeeds.  Wave 10
+adapts PureDatabase, textual DB, and server DB through the frozen contract;
+it must not reopen the completed Wave-4 DBFS scorer/facade migration.
 
 #### Wave 4 streaming/deadline fan-out
 
@@ -301,7 +322,7 @@ violates this evidence boundary.
 
 **Depends on:** Waves 3–4. **Owners:** D.  
 **Deliverables:** authoritative `spipe://` resolver; lifecycle/feature/component/layer/matrix/trace/project/status/diagnostic projections; bounded MCP list/read/search/resolve/trace/diagnostic tools and resources; legacy stdio plus a stateless MCP 2026 HTTP implementation held disabled until its Wave 0 transport/auth/cache threat gates pass; deterministic pagination/cache hints; `.spipe/view/` materializer; editor-provider skeleton.  
-**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to the immutable snapshot UID and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
+**Exit gates:** model navigates without canonical paths; each artifact-representation file maps to exactly one canonical artifact UID, while directory indexes, search pages, trace matrices, diagnostics, and other aggregate outputs carry deterministic synthetic projection UIDs bound to immutable snapshot identity and query/view parameters; writes fail closed; outputs are deterministic, paginated, and bounded; private data never receives public cache scope; unchanged materializations are not rewritten; HTTP cannot be enabled without path/auth/cache negative tests passing. A cursor must be a signed receipt whose authority/base-snapshot/authority-snapshot/revision/view/selector/scope/page-limit bindings match the independently authorized request exactly; legacy aliases cannot remap foreign workspaces; every verifier is an admitted branded `AuthorizationPortV1`; and the positive plus hostile URI/receipt/cursor/public-error matrix in the system-test plan must pass.
 
 ### Wave 6 — Transactional refactoring and repair
 
@@ -955,8 +976,7 @@ base snapshot UID, and a separate content-addressed `AuthorityManifestV1`
 authority snapshot UID commits the base UID plus inventory root. Receipts bind
 the authority snapshot. The sealed inventory owns normalized legacy alias
 mappings, so the frozen authority API includes
-`resolveCanonicalAlias(view, alias) -> CanonicalTargetCandidateV1`, followed
-by `resolveCanonicalTarget` proof before receipt verification; external
+`resolveCanonicalAlias(view, alias)` before receipt verification; external
 registry/path alias lookup is not admissible. W5A evidence must inject cyclic,
 tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 
@@ -985,6 +1005,179 @@ tampered-root, missing/ambiguous alias, and foreign-authority alias cases.
 Merge owner remains `/root`; final acceptance remains owned by an independent
 normal/highest-capability reviewer.
 
+### Wave 5 admission-remediation execution order (2026-08-26)
+
+This is a serial authority chain. No agent may implement a successor against a
+mock, fixture, cache, URI, or structural substitute for its predecessor.
+
+1. **P2 publisher repair owner.** Starting from P1 only, repair the
+   `AuthorityPublicationJournalV1` first-use directory race (`EEXIST`): fsync
+   every created ancestor, use a durable owner receipt, and compare/revalidate
+   the exact observed stale owner/lock before unlink. Prove canonical-envelope
+   replay/altered-input denial, real competing processes, and SIGKILL recovery.
+   Public journals, `instanceof`, in-memory locks, path-blind recovery, and
+   process-free tests are prohibited. P2 remains `NON-ADMITTED` until an
+   independent highest-capability review PASS.
+2. **Read-authority owner (blocked on P2).** Freeze only
+   `SnapshotAuthorityPortV1`, opaque authority view, canonical target, and
+   closed expected-read binding. `openBoundSnapshot` uses production registry/
+   snapshot state through branded `TargetInventoryStoreV1.openPublishedAuthorityInventoryV1`,
+   and rejects every swapped dual snapshot, manifest, instance,
+   worktree, revision, target, and brand before authorization/projection.
+   No raw manifest/map/cache, public journal, or duck-typed view is admissible.
+3. **URI/projection owner (blocked on read authority).** Resolve URI and legacy
+   alias to a candidate, prove sealed membership, verify the real branded
+   receipt, compare every frozen receipt/binding field, then call ProjectionPort.
+   Run hostile URI/Unicode/path/receipt/visibility matrices and canonical
+   positives; raw filesystem paths, alias-only success, local signing, and the
+   rejected URI candidate are forbidden.
+4. **Cursor/MCP/materializer owner (blocked on URI).** Consume only the admitted
+   binding; prove zero pre-admission projection calls, sealed continuation
+   domain/position/limit, bounded pages, cache partitioning, and read-only
+   materialization. Mock projection or synthetic cursor tests cannot advance
+   admission.
+
+For each owner: focused production oracle once, exact-scope diff inspection,
+then independent normal/highest-capability review. A FAIL does not transfer
+authority or scope to the next owner; it reopens only its sealed boundary.
+This additive sequence preserves the existing normative authority/cursor ABI,
+raw snapshot APIs, and exact `spipe-markdown-token-v1@1` <=6,000-token gate.
+Rejected cursor code is forensic evidence only; no owner may delete or weaken
+those contracts.
+
+### 10.24 Wave 5a commit-publisher prerequisite (2026-08-26)
+
+**Status: W5A authority primitive is `NON-ADMITTED`.** Existing stores persist
+metadata/graph snapshots but lack the KnowledgeCompiler transaction required to
+materialize and publish complete artifact/section/directory/project/aggregate
+authority inventories. Synthetic manifests/maps cannot satisfy W5A-18/19.
+
+| Lane | Exclusive ownership | Required output | Gate |
+|---|---|---|---|
+| W5A-P commit publisher | `src/core/knowledge_compiler_commit_publisher.js`, materializer, composition-root wiring | exact base/publication input, immutable base snapshot, sealed inventories/manifests, closure permit | W5A-25..27 parity/all-and-only contributor proof |
+| W5A-S authority ports | `src/workspace/registry_authority_v1.js`, `src/storage/snapshot_authority_v1.js`, `src/storage/target_inventory_store.js` | branded revisioned registry/snapshot/inventory construction and store wiring | real owner construction before W5A-P/E |
+| W5A-J publication journal | `src/storage/authority_publication_journal.js` | `AuthorityPublicationRecordV1`, fsynced staged objects/records/parents, atomic durable current-pointer CAS, sole recovery owner | W5A-28..29 fault/restart/concurrent-read/replay proof |
+| W5A-E independent oracle | focused production fixtures | real roots/pages/projections and substitution evidence | W5A-30 + highest-capability PASS |
+
+Frozen names: `KnowledgeCompilerCommitPublisherV1`, `CommitInputV1`,
+`TargetInventoryMaterializerV1`, `ProductionInventoryBuildV1`,
+`AuthorityPublicationJournalV1`, `PublishedAuthorityCommitV1`. Commit order:
+open exact expected base/publication -> normalize deltas -> base snapshot -> exact registry -> complete project
+inventories -> all-and-only aggregate -> seal -> closure permit -> fsynced CAS
+publish -> recovery-safe acknowledgement. URI/MCP/materializer stays read-only.
+
+Merge owner: `/root`; final reviewer: independent highest-capability reviewer.
+No authority/cursor/URI/projection admission before W5A-P/J/E passes.
+
+### 10.25 Publisher non-admission repair sequence (2026-08-26)
+
+**Status: `NON-ADMITTED`.** The first W5A-P candidate may not be repaired by
+loosening an oracle. It failed five ownership/evidence gates: public
+journal/`instanceof` permit admission, non-canonical replay identity, shallow
+current/recovery validation, non-durable inventory/manifest ownership, and
+non-production crash/parity proof.
+
+| Step | Owner | Required deliverable | Admission evidence |
+|---|---|---|---|
+| P1 | W5A-P + W5A-S | closure-branded `TargetInventoryStoreV1` path and canonical replay envelope hash | strings, structural objects, serialized permits, public journals, and caller roots deny |
+| P2 | W5A-J | journal-owned content-addressed inventory/manifest objects, full record fields, atomic state machine | staged objects/record/current pointer survive fsync/rename/CAS/restart and replay exactly |
+| P3 | W5A-J + W5A-E | deep current/recovery verifier and stale-lock/process-crash recovery | readers see only old/new complete record, never null/staged/partial; corruption denies |
+| P4 | W5A-P + W5A-E | real clean/incremental publisher parity and sealed directory continuations | W5A-26, W5A-28, W5A-31..35 PASS against production filesystem owners |
+
+`AuthorityPublicationRecordV1` must contain exact workspace/project/worktree/
+revision IDs, expected registry/base/publication IDs, base and authority
+snapshot IDs, ordered project roots, aggregate root, manifest digests, object
+hashes, and canonical replay-envelope digest. The journal alone owns its
+objects, transitions (`staging -> objects_durable -> record_durable ->
+current_cas -> acknowledged`), recovery, and current pointer. W5A-P accepts no
+parallel shortcut: cursor, URI, projection, MCP, and materialization remain
+blocked until independent highest-capability review reports PASS.
+
+### 11.2 Wave 5a sealed-publication repair gate (2026-08-26)
+
+1. **Status/ownership.** The rejected pre-cursor authority candidate is
+   forensic-only and `NON-ADMITTED`. W5A-A owns authority; W5A-C owns oracle
+   fixtures; W5C/URI/MCP/materializer cannot edit until both independently PASS.
+2. **Foundation.** W5A-A binds loaded manifest/inventory bytes to the exact
+   dual-snapshot/registry tuple, recomputes roots, and revalidates live registry
+   plus snapshot revision after open. The commit root alone mints a
+   non-forgeable publisher permit through the sole
+   `publishAuthorityInventoryV1({permit,build})` ABI and selects all-and-only schema-complete
+   aggregate contributors.
+3. **Directory/policy.** W5A-A seals ordered unique children, bounds, and a
+   continuation domain derived only after manifest/inventory verification; no
+   manifest root or digest commits it. W5C-A uses cross-process monotonic CAS
+   and atomic rename with file/parent fsync, validates every schema, and
+   recovers only a contiguous valid log.
+4. **Evidence.** W5A-C/W5C-A must pass W5A-21..24 and W5C-13..14: substitution,
+   revision windows, permits/aggregate completeness, page adversaries,
+   cross-process races, and fault/restart recovery. Mock maps or in-memory
+   tests are not evidence.
+5. **Merge/review.** Merge owner `/root`; independent normal/highest-capability
+   reviewer. Commit only after focused tests and PASS; do not push from this lane.
+
+### 12.1 Wave 5a/5c production-authority correction (2026-08-26)
+
+**Both prior sealed-read implementation attempts are non-admitted.** Do not
+reuse their mocked source/evidence. Freeze branded production
+`WorkspaceRegistryV1.resolveExactWorkspaceWorktreeV1`,
+`SnapshotStoreV1.openExactSnapshotV1`, and
+`TargetInventoryStoreV1.publishAuthorityInventoryV1/openPublishedAuthorityInventoryV1`.
+Worktree UID grammar is `W-<opaque-base32>` only; `WT-*` denies. The authority
+revalidates exact registry and snapshot revisions after published-manifest open.
+
+| Lane | Additional owned deliverable | Admission evidence |
+|---|---|---|
+| W5A-A | non-forgeable production commit publisher and complete aggregate roots | atomic visibility; clean/incremental artifact/section/directory/aggregate parity; strings/structural permits deny |
+| W5A-B | bounded directory page `1..100`, <=100 entries, <=200 lines, <=6,000 `spipe-markdown-token-v1@1` tokens | sealed child identity/order/page bounds and authenticated continuation |
+| W5C-A | fsynced policy directory; monotonic CAS single-policy append-only policy/key/issuer/rotation/revocation family | restart plus create/write/fsync/rename/CAS faults |
+| W5A-C/W5C-D | independent real-port oracle | W5A-16…20 and W5C-11…12 PASS |
+
+Only KnowledgeCompiler's production commit path publishes inventory. Durable
+operations use immutable UIDs: exact replay is idempotent; altered/stale input
+fails closed. URI/MCP/materializer stays blocked until all listed gates pass.
+
+## 12. Cursor authorization prerequisite (2026-08-26)
+
+**Status: design frozen; implementation non-admitted.** The existing concrete
+`AuthorizationPortV1` is Trust/Edge-only. Wave 5 URI/MCP/materializer work must
+wait for the required §3.1 extension of that same branded port; no lane may
+create a parallel signer or alter Trust/Edge receipt semantics.
+
+| Lane | Exclusive ownership | Published boundary | Gate |
+|---|---|---|---|
+| W5C-A authorization | `src/core/authorization.js` owner | read/cursor grants, durable cursor key policy | exact domain/brand/binding/expiry/revocation evidence |
+| W5C-B authority/projection | SnapshotAuthority + `src/view` integration owner | trusted expected read binding and sole ProjectionPort ABI | no raw authority claim or Projection call before proof |
+| W5C-C URI/MCP | view/MCP owner | inbound/outbound cursor adapter | blocked on W5C-A/B PASS |
+| W5C-D evidence | independent reviewer | real-port restart/rotation/fault matrix | W5C-01…W5C-10 PASS |
+
+**Required ordering:** W5A-A/B/C first delivers and independently admits the
+sealed production authority, ProjectionPort ABI, and W5A-01…20 evidence. Only
+then does W5C-A extend AuthorizationPort against W5A's branded bindings and
+pass W5C-01…12. W5C-B is an authority/projection-to-authorization integration
+check, not a second authority/projection implementation, and cannot overlap
+W5A-A/B ownership. W5C-C URI/MCP starts only after W5A and W5C-A/B PASS.
+
+The only projection operations are
+`render(authorityView,canonicalTarget,verifiedReadGrant)` and
+`list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
+The inbound cursor is verified against the same opaque read grant before list;
+the returned deterministic next position is sent to `issueCursorReceiptV1`
+only after list. `VerifiedReadGrantV1` carries a sealed `ExpectedReadBindingV1`'s
+trusted worktree UID, authority-instance UID, and authority-manifest digest,
+despite its legacy read receipt not serializing the worktree field. The
+canonical schemas and the only durable key-policy state machine are
+architecture §21; no `lastSortKey`, `pageRequest`, or adapter-created grant is
+an ABI.
+
+W5C-A owns one durable `CursorReceiptKeyPolicyV1`, including unique rotation
+records and `pending -> current -> grace -> revoked` transitions. It must make
+the durable revocation-epoch advance restart-idempotent, preserve old
+verification only during grace, and fail closed for a missing current private
+KeyProvider handle. The final reviewer rejects any configuration that has a
+second rotation record shape, non-durable transition, or a cursor binding
+derived after read-grant verification.
+
 ## 11. Wave 5a snapshot-authority prerequisite and ownership (2026-08-26)
 
 The current URI lane is **non-admitted**. `ImmutableSnapshotStore` lacks a
@@ -995,17 +1188,23 @@ slice is accepted.
 
 | Lane | Exclusive ownership | Published boundary | Gate before downstream work |
 |---|---|---|---|
-| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/snapshot/revision and digest checks plus target membership |
-| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming only authority views and canonical targets | no raw store, path inference, scan, or refresh request path |
-| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-14 oracle evidence | independent highest-capability PASS |
+| W5A-A Snapshot authority | `src/core`, `src/storage`, `src/workspace` integration owner | branded `SnapshotAuthorityPortV1`, opaque `SnapshotAuthorityViewV1`, inventory manifest | workspace/project/worktree/base-snapshot/authority-snapshot/revision and digest checks plus target membership |
+| W5A-B Projection | `src/view` | branded `ProjectionPortV1` consuming authority views, proven targets, and opaque verified grants | no raw store, path inference, scan, refresh, or adapter-created grant |
+| W5A-C Evidence | focused unit/integration fixtures and system-plan mapping | W5A-01 through W5A-15 oracle evidence | independent highest-capability PASS |
 | W5-D URI/MCP/materializer | `src/view`, `mcp` | resolver/resources/tools adapters | waits for all W5A gates; a sealed alias yields only a candidate, authority proves its canonical target, then receipt authorization occurs |
 
 The integration owner freezes these exact methods before sidecars work:
 `openBoundSnapshot(binding)`, `resolveCanonicalTarget(view, target)`,
 `resolveCanonicalAlias(view, alias)`, `listDirectoryTarget(view, selector)`,
-`ProjectionPortV1.list(...)`, and
-`ProjectionPortV1.render(...)`. The binding is exactly `{workspaceUid,
-projectUidOrNull, worktreeUid, snapshotUid, revisionId}`. The final reviewer
+`createExpectedReadBindingV1(view, canonicalTargetOrDirectory, normalizedRequest)`,
+`ProjectionPortV1.render(authorityView,canonicalTarget,verifiedReadGrant)`, and
+`ProjectionPortV1.list(authorityView,directoryTarget,verifiedReadGrant,verifiedCursorGrantOrNull)`.
+The authority binding is exactly `{workspaceUid,
+projectUidOrNull, worktreeUid, baseSnapshotUid, authoritySnapshotUid,
+revisionId, registryRevisionId}`. `baseSnapshotUid` opens the exact immutable SnapshotStore tuple;
+`authoritySnapshotUid` selects the matching content-addressed authority
+manifest/inventory; the exact inventory-open binding carries both and neither
+identity may be inferred from the other. The final reviewer
 must reject structural substitutes, project-only snapshot reads, missing
 manifest target inventory, and any URI rendering before target proof. This is
 a read-only prerequisite and does not authorize an HTTP or write feature.
@@ -1019,11 +1218,13 @@ project scope, and permits an explicit empty aggregate only. Resolver adapters
 first open and verify the receipt-named snapshot only as an untrusted
 candidate; a legacy alias yields only a canonical candidate, which must pass
 sealed `resolveCanonicalTarget` membership proof; only then verify the receipt
-against a binding derived from that proof. `worktreeUid` stays out
-of the frozen receipt ABI and is proved through the authority view's verified
-workspace/worktree/snapshot/revision tuple. Evidence must include tampered
-root, project mismatch, aggregate positives, and cross-instance genuine-brand
-mixing before W5-D begins.
+against an `ExpectedReadBindingV1` created from that proof, including its
+`authorityInstanceUid` and `authorityManifestDigest`. `worktreeUid` stays out
+of the legacy serialized read receipt but is a trusted `VerifiedReadGrantV1`
+claim, together with the two authority claims, copied from the sealed authority
+binding and a signed cursor field. Evidence
+must include tampered root, project mismatch, aggregate positives, and
+cross-instance genuine-brand mixing before W5-D begins.
 
 ### 10.23 Wave 5 URI-foundation non-admission and fresh lane (2026-08-26)
 
@@ -1039,11 +1240,14 @@ mixing before W5-D begins.
    fields against its direct proven target or reauthorizes/fails closed.
    Freeze exactly `CanonicalReadReceiptV1{receiptVersion, authorityKeyId,
    authorityKeyEpoch, normalizedAliasUriOrNull, canonicalUri, workspaceUid,
-   projectUidOrNull, targetKind, targetUid, snapshotUid, revisionId, viewKind,
+   projectUidOrNull, targetKind, targetUid, baseSnapshotUid,
+   authoritySnapshotUid, revisionId, viewKind,
    normalizedLogicalPath, selectorDigest, effectiveScopeDigest, orderingVersion,
    pageLimitOrNull, policyVersion, decision, issuedAtMs, expiresAtMs, receiptUid,
    issuerKeyId, revocationEpoch, signature}` and `CursorReceiptV1` with the
-   same binding plus `lastSortKey`.
+   closed Wave 5a architecture schema: canonical alias/URI/target binding,
+   worktree, algorithm, bounded `pagePosition`, and separate identity/signing
+   preimages; `lastSortKey` is not an ABI field.
 3. **Snapshot gate.** Directly validate immutable snapshot existence,
    workspace/project ownership, revision, and target membership; URI/query text
    is never authority.
@@ -1063,8 +1267,10 @@ mixing before W5-D begins.
 6. **Fresh-v2 correction.** Before the new implementation starts, extend the
    frozen receipt tuple to include authority key/epoch, view, normalized
    selector/filter digest, ordering version, and page limit. Cursor receipts
-   use the same tuple plus page position and cannot be replayed against any
-   selector, including a foreign workspace. The composition root must reject
+   use only architecture §21.1's complete schema, including `receiptKind`,
+   trusted signed worktree, algorithm, and bounded page position; they cannot
+   be replayed against any selector, including a foreign workspace. The
+   composition root must reject
    structural/duck-typed “verifiers”; only an opaque branded real signed
    `AuthorizationPortV1` creates verified grants. The workspace-root success
    case is exactly `spipe://workspace/{workspace}/`; its un-slashed form is a

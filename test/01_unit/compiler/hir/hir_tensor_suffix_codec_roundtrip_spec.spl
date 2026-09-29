@@ -1,0 +1,57 @@
+"""
+Semantic round-trip coverage for the hand-written HirTensorSuffix codec.
+
+`HirCodecWriter.put_text` gives nil and empty text different wire images. The
+suffix decoder must preserve that distinction because `raw` is canonical HIR
+payload, even though its declared `text` field can contain nil in a lowered
+module.
+"""
+
+use std.spec
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.hir.hir_definitions.{HirTensorSuffix}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_tensor_suffix, hc_dec_hir_tensor_suffix}
+
+fn suffix_with_raw(raw: text) -> HirTensorSuffix:
+    HirTensorSuffix(
+        has_dtype: true,
+        dtype: 7,
+        has_device: true,
+        device_kind: 3,
+        device_id: 11,
+        trainable: true,
+        pinned: false,
+        has_backend: true,
+        backend: 5,
+        raw: raw)
+
+fn roundtrip_suffix(original: HirTensorSuffix) -> HirTensorSuffix:
+    var writer = HirCodecWriter.create()
+    hc_enc_hir_tensor_suffix(writer, original)
+    val blob = writer.finish()
+    hc_dec_hir_tensor_suffix(FlatPoolReader.new(blob))
+
+describe "HirTensorSuffix codec semantics":
+    it "keeps nil distinct from empty text":
+        step("Round-trip absent and explicitly empty raw suffixes")
+        val absent = roundtrip_suffix(suffix_with_raw(nil))
+        val empty = roundtrip_suffix(suffix_with_raw(""))
+        expect(absent.raw == nil).to_equal(true)
+        expect(empty.raw == "").to_equal(true)
+        expect(empty.raw == nil).to_equal(false)
+
+    it "preserves every scalar and escaped raw text":
+        step("Round-trip a complete suffix with escaped payload")
+        val original = suffix_with_raw("cuda\\device\nfloat32")
+        val decoded = roundtrip_suffix(original)
+        expect(decoded.has_dtype).to_equal(original.has_dtype)
+        expect(decoded.dtype).to_equal(original.dtype)
+        expect(decoded.has_device).to_equal(original.has_device)
+        expect(decoded.device_kind).to_equal(original.device_kind)
+        expect(decoded.device_id).to_equal(original.device_id)
+        expect(decoded.trainable).to_equal(original.trainable)
+        expect(decoded.pinned).to_equal(original.pinned)
+        expect(decoded.has_backend).to_equal(original.has_backend)
+        expect(decoded.backend).to_equal(original.backend)
+        expect(decoded.raw).to_equal(original.raw)

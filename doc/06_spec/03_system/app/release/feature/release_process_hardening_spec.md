@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ This manual shows a release operator how Simple and Spipe validate a beta or sta
 | Design | doc/05_design/release_process_hardening.md |
 | Research | doc/01_research/infra/release/simple_spipe_release_branch_tag_test_repair_bootstrap_scheduling_hardening_2026-08-26.md |
 | Source | `test/03_system/app/release/feature/release_process_hardening_spec.spl` |
-| Updated | 2026-08-27 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -70,7 +70,6 @@ Use the shipped validation commands before provider mutation:
 simple release version-check
 simple release beta-prepare
 simple release backport-check
-simple release self-review-plan
 simple release candidate-check
 simple release promote-check
 simple release withdraw-check
@@ -95,11 +94,6 @@ change kind `fix`, review receipt digest, target `release/X.Y`, expected target
 SHA, explicit adaptation reason, result SHA, and renewed evidence digest. Reject
 feature commits, commit ranges, moving refs, stale review, wrong release line,
 or evidence from before the backport was applied.
-
-Protected convergence additionally binds every selected main source SHA to one
-result reachable in the pre-merge release inventory. Source and result must
-have the same stable patch ID and share the exact release PR review/check
-receipt; candidate admission independently replays every binding.
 
 ## Candidate evidence
 
@@ -129,9 +123,6 @@ or a mismatched commit/digest fail before a provider can run.
   promotion is never a build retry.
 - `withdrawal must preserve published release identity` means redeploy or
   publish a new correction rather than rewriting history.
-- `no exact self-attested review evidence` means review the server-current
-  target/head/base/diff and redispatch; never label it independently
-  authenticated, reuse expired evidence, or claim provider Approve.
 
 ## Verification boundary
 
@@ -145,29 +136,28 @@ once. Required external rows stay blocked until their own receipts exist.
 
 #### loads the canonical release policy and rejects stale version projections
 
-- Load the canonical release policy
-   - Expected: beta.canonical equals `1.4.0-beta.2`
-   - Expected: beta.line equals `1.4`
-   - Expected: check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason equals `version projection is stale: VERSION`
-   - Expected: parse_release_version("1.4.0-BETA").channel equals `invalid`
-   - Expected: parse_release_version("v1.4.0-beta.2").channel equals `invalid`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Load the canonical release policy")
-val beta = parse_release_version("1.4.0-beta.2")
-expect(beta.canonical).to_equal("1.4.0-beta.2")
-expect(beta.line).to_equal("1.4")
-expect(check_version_channel(beta, "beta").valid).to_be(true)
-expect(check_version_projection(beta.canonical, "VERSION", "1.4.0-beta.1").reason).to_equal("version projection is stale: VERSION")
-expect(parse_release_version("1.4.0-BETA").channel).to_equal("invalid")
-expect(parse_release_version("v1.4.0-beta.2").channel).to_equal("invalid")
+# @req REQ-001
+# @req REQ-002
+# @req REQ-003
+# @req REQ-004
+# @req REQ-005
+# @req REQ-006
+# @req REQ-007
+# @req REQ-008
+# @req REQ-009
+# @req REQ-010
+# @req REQ-011
+# @req REQ-012
+# @req REQ-013
+# @req REQ-014
+# @req REQ-015
 ```
 
 </details>
@@ -176,13 +166,12 @@ expect(parse_release_version("v1.4.0-beta.2").channel).to_equal("invalid")
 
 - Prepare an isolated beta release
    - Expected: validate_release_session(main_session).reason equals `release mutation is forbidden in the main worktree`
-   - Expected: validate_release_session(unsafe_branch).reason equals `release session must own a work branch`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -201,17 +190,6 @@ val main_session = ReleaseSession(
     policy_sha256: session.policy_sha256
 )
 expect(validate_release_session(main_session).reason).to_equal("release mutation is forbidden in the main worktree")
-val unsafe_branch = ReleaseSession(
-    session_id: session.session_id,
-    workspace_path: session.workspace_path,
-    main_workspace_path: session.main_workspace_path,
-    work_branch: "work/release/../../main",
-    target_ref: session.target_ref,
-    base_sha: session.base_sha,
-    expected_target_sha: session.expected_target_sha,
-    policy_sha256: session.policy_sha256
-)
-expect(validate_release_session(unsafe_branch).reason).to_equal("release session must own a work branch")
 ```
 
 </details>
@@ -220,14 +198,12 @@ expect(validate_release_session(unsafe_branch).reason).to_equal("release session
 
 - Admit reviewed bug-fix backports
    - Expected: check_backport_admission(feature).reason equals `beta backports accept reviewed bug fixes only`
-   - Expected: check_backport_admission(stale_review).reason equals `backport review receipt binding does not match the requested change`
-   - Expected: check_backport_admission(missing_forward_port).reason equals `release-first emergency fix requires an exact forward-port receipt to main`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 87 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -235,229 +211,18 @@ step("Admit reviewed bug-fix backports")
 val request = setup_backport_fixture()
 expect(check_backport_admission(request).valid).to_be(true)
 val feature = BackportRequest(
-    direction: request.direction,
-    source_ref: request.source_ref,
     source_commit_sha: request.source_commit_sha,
     change_id: request.change_id,
     work_id: request.work_id,
     change_kind: "feat",
     review_receipt_sha256: request.review_receipt_sha256,
-    reviewed_source_commit_sha: request.reviewed_source_commit_sha,
-    reviewed_change_id: request.reviewed_change_id,
     target_line: request.target_line,
     expected_target_sha: request.expected_target_sha,
     adaptation_reason: request.adaptation_reason,
     evidence_sha256: request.evidence_sha256,
-    evidence_result_commit_sha: request.evidence_result_commit_sha,
-    evidence_target_sha: request.evidence_target_sha,
-    result_commit_sha: request.result_commit_sha,
-    forward_port_target_ref: request.forward_port_target_ref,
-    forward_port_receipt_sha256: request.forward_port_receipt_sha256
+    result_commit_sha: request.result_commit_sha
 )
 expect(check_backport_admission(feature).reason).to_equal("beta backports accept reviewed bug fixes only")
-val stale_review = BackportRequest(
-    direction: request.direction,
-    source_ref: request.source_ref,
-    source_commit_sha: request.source_commit_sha,
-    change_id: request.change_id,
-    work_id: request.work_id,
-    change_kind: request.change_kind,
-    review_receipt_sha256: request.review_receipt_sha256,
-    reviewed_source_commit_sha: sha_b(),
-    reviewed_change_id: request.reviewed_change_id,
-    target_line: request.target_line,
-    expected_target_sha: request.expected_target_sha,
-    adaptation_reason: request.adaptation_reason,
-    evidence_sha256: request.evidence_sha256,
-    evidence_result_commit_sha: request.evidence_result_commit_sha,
-    evidence_target_sha: request.evidence_target_sha,
-    result_commit_sha: request.result_commit_sha,
-    forward_port_target_ref: request.forward_port_target_ref,
-    forward_port_receipt_sha256: request.forward_port_receipt_sha256
-)
-expect(check_backport_admission(stale_review).reason).to_equal("backport review receipt binding does not match the requested change")
-val emergency = BackportRequest(
-    direction: "beta_to_main",
-    source_ref: request.target_line,
-    source_commit_sha: request.source_commit_sha,
-    change_id: request.change_id,
-    work_id: request.work_id,
-    change_kind: request.change_kind,
-    review_receipt_sha256: request.review_receipt_sha256,
-    reviewed_source_commit_sha: request.reviewed_source_commit_sha,
-    reviewed_change_id: request.reviewed_change_id,
-    target_line: request.target_line,
-    expected_target_sha: request.expected_target_sha,
-    adaptation_reason: "emergency correction originated on the beta line",
-    evidence_sha256: request.evidence_sha256,
-    evidence_result_commit_sha: request.evidence_result_commit_sha,
-    evidence_target_sha: request.evidence_target_sha,
-    result_commit_sha: request.result_commit_sha,
-    forward_port_target_ref: "main",
-    forward_port_receipt_sha256: digest_c()
-)
-expect(check_backport_admission(emergency).valid).to_be(true)
-val missing_forward_port = BackportRequest(
-    direction: emergency.direction,
-    source_ref: emergency.source_ref,
-    source_commit_sha: emergency.source_commit_sha,
-    change_id: emergency.change_id,
-    work_id: emergency.work_id,
-    change_kind: emergency.change_kind,
-    review_receipt_sha256: emergency.review_receipt_sha256,
-    reviewed_source_commit_sha: emergency.reviewed_source_commit_sha,
-    reviewed_change_id: emergency.reviewed_change_id,
-    target_line: emergency.target_line,
-    expected_target_sha: emergency.expected_target_sha,
-    adaptation_reason: emergency.adaptation_reason,
-    evidence_sha256: emergency.evidence_sha256,
-    evidence_result_commit_sha: emergency.evidence_result_commit_sha,
-    evidence_target_sha: emergency.evidence_target_sha,
-    result_commit_sha: emergency.result_commit_sha,
-    forward_port_target_ref: "main",
-    forward_port_receipt_sha256: ""
-)
-expect(check_backport_admission(missing_forward_port).reason).to_equal("release-first emergency fix requires an exact forward-port receipt to main")
-```
-
-</details>
-
-#### plans reviewed bidirectional convergence without mutating or repointing main
-
-- Reconcile reviewed fixes with main
-   - Expected: backport_plan.mutation equals `none`
-   - Expected: forward_plan.forward_port_target_ref equals `main`
-- Admit only an exhaustive receipt-bound release-first classification
-   - Expected: check_convergence_admission(concealed).reason equals `every release-first inventory commit requires an exhaustive receipt-bound cla... (full value in folded executable source)`
-   - Expected: plan_release_main_convergence(unsafe_tracking).reason equals `main must remain an independent trunk and never track a release branch`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 82 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Reconcile reviewed fixes with main")
-val main_fix = ReviewedBugFix(
-    commit_sha: sha_a(), review_receipt_sha256: digest_a(),
-    source_ref: "main", change_kind: "fix"
-)
-val backport = ConvergenceRequest(
-    last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
-    release_ref: "release/1.4", release_head_sha: sha_b(),
-    last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
-    scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [main_fix],
-    selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
-    direction: "main_to_release", forward_port_required: false,
-    forward_port_target_ref: "", main_tracks_release: false
-)
-val backport_plan = plan_release_main_convergence(backport)
-expect(backport_plan.valid).to_be(true)
-expect(backport_plan.ready).to_be(true)
-expect(backport_plan.mutation).to_equal("none")
-expect(backport_plan.main_remains_independent).to_be(true)
-
-val release_fix = ReviewedBugFix(
-    commit_sha: sha_a(), review_receipt_sha256: digest_b(),
-    source_ref: "release/1.4", change_kind: "fix"
-)
-val forward_port = ConvergenceRequest(
-    last_scanned_main_sha: sha_b(), current_main_sha: sha_c(),
-    release_ref: "release/1.4", release_head_sha: sha_b(),
-    last_scan_epoch_seconds: 100, current_epoch_seconds: 200,
-    scan_interval_seconds: 60, eligible_reviewed_bug_fixes: [release_fix],
-    selected_bug_fix_shas: [sha_a()], caller_selection_confirmed: true,
-    direction: "release_to_main", forward_port_required: true,
-    forward_port_target_ref: "main", main_tracks_release: false
-)
-val forward_plan = plan_release_main_convergence(forward_port)
-expect(forward_plan.valid).to_be(true)
-expect(forward_plan.forward_port_required).to_be(true)
-expect(forward_plan.forward_port_target_ref).to_equal("main")
-
-step("Admit only an exhaustive receipt-bound release-first classification")
-val convergence_admission = ConvergenceAdmissionRequest(
-    candidate_commit_sha: sha_c(), receipt_candidate_commit_sha: sha_c(),
-    release_ref: "release/1.4", main_head_sha: sha_a(), release_head_sha: sha_c(),
-    receipt_sha256: digest_a(), review_summary_sha256: digest_b(),
-    evidence_receipt_sha256: digest_c(), integration_receipt_sha256: digest_d(),
-    inventory_origin: "protected_integration", graph_independent: true,
-    main_to_release_inventory_shas: [], main_to_release_shared_fix_shas: [],
-    main_to_release_selected_shas: [], main_to_release_backported_shas: [],
-    main_to_release_backport_result_shas: [], main_to_release_backport_target_refs: [],
-    backport_receipt_sha256s: [], release_to_main_inventory_shas: [sha_b()],
-    release_to_main_classified_shas: [sha_b()],
-    release_to_main_classification_kinds: ["fix"],
-    release_to_main_classification_receipt_sha256s: [digest_e()],
-    release_to_main_forward_ported_shas: [sha_b()],
-    release_to_main_forward_port_result_shas: [sha_a()],
-    release_to_main_forward_port_target_refs: ["main"],
-    forward_port_receipt_sha256s: [digest_f()]
-)
-expect(check_convergence_admission(convergence_admission).valid).to_be(true)
-var concealed = convergence_admission
-concealed.release_to_main_classified_shas = []
-concealed.release_to_main_classification_kinds = []
-concealed.release_to_main_classification_receipt_sha256s = []
-concealed.release_to_main_forward_ported_shas = []
-concealed.release_to_main_forward_port_result_shas = []
-concealed.release_to_main_forward_port_target_refs = []
-concealed.forward_port_receipt_sha256s = []
-expect(check_convergence_admission(concealed).reason).to_equal("every release-first inventory commit requires an exhaustive receipt-bound classification")
-
-val unsafe_tracking = ConvergenceRequest(
-    last_scanned_main_sha: backport.last_scanned_main_sha,
-    current_main_sha: backport.current_main_sha,
-    release_ref: backport.release_ref,
-    release_head_sha: backport.release_head_sha,
-    last_scan_epoch_seconds: backport.last_scan_epoch_seconds,
-    current_epoch_seconds: backport.current_epoch_seconds,
-    scan_interval_seconds: backport.scan_interval_seconds,
-    eligible_reviewed_bug_fixes: [], selected_bug_fix_shas: [],
-    caller_selection_confirmed: false, direction: backport.direction,
-    forward_port_required: false, forward_port_target_ref: "",
-    main_tracks_release: true
-)
-expect(plan_release_main_convergence(unsafe_tracking).reason).to_equal("main must remain an independent trunk and never track a release branch")
-```
-
-</details>
-
-#### admits exact-state self-attested review without claiming independent approval
-
-- Self-attest the exact protected PR head/base/diff with the scoped gate
-   - Expected: decision.head_sha equals `sha_a()`
-   - Expected: decision.review_evidence_mode equals `self_attested`
-- Reject stale and secret-bearing evidence before the provider check
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 18 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Self-attest the exact protected PR head/base/diff with the scoped gate")
-val policy = parse_self_review_policy_db(setup_self_review_policy())
-val manifest = parse_self_review_changed_manifest(setup_self_review_manifest())
-val decision = evaluate_self_review(policy, manifest, setup_self_review_request(policy.sha256))
-expect(decision.allowed).to_be(true)
-expect(decision.head_sha).to_equal(sha_a())
-expect(decision.review_evidence_mode).to_equal("self_attested")
-expect(decision.provider_action).to_contain("separate_eligible_broker")
-expect(decision.provider_approval_claimed).to_be(false)
-
-step("Reject stale and secret-bearing evidence before the provider check")
-var stale = setup_self_review_request(policy.sha256)
-stale.head_sha = sha_b()
-expect(evaluate_self_review(policy, manifest, stale).allowed).to_be(false)
-val secret_manifest = parse_self_review_changed_manifest(
-    setup_self_review_manifest().replace("semantic_class: ordinary", "semantic_class: credential_secret")
-)
-expect(evaluate_self_review(policy, secret_manifest, setup_self_review_request(policy.sha256)).allowed).to_be(false)
 ```
 
 </details>
@@ -465,14 +230,13 @@ expect(evaluate_self_review(policy, secret_manifest, setup_self_review_request(p
 #### freezes one complete candidate and rejects mutation
 
 - Freeze and qualify the release candidate
-   - Expected: identity.len() equals `64`
    - Expected: check_candidate_create_once("different-existing-identity", candidate).reason equals `candidate identity is create-once and cannot be mutated`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -480,34 +244,8 @@ step("Freeze and qualify the release candidate")
 val candidate = setup_candidate_fixture()
 expect(check_candidate_manifest(candidate).valid).to_be(true)
 val identity = candidate_identity(candidate)
-expect(identity.len()).to_equal(64)
 expect(check_candidate_create_once(identity, candidate).valid).to_be(true)
 expect(check_candidate_create_once("different-existing-identity", candidate).reason).to_equal("candidate identity is create-once and cannot be mutated")
-val separator_candidate = CandidateManifest(
-    version: candidate.version,
-    attempt: candidate.attempt,
-    candidate_ref: candidate.candidate_ref,
-    commit_sha: sha_b(),
-    source_tree_sha256: digest_a(),
-    policy_sha256: candidate.policy_sha256,
-    version_manifest_sha256: candidate.version_manifest_sha256,
-    toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
-    support_manifest_sha256: candidate.support_manifest_sha256,
-    build_graph_sha256: candidate.build_graph_sha256,
-    creator_identity: candidate.creator_identity,
-    evidence_manifest_sha256: candidate.evidence_manifest_sha256
-)
-expect(candidate_identity(separator_candidate) == identity).to_be(false)
-val qualification = QualificationReceipt(
-    candidate_identity: identity,
-    candidate_commit_sha: candidate.commit_sha,
-    build_graph_sha256: candidate.build_graph_sha256,
-    artifact_manifest_sha256: digest_b(),
-    evidence_manifest_sha256: candidate.evidence_manifest_sha256,
-    required_support_sha256: digest_c(),
-    required_support_passed: true
-)
-expect(check_qualification_receipt(candidate, qualification).valid).to_be(true)
 ```
 
 </details>
@@ -516,45 +254,30 @@ expect(check_qualification_receipt(candidate, qualification).valid).to_be(true)
 
 - Promote exact admitted artifacts
    - Expected: check_promotion_plan(admission, rebuild).reason equals `promotion must not rebuild admitted artifacts`
-   - Expected: check_promotion_plan(admission, stale_candidate).reason equals `promotion candidate identity does not match release admission`
-   - Expected: check_promotion_plan(admission, wrong_version).reason equals `promotion tag version does not match the admitted candidate version`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 80 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Promote exact admitted artifacts")
 val candidate = setup_candidate_fixture()
 val admission = ReleaseAdmission(
-    candidate_version: candidate.version,
-    candidate_attempt: candidate.attempt,
-    candidate_ref: candidate.candidate_ref,
     candidate_identity: candidate_identity(candidate),
     candidate_commit_sha: candidate.commit_sha,
-    source_tree_sha256: candidate.source_tree_sha256,
-    policy_sha256: candidate.policy_sha256,
-    version_manifest_sha256: candidate.version_manifest_sha256,
-    toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
-    support_manifest_sha256: candidate.support_manifest_sha256,
-    build_graph_sha256: candidate.build_graph_sha256,
-    creator_identity: candidate.creator_identity,
-    artifact_manifest_sha256: digest_a(),
+    artifact_manifest_sha256: "artifact-digest",
     evidence_manifest_sha256: candidate.evidence_manifest_sha256,
-    qualification_receipt_sha256: digest_b(),
-    admission_receipt_schema: "spipe-review-admission/1",
-    admission_receipt_sha256: digest_c()
+    admitted: true
 )
 val plan = PromotionPlan(
-    candidate_identity: admission.candidate_identity,
     tag: "v1.4.0-beta.2",
     target_commit_sha: candidate.commit_sha,
     candidate_commit_sha: candidate.commit_sha,
-    artifact_manifest_sha256: digest_a(),
-    admitted_artifact_manifest_sha256: digest_a(),
+    artifact_manifest_sha256: "artifact-digest",
+    admitted_artifact_manifest_sha256: "artifact-digest",
     signed_tag: true,
     annotated_tag: true,
     exact_tag_push: true,
@@ -562,11 +285,7 @@ val plan = PromotionPlan(
     fallback_artifact: false
 )
 expect(check_promotion_plan(admission, plan).valid).to_be(true)
-var self_review_only = admission
-self_review_only.admission_receipt_schema = "spipe-self-review-decision/1"
-expect(check_promotion_plan(self_review_only, plan).reason).to_contain("self-review decisions cannot authorize")
 val rebuild = PromotionPlan(
-    candidate_identity: plan.candidate_identity,
     tag: plan.tag,
     target_commit_sha: plan.target_commit_sha,
     candidate_commit_sha: plan.candidate_commit_sha,
@@ -579,34 +298,6 @@ val rebuild = PromotionPlan(
     fallback_artifact: false
 )
 expect(check_promotion_plan(admission, rebuild).reason).to_equal("promotion must not rebuild admitted artifacts")
-val stale_candidate = PromotionPlan(
-    candidate_identity: "stale-candidate-identity",
-    tag: plan.tag,
-    target_commit_sha: plan.target_commit_sha,
-    candidate_commit_sha: plan.candidate_commit_sha,
-    artifact_manifest_sha256: plan.artifact_manifest_sha256,
-    admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
-    signed_tag: plan.signed_tag,
-    annotated_tag: plan.annotated_tag,
-    exact_tag_push: plan.exact_tag_push,
-    rebuild: false,
-    fallback_artifact: false
-)
-expect(check_promotion_plan(admission, stale_candidate).reason).to_equal("promotion candidate identity does not match release admission")
-val wrong_version = PromotionPlan(
-    candidate_identity: plan.candidate_identity,
-    tag: "v1.4.0-beta.3",
-    target_commit_sha: plan.target_commit_sha,
-    candidate_commit_sha: plan.candidate_commit_sha,
-    artifact_manifest_sha256: plan.artifact_manifest_sha256,
-    admitted_artifact_manifest_sha256: plan.admitted_artifact_manifest_sha256,
-    signed_tag: plan.signed_tag,
-    annotated_tag: plan.annotated_tag,
-    exact_tag_push: plan.exact_tag_push,
-    rebuild: false,
-    fallback_artifact: false
-)
-expect(check_promotion_plan(admission, wrong_version).reason).to_equal("promotion tag version does not match the admitted candidate version")
 ```
 
 </details>
@@ -635,8 +326,8 @@ expect(check_withdrawal_plan(true, false, false, "1.3.9").reason).to_equal("with
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -651,3 +342,71 @@ expect(check_withdrawal_plan(true, false, false, "1.3.9").reason).to_equal("with
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-001`
+- `REQ-002`
+- `REQ-003`
+- `REQ-004`
+- `REQ-005`
+- `REQ-006`
+- `REQ-007`
+- `REQ-008`
+- `REQ-009`
+- `REQ-010`
+- `REQ-011`
+- `REQ-012`
+- `REQ-013`
+- `REQ-014`
+- `REQ-015`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `49abfa37e49d0d3ece9f4031752bd6af0bf67560e18be7c7fed2a338ccbbd6cc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `49abfa37e49d0d3ece9f4031752bd6af0bf67560e18be7c7fed2a338ccbbd6cc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `49abfa37e49d0d3ece9f4031752bd6af0bf67560e18be7c7fed2a338ccbbd6cc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **87/100**; effective score: **87/100**; blockers: **0**.
+
+SSpec documentization score: 87/100
+source: test/03_system/app/release/feature/release_process_hardening_spec.spl
+mirror: doc/06_spec/03_system/app/release/feature/release_process_hardening_spec.md (current)
+findings: 7 blockers: 0
+  narrative=80 structure=90 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=65
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/release/feature/release_process_hardening_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:1:1: advice SSDOC-MNT-001 [maintainability] (-15): multiple scenarios form a flat, unfolded presentation
+  why: Long flat dumps obscure the primary workflow.
+  improve: Group secondary detail and keep the primary workflow visible.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:1:1: warning SSDOC-NAR-001 [narrative] (-20): missing authored purpose and audience
+  why: Readers need scope, audience, and intent before executable detail.
+  improve: Add authored purpose, scope, and audience facts.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:164:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'loads the canonical release policy and rejects stale version projections' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:203:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'prepares an isolated beta release and rejects the main worktree' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:220:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'admits reviewed bug-fix backports and rejects unrelated features' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/release/feature/release_process_hardening_spec.spl:238:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'freezes one complete candidate and rejects mutation' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

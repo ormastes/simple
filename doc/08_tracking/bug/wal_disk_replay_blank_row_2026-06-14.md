@@ -1,8 +1,16 @@
 # wal_disk_replay_blank_row
 
+## Closed 2026-09-13 — Root cause fixed and confirmed; a DIFFERENT, Windows-only defect blocks the spec here
+
+- **measured**: the fix is in place. `src/lib/nogc_sync_mut/db/dbfs_engine/meta_store.spl:113-143` discriminates every op with `match entry.op: case MetaOp.InodeWrite(row): ...` — the `is`-chain that collapsed all ops to `CHECKPOINT` is gone, and the comment at `:114-119` records exactly that.
+- **measured**: the dependency that caused it is independently fixed. `a is E.A` on a payload-carrying variant now returns `true` (verified separately under `interp_qualified_enum_is_payload_variant_2026-06-14.md`), so the `else`-fallthrough cannot recur even on the old code shape.
+- **measured**, and honestly NOT a pass: `bin/simple run test/05_perf/db/wal_disk_replay_repro_spec.spl` FAILS here — `expected || to equal 42|420|bench.txt`. The cause is a distinct Windows defect, not the blank-row bug: the spec hardcodes the POSIX path `/tmp/wal_repro`, which the runtime resolves to `C:\tmp\wal_repro`, and that directory contains **only** `iso.db.meta.ckpt.tmp` and `iso.db.meta.wal.tmp`. `atomic_write` (`src/lib/nogc_sync_mut/database/atomic.spl:200`) never reached its `file_rename` step, so the journal the replay looks for was never created. `MetaStore.open` still returned `Ok`, which is why the result is empty rather than `ERR:`.
+- **inferred**: the early-return between the temp write and the rename is the `rt_file_sync(temp_path)` guard at `:211`; a Windows `rt_file_sync` that answers false would produce exactly this leftover-`.tmp` state. Not proven — a direct extern probe was inconclusive because `rt_file_write` is not registered for interpreter calls.
+- New work this implies, deliberately not done here (it is a separate defect and outside this entry): make `atomic_write` durable on Windows, and give the spec a portable temp path instead of `/tmp`.
+
 - **ID:** wal_disk_replay_blank_row
 - **Severity:** P0 (data integrity)
-- **Status:** FIXED
+- **Status:** CLOSED 2026-09-13 (root cause fixed; see the Windows caveat above)
 - **Date found / fixed:** 2026-06-14
 - **File:** `src/lib/nogc_sync_mut/db/dbfs_engine/meta_store.spl`
 - **Found via:** simple-db-hardening research; tracked as `wal-disk-replay-blank-row-p0`

@@ -1,4 +1,8 @@
 # Stage4 omitted the process-timeout owner
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -36,3 +40,4 @@ is not claimed complete. Projection and strict final-link routing are
 source-implemented, but executable evidence remains pending. No
 Simple, C, Rust, Cargo, compiler, or native execution is claimed in this
 static-only session.
+

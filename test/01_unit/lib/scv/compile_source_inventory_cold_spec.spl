@@ -1,0 +1,71 @@
+use std.spec.*
+use std.scv.compile_source_inventory.*
+
+fn cold_event(operation: text, path: text, content: text) -> CompileSourceEventV1:
+    compile_source_inventory_git_event_v1(operation, path, content)
+
+fn cold_sequential(generation: i64, events: [CompileSourceEventV1]) -> CompileSourceInventoryV1:
+    var inventory = CompileSourceInventoryV1(1, generation, [])
+    for event in events:
+        val changed = compile_source_inventory_apply_event_v1(inventory, event)
+        expect(changed.valid).to_equal(true)
+        inventory = changed.inventory!
+    inventory
+
+describe "bounded cold source inventory replay":
+    it "matches sequential generation and canonical bytes through churn and no-ops":
+        val events = [
+            cold_event("delete", "missing.spl", ""),
+            cold_event("create", "z.spl", "pub fn z(): 1"),
+            cold_event("modify", "a.spl", "fn a(): 1"),
+            cold_event("create", "z.spl", "pub fn z(): 1"),
+            cold_event("modify", "z.spl", "# comment\npub fn z(): 1"),
+            cold_event("modify", "a.spl", "fn a(): 2"),
+            cold_event("delete", "z.spl", ""),
+            cold_event("delete", "z.spl", ""),
+            cold_event("create", "z.spl", "pub fn z(): 3")
+        ]
+        val sequential = cold_sequential(11, events)
+        val cold = compile_source_inventory_apply_cold_events_v1(11, events)
+        expect(cold.valid).to_equal(true)
+        expect(cold.inventory!.generation).to_equal(17)
+        expect(compile_source_inventory_encode_v1(cold.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(sequential))
+        expect(cold.content_changed).to_equal(true)
+        expect(cold.semantics_changed).to_equal(true)
+
+    it "preserves the first invalid event reason and never returns partial state":
+        val first = cold_event("create", "z.spl", "fn z(): 1")
+        val invalids = [
+            cold_event("create", "../bad.spl", "x"),
+            cold_event("unknown", "z.spl", "x"),
+            CompileSourceEventV1("git", "create", "a.spl", "", "", "", "", "", 0),
+            CompileSourceEventV1("unknown", "create", "a.spl", "", "", "", "", "", 0)
+        ]
+        for invalid in invalids:
+            val sequential = compile_source_inventory_apply_event_v1(
+                cold_sequential(0, [first]), invalid)
+            val cold = compile_source_inventory_apply_cold_events_v1(0, [first, invalid])
+            expect(cold.valid).to_equal(false)
+            expect(cold.reason).to_equal(sequential.reason)
+            expect(cold.inventory).to_be_nil()
+
+    it "keeps empty and delete-only generations unchanged":
+        val empty = compile_source_inventory_apply_cold_events_v1(19, [])
+        val deleted = compile_source_inventory_apply_cold_events_v1(19,
+            [cold_event("delete", "missing.spl", "")])
+        expect(empty.inventory!.generation).to_equal(19)
+        expect(deleted.inventory!.entries.len()).to_equal(0)
+        expect(deleted.inventory!.generation).to_equal(19)
+        expect(deleted.reason).to_equal("ok-no-change")
+
+    it "sorts reverse odd-sized input stably including equal identities":
+        val first = cold_sequential(0, [cold_event("create", "z.spl", "first")]).entries[0]
+        val second = cold_sequential(0, [cold_event("create", "z.spl", "second")]).entries[0]
+        val middle = cold_sequential(0, [cold_event("create", "m.spl", "middle")]).entries[0]
+        val low = cold_sequential(0, [cold_event("create", "a.spl", "low")]).entries[0]
+        val sorted = compile_source_inventory_sort_v1([first, second, middle, low, low])
+        expect(sorted[0].source_identity).to_equal("a.spl")
+        expect(sorted[2].source_identity).to_equal("m.spl")
+        expect(sorted[3].content_digest).to_equal(first.content_digest)
+        expect(sorted[4].content_digest).to_equal(second.content_digest)

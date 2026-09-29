@@ -1,8 +1,14 @@
 # Bug: simd_dispatch_facade_spec — encoding/utf8.spl source missing
 
+## Closed 2026-09-13 — both fix items done: utf8.spl restored and cipher.spl imports modernised
+- **measured**: `src/lib/common/encoding/utf8.spl` exists; `find src/lib -name '*.smf'` returns nothing, so the `.smf`-only state is gone.
+- **measured** (`bin/simple run`): `use std.common.encoding.utf8.{text_codepoint_len, utf8_count_codepoints}` resolves and executes.
+- **measured**: `grep '^import ' src/lib/common/aes/cipher.spl` returns no matches — fix item 2 (deprecated `import` keyword) is done.
+- **inferred**: `simd_dispatch_facade_spec.spl` was not re-run; `bin/simple test` is broken on this Windows host.
+
 **Date:** 2026-06-26
 **Spec:** test/01_unit/lib/common/simd_dispatch_facade_spec.spl
-**Status:** Open (blocked on encoding agent scope)
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 

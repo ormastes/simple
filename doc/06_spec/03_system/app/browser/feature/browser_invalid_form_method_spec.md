@@ -1,59 +1,15 @@
-# BrowserSession invalid form method fallback
+# browser_invalid_form_method_spec
 
-Executable scenario:
-`test/03_system/app/browser/feature/browser_invalid_form_method_spec.spl`
+> Invalid HTML form-method fallback system specification.
 
-**Docgen:** pending by task constraint; no bootstrap, seed, or runtime was
-started. This checked-in manual mirrors every scenario step and helper.
-
-| Requirement | Executable evidence |
-| --- | --- |
-| REQ-WEB-BROWSER-007 | The submit callback runs before the default action and can cancel it. |
-| REQ-WEB-BROWSER-008 | Public button click dispatch activates the owning form. |
-| REQ-WEB-BROWSER-010 | Missing, empty, invalid, GET, POST, and valid-but-unsupported dialog tokens produce exact outcomes. |
-| REQ-WEB-BROWSER-012 | `file:` remains rejected by the navigation boundary. |
-| REQ-WEB-BROWSER-021 | Frozen steps and all four helpers are mirrored below. |
-
-## Submit a form with an invalid method
-
-`setup_invalid_form_method_fixture` opens a live `BrowserSession` document with
-an invalid `patch` method, successful controls, a submit button, and an
-`onsubmit` mutation callback.
-
-## Observe canonical GET encoding
-
-`check_invalid_method_uses_get` clicks the real button and verifies callback
-ordering, the exact GET URL, empty request body/content type, and missing or
-empty form methods. It also verifies empty and invalid submitter overrides
-replace a valid form-level POST with GET. A canceling submit callback must
-prevent the default request.
-
-## Submit valid GET and POST controls
-
-`check_valid_methods_unchanged` proves valid GET retains an existing query and
-appends encoded controls, while valid POST retains its URL-encoded body and
-content type.
-
-## Reject transport outside the form-method fallback
-
-`check_transport_policy_still_fails_closed` proves form-level and
-submitter-level `dialog` remain recognized but explicitly unsupported, then
-proves method fallback does not authorize `file:`. Submit callbacks run, no
-request is queued, and each warning names the correct capability boundary.
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
 
 <details>
-<summary>Complete executable SSpec</summary>
+<summary>Full Scenario Manual</summary>
 
-```simple
-# codex-system-test
-# @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-021
-use std.spec.*
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_get_attr, be_dom_path_for_route
-}
-use std.gc_async_mut.web.browser_session.{BrowserSession}
-use std.gc_async_mut.web.browser_session_runtime.*
-use test.system.browser_dom_identity_helpers.{system_browser_dom_identity_index, system_dom_route}
+# browser_invalid_form_method_spec
 
 """
 Invalid HTML form-method fallback system specification.
@@ -257,3 +213,75 @@ describe "BrowserSession invalid form method fallback":
 ```
 
 </details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-WEB-BROWSER-007`
+- `REQ-WEB-BROWSER-008`
+- `REQ-WEB-BROWSER-010`
+- `REQ-WEB-BROWSER-012`
+- `REQ-WEB-BROWSER-021`
+- `REQ-WEB-BROWSER-007:`
+- `REQ-WEB-BROWSER-008:`
+- `REQ-WEB-BROWSER-010:`
+- `REQ-WEB-BROWSER-012:`
+- `REQ-WEB-BROWSER-021:`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `1f87a72a5325587546db2069152de95ad1f68611ebb61721df90a9a691380ab3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `1f87a72a5325587546db2069152de95ad1f68611ebb61721df90a9a691380ab3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `1f87a72a5325587546db2069152de95ad1f68611ebb61721df90a9a691380ab3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **84/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/03_system/app/browser/feature/browser_invalid_form_method_spec.spl
+mirror: doc/06_spec/03_system/app/browser/feature/browser_invalid_form_method_spec.md (current)
+findings: 5 blockers: 1
+  narrative=100 structure=85 oracle=50
+  traceability=100 evidence=100 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=84; blocker cap makes effective=49
+doc/06_spec/03_system/app/browser/feature/browser_invalid_form_method_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/browser/feature/browser_invalid_form_method_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/browser/feature/browser_invalid_form_method_spec.spl:1:1: blocker SSDOC-ORA-001 [oracle] (-50): no real executed assertion or compiler oracle
+  why: A passing-looking document without an oracle is not conformance evidence.
+  improve: Replace placeholders with an observable production assertion.
+test/03_system/app/browser/feature/browser_invalid_form_method_spec.spl:205:1: warning SSDOC-BEH-001 [structure] (-10): scenario 'should use GET for invalid method tokens without widening transport' has no visible step flow
+  why: Ordered visible actions make the manual operable.
+  improve: Add ordered step("...") calls for meaningful actions.
+test/03_system/app/browser/feature/browser_invalid_form_method_spec.spl:205:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should use GET for invalid method tokens without widening transport' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

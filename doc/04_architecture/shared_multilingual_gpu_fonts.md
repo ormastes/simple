@@ -171,11 +171,9 @@ identity, then store the exact bytes under readable registry-owned VFAT long
 names in `/SYS/FONTS`; unique 8.3 aliases remain compatibility byte sources,
 never alternate identities. The pure-Simple writer emits the LFN slots and the
 shared pure-Simple reader resolves them before the raw 8.3 fallback.
-This writer/reader contract uses UTF-16LE VFAT slots, including valid BMP and
-surrogate-pair astral scalars. Malformed surrogate chains fail closed to the
-backing 8.3 alias. Nested directories grow by FAT cluster chains, while the
-fixed root cluster rejects more than 16 directory slots instead of corrupting
-data.
+This writer/reader contract is ASCII VFAT today: nested directories grow by FAT
+cluster chains, while the fixed root cluster rejects more than 16 directory
+slots instead of corrupting data. Non-ASCII UTF-16 LFN support remains pending.
 The production Simple Browser registers those exact VFS bytes with the current
 font facade before Web layout and Engine2D execution and rejects any skipped
 Draw IR command. A guest path marker without glyph/framebuffer evidence is not
@@ -230,20 +228,6 @@ source-wired. Retained evidence now binds and independently recomputes the
 canonical wrapper, kernel ELF, and FAT32 image hashes. Guest rendering and an
 independent host extraction established the same pinned crop hash; a current
 retained PASS bundle remains pending.
-RV64 remains a separate fail-closed admission row. Its canonical entry already
-uses `SharedWmScene -> DrawIrComposition -> Engine2D`, but its display scenario
-does not attach the font FAT32 image and its serial-only loop does not consume
-VirtIO input. The entry must keep both explicit unavailable markers until the
-existing VirtIO-FAT32/shared font bootstrap and evdev decoder are connected by
-architecture-owned RV64 transports. RV64 capture should then move from QEMU
-`screendump` to `pmemsave` of the guest-emitted physical scanout address,
-stride, format, and scanout generation. The host converts the RV64 BGRA backing
-buffer to RGB and pins a fresh RV64-only rightmost 56x48 crop; neither the x86
-address nor its crop/hash is reusable. The exact bounded RV64 framebuffer
-gate is tracked in
-`doc/08_tracking/bug/simpleos_rv64_wm_live_framebuffer_gate_2026-06-30.md`;
-the shared ARM64/RV64 input-transport ownership remains in
-`doc/08_tracking/bug/simpleos_arm64_qmp_input_transport_missing_2026-07-24.md`.
 Widget producers read existing `lang`/`font-family` properties, and
 `SharedWmWindow.language` preserves explicit WM language; absent metadata stays
 `und` and retains the previous Noto Sans Mono behavior.
@@ -370,3 +354,36 @@ Vulkan). Only an independently reviewed, reproducible tracked tuple may report
 5. Add the two Engine3D entrypoints and promote one real graphics backend.
 6. Update guides/SPipe recipes, then remove compatibility code only after parity
    and reference-removal gates pass.
+
+## GSUB/GPOS staged-completion boundary — 2026-07-25
+
+<!-- codex-design -->
+
+One pure layout plan is selected per script run from the owned `OtFont` bytes.
+GSUB mutates a bounded glyph-record sequence carrying glyph ID, source index,
+cluster, advance, and offsets; GPOS then adjusts that same sequence. It becomes
+the existing public `ShapedGlyph` sequence only after every active lookup
+validates and applies.
+
+`src/lib/skia/feature/shaper/ot_layout_shaper.spl` owns that canonical
+selected-run transaction and returns independent substitution and positioning
+completion truth to `shaper.spl`.
+The GPOS semantic owner shares its table-bounded readers and single work budget
+through `ot_layout_gpos_data.spl`.
+
+The selector is common to GSUB and GPOS and owns Script/LangSys/Feature/Lookup
+bounds, fallback, uniqueness, indices, and order. Unsupported active flags,
+types, formats, nested calls, device data, or GDEF dependencies make the plan
+incomplete. Pinned Arabic/Devanagari profiles remain compatibility witnesses
+until the generic plan covers their full active lookup sets.
+
+No parser, lookup, face, atlas, cache, or backend resource crosses into Draw IR.
+The established `FontRenderer` resolver and transient `FontRenderBatch` remain
+the only material boundary. A simple bounded
+O(active-lookups × glyphs × subtables) pass is accepted initially; the existing
+resolved-metrics cache avoids repeated shaping, and no second cache is added
+without measurement.
+
+This boundary cannot claim selected-corpus completion until every active pinned
+lookup validates and applies. Full specification-wide GSUB/GPOS is a separate
+option.

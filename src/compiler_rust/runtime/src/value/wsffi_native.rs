@@ -6,13 +6,22 @@
 //! between the Simple extern fn declarations and the C ABI.
 
 use super::core::RuntimeValue;
-use super::collections::{byte_array_bytes, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
+use super::collections::{byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 
 const WFFI_OK: i64 = 0;
 const WFFI_INVALID_ARGUMENT: i64 = 1;
 const WFFI_NULL_FUNCTION: i64 = 2;
 const WFFI_UNSUPPORTED_SIGNATURE: i64 = 3;
 const WFFI_INVALID_OUTPUT: i64 = 4;
+
+unsafe extern "C" {
+    /// Native C twin compiled from `runtime_backend_plugin.c`.
+    pub fn spl_backend_plugin_run_v1(
+        path_bytes: RuntimeValue,
+        request_bytes: RuntimeValue,
+        mir_bytes: RuntimeValue,
+    ) -> RuntimeValue;
+}
 
 fn store_i64_output(out: RuntimeValue, value: i64) -> bool {
     if rt_array_len(out) < 1 {
@@ -102,6 +111,118 @@ pub extern "C" fn rt_host_dynlib_close(handle: i64) -> i64 {
             -1
         }
     }
+}
+
+/// Seed twin of `spl_dynlib_snapshot_linux` in `src/runtime/runtime_dynload.c`.
+///
+/// Copies the regular file at `path` (no symlink follow, <= 1 GiB) into a
+/// sealed memfd and returns its descriptor, or -1 on any failure / non-Linux.
+pub fn dynlib_snapshot_linux_path(path: &[u8]) -> i64 {
+    #[cfg(target_os = "linux")]
+    {
+        const LIMIT: u64 = 1 << 30;
+        if path.is_empty() || path.contains(&0) {
+            return -1;
+        }
+        let mut c_path = Vec::with_capacity(path.len() + 1);
+        c_path.extend_from_slice(path);
+        c_path.push(0);
+        unsafe {
+            let source = libc::open(
+                c_path.as_ptr() as *const libc::c_char,
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            );
+            if source < 0 {
+                return -1;
+            }
+            let mut st: libc::stat = std::mem::zeroed();
+            if libc::fstat(source, &mut st) != 0
+                || (st.st_mode & libc::S_IFMT) != libc::S_IFREG
+                || st.st_size < 0
+                || st.st_size as u64 > LIMIT
+            {
+                libc::close(source);
+                return -1;
+            }
+            let snapshot = libc::memfd_create(
+                b"simple-sffi-provider\0".as_ptr() as *const libc::c_char,
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+            );
+            if snapshot < 0 {
+                libc::close(source);
+                return -1;
+            }
+            let mut buffer = vec![0u8; 65536];
+            let mut total: u64 = 0;
+            loop {
+                let got = libc::read(source, buffer.as_mut_ptr() as *mut libc::c_void, buffer.len());
+                if got == 0 {
+                    break;
+                }
+                if got < 0 {
+                    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    libc::close(source);
+                    libc::close(snapshot);
+                    return -1;
+                }
+                if got as u64 > LIMIT - total {
+                    libc::close(source);
+                    libc::close(snapshot);
+                    return -1;
+                }
+                total += got as u64;
+                let mut offset: isize = 0;
+                while offset < got {
+                    let put = libc::write(
+                        snapshot,
+                        buffer.as_ptr().offset(offset) as *const libc::c_void,
+                        (got - offset) as usize,
+                    );
+                    if put < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    if put <= 0 {
+                        libc::close(source);
+                        libc::close(snapshot);
+                        return -1;
+                    }
+                    offset += put;
+                }
+            }
+            if total != st.st_size as u64
+                || libc::close(source) != 0
+                || libc::lseek(snapshot, 0, libc::SEEK_SET) < 0
+                || libc::fcntl(
+                    snapshot,
+                    libc::F_ADD_SEALS,
+                    libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL,
+                ) != 0
+            {
+                libc::close(snapshot);
+                return -1;
+            }
+            snapshot as i64
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        -1
+    }
+}
+
+/// spl_dynlib_snapshot_linux(path: text) -> i64 — native ABI (tagged text).
+#[no_mangle]
+pub extern "C" fn spl_dynlib_snapshot_linux(path_rv: RuntimeValue) -> i64 {
+    let raw_ptr = rt_string_data(path_rv);
+    let len = rt_string_len(path_rv);
+    if raw_ptr.is_null() || len <= 0 {
+        return -1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(raw_ptr, len as usize) };
+    dynlib_snapshot_linux_path(slice)
 }
 
 /// spl_dlopen(path: text) -> i64
@@ -196,11 +317,7 @@ pub extern "C" fn spl_dlsym(handle: i64, name_rv: RuntimeValue) -> i64 {
 
 /// Status/out symbol-resolution primitive.
 #[no_mangle]
-pub extern "C" fn spl_dlsym_checked(
-    handle: i64,
-    name_rv: RuntimeValue,
-    out_symbol: *mut i64,
-) -> i64 {
+pub extern "C" fn spl_dlsym_checked(handle: i64, name_rv: RuntimeValue, out_symbol: *mut i64) -> i64 {
     if out_symbol.is_null() {
         return 1;
     }
@@ -283,6 +400,11 @@ pub extern "C" fn spl_dlsym_process_checked(name_rv: RuntimeValue, out_symbol: *
     {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
         let process = unsafe { GetModuleHandleW(std::ptr::null()) };
+        // windows-sys models HMODULE as `*mut c_void` (it was `isize` in older
+        // releases), so the `== 0` this used to do no longer type-checks. This
+        // whole block is `#[cfg(windows)]`, so the break was invisible to every
+        // Linux and macOS build and only surfaces when the seed is compiled on
+        // Windows -- which is exactly the lane that had not been reachable.
         if process.is_null() {
             return 3;
         }
@@ -341,6 +463,20 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
     try_call_i64_value(fptr, args_rv, nargs).unwrap_or(0)
 }
 
+/// Exact mixed ABI for a resolved `i32(i64, u32, u32, f64)` entry.
+/// The final integer is an f64 bit pattern, so the Simple extern stays all-i64.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i32_i64_u32_u32_f64_bits(
+    fptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3_bits: i64,
+) -> i64 {
+    if fptr == 0 || arg1 <= 0 || arg2 <= 0 || arg1 > u32::MAX as i64 || arg2 > u32::MAX as i64 {
+        return -1;
+    }
+    type Target = unsafe extern "C" fn(i64, u32, u32, f64) -> i32;
+    let target: Target = unsafe { std::mem::transmute(fptr as usize) };
+    unsafe { target(arg0, arg1 as u32, arg2 as u32, f64::from_bits(arg3_bits as u64)) as i64 }
+}
+
 /// Allocation-free typed C-boolean call with no arguments.
 #[no_mangle]
 pub extern "C" fn spl_wffi_call_bool0_checked(fptr: i64, out_value: *mut bool) -> i64 {
@@ -392,12 +528,7 @@ pub extern "C" fn spl_wffi_try_call_i64(fptr: i64, args_rv: RuntimeValue, nargs:
 
 /// Allocation-free checked integer transport using caller-owned scalar output.
 #[no_mangle]
-pub extern "C" fn spl_wffi_try_call_i64_out(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-    out_value: *mut i64,
-) -> i64 {
+pub extern "C" fn spl_wffi_try_call_i64_out(fptr: i64, args_rv: RuntimeValue, nargs: i64, out_value: *mut i64) -> i64 {
     if out_value.is_null() {
         return WFFI_INVALID_ARGUMENT;
     }
@@ -600,6 +731,84 @@ pub extern "C" fn spl_wffi_call_i64_with_bytes_checked(
     checked_i64_result(WFFI_OK, unsafe { call_i64_raw(fptr, &args) })
 }
 
+/// One-call dynamic dispatch with a caller-allocated OUT byte buffer.
+///
+/// The sibling `spl_wffi_call_i64_with_bytes` passes bytes **IN** only: it
+/// hands the callee a pointer to a copy that dies with this frame, so anything
+/// the callee writes there is lost. Providers that follow the
+/// `(buf, cap, out_len)` idiom -- the only shape that lets Simple own the
+/// allocation instead of holding C memory -- therefore had no facade at all.
+///
+/// Arg marshalling mirrors `_with_bytes` exactly, with one extra foreign
+/// argument: the callee receives `prefix..., buf_ptr, cap, out_len_ptr,
+/// suffix...`. `out_bytes[offset .. offset + cap]` is the writable window; at
+/// most `cap` bytes are copied back into the Simple array, whose length is
+/// never changed. The callee's `i64` return is returned verbatim, so a
+/// provider status (`UNAVAILABLE`, `INVALID_HANDLE`, ...) reaches Simple
+/// unaltered. `out_len` receives whatever the callee reported, clamped to a
+/// non-negative value; a facade-level rejection returns the same
+/// `WFFI_*` negatives the checked transports use and writes `0`.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i64_into_bytes(
+    fptr: i64,
+    prefix_args: RuntimeValue,
+    out_bytes: RuntimeValue,
+    offset: i64,
+    capacity: i64,
+    out_len: *mut i64,
+    suffix_args: RuntimeValue,
+) -> i64 {
+    if out_len.is_null() {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_len.write(0) };
+    if fptr == 0 {
+        return -WFFI_NULL_FUNCTION;
+    }
+    let Some(mut owner) = byte_array_bytes(out_bytes) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    let (Ok(offset), Ok(capacity)) = (usize::try_from(offset), usize::try_from(capacity)) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    let Some(end) = offset.checked_add(capacity) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    if end > owner.len() {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    let (Some(mut args), Some(suffix)) = (runtime_i64_values(prefix_args), runtime_i64_values(suffix_args)) else {
+        return -WFFI_INVALID_ARGUMENT;
+    };
+    if args.len() + 3 + suffix.len() > 8 {
+        return -WFFI_UNSUPPORTED_SIGNATURE;
+    }
+    let mut reported: i64 = 0;
+    // A zero CAPACITY is not a null buffer. The `(buf, cap, out_len)` idiom lets
+    // a caller ask "how much would you need?" by offering room for nothing, and
+    // a provider answers that by filling `out_len` -- but only if `buf` is a
+    // real address, since a NULL buffer is an invalid request to most of them.
+    // (The IN-only sibling passes 0 for an empty payload, which is right there:
+    // there is no data to point at. Here there is an allocation, just no room.)
+    let ptr = if owner.is_empty() {
+        0
+    } else {
+        owner[offset..end].as_mut_ptr() as i64
+    };
+    args.push(ptr);
+    args.push(capacity as i64);
+    args.push(&mut reported as *mut i64 as i64);
+    args.extend_from_slice(&suffix);
+    let rc = unsafe { call_i64_raw(fptr, &args) };
+    // The callee wrote into `owner`, which is this frame's copy of the Simple
+    // array; publish it back before anything else can observe the array.
+    if !byte_array_write(out_bytes, &owner) {
+        return -WFFI_INVALID_ARGUMENT;
+    }
+    unsafe { out_len.write(reported.max(0)) };
+    rc
+}
+
 #[no_mangle]
 pub extern "C" fn spl_fonts_call_init_blob(fptr: i64, blob: RuntimeValue, digest: RuntimeValue) -> i64 {
     if fptr == 0 {
@@ -650,11 +859,7 @@ pub extern "C" fn spl_wffi_call_f64(fptr: i64, args_rv: RuntimeValue, nargs: i64
 /// Interpreter/native-equivalent checked float transport. The second element
 /// is the exact IEEE-754 bit pattern and is meaningful only for status zero.
 #[no_mangle]
-pub extern "C" fn spl_wffi_call_f64_checked(
-    fptr: i64,
-    args_rv: RuntimeValue,
-    nargs: i64,
-) -> RuntimeValue {
+pub extern "C" fn spl_wffi_call_f64_checked(fptr: i64, args_rv: RuntimeValue, nargs: i64) -> RuntimeValue {
     match try_call_f64_value(fptr, args_rv, nargs) {
         Ok(value) => checked_i64_result(WFFI_OK, value.to_bits() as i64),
         Err(status) => checked_i64_result(status, 0),
@@ -814,6 +1019,30 @@ mod tests {
         assert_eq!(spl_dlopen_checked(empty, std::ptr::null_mut()), 1);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dynlib_snapshot_linux_seals_regular_files_and_rejects_others() {
+        let dir = std::env::temp_dir().join(format!("spl_dynsnap_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("provider.bin");
+        std::fs::write(&file, b"sealed-bytes").unwrap();
+        let fd = dynlib_snapshot_linux_path(file.to_str().unwrap().as_bytes());
+        assert!(fd >= 0);
+        let seals = unsafe { libc::fcntl(fd as i32, libc::F_GET_SEALS) };
+        assert!(seals & libc::F_SEAL_WRITE != 0 && seals & libc::F_SEAL_SEAL != 0);
+        let mut buf = [0u8; 32];
+        let got = unsafe { libc::read(fd as i32, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        assert_eq!(&buf[..got as usize], b"sealed-bytes");
+        unsafe { libc::close(fd as i32) };
+        let link = dir.join("provider.link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(dynlib_snapshot_linux_path(link.to_str().unwrap().as_bytes()), -1);
+        assert_eq!(dynlib_snapshot_linux_path(dir.to_str().unwrap().as_bytes()), -1);
+        assert_eq!(dynlib_snapshot_linux_path(b""), -1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn checked_symbol_lookup_initializes_output_and_rejects_null_handle() {
         let name = rt_string_new(b"rt_probe".as_ptr(), 8);
@@ -862,17 +1091,82 @@ mod tests {
         assert_eq!(rt_array_get(rejected, 0).as_int(), WFFI_INVALID_ARGUMENT);
     }
 
+    /// Status table for the allocation-free scalar transport. These four cases
+    /// plus the null-output case below are asserted identically against the C
+    /// provider by `test/harness/wffi_i64_alloc_count_c_harness.c`, so the two
+    /// lanes cannot drift apart on the contract.
+    #[test]
+    fn try_call_i64_out_matches_the_cross_lane_status_table() {
+        let args = rt_array_new(2);
+        assert!(rt_array_push(args, RuntimeValue::from_int(3)));
+        assert!(rt_array_push(args, RuntimeValue::from_int(4)));
+        let fptr = i64_two_args as usize as i64;
+
+        let mut value = -1i64;
+        assert_eq!(spl_wffi_try_call_i64_out(fptr, args, 2, &mut value), WFFI_OK);
+        assert_eq!(value, 7);
+
+        value = -1;
+        assert_eq!(spl_wffi_try_call_i64_out(0, args, 2, &mut value), WFFI_NULL_FUNCTION);
+        assert_eq!(value, 0);
+
+        value = -1;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(fptr, args, 3, &mut value),
+            WFFI_INVALID_ARGUMENT
+        );
+        assert_eq!(value, 0);
+
+        value = -1;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(fptr, args, 9, &mut value),
+            WFFI_UNSUPPORTED_SIGNATURE
+        );
+        assert_eq!(value, 0);
+    }
+
+    #[test]
+    fn try_call_i64_out_rejects_a_null_output_slot() {
+        let args = rt_array_new(0);
+        assert_eq!(
+            spl_wffi_try_call_i64_out(i64_zero as usize as i64, args, 0, std::ptr::null_mut()),
+            WFFI_INVALID_ARGUMENT
+        );
+    }
+
+    /// A foreign zero must stay distinguishable from a bridge failure on the
+    /// scalar transport too: status zero with a zero output is a real result.
+    #[test]
+    fn try_call_i64_out_preserves_a_valid_foreign_zero() {
+        let args = rt_array_new(0);
+        let mut value = -1i64;
+        assert_eq!(
+            spl_wffi_try_call_i64_out(i64_zero as usize as i64, args, 0, &mut value),
+            WFFI_OK
+        );
+        assert_eq!(value, 0);
+    }
+
     #[test]
     fn checked_boolean_transport_preserves_bool_and_failure_identity() {
         let mut value = false;
-        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value), WFFI_OK);
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, &mut value),
+            WFFI_OK
+        );
         assert!(value);
-        assert_eq!(spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value), WFFI_OK);
+        assert_eq!(
+            spl_wffi_call_bool1_checked(bool_is_positive as usize as i64, -1, &mut value),
+            WFFI_OK
+        );
         assert!(!value);
         value = true;
         assert_eq!(spl_wffi_call_bool0_checked(0, &mut value), WFFI_NULL_FUNCTION);
         assert!(!value);
-        assert_eq!(spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()), WFFI_INVALID_ARGUMENT);
+        assert_eq!(
+            spl_wffi_call_bool0_checked(bool_true as usize as i64, std::ptr::null_mut()),
+            WFFI_INVALID_ARGUMENT
+        );
     }
 
     unsafe extern "C" fn f64_no_args() -> f64 {

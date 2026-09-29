@@ -372,3 +372,24 @@ regression spec that would catch its return are present and green. Cause 1
 (the kill-monitor SIGTERM race) remains a real, nondeterministic hazard, but
 it surfaces as rc=143 — UNVERIFIED — not as a silent exit 0, and is therefore
 a separate concern from this defect.
+
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE on this binary
+
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
+
+The deployed aarch64 seed prints a summary AND exits non-zero on failure. Run
+on a 4-example spec deliberately containing 2 passes and 2 failures:
+
+```
+SPEC FILE VERDICT: ... outcome=ERROR declared>=4 executed=4 passed=2 failed=2 skipped=0 dropped=0
+Results: 4 total, 2 passed, 2 failed
+EXIT=1
+```
+
+and on an all-green 2-example spec: `Results: 2 total, 2 passed, 0 failed`,
+`EXIT=0`. Both are correct. This record says "on deployed <binary>"; the binary
+it was measured against is not the one probed here, so this is evidence about
+the aarch64 seed only and does not retire the record for other deployments.

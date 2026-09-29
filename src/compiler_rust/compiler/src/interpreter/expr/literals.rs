@@ -29,7 +29,7 @@ pub(super) fn eval_literal_expr(
             NumericSuffix::Unit(unit_name) => {
                 // Create a Unit value for unit-suffixed integers
                 // Look up family from thread-local registry, with SI prefix support
-                let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                let (family, si_multiplier, base_suffix) = lookup_unit_family_with_si(unit_name);
                 // Apply SI prefix multiplier if present
                 let final_value = if let Some(mult) = si_multiplier {
                     // Convert to float and apply multiplier
@@ -37,9 +37,18 @@ pub(super) fn eval_literal_expr(
                 } else {
                     Value::Int(*value)
                 };
+                // An SI-decomposed literal has already been converted INTO the
+                // family's base unit, so it must carry the base suffix. Keeping
+                // the prefixed suffix made a later `to_<base>()` apply the
+                // family's conversion factor a second time (`2_km.to_m()` =>
+                // 2_000_000).
+                let suffix = match (&si_multiplier, &base_suffix) {
+                    (Some(_), Some(base)) => base.clone(),
+                    _ => unit_name.clone(),
+                };
                 Value::Unit {
                     value: Box::new(final_value),
-                    suffix: unit_name.clone(),
+                    suffix,
                     family,
                 }
             }
@@ -68,16 +77,22 @@ pub(super) fn eval_literal_expr(
         Expr::TypedFloat(value, suffix) => Ok(Some(match suffix {
             NumericSuffix::Unit(unit_name) => {
                 // Create a Unit value for unit-suffixed floats, with SI prefix support
-                let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                let (family, si_multiplier, base_suffix) = lookup_unit_family_with_si(unit_name);
                 // Apply SI prefix multiplier if present
                 let final_value = if let Some(mult) = si_multiplier {
                     *value * mult
                 } else {
                     *value
                 };
+                // See the integer arm above: an SI-decomposed literal carries
+                // the base suffix, never the prefixed one.
+                let suffix = match (&si_multiplier, &base_suffix) {
+                    (Some(_), Some(base)) => base.clone(),
+                    _ => unit_name.clone(),
+                };
                 Value::Unit {
                     value: Box::new(Value::Float(final_value)),
-                    suffix: unit_name.clone(),
+                    suffix,
                     family,
                 }
             }
@@ -273,6 +288,13 @@ pub(super) fn eval_literal_expr(
                     ctx,
                 ));
             }
+            // strict-mem (plan M5 §2): an initializer-less `let` marks its name
+            // uninit (node_exec.rs); trap the read before the lookup cascade
+            // can shadow-miss into an unrelated enclosing/global binding.
+            // Off-path cost: one bool load.
+            if crate::value::strict_mem_enabled() && env.is_uninit(name) {
+                return Err(CompileError::semantic(format!("strict-mem: read of uninitialized {name}")));
+            }
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
@@ -296,6 +318,19 @@ pub(super) fn eval_literal_expr(
                 // MODULE_GLOBALS is authoritative for these names (a direct
                 // write in the body syncs there too), so prefer it on read.
                 if !env.is_local(name) {
+                    // A global with owner provenance resolves through its
+                    // defining module's store, never the bare-name flat map,
+                    // where a same-named global of an unrelated loaded module
+                    // may sit (PR #1905: x86_32 `g_vmm` shadowed the imported
+                    // `memory.vmm.g_vmm`).
+                    // A write by this frame (overlay entry) is published to the
+                    // owner store only when the frame returns, so it wins.
+                    if let Some(live) = env.live_owned_global(name) {
+                        if env.has_overlay_entry(name) {
+                            return Ok(Some(val.clone()));
+                        }
+                        return Ok(Some(live.unwrap_or_else(|| val.clone())));
+                    }
                     let live = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());
                     if let Some(live) = live {
                         return Ok(Some(live));
@@ -386,7 +421,10 @@ pub(super) fn eval_literal_expr(
                 let tail: Vec<&str> = stack.iter().rev().take(12).map(|s| s.as_str()).collect();
                 let mut avail: Vec<&str> = known_names.clone();
                 avail.sort();
-                eprintln!("[undefined-var] name={} call_stack_top={:?} in_scope={:?}", name, tail, avail);
+                eprintln!(
+                    "[undefined-var] name={} call_stack_top={:?} in_scope={:?}",
+                    name, tail, avail
+                );
             }
             Err(CompileError::semantic_with_context(
                 format!("variable `{}` not found", name),

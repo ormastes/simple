@@ -22,8 +22,6 @@
 |------|----------|--------|
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/engine2d_facade_backend_mutation_spec.spl` | Public Engine2D facade mutation/readback for software + CPU SIMD, including clip/mask through image, scaled image, and transformed image | ✅ 8 tests passing — real facade `read_pixels()` assertions |
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/vulkan_compute_oracle_spec.spl` | Vulkan clear/rect/draw_image device readback, clipped draw_image, clip rect, mask, and cross-backend wrappers | ✅ 7 tests passing — Vulkan-backed readback oracle |
-| `test/02_integration/rendering/vulkan_buffer_readback_bytes_spec.spl` | Typed-array Vulkan upload and exact bounded byte readback at a nonzero offset | ✅ Live Linux interpreter and native Rust runtime device passes; source-matched Simple native receipt remains open |
-| `test/03_system/app/simple_2d/native_processing_ir_cuda_vulkan_readback_parity_spec.spl` | Current-emitter CUDA PTX provenance plus CUDA/Vulkan device readback parity | ✅ Retained native ProcessingIR candidates pass exact 64-value CUDA/Vulkan receipts and CUDA passes the 1,048,576-element policy workload; warm session timing and source-matched direct indexing remain open |
 | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_backend_parity_spec.spl` | CPU, CPU SIMD, Metal-on-Vulkan, CUDA fallback, OpenCL fallback, and Vulkan generic layout parity | ✅ 10 tests passing — backend selection parity |
 | `gpu_rendering_functional_cpu_simd_coverage_spec.spl` | Real pixel capture, deterministic rendering, render stats, event patterns, multi-item rendering | ✅ 9 tests passing — real SoftwareRenderer.get_pixels() pixel capture |
 | `gpu_rendering_vulkan_renderdoc_capture_spec.spl` | Trace structure, metrics validation, CPU-Vulkan parity, draw call alignment | ✅ 5 tests passing — RenderDoc trace validation framework |
@@ -112,24 +110,11 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 ### Plans
 - **Full GPU Render Offload Strategy:** `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md`
 - **Vulkan-Backed Web/GUI RenderDoc:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
-- **ProcessingIR Backend Fault Matrix:** `doc/03_plan/sys_test/gpu_backend_failure_injection_matrix.md`
-- **Three-Backend Fault Contract Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_fault_source_contract_spec.md`
-- **Fault Gate Unit Manual:** `doc/06_spec/01_unit/lib/gc_async_mut/processing/fault_injection_spec.md`
-- **Executor Wire-Reason Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_executor_reason_mapping_contract_spec.md`
-- **Failure/Fallback Receipt Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/native_backend_failure_fallback_spec.md`
-- **CPU Fallback Policy Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_policy_contract_spec.md`
-- **Native CPU Fallback Wire Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md`
-- **Native Vulkan Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_vulkan_fault_native_contract_spec.md`
-- **Direct CUDA ProcessingIR Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.md`
-- **ivshmem Fallback Receipt Manual:** `doc/06_spec/01_unit/os/host_gpu_ivshmem_fallback_receipt_spec.md`
-- **SimpleOS Host GPU Protocol Manual:** `doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_protocol_spec.md`
-- **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`
 
 ### Bug Tracking (Critical Blockers)
 - **RenderDoc Blockers:** `doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md`
 - **Electron RenderDoc Diagnostics:** `doc/08_tracking/bug/electron_renderdoc_vulkan_widget_capture_launch_diagnostics_2026-06-28.md`
 - **GUI RenderDoc Performance:** `doc/08_tracking/bug/gui_renderdoc_aggregate_spec_static_cache_artifact_bloat_2026-06-27.md`
-- **SimpleOS Fallback Wire Native Probe:** `doc/08_tracking/bug/simpleos_gpu_fallback_wire_native_probe_segfault_2026-07-26.md`
 
 ## Coverage Summary
 

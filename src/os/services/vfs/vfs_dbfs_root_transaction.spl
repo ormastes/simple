@@ -1,0 +1,153 @@
+# Exact staged publication for one device-backed DBFS root.
+#
+# This owner keeps the canonical MountTable, DBFS durability capability, and
+# VFS readiness transitions in one package.  The boot layer receives only an
+# opaque stage and cannot publish readiness before the mounted driver identity
+# has been revalidated through a MountTable-issued root seal.
+
+use os.services.vfs.vfs_boot_state.{
+    vfs_is_ready,
+    vfs_state_mount,
+    vfs_state_unmount,
+    vfs_state_mark_rootfs_ready,
+    vfs_state_mark_rootfs_unready,
+    vfs_state_acquire_dbfs_root_mount_seal_v1,
+    vfs_state_revalidate_dbfs_root_mount_seal_v1,
+    vfs_state_close_dbfs_root_mount_seal_v1
+}
+use os.services.vfs.dbfs_mount_capability.{
+    dbfs_vfs_mount_capability_clear_v1,
+    dbfs_vfs_mount_capability_publish_driver_v1,
+    dbfs_vfs_mount_capability_snapshot_v1,
+    dbfs_vfs_mount_capability_snapshot_current_v1
+}
+use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
+use std.fs_driver.instance.{DriverInstance}
+use std.fs_driver.mount_table.{DbfsRootMountSealV1}
+use std.fs_driver.types.{MountOptions}
+
+pub struct VfsDbfsRootMountStageV1:
+    driver: DbFsDriver
+    seal: DbfsRootMountSealV1
+    instance_id: i64
+
+fn _vfs_dbfs_root_close_driver_v1(driver: DbFsDriver) -> bool:
+    val instance_id = driver.device_instance_id()
+    val closed = driver.close_device_backing(instance_id)
+    closed.is_ok() and closed.unwrap()
+
+fn _vfs_dbfs_root_remove_staged_mount_v1(
+    stage: VfsDbfsRootMountStageV1,
+    withdraw_ready: bool
+) -> Result<(), text>:
+    val current = vfs_state_revalidate_dbfs_root_mount_seal_v1(stage.seal)
+    if (current.is_err() or
+        current.unwrap().dbfs_instance_identity != stage.instance_id):
+        return Err("vfs-dbfs-root: staged-root-identity-stale")
+    if withdraw_ready:
+        vfs_state_mark_rootfs_unready()
+    val unmounted = vfs_state_unmount("/")
+    if unmounted.is_err():
+        dbfs_vfs_mount_capability_clear_v1()
+        return Err("vfs-dbfs-root: staged-root-unmount-failed")
+    # Unmount deliberately makes the seal stale. close still retires the
+    # binding before returning StaleHandle, so its result is not an error for
+    # this exact rollback sequence.
+    _ = vfs_state_close_dbfs_root_mount_seal_v1(stage.seal)
+    dbfs_vfs_mount_capability_clear_v1()
+    if not _vfs_dbfs_root_close_driver_v1(stage.driver):
+        return Err("vfs-dbfs-root: staged-root-device-close-failed")
+    Ok(())
+
+pub fn vfs_dbfs_root_mount_stage_v1(
+    driver: DbFsDriver
+) -> Result<VfsDbfsRootMountStageV1, text>:
+    """Mount but do not publish readiness until exact identity is sealed."""
+    if vfs_is_ready():
+        if not _vfs_dbfs_root_close_driver_v1(driver):
+            return Err("vfs-dbfs-root: root-already-ready-device-close-failed")
+        return Err("vfs-dbfs-root: root-already-ready")
+    if not driver.durability_serialization_ready():
+        if not _vfs_dbfs_root_close_driver_v1(driver):
+            return Err("vfs-dbfs-root: durability-owner-not-ready-device-close-failed")
+        return Err("vfs-dbfs-root: durability-owner-not-ready")
+    val instance_id = driver.device_instance_id()
+    val mounted = vfs_state_mount(
+        "/", DriverInstance.DbFs(driver), MountOptions.default())
+    if mounted.is_err():
+        if not _vfs_dbfs_root_close_driver_v1(driver):
+            return Err("vfs-dbfs-root: mount-failed-device-close-failed")
+        return Err("vfs-dbfs-root: mount-failed")
+    val acquired = vfs_state_acquire_dbfs_root_mount_seal_v1()
+    if acquired.is_err():
+        val removed = vfs_state_unmount("/")
+        if removed.is_err():
+            return Err("vfs-dbfs-root: seal-failed-rollback-indeterminate")
+        if not _vfs_dbfs_root_close_driver_v1(driver):
+            return Err("vfs-dbfs-root: seal-failed-device-close-failed")
+        return Err("vfs-dbfs-root: seal-acquisition-failed")
+    val seal = acquired.unwrap()
+    val facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(seal)
+    if (facts.is_err() or
+        facts.unwrap().dbfs_instance_identity != instance_id):
+        val stage = VfsDbfsRootMountStageV1(
+            driver: driver, seal: seal, instance_id: instance_id)
+        val removed = _vfs_dbfs_root_remove_staged_mount_v1(stage, false)
+        if removed.is_err():
+            return Err("vfs-dbfs-root: seal-identity-mismatch:" + removed.unwrap_err())
+        return Err("vfs-dbfs-root: seal-identity-mismatch")
+    Ok(VfsDbfsRootMountStageV1(
+        driver: driver, seal: seal, instance_id: instance_id))
+
+pub fn vfs_dbfs_root_mount_abort_v1(
+    stage: VfsDbfsRootMountStageV1
+) -> Result<(), text>:
+    """Consume one exact uncommitted stage and release its device owner."""
+    _vfs_dbfs_root_remove_staged_mount_v1(stage, false)
+
+pub fn vfs_dbfs_root_mount_commit_v1(
+    stage: VfsDbfsRootMountStageV1
+) -> Result<DbFsDriver, text>:
+    """Publish capability and readiness only while the sealed root is live."""
+    val facts = vfs_state_revalidate_dbfs_root_mount_seal_v1(stage.seal)
+    if (facts.is_err() or
+        facts.unwrap().dbfs_instance_identity != stage.instance_id):
+        return Err("vfs-dbfs-root: commit-identity-stale")
+    dbfs_vfs_mount_capability_clear_v1()
+    dbfs_vfs_mount_capability_publish_driver_v1(
+        stage.driver.durability_serialization_ready())
+    val before = dbfs_vfs_mount_capability_snapshot_v1()
+    val after = dbfs_vfs_mount_capability_snapshot_v1()
+    if not dbfs_vfs_mount_capability_snapshot_current_v1(before, after):
+        val removed = _vfs_dbfs_root_remove_staged_mount_v1(stage, false)
+        if removed.is_err():
+            return Err("vfs-dbfs-root: capability-publication-failed:" + removed.unwrap_err())
+        return Err("vfs-dbfs-root: capability-publication-failed")
+    val closed = vfs_state_close_dbfs_root_mount_seal_v1(stage.seal)
+    if closed.is_err():
+        dbfs_vfs_mount_capability_clear_v1()
+        val unmounted = vfs_state_unmount("/")
+        if unmounted.is_err():
+            return Err("vfs-dbfs-root: seal-close-failed-rollback-indeterminate")
+        _ = vfs_state_close_dbfs_root_mount_seal_v1(stage.seal)
+        if not _vfs_dbfs_root_close_driver_v1(stage.driver):
+            return Err("vfs-dbfs-root: seal-close-failed-device-close-failed")
+        return Err("vfs-dbfs-root: seal-close-failed")
+    vfs_state_mark_rootfs_ready()
+    Ok(stage.driver)
+
+pub fn vfs_dbfs_root_mount_rollback_committed_v1(
+    driver: DbFsDriver
+) -> Result<(), text>:
+    """Withdraw a just-committed root after a later boot publication fails."""
+    # Fail closed before acquiring cleanup authority.  If the owner itself is
+    # unavailable, callers cannot observe the root as ready or durable.
+    vfs_state_mark_rootfs_unready()
+    dbfs_vfs_mount_capability_clear_v1()
+    val acquired = vfs_state_acquire_dbfs_root_mount_seal_v1()
+    if acquired.is_err():
+        return Err("vfs-dbfs-root: committed-rollback-seal-failed")
+    val seal = acquired.unwrap()
+    val stage = VfsDbfsRootMountStageV1(
+        driver: driver, seal: seal, instance_id: driver.device_instance_id())
+    _vfs_dbfs_root_remove_staged_mount_v1(stage, true)

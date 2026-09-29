@@ -1,0 +1,90 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-006
+# @req NFR-2D-002
+# @tag: system, web, vulkan, corpus, fail_closed
+"""Case 01 source admission and a constructed native-frame negative control."""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use std.fs.{read_file}
+use std.common.crypto.sha256.{sha256_text}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.renderdoc.corpus_case01_oracle.{
+    CORPUS_CASE01_FIXTURE_ID, CORPUS_CASE01_SOURCE_PATH,
+    CORPUS_CASE01_SOURCE_SHA256, CORPUS_CASE01_REFERENCE_PATH,
+    CORPUS_CASE01_REFERENCE_SHA256, CORPUS_CASE01_WIDTH,
+    CORPUS_CASE01_HEIGHT, corpus_case01_expected_rgba}
+use common.renderdoc.physical_vulkan_2d_qualification.{PreparedRenderScene}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_corpus_case01_gpu_scene_from_html}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{UpstreamSkiaGaneshFrame}
+use std.skia.backend.upstream_ganesh_vulkan.corpus_case01_capture_artifact.{
+    upstream_skia_corpus_case01_artifact}
+
+fn _prepared() -> PreparedRenderScene:
+    PreparedRenderScene(fixture_id: CORPUS_CASE01_FIXTURE_ID,
+        source_path: CORPUS_CASE01_SOURCE_PATH,
+        source_sha256: CORPUS_CASE01_SOURCE_SHA256,
+        scene_scope: "corpus-case01-solid-boxes-only",
+        render_degraded: false, degrade_reason: "")
+
+fn _constructed_frame() -> UpstreamSkiaGaneshFrame:
+    UpstreamSkiaGaneshFrame(width: CORPUS_CASE01_WIDTH,
+        height: CORPUS_CASE01_HEIGHT, rgba_bytes: [],
+        provider_identity: 0x534b4941564b0001, device_identity: 0,
+        resource_id: 1, submission_token: 1, completion_token: 1,
+        readback_checksum: 0, backend_handle: 1)
+
+describe "corpus case 01 physical Vulkan boundary":
+    it "pins source and reference and retains original Web command mapping":
+        # @req REQ-2D-006
+        # @req NFR-2D-002
+        step("Admit the real 640 by 480 Web layout from pinned HTML")
+        val html = read_file(CORPUS_CASE01_SOURCE_PATH)
+        expect(sha256_text(html)).to_equal(CORPUS_CASE01_SOURCE_SHA256)
+        expect(sha256_text(read_file(CORPUS_CASE01_REFERENCE_PATH))).to_equal(
+            CORPUS_CASE01_REFERENCE_SHA256)
+        match web_corpus_case01_gpu_scene_from_html(html):
+            case Err(reason): fail_test("Corpus Web admission failed: {reason}")
+            case Ok(web):
+                expect(web.source_draw_ir_sha256).to_equal(
+                    sha256_text(draw_ir_to_sdn(web.source_draw_ir)))
+                expect(web.source_command_count).to_equal(7)
+                expect(web.gpu_command_count).to_equal(7)
+                expect(web.source_command_indexes.len()).to_equal(7)
+                expect(web.gpu_draw_ir.batches[0].embedding.width).to_equal(
+                    CORPUS_CASE01_WIDTH)
+                expect(web.gpu_draw_ir.batches[0].embedding.height).to_equal(
+                    CORPUS_CASE01_HEIGHT)
+
+    it "blocks a constructed frame despite a valid Web source":
+        # @req REQ-2D-006
+        # @req NFR-2D-002
+        step("Reject a constructed corpus case 01 native frame")
+        val html = read_file(CORPUS_CASE01_SOURCE_PATH)
+        match web_corpus_case01_gpu_scene_from_html(html):
+            case Err(reason): fail_test("Corpus Web admission failed: {reason}")
+            case Ok(web):
+                match upstream_skia_corpus_case01_artifact(
+                    _constructed_frame(), _prepared(), web):
+                    case Err(reason): expect(reason).to_equal(
+                        "upstream Skia corpus case 01 completion missing")
+                    case Ok(_): fail_test(
+                        "constructed corpus frame became a physical artifact")
+
+    it "keeps the independent oracle at the full corpus extent":
+        # @req REQ-2D-006
+        # @req NFR-2D-002
+        step("Check exact corpus pixel count and authored color regions")
+        match corpus_case01_expected_rgba():
+            case Err(reason): fail_test("Corpus oracle failed: {reason}")
+            case Ok(rgba):
+                expect(rgba.len()).to_equal(1228800)
+                expect(rgba[0:4]).to_equal([255, 255, 255, 255])
+                val red_offset = (20 * 640 + 20) * 4
+                val blue_offset = (30 * 640 + 240) * 4
+                val green_offset = (50 * 640 + 380) * 4
+                expect(rgba[red_offset:red_offset + 4]).to_equal([255, 0, 0, 255])
+                expect(rgba[blue_offset:blue_offset + 4]).to_equal([0, 0, 255, 255])
+                expect(rgba[green_offset:green_offset + 4]).to_equal([0, 255, 0, 255])

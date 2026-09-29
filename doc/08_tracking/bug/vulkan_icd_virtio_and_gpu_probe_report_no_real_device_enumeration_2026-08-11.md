@@ -1,4 +1,8 @@
 # Bug: candidate Vulkan sources report no real device enumeration data
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-11
 **Boundary:** `vulkan.device.enumeration@1` (lane L2 of the board Vulkan
@@ -104,3 +108,4 @@ different lane, H3/probe-adapter) were not touched here — see that lane's
 scope. A real virtio-gpu transport (ring buffer I/O, Venus
 `VK_STRUCTURE_TYPE_*` decode) still does not exist; `_venus_device_available`
 is the single wire-in point for when it does.
+

@@ -69,6 +69,18 @@ pub fn to_int(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `rt_hash_text(s)`
 ///
+/// Canonical algorithm: FNV-1a 64-bit (offset basis
+/// `0xcbf29ce484222325` / `14695981039346656037`, prime
+/// `0x100000001b3` / `1099511628211`) — this MUST match the C runtime
+/// (`src/runtime/runtime_native.c` `rt_hash_text`), the Rust native runtime
+/// (`src/compiler_rust/runtime/src/value/collections.rs` `rt_hash_text`), and
+/// the pure-Simple twin (`src/runtime/simple_core/core_string.spl`
+/// `rt_hash_text`). FNV-1a was chosen as canonical, not DJB2 (this
+/// function's previous algorithm), because the C/native lane's values are
+/// already what persisted capsule receipts and cache hashes were written
+/// against; changing that side instead would invalidate existing hashes.
+/// See doc/08_tracking/bug/rt_hash_text_cross_lane_disagreement_2026-09-07.md.
+///
 /// # Arguments
 /// * `args` - Evaluated arguments [text]
 ///
@@ -88,9 +100,10 @@ pub fn rt_hash_text(args: &[Value]) -> Result<Value, CompileError> {
         }
     };
 
-    let mut hash = 5381u64;
+    let mut hash = 14695981039346656037u64;
     for byte in text.as_bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(*byte as u64);
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211u64);
     }
 
     Ok(Value::Int(hash as i64))
@@ -475,14 +488,18 @@ mod tests {
 
     #[test]
     fn test_rt_hash_text_uses_stable_byte_hash() {
-        assert_eq!(rt_hash_text(&[Value::text("".to_string())]).unwrap(), Value::Int(5381));
+        // FNV-1a 64-bit (canonical algorithm, matches the C runtime oracle).
+        assert_eq!(
+            rt_hash_text(&[Value::text("".to_string())]).unwrap(),
+            Value::Int(-3750763034362895579)
+        );
         assert_eq!(
             rt_hash_text(&[Value::text("abc".to_string())]).unwrap(),
-            Value::Int(193485963)
+            Value::Int(-1792535898324117685)
         );
         assert_eq!(
             rt_hash_text(&[Value::text("key_7".to_string())]).unwrap(),
-            Value::Int(210718207876)
+            Value::Int(8134605878600553210u64 as i64)
         );
     }
 

@@ -1,8 +1,14 @@
 # Bug: generic `!=` / 2-arg `==` on `[T]` elements mis-evaluates in interpreter
 
+## Closed 2026-09-13 — does not reproduce: generic `!=` on `[T]` elements evaluates correctly
+- **measured** — `fn uniq<T>(data: [T])` counting `data[i] != data[i - 1]` under
+  `bin/simple run` (Rust seed v1.0.0-rc.1, Windows) returns `2` for `[1,1,2,2,3]` and `1`
+  for `["p","p","q"]` — both are the correct transition counts, so no dedup collapse.
+- **inferred** — matches the entry's "source fixed; focused seed-interpreter execution
+  pending"; this is that execution, on Windows rather than the filing host.
+
 **Found:** 2026-06-16 · **Severity:** P2 (correctness) · **Area:** interpreter / generics
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 
 ## Summary
 Inside a generic function `fn f<T>(data: [T], ...)`, comparing two array elements of the
@@ -51,14 +57,3 @@ Investigate generic operator lowering for `==`/`!=` on type parameters in the in
 ## Discovered by
 The std.compute parity build (feature `gpu_containers_unified`) while implementing
 `compute_unique`. Co-goal: "find + fix bugs while building the compute stdlib."
-
-## Resolution status (2026-07-15)
-
-Current seed-interpreter array indexing preserves the element `Value`, generic
-function calls bind those values directly, and shared equality handles integer
-elements without a monomorphized callback path. Multi-field pattern binding also
-uses the current tuple-payload field order. No production equality patch is
-therefore justified without a fresh failing execution. A focused driver
-regression runs the original generic `dedup<T>` form and encodes the complete
-`[1, 2, 3, 1]` result as `41231`; execution remains pending a runnable Rust
-test artifact.

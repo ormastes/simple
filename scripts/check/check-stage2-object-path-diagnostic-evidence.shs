@@ -1,0 +1,209 @@
+#!/bin/sh
+# check-stage2-object-path-diagnostic-evidence.shs
+#
+# Check retained native diagnostic evidence; never claim the wrapper A/B passed.
+#
+# Validates the retained Stage 2 object-path diagnostic-recovery capsule
+# (`capsule-build.json` + `capsule-build.log` under --evidence) against the
+# admitted Stage 2 candidate receipt (--admission): candidate and receipt
+# hashes must agree, the source snapshot must pin the two owner files at their
+# in-tree digests, the recovered log must carry a concrete LLVM diagnostic
+# inside the resource budget, and five negative controls must each be rejected.
+#
+# Usage:
+#   sh scripts/check/check-stage2-object-path-diagnostic-evidence.shs \
+#       --evidence <dir> --admission <receipt-file>
+#
+# stdout on success: one JSON line, {"status": "PASS", ...}; exit 0.
+# Any failed requirement prints `ValueError: <reason>` to stderr; exit 1.
+#
+# Not a push/CI gate: the evidence capsule and admission receipt are retained
+# on the Windows x86_64 host that produced them and are not shipped in-tree.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+OWNERS="src/lib/nogc_sync_mut/io/file_ops.spl
+src/compiler/80.driver/driver_aot_native_output.spl"
+RSS_LIMIT=536870912   # 512 * 1024 * 1024
+
+require() {
+    # require <condition-exit-status> <message>
+    if [ "$1" -ne 0 ]; then
+        printf 'ValueError: %s\n' "$2" >&2
+        exit 1
+    fi
+}
+
+digest() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$1" | awk '{print $1}'
+    else
+        shasum -a 256 -- "$1" | awk '{print $1}'
+    fi
+}
+
+native_path() {
+    printf '%s\n' "$1" | sed -E 's#^/([A-Za-z])/#\1:/#'
+}
+
+# receipt_get <file> <key>: value after the FIRST '=' of the LAST line whose
+# key is exactly <key> (later duplicates win, as a dict built from the lines
+# would).
+receipt_get() {
+    tr -d '\r' < "$1" | awk -v k="$2" -F= '
+        index($0, "=") { key = substr($0, 1, index($0, "=") - 1)
+                         if (key == k) { v = substr($0, index($0, "=") + 1); found = 1 } }
+        END { if (found) print v }'
+}
+
+# JSON helpers over capsule-build.json (flattened to one line).
+json_flat() { tr -d '\n\r' < "$1"; }
+
+json_scalar() {
+    # json_scalar <flat-json> <key>: raw token after "<key>":
+    printf '%s' "$1" | sed -E -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*([^,}[:space:]]*).*/\1/p"
+}
+
+json_unescape() {
+    printf '%s' "$1" | sed -e 's#\\/#/#g' -e 's#\\"#"#g' -e 's#\\\\#\\#g'
+}
+
+json_string() {
+    # json_string <flat-json> <key>: decoded string value of "<key>": "..."
+    _raw=$(printf '%s' "$1" | sed -E -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"(([^\"\\\\]|\\\\.)*)\".*/\1/p")
+    json_unescape "$_raw"
+}
+
+json_command0() {
+    # first string element of the "command" array
+    _raw=$(printf '%s' "$1" | sed -E -n "s/.*\"command\"[[:space:]]*:[[:space:]]*\\[[[:space:]]*\"(([^\"\\\\]|\\\\.)*)\".*/\1/p")
+    json_unescape "$_raw"
+}
+
+truthy() {
+    case "$1" in
+        ''|false|null|0|0.0) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# recovery_errors <exit> <timeout> <elapsed_s> <rss> <logfile>
+# prints one error per line; empty output means no errors.
+recovery_errors() {
+    _exit=$1; _timeout=$2; _elapsed=$3; _rss=$4; _log=$5
+    if [ "$_exit" != "1" ] || truthy "$_timeout"; then
+        echo "not a completed rejected compile"
+    fi
+    if ! grep -qF "AOT compile error in " "$_log" || ! grep -qF "llc failed (exit 1):" "$_log"; then
+        echo "missing recovered provider failure"
+    fi
+    if ! grep -qF "error: redefinition of global" "$_log"; then
+        echo "missing concrete LLVM diagnostic"
+    fi
+    if grep -qF "backend object-path status" "$_log" || grep -qF "diagnostic file empty" "$_log" \
+        || grep -qF "diagnostic unreadable" "$_log"; then
+        echo "opaque or unreadable diagnostic"
+    fi
+    if ! awk -v e="$_elapsed" -v r="$_rss" -v lim="$RSS_LIMIT" \
+        'BEGIN { exit !((e + 0 > 0) && (e + 0 <= 90) && (r + 0 > 0) && (r + 0 < lim)) }'; then
+        echo "focused diagnostic evidence exceeds budget"
+    fi
+}
+
+# controls <exit> <timeout> <elapsed_s> <rss> <logfile> <workdir>
+# Every mutated capsule must still be rejected. Prints the control count.
+controls() {
+    _c_exit=$1; _c_timeout=$2; _c_elapsed=$3; _c_rss=$4; _c_log=$5; _c_wd=$6
+    _n=0; _accepted=0
+    for _m in 1 2 3 4 5; do
+        _n=$((_n + 1))
+        case $_m in
+            1) _out=$(recovery_errors 0 "$_c_timeout" "$_c_elapsed" "$_c_rss" "$_c_log") ;;
+            2) _out=$(recovery_errors "$_c_exit" true "$_c_elapsed" "$_c_rss" "$_c_log") ;;
+            3) _out=$(recovery_errors "$_c_exit" "$_c_timeout" "$_c_elapsed" "$RSS_LIMIT" "$_c_log") ;;
+            4) sed 's/error: redefinition of global/redacted/g' "$_c_log" > "$_c_wd/ctl4.log"
+               _out=$(recovery_errors "$_c_exit" "$_c_timeout" "$_c_elapsed" "$_c_rss" "$_c_wd/ctl4.log") ;;
+            5) { cat "$_c_log"; printf '\nbackend object-path status 1 (diagnostic file empty)'; } > "$_c_wd/ctl5.log"
+               _out=$(recovery_errors "$_c_exit" "$_c_timeout" "$_c_elapsed" "$_c_rss" "$_c_wd/ctl5.log") ;;
+        esac
+        [ -n "$_out" ] || _accepted=1
+    done
+    require "$_accepted" "negative control accepted"
+    echo "$_n"
+}
+
+EVIDENCE=""; ADMISSION=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --evidence) EVIDENCE=$2; shift 2 ;;
+        --evidence=*) EVIDENCE=${1#--evidence=}; shift ;;
+        --admission) ADMISSION=$2; shift 2 ;;
+        --admission=*) ADMISSION=${1#--admission=}; shift ;;
+        -h|--help)
+            echo "usage: $0 --evidence <dir> --admission <receipt>"; exit 0 ;;
+        *) echo "usage: $0 --evidence <dir> --admission <receipt>" >&2; exit 2 ;;
+    esac
+done
+if [ -z "$EVIDENCE" ] || [ -z "$ADMISSION" ]; then
+    echo "usage: $0 --evidence <dir> --admission <receipt>" >&2
+    exit 2
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/stage2-object-path-evidence.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+
+RESULT_JSON="$EVIDENCE/capsule-build.json"
+LOG="$EVIDENCE/capsule-build.log"
+[ -f "$RESULT_JSON" ] || { echo "ValueError: missing $RESULT_JSON" >&2; exit 1; }
+[ -f "$LOG" ] || { echo "ValueError: missing $LOG" >&2; exit 1; }
+[ -f "$ADMISSION" ] || { echo "ValueError: missing $ADMISSION" >&2; exit 1; }
+
+FLAT=$(json_flat "$RESULT_JSON")
+R_EXIT=$(json_scalar "$FLAT" exit)
+R_TIMEOUT=$(json_scalar "$FLAT" timeout)
+R_ELAPSED=$(json_scalar "$FLAT" elapsed_s)
+R_RSS=$(json_scalar "$FLAT" peak_sampled_tree_rss_bytes)
+R_RUNTIME_SHA=$(json_string "$FLAT" runtime_sha256)
+CANDIDATE=$(json_command0 "$FLAT")
+
+A_STATUS=$(receipt_get "$ADMISSION" status)
+_ok=0; [ "$A_STATUS" = "admitted" ] || _ok=1; require $_ok "candidate is not admitted"
+
+A_CAND_SHA=$(receipt_get "$ADMISSION" candidate_sha256)
+[ -f "$CANDIDATE" ] || { echo "ValueError: candidate not readable: $CANDIDATE" >&2; exit 1; }
+CAND_DIGEST=$(digest "$CANDIDATE")
+_ok=0; { [ "$CAND_DIGEST" = "$R_RUNTIME_SHA" ] && [ "$R_RUNTIME_SHA" = "$A_CAND_SHA" ]; } || _ok=1
+require $_ok "candidate hash mismatch"
+
+for name in source_snapshot runtime_snapshot tool_authority sanity_evidence; do
+    _p=$(native_path "$(receipt_get "$ADMISSION" "${name}_path")")
+    _want=$(receipt_get "$ADMISSION" "${name}_sha256")
+    [ -f "$_p" ] || { echo "ValueError: $name hash mismatch" >&2; exit 1; }
+    _ok=0; [ "$(digest "$_p")" = "$_want" ] || _ok=1; require $_ok "$name hash mismatch"
+done
+
+SNAPSHOT=$(native_path "$(receipt_get "$ADMISSION" source_snapshot_path)")
+tr -d '\r' < "$SNAPSHOT" > "$WORK/snapshot.txt"
+printf '%s\n' "$OWNERS" | while IFS= read -r owner; do
+    [ -n "$owner" ] || continue
+    hexname=$(printf '%s' "$owner" | od -An -tx1 -v | tr -d ' \n')
+    want=$(digest "$ROOT/$owner")
+    rows=$(grep -F -- "$hexname" "$WORK/snapshot.txt" | awk -F: '{print $NF}' || :)
+    if [ "$rows" != "$want" ]; then
+        printf 'ValueError: %s source mismatch\n' "$owner" >&2
+        exit 1
+    fi
+done || exit 1
+
+ERRORS=$(recovery_errors "$R_EXIT" "$R_TIMEOUT" "$R_ELAPSED" "$R_RSS" "$LOG")
+if [ -n "$ERRORS" ]; then
+    # Same shape as the Python list repr: ['a', 'b']
+    _msg=$(printf '%s\n' "$ERRORS" | awk 'BEGIN{ORS=""; printf "["} NR>1{printf ", "} {printf "\047%s\047", $0} END{printf "]"}')
+    printf 'ValueError: %s\n' "$_msg" >&2
+    exit 1
+fi
+
+COUNT=$(controls "$R_EXIT" "$R_TIMEOUT" "$R_ELAPSED" "$R_RSS" "$LOG" "$WORK")
+LOG_SHA=$(digest "$LOG")
+printf '{"status": "PASS", "scope": "retained Windows x86_64 LLVM driver diagnostic recovery only", "negative_controls_rejected": %s, "wrapper_native_ab": "pending", "log_sha256": "%s", "candidate_sha256": "%s"}\n' \
+    "$COUNT" "$LOG_SHA" "$CAND_DIGEST"

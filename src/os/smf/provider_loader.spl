@@ -7,7 +7,7 @@
 
 use os.posix.dynlib.{
     DynLibKind, dynlib_open, dynlib_symbol, dynlib_symbol_is_process_callable,
-    dynlib_close, dynlib_is_valid
+    dynlib_close_checked, dynlib_is_valid
 }
 use os.posix.dynlib_sffi.{
     ProviderQueryCallV1, call_provider_query_v1,
@@ -15,7 +15,12 @@ use os.posix.dynlib_sffi.{
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.composition.provider_contract.{
-    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, simple_provider_query_error_v1
+    SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, SimpleProviderQueryResultV1,
+    simple_provider_query_error_v1,
+    simple_provider_digest_is_canonical_v1,
+    simple_provider_digest_is_zero_v1,
+    simple_provider_digest_equal_v1,
+    simple_provider_digest_from_hex_v1
 }
 use std.nogc_sync_mut.composition.cli_command_wire.{CliCommandResultViewV1}
 
@@ -35,6 +40,7 @@ val PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED: i32 = 6
 val PROVIDER_ADMISSION_LOAD_FAILED: i32 = 7
 val PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING: i32 = 8
 val PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE: i32 = 9
+val PROVIDER_ADMISSION_DIGEST_UNSTABLE: i32 = 10
 
 val PROVIDER_SESSION_OK: i32 = 0
 val PROVIDER_SESSION_NOT_OPEN: i32 = 1
@@ -44,6 +50,23 @@ val PROVIDER_SESSION_CLOSE_PINNED: i32 = 4
 val PROVIDER_SESSION_CLOSE_FAILED: i32 = 5
 val PROVIDER_SESSION_CLI_SYMBOL_MISSING: i32 = 6
 val PROVIDER_SESSION_CLI_CALL_FAILED: i32 = 7
+val PROVIDER_SESSION_QUERY_INCOMPATIBLE: i32 = 8
+
+# Integer statuses remain stable for compatibility. Consumers use this closed
+# outcome instead of re-parsing reason text or treating any address as admitted.
+enum ProviderAdmissionOutcomeV1:
+    Admitted
+    PathDenied
+    ArtifactMissing
+    DigestMismatch
+    DigestUnstable
+    CapabilityDenied
+    HostAbiUnsupported
+    InterfaceUnsupported
+    LoadFailed
+    QuerySymbolMissing
+    QuerySymbolNotProcessCallable
+    InternalError
 
 class ProviderAdmissionRequestV1:
     artifact_path: text
@@ -68,13 +91,19 @@ class ProviderCallableEvidenceV1:
 
 class ProviderAdmissionResultV1:
     status: i32
+    outcome: ProviderAdmissionOutcomeV1
     query_symbol_address: i64
     artifact_digest: text
     process_callable: bool
     reason: text
 
+    me is_admitted() -> bool:
+        (self.outcome == ProviderAdmissionOutcomeV1.Admitted and
+            self.status == PROVIDER_ADMISSION_OK and self.process_callable and
+            self.query_symbol_address > 0)
+
 class ProviderLoaderSessionV1:
-    library: DynLibKind
+    var library: DynLibKind
     admission: ProviderAdmissionResultV1
     var open: bool
     var next_pin_id: u64
@@ -98,9 +127,53 @@ class ProviderSessionCliInvokeV1:
     call: CliCommandCallV1
     reason: text
 
+class ProviderSessionQueryOwnedResultV1:
+    """Query result paired with the caller-owned session transition."""
+    query: ProviderSessionQueryV1
+    session: ProviderLoaderSessionV1
+
+class ProviderSessionReleaseOwnedResultV1:
+    """Pin-release status paired with the caller-owned session transition."""
+    status: i32
+    session: ProviderLoaderSessionV1
+
+class ProviderSessionCloseResultV1:
+    """Explicit value-owner transition for one provider close attempt."""
+    status: i32
+    session: ProviderLoaderSessionV1
+    # Indicates that the valid-native close branch was selected. It is not an
+    # independent observation or cumulative count of provider calls.
+    provider_called: bool
+
+fn provider_admission_outcome_v1(status: i32) -> ProviderAdmissionOutcomeV1:
+    if status == PROVIDER_ADMISSION_OK:
+        return ProviderAdmissionOutcomeV1.Admitted
+    if status == PROVIDER_ADMISSION_PATH_DENIED:
+        return ProviderAdmissionOutcomeV1.PathDenied
+    if status == PROVIDER_ADMISSION_ARTIFACT_MISSING:
+        return ProviderAdmissionOutcomeV1.ArtifactMissing
+    if status == PROVIDER_ADMISSION_DIGEST_MISMATCH:
+        return ProviderAdmissionOutcomeV1.DigestMismatch
+    if status == PROVIDER_ADMISSION_DIGEST_UNSTABLE:
+        return ProviderAdmissionOutcomeV1.DigestUnstable
+    if status == PROVIDER_ADMISSION_CAPABILITY_DENIED:
+        return ProviderAdmissionOutcomeV1.CapabilityDenied
+    if status == PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED:
+        return ProviderAdmissionOutcomeV1.HostAbiUnsupported
+    if status == PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED:
+        return ProviderAdmissionOutcomeV1.InterfaceUnsupported
+    if status == PROVIDER_ADMISSION_LOAD_FAILED:
+        return ProviderAdmissionOutcomeV1.LoadFailed
+    if status == PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING:
+        return ProviderAdmissionOutcomeV1.QuerySymbolMissing
+    if status == PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE:
+        return ProviderAdmissionOutcomeV1.QuerySymbolNotProcessCallable
+    ProviderAdmissionOutcomeV1.InternalError
+
 fn _provider_admission_result(status: i32, address: i64, digest: text, callable: bool, reason: text) -> ProviderAdmissionResultV1:
     ProviderAdmissionResultV1(
         status: status,
+        outcome: provider_admission_outcome_v1(status),
         query_symbol_address: address,
         artifact_digest: digest,
         process_callable: callable,
@@ -153,6 +226,18 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         val missing = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(artifact_exists: false, artifact_digest: "", loader_valid: false, query_symbol_address: 0, query_symbol_process_callable: false))
         return ProviderDynamicAdmissionV1(admission: missing, session: _closed_provider_session(missing))
     val library = dynlib_open(request.artifact_path, 2)
+    # This is cold admission work. Re-read after open and fail closed if the
+    # path changed. The library generation stays retained by the session.
+    val loaded_digest = provider_artifact_digest_v1(rt_file_read_bytes(request.artifact_path))
+    if loaded_digest != digest:
+        val unstable = _provider_admission_result(
+            PROVIDER_ADMISSION_DIGEST_UNSTABLE, 0, loaded_digest, false,
+            "artifact-digest-unstable"
+        )
+        return ProviderDynamicAdmissionV1(
+            admission: unstable,
+            session: _provider_rejection_session_v1(library, unstable),
+        )
     val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
     val cli_address = dynlib_symbol(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
     val admission = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
@@ -163,9 +248,10 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         query_symbol_process_callable: dynlib_symbol_is_process_callable(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
     ))
     if admission.status != PROVIDER_ADMISSION_OK:
-        if dynlib_is_valid(library):
-            dynlib_close(library)
-        return ProviderDynamicAdmissionV1(admission: admission, session: _closed_provider_session(admission))
+        return ProviderDynamicAdmissionV1(
+            admission: admission,
+            session: _provider_rejection_session_v1(library, admission),
+        )
     ProviderDynamicAdmissionV1(
         admission: admission,
         session: ProviderLoaderSessionV1(
@@ -190,6 +276,27 @@ fn _closed_provider_session(admission: ProviderAdmissionResultV1) -> ProviderLoa
         cli_invoke_process_callable: false
     )
 
+# Rejection still owns a valid library until close succeeds. A failed close
+# returns an open, non-queryable session so the existing session-close owner can
+# retry cleanup without losing the library generation.
+fn _provider_rejection_session_v1(library: DynLibKind,
+        admission: ProviderAdmissionResultV1) -> ProviderLoaderSessionV1:
+    if not dynlib_is_valid(library):
+        return _closed_provider_session(admission)
+    match dynlib_close_checked(library):
+        Ok(_):
+            return _closed_provider_session(admission)
+        Err(_):
+            return ProviderLoaderSessionV1(
+                library: library,
+                admission: admission,
+                open: true,
+                next_pin_id: 1,
+                live_pins: [],
+                cli_invoke_symbol_address: 0,
+                cli_invoke_process_callable: false,
+            )
+
 fn _provider_session_query_error(status: i32, reason: text) -> ProviderSessionQueryV1:
     ProviderSessionQueryV1(
         status: status,
@@ -203,35 +310,111 @@ fn _provider_session_query_error(status: i32, reason: text) -> ProviderSessionQu
         reason: reason
     )
 
-fn provider_session_query_v1(session: ProviderLoaderSessionV1, request: SimpleProviderQueryV1) -> ProviderSessionQueryV1:
-    if not session.open or session.admission.status != PROVIDER_ADMISSION_OK:
-        return _provider_session_query_error(PROVIDER_SESSION_NOT_OPEN, "provider-session-not-open")
-    val call = call_provider_query_v1(session.admission.query_symbol_address, request)
-    if not call.ok:
-        return ProviderSessionQueryV1(status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0, call: call, reason: call.diagnostic)
-    if call.result.status != SIMPLE_PROVIDER_OK:
-        return ProviderSessionQueryV1(status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0, call: call, reason: "provider-query-rejected")
-    val pin_id = session.next_pin_id
-    session.next_pin_id = pin_id + 1
-    session.live_pins.push(pin_id)
-    ProviderSessionQueryV1(status: PROVIDER_SESSION_OK, pin_id: pin_id, call: call, reason: "pinned")
+fn provider_query_abi_validate_v1(expected_interface_abi_digest: text,
+        result: SimpleProviderQueryResultV1) -> text:
+    if not simple_provider_digest_is_canonical_v1(expected_interface_abi_digest):
+        return "interface-abi-digest-invalid"
+    val expected = simple_provider_digest_from_hex_v1(expected_interface_abi_digest)
+    if simple_provider_digest_is_zero_v1(expected):
+        return "interface-abi-digest-invalid"
+    if simple_provider_digest_is_zero_v1(result.abi_digest):
+        return "provider-query-abi-digest-not-declared"
+    if not simple_provider_digest_equal_v1(expected, result.abi_digest):
+        return "provider-query-abi-digest-mismatch"
+    ""
 
-fn provider_session_release_v1(session: ProviderLoaderSessionV1, pin_id: u64) -> i32:
-    if not session.open or pin_id == 0:
-        return PROVIDER_SESSION_PIN_UNKNOWN
+fn provider_session_query_owned_v1(session: ProviderLoaderSessionV1,
+        request: SimpleProviderQueryV1,
+        expected_interface_abi_digest: text) -> ProviderSessionQueryOwnedResultV1:
+    var out = session
+    if not out.open or out.admission.status != PROVIDER_ADMISSION_OK:
+        return ProviderSessionQueryOwnedResultV1(
+            _provider_session_query_error(
+                PROVIDER_SESSION_NOT_OPEN, "provider-session-not-open",
+            ),
+            out,
+        )
+    val call = call_provider_query_v1(out.admission.query_symbol_address, request)
+    if not call.ok:
+        return ProviderSessionQueryOwnedResultV1(
+            ProviderSessionQueryV1(
+                status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0,
+                call: call, reason: call.diagnostic,
+            ),
+            out,
+        )
+    if call.result.status != SIMPLE_PROVIDER_OK:
+        return ProviderSessionQueryOwnedResultV1(
+            ProviderSessionQueryV1(
+                status: PROVIDER_SESSION_QUERY_FAILED, pin_id: 0,
+                call: call, reason: "provider-query-rejected",
+            ),
+            out,
+        )
+    val abi_diagnostic = provider_query_abi_validate_v1(
+        expected_interface_abi_digest, call.result,
+    )
+    if abi_diagnostic != "":
+        return ProviderSessionQueryOwnedResultV1(
+            ProviderSessionQueryV1(
+                status: PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+                pin_id: 0,
+                call: call,
+                reason: abi_diagnostic,
+            ),
+            out,
+        )
+    val pin_id = out.next_pin_id
+    out.next_pin_id = pin_id + 1
+    var pins = out.live_pins
+    pins.push(pin_id)
+    out.live_pins = pins
+    ProviderSessionQueryOwnedResultV1(
+        ProviderSessionQueryV1(
+            status: PROVIDER_SESSION_OK, pin_id: pin_id,
+            call: call, reason: "pinned",
+        ),
+        out,
+    )
+
+# Compatibility query adapter. It is intentionally non-owning: production
+# callers must retain `provider_session_query_owned_v1(...).session` so a
+# successful pin transition cannot be discarded.
+fn provider_session_query_v1(session: ProviderLoaderSessionV1,
+        request: SimpleProviderQueryV1,
+        expected_interface_abi_digest: text) -> ProviderSessionQueryV1:
+    provider_session_query_owned_v1(
+        session, request, expected_interface_abi_digest,
+    ).query
+
+fn provider_session_release_owned_v1(session: ProviderLoaderSessionV1,
+        pin_id: u64) -> ProviderSessionReleaseOwnedResultV1:
+    var out = session
+    if not out.open or pin_id == 0:
+        return ProviderSessionReleaseOwnedResultV1(
+            PROVIDER_SESSION_PIN_UNKNOWN, out,
+        )
     var found = false
     var retained: [u64] = []
     var i = 0
-    while i < session.live_pins.len():
-        if session.live_pins[i] == pin_id and not found:
+    while i < out.live_pins.len():
+        if out.live_pins[i] == pin_id and not found:
             found = true
         else:
-            retained.push(session.live_pins[i])
+            retained.push(out.live_pins[i])
         i = i + 1
     if not found:
-        return PROVIDER_SESSION_PIN_UNKNOWN
-    session.live_pins = retained
-    PROVIDER_SESSION_OK
+        return ProviderSessionReleaseOwnedResultV1(
+            PROVIDER_SESSION_PIN_UNKNOWN, out,
+        )
+    out.live_pins = retained
+    ProviderSessionReleaseOwnedResultV1(PROVIDER_SESSION_OK, out)
+
+# Compatibility status adapter. It is intentionally non-owning: production
+# callers must retain `provider_session_release_owned_v1(...).session` so a
+# successful release transition cannot be discarded.
+fn provider_session_release_v1(session: ProviderLoaderSessionV1, pin_id: u64) -> i32:
+    provider_session_release_owned_v1(session, pin_id).status
 
 fn _provider_session_has_pin_v1(session: ProviderLoaderSessionV1, pin_id: u64) -> bool:
     var i = 0
@@ -270,16 +453,41 @@ fn provider_session_invoke_cli_v1(session: ProviderLoaderSessionV1,
         return ProviderSessionCliInvokeV1(PROVIDER_SESSION_CLI_CALL_FAILED, query.pin_id, call, call.diagnostic)
     ProviderSessionCliInvokeV1(PROVIDER_SESSION_OK, query.pin_id, call, "invoked")
 
+fn provider_session_close_owned_v1(
+        session: ProviderLoaderSessionV1) -> ProviderSessionCloseResultV1:
+    var out = session
+    if not out.open:
+        return ProviderSessionCloseResultV1(
+            PROVIDER_SESSION_NOT_OPEN, out, false,
+        )
+    if out.live_pins.len() > 0:
+        return ProviderSessionCloseResultV1(
+            PROVIDER_SESSION_CLOSE_PINNED, out, false,
+        )
+
+    val provider_called = match out.library:
+        DynLibKind.Elf(_): dynlib_is_valid(out.library)
+        DynLibKind.Smf(_): false
+        DynLibKind.Pe(_): false
+        DynLibKind.Invalid: false
+    match dynlib_close_checked(out.library):
+        Err(_):
+            # Return the same generation so the caller can retain/retry it.
+            return ProviderSessionCloseResultV1(
+                PROVIDER_SESSION_CLOSE_FAILED, out, provider_called,
+            )
+        Ok(_):
+            out.library = DynLibKind.Invalid
+            out.open = false
+            return ProviderSessionCloseResultV1(
+                PROVIDER_SESSION_OK, out, provider_called,
+            )
+
+# Compatibility status adapter. Value-owning production callers must retain
+# `provider_session_close_owned_v1(...).session`; this scalar cannot express
+# the updated owner and therefore carries no exactly-once claim by itself.
 fn provider_session_close_v1(session: ProviderLoaderSessionV1) -> i32:
-    if not session.open:
-        return PROVIDER_SESSION_NOT_OPEN
-    if session.live_pins.len() > 0:
-        return PROVIDER_SESSION_CLOSE_PINNED
-    val status = dynlib_close(session.library)
-    if status != 0:
-        return PROVIDER_SESSION_CLOSE_FAILED
-    session.open = false
-    PROVIDER_SESSION_OK
+    provider_session_close_owned_v1(session).status
 
 fn _provider_library_valid(library: DynLibKind) -> bool:
     match library:
@@ -293,11 +501,18 @@ export PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_PATH_DENIED, PROVIDER_ADMISSION
 export PROVIDER_ADMISSION_DIGEST_MISMATCH, PROVIDER_ADMISSION_CAPABILITY_DENIED
 export PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED
 export PROVIDER_ADMISSION_LOAD_FAILED, PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE
+export PROVIDER_ADMISSION_DIGEST_UNSTABLE
 export PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN, PROVIDER_SESSION_QUERY_FAILED
 export PROVIDER_SESSION_PIN_UNKNOWN, PROVIDER_SESSION_CLOSE_PINNED, PROVIDER_SESSION_CLOSE_FAILED
 export PROVIDER_SESSION_CLI_SYMBOL_MISSING, PROVIDER_SESSION_CLI_CALL_FAILED
-export ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
+export PROVIDER_SESSION_QUERY_INCOMPATIBLE
+export ProviderAdmissionOutcomeV1, ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
 export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1
-export provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export ProviderSessionQueryOwnedResultV1, ProviderSessionReleaseOwnedResultV1
+export ProviderSessionCloseResultV1
+export provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
+export provider_query_abi_validate_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
+export provider_session_query_owned_v1, provider_session_release_owned_v1
+export provider_session_close_owned_v1
 export provider_session_invoke_cli_v1

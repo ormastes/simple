@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: RESOLVED — Bug A and Bug B verified fixed 2026-05-29.
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Bug: Native codegen string equality broken
 
 Status: RESOLVED — Bug A and Bug B verified fixed 2026-05-29.
@@ -191,7 +205,7 @@ no ODR conflict in the actual build. Cleanup is a low-priority housekeeping item
 
 ## Latent: .spl textual MIR-to-LLVM backend (2026-05-29)
 
-The .spl `_MirToLlvm/core_codegen.spl` `Eq`/`Ne` cases use `icmp eq`/`icmp ne`
+The .spl `mir_to_llvm_part2_part1.spl` `Eq`/`Ne` cases use `icmp eq`/`icmp ne`
 on the raw LLVM value. In the MIR type system, strings are `Ptr(I8, false)` →
 LLVM `ptr`, so `icmp eq ptr` compares pointer addresses (identity), not string
 content. However, `rt_native_eq` cannot be used here because it operates on

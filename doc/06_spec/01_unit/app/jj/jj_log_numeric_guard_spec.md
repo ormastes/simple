@@ -1,4 +1,4 @@
-# Jj Log Numeric Guard Specification
+# @manual: primary
 
 > <details>
 
@@ -32,7 +32,37 @@ jj_log_numeric_guard_spec
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Jj Log Numeric Guard Specification
+# @manual: primary
+
+Purpose: Verify jj log numeric guard — malformed --limit values fall back to
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Source | `test/01_unit/app/jj/jj_log_numeric_guard_spec.spl` |
+| Updated | 2026-08-22 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Purpose and audience
+Purpose: Verify jj log numeric guard — malformed --limit values fall back to
+the caller-supplied default instead of crashing or being trusted blindly.
+Audience: compiler and tooling engineers who maintain this spec.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines;
+a failing scenario pinpoints the behavior that regressed.
+## Compatibility and limitations
+Covers the pinned behavior only; fixture data is local to this spec.
+Troubleshooting: a red scenario here means the pinned contract changed —
+check verification guidance in the linked design docs before editing oracles.
+# @manual: primary
+REQ-APP-JJ-001
+doc/01_research/local/REQ-APP-JJ-001.md
+doc/03_plan/sys_test/REQ-APP-JJ-001.md
+doc/04_architecture/REQ-APP-JJ-001.md
+doc/05_design/REQ-APP-JJ-001.md
 
 ## Scenarios
 

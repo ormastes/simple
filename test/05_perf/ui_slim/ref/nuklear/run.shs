@@ -1,0 +1,197 @@
+#!/bin/sh
+# A09 reference fixture runner — Nuklear, category widget-core-headless.
+#
+#   sh run.shs [--runs N]     build, run N times (default 10), emit receipt
+#   sh run.shs --selftest     sabotage check only (must FAIL a greeting-less build)
+#
+# Verdict is ALWAYS the last line of stdout:
+#   PASS  — ... exit 0
+#   FAIL  — ... exit 1
+#   ERROR — nothing was checked (...) exit 2
+#
+# Diagnostic only.  These numbers describe Nuklear in isolation; they are NOT a
+# comparison against Simple.  See doc/07_guide/ui/ui_slim_gui_references.md.
+set -u
+
+NAME=nuklear
+CATEGORY=widget-core-headless
+here=$(cd "$(dirname "$0")" && pwd)
+ref=$(cd "$here/.." && pwd)
+repo=$(cd "$ref/../../../.." && pwd)
+outdir="$repo/build/ui_slim/ref/$NAME"
+receipt="$repo/build/ui_slim/ref/$NAME.receipt.sdn"
+GREETING='Hello from Simple UI!'
+EXPECT_FRAMES=100
+
+RUNS=10
+SELFTEST=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --runs) RUNS=${2:-}; shift 2 ;;
+    --selftest) SELFTEST=1; shift ;;
+    *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+  esac
+done
+
+CC_BIN=${CC:-cc}
+command -v "$CC_BIN" >/dev/null 2>&1 || {
+  echo "ERROR — nothing was checked (no C compiler: $CC_BIN not on PATH)"; exit 2; }
+for f in "$ref/vendor/$NAME/nuklear.h" "$here/main.c"; do
+  [ -f "$f" ] || { echo "ERROR — nothing was checked (missing source: $f)"; exit 2; }
+done
+
+mkdir -p "$outdir" || { echo "ERROR — nothing was checked (cannot create $outdir)"; exit 2; }
+
+CFLAGS="-O2 -Wall"
+# Nuklear is a single-header library: main.c defines NK_IMPLEMENTATION, so there
+# is no separate vendored translation unit to compile.
+LDFLAGS="-lm"
+INCLUDE="-I$ref/vendor/$NAME"
+
+# build <output> <extra-defines>; sets build_rc.  The compiler status is read
+# directly on the next line, never through a pipe (a pipeline's $? is the last
+# command's status and has produced false greens in this repo).
+build() {
+  _out=$1; _def=${2:-}
+  # shellcheck disable=SC2086
+  "$CC_BIN" $CFLAGS $_def $INCLUDE -o "$_out" "$here/main.c" $LDFLAGS \
+    > "$outdir/build.log" 2>&1
+  build_rc=$?
+}
+
+# ---------------------------------------------------------------- selftest ---
+# Sabotage: a build with the greeting string removed MUST fail the run's
+# greeting assertion.  If it passes, the assertion is not actually checking
+# anything and every green verdict from this fixture is worthless.
+selftest() {
+  sab="$outdir/${NAME}_ref_sabotage"
+  build "$sab" "-DSABOTAGE_NO_GREETING"
+  if [ "$build_rc" -ne 0 ]; then
+    echo "selftest: sabotage build failed to compile (see $outdir/build.log)"
+    return 2
+  fi
+  sab_out=$("$sab" 2>&1); sab_rc=$?
+  if [ "$sab_rc" -ne 0 ]; then
+    echo "selftest: sabotage binary exited $sab_rc"
+    return 2
+  fi
+  if printf '%s\n' "$sab_out" | grep -q "greeting_frames=$EXPECT_FRAMES"; then
+    echo "selftest: SABOTAGE NOT DETECTED — a greeting-less build still reported greeting_frames=$EXPECT_FRAMES"
+    return 1
+  fi
+  rm -f "$sab"
+  echo "selftest: sabotage detected (greeting-less build does not report greeting_frames=$EXPECT_FRAMES)"
+  return 0
+}
+
+selftest_msg=$(selftest); selftest_rc=$?
+echo "$selftest_msg"
+if [ "$selftest_rc" -eq 1 ]; then
+  echo "FAIL — selftest sabotage was not detected; the greeting assertion is vacuous"
+  exit 1
+elif [ "$selftest_rc" -ne 0 ]; then
+  echo "ERROR — nothing was checked (selftest could not run: $selftest_msg)"
+  exit 2
+fi
+if [ "$SELFTEST" -eq 1 ]; then
+  echo "PASS — 1 sabotage fixture checked, greeting assertion is live (no timing run requested)"
+  exit 0
+fi
+
+# ------------------------------------------------------------------- build ---
+case "$RUNS" in ''|*[!0-9]*) echo "ERROR — nothing was checked (--runs must be a positive integer)"; exit 2 ;; esac
+[ "$RUNS" -gt 0 ] || { echo "ERROR — nothing was checked (--runs must be > 0)"; exit 2; }
+
+bin="$outdir/${NAME}_ref"
+build "$bin"
+if [ "$build_rc" -ne 0 ]; then
+  echo "FAIL — build failed (exit $build_rc); see $outdir/build.log"
+  exit 1
+fi
+warnings=$(grep -c 'warning:' "$outdir/build.log")
+cc_version=$("$CC_BIN" --version 2>&1 | head -1)
+"$CC_BIN" $CFLAGS $INCLUDE -o "$outdir/${NAME}_ref_stripped" "$here/main.c" $LDFLAGS >/dev/null 2>&1
+strip "$outdir/${NAME}_ref_stripped" >/dev/null 2>&1
+stripped_size=$(wc -c < "$outdir/${NAME}_ref_stripped" | tr -d ' ')
+unstripped_size=$(wc -c < "$bin" | tr -d ' ')
+
+# --------------------------------------------------------------------- run ---
+samples=""
+n_ok=0
+first_commands=""
+commands_stable=1
+fail_reason=""
+i=1
+while [ "$i" -le "$RUNS" ]; do
+  out=$("$bin" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then fail_reason="run $i exited $rc"; break; fi
+  g=$(printf '%s\n' "$out" | sed -n 's/^greeting_frames=//p')
+  s=$(printf '%s\n' "$out" | sed -n 's/^submit_count=//p')
+  c=$(printf '%s\n' "$out" | sed -n 's/^total_commands=//p')
+  w=$(printf '%s\n' "$out" | sed -n 's/^wall_ms=//p')
+  f=$(printf '%s\n' "$out" | sed -n 's/^frames=//p')
+  if [ "$f" != "$EXPECT_FRAMES" ]; then fail_reason="run $i reported frames=$f, expected $EXPECT_FRAMES"; break; fi
+  # The greeting must appear in the draw-command stream on EVERY frame.
+  if [ "$g" != "$EXPECT_FRAMES" ]; then fail_reason="run $i reported greeting_frames=$g, expected $EXPECT_FRAMES"; break; fi
+  # A scripted click that lands on nothing still emits draw commands, so the
+  # button hit is asserted separately.
+  if [ "${s:-0}" -lt 1 ]; then fail_reason="run $i reported submit_count=$s; the scripted click hit no button"; break; fi
+  if [ -z "$first_commands" ]; then first_commands=$c
+  elif [ "$c" != "$first_commands" ]; then commands_stable=0; fi
+  samples="$samples $w"
+  n_ok=$((n_ok + 1))
+  i=$((i + 1))
+done
+
+if [ -n "$fail_reason" ]; then
+  echo "FAIL — $n_ok of $RUNS run(s) completed; $fail_reason"
+  exit 1
+fi
+if [ "$n_ok" -eq 0 ]; then
+  echo "ERROR — nothing was checked (no run produced output)"
+  exit 2
+fi
+
+median=$(printf '%s\n' $samples | sort -n | awk '{a[NR]=$1} END{ if(NR%2) print a[(NR+1)/2]; else printf "%.4f", (a[NR/2]+a[NR/2+1])/2 }')
+min=$(printf '%s\n' $samples | sort -n | head -1)
+max=$(printf '%s\n' $samples | sort -n | tail -1)
+pin=$(sed -n 's/^pinned_commit: *//p' "$ref/vendor/$NAME/README.md" | head -1)
+
+cat > "$receipt" <<EOF
+# Generated by test/05_perf/ui_slim/ref/$NAME/run.shs — reference fixture receipt.
+# Diagnostic only. No comparison against Simple is expressed or implied.
+fixture: $NAME
+category: $CATEGORY
+work_package: A09
+label: diagnostic
+generated_utc: $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+host_os: $(uname -srm)
+compiler: $cc_version
+cflags: $CFLAGS
+include: -I(ref)/vendor/$NAME
+link_line: $CC_BIN $CFLAGS -I(ref)/vendor/$NAME -o (out)/${NAME}_ref main.c $LDFLAGS
+build_warnings: $warnings
+upstream_pin: $pin
+binary_unstripped_bytes: $unstripped_size
+binary_stripped_bytes: $stripped_size
+frames_per_run: $EXPECT_FRAMES
+runs: $n_ok
+total_draw_commands_per_run: $first_commands
+draw_commands_deterministic: $commands_stable
+wall_ms_median: $median
+wall_ms_min: $min
+wall_ms_max: $max
+greeting_asserted: "$GREETING"
+button_click_asserted: submit_count >= 1
+sabotage_selftest: detected
+EOF
+
+echo "receipt: $receipt"
+echo "median wall_ms over $n_ok run(s): $median (min $min, max $max)"
+echo "draw commands per run: $first_commands (deterministic=$commands_stable)"
+if [ "$commands_stable" -ne 1 ]; then
+  echo "FAIL — $n_ok run(s) checked, draw-command count varied across runs; the fixture is not deterministic"
+  exit 1
+fi
+echo "PASS — $n_ok run(s) x $EXPECT_FRAMES frame(s) checked, greeting present on every frame, scripted click hit the button, $first_commands draw commands/run"
+exit 0

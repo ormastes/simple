@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-SYSTEM
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # @cover src/app/memstat/main.spl 60%
 # @req REQ-STAGE4-MEMORY-GATE-001
 """
@@ -12,9 +16,9 @@
 ## Overview
 
 Operators attach the out-of-process `memstat` sampler (src/app/memstat) to a
-running PID to record an OS-truth memory profile: /proc/<pid>/smaps_rollup
-(Rss, Pss, Pss_Anon, Private_Dirty, Swap) plus /proc/<pid>/stat fault
-counters, one CSV row per interval. `scripts/check/check-stage4-memory-gate.shs`
+running PID to record an OS-truth memory profile. Linux uses
+/proc/<pid>/smaps_rollup and stat; macOS uses one `ps` RSS query per interval
+and reports unavailable Linux-only columns as -1. `scripts/check/check-stage4-memory-gate.shs`
 wraps the same sampler around a fixed workload and gates on peak RSS. This
 spec proves the sampler contract on a short-lived target: the CSV exists,
 carries the fixed header plus at least one data row, the RSS column parses as
@@ -34,7 +38,7 @@ a positive integer, and a missing-argument invocation fails with usage help.
 """
 
 use std.spec.*
-use std.io_runtime.{file_read, file_exists, process_run, dir_create_all, env_get}
+use std.io_runtime.{file_read, file_exists, process_run, dir_create_all, host_os}
 
 val ARTIFACT_DIR = "build/test-artifacts/stage4_memory_gate"
 val CSV_PATH = "build/test-artifacts/stage4_memory_gate/memstat.csv"
@@ -78,54 +82,10 @@ fn sample_with_memstat(pid: text, csv: text) -> i64:
     val (_out, _err, code) = process_run("bin/simple", ["run", "src/app/memstat/main.spl", pid, csv, "300"])
     code
 
-# Mirrors the SIMPLE_TEST_BINARY override convention used by the sibling
-# mem_attr_report_spec.spl: defaults to the deployed bin/simple, but honors
-# an explicit override so this spec can be re-run against a specific seed.
-fn contract_binary() -> text:
-    val override = env_get("SIMPLE_TEST_BINARY")
-    if override != "" and override != nil:
-        return override
-    "bin/simple"
-
-# @step: Run memstat --by-owner in a child process with a chosen SIMPLE_MEM_ATTR.
-# Two landmines make a plain `process_run(binary, args)` unrepresentative here:
-#  1. `bin/simple test` scrubs env vars from spec bodies via the session
-#     daemon, so setting SIMPLE_MEM_ATTR in the spec's own process env would
-#     never reach a directly-exec'd child.
-#  2. The test runner's own process carries SIMPLE_EXECUTION_MODE=interpret
-#     in its env, which a directly-exec'd `process_run("bin/simple", ...)`
-#     child inherits verbatim and which forces the interpreter's stricter
-#     *compile-time* "unknown extern function" abort (exit 1, no in-band
-#     message) instead of the JIT's runtime soft-fail-and-continue path a
-#     real interactive shell invocation gets. `env -u` strips it so this
-#     spec exercises the same engine path an operator actually hits.
-fn run_by_owner_with(binary: text, attr_on: bool) -> (text, text, i64):
-    val attr_prefix = if attr_on: "SIMPLE_MEM_ATTR=1 " else: ""
-    val cmd = "env -u SIMPLE_EXECUTION_MODE {attr_prefix}'{binary}' run src/app/memstat/main.spl --by-owner"
-    process_run("/bin/sh", ["-c", cmd])
-
-# Self-heals onto a fresher seed binary (mirroring mem_attr_report_spec.spl)
-# when the deployed bin/simple predates the rt_mem_attr_* extern wiring, so
-# this spec proves the real per-owner-rows path whenever ANY available
-# binary supports it, instead of red-lining on deploy staleness alone.
-fn run_by_owner_attr_on() -> (text, text, i64):
-    val (out, err, code) = run_by_owner_with(contract_binary(), true)
-    if out.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
-        return (out, err, code)
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        val (out2, err2, code2) = run_by_owner_with("src/compiler_rust/target/release/simple", true)
-        if out2.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
-            return (out2, err2, code2)
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_by_owner_with("src/compiler_rust/target/debug/simple", true)
-    (out, err, code)
-
 describe "Stage-4 memory gate sampler":
     it "records a header plus data rows with positive RSS for a short-lived process":
+        # @req REQ-SSPEC-SYSTEM
+        step("records a header plus data rows with positive RSS for a short-lived process")
         step("Prepare a clean artifact directory")
         dir_create_all(ARTIFACT_DIR)
 
@@ -149,14 +109,22 @@ describe "Stage-4 memory gate sampler":
         assert_equal(cols.len(), 8)
         val rss_kb = parse_dec(cols[1])
         expect(rss_kb).to_be_greater_than(0)
+        if host_os() == "macos":
+            step("Confirm Linux-only metrics are marked unavailable on macOS")
+            expect(cols[2]).to_equal("-1")
+            expect(cols[7]).to_equal("-1")
 
     it "rejects an invocation without arguments and prints usage help":
+        # @req REQ-SSPEC-SYSTEM
+        step("rejects an invocation without arguments and prints usage help")
         step("Run memstat with no arguments")
         val (out, _err, code) = process_run("bin/simple", ["run", "src/app/memstat/main.spl"])
         expect(code).to_equal(2)
         expect(out).to_contain("usage: memstat")
 
     it "--by-owner degrades to a clear status instead of a crash or silent empty output when attribution is off":
+        # @req REQ-SSPEC-SYSTEM
+        step("--by-owner degrades to a clear status instead of a crash or silent empty output when attribution is off")
         step("Run memstat --by-owner without SIMPLE_MEM_ATTR set")
         val (out, _err, code) = run_by_owner_with(contract_binary(), false)
 
@@ -169,6 +137,8 @@ describe "Stage-4 memory gate sampler":
         assert_true(degraded)
 
     it "--by-owner prints real per-owner rows when SIMPLE_MEM_ATTR=1 and the extern is available":
+        # @req REQ-SSPEC-SYSTEM
+        step("--by-owner prints real per-owner rows when SIMPLE_MEM_ATTR=1 and the extern is available")
         step("Run memstat --by-owner in a child process with SIMPLE_MEM_ATTR=1 (self-heals onto a seed with the extern wired if needed)")
         val (out, _err, code) = run_by_owner_attr_on()
 

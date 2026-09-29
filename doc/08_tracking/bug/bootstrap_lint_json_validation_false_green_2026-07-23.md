@@ -1,7 +1,10 @@
 # Bootstrap lint JSON validation accepted malformed output — 2026-07-23
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
+
+**Status:** SOURCE FIXED / FRESH STAGE 4 QUALIFICATION PENDING
 
 ## Reproduction
 
@@ -19,3 +22,4 @@ and unreadable input. Focused parser/JSONL and bootstrap-wiring contracts cover
 the regression. The temporary bootstrap interpreter also returned exit 1 for
 an unreadable validator input. The current self-hosted `check src/lib` still
 crashes with exit 139, so the aggregate requires a fresh Stage 4 binary run.
+

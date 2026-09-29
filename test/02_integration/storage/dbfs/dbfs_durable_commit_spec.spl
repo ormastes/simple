@@ -1,3 +1,26 @@
+
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: the behavior asserted in this spec  Audience: engineers reading this spec to confirm the behavior still holds.
+
+## Operator workflow
+
+1. Run `bin/simple test test/02_integration/storage/dbfs/dbfs_durable_commit_spec.spl`.
+2. Every scenario must pass; a failure is a regression in the behavior under test.
+
+## Compatibility and limitations
+
+Covers the behavior asserted here; platform-specific behavior is out of scope.
+"""
+
+# doc-path: doc/01_research/local/dbfs_durable_commit_spec.md
+# doc-path: doc/03_plan/sys_test/dbfs_durable_commit_spec.md
+# doc-path: doc/04_architecture/dbfs_durable_commit_spec.md
+# doc-path: doc/05_design/dbfs_durable_commit_spec_oracles.md
+# @manual: primary
+
 """
 DBFS durable commit and recovery specification.
 
@@ -30,6 +53,8 @@ var _crash_volatile: [[u8]] = []
 var _crash_durable: [[u8]] = []
 var _crash_fail_flush: [bool] = []
 var _crash_flush_counts: [i64] = []
+var _crash_write_counts: [i64] = []
+var _crash_fail_write_numbers: [i64] = []
 
 fn _copy_bytes(source: [u8]) -> [u8]:
     var out: [u8] = []
@@ -70,6 +95,8 @@ impl DurableCrashDevice:
         _crash_durable.push(_copy_bytes(bytes))
         _crash_fail_flush.push(false)
         _crash_flush_counts.push(0)
+        _crash_write_counts.push(0)
+        _crash_fail_write_numbers.push(-1)
         DurableCrashDevice(id: id, sector_size_: sector_size, sector_count_: sector_count)
 
     fn set_flush_failure(fail: bool):
@@ -78,6 +105,10 @@ impl DurableCrashDevice:
 
     fn flush_count() -> i64:
         _crash_flush_counts[_crash_idx(self.id)]
+
+    fn fail_nth_future_write(n: i64):
+        val idx = _crash_idx(self.id)
+        _crash_fail_write_numbers[idx] = _crash_write_counts[idx] + n
 
     fn power_cut():
         val idx = _crash_idx(self.id)
@@ -120,6 +151,10 @@ impl BlockDevice for DurableCrashDevice:
         val idx = _crash_idx(self.id)
         if idx < 0 or lba as i64 >= _crash_sector_counts[idx] or data.len() as i64 != _crash_sector_sizes[idx]:
             return Err("crash device write rejected")
+        _crash_write_counts[idx] = _crash_write_counts[idx] + 1
+        if _crash_write_counts[idx] == _crash_fail_write_numbers[idx]:
+            _crash_fail_write_numbers[idx] = -1
+            return Err("injected sector write failure")
         val size = _crash_sector_sizes[idx]
         val start = lba as i64 * size
         var volatile = _crash_volatile[idx]
@@ -154,7 +189,14 @@ fn reopened_text(dev: DurableCrashDevice, path: text, block_count: i64) -> Resul
         return Err(handle.unwrap_err())
     driver.read_handle(handle.unwrap(), stat.unwrap().size)
 
+fn long_checkpoint_path(prefix: text) -> text:
+    var path = "/" + prefix + "-"
+    while path.len() < 200:
+        path = path + "x"
+    path
+
 describe "DBFS durable device commit":
+    # @manual scenario evidence
     it "reconstructs exact bytes after an acknowledged fsync and power cut":
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
@@ -167,7 +209,9 @@ describe "DBFS durable device commit":
         val handle = mounts.open("/state", OpenFlags.create_write()).unwrap()
         mounts.write(handle, "committed-state").unwrap()
         mounts.fsync(handle).unwrap()
-        expect(dev.flush_count()).to_equal(1)
+        # V4 orders the inactive payload before publishing its root, then
+        # durably acknowledges that root in a second device boundary.
+        expect(dev.flush_count()).to_equal(2)
         dev.power_cut()
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("committed-state")
 
@@ -219,11 +263,97 @@ describe "DBFS durable device commit":
         val dev = DurableCrashDevice.new(160, 4096)
         val driver = DbFsDriver.open_on_device(dev, 0, 160).unwrap()
         var i: i64 = 0
-        while i < 64:
+        while i < 96:
             driver.open_path(Path(raw: "/f" + i.to_text()), OpenFlags.create_write()).unwrap()
             i = i + 1
-        expect(driver.open_path(Path(raw: "/overflow"), OpenFlags.create_write()).unwrap_err()).to_equal(FsError.TooLarge)
-        expect(driver.stat_path(Path(raw: "/overflow")).unwrap_err()).to_equal(FsError.NotFound)
+        val last = driver.open_path(Path(raw: "/f95"), OpenFlags.read_only()).unwrap()
+        driver.fsync(last).unwrap()
+        expect(dev.flush_count()).to_equal(2)
+        dev.power_cut()
+        val reopened = DbFsDriver.open_on_device(dev, 0, 160).unwrap()
+        expect(reopened.stat_path(Path(raw: "/f0")).is_ok()).to_equal(true)
+        expect(reopened.stat_path(Path(raw: "/f95")).is_ok()).to_equal(true)
+
+    it "falls back when the newest multi-sector payload fails CRC":
+        step("Verify: a valid older root remains authoritative after payload corruption")
+        # @req: REQ-SSPEC-LOCAL-001
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val handle = driver.open_path(
+            Path(raw: "/state"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(handle, "generation-one").unwrap()
+        driver.fsync(handle).unwrap()
+        driver.write_handle(handle, "generation-two").unwrap()
+        driver.fsync(handle).unwrap()
+
+        # For a 32-sector arena v4 derives three sectors per payload slot:
+        # data occupies LBAs 1..23, slot 0 starts at 24, slot 1 at 27, and
+        # roots remain at 30/31.  Generation two is committed through slot 1.
+        dev.corrupt_durable_sector(27u64)
+        dev.power_cut()
+        expect(reopened_text(dev, "/state", 32).unwrap()).to_equal(
+            "generation-one")
+
+    it "fails closed and rolls back a namespace payload overflow":
+        step("Verify: bounded checkpoint geometry never publishes a partial entry")
+        # @req: REQ-SSPEC-LOCAL-001
+        val dev = DurableCrashDevice.new(7, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 7).unwrap()
+        val first_path = long_checkpoint_path("first")
+        val second_path = long_checkpoint_path("second")
+        val overflow_path = long_checkpoint_path("overflow")
+        driver.open_path(Path(raw: first_path), OpenFlags.create_write()).unwrap()
+        driver.open_path(Path(raw: second_path), OpenFlags.create_write()).unwrap()
+        expect(driver.open_path(
+            Path(raw: overflow_path), OpenFlags.create_write()).unwrap_err()).to_equal(
+                FsError.TooLarge)
+        expect(driver.stat_path(Path(raw: overflow_path)).unwrap_err()).to_equal(
+            FsError.NotFound)
+
+    it "retains the legacy 64-entry ceiling when geometry has no payload slots":
+        step("Verify: a legacy checkpoint never writes a snapshot recovery would reject")
+        # @req: REQ-SSPEC-LOCAL-001
+        val dev = DurableCrashDevice.new(6, 4096)
+        val driver = DbFsDriver.open_on_device(dev, 0, 6).unwrap()
+        var i: i64 = 0
+        while i < 64:
+            driver.open_path(
+                Path(raw: "/legacy-" + i.to_text()),
+                OpenFlags.create_write()).unwrap()
+            i = i + 1
+        val overflow_path = Path(raw: "/legacy-overflow")
+        expect(driver.open_path(
+            overflow_path, OpenFlags.create_write()).unwrap_err()).to_equal(
+                FsError.TooLarge)
+        expect(driver.stat_path(overflow_path).unwrap_err()).to_equal(
+            FsError.NotFound)
+
+    it "never publishes a stale root after a partial pending-payload rewrite":
+        step("Verify: an Nth-sector failure poisons the pending commit")
+        # @req: REQ-SSPEC-LOCAL-001
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val base = driver.open_path(
+            Path(raw: "/base"), OpenFlags.create_write()).unwrap()
+        driver.fsync(base).unwrap()
+
+        val first_path = long_checkpoint_path("pending-first")
+        val second_path = long_checkpoint_path("pending-second")
+        val torn_path = long_checkpoint_path("pending-torn")
+        driver.open_path(Path(raw: first_path), OpenFlags.create_write()).unwrap()
+        driver.open_path(Path(raw: second_path), OpenFlags.create_write()).unwrap()
+        dev.fail_nth_future_write(2)
+        expect(driver.open_path(
+            Path(raw: torn_path), OpenFlags.create_write()).unwrap_err()).to_equal(
+                FsError.IoError(code: 0u32))
+        expect(driver.fsync(base).unwrap_err()).to_equal(
+            FsError.IoError(code: 0u32))
+
+        dev.power_cut()
+        val reopened = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        expect(reopened.stat_path(Path(raw: "/base")).is_ok()).to_equal(true)
+        expect(reopened.stat_path(Path(raw: first_path)).unwrap_err()).to_equal(
+            FsError.NotFound)
 
     it "serializes interleaved commit transitions without crossing device owners":
         val left = DurableCrashDevice.new(32, 512)
@@ -258,6 +388,22 @@ describe "DBFS durable device commit":
         expect(driver.read_handle(handle, 10).unwrap_err()).to_equal(
             FsError.InvalidArg)
 
+    it "rejects unlink while another namespace generation is pending":
+        step("Verify: rejects unlink while another namespace generation is pending")
+        # @req: REQ-SSPEC-LOCAL-001
+        val dev = DurableCrashDevice.new(32, 512)
+        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
+        val retained = driver.open_path(
+            Path(raw: "/retained"), OpenFlags.create_write()).unwrap()
+        driver.write_handle(retained, "retained-data").unwrap()
+        # mkdir prepares a namespace image without claiming its durability;
+        # unlink must not join that operation's rollback authority.
+        driver.mkdir_path("/pending", 0o755).unwrap()
+
+        expect(driver.unlink_path("/retained").unwrap_err()).to_equal(FsError.Busy)
+        expect(driver.stat_path(Path(raw: "/retained")).is_ok()).to_equal(true)
+        expect(driver.read_handle(retained, 13).unwrap()).to_equal("retained-data")
+
     it "uses one append cursor for passthrough bytes and committed file blobs":
         val dev = DurableCrashDevice.new(32, 512)
         val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
@@ -270,19 +416,6 @@ describe "DBFS durable device commit":
         driver.fsync(handle).unwrap()
         dev.power_cut()
         expect(reopened_text(dev, "/state", 32).unwrap()).to_equal("after-prefix")
-
-    it "flushes unbound passthrough bytes even without a pending checkpoint":
-        val dev = DurableCrashDevice.new(32, 512)
-        val driver = DbFsDriver.open_on_device(dev, 0, 32).unwrap()
-        val handle = driver.open_path(
-            Path(raw: "/sync-anchor"), OpenFlags.create_write()).unwrap()
-        driver.fsync(handle).unwrap()
-        val flushes_before = dev.flush_count()
-        expect(driver.write_passthrough([0xA5u8]).unwrap()).to_equal(1)
-        driver.fsync(handle).unwrap()
-        expect(dev.flush_count()).to_equal(flushes_before + 1)
-        dev.power_cut()
-        expect(dev.read_sector(1u64).unwrap()[0]).to_equal(0xA5u8)
 
     it "rejects the SimpleOS no-op mutex provider with a stable blocker":
         expect(dbfs_device_mutex_provider_blocker(

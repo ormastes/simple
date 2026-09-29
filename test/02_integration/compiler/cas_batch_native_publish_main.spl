@@ -1,0 +1,54 @@
+# Fail-fast native publish/load/pin/decode probe for CAS batch generations.
+use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1, PackageArchivePublishInputV1, package_archive_aggregate_entry_v1, package_archive_publish_scc_v1, package_archive_load_v1}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.driver.cache.cas_store.{cas_get}
+use compiler.driver.cache.cas_batch_transaction.{cas_batch_current_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_file_read_regular_no_follow_bounded(path: text, max_bytes: i64) -> text?
+
+fn probe_entry(package_name: text, scc: text) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1(
+        package_name, "{package_name}.main", "", "",
+        sha256_text("metadata-{package_name}"), "", "", "", "",
+        sha256_text("action-{package_name}"), "", scc, [], [])
+
+fn probe_case(root: text, package_name: text, scc: text, dependencies: [text], authority: PackageArchiveAuthorityV1) -> bool:
+    val entry = probe_entry(package_name, scc)
+    val aggregate = package_archive_aggregate_entry_v1([entry])
+    if aggregate == nil:
+        return false
+    val input = PackageArchivePublishInputV1(entry, dependencies, "interface-{package_name}", "action-{package_name}", true)
+    if not package_archive_publish_scc_v1(root, scc, authority, [input]):
+        print "publish-failed:{package_name}"
+        return false
+    val current = cas_batch_current_v1(root)
+    val generation = rt_file_read_regular_no_follow_bounded(
+        "{root}/batch-v1/generations/{current}.generation", 1024 * 1024)
+    if (generation == nil or not generation!.starts_with("simple-cas-batch-v1\ngeneration={current}\n") or
+            not generation!.contains("\ntransaction=") or generation!.bytes().len() < 200):
+        print "generation-invalid:{package_name}"
+        return false
+    val loaded = package_archive_load_v1(root, aggregate!, authority, dependencies)
+    if not loaded.valid or loaded.receipt == nil:
+        print "load-failed:{package_name}:{loaded.reason}"
+        return false
+    val pinned = cas_get(root, loaded.receipt!.archive_digest)
+    if pinned == nil or not pinned!.contains("simple-interface-action-archive-v1"):
+        print "pin-failed:{package_name}"
+        return false
+    print "publish-load-pin-ok:{package_name}:generation-bytes={generation!.bytes().len()}"
+    true
+
+fn main() -> i64:
+    val root = "build/tmp/cas_batch_native_publish/{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val authority = PackageArchiveAuthorityV1(
+        sha256_text("producer"), "root-generation", sha256_text("variant"),
+        "revision", "tree", "inventory")
+    if not probe_case(root, "zero", "scc-zero", [], authority):
+        return 1
+    if not probe_case(root, "one", "scc-one", [sha256_text("dependency")], authority):
+        return 1
+    0

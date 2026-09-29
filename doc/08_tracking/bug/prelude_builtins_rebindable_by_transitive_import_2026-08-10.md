@@ -536,3 +536,8 @@ remaining shadowability of the other 50 names is documented in-source as
 **Status: downgrade from OPEN(P2) to a design note.** If full fencing is still
 wanted, that is a language-design decision, not a bug fix, and should be re-filed
 as a feature request naming the 50 affected identifiers.
+
+## Triage 2026-09-13
+Reconfirmed: `exit` fenced already; the general hazard (50 other prelude
+names shadowable) remains, needing Rust-seed interpreter_call resolution
+work. Left as PARTIALLY FIXED / OPEN for the remainder, no code change.

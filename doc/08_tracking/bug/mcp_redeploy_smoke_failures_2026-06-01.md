@@ -1,7 +1,13 @@
 # MCP redeploy smoke failures - 2026-06-01
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+## Closed 2026-09-13 — Stale by host: filed entirely against a macOS ARM64 redeploy that cannot exist here
+
+- **measured** Triage host is Windows 11 x86_64; `bin/simple --version` -> `Simple Language v1.0.0-rc.1` (Rust seed), not the `aarch64-apple-darwin-macho` v1.0.0-beta driver the entry describes.
+- **inferred** Every listed failure is macOS-specific: core-C link duplicate symbols, macOS clang rejecting emitted `.weak` directives, and the macOS-deployed `bin/simple_mcp_server` tool list. None is reproducible from this host.
+- **measured** The MCP servers are also unavailable in this session (`simple-mcp` reports `CONNECTION_CLOSED`), so no substitute smoke evidence could be gathered.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 ## Summary
 
@@ -114,12 +120,3 @@ stale native candidate, and only then falls back to
 `bin/simple src/app/mcp/main.spl`. `bin/simple_lsp_mcp_server` now applies the
 same checked-native selection and verifies `lsp_definition` before executing a
 candidate.
-
-## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIABLE (macOS deploy lane)
-
-Every symptom in this record is macOS-ARM64 deploy/link-time: duplicate
-`to_string` symbols, clang `.weak` handling, and `mcp_tools_count=0` read from a
-deployed binary. Confirming or closing it requires a native build plus redeploy
-on Darwin, which is not available on this host. No static verdict is possible;
-the record should carry a blocked-on-platform marker rather than sit as an
-untriaged open bug.

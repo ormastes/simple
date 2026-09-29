@@ -1,7 +1,7 @@
 # NVMe FW — Gap-Closure Implementation Plan (simulation → hardware-faithful), with tests
 
-> **Status (2026-07-07): WIRED SIMULATION FLOORS.** This plan tracks the closed simulation
-> floors between `examples/09_embedded/simpleos_nvme_fw/fw/` (~5K LOC pure-Simple, run-green)
+> **Status (2026-06-30): PLANNED.** This plan closes the gap between the current
+> simulation (`examples/09_embedded/simpleos_nvme_fw/fw/`, ~5K LOC pure-Simple, run-green)
 > and a real hardware-facing NVMe SSD firmware, as measured against the open comparators
 > Cosmos+ OpenSSD GreedyFTL (runs on FPGA+ARM, NVMe 1.2/PCIe) and FEMU (QEMU NVMe emulator),
 > and against commercial firmware ("millions of LOC, a miniature OS").
@@ -47,7 +47,7 @@ the firmware":
 | Phase | Module | Live caller | Status |
 |-------|--------|-------------|--------|
 | P1 | `fil_fmc` | `fil.spl` (every program/read/erase routes through the FMC handshake) | **wired** |
-| P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload-window bit, and fails double-bit/OOB corruption closed | **wired SECDED payload-window floor** — not full BCH/LDPC |
+| P3 | `fil_ecc` + NAND OOB ECC latch | `fil.spl` reads stored ECC through `fil_fmc`, corrects one silent payload bit, and fails double-bit/OOB corruption closed | **wired SECDED floor** — not full BCH/LDPC |
 | P4 | `hil_command.prp_byte` | HIL + multi-queue NVMe writes program each LBA from a segmented PRP host byte stream | **wired segmented-PRP floor** — no full HostMem/SGL/IOMMU yet |
 | P5 | `ftl_map` + `dram` | `Ftl` uses bounded LRU write-back cache; HIL/controller writes allocate a bounded DRAM arena span before programming media | **wired DRAM floor** — no full DRAM subsystem yet |
 | P6 | `firmware.service_tick` | Foreground HIL ticks and background GC ticks share an explicit FTL-map owner token | **wired cooperative floor** — no multicore/preemption |
@@ -142,10 +142,9 @@ not nanoseconds.
 
 > Landed floor: NAND now stores a compact SECDED ECC word in OOB/spare-area state at program time,
 > the ONFI device and FMC latch that stored value on read, and `fil.read` decodes against it.
-> A silent one-bit payload-window error is corrected before returning data, extending coverage beyond
-> byte 0 through bit 16; double-bit payload corruption and stored-ECC/OOB metadata corruption fail
-> closed. Covered by `ecc_check.spl` in the system spec. Full BCH/LDPC encode/decode remains open
-> below.
+> A silent one-bit payload error is corrected before returning data; double-bit payload corruption
+> and stored-ECC/OOB metadata corruption fail closed. Covered by `ecc_check.spl` in the system
+> spec. Full BCH/LDPC encode/decode remains open below.
 
 **Goal.** Replace checksum+injected-flip with a real **BCH** codec: correct up to *t* bit
 errors per codeword, detect beyond *t*.
@@ -293,14 +292,15 @@ calibration knob (`ponytail:` real sensors drift; leave the knob).
 > **Wired into the live FTL (2026-06-30).** The physical address space is a clean
 > NUM_GROUPS×NUM_CHANNELS block grid (`block = group·NUM_CHANNELS + channel`), so a RAIN stripe is
 > one page per channel at a fixed (group, page). `Ftl` carries a per-stripe parity word array;
-> writes/GC/format maintain `rain_parity` as physical pages change, `me.rain_seal()` remains a
-> RAID parity-scrub/repair pass, and `me.rain_recover_channel(c)` rebuilds a corrupted/failed
-> channel: per NAND block it computes the recovered payloads from live parity XOR the surviving
-> channels, erases the failed block, and reprograms its live pages in place — the L2P ppns are
-> unchanged, so the normal read path returns the original data. Proven end-to-end by
-> `rain_ftl_check.spl` (256 known writes → a whole channel made uncorrectable, confirmed via
-> `read_status` → rebuild without a pre-rebuild seal → every LBA reads back its original value)
-> plus `ftl_rain_selftest` in `test_fw`.
+> `me.rain_seal()` snapshots parity over the current physical contents (a RAID parity-scrub pass),
+> and `me.rain_recover_channel(c)` rebuilds a corrupted/failed channel: per NAND block it computes
+> the recovered payloads from the sealed parity XOR the surviving channels, erases the failed
+> block, and reprograms its live pages in place — the L2P ppns are unchanged, so the normal read
+> path returns the original data. Proven end-to-end by `rain_ftl_check.spl` (256 known writes →
+> seal → a whole channel made uncorrectable, confirmed via `read_status` → rebuild → every LBA
+> reads back its original value) plus `ftl_rain_selftest` in `test_fw`. **Ceiling:** parity is
+> sealed on demand, not maintained on every program/erase/GC relocation — a continuously-correct
+> live parity (updated through the GC mover) is the next step; recorded here, not silently skipped.
 
 **Goal.** XOR parity stripe across channels so a die/channel failure is recoverable.
 
@@ -317,15 +317,13 @@ on an injected die/channel failure, reconstruct the lost page from the survivors
 **Silicon ceiling.** Real die/plane failure modes (partial-page, RBER drift) are modeled as
 whole-unit erasure.
 
-## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ◐ REFERENCE WIRED; FULL PORT REMAINS
+## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ⛔ STARTED, BUILD-BLOCKED (2026-06-30)
 
 > **Status (2026-07-25).** The fast direct-smoke path in
 > `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` is the small rv32 ELF recipe that
 > avoids rebuilding the Rust seed and does not compile the full Simple firmware graph. QEMU boot
 > evidence is valid only after `build/nvme_fw_rv32.elf` exists and prints
-> `RV32 NVME FW BEGIN`, `ALL RV32 NVME FW CHECKS PASS`, and `RESULT: PASS`.
-> The rv32 scalar smoke uses bounded no-alloc counter caps; host simulation owns
-> full-width counter stress. `fw_rv32/entry.spl` remains a host-verified,
+> `ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`. `fw_rv32/entry.spl` remains a host-verified,
 > array-free scalar reference for the Lean-proven RAIN reconstruction, SECDED ECC floor, fixed
 > scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed
 > journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor, fixed task-pool

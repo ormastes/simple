@@ -1,8 +1,16 @@
 # Bug: `quic_aead_encrypt` failed in interpreter / SEGFAULTed under JIT — RESOLVED
 
+## Closed 2026-09-13 — confirmed resolved: KAT green, no segfault
+- **measured** — `bin/simple run test/01_unit/lib/nogc_async_mut/quic/quic_aead_spec.spl`
+  (Rust seed v1.0.0-rc.1, Windows): `3 examples, 0 failures`,
+  `outcome=OK declared>=3 executed=3 passed=3` — the encrypt KAT passes and the process
+  exits cleanly (no rc=139).
+- **inferred** — the entry already recorded RESOLVED 2026-06-16; this re-confirms it on a
+  second host and OS.
+
 - **ID:** quic_aead_encrypt_fails_interp_segfaults_jit_2026-06-16
 - **Severity:** P1 (RED spec + native crash)
-- **Status:** RESOLVED 2026-06-16 (pure-Simple fix; underlying compiler bug filed separately)
+- **Status:** CLOSED 2026-09-13 (triage shard 03) — see the Closed section below
 - **Area:** std.common.crypto.aes_gcm / cross-module private-symbol resolution
 
 ## Symptom

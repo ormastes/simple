@@ -3,8 +3,7 @@
 # AES-128-OCB3 per RFC 7253.  Provides authenticated encryption with
 # associated data (AEAD): one-pass confidentiality + integrity.
 #
-# The algorithm is Pure Simple; two explicitly bounded runtime helpers provide
-# byte access and capacity-reserving array allocation on supported lanes.
+# No SFFI/Rust SFFI — pure Simple language, suitable for baremetal.
 #
 # Reference: RFC 7253 — The OCB Authenticated-Encryption Algorithm
 #   §2  Notation and Conventions
@@ -25,17 +24,9 @@
 
 use os.crypto.aes128_gcm.{aes128_key_expansion, aes128_encrypt_block}
 
-@unsafe(reason: "foreign byte indexing requires caller-proven array bounds", capabilities: [ffi])
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
-@unsafe(reason: "foreign capacity-reserving array allocation is not artifact-verified", capabilities: [ffi])
 extern fn rt_array_new_with_cap(cap: i64) -> [u8]
 
-@always_inline
-fn _ocb3_new_u8(cap: i64) -> [u8]:
-    unsafe(capabilities: [ffi]):
-        rt_array_new_with_cap(cap)
-
-@unsafe(reason: "caller must prove the foreign byte index is in bounds", capabilities: [ffi])
 fn _u8_at(buf: [u8], idx: u64) -> u8:
     rt_bytes_u8_at(buf, idx.to_i64()).to_u8()
 
@@ -48,7 +39,7 @@ fn _u8_at(buf: [u8], idx: u64) -> u8:
 
 fn _ocb3_double(block: [u8]) -> [u8]:
     """GF(2^128) doubling (left shift with conditional XOR 0x87 on last byte)."""
-    var out: [u8] = _ocb3_new_u8(16)
+    var out: [u8] = rt_array_new_with_cap(16)
     val msb = (_u8_at(block, 0).to_u32() >> 7) & 0x01
     var i: u64 = 0
     while i < 15:
@@ -68,7 +59,7 @@ fn _ocb3_double(block: [u8]) -> [u8]:
 # ============================================================================
 
 fn _xor16(a: [u8], b: [u8]) -> [u8]:
-    var out: [u8] = _ocb3_new_u8(16)
+    var out: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         out.push(_u8_at(a, i) ^ _u8_at(b, i))
@@ -98,7 +89,7 @@ fn _ntz(n: u64) -> u64:
 # ============================================================================
 
 fn _aes_inv_sbox_table() -> [u8]:
-    var t: [u8] = _ocb3_new_u8(256)
+    var t: [u8] = rt_array_new_with_cap(256)
     t.push(0x52)
     t.push(0x09)
     t.push(0x6a)
@@ -382,7 +373,7 @@ fn _gf_mul(a: u32, b: u32) -> u32:
     result & 0xFF
 
 fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> [u8]:
-    var state: [u8] = _ocb3_new_u8(16)
+    var state: [u8] = rt_array_new_with_cap(16)
     var si: u64 = 0
     while si < 16:
         state.push(_u8_at(block, si))
@@ -398,7 +389,7 @@ fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> 
     var rnd: u64 = nr - 1
     while rnd >= 1:
         # InvShiftRows (column-major: state[row + col*4])
-        var tmp: [u8] = _ocb3_new_u8(16)
+        var tmp: [u8] = rt_array_new_with_cap(16)
         tmp.push(_u8_at(state, 0))   # col0 row0
         tmp.push(_u8_at(state, 13))  # col0 row1 ← was col3 row1
         tmp.push(_u8_at(state, 10))  # col0 row2 ← was col2 row2
@@ -417,7 +408,7 @@ fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> 
         tmp.push(_u8_at(state, 3))   # col3 row3 ← was col0 row3
 
         # InvSubBytes
-        var sub: [u8] = _ocb3_new_u8(16)
+        var sub: [u8] = rt_array_new_with_cap(16)
         var ssi: u64 = 0
         while ssi < 16:
             sub.push(_inv_sbox(_u8_at(tmp, ssi).to_i64()))
@@ -425,14 +416,14 @@ fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> 
 
         # AddRoundKey
         rk_off = rnd * 16
-        var ark: [u8] = _ocb3_new_u8(16)
+        var ark: [u8] = rt_array_new_with_cap(16)
         var ai: u64 = 0
         while ai < 16:
             ark.push(_u8_at(sub, ai) ^ _u8_at(expanded_key, rk_off + ai))
             ai = ai + 1
 
         # InvMixColumns (column-major)
-        var mc: [u8] = _ocb3_new_u8(16)
+        var mc: [u8] = rt_array_new_with_cap(16)
         var col: u64 = 0
         while col < 4:
             val b0 = _u8_at(ark, col * 4).to_u32()
@@ -449,7 +440,7 @@ fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> 
         rnd = rnd - 1
 
     # Final round (no InvMixColumns)
-    var ftmp: [u8] = _ocb3_new_u8(16)
+    var ftmp: [u8] = rt_array_new_with_cap(16)
     ftmp.push(_u8_at(state, 0))
     ftmp.push(_u8_at(state, 13))
     ftmp.push(_u8_at(state, 10))
@@ -467,13 +458,13 @@ fn _aes_decrypt_block_pure(block: [u8], expanded_key: [u8], num_rounds: i64) -> 
     ftmp.push(_u8_at(state, 6))
     ftmp.push(_u8_at(state, 3))
 
-    var fsub: [u8] = _ocb3_new_u8(16)
+    var fsub: [u8] = rt_array_new_with_cap(16)
     var fi: u64 = 0
     while fi < 16:
         fsub.push(_inv_sbox(_u8_at(ftmp, fi).to_i64()))
         fi = fi + 1
 
-    var result: [u8] = _ocb3_new_u8(16)
+    var result: [u8] = rt_array_new_with_cap(16)
     var ri: u64 = 0
     while ri < 16:
         result.push(_u8_at(fsub, ri) ^ _u8_at(expanded_key, ri))
@@ -486,7 +477,7 @@ fn _aes128_decrypt_block(block: [u8], round_keys: [u8]) -> [u8]:
 
 fn _ocb3_build_l_table(round_keys: [u8]) -> [[u8]]:
     """Returns [L_*, L_$, L_0, L_1, ..., L_30]."""
-    var zero: [u8] = _ocb3_new_u8(16)
+    var zero: [u8] = rt_array_new_with_cap(16)
     var zi: u64 = 0
     while zi < 16:
         zero.push(0x00)
@@ -518,7 +509,7 @@ fn _table_get(table: [[u8]], idx: u64) -> [u8]:
             return entry
         i = i + 1
     # Fallback — should not reach here.
-    var fallback: [u8] = _ocb3_new_u8(16)
+    var fallback: [u8] = rt_array_new_with_cap(16)
     var j: u64 = 0
     while j < 16:
         fallback.push(0x00)
@@ -545,7 +536,7 @@ fn _l_ntz(table: [[u8]], block_num: u64) -> [u8]:
 fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
     """Derive Offset_0 from key and 12-byte nonce per RFC 7253 §4."""
     # Build the 128-bit Nonce value: [0x00, 0x00, 0x00, 0x01, nonce[0..11]]
-    var nonce128: [u8] = _ocb3_new_u8(16)
+    var nonce128: [u8] = rt_array_new_with_cap(16)
     nonce128.push(0x00)
     nonce128.push(0x00)
     nonce128.push(0x00)
@@ -559,7 +550,7 @@ fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
     val bottom: u64 = (_u8_at(nonce128, 15).to_u32() & 0x3F).to_u64()
 
     # top = nonce128 with last 6 bits cleared
-    var top: [u8] = _ocb3_new_u8(16)
+    var top: [u8] = rt_array_new_with_cap(16)
     var ti: u64 = 0
     while ti < 15:
         top.push(_u8_at(nonce128, ti))
@@ -570,7 +561,7 @@ fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
     val ktop = aes128_encrypt_block(top, round_keys)
 
     # Stretch = Ktop || (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
-    var stretch: [u8] = _ocb3_new_u8(24)
+    var stretch: [u8] = rt_array_new_with_cap(24)
     var si: u64 = 0
     while si < 16:
         stretch.push(_u8_at(ktop, si))
@@ -584,7 +575,7 @@ fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
     val byte_shift: u64 = bottom >> 3
     val bit_shift: u32 = (bottom & 7).to_u32()
 
-    var offset: [u8] = _ocb3_new_u8(16)
+    var offset: [u8] = rt_array_new_with_cap(16)
     if bit_shift == 0:
         var oi: u64 = 0
         while oi < 16:
@@ -607,13 +598,13 @@ fn _ocb3_nonce_to_offset(round_keys: [u8], nonce: [u8]) -> [u8]:
 
 fn _ocb3_hash(round_keys: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
     """Compute HASH(K, A) for OCB3.  Returns a 16-byte authentication offset."""
-    var sum: [u8] = _ocb3_new_u8(16)
+    var sum: [u8] = rt_array_new_with_cap(16)
     var si: u64 = 0
     while si < 16:
         sum.push(0x00)
         si = si + 1
 
-    var offset_h: [u8] = _ocb3_new_u8(16)
+    var offset_h: [u8] = rt_array_new_with_cap(16)
     var oi: u64 = 0
     while oi < 16:
         offset_h.push(0x00)
@@ -625,7 +616,7 @@ fn _ocb3_hash(round_keys: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
         # Offset_i = Offset_{i-1} XOR L_{ntz(i+1)}
         offset_h = _xor16(offset_h, _l_ntz(l_table, i + 1))
 
-        var blk: [u8] = _ocb3_new_u8(16)
+        var blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
         while bi < 16:
             blk.push(_u8_at(aad, i * 16 + bi))
@@ -641,7 +632,7 @@ fn _ocb3_hash(round_keys: [u8], aad: [u8], l_table: [[u8]]) -> [u8]:
         offset_h = _xor16(offset_h, _table_get(l_table, 0))
 
         # Pad partial block with 1 || 0*
-        var pad_blk: [u8] = _ocb3_new_u8(16)
+        var pad_blk: [u8] = rt_array_new_with_cap(16)
         var pi: u64 = 0
         while pi < rem:
             pad_blk.push(_u8_at(aad, num_full * 16 + pi))
@@ -678,21 +669,21 @@ fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
     val l_dollar = _table_get(l_table, 1)
 
     var offset: [u8] = _ocb3_nonce_to_offset(round_keys, nonce)
-    var checksum: [u8] = _ocb3_new_u8(16)
+    var checksum: [u8] = rt_array_new_with_cap(16)
     var ci: u64 = 0
     while ci < 16:
         checksum.push(0x00)
         ci = ci + 1
 
     val num_full = plaintext.len() / 16
-    var out: [u8] = _ocb3_new_u8(plaintext.len().to_i64())
+    var out: [u8] = rt_array_new_with_cap(plaintext.len().to_i64())
 
     # Process full 16-byte plaintext blocks
     var i: u64 = 0
     while i < num_full:
         offset = _xor16(offset, _l_ntz(l_table, i + 1))
 
-        var p_blk: [u8] = _ocb3_new_u8(16)
+        var p_blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
         while bi < 16:
             p_blk.push(_u8_at(plaintext, i * 16 + bi))
@@ -718,7 +709,7 @@ fn ocb3_encrypt(key: [u8], nonce: [u8], aad: [u8], plaintext: [u8]) -> [u8]:
 
         # C_last[0..rem] = P_last[0..rem] XOR Pad[0..rem]
         # Checksum XOR= P_last || 0x80 || 0*  (padded to 16 bytes)
-        var p_last: [u8] = _ocb3_new_u8(16)
+        var p_last: [u8] = rt_array_new_with_cap(16)
         var pi: u64 = 0
         while pi < rem:
             val byte = _u8_at(plaintext, num_full * 16 + pi)
@@ -766,7 +757,7 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
     val ct_len = ciphertext_tag.len() - 16
 
     # Extract received tag (last 16 bytes)
-    var tag_rcv: [u8] = _ocb3_new_u8(16)
+    var tag_rcv: [u8] = rt_array_new_with_cap(16)
     var ti: u64 = 0
     while ti < 16:
         tag_rcv.push(_u8_at(ciphertext_tag, ct_len.to_u64() + ti))
@@ -777,14 +768,14 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
     val l_dollar = _table_get(l_table, 1)
 
     var offset: [u8] = _ocb3_nonce_to_offset(round_keys, nonce)
-    var checksum: [u8] = _ocb3_new_u8(16)
+    var checksum: [u8] = rt_array_new_with_cap(16)
     var ci: u64 = 0
     while ci < 16:
         checksum.push(0x00)
         ci = ci + 1
 
     val num_full = ct_len / 16
-    var plaintext: [u8] = _ocb3_new_u8(ct_len.to_i64())
+    var plaintext: [u8] = rt_array_new_with_cap(ct_len.to_i64())
 
     # Process full 16-byte ciphertext blocks:
     #   P_i = Offset_i XOR DECIPHER(K, C_i XOR Offset_i)
@@ -792,7 +783,7 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
     while i < num_full:
         offset = _xor16(offset, _l_ntz(l_table, i + 1))
 
-        var c_blk: [u8] = _ocb3_new_u8(16)
+        var c_blk: [u8] = rt_array_new_with_cap(16)
         var bi: u64 = 0
         while bi < 16:
             c_blk.push(_u8_at(ciphertext_tag, i * 16 + bi))
@@ -813,7 +804,7 @@ fn ocb3_decrypt(key: [u8], nonce: [u8], aad: [u8], ciphertext_tag: [u8]) -> Ocb3
 
         val pad = aes128_encrypt_block(offset, round_keys)
 
-        var p_last: [u8] = _ocb3_new_u8(16)
+        var p_last: [u8] = rt_array_new_with_cap(16)
         var pi: u64 = 0
         while pi < rem:
             val byte = _u8_at(ciphertext_tag, num_full * 16 + pi) ^ _u8_at(pad, pi)

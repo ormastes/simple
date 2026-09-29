@@ -4,14 +4,8 @@
 - **Severity:** medium — silently unusable feature shape (string template with
   a repeated bare placeholder), no known workaround inside the template
   itself
-- **Status:** FIXED (lane TPL1, 2026-07-30) — root cause pinned down and
-  patched in the Rust seed (`src/compiler_rust`), verified by 2 new unit
-  tests + the 3 pre-existing placeholder tests, all passing. NOT yet
-  verified end-to-end against a rebuilt `bin/simple` binary (a full seed
-  rebuild is out of scope for this lane — see "Verification" below). A
-  parallel, currently-*unreachable* copy of the same bug pattern exists in
-  the pure-Simple self-hosted compiler's mirror module; see "Pure-Simple
-  mirror" below — NOT fixed (deliberately, see reasoning there).
+- **Status:** open — root cause NOT pinned down; mechanism confirmed distinct
+  from the nested-call-arg bug fixed alongside it
 - **Found via:** lane TMF1 (mission-critical robustness campaign), bisecting
   `test/01_unit/compiler/backend/type_mapper_spec.spl`'s "handles composite
   types using each backend strategy" failure (see bonus-find update in
@@ -44,34 +38,6 @@ describe "probe4 isolated":
 
 `bin/simple test --no-session-daemon <that file>` → `Results: 1 total, 0
 passed, 1 failed`, same `variable __p1 not found` message.
-
-Re-reproduced 2026-07-30 (lane TPL1) with a minimal `run` (not `test`)
-probe against the CURRENTLY DEPLOYED `bin/simple`:
-
-```simple
-fn main():
-    val xs = [1, 2, 3]
-    val ys = xs.map("{_} -> {_}")
-    for y in ys:
-        print(y)
-```
-
-```
-$ bin/simple run /tmp/.../tpl1_probe.spl
-WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
-Build and use the pure-Simple bin/simple instead.
-[INFO] JIT compilation failed, falling back to interpreter: ...
-error: semantic: variable `__p1` not found
-```
-
-**Important correction to the original investigation (see "Why the original
-static trace hit a contradiction" below): the deployed `bin/simple` in this
-environment is currently the Rust seed, not a self-hosted pure-Simple
-binary** (its own WARNING banner says so). All of the original lane's
-bisection AND its static tracing were performed/reasoned against
-`src/compiler`'s pure-Simple `_FlatAstBridge`/`placeholder_lambda.spl` — but
-that code never ran for this repro. The real, executing logic lives in
-`src/compiler_rust/parser/src/expressions/placeholder.rs`.
 
 ## Bisection (all against `bin/release/x86_64-unknown-linux-gnu/simple`, 2026-07-30)
 
@@ -258,6 +224,8 @@ redeploy.
 ## Dead ends from the original investigation (SUPERSEDED by the root cause above,
 ## preserved verbatim from the initial filing so nobody retraces them)
 
+## Why the obvious mechanism does not explain it (dead ends recorded so the
+## next investigator doesn't retrace them)
 
 `__p0`/`__p1`-style names are generated in exactly one place in the whole
 compiler: `src/compiler/10.frontend/desugar/placeholder_lambda.spl`
@@ -317,23 +285,6 @@ to add a temporary `eprint` at the top of `transform_placeholder_lambda` (and
 at `expr_interpolated_string`'s one call site) showing `eid`/`tag`, rebuild
 once, and run the isolated repro above to get a real call trace instead of
 guessing further from source reading alone.
-
-
-## Why the original static trace hit a contradiction (historical note, corrected)
-
-The original investigation (this section preserved from the initial filing)
-reasoned entirely from `src/compiler`'s pure-Simple frontend and predicted
-that a bare `_.0`/`_.1` region should come out unrenamed — a prediction that
-in fact holds **for the pure-Simple compiler's own `EXPR_STRING_LIT`
-conversion path**, which is why it contradicted the observed failure: the
-investigation was tracing the wrong binary. The bisection table above was
-run against `bin/release/x86_64-unknown-linux-gnu/simple`, which prints its
-own "this Rust-built Simple binary is a bootstrap seed only" warning on
-every invocation — i.e. it is (and, per this lane's re-check, still is) the
-Rust seed, not a rebuilt self-hosted binary. Lesson for future lanes: when a
-bisection's own static trace contradicts its own reproduction, check which
-binary is actually deployed at `bin/simple` before concluding the trace (or
-the repro) is wrong.
 
 ## Workaround
 

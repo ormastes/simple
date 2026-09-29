@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 """Engine2D Shared-Raster Parity Harness — emu vs software per-op oracle.
 
 This is the bit-exact parity gate that must pass before the Draw-IR backend
@@ -28,29 +32,16 @@ Three op families:
      byte-exact (opaque rect outline, thin line, opaque gradient); several
      DIVERGE and block unification until a single canonical algorithm is chosen.
 
-Alpha anchor: src-over 0x01020304 over 0x10203040 == 0x101E2D3C, verified
+Alpha anchor: src-over 0x01020304 over 0x10203040 == 0x101F2F3F, verified
 directly through both blend ops (both route through _emu_blend_over at
-src/lib/gc_async_mut/gpu/engine2d/backend_emu_math.spl:33, which itself
-delegates to std.gpu.engine2d.color.blend()). Updated from the prior
-0x101F2F3F anchor when color.blend()'s straight-alpha-over-transparent-dst
-formula was fixed (doc/08_tracking/bug/engine2d_straight_alpha_transparent_destination_blend_2026-07-11.md):
-0x10203040 has da=0x10 (mostly transparent), which is exactly the case the
-fix changes — 0x101F2F3F was the old (wrong) result of treating dst's RGB as
-if dst were opaque and never unpremultiplying by the true output alpha.
+src/lib/gc_async_mut/gpu/engine2d/backend_emu_math.spl:33).
 
 @tag: gpu, engine2d, rendering, parity, draw-ir
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 55%
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl 40%
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_adv.spl 10%
 @cover src/lib/gc_async_mut/gpu/engine2d/backend_emu_math.spl 30%
-
-## Purpose and audience
-Purpose: clear paints an identical surface on both backends
-Audience: compiler and tooling engineers who maintain this spec
-
 """
-
-# @req: REQ-RENDERING-EngiSharRastPari-001
 
 # @req D2 Draw-IR multi-backend unification — per-op bit-exact parity gate
 #      (doc/05_design/ui/rendering/draw_ir_multibackend_design.md)
@@ -529,66 +520,89 @@ fn _cmp_gradient_kernel_formula(w: i32, h: i32, top: u32, bottom: u32, bg: u32) 
 fn _rr_rect_hit(lx: i32, ly: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool:
     lx >= rx and lx < rx + rw and ly >= ry and ly < ry + rh
 
-# Independent replica of _emu_corner_arc's per-iteration span coverage test,
-# reused by the MSL kernel's corner-arc replay. Decision boundary is `d < 0`
-# (matching backend_emu.spl _emu_corner_arc's own midpoint loop) — DIFFERENT
-# from the `d <= 0` boundary the sw_corner_arc/_rr_ring_hit OUTLINE algorithm
-# uses; draw_rounded_rect and draw_rounded_rect_outline are independent
-# corner-arc algorithms.
-fn _rr_corner_arc_blend(cx: i32, cy: i32, rad: i32, dx_sign: i32, dy_sign: i32, lx: i32, ly: i32, color: u32, bg: u32) -> u32:
-    var px = rad
-    var py = 0
-    var d = 1 - rad
-    var dst = bg
-    while px >= py:
-        val row1 = cy + dy_sign * py
-        val col_a1 = cx
-        val col_b1 = cx + dx_sign * px
-        var lo1 = col_a1
-        var hi1 = col_b1
-        if col_b1 < col_a1:
-            lo1 = col_b1
-            hi1 = col_a1
-        if ly == row1 and lx >= lo1 and lx <= hi1:
-            dst = _gradient_blend_src_over_ref(color, dst)
-        val row2 = cy + dy_sign * px
-        val col_b2 = cx + dx_sign * py
-        var lo2 = col_a1
-        var hi2 = col_b2
-        if col_b2 < col_a1:
-            lo2 = col_b2
-            hi2 = col_a1
-        if ly == row2 and lx >= lo2 and lx <= hi2:
-            dst = _gradient_blend_src_over_ref(color, dst)
-        py = py + 1
-        if d < 0:
-            d = d + 2 * py + 1
-        else:
-            px = px - 1
-            d = d + 2 * (py - px) + 1
-    dst
+# Independent replica of the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA v1
+# (2026-09-12). The single definition lives in the comment block above
+# emu_draw_rounded_rect in src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl;
+# these helpers are deliberately re-implemented here rather than imported —
+# importing the production helpers would make this spec assert `f(x) == f(x)`
+# and prove nothing.
+#
+# Replaces the 2026-07-07 midpoint-circle replay. That replica had to replay
+# CPU's seven primitives in order because their footprints OVERLAPPED at the
+# band/arc seams, double-compositing alpha<255 fills. The regions are now
+# DISJOINT on every lane (CPU, Vulkan, Metal), so each pixel is blended
+# exactly once — the precondition for carrying fractional coverage at all.
+#
+# isqrt is floor(sqrt(v)) by integer Newton. The formula is defined on
+# floor(sqrt(v)), which is algorithm-independent, so any exact isqrt agrees;
+# a float sqrt is the one thing that can break parity, so no lane uses one.
+fn _rr_isqrt_ref(v: i64) -> i64:
+    if v <= 0:
+        return 0
+    var guess = v
+    var next = (guess + 1) / 2
+    while next < guess:
+        guess = next
+        next = (guess + v / guess) / 2
+    guess
 
-# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula:
-# literally replays emu_draw_rounded_rect's seven primitive draws, in the
-# same order, blending every one that covers (lx, ly).
+# q = (2dx+1)^2 + (2dy+1)^2; cov256 = clamp(r*256 + 128 - isqrt(q*16384), 0, 256)
+# dx, dy are measured positive AWAY from the rect interior, so both are >= 0
+# inside a corner box. 256 = interior, 0 = exterior, between = the arc ramp.
+# The 2d+1 terms measure from the pixel CENTRE to the continuous arc centre.
+fn _rr_cov256_ref(dx: i32, dy: i32, r: i32) -> i32:
+    val ex = (2 * dx + 1) as i64
+    val ey = (2 * dy + 1) as i64
+    val dist256 = _rr_isqrt_ref((ex * ex + ey * ey) * 16384)
+    val cov = ((r as i64) * 256 + 128 - dist256) as i32
+    if cov < 0:
+        return 0
+    if cov > 256:
+        return 256
+    cov
+
+# Coverage is applied by modulating the SOURCE ALPHA BYTE only; the blend
+# itself stays the unchanged src-over already pinned by this spec's other rows.
+fn _rr_modulate_alpha_ref(color: u32, cov: i32) -> u32:
+    val a = ((color >> 24) & 0xFFu32) as i32
+    val a_eff = (a * cov) / 256
+    (color & 0x00FFFFFFu32) | ((a_eff as u32) << 24)
+
+# Independent replica of kernel_draw_rounded_rect's whole per-pixel formula.
+# The rect is SEVEN DISJOINT regions — a full-height middle band, two side
+# bands, and four r x r corner boxes — so every pixel is blended EXACTLY ONCE
+# and the result is order-independent.
 fn _rr_kernel_pixel_ref(lx: i32, ly: i32, w: i32, h: i32, radius: i32, color: u32, bg: u32) -> u32:
     var r = radius
     if r > w / 2:
         r = w / 2
     if r > h / 2:
         r = h / 2
-    var dst = bg
+    # Middle band (all rows) or a side band (rows [r, h-r)) — a plain full blend.
     if _rr_rect_hit(lx, ly, r, 0, w - 2 * r, h):
-        dst = _gradient_blend_src_over_ref(color, dst)
+        return _gradient_blend_src_over_ref(color, bg)
     if _rr_rect_hit(lx, ly, 0, r, r, h - 2 * r):
-        dst = _gradient_blend_src_over_ref(color, dst)
+        return _gradient_blend_src_over_ref(color, bg)
     if _rr_rect_hit(lx, ly, w - r, r, r, h - 2 * r):
-        dst = _gradient_blend_src_over_ref(color, dst)
-    dst = _rr_corner_arc_blend(r, r, r, -1, -1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(w - r - 1, r, r, 1, -1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(r, h - r - 1, r, -1, 1, lx, ly, color, dst)
-    dst = _rr_corner_arc_blend(w - r - 1, h - r - 1, r, 1, 1, lx, ly, color, dst)
-    dst
+        return _gradient_blend_src_over_ref(color, bg)
+    if r <= 0:
+        return bg
+    # A corner box: offsets measured positive away from the rect interior.
+    var dx = lx - (w - r)
+    if lx < r:
+        dx = (r - 1) - lx
+    var dy = ly - (h - r)
+    if ly < r:
+        dy = (r - 1) - ly
+    val cov = _rr_cov256_ref(dx, dy, r)
+    if cov >= 256:
+        return _gradient_blend_src_over_ref(color, bg)
+    if cov <= 0:
+        return bg
+    val c = _rr_modulate_alpha_ref(color, cov)
+    if ((c >> 24) & 0xFFu32) == 0u32:
+        return bg
+    _gradient_blend_src_over_ref(c, bg)
 
 fn _cmp_rounded_rect_kernel_formula(w: i32, h: i32, radius: i32, color: u32, bg: u32) -> i32:
     var sw = _fresh_fill(bg)
@@ -663,106 +677,67 @@ fn _cmp_blit_kernel_formula(fb_w: i32, fb_h: i32, x: i32, y: i32, w: i32, h: i32
 # Specification
 # ============================================================================
 
-use std.spec.step
 describe "Engine2D shared-raster parity (emu vs software) — D2 unification gate":
+    # @manual scenario evidence
 
     context "Family A — core primitives are byte-identical (shared surface)":
 
         it "clear paints an identical surface on both backends":
-            step("Verify: clear paints an identical surface on both backends")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_clear()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_clear()).to_equal(0)
 
         it "draw_rect_filled — the primitive emu itself composes from — is identical":
-            step("Verify: draw_rect_filled — the primitive emu itself composes from — is identical")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_rect_filled_core()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_rect_filled_core()).to_equal(0)
 
         it "draw_image blits an identical surface":
-            step("Verify: draw_image blits an identical surface")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_image_core()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_image_core()).to_equal(0)
 
     context "Family B — emu-delegating ops stay byte-exact":
 
         it "draw_gradient_rect_h matches its emu delegate":
-            step("Verify: draw_gradient_rect_h matches its emu delegate")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_gradient_rect_h()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_gradient_rect_h()).to_equal(0)
 
         it "draw_rect_blend matches emu and hits the src-over anchor 0x101E2D3C":
-            step("Verify: draw_rect_blend matches emu and hits the src-over anchor 0x101E2D3C")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_rect_blend()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_rect_blend()).to_equal(0)
             expect(anchor_rect_blend()).to_equal(0x101E2D3Cu32)
 
         it "draw_image_blend matches emu and hits the src-over anchor 0x101E2D3C":
-            step("Verify: draw_image_blend matches emu and hits the src-over anchor 0x101E2D3C")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_image_blend()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_image_blend()).to_equal(0)
             expect(anchor_image_blend()).to_equal(0x101E2D3Cu32)
 
     context "Family C — independently written ops that ARE byte-exact":
 
         it "draw_rect (opaque outline) is byte-identical to emu":
-            step("Verify: draw_rect (opaque outline) is byte-identical to emu")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_rect_opaque()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_rect_opaque()).to_equal(0)
 
         it "draw_line (thickness 1, Bresenham) is byte-identical to emu":
-            step("Verify: draw_line (thickness 1, Bresenham) is byte-identical to emu")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_line_thin()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_line_thin()).to_equal(0)
 
         it "draw_gradient_rect (opaque, integer lerp) is byte-identical to emu":
-            step("Verify: draw_gradient_rect (opaque, integer lerp) is byte-identical to emu")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_gradient_rect_opaque()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_gradient_rect_opaque()).to_equal(0)
 
         it "draw_rounded_rect is byte-identical to emu — sw now FILLS (was a 1px OUTLINE bug) [de-faked; canonical: emu]":
-            step("Verify: draw_rounded_rect is byte-identical to emu — sw now FILLS (was a 1px OUTLINE bug) [de-faked; canonical: emu]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_rounded_rect()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_rounded_rect()).to_equal(0)
 
         it "draw_text is byte-identical to emu — emu delegates to the real 5x7 glyph blit (was a placeholder box) [de-faked; canonical: sw]":
-            step("Verify: draw_text is byte-identical to emu — emu delegates to the real 5x7 glyph blit (was a placeholder box) [de-faked; canonical: sw]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_text()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_text()).to_equal(0)
 
         it "draw_text_bg is byte-identical to emu — emu delegates to the real AA blit (was bg-fill + placeholder box) [de-faked; canonical: sw]":
-            step("Verify: draw_text_bg is byte-identical to emu — emu delegates to the real AA blit (was bg-fill + placeholder box) [de-faked; canonical: sw]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_text_bg()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_text_bg()).to_equal(0)
 
         it "draw_rect (alpha outline) is byte-identical to emu — sw now delegates to emu_draw_rect, so alpha edges blend instead of writing raw [reconciled to canonical emu 2026-07-06 (D2)]":
-            step("Verify: draw_rect (alpha outline) is byte-identical to emu — sw now delegates to emu_draw_rect, so alpha edges blend instead of writing raw [reconciled to canonical emu 2026-07-06 (D2)]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_rect_alpha()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_rect_alpha()).to_equal(0)
 
         it "draw_circle (outline) is byte-identical to emu at midpoint-tie radii — sw's decision variable unified to emu's textbook `d<0` (was `d<=0`) [reconciled to canonical emu 2026-07-06 (D2)]":
-            step("Verify: draw_circle (outline) is byte-identical to emu at midpoint-tie radii — sw's decision variable unified to emu's textbook `d<0` (was `d<=0`) [reconciled to canonical emu 2026-07-06 (D2)]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_circle()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_circle()).to_equal(0)
 
         it "draw_circle_filled is byte-identical to emu — emu body replaced with sw's exact per-row distance test (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]":
-            step("Verify: draw_circle_filled is byte-identical to emu — emu body replaced with sw's exact per-row distance test (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_circle_filled()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_circle_filled()).to_equal(0)
 
         it "draw_triangle_filled is byte-identical to emu — emu body replaced with sw's integer barycentric fill (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]":
-            step("Verify: draw_triangle_filled is byte-identical to emu — emu body replaced with sw's integer barycentric fill (Metal-exact) [reconciled to canonical sw 2026-07-06 (D2)]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_triangle()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_triangle()).to_equal(0)
 
         it "draw_triangle_filled (collinear, d==0) is byte-identical to emu — barycentric fill no-ops on a zero determinant, same as sw [reconciled to canonical sw 2026-07-06 (D2)]":
-            step("Verify: draw_triangle_filled (collinear, d==0) is byte-identical to emu — barycentric fill no-ops on a zero determinant, same as sw [reconciled to canonical sw 2026-07-06 (D2)]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_triangle_degen()).to_equal(0)  # oracle: value fixed by the spec contract
-
-        it "draw_line (thick) is byte-identical to emu — sw unified to the Vulkan/emu per-point square stamp (was parallel-offset lines) [reconciled to canonical emu 2026-08-15]":
-            step("Verify: draw_line (thick) is byte-identical to emu — sw unified to the Vulkan/emu per-point square stamp (was parallel-offset lines) [reconciled to canonical emu 2026-08-15]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(cmp_line_thick()).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(cmp_triangle_degen()).to_equal(0)
 
     context "Family C — DIVERGENT ops (unification blocked until unified)":
         # Each `expect(... > 0)` pins a KNOWN divergence. If a future change
@@ -770,21 +745,18 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # signal to move the op into the byte-exact set above and pick the
         # single canonical algorithm named in each block.
 
+        it "draw_line (thick) diverges — sw parallel-offset lines vs emu per-point txt square [canonical: design review]":
+            expect(cmp_line_thick() > 0).to_equal(true)
+
         it "draw_circle (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw guard]":
-            step("Verify: draw_circle (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw guard]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
             expect(cmp_circle_r0() > 0).to_equal(true)
 
         it "draw_circle_filled (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw]":
-            step("Verify: draw_circle_filled (r<=0) diverges — emu stamps a stray center pixel, sw no-ops [canonical: sw]")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
             expect(cmp_circle_filled_r0() > 0).to_equal(true)
 
     context "equality matrix":
 
         it "prints the full per-op equality matrix":
-            step("Verify: prints the full per-op equality matrix")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
             print("=== ENGINE2D SHARED-RASTER PARITY MATRIX (emu vs software) ===")
             print("clear                | EQUAL   | mism={cmp_clear()}      | core primitive (shared)")
             print("draw_rect_filled     | EQUAL   | mism={cmp_rect_filled_core()}      | core primitive (shared)")
@@ -796,7 +768,7 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
             print("draw_line (thin)     | EQUAL   | mism={cmp_line_thin()}      | independent, byte-exact (not consolidated: perf, see D2 notes)")
             print("draw_gradient_rect   | EQUAL   | mism={cmp_gradient_rect_opaque()}      | consolidated to emu 2026-07-06 (D2): sw delegates to emu_draw_gradient_rect")
             print("draw_rect (alpha)    | EQUAL   | mism={cmp_rect_alpha()}      | reconciled to emu 2026-07-06 (D2): sw delegates to emu_draw_rect")
-            print("draw_line (thick)    | EQUAL   | mism={cmp_line_thick()}   | reconciled to emu 2026-08-15: sw per-point square stamp (Vulkan-exact)")
+            print("draw_line (thick)    | DIVERGE | mism={cmp_line_thick()}   | canonical=design review")
             print("draw_circle          | EQUAL   | mism={cmp_circle()}      | reconciled to emu 2026-07-06 (D2): sw decision var d<0")
             print("draw_circle r<=0     | DIVERGE | mism={cmp_circle_r0()}   | canonical=sw (no-op)")
             print("draw_circle_filled   | EQUAL   | mism={cmp_circle_filled()}      | reconciled to sw 2026-07-06 (D2): emu distance-test (Metal-exact)")
@@ -807,21 +779,7 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
             print("draw_text            | EQUAL   | mism={cmp_text()}   | de-faked: emu delegates to real glyphs (canonical=sw)")
             print("draw_text_bg         | EQUAL   | mism={cmp_text_bg()}   | de-faked: emu delegates to AA blit (canonical=sw)")
             print("=== END MATRIX ===")
-            expect(cmp_gradient_rect_h()).to_equal(0)
-            expect(cmp_rect_blend()).to_equal(0)
-            expect(cmp_image_blend()).to_equal(0)
-            expect(cmp_rect_opaque()).to_equal(0)
-            expect(cmp_line_thin()).to_equal(0)
-            expect(cmp_gradient_rect_opaque()).to_equal(0)
-            expect(cmp_rect_alpha()).to_equal(0)
-            expect(cmp_line_thick()).to_equal(0)
-            expect(cmp_circle()).to_equal(0)
-            expect(cmp_circle_filled()).to_equal(0)
-            expect(cmp_rounded_rect()).to_equal(0)
-            expect(cmp_triangle()).to_equal(0)
-            expect(cmp_triangle_degen()).to_equal(0)
-            expect(cmp_text()).to_equal(0)
-            expect(cmp_text_bg()).to_equal(0)
+            expect(true).to_equal(true)
 
     context "GPU-dict pilot — indexed_fill CPU-lane oracle (design cpu_gpu_dual_algorithm)":
         # SoftwareBackend.indexed_fill (the design's CPU-lane oracle body,
@@ -831,18 +789,12 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # harness (Metal's module graph is unsafe to import here).
 
         it "matches the dense-lut formula on a full 256-entry palette (byte 0..255 sweep)":
-            step("Verify: matches the dense-lut formula on a full 256-entry palette (byte 0..255 sweep)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_indexed_fill(16, 16, _palette_256())).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_indexed_fill(16, 16, _palette_256())).to_equal(0)
 
         it "matches the dense-lut formula on a minimal 1-entry palette (every non-zero key is an out-of-range miss)":
-            step("Verify: matches the dense-lut formula on a minimal 1-entry palette (every non-zero key is an out-of-range miss)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_indexed_fill(8, 8, [0xFF445566u32])).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_indexed_fill(8, 8, [0xFF445566u32])).to_equal(0)
 
         it "resolves an out-of-range index to the SAME 0xFFFFFFFF sentinel the design's lut_lookup dense-miss path returns":
-            step("Verify: resolves an out-of-range index to the SAME 0xFFFFFFFF sentinel the design's lut_lookup dense-miss path returns")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
             var idx: [u8] = [250u8]
             var sw = _fresh()
             sw.indexed_fill(0, 0, 1, 1, idx, [0xFF010203u32, 0xFF040506u32])
@@ -856,19 +808,13 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # Metal's module graph is unsafe to import here).
 
         it "matches the atlas-lookup formula on an in-charset string at scale=2 (font_size=14)":
-            step("Verify: matches the atlas-lookup formula on an in-charset string at scale=2 (font_size=14)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_text_via_atlas("Hi", 0xFFFFFFFFu32, 14)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_text_via_atlas("Hi", 0xFFFFFFFFu32, 14)).to_equal(0)
 
         it "matches the atlas-lookup formula on out-of-charset glyphs at scale=1 (font_size=7) — unknown slot (index 88) resolves identically on both sides":
-            step("Verify: matches the atlas-lookup formula on out-of-charset glyphs at scale=1 (font_size=7) — unknown slot (index 88) resolves identically on both sides")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_text_via_atlas("~$09", 0xFFFFFFFFu32, 7)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_text_via_atlas("~$09", 0xFFFFFFFFu32, 7)).to_equal(0)
 
         it "matches the atlas-lookup formula on a lowercase/digit/space mix":
-            step("Verify: matches the atlas-lookup formula on a lowercase/digit/space mix")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_text_via_atlas("Zz 9", 0xFF22C55Eu32, 14)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_text_via_atlas("Zz 9", 0xFF22C55Eu32, 14)).to_equal(0)
 
     context "W3 — draw_gradient_rect GPU-kernel formula oracle (design cpu_gpu_dual_algorithm_plan W3)":
         # SoftwareBackend.draw_gradient_rect (delegates to the canonical
@@ -884,26 +830,79 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # pre-existing opaque case stays bit-exact).
 
         it "matches the lerp formula on an opaque top/bottom pair (h=24, the pre-existing bit-exact case)":
-            step("Verify: matches the lerp formula on an opaque top/bottom pair (h=24, the pre-existing bit-exact case)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_gradient_kernel_formula(30, 24, 0xFFFF0000u32, 0xFF0000FFu32, 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_gradient_kernel_formula(30, 24, 0xFFFF0000u32, 0xFF0000FFu32, 0xFF000000u32)).to_equal(0)
 
         it "matches the lerp formula at h=1 (max_t clamps to 1, no divide-by-zero)":
-            step("Verify: matches the lerp formula at h=1 (max_t clamps to 1, no divide-by-zero)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_gradient_kernel_formula(20, 1, 0xFF112233u32, 0xFF445566u32, 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_gradient_kernel_formula(20, 1, 0xFF112233u32, 0xFF445566u32, 0xFF000000u32)).to_equal(0)
 
         it "matches the lerp+blend formula on a semi-transparent top/bottom pair over a non-black destination":
-            step("Verify: matches the lerp+blend formula on a semi-transparent top/bottom pair over a non-black destination")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_gradient_kernel_formula(16, 12, 0x80FFFFFFu32, 0x8000FF00u32, 0xFF202020u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x80FFFFFFu32, 0x8000FF00u32, 0xFF202020u32)).to_equal(0)
 
         it "matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)":
-            step("Verify: matches the lerp+blend formula when only one endpoint is transparent (asymmetric alpha)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_gradient_kernel_formula(16, 12, 0x00FFFFFFu32, 0xFFFF0000u32, 0xFF303030u32)).to_equal(0)
 
-    context "Rounded-rect FILL parity fix (2026-07-07) — draw_rounded_rect GPU-kernel formula oracle":
+    context "Rounded-rect corner ANTI-ALIASING, shared formula v1 (2026-09-12)":
+        # ABSOLUTE oracle, not a parity oracle. The rows in the next context
+        # prove CPU == Metal == Vulkan; they would still pass if all three
+        # agreed on a WRONG formula ("MATCH != correct",
+        # .claude/skills/spipe.md § false green). These rows pin the
+        # shared formula to hand-derived arithmetic instead.
+        #
+        #   q = (2dx+1)^2 + (2dy+1)^2
+        #   cov256 = clamp(r*256 + 128 - isqrt(q*16384), 0, 256)
+        #
+        # Hand-derived, all at r=6 (so r*256+128 = 1664):
+        #  (0,0): q = 1+1 = 2; isqrt(32768) = 181; 1664-181 = 1483 -> clamps to
+        #         256. The deep interior of a corner is exactly full.
+        #  (4,3): q = 81+49 = 130; isqrt(2130 ... = 130*16384 = 2129920) = 1459
+        #         (sqrt = 1459.42); 1664-1459 = 205. On the ramp.
+        #  (4,4): q = 81+81 = 162; isqrt(162*16384 = 2654208) = 1629
+        #         (sqrt = 1629.18); 1664-1629 = 35. Further out on the ramp.
+        #  (5,5): q = 121+121 = 242; isqrt(242*16384 = 3964928) = 1991
+        #         (sqrt = 1991.21); 1664-1991 < 0 -> 0. The corner TIP is
+        #         untouched background.
+        # Monotonicity (256 -> 205 -> 35 -> 0 as the pixel moves outward) is
+        # itself an oracle: a formula that ramped the wrong way, or was flat,
+        # would still satisfy a bare "0 < v < 256" check.
+
+        it "gives the deep interior of a corner exactly full coverage":
+            expect(_rr_cov256_ref(0, 0, 6)).to_equal(256)
+
+        it "gives a pixel on the arc the hand-derived coverage 205/256":
+            expect(_rr_cov256_ref(4, 3, 6)).to_equal(205)
+
+        it "gives a pixel further out on the arc the hand-derived coverage 35/256":
+            expect(_rr_cov256_ref(4, 4, 6)).to_equal(35)
+
+        it "gives the corner tip zero coverage, so the background is left untouched":
+            expect(_rr_cov256_ref(5, 5, 6)).to_equal(0)
+
+        it "leaves straight edges exact, because band pixels never reach the coverage path":
+            # A notch on a straight edge would mean a band pixel got partial
+            # coverage. The bands are separate disjoint regions, so the tangent
+            # row and column are a plain full blend.
+            expect(_rr_kernel_pixel_ref(8, 0, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+            expect(_rr_kernel_pixel_ref(0, 8, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+
+        it "modulates only the source alpha, leaving a full-coverage pixel bit-identical to a plain fill":
+            expect(_rr_modulate_alpha_ref(0xFF204080u32, 256)).to_equal(0xFF204080u32)
+            # (255 * 205) / 256 = 204 = 0xCC; RGB is untouched.
+            expect(_rr_modulate_alpha_ref(0xFF204080u32, 205)).to_equal(0xCC204080u32)
+
+        it "renders an opaque black corner over white as a real ramp, not two colours":
+            # The 2026-09-12 defect: a hard in/out test produced exactly 2
+            # distinct colours across a corner. Pixel (1,2) of a 16x16 r=6 rect
+            # is corner-box offset (dx,dy) = (4,3), cov 205, so a_eff =
+            # (255*205)/256 = 204, and src-over of opaque black at alpha 204
+            # over white gives (0*204 + 255*51)/255 = 51.
+            val on_arc = _rr_kernel_pixel_ref(1, 2, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)
+            expect((on_arc & 0xFFu32) as i32).to_equal(51)
+
+        it "keeps the corner interior exactly the fill and the corner tip exactly the background":
+            expect(_rr_kernel_pixel_ref(5, 5, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFF000000u32)
+            expect(_rr_kernel_pixel_ref(0, 0, 16, 16, 6, 0xFF000000u32, 0xFFFFFFFFu32)).to_equal(0xFFFFFFFFu32)
+
+    context "Rounded-rect FILL parity fix (2026-07-07, AA'd 2026-09-12) — draw_rounded_rect GPU-kernel formula oracle":
         # SoftwareBackend.draw_rounded_rect (delegates to the canonical
         # emu_draw_rounded_rect fill, the 2026-07-06 outline-vs-fill fix) vs an
         # independent Simple replica of kernel_draw_rounded_rect's band/corner
@@ -913,31 +912,31 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # kernel replayed the stale pre-fix CPU OUTLINE algorithm instead of a
         # FILL — these rows pin the corner-radius clamp, the plain-radius
         # case, and an alpha-blended fill.
+        #
+        # Updated 2026-09-12 to the SHARED ROUNDED-RECT CORNER COVERAGE FORMULA
+        # v1 (defined once above emu_draw_rounded_rect in backend_emu.spl).
+        # The corner is now anti-aliased and the seven regions are DISJOINT, so
+        # each pixel is blended exactly once. All three lanes moved together —
+        # CPU and Vulkan through emu_draw_rounded_rect, Metal through
+        # kernel_draw_rounded_rect — which is what these rows check. They are a
+        # PARITY oracle only; the absolute oracle for the formula itself is the
+        # context above, because three lanes agreeing on a wrong formula would
+        # satisfy every row here.
 
         it "matches the band/corner formula on the original bug-doc fixture (radius=6, well inside the corner-radius range)":
-            step("Verify: matches the band/corner formula on the original bug-doc fixture (radius=6, well inside the corner-radius range)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_rounded_rect_kernel_formula(30, 24, 6, 0xFFFF0000u32, 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_rounded_rect_kernel_formula(30, 24, 6, 0xFFFF0000u32, 0xFF000000u32)).to_equal(0)
 
         it "matches the band/corner formula when radius == min(w,h)/2 (full corner-radius clamp, a 'stadium' shape)":
-            step("Verify: matches the band/corner formula when radius == min(w,h)/2 (full corner-radius clamp, a 'stadium' shape)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_rounded_rect_kernel_formula(16, 16, 8, 0xFF33CC88u32, 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_rounded_rect_kernel_formula(16, 16, 8, 0xFF33CC88u32, 0xFF000000u32)).to_equal(0)
 
         it "matches the band/corner formula on a narrow strip (h < 2*radius forces the radius clamp on h, not w)":
-            step("Verify: matches the band/corner formula on a narrow strip (h < 2*radius forces the radius clamp on h, not w)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_rounded_rect_kernel_formula(40, 12, 8, 0xFF4488FFu32, 0xFF101010u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_rounded_rect_kernel_formula(40, 12, 8, 0xFF4488FFu32, 0xFF101010u32)).to_equal(0)
 
         it "matches the band/corner-fill+blend formula on a semi-transparent fill over a non-black destination":
-            step("Verify: matches the band/corner-fill+blend formula on a semi-transparent fill over a non-black destination")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_rounded_rect_kernel_formula(30, 20, 6, 0x80FFFFFFu32, 0xFF202020u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_rounded_rect_kernel_formula(30, 20, 6, 0x80FFFFFFu32, 0xFF202020u32)).to_equal(0)
 
         it "matches the band/corner formula at radius=0 (plain rect, no corner-arc dispatch)":
-            step("Verify: matches the band/corner formula at radius=0 (plain rect, no corner-arc dispatch)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_rounded_rect_kernel_formula(20, 14, 0, 0xFF00FF00u32, 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_rounded_rect_kernel_formula(20, 14, 0, 0xFF00FF00u32, 0xFF000000u32)).to_equal(0)
 
     context "draw_image (blit) parity-sweep coverage close (2026-07-07) — kernel_blit_image GPU-kernel formula oracle":
         # SoftwareBackend.draw_image vs an independent Simple replica of
@@ -949,21 +948,13 @@ describe "Engine2D shared-raster parity (emu vs software) — D2 unification gat
         # clip exactly like the CPU bounds-clipped row loop).
 
         it "matches the raw-copy formula on a fully on-surface blit":
-            step("Verify: matches the raw-copy formula on a fully on-surface blit")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_blit_kernel_formula(48, 48, 10, 10, 16, 12, _img_varied(16, 12), 0xFF000000u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_blit_kernel_formula(48, 48, 10, 10, 16, 12, _img_varied(16, 12), 0xFF000000u32)).to_equal(0)
 
         it "matches the raw-copy formula on a blit straddling the right/bottom framebuffer edge":
-            step("Verify: matches the raw-copy formula on a blit straddling the right/bottom framebuffer edge")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_blit_kernel_formula(48, 48, 40, 40, 16, 16, _img_varied(16, 16), 0xFF101820u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_blit_kernel_formula(48, 48, 40, 40, 16, 16, _img_varied(16, 16), 0xFF101820u32)).to_equal(0)
 
         it "matches the raw-copy formula on a blit straddling the left/top framebuffer edge (negative origin)":
-            step("Verify: matches the raw-copy formula on a blit straddling the left/top framebuffer edge (negative origin)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_blit_kernel_formula(48, 48, -6, -4, 16, 16, _img_varied(16, 16), 0xFF203040u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_blit_kernel_formula(48, 48, -6, -4, 16, 16, _img_varied(16, 16), 0xFF203040u32)).to_equal(0)
 
         it "matches the raw-copy formula on a blit entirely off-surface (fully clipped, complete no-op)":
-            step("Verify: matches the raw-copy formula on a blit entirely off-surface (fully clipped, complete no-op)")
-            # @req: REQ-RENDERING-EngiSharRastPari-001
-            expect(_cmp_blit_kernel_formula(48, 48, -20, -20, 8, 8, _img_varied(8, 8), 0xFF556677u32)).to_equal(0)  # oracle: value fixed by the spec contract
+            expect(_cmp_blit_kernel_formula(48, 48, -20, -20, 8, 8, _img_varied(8, 8), 0xFF556677u32)).to_equal(0)

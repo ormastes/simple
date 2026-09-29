@@ -14,6 +14,15 @@ mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
 mod linker;
+mod linker_env;
+/// Re-exported so `tests/simple_linker_preference.rs` can pin the
+/// `SIMPLE_LINKER` alias contract. The crate's `--lib` test target does not
+/// compile at present (three pre-existing errors in
+/// `interpreter_extern/wsffi.rs`, `interpreter_extern/mod.rs` and
+/// `native_project/tests.rs`), so a `#[cfg(test)]` module here would be a
+/// check that can never run. An integration test builds the crate without
+/// `cfg(test)` and therefore does run.
+pub use linker::linker_alias;
 mod imports;
 mod mangle;
 mod module_global_init;
@@ -42,6 +51,146 @@ use simple_parser::Parser;
 use crate::optimizations::NativeOptimizationLevel;
 use crate::security::build_security_inventory;
 use crate::stdlib_variant::active_simd_tier_name;
+
+/// Lift the Windows 260-character `MAX_PATH` limit for a filesystem path.
+///
+/// The native-incremental object cache nests several content-hash segments
+/// (`compiler-tools/<phase>/<64-hex snapshot>/<64-hex runtime-identity>/
+/// full-cli/objects/<16-hex>.o`), and a caller-supplied `--cache-dir` under a
+/// long checkout root routinely pushes the final object path past 260
+/// characters. Every ordinary Win32 file API (and `std::fs` on top of it)
+/// enforces that limit unless the path uses the "verbatim" / extended-length
+/// form `\\?\C:\...`, which also disables `.`/`..` and short-name
+/// normalization — safe here because every path built under a cache
+/// directory is already absolute and made only of literal hash/name
+/// segments. Idempotent; a relative path is first resolved against the
+/// current directory; a no-op on non-Windows targets, where the limit does
+/// not exist.
+///
+/// See `doc/08_tracking/bug/windows_native_incremental_cache_persist_path_too_long_2026-09-24.md`.
+#[cfg(windows)]
+pub(crate) fn win_long_path(path: &Path) -> PathBuf {
+    if path.as_os_str().to_string_lossy().starts_with(r"\\?\") {
+        return path.to_path_buf();
+    }
+    // A verbatim prefix is only valid on a fully qualified path; `\\?\` in
+    // front of a relative (`.simple\...`) or drive-relative (`\x`) path names
+    // nothing. Resolve such input against the current directory first
+    // (GetFullPathNameW) and leave it untouched if that fails.
+    let absolute;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        match std::path::absolute(path) {
+            Ok(resolved) => {
+                absolute = resolved;
+                absolute.as_path()
+            }
+            Err(_) => return path.to_path_buf(),
+        }
+    };
+    let raw = path.as_os_str().to_string_lossy();
+    // The verbatim form is NOT normalized by Win32 the way an ordinary path
+    // is: a forward slash inside it is a literal (invalid) filename
+    // character, not a separator, and the API rejects the whole path
+    // (ERROR_INVALID_NAME) instead of coping. Mixed separators are common
+    // here even though every segment we join is backslash-joined, because
+    // the base can arrive with forward slashes already baked in as literal
+    // bytes of one component — a `--cache-dir` argument built by a shell
+    // script (`D:/wk.../cache`), or this crate's own default
+    // `project_root.join(".simple/native_cache")`, whose `.join` call adds
+    // one real separator but does not rewrite the `/` already inside the
+    // literal `".simple/native_cache"` argument. Normalize before deciding
+    // whether the path is absolute or UNC, and before prefixing it.
+    let raw = raw.replace('/', r"\");
+    if let Some(rest) = raw.strip_prefix(r"\\") {
+        // UNC path: `\\server\share\...` -> `\\?\UNC\server\share\...`.
+        return PathBuf::from(format!(r"\\?\UNC\{rest}"));
+    }
+    PathBuf::from(format!(r"\\?\{raw}"))
+}
+
+#[cfg(not(windows))]
+pub(crate) fn win_long_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(test)]
+mod win_long_path_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn prefixes_a_long_absolute_drive_path() {
+        let long = PathBuf::from(r"D:\wk\.simple\storage\build\bootstrap\compiler-tools\objects\deadbeefcafef00d.o");
+        let out = win_long_path(&long);
+        assert_eq!(out, PathBuf::from(format!(r"\\?\{}", long.display())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn is_idempotent_on_an_already_verbatim_path() {
+        let verbatim = PathBuf::from(r"\\?\D:\wk\objects\abc.o");
+        assert_eq!(win_long_path(&verbatim), verbatim);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prefixes_unc_paths_with_the_verbatim_unc_form() {
+        let unc = PathBuf::from(r"\\build-server\share\objects\abc.o");
+        assert_eq!(win_long_path(&unc), PathBuf::from(r"\\?\UNC\build-server\share\objects\abc.o"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolutizes_a_relative_path_before_prefixing() {
+        // Never `\\?\` + a relative path: that names nothing to any Win32 API.
+        let relative = PathBuf::from(".simple/storage/objects/abc.o");
+        let expected = std::env::current_dir().unwrap().join(r".simple\storage\objects\abc.o");
+        let out = win_long_path(&relative);
+        assert_eq!(out, PathBuf::from(format!(r"\\?\{}", expected.display())));
+        assert!(!out.to_string_lossy().starts_with(r"\\?\."));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn external_tool_path_undoes_the_verbatim_prefix() {
+        // llvm-nm rejects `\\?\` paths; tools must get the plain spelling.
+        use super::tools::external_tool_path;
+        let plain = PathBuf::from(r"D:\wk\cache\objects\abc.o");
+        assert_eq!(external_tool_path(win_long_path(&plain)), plain);
+        let unc = PathBuf::from(r"\\build-server\share\objects\abc.o");
+        assert_eq!(external_tool_path(win_long_path(&unc)), unc);
+        assert_eq!(external_tool_path(&plain), plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalizes_embedded_forward_slashes_before_prefixing() {
+        // Reproduces this crate's own default cache base: `project_root.join(
+        // ".simple/native_cache")` leaves the literal `/` inside the joined
+        // component untouched, so the resulting path mixes separators
+        // (`C:\repo\.simple/native_cache`). A verbatim path containing `/` is
+        // rejected outright by Win32 (ERROR_INVALID_NAME) instead of being
+        // normalized, so this must come out all-backslash.
+        let mixed = PathBuf::from("C:/repo").join(".simple/native_cache");
+        assert_eq!(mixed.display().to_string(), r"C:/repo\.simple/native_cache");
+        let out = win_long_path(&mixed);
+        assert_eq!(out, PathBuf::from(r"\\?\C:\repo\.simple\native_cache"));
+        assert!(
+            !out.to_string_lossy().contains('/'),
+            "verbatim path must not contain a forward slash: {}",
+            out.display()
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn is_a_no_op_off_windows() {
+        let any = PathBuf::from("/tmp/wk/.simple/storage/build/bootstrap/compiler-tools/objects/deadbeefcafef00d.o");
+        assert_eq!(win_long_path(&any), any);
+    }
+}
 
 pub(crate) fn native_project_rust_trace_enabled() -> bool {
     matches!(
@@ -230,6 +379,7 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
                 out.push(c);
                 if out.is_symlink() {
                     if let Ok(target) = std::fs::read_link(&out) {
+                        let target = normalize_unix_style_target(target);
                         if target.is_absolute() {
                             out = target;
                         } else {
@@ -242,6 +392,49 @@ pub(crate) fn safe_canonicalize(path: &Path) -> PathBuf {
         }
     }
     out
+}
+
+/// Git-Bash/MSYS/Cygwin `ln -s` writes symlink targets in Unix form
+/// (`/c/Users/...` or `/cygdrive/c/Users/...`). Windows `Path::is_absolute`
+/// rejects those (no drive prefix), so safe_canonicalize used to push them as
+/// relative components and produced a nonexistent path — which made
+/// `deduplicate_for_compilation` keep every aliased source file twice (e.g.
+/// `src/compiler/frontend` and `src/compiler/10.frontend`), and HIR then
+/// rejected the dual-loaded modules with "invalid export origin". Translate
+/// the leading `/X/` (or `/cygdrive/X/`) into `X:/` so dedup keys match.
+#[cfg(windows)]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    let s = target.to_string_lossy().replace('\\', "/");
+    let mut rest: Option<&str> = None;
+    let mut drive: Option<char> = None;
+    if let Some(tail) = s.strip_prefix("/cygdrive/") {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    } else if let Some(tail) = s.strip_prefix('/') {
+        let mut chars = tail.chars();
+        if let Some(d) = chars.next() {
+            if chars.next() == Some('/') {
+                drive = Some(d);
+                rest = Some(chars.as_str());
+            }
+        }
+    }
+    match (drive, rest) {
+        (Some(d), Some(r)) if d.is_ascii_alphabetic() => {
+            PathBuf::from(format!("{}:/{}", d.to_ascii_uppercase(), r))
+        }
+        _ => target,
+    }
+}
+
+#[cfg(not(windows))]
+fn normalize_unix_style_target(target: PathBuf) -> PathBuf {
+    target
 }
 
 /// CLI-provided runtime library directory override.
@@ -439,13 +632,19 @@ pub struct NativeBuildConfig {
     pub low_memory: bool,
 }
 
+/// Per-file budget shared by every native-build entrypoint.
+///
+/// Export-heavy compiler facades are deliberately compiled before parallel
+/// fanout, but still need more than 60 seconds when their cache entry is cold.
+pub const DEFAULT_NATIVE_FILE_TIMEOUT_SECS: u64 = 300;
+
 impl Default for NativeBuildConfig {
     fn default() -> Self {
         Self {
             // Large legitimate files (3000+-line controllers, big re-export hubs)
             // need more than 60s for full parse->lowering->codegen; they compile
             // fine, just slowly. Raised to avoid spurious bootstrap aborts.
-            file_timeout: 300,
+            file_timeout: DEFAULT_NATIVE_FILE_TIMEOUT_SECS,
             stack_size: 16 * 1024 * 1024,
             parallel: true,
             strip: false,
@@ -589,10 +788,16 @@ impl NativeProjectBuilder {
 
     /// Resolve the configured cache root before target isolation.
     pub(crate) fn cache_base_dir(&self) -> PathBuf {
-        self.config
+        let base = self
+            .config
             .cache_dir
             .clone()
-            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"))
+            .unwrap_or_else(|| self.project_root.join(".simple/native_cache"));
+        // Applied at the root of the cache path, not at each join site, so
+        // every path built from it (objects dir, per-module cache files, the
+        // incremental manifest, the staging tempdir) inherits the
+        // extended-length form automatically.
+        win_long_path(&base)
     }
 
     /// Resolve the effective cache directory, including a cross-target triple.
@@ -724,6 +929,7 @@ impl NativeProjectBuilder {
         }
 
         // 1. Discover files
+        let step_start = Instant::now();
         let (files, file_sources) = if self.config.entry_closure {
             let entry_file = self
                 .entry_file
@@ -780,7 +986,11 @@ impl NativeProjectBuilder {
         }
 
         if rust_trace {
-            eprintln!("[native-rust-trace] discovered {} file(s)", files.len());
+            eprintln!(
+                "[native-rust-trace] step 1 discover: {} file(s) in {:.3}s",
+                files.len(),
+                step_start.elapsed().as_secs_f64()
+            );
             for (idx, path) in files.iter().take(12).enumerate() {
                 eprintln!("  discovered[{idx}]={}", path.display());
             }
@@ -788,11 +998,21 @@ impl NativeProjectBuilder {
                 eprintln!("  discovered_more={}", files.len() - 12);
             }
         }
+        if let Ok(list_path) = std::env::var("SIMPLE_DEBUG_DISCOVERY_LIST") {
+            // Full ordered discovery list, one path per line: discovery order
+            // feeds cache keys and link order, so this is the artifact to diff
+            // when touching the discovery walk.
+            let listing: String = files.iter().map(|p| format!("{}\n", p.display())).collect();
+            if let Err(e) = std::fs::write(&list_path, listing) {
+                eprintln!("warning: could not write SIMPLE_DEBUG_DISCOVERY_LIST {list_path}: {e}");
+            }
+        }
         if self.config.verbose {
             eprintln!("Found {0} .spl files", files.len());
         }
 
         // 2. Set up incremental state
+        let step_start = Instant::now();
         let cache_base_dir = self.cache_base_dir();
         let cache_dir = self.cache_dir();
         let objects_dir = cache_dir.join("objects");
@@ -812,15 +1032,31 @@ impl NativeProjectBuilder {
             std::fs::create_dir_all(&objects_dir).map_err(|e| format!("create cache dir: {e}"))?;
         }
 
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 2 incremental state: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+
         // 3. Stage .o files beside the cache so system-temp and cache cleanup cannot remove them.
+        let step_start = Instant::now();
         let mut temp_dir = Some(native_object_staging_dir(&cache_base_dir, &cache_dir)?);
         let temp_dir_path = temp_dir
             .as_ref()
             .map(|dir| dir.path().to_path_buf())
             .ok_or_else(|| "tempdir unexpectedly missing".to_string())?;
 
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 3 stage dir: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+
         // 4. Read all source files and determine dirty set
         let compile_start = Instant::now();
+        let step_start = Instant::now();
         // 4b. Discovery phase (hoisted above the dirty-set determination so the
         // opt-in safe-incremental object cache key can fold in every cross-module
         // codegen input): build the import map for cross-module function
@@ -829,6 +1065,12 @@ impl NativeProjectBuilder {
         let incr_hardening = incremental_hardening_requested(self.config.incremental_hardening);
         let mut layout_fp: u64 = 0;
         let result = build_import_map(&file_sources, &self.source_dirs, &self.source_root);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b build_import_map: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
         if let Some(collision) = &result.enum_runtime_collision {
             return Err(collision.clone());
         }
@@ -955,11 +1197,20 @@ impl NativeProjectBuilder {
             None
         };
         let global_fp_combined: u64 = global_fp.as_ref().map(GlobalBuildFingerprint::combined).unwrap_or(0);
+        if rust_trace {
+            eprintln!(
+                "[native-rust-trace] step 4b import map + fingerprint: {:.3}s",
+                step_start.elapsed().as_secs_f64()
+            );
+        }
+        let step_start = Instant::now();
 
         let effective_backend = self.config.backend.as_str();
 
         // Determine which files need recompilation via content hash
-        let mut to_compile: Vec<(usize, PathBuf, String, Option<PathBuf>)> = Vec::new();
+        // `Arc<str>` so the dirty-set shares source text with `file_sources`
+        // instead of cloning every module's source again.
+        let mut to_compile: Vec<(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
         if use_incremental {
@@ -1007,7 +1258,7 @@ impl NativeProjectBuilder {
                     // inline-asm sidecars remain excluded above.
                     immediate_cache = Some(cached_o);
                 }
-                to_compile.push((i, path.clone(), source.clone(), immediate_cache));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), immediate_cache));
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
@@ -1015,17 +1266,18 @@ impl NativeProjectBuilder {
                 if !compile_indices.contains(&i) {
                     continue;
                 }
-                to_compile.push((i, path.clone(), source.clone(), None));
+                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), None));
             }
         }
 
         let cached_count = cached_objects.len();
         if rust_trace {
             eprintln!(
-                "[native-rust-trace] dirty set: cached={} to_compile={} use_incremental={}",
+                "[native-rust-trace] step 4 dirty set: cached={} to_compile={} use_incremental={} in {:.3}s",
                 cached_count,
                 to_compile.len(),
-                use_incremental
+                use_incremental,
+                step_start.elapsed().as_secs_f64()
             );
             for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
@@ -1056,6 +1308,9 @@ impl NativeProjectBuilder {
             self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
         let compile_time = compile_start.elapsed();
+        if rust_trace {
+            eprintln!("[native-rust-trace] step 5 compile: {:.3}s", compile_time.as_secs_f64());
+        }
 
         // Collect results
         let mut object_paths_with_indices: Vec<(usize, PathBuf)> = cached_objects;
@@ -1077,6 +1332,26 @@ impl NativeProjectBuilder {
 
         let compiled = object_paths.len();
         let failed = failures.len();
+
+        // Always print compiled/reused/failed counts, unconditionally and on
+        // BOTH the success and failure paths — previously this only appeared
+        // with SIMPLE_NATIVE_INCREMENTAL=1 and after the failure early-return
+        // below, so a failed build never showed counts (see rebuild_separation
+        // measurement, gap G3). Print-only; no logic change.
+        // `compiled` (object_paths.len()) is cached ∪ freshly-compiled, so the
+        // "compiled" field here is freshly_compiled.len() specifically —
+        // reused=cached_count, compiled=freshly_compiled.len() do not overlap.
+        // `scope=` names the seed-keyed cache directory (cache_scope_segment())
+        // so the bootstrap script can tell which scope a run actually used,
+        // without recomputing the hash itself.
+        let native_build_scope_name = cache_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+        eprintln!(
+            "[native-build] compiled={} reused={cached_count} failed={failed} scope={native_build_scope_name}",
+            freshly_compiled.len()
+        );
 
         // Always log individual failures when present (bootstrap visibility).
         if failed > 0 {
@@ -1146,7 +1421,8 @@ impl NativeProjectBuilder {
         let link_start = Instant::now();
         let mut final_object_paths = object_paths;
         if self.config.emit_archive {
-            if let Some(init_o) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)? {
+            let (init_o, _init_names) = self.generate_init_caller(&temp_dir_path, &final_object_paths, None)?;
+            if let Some(init_o) = init_o {
                 final_object_paths.push(init_o);
             }
         }
@@ -1212,7 +1488,7 @@ impl NativeProjectBuilder {
             std::fs::remove_file(&self.output)
                 .map_err(|e| format!("remove existing archive {}: {e}", self.output.display()))?;
         }
-        let ar = find_archive_tool();
+        let ar = find_archive_tool()?;
         let output = archive_create_command(&ar, &self.output, object_paths, false, false)
             .output()
             .map_err(|e| format!("run archive tool {ar}: {e}"))?;
@@ -1236,31 +1512,38 @@ impl NativeProjectBuilder {
             return Ok(None);
         };
 
-        let cxx = tools::find_cxx_compiler();
-        let is_clang_cl = cxx.contains("clang-cl");
-        let escaped = cxx_raw_string_literal(&registry_sdn);
+        let target = effective_target();
+        let compiler = security_registry_c_source_compiler(target);
+        let is_clang_cl = compiler.contains("clang-cl");
+        let escaped = c_string_literal(&registry_sdn);
         let loader_decl = if is_clang_cl {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long);"#
         } else {
-            r#"extern "C" unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
+            r#"extern unsigned long long rt_security_load_registry_sdn(const unsigned char*, unsigned long long) __attribute__((weak));"#
         };
         let source = format!(
             r#"
+#ifdef __cplusplus
+extern "C" {{
+#endif
 {loader_decl}
-static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = R"SECURITY_SDN({escaped})SECURITY_SDN";
-extern "C" void __module_init_security_registry(void) {{
+static const unsigned char SIMPLE_SECURITY_REGISTRY_SDN[] = "{escaped}";
+void __module_init_security_registry(void) {{
     if (rt_security_load_registry_sdn) {{
         rt_security_load_registry_sdn(SIMPLE_SECURITY_REGISTRY_SDN, sizeof(SIMPLE_SECURITY_REGISTRY_SDN) - 1);
     }}
 }}
+#ifdef __cplusplus
+}}
+#endif
 "#
         );
-        let source_path = temp_dir.join("_security_registry_init.cpp");
+        let source_path = temp_dir.join("_security_registry_init.c");
         std::fs::write(&source_path, source).map_err(|e| format!("write security registry init: {e}"))?;
 
         let object_path = temp_dir.join("_security_registry_init.o");
         let status = if is_clang_cl {
-            std::process::Command::new(&cxx)
+            std::process::Command::new(&compiler)
                 .arg("/c")
                 .arg("/O2")
                 .arg("/Gy")
@@ -1269,15 +1552,19 @@ extern "C" void __module_init_security_registry(void) {{
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         } else {
-            std::process::Command::new(&cxx)
-                .args(["-c", "-O2", "-ffunction-sections", "-fdata-sections", "-o"])
+            let mut cmd = std::process::Command::new(&compiler);
+            cmd.args(["-c", "-O2", "-ffunction-sections", "-fdata-sections"]);
+            if let Some(flag) = tools::windows_gnu_target_flag(target, &compiler) {
+                cmd.arg(flag);
+            }
+            cmd.arg("-o")
                 .arg(&object_path)
                 .arg(&source_path)
                 .status()
                 .map_err(|e| format!("compile security registry init: {e}"))?
         };
         if !status.success() {
-            return Err(format!("compile security registry init failed ({})", cxx));
+            return Err(format!("compile security registry init failed ({})", compiler));
         }
         Ok(Some(object_path))
     }
@@ -1380,8 +1667,20 @@ fn source_may_declare_security(source: &str) -> bool {
     })
 }
 
-fn cxx_raw_string_literal(value: &str) -> String {
-    value.replace(")SECURITY_SDN\"", ")SECURITY_SDN_\"")
+fn c_string_literal(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n\"\n\"")
+}
+
+fn security_registry_c_source_compiler(target: simple_common::target::Target) -> String {
+    if target.os == simple_common::target::TargetOS::Windows {
+        tools::target_c_compiler(target)
+    } else {
+        tools::find_cxx_compiler()
+    }
 }
 
 /// Check if a file path matches the canonical entry file path.
@@ -1763,11 +2062,6 @@ pub(crate) fn collect_spl_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
                 out.push(path);
             }
         } else if path.extension().is_some_and(|e| e == "spl") {
-            if let Some(p) = path.to_str() {
-                if p.contains("check.spl") {
-                    continue;
-                }
-            }
             if path.is_file() {
                 out.push(path);
             }

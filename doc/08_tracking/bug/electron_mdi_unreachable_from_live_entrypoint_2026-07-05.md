@@ -1,7 +1,8 @@
 # Electron MDI windows unreachable from live entrypoint
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 Open.
@@ -22,3 +23,4 @@ Launch via documented path (`npm run desktop`), open any `.ui.sdn` file → sing
 
 ## Next Step
 Either route MDI-aware demo entry from bridge.js, or wire shared-WM support into the reachable `run_electron` path and remove the dead JS.
+

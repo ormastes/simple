@@ -1,4 +1,8 @@
 # Theme IPC K2 review hard stop
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/**
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 **Status:** open / fail-closed — re-verified against `origin/main` 2026-07-27,
 still live  
@@ -79,3 +83,4 @@ Start from current `origin/main` and retain landed K1:
 7. obtain independent highest-capability review before integration.
 
 Only after K2 lands may `ThemeChangedV1` receive a production OS transport.
+

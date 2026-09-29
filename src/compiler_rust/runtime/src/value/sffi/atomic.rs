@@ -74,7 +74,11 @@ pub extern "C" fn rt_atomic_bool_compare_exchange(handle: i64, current: bool, ne
     ATOMIC_BOOL_MAP
         .lock()
         .get(&handle)
-        .map(|atomic| atomic.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst).is_ok())
+        .map(|atomic| {
+            atomic
+                .compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        })
         .unwrap_or(false)
 }
 

@@ -192,3 +192,7 @@ underlying gap this document already tracks.
 - `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §7 (lanes U0–U3)
 - `.claude/rules/board-runnable.md`
 - `.spipe/simple-wm-host-simpleos-fullscreen/state.md` (tonight's rung-(c)/(d) work item; scope-exclusion language flagged above)
+
+## Triage 2026-09-13 (BUGFIX-7 lane)
+
+Out of lane: needs an integrated, board-runnable SimpleOS WM lane; this is a board-runnable-rule scope gap, not a bounded fix. No change made.

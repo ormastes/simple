@@ -1,0 +1,93 @@
+"""LinkRequestV1 is a plain KPF-headered struct (design §6.2, D8): the schema
+header gates identity/version exactly like every other KPF record, and the
+target/reproducibility fields get their own well-formedness checks."""
+
+use std.spec.*
+use std.common.kernel_plugin.ids.*
+use std.common.kernel_plugin.schema_header.*
+use std.common.linker.link_request_v1.*
+
+val REQUIREMENT = KpfSchemaRequirementV1(
+    schema_id: KpfId128(hi: 1, lo: 1),
+    schema_major: 1,
+    minimum_minor: 0,
+    minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+    schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0)
+)
+
+fn valid_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(
+        abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_id: KpfId128(hi: 1, lo: 1),
+        schema_major: 1,
+        schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+        reserved0: 0
+    )
+
+fn valid_target() -> LinkTargetV1:
+    LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 64)
+
+fn valid_request() -> LinkRequestV1:
+    LinkRequestV1(
+        header: valid_header(),
+        target: valid_target(),
+        inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+        output_contract: 1,
+        semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+        runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+        required_features: 0,
+        layout_handle: 0,
+        debug_handle: 0,
+        reproducibility: 1
+    )
+
+describe "LinkRequestV1":
+    it "accepts a well-formed request against its schema requirement":
+        # @req REQ-LINKER-A2-REQUEST
+        step("Validate a hand-built golden request")
+        expect(link_request_v1_validate(valid_request(), REQUIREMENT)).to_equal("")
+
+    it "rejects a request whose schema header does not satisfy the requirement":
+        step("Mismatch schema_major against the requirement")
+        val bad_header = KpfSchemaHeaderV1(
+            abi_version: KPF_ABI_VERSION_V1,
+            struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+            schema_id: KpfId128(hi: 1, lo: 1),
+            schema_major: 2,
+            schema_minor: 0,
+            schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0),
+            reserved0: 0
+        )
+        val request = LinkRequestV1(
+            header: bad_header, target: valid_target(),
+            inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+            output_contract: 1,
+            semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+            runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+            required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 0
+        )
+        expect(link_request_v1_validate(request, REQUIREMENT)).to_contain("schema header invalid")
+
+    it "rejects an address_width outside {32, 64}":
+        val request = LinkRequestV1(
+            header: valid_header(), target: LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 16),
+            inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+            output_contract: 1,
+            semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+            runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+            required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 0
+        )
+        expect(link_request_v1_validate(request, REQUIREMENT)).to_contain("address_width")
+
+    it "rejects a reproducibility flag outside {0, 1}":
+        val request = LinkRequestV1(
+            header: valid_header(), target: valid_target(),
+            inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+            output_contract: 1,
+            semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+            runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+            required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 2
+        )
+        expect(link_request_v1_validate(request, REQUIREMENT)).to_contain("reproducibility")

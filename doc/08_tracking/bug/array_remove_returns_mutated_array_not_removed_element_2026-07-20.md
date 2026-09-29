@@ -1,4 +1,8 @@
 # `array.remove(index)` returns the mutated array, not the removed element
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED IN SOURCE 2026-08-08 — both lanes. `.remove(index)` now returns
 the removed element and mutates in place on the interpreter AND the compiled
@@ -240,3 +244,4 @@ originally-RED examples were correct all along and were never weakened.
 
 **Not yet closed:** `bin/release/<triple>/simple` predates this fix, so the guard
 is red until the next seed redeploy.
+

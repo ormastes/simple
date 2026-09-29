@@ -1,0 +1,127 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MSYS*|MINGW*|CYGWIN*) ;;
+    *)
+        echo 'PASS: Windows LLVM 23 dynamic authority test skipped off Windows'
+        exit 0
+        ;;
+esac
+
+stage2_env_names=$(bootstrap_stage3_stage2_canonical_env_names \
+    x86_64-pc-windows-msvc)
+case " $stage2_env_names " in
+    *' LLVM_SYS_231_PREFIX '*) ;;
+    *) echo 'Stage 2 canonical environment omits LLVM_SYS_231_PREFIX' >&2; exit 1 ;;
+esac
+case " $stage2_env_names " in
+    *' LLVM_SYS_180_PREFIX '*)
+        echo 'Stage 2 canonical environment still admits LLVM_SYS_180_PREFIX' >&2
+        exit 1
+        ;;
+esac
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-llvm23-authority.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+fake_prefix="$tmp/llvm-23.1.1"
+fake_bin="$tmp/bin"
+static_query_marker="$tmp/static-query-ran"
+mkdir -p "$fake_prefix/bin" "$fake_prefix/lib" "$fake_bin"
+printf 'fixture LLVM-C import library\n' >"$fake_prefix/lib/LLVM-C.lib"
+printf 'fixture LLVM-C runtime DLL\n' >"$fake_prefix/bin/LLVM-C.dll"
+cat >"$fake_prefix/bin/clang-cl" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'clang version 23.1.1'
+EOF
+chmod 700 "$fake_prefix/bin/clang-cl"
+
+cat >"$fake_bin/llvm-config" <<EOF
+#!/bin/sh
+case "\$*" in
+    --version) printf '%s\n' '23.1.1' ;;
+    --prefix) printf '%s\n' '$fake_prefix' ;;
+    --libdir) printf '%s\n' '$fake_prefix/lib' ;;
+    '--link-static --libfiles')
+        : >'$static_query_marker'
+        printf '%s\n' 'S:/stale/build/lib/LLVMCore.lib'
+        ;;
+    '--link-static --system-libs')
+        : >'$static_query_marker'
+        printf '%s\n' 'psapi.lib S:/stale/build/zstd_static.lib'
+        ;;
+    *) exit 2 ;;
+esac
+EOF
+chmod 700 "$fake_bin/llvm-config"
+
+producer_path="$fake_bin:$PATH"
+authority=$(bootstrap_stage3_resolve_llvm_build_authority \
+    "$producer_path" '--features llvm')
+
+canonical_prefix=$(CDPATH= cd -- "$fake_prefix" && pwd -P)
+canonical_import=$(bootstrap_stage3_canonical_file \
+    "$fake_prefix/lib/LLVM-C.lib")
+canonical_runtime=$(bootstrap_stage3_canonical_file \
+    "$fake_prefix/bin/LLVM-C.dll")
+import_sha=$(bootstrap_stage3_hash_file "$canonical_import")
+runtime_sha=$(bootstrap_stage3_hash_file "$canonical_runtime")
+canonical_clang_cl=$(bootstrap_stage3_canonical_file \
+    "$fake_prefix/bin/clang-cl")
+clang_cl_sha=$(bootstrap_stage3_hash_file "$canonical_clang_cl")
+
+printf '%s\n' "$authority" | grep -Fqx 'llvm-build-status=enabled'
+printf '%s\n' "$authority" | grep -Fqx 'llvm-version=23.1.1'
+printf '%s\n' "$authority" | grep -Fqx 'llvm-major=23'
+printf '%s\n' "$authority" | grep -Fqx "llvm-prefix=$canonical_prefix"
+printf '%s\n' "$authority" | grep -Fqx 'llvm-link-kind=dynamic-c-api'
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-c-import-lib-path=$canonical_import"
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-c-import-lib-sha256=$import_sha"
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-c-runtime-dll-path=$canonical_runtime"
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-c-runtime-dll-sha256=$runtime_sha"
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-clang-cl-path=$canonical_clang_cl"
+printf '%s\n' "$authority" |
+    grep -Fqx "llvm-clang-cl-sha256=$clang_cl_sha"
+printf '%s\n' "$authority" | grep -Fqx 'llvm-clang-cl-version=23.1.1'
+printf '%s\n' "$authority" | grep -Fqx \
+    "llvm-config-path=$(bootstrap_stage3_canonical_file "$fake_bin/llvm-config")"
+[ ! -e "$static_query_marker" ]
+
+rm "$fake_prefix/lib/LLVM-C.lib"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$producer_path" '--features llvm' >/dev/null 2>&1; then
+    echo 'LLVM authority accepted a missing LLVM-C import library' >&2
+    exit 1
+fi
+printf 'fixture LLVM-C import library\n' >"$fake_prefix/lib/LLVM-C.lib"
+rm "$fake_prefix/bin/LLVM-C.dll"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$producer_path" '--features llvm' >/dev/null 2>&1; then
+    echo 'LLVM authority accepted a missing LLVM-C runtime DLL' >&2
+    exit 1
+fi
+printf 'fixture LLVM-C runtime DLL\n' >"$fake_prefix/bin/LLVM-C.dll"
+cat >"$fake_prefix/bin/clang-cl" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'clang version 22.1.0'
+EOF
+chmod 700 "$fake_prefix/bin/clang-cl"
+if bootstrap_stage3_resolve_llvm_build_authority \
+    "$producer_path" '--features llvm' >/dev/null 2>&1; then
+    echo 'LLVM authority accepted clang-cl outside version 23.1.1' >&2
+    exit 1
+fi
+
+echo 'PASS: Windows LLVM 23 authority binds packaged LLVM-C and clang-cl 23.1.1'

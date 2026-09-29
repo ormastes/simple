@@ -1,4 +1,8 @@
 # Bug: member-path stores silently lost inside BDD it-block closures
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-03
 **Severity:** Medium-High — silently no-ops writes, producing false test
@@ -8,8 +12,7 @@ directly inside an `it` block.
 `bin/release/x86_64-unknown-linux-gnu/simple`; same family as
 `interp_crossmodule_array_writeback_lost_in_bdd_closure_2026-06-29.md` and
 `interp_enum_arg_corruption_in_bdd_closure_2026-06-30.md`).
-Status: FIXED
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+**Status:** Source fixed; execution verification pending.
 **Found by:** rollball production spec lane (W6d event-handling gap check).
 
 ## Symptom
@@ -65,13 +68,3 @@ assignment/store path for closure frames so `obj.field[i]` / `obj.a.b`
 resolve the same object identity as in plain function frames. Add the four
 store shapes above as an interpreter regression spec.
 
-## Resolution (2026-07-15)
-
-The closure executors had two partial copies of plain-assignment dispatch that
-only handled field and index receivers when the receiver was a direct
-identifier. Both closure paths now delegate to the interpreter's canonical
-`exec_assignment`, which already owns nested field and member-index writeback.
-The clone-isolated BDD path retains its existing module-global write-through
-policy after shared assignment dispatch.
-The interpreter field-assignment spec covers all four store shapes directly
-inside `it` closures. Execution remains pending an authorized runtime test run.

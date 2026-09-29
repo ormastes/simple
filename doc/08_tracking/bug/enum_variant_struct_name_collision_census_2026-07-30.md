@@ -1,7 +1,8 @@
 # Census: enum-variant / struct-name bare-match collisions (repo-wide, ENUM1)
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-30
 Scope: `src/compiler/**` and `src/lib/**`
@@ -237,22 +238,3 @@ Not performed in this lane (per instructions): no struct/class renames, no
 `git`/`jj` operations, no `src/` edits. Only the throwaway
 `/tmp/claude-1000/enum1_probe.spl` was written.
 
-## RK1 cross-reference (2026-08-01)
-
-The root-cause site for this census's collision class, plus the refutation of
-the "re-key by `runtime_name` is cheap" plan, is recorded in
-`symbolkind_enum_match_fails_cross_module_discriminant_minus_one_2026-07-29.md`
-§ "RK1 update (2026-08-01)". Summary: **three** MIR maps are bare-keyed
-last-wins (`enum_variant_index`, `enum_variant_discriminants`, and
-`enum_runtime_id_index` — the last was wrongly believed to be namespace-aware),
-the interpreter's equivalent table is **first-wins**, and the reader answers a
-miss with a silent `-1`. No `src/` change was made: the deployed binary exposes
-no `test`/`lint`/`check` subcommand, so a change to enum lowering cannot be
-verified at this tip.
-
-**Correction (2026-08-01):** the RK1 section referenced above also carries a
-same-day `RK1 CORRECTION` retracting two false existence claims (the
-enumeration TSV and the `StyleMutation` rename **both do exist** at tip — they
-were missed by surveying a stale sparse working copy instead of `git grep
-<rev>`). The three-defective-maps root cause is unaffected and confirmed at
-tip. Read the correction section, not the original, for the read-site counts.

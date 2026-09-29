@@ -1,4 +1,9 @@
 # Parser: `//` comments are silently misparsed as code
+## Closed 2026-09-16 — source fixed 2026-07-15 in both parsers; Resolution section with focused lexer/parser specs
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Date:** 2026-07-04
 **Severity:** medium (silent; errors surface on the NEXT statement)
@@ -41,3 +46,4 @@ The Rust seed retains `//` as the valid infix Parallel operator. Its primary
 expression parser now rejects prefix/statement-position `//` at that token with
 the same `use # for comments` guidance, while the existing infix parse remains
 covered. A focused parser regression preserves the diagnostic.
+

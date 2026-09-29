@@ -78,11 +78,11 @@ expect(pool.pending_tasks()).to_equal(0)
 
 #### tracks submitted tasks in the pending queue
 
-- var pool = TestThreadPool new
-- pool submit
+1. var pool = TestThreadPool new
+2. pool submit
    - Expected: pool.pending_tasks() equals `1`
    - Expected: pool.is_idle() is false
-- pool shutdown now
+3. pool shutdown now
 
 
 <details>
@@ -103,13 +103,13 @@ pool.shutdown_now()
 
 #### queues batch submissions in order
 
-- var pool = TestThreadPool new
-- pool submit batch
+1. var pool = TestThreadPool new
+2. pool submit batch
    - Expected: pool.pending_tasks() equals `3`
    - Expected: pool.task_queue[0] equals `3`
    - Expected: pool.task_queue[1] equals `5`
    - Expected: pool.task_queue[2] equals `8`
-- pool shutdown now
+3. pool shutdown now
    - Expected: pool.pending_tasks() equals `0`
 
 
@@ -134,10 +134,10 @@ expect(pool.pending_tasks()).to_equal(0)
 
 #### clears pending work and rejects new submissions after shutdown
 
-- var pool = TestThreadPool new
-- pool submit batch
-- pool shutdown now
-- pool submit
+1. var pool = TestThreadPool new
+2. pool submit batch
+3. pool shutdown now
+4. pool submit
    - Expected: pool.is_shutdown() is true
    - Expected: pool.pending_tasks() equals `0`
    - Expected: pool.is_idle() is true
@@ -163,9 +163,9 @@ expect(pool.is_idle()).to_equal(true)
 
 #### waits successfully when the pool is already idle
 
-- var pool = TestThreadPool new
+1. var pool = TestThreadPool new
    - Expected: pool.wait_until_idle(10) is true
-- pool shutdown now
+2. pool shutdown now
 
 
 <details>
@@ -221,7 +221,7 @@ expect(runtime.scheduler.worker_count).to_equal(3)
 
 #### creates a multi-threaded runtime when explicitly requested
 
-- scheduler: HostScheduler new
+1. scheduler: HostScheduler new
    - Expected: runtime.is_multi_threaded() is true
    - Expected: runtime.num_threads equals `2`
    - Expected: runtime.scheduler.worker_count equals `2`
@@ -315,13 +315,13 @@ expect(mapped.is_ready()).to_equal(false)
 
 #### pops from the local end in LIFO order
 
-- var queue = WorkStealingQueue new
-- queue push
-- queue push
-- queue push
-- expect some usize
-- expect some usize
-- expect some usize
+1. var queue = WorkStealingQueue new
+2. queue push
+3. queue push
+4. queue push
+   - Expected: queue.pop() equals `3`
+   - Expected: queue.pop() equals `2`
+   - Expected: queue.pop() equals `1`
 
 
 <details>
@@ -335,22 +335,22 @@ var queue = WorkStealingQueue.new()
 queue.push(1)
 queue.push(2)
 queue.push(3)
-expect_some_usize(queue.pop(), 3)
-expect_some_usize(queue.pop(), 2)
-expect_some_usize(queue.pop(), 1)
+expect(queue.pop()).to_equal(3)
+expect(queue.pop()).to_equal(2)
+expect(queue.pop()).to_equal(1)
 ```
 
 </details>
 
 #### steals from the opposite end in FIFO order
 
-- var queue = WorkStealingQueue new
-- queue push
-- queue push
-- queue push
-- expect some usize
-- expect some usize
-- expect some usize
+1. var queue = WorkStealingQueue new
+2. queue push
+3. queue push
+4. queue push
+   - Expected: queue.steal() equals `1`
+   - Expected: queue.steal() equals `2`
+   - Expected: queue.steal() equals `3`
 
 
 <details>
@@ -364,23 +364,23 @@ var queue = WorkStealingQueue.new()
 queue.push(1)
 queue.push(2)
 queue.push(3)
-expect_some_usize(queue.steal(), 1)
-expect_some_usize(queue.steal(), 2)
-expect_some_usize(queue.steal(), 3)
+expect(queue.steal()).to_equal(1)
+expect(queue.steal()).to_equal(2)
+expect(queue.steal()).to_equal(3)
 ```
 
 </details>
 
 #### updates remaining length after mixed pop and steal operations
 
-- var queue = WorkStealingQueue new
-- queue push
-- queue push
-- queue push
-- queue push
+1. var queue = WorkStealingQueue new
+2. queue push
+3. queue push
+4. queue push
+5. queue push
    - Expected: queue.len() equals `4`
-- expect some usize
-- expect some usize
+   - Expected: queue.steal() equals `10`
+   - Expected: queue.pop() equals `40`
    - Expected: queue.len() equals `2`
    - Expected: queue.is_empty() is false
 
@@ -398,8 +398,8 @@ queue.push(20)
 queue.push(30)
 queue.push(40)
 expect(queue.len()).to_equal(4)
-expect_some_usize(queue.steal(), 10)
-expect_some_usize(queue.pop(), 40)
+expect(queue.steal()).to_equal(10)
+expect(queue.pop()).to_equal(40)
 expect(queue.len()).to_equal(2)
 expect(queue.is_empty()).to_equal(false)
 ```
@@ -408,10 +408,10 @@ expect(queue.is_empty()).to_equal(false)
 
 #### reports empty once all work is drained
 
-- var queue = WorkStealingQueue new
-- queue push
+1. var queue = WorkStealingQueue new
+2. queue push
    - Expected: queue.is_empty() is false
-- expect some usize
+   - Expected: queue.pop() equals `99`
    - Expected: queue.is_empty() is true
    - Expected: queue.len() equals `0`
 
@@ -426,7 +426,7 @@ Reproduction: this block contains the complete executable scenario source.
 var queue = WorkStealingQueue.new()
 queue.push(99)
 expect(queue.is_empty()).to_equal(false)
-expect_some_usize(queue.pop(), 99)
+expect(queue.pop()).to_equal(99)
 expect(queue.is_empty()).to_equal(true)
 expect(queue.len()).to_equal(0)
 ```
@@ -440,7 +440,7 @@ expect(queue.len()).to_equal(0)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/02_integration/lib/thread_pool_async_spec.spl` |
-| Updated | 2026-07-05 |
+| Updated | 2026-06-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview

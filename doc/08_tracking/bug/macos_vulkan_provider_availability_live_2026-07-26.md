@@ -1,7 +1,8 @@
 # macOS Vulkan live backend is unavailable before rendering
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -71,3 +72,4 @@ runtime error: field access on nil receiver
 blocked dynamic-text ABI instead of unsafely calling it. Provider availability,
 device count, dyld resolution, and provider error remain unobserved in this
 run. No Rust seed fallback and no exhausted full-live Vulkan command were used.
+

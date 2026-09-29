@@ -1,0 +1,166 @@
+use compiler.hir.import_materialization.state.{
+    IMPORT_MATERIALIZATION_WAIT_BUDGET_V1,
+    ImportDemandV1, ImportMaterializationErrorV1,
+    ImportMaterializationFailureV1, ImportMaterializationReceiptV1,
+    ImportMaterializationStateV1, ImportMaterializationV1,
+    import_demand_level_v1, import_materialization_publish_failure_v1,
+    import_materialization_publish_ready_v1,
+    import_materialization_snapshot_valid_v1,
+    import_materialization_state_v1, import_materialization_try_claim_v1
+}
+use compiler.driver.cache.pinned_archive_capability.{
+    pinned_archive_read_member_v1
+}
+use std.nogc_sync_mut.atomic.{MemoryOrdering}
+use std.nogc_sync_mut.concurrent.thread.{thread_yield}
+
+fn import_materialization_member_v1(demand: ImportDemandV1) -> text:
+    match demand:
+        case declaration: "interface.smf"
+        case body: "hir-bodies.smf"
+        case mir: "mir.smf"
+        case native: "native.smf"
+
+fn import_materialization_missing_error_v1(
+    demand: ImportDemandV1
+) -> ImportMaterializationErrorV1:
+    match demand:
+        case declaration: ImportMaterializationErrorV1.missing_declaration_section
+        case body: ImportMaterializationErrorV1.missing_body_section
+        case mir: ImportMaterializationErrorV1.missing_mir_section
+        case native: ImportMaterializationErrorV1.missing_native_section
+
+fn import_materialization_receipt_v1(
+    materialization: ImportMaterializationV1,
+    state: ImportMaterializationStateV1,
+    owner: bool,
+    waited: bool
+) -> ImportMaterializationReceiptV1:
+    ImportMaterializationReceiptV1(
+        materialization.package_key, materialization.symbol_key,
+        materialization.snapshot, materialization.receipt.archive_digest,
+        materialization.receipt.receipt_digest, state, owner, waited)
+
+fn import_materialization_failure_v1(
+    materialization: ImportMaterializationV1,
+    demand: ImportDemandV1,
+    fallback: ImportMaterializationErrorV1
+) -> ImportMaterializationFailureV1:
+    if materialization.failure != nil:
+        return materialization.failure!
+    ImportMaterializationFailureV1(
+        fallback, materialization.package_key, materialization.symbol_key,
+        materialization.snapshot, materialization.receipt.archive_digest,
+        demand)
+
+fn import_materialization_store_v1(
+    materialization: ImportMaterializationV1,
+    demand: ImportDemandV1,
+    payload: [u8]
+):
+    match demand:
+        case declaration: materialization.payload.declaration_bytes = payload
+        case body: materialization.payload.body_bytes = payload
+        case mir: materialization.payload.mir_bytes = payload
+        case native: materialization.payload.native_bytes = payload
+
+fn import_materialize_owner_v1(
+    materialization: ImportMaterializationV1,
+    demand: ImportDemandV1,
+    completed_level: i64,
+    waited: bool
+) -> Result<ImportMaterializationReceiptV1, ImportMaterializationFailureV1>:
+    if (not import_materialization_snapshot_valid_v1(materialization.snapshot) or
+            materialization.receipt.package_key != materialization.package_key or
+            materialization.receipt.archive_digest == "" or
+            materialization.receipt.receipt_digest == "" or
+            not materialization.capability.open):
+        val error = if not import_materialization_snapshot_valid_v1(
+                materialization.snapshot):
+            ImportMaterializationErrorV1.invalid_snapshot_identity
+        else:
+            ImportMaterializationErrorV1.invalid_archive_authority
+        _ = import_materialization_publish_failure_v1(
+            materialization, demand, error)
+        return Err(import_materialization_failure_v1(
+            materialization, demand, error))
+    if (materialization.capability.archive_digest !=
+            materialization.receipt.archive_digest or
+            materialization.capability.receipt_digest !=
+            materialization.receipt.receipt_digest):
+        _ = import_materialization_publish_failure_v1(
+            materialization, demand,
+            ImportMaterializationErrorV1.snapshot_identity_mismatch)
+        return Err(import_materialization_failure_v1(
+            materialization, demand,
+            ImportMaterializationErrorV1.snapshot_identity_mismatch))
+    val target = import_demand_level_v1(demand)
+    var level = completed_level + 1
+    while level <= target:
+        val level_demand = match level:
+            case 1: ImportDemandV1.declaration
+            case 2: ImportDemandV1.body
+            case 3: ImportDemandV1.mir
+            case _: ImportDemandV1.native
+        val payload = pinned_archive_read_member_v1(
+            &materialization.capability,
+            import_materialization_member_v1(level_demand))
+        if payload.is_err():
+            val missing = import_materialization_missing_error_v1(level_demand)
+            _ = import_materialization_publish_failure_v1(
+                materialization, demand, missing)
+            return Err(import_materialization_failure_v1(
+                materialization, level_demand, missing))
+        import_materialization_store_v1(
+            materialization, level_demand, payload.unwrap())
+        level = level + 1
+    if not import_materialization_publish_ready_v1(materialization, demand):
+        return Err(import_materialization_failure_v1(
+            materialization, demand,
+            ImportMaterializationErrorV1.owner_publication_conflict))
+    Ok(import_materialization_receipt_v1(
+        materialization, import_materialization_state_v1(materialization),
+        true, waited))
+
+fn import_materialize_v1(
+    materialization: ImportMaterializationV1,
+    demand: ImportDemandV1
+) -> Result<ImportMaterializationReceiptV1, ImportMaterializationFailureV1>:
+    val target = import_demand_level_v1(demand)
+    var waited = false
+    var attempts = 0
+    while attempts < IMPORT_MATERIALIZATION_WAIT_BUDGET_V1:
+        val encoded = materialization.atomic_state.load(MemoryOrdering.Acquire)
+        if encoded < 0:
+            return Err(import_materialization_failure_v1(
+                materialization, demand,
+                ImportMaterializationErrorV1.cached_failure))
+        if encoded < 16 and encoded >= target:
+            return Ok(import_materialization_receipt_v1(
+                materialization,
+                import_materialization_state_v1(materialization), false,
+                waited))
+        val completed_level = if encoded < 16:
+            import_materialization_try_claim_v1(materialization, demand)
+        else:
+            -1
+        if completed_level >= 0:
+            return import_materialize_owner_v1(
+                materialization, demand, completed_level, waited)
+        waited = true
+        materialization.waiter_count.fetch_add(1, MemoryOrdering.AcqRel)
+        thread_yield()
+        materialization.waiter_count.fetch_sub(1, MemoryOrdering.AcqRel)
+        attempts = attempts + 1
+    Err(import_materialization_failure_v1(
+        materialization, demand, ImportMaterializationErrorV1.wait_exhausted))
+
+fn import_materialization_ready_for_mir_v1(
+    materialization: ImportMaterializationV1
+) -> bool:
+    materialization.atomic_state.load(MemoryOrdering.Acquire) >= 3 and
+        materialization.atomic_state.load(MemoryOrdering.Acquire) < 16 and
+        materialization.failure == nil
+
+export import_materialize_v1, import_materialization_ready_for_mir_v1
+export import_materialization_member_v1

@@ -1,6 +1,13 @@
 # SMF Runtime-Pool Closure Lookup Blocker
 
-Status: Closed
+## Closed 2026-09-13 — Already closed per the entry's own status
+
+- **inferred** The Status line reads `Closed`.
+- **measured** The referenced sources still exist; the two path-scan misses are scenario filenames (`fanout_multicore_green.spl`, `parallel_multicore_green.spl`), not the SMF runtime modules.
+- **inferred** Recorded so a status-grep does not keep surfacing a closed entry.
+
+
+Status: closed (2026-09-13 triage) — see the "Closed 2026-09-13" section below
 
 **Status:** Closed
 

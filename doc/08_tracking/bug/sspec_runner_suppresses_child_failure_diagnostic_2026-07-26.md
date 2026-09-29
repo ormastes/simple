@@ -1,4 +1,8 @@
 # SSpec runner suppresses the failing child diagnostic
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** open
 **Found:** 2026-07-26
@@ -37,3 +41,4 @@ intentionally failing minimal SSpec, executed by the same deployed
 pure-Simple binary, with the failing child message visible and no seed
 delegation. This WM/Web lane will consume that repair but will not implement a
 parallel runner or bootstrap the toolchain.
+

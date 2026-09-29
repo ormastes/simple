@@ -32,10 +32,12 @@ treesitter_tree_spec -> compiler
 <details>
 <summary>Full Scenario Manual</summary>
 
+```simple
 # TreeSitter OutlineModule Structure Specification
 
 use compiler.treesitter.*
 
+```
 ## At a Glance
 
 | Field | Value |

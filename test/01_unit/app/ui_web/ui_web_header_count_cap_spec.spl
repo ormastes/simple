@@ -1,0 +1,37 @@
+use std.spec.*
+use app.ui.web.auth_params.{ui_web_header_count_status, ui_web_request_head_status}
+
+fn many_headers(n: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = "{out}X-H{i}: v\n"
+        i = i + 1
+    out
+
+describe "ui.web request header-count cap (S1)":
+
+    it "accepts a request at the http_core limit of 100 headers":
+        expect(ui_web_header_count_status(many_headers(100))).to_be("ok")
+
+    it "rejects a request above the limit":
+        expect(ui_web_header_count_status(many_headers(101))).to_be("too_many_headers")
+        expect(ui_web_header_count_status(many_headers(5000))).to_be("too_many_headers")
+
+    it "counts only real header lines":
+        expect(ui_web_header_count_status("")).to_be("ok")
+        expect(ui_web_header_count_status("Host: a\n\n\nOrigin: b\n")).to_be("ok")
+        # blank and colon-less lines are not headers and must not inflate the count
+        expect(ui_web_header_count_status("{many_headers(100)}\nnot-a-header\n")).to_be("ok")
+
+    it "fails the shared head gate closed, so all three servers inherit the cap":
+        expect(ui_web_request_head_status("GET / HTTP/1.1", many_headers(10))).to_be("ok")
+        expect(ui_web_request_head_status("GET / HTTP/1.1", many_headers(101))).to_be("too_many_headers")
+
+    it "is a distinct failure from the byte-size cap it does not replace":
+        # 2000 one-byte-value headers stay under the 32 KiB head budget and
+        # under the 8 KiB per-line budget, so before S1 this request passed
+        # every limit ui.web had.
+        val flood = many_headers(2000)
+        expect(flood.len() < 32768).to_be(true)
+        expect(ui_web_request_head_status("GET / HTTP/1.1", flood)).to_be("too_many_headers")

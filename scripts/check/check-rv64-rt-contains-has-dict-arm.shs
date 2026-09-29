@@ -1,0 +1,203 @@
+#!/bin/sh
+# check-rv64-rt-contains-has-dict-arm.shs
+#
+# Pins the fix for
+# doc/08_tracking/bug/riscv64_in_guest_mir_lower_type_zero_kind_on_main_2026-09-01.md
+# (the row-2 RUN-half half of it) and its successor
+# doc/08_tracking/bug/riscv64_in_guest_interp_resets_on_cross_function_call_2026-09-01.md
+#
+# THE DEFECT
+# ----------
+# `.has` / `.contains` / `.contains_key` on a Dict lower to **rt_contains**, not
+# to rt_dict_contains -- codegen/llvm/emitter.rs:324 and
+# codegen/instr/closures_structs.rs:117 map all of those spellings to
+# "rt_contains". The hosted rt_contains answers dicts via rt_core_dict_has
+# (runtime_native.c). The riscv64 baremetal PORT handled only HEAP_STRING and
+# HEAP_ARRAY and fell through to `return 0`, so EVERY `dict.has(k)` answered
+# FALSE in-guest.
+#
+# MEASURED 2026-09-01, in-guest under real OpenSBI v1.4 fw_payload (-bios only,
+# never -kernel, never isa-debug-exit), nonce 8d03ec284ec3be32, from the
+# build-and-run row's own run half:
+#
+#     FAIL run error: function 'add' not found
+#       [PROBE hit=N hasidx=Y dictlen=2 vals=2]
+#
+# The interpreter's name index held BOTH functions (dictlen=2, built from the
+# same 2 module functions, vals=2) and `.has("add")` still said no.
+# resolve_function_by_name then fail-closed on has_fn_index and never ran the
+# linear scan that would have found it. Same defect family as the tag-11 gap in
+# the inline `.len()` path (c40a489ebee): a hosted-parity port that silently
+# answers the falsy value for the tag nobody covered.
+#
+# WHY THIS GUARD EXISTS SEPARATELY FROM THE C-RUNTIME COMPILE GATE
+# ----------------------------------------------------------------
+# check-c-runtime-compiles-push.shs scans `src/runtime/` ONLY. This file lives
+# under `examples/09_embedded/**`, so that gate cannot see it -- measured, and
+# not hypothetically: this incident's OWN first fix attempt spelled the arm
+# inline with a `RuntimeDict *d` at line ~1210 while RuntimeDict is not declared
+# until ~2101, which fails the whole TU and cascades into the link, and
+# check-c-runtime-compiles-push.shs still returned rc=0 over it. A compile gate
+# that does not cover the tree in question is not evidence about that tree.
+#
+# This guard is a SOURCE-SHAPE RATCHET on the arm's presence, not proof the
+# target works. The boot in
+# scripts/check/check-simpleos-riscv64-interpreter-in-guest-opensbi.shs is the
+# acceptance test.
+#
+# VERDICT CONVENTION (last line of stdout):
+#   PASS — <n> ... checked, ...   exit 0   (n is always > 0)
+#   FAIL — ...                    exit 1
+#   ERROR — nothing was checked   exit 2
+# `--selftest` runs before every scan and is fatal.
+
+set -e
+
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
+
+TARGET_REL="examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_runtime_core.inc.c"
+
+# extract_fn <file>
+# Prints the body of `RuntimeValue rt_contains(` up to the closing brace at
+# column 0.
+extract_fn() {
+    awk '
+        /^RuntimeValue rt_contains\(/ { inside=1; print; next }
+        inside { print }
+        inside && /^}/ { inside=0 }
+    ' "$1"
+}
+
+# classify <file> -> HAS_DICT_ARM / NO_DICT_ARM / ABSENT
+classify() {
+    _f=$1
+    [ -f "$_f" ] || { echo "ABSENT"; return; }
+    _body=$(extract_fn "$_f" || true)
+    [ -n "$_body" ] || { echo "ABSENT"; return; }
+    # A dict arm is a HEAP_DICT branch that either delegates to
+    # rt_dict_contains or walks the keys itself.
+    if printf '%s\n' "$_body" | grep -q "HEAP_DICT"; then
+        echo "HAS_DICT_ARM"
+    else
+        echo "NO_DICT_ARM"
+    fi
+}
+
+selftest() {
+    _tmp=$(mktemp -d)
+    _fail=0
+    _n=0
+    _expect() {
+        _n=$((_n + 1))
+        if [ "$2" != "$3" ]; then
+            echo "selftest FAIL: $1 -> got '$2', want '$3'" >&2
+            _fail=1
+        fi
+    }
+
+    # 1. must-FAIL fixture: the PRE-FIX body verbatim in shape -- string and
+    #    array arms, then a bare fall-through `return 0` for everything else.
+    cat > "$_tmp/prefix.c" <<'EOF'
+RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
+{
+    if (!IS_HEAP(collection)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+    if (!h) return 0;
+    if (h->type == HEAP_STRING) {
+        return 0;
+    }
+    if (h->type == HEAP_ARRAY) {
+        return 0;
+    }
+    return 0;
+}
+EOF
+    _expect "pre-fix body must be NO_DICT_ARM" "$(classify "$_tmp/prefix.c")" "NO_DICT_ARM"
+
+    # 2. must-PASS: the fix, delegating to rt_dict_contains.
+    cat > "$_tmp/fixed.c" <<'EOF'
+RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
+{
+    if (!IS_HEAP(collection)) return 0;
+    HeapHeader *h = (HeapHeader *)DECODE_PTR(collection);
+    if (h->type == HEAP_ARRAY) {
+        return 0;
+    }
+    if (h->type == HEAP_DICT) {
+        return rt_dict_contains((int64_t)collection, (int64_t)value) ? 1 : 0;
+    }
+    return 0;
+}
+EOF
+    _expect "fixed body must be HAS_DICT_ARM" "$(classify "$_tmp/fixed.c")" "HAS_DICT_ARM"
+
+    # 3. a dict arm in some OTHER function must not count -- the scan is
+    #    scoped to rt_contains' own body.
+    cat > "$_tmp/wrongfn.c" <<'EOF'
+RuntimeValue rt_len(RuntimeValue v)
+{
+    if (h->type == HEAP_DICT) return 1;
+    return 0;
+}
+RuntimeValue rt_contains(RuntimeValue collection, RuntimeValue value)
+{
+    if (h->type == HEAP_ARRAY) {
+        return 0;
+    }
+    return 0;
+}
+EOF
+    _expect "dict arm in another fn must be NO_DICT_ARM" "$(classify "$_tmp/wrongfn.c")" "NO_DICT_ARM"
+
+    # 4. a missing rt_contains must be ABSENT so the caller is forced to ERROR
+    #    -- a scan that found no function to examine is absence of evidence.
+    echo "int unrelated(void) { return 0; }" > "$_tmp/absent.c"
+    _expect "missing rt_contains must be ABSENT" "$(classify "$_tmp/absent.c")" "ABSENT"
+
+    # 5. a missing FILE must also be ABSENT.
+    _expect "missing file must be ABSENT" "$(classify "$_tmp/nope.c")" "ABSENT"
+
+    rm -rf "$_tmp"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-rv64-rt-contains-has-dict-arm: ERROR — nothing was checked: selftest failed ($_n fixtures)"
+        exit 2
+    fi
+    echo "check-rv64-rt-contains-has-dict-arm: selftest OK ($_n fixtures)"
+}
+
+ROOT="$REPO_ROOT"
+ONLY_SELFTEST=0
+while [ $# -gt 0 ]; do
+    case $1 in
+        --selftest) ONLY_SELFTEST=1 ;;
+        --root) ROOT=$2; shift ;;
+        -h|--help) echo "usage: $0 [--selftest] [--root DIR]"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+selftest
+[ "$ONLY_SELFTEST" -eq 1 ] && exit 0
+
+FILE="$ROOT/$TARGET_REL"
+VERDICT=$(classify "$FILE")
+case $VERDICT in
+    ABSENT)
+        echo "check-rv64-rt-contains-has-dict-arm: ERROR — nothing was checked: no rt_contains in $TARGET_REL"
+        exit 2 ;;
+    NO_DICT_ARM)
+        echo "offender=$TARGET_REL:rt_contains"
+        echo ""
+        echo "The riscv64 baremetal rt_contains has no HEAP_DICT arm, so every"
+        echo "dict.has(k) / .contains(k) / .contains_key(k) answers FALSE"
+        echo "in-guest -- those spellings all lower to rt_contains, not to"
+        echo "rt_dict_contains. Delegate to rt_dict_contains (declare it above"
+        echo "rt_contains: the RuntimeDict type is not in scope that early)."
+        echo "check-rv64-rt-contains-has-dict-arm: FAIL — 1 function checked, rt_contains has no dict arm"
+        exit 1 ;;
+    *)
+        echo "check-rv64-rt-contains-has-dict-arm: PASS — 1 function checked, rt_contains answers dicts"
+        exit 0 ;;
+esac

@@ -1,7 +1,9 @@
 # DAP spec examples reported GREEN while asserting nothing (2026-08-08)
+## Closed 2026-09-16 — 58 vacuous stubs replaced with real assertions; sabotage-probed; zero assert_true(true) remain
 
-Status: OPEN (P3)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 ## Summary
 
@@ -183,3 +185,4 @@ in the implementation.
   (`grep -c "assert_true(true)"` → 0 for all).
 - Confirmed no stray diffs were left in `src/lib/nogc_sync_mut/dap/*` after
   the sabotage probes (`git status --short` clean on those paths).
+

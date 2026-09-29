@@ -42,7 +42,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let struct_ptr = match alloc_value {
             inkwell::values::BasicValueEnum::PointerValue(ptr) => builder
@@ -190,7 +190,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let new_ptr =
             match alloc_value {
@@ -311,7 +311,33 @@ impl LlvmBackend {
         let tagged = builder
             .build_or(new_i64, i64_type.const_int(1, false), "aggcopy_tagged")
             .map_err(|e| crate::error::factory::llvm_build_failed("or tag", &e))?;
-        Ok(tagged)
+        // A source that is not a live heap handle has nothing to copy, and the
+        // freshly allocated block above was filled with ZEROES for it (see the
+        // `aggcopy_word_guarded` select). Returning that block for such a
+        // source manufactures a non-nil, all-zero aggregate out of a value that
+        // was nil: `src_is_valid` requires tag == TAG_HEAP(1), while the nil
+        // sentinel is raw 3 (TAG_SPECIAL), so every nil `Optional<aggregate>`
+        // took that path. The reader then sees a well-formed pointer whose
+        // fields are all 0 -- an `x == nil` test misses, and a field that is an
+        // enum reads back as discriminant 0.
+        //
+        // Propagate the original value instead. This is the same rule the deep
+        // field loop above already applies per word ("Replace only a live
+        // tagged heap handle; nil (0) and non-handle words keep their original
+        // value"); it simply was never applied to the block as a whole.
+        //
+        // Measured on aarch64: a byte-identical probe built by this backend
+        // reported NON-NIL for a `Ty?` local, an enum payload and array
+        // elements, while the same source built by the pure-Simple backend
+        // reported nil for all of them. That divergence is what made the
+        // Stage-3 self-host fail with E-MIR-TYPE-ZeroKind, because HIR tuple
+        // destructuring stores literal `nil` type slots that came back as
+        // zeroed aggregates.
+        let result = builder
+            .build_select(src_is_valid, tagged, src_tagged, "aggcopy_result")
+            .map_err(|e| crate::error::factory::llvm_build_failed("select result", &e))?
+            .into_int_value();
+        Ok(result)
     }
 
     #[cfg(feature = "llvm")]
@@ -459,14 +485,19 @@ impl LlvmBackend {
         let alloc_fn = module
             .get_function("rt_alloc")
             .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
-        let allocation_size = closure_size.max(16);
+        // LLVM native callable header: entry pointer, reserved kind word.
+        // MIR capture offsets start at 8; shift them past the kind word so
+        // arbitrary captured data can never masquerade as a direct function.
+        let allocation_size = closure_size.checked_add(8)
+            .ok_or_else(|| CompileError::semantic("LLVM closure allocation size overflow"))?
+            .max(16);
         let size_val = i64_type.const_int(allocation_size as u64, false);
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
         let alloc_value = alloc_call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| crate::error::factory::llvm_build_failed("rt_alloc result", &"missing return value"))?;
         let closure_ptr =
             match alloc_value {
@@ -499,7 +530,7 @@ impl LlvmBackend {
             .build_store(fn_slot, func_ptr_cast)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
 
-        if closure_size < 16 {
+        {
             let offset_val = self.context_ref().i32_type().const_int(8, false);
             let marker_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
@@ -517,7 +548,7 @@ impl LlvmBackend {
 
         for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context_ref().i32_type().const_int(*offset as u64, false);
+            let offset_val = self.context_ref().i32_type().const_int(*offset as u64 + 8, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;

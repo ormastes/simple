@@ -12,7 +12,15 @@ OUT_ENV="$BUILD_DIR/evidence.env"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 
-python3 - <<'PY' >"$OUT_ENV"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "html_css_rendering_manifest_traceability_status=error"
+    echo "html_css_rendering_manifest_traceability_reason=missing-command:python3"
+    echo "ERROR — nothing was checked (missing-command:python3)"
+    exit 2
+fi
+
+py_rc=0
+python3 - >"$OUT_ENV" <<'PY' || py_rc=$?
 from pathlib import Path
 from urllib.request import Request, urlopen
 import os
@@ -195,6 +203,12 @@ PY
 status="$(sed -n 's/^html_css_rendering_manifest_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
 reason="$(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
 
+if [ -z "$status" ]; then
+    cat "$OUT_ENV" 2>/dev/null || true
+    echo "ERROR — nothing was checked (traceability-extractor-produced-no-status; python3 exit $py_rc)"
+    exit 2
+fi
+
 {
     echo "# HTML/CSS Rendering Manifest Traceability"
     echo
@@ -210,7 +224,24 @@ reason="$(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_
 
 cat "$OUT_ENV"
 
+env_value() {
+    sed -n "s/^html_css_rendering_manifest_traceability_$1=//p" "$OUT_ENV" | tail -n 1
+}
+
+tag_count="$(env_value html_tag_count)"
+css_count="$(env_value css_property_count)"
+case_count="$(env_value manifest_case_count)"
+tag_source="$(env_value tag_source)"
+checked=$(( ${tag_count:-0} + ${css_count:-0} ))
+
+if [ "$checked" -le 0 ] || [ "${case_count:-0}" -le 0 ]; then
+    echo "ERROR — nothing was checked (empty-traceability-inventory: html_tags=${tag_count:-0} css_properties=${css_count:-0} manifest_cases=${case_count:-0})"
+    exit 2
+fi
+
 if [ "$status" = "pass" ]; then
+    echo "PASS — $checked traceability item(s) checked (${tag_count} HTML tag(s) from ${tag_source}, ${css_count} implemented CSS propert(y/ies)) across ${case_count} manifest case(s), 0 missing"
     exit 0
 fi
+echo "FAIL — $checked traceability item(s) checked across ${case_count} manifest case(s), $reason"
 exit 1

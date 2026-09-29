@@ -1,4 +1,9 @@
 # Anonymous `fn` block call argument loses indentation
+## Closed 2026-09-16 — Status fixed; focused verification 6/0 passed; regression spec added
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - ID: `parser_anonymous_fn_block_call_arg_2026-08-03`
 - Severity: P1
@@ -72,3 +77,4 @@ this scoped repair lane.
 covers the exact comparator, comma termination with an adjacent argument,
 unchanged expression-bodied syntax, and malformed-then-valid parser error-state
 recovery.
+

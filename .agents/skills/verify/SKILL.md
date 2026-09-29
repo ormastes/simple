@@ -16,6 +16,9 @@ description: Production readiness verification. Checks SPipe tests for stubs/dum
 ## Checks
 
 ### 1. SPipe Tests
+
+- Verify longest-prefix receipt coverage for every changed source path and
+  reject MDSOC+ profiles for kernel or drivers.
 SPipe is verified here, before release. Release consumes `STATUS: PASS`; it does
 not create, rewrite, or weaken SPipe after verification.
 
@@ -24,16 +27,9 @@ not create, rewrite, or weaken SPipe after verification.
 - Every REQ-NNN has test coverage
 - Required executable SPipe specs exist under `test/...`; generated/manual
   scenario docs exist under the mirrored `doc/06_spec/.../*_spec.md` path
-- For changed specs, `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
+- For changed specs, `simple spipe-docgen <spec> --output doc/06_spec --no-index`
   reports complete documentation with `0 stubs`; a generated manual marked as a
   stub is a FAIL even when the `.md` file exists.
-- Shared-font interpreter diagnostics must use
-  `build_interpreter_result_wrapper`; both
-  `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` must exit 1 with
-  `test-runner: spec failed`, and
-  `scripts/check/fixtures/font_evidence_runner_empty_spec.spl` must exit 1 with
-  `test-runner: no examples executed`; reject 2/124/132/139 and retain commands,
-  binary SHA-256, and logs. Native evidence remains authoritative.
 - Scenario-oriented generated docs read as manuals: primary steps visible,
   inline/previous setup expanded, executable SPipe folded by default, detailed
   edge/matrix/stress/helper cases folded or skipped by policy.
@@ -47,12 +43,6 @@ not create, rewrite, or weaken SPipe after verification.
 - Every BDD scenario has an executable or intentionally skipped SPipe `it` block with a concrete reason
 - Stale, missing, placeholder, or requirement-disconnected SPipe is a FAIL
 - Shared interface/manual helper names match the design/spec/manual references
-- CUDA font production trust must satisfy the canonical artifact rule in
-  `.codex/skills/system_test/SKILL.md` before PASS.
-- The checker requires extracted optimization/font source bytes to match their
-  emitter-declared hashes. Vulkan rejects missing/malformed hashes before compilation;
-  a well-formed stale source may retain compiled `.comp`/`.spv` candidates for
-  review, but remains invalid until both source and artifact pins match.
 - Placeholder helper definitions fail explicitly with `assert(false)` or
   `fail(...)`; silent no-op helpers are a FAIL
 - For broad SPipe lanes, the recorded cooperative review plan is complete or
@@ -74,6 +64,25 @@ not create, rewrite, or weaken SPipe after verification.
   `requirement`, `research`, `plan`, `architecture`, `design`, `system_spec`,
   `spec_doc`, `implementation`, `unit_tests`, `integration_tests`, and `guide`;
   confirm with `<runtime> lint doc/08_tracking/feature/feature_db.sdn`
+- For debug-driven fixes, verify D0–D12 evidence: original evidence predates
+  the fix; doctor proves real reachability; observation respects policy and
+  perturbation budgets; `DebugServiceV1` owns mutable state and clients use
+  `DebugSessionId`; every attach/probe/control/capture/cleanup has an
+  exact-build `DebugReceiptV1`; temporary instrumentation is removed.
+- Verify the System → Integration → Unit/property decision matches the failure
+  boundary. A lower-level surrogate cannot replace the original external
+  reproducer. FAIL if an unfaithful System or Integration reproducer is
+  replaced by more tests instead of resuming evidence/boundary debugging;
+  adjacent cases are valid only after both required reproducers are faithful.
+- FAIL a bug fix without same-mechanism similar-scenario tests at System,
+  Integration, and Unit levels, or without 100% branch coverage of every
+  changed unit owner. FAIL when the fix, tests, coverage evidence, and bug
+  receipt are split across later commits.
+- Every resolved bug records provider input/output/cache-read/cache-create
+  tokens or `unavailable`, a documented comparable cohort average, and ratio.
+  Ratio `> 2.0` without a linked knowledge/skill/tool update is a FAIL; guessed
+  or zero-filled unavailable usage is a FAIL. Verify that the receipt is
+  persisted per bug in the bug database, not merely printed or reported.
 
 ### 4. NFR
 - Performance benchmarks exist
@@ -98,13 +107,6 @@ not create, rewrite, or weaken SPipe after verification.
   `RDOC_RENDERDOC_HOOK_CHILDREN=0` and Chromium `--in-process-gpu` runs are
   diagnostic only unless they still produce valid browser GPU-process `.rdc`
   evidence with `RDOC` magic and prove Vulkan remains active.
-- GUI/web/2D source-coupling verification must run
-  `sh scripts/check/check-rendering-source-coupling.shs` for rendering-lane
-  implementation, wrapper, benchmark, or platform-agent diffs. Set
-  `RENDERING_SOURCE_COUPLING_REVISION=<rev>` to check a specific jj change.
-  New raw `rt_*`, direct backend proof/status pokes, or forced backend pass
-  states in rendering-scoped files are FAIL unless routed through an owning
-  facade or the documented RenderDoc helper exception.
 - Metal/Vulkan/8K claims require matching evidence: native Metal raw readback
   on macOS, `metal-requires-macos` for Linux Metal, the Vulkan gate above for
   Vulkan, and a retained 8K row or explicit blocker in `doc/09_report` /
@@ -124,40 +126,6 @@ not create, rewrite, or weaken SPipe after verification.
   `sh scripts/audit/direct-env-runtime-guard.shs --staged`.
 - Security: input validation, no secrets
 - Reliability: error handling paths
-- Formal verification boundary:
-  - RTL/hardware claims use RVFI/riscv-formal/SymbiYosys evidence. Generated
-    RISC-V RTL must pass `scripts/rtl/check-rvfi-formal-readiness.shs` with the
-    core VHDL and, when emitted, `FORMAL_HARNESS`, `FORMAL_SBY`, and
-    `FORMAL_MANIFEST`. Missing `sby` means readiness only, not proof pass.
-  - Lean claims use `simple gen-lean verify`, `simple verify check`, or the
-    lane-specific Lean proof wrapper with zero `sorry`/`admit`/untrusted axioms.
-    Generated Lean/BYL artifacts must stay separate from manual theorem or
-    constraint files; when manual proof files exist, rerun and cite the
-    post-regeneration gate that checked that stable entry point.
-  - Use both when the lane spans RTL plus higher-level Simple/spec behavior.
-    Starvation, fairness, race-condition, scheduler, channel, lock, or resource
-    lifecycle changes require a concurrency/resource model check or an explicit
-    blocker; one interleaving test is not enough for formal verification PASS.
-  - SimpleOS mission-critical release verification must run
-    `sh scripts/check/check-simpleos-mission-critical-release.shs`; matrix
-    readiness is not release completion while that gate reports blocked or
-    failed, and PASS requires `release_blockers=none`. If blocked, run
-    `sh scripts/check/check-simpleos-mission-critical-prereqs.shs` for the host
-    dependency list and
-    `sh scripts/setup/setup-simpleos-formal-env.shs --print-install` for setup
-    commands. Treat `sidecar-contract-failed`, `missing-artifact`, and
-    `sby-run-failed` as release-failing RTL evidence problems, not missing-tool
-    blockers.
-- SimpleOS compiler-in-filesystem verification requires a target-native Simple
-  payload embedded in the install image at `/usr/bin/simple(.smf)`,
-  `/bin/simple(.smf)`, `/sys/apps/simple(.smf)`,
-  `/sys/apps/simple_compiler(.smf)`, `/sys/apps/simple_interpreter(.smf)`,
-  `/sys/apps/simple_loader(.smf)`, and `/SYS/SIMPLETOOL.SDN`, then in-guest
-  `/usr/bin/simple --version` and compile/run `hello world` evidence from the
-  mounted SimpleOS filesystem. Host `bin/simple`, placeholder marker apps,
-  host-side compile/run, and QEMU fixed-command SSH responses are FAIL. Board
-  claims additionally need board identity, boot/download path, and serial or
-  SSH transcript.
 - Core/MCP regression gate for compiler/core/lib or MCP/LSP changes:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`
@@ -204,13 +172,10 @@ not create, rewrite, or weaken SPipe after verification.
 - Do not mark PASS when workflow/tooling changes left stale `doc/07_guide`,
   `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
   `.claude/agents/spipe/`, or `.gemini/commands/` instructions behind
-- Do not mark the agent goal complete before that workflow/tooling doc
-  freshness gate is satisfied or explicitly recorded as `N/A`
 - For `simple_context` or context-mode changes, verify the MCP/tooling guide,
   generated manuals, and skill/command docs mention any new `--sql`/`--db`
-  behavior, `--source-filter`/MCP `source_filter`, file-optional SQL query
-  shape, embedded SQLite facade boundary, and explicit absence statuses. Run
-  `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
+  behavior, embedded SQLite facade boundary, and explicit absence statuses.
+  Run `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed
 - For compiled feature work, verify the receipt described by
   `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`.

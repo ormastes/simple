@@ -1,0 +1,279 @@
+# Parser for MSVC/LLVM `.drectve` section payloads.
+# Unknown directives remain outside this resolution-focused contract; malformed
+# forms of the directives we own fail closed rather than being partly applied.
+
+use compiler.backend.linker.coff.coff_object.{CoffObject, COFF_SECTION_LNK_INFO}
+
+struct CoffAlternateName:
+    weak_name: text
+    default_name: text
+
+struct CoffExportDirective:
+    public_name: text
+    internal_name: text
+    ordinal: i64
+    noname: bool
+    data: bool
+    private_export: bool
+
+struct CoffDirectives:
+    default_libraries: [text]
+    excluded_default_libraries: [text]
+    exclude_all_default_libraries: bool
+    fail_if_mismatch: {text: text}
+    includes: [text]
+    alternate_names: [CoffAlternateName]
+    exports: [CoffExportDirective]
+
+fn _coff_directive_tokens(content: text) -> Result<[text], text>:
+    var result: [text] = []
+    var token = ""
+    var quoted = false
+    var index: i64 = 0
+    while index < content.len():
+        val ch = content[index:index + 1]
+        if ch == "\"":
+            quoted = not quoted
+        elif (ch == " " or ch == "\t" or ch == "\r" or ch == "\n") and not quoted:
+            if token != "":
+                result = result.push(token)
+                token = ""
+        else:
+            token = token + ch
+        index = index + 1
+    if quoted: return Err("unterminated quote in COFF .drectve section")
+    if token != "": result = result.push(token)
+    Ok(result)
+
+fn _coff_directive_add_unique(values: [text], value: text) -> [text]:
+    if values.contains(value): return values
+    values.push(value)
+
+fn _coff_export_same(left: CoffExportDirective,
+        right: CoffExportDirective) -> bool:
+    left.public_name == right.public_name and
+        left.internal_name == right.internal_name and
+        left.ordinal == right.ordinal and left.noname == right.noname and
+        left.data == right.data and left.private_export == right.private_export
+
+fn _coff_export_ordinal(value: text) -> Result<i64, text>:
+    if value.len() < 2 or value[0:1] != "@":
+        return Err("COFF /EXPORT ordinal must use @number")
+    var ordinal: i64 = 0
+    var index: i64 = 1
+    while index < value.len():
+        val ch = value[index:index + 1]
+        if ch < "0" or ch > "9":
+            return Err("COFF /EXPORT ordinal must be decimal")
+        ordinal = ordinal * 10 + (value.byte_at(index) - 48)
+        if ordinal > 65535:
+            return Err("COFF /EXPORT ordinal exceeds 65535")
+        index = index + 1
+    if ordinal == 0: return Err("COFF /EXPORT ordinal must be at least 1")
+    Ok(ordinal)
+
+fn coff_parse_export_directive(value: text) -> Result<CoffExportDirective, text>:
+    val parts = value.split(",")
+    if parts.len() == 0 or parts[0] == "":
+        return Err("COFF /EXPORT requires a symbol name")
+    val names = parts[0].split("=")
+    if names.len() > 2 or names[0] == "":
+        return Err("COFF /EXPORT requires export[=internal]")
+    val internal = if names.len() == 2: names[1] else: names[0]
+    if internal == "": return Err("COFF /EXPORT internal symbol is empty")
+    var ordinal: i64 = -1
+    var noname = false
+    var data = false
+    var private_export = false
+    var index: i64 = 1
+    while index < parts.len():
+        val option = parts[index]
+        val lower = option.lower()
+        if option.starts_with("@"):
+            if ordinal >= 0: return Err("COFF /EXPORT has multiple ordinals")
+            ordinal = _coff_export_ordinal(option)?
+        elif lower == "noname": noname = true
+        elif lower == "data": data = true
+        elif lower == "private": private_export = true
+        else: return Err("COFF /EXPORT has unsupported option '{option}'")
+        index = index + 1
+    if noname and ordinal < 0:
+        return Err("COFF /EXPORT NONAME requires an explicit ordinal")
+    Ok(CoffExportDirective(public_name: names[0], internal_name: internal,
+        ordinal: ordinal, noname: noname, data: data,
+        private_export: private_export))
+
+fn coff_parse_directives(content: text) -> Result<CoffDirectives, text>:
+    val tokens = _coff_directive_tokens(content)?
+    var defaults: [text] = []
+    var excluded_defaults: [text] = []
+    var exclude_all_defaults = false
+    var mismatch: {text: text} = {}
+    var includes: [text] = []
+    var alternates: [CoffAlternateName] = []
+    var exports: [CoffExportDirective] = []
+    for token in tokens:
+        val lower = token.lower()
+        if lower.starts_with("/defaultlib:") or lower.starts_with("-defaultlib:"):
+            val value = token.substring("/defaultlib:".len())
+            if value == "": return Err("COFF /DEFAULTLIB requires a library name")
+            defaults = _coff_directive_add_unique(defaults, value)
+        elif lower == "/nodefaultlib" or lower == "-nodefaultlib":
+            exclude_all_defaults = true
+        elif lower.starts_with("/nodefaultlib:") or lower.starts_with("-nodefaultlib:"):
+            val value = token.substring("/nodefaultlib:".len())
+            if value == "": return Err("COFF /NODEFAULTLIB requires a library name")
+            excluded_defaults = _coff_directive_add_unique(excluded_defaults, value)
+        elif lower.starts_with("/include:") or lower.starts_with("-include:"):
+            val value = token.substring("/include:".len())
+            if value == "": return Err("COFF /INCLUDE requires a symbol name")
+            includes = _coff_directive_add_unique(includes, value)
+        elif lower.starts_with("/alternatename:") or lower.starts_with("-alternatename:"):
+            val value = token.substring("/alternatename:".len())
+            val parts = value.split("=")
+            if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+                return Err("COFF /ALTERNATENAME requires weak=default names")
+            var duplicate = false
+            for alternate in alternates:
+                if alternate.weak_name == parts[0]:
+                    if alternate.default_name != parts[1]:
+                        return Err("conflicting COFF /ALTERNATENAME for '{parts[0]}'")
+                    duplicate = true
+            if not duplicate:
+                alternates = alternates.push(CoffAlternateName(
+                    weak_name: parts[0], default_name: parts[1]))
+        elif lower.starts_with("/failifmismatch:") or lower.starts_with("-failifmismatch:"):
+            val value = token.substring("/failifmismatch:".len())
+            val parts = value.split("=")
+            if parts.len() != 2 or parts[0] == "" or parts[1] == "":
+                return Err("COFF /FAILIFMISMATCH requires key=value")
+            if mismatch.has(parts[0]) and mismatch[parts[0]] != parts[1]:
+                return Err("COFF /FAILIFMISMATCH '{parts[0]}' conflicts: " +
+                    "'{mismatch[parts[0]]}' versus '{parts[1]}'")
+            mismatch[parts[0]] = parts[1]
+        elif lower.starts_with("/export:") or lower.starts_with("-export:"):
+            val parsed_export = coff_parse_export_directive(
+                token.substring("/export:".len()))?
+            var duplicate = false
+            for existing in exports:
+                if existing.public_name == parsed_export.public_name:
+                    if not _coff_export_same(existing, parsed_export):
+                        return Err("conflicting COFF /EXPORT for '{parsed_export.public_name}'")
+                    duplicate = true
+            if not duplicate: exports = exports.push(parsed_export)
+        elif lower.starts_with("/defaultlib") or lower.starts_with("-defaultlib"):
+            return Err("malformed COFF /DEFAULTLIB directive")
+        elif lower.starts_with("/nodefaultlib") or lower.starts_with("-nodefaultlib"):
+            return Err("malformed COFF /NODEFAULTLIB directive")
+        elif lower.starts_with("/include") or lower.starts_with("-include"):
+            return Err("malformed COFF /INCLUDE directive")
+        elif lower.starts_with("/alternatename") or lower.starts_with("-alternatename"):
+            return Err("malformed COFF /ALTERNATENAME directive")
+        elif lower.starts_with("/failifmismatch") or lower.starts_with("-failifmismatch"):
+            return Err("malformed COFF /FAILIFMISMATCH directive")
+        elif lower.starts_with("/export") or lower.starts_with("-export"):
+            return Err("malformed COFF /EXPORT directive")
+    Ok(CoffDirectives(default_libraries: defaults,
+        excluded_default_libraries: excluded_defaults,
+        exclude_all_default_libraries: exclude_all_defaults,
+        fail_if_mismatch: mismatch,
+        includes: includes, alternate_names: alternates, exports: exports))
+
+fn coff_collect_directives(objects: [CoffObject]) -> Result<CoffDirectives, text>:
+    var defaults: [text] = []
+    var excluded_defaults: [text] = []
+    var exclude_all_defaults = false
+    var mismatch: {text: text} = {}
+    var includes: [text] = []
+    var alternates: [CoffAlternateName] = []
+    var exports: [CoffExportDirective] = []
+    for object in objects:
+        for section in object.sections:
+            if section.name != ".drectve": continue
+            if (section.characteristics & COFF_SECTION_LNK_INFO) == 0:
+                return Err("COFF .drectve section is missing LNK_INFO")
+            var content = ""
+            for byte in section.data:
+                if byte != 0: content = content + text.from_char_code(byte)
+            val parsed = coff_parse_directives(content)?
+            for value in parsed.default_libraries:
+                defaults = _coff_directive_add_unique(defaults, value)
+            for value in parsed.excluded_default_libraries:
+                excluded_defaults = _coff_directive_add_unique(excluded_defaults, value)
+            if parsed.exclude_all_default_libraries: exclude_all_defaults = true
+            for key in parsed.fail_if_mismatch.keys():
+                val value = parsed.fail_if_mismatch[key]
+                if mismatch.has(key) and mismatch[key] != value:
+                    return Err("COFF /FAILIFMISMATCH '{key}' conflicts: " +
+                        "'{mismatch[key]}' versus '{value}'")
+                mismatch[key] = value
+            for value in parsed.includes:
+                includes = _coff_directive_add_unique(includes, value)
+            for alternate in parsed.alternate_names:
+                var duplicate = false
+                for existing in alternates:
+                    if existing.weak_name == alternate.weak_name:
+                        if existing.default_name != alternate.default_name:
+                            return Err("conflicting COFF /ALTERNATENAME for '{alternate.weak_name}'")
+                        duplicate = true
+                if not duplicate: alternates = alternates.push(alternate)
+            for parsed_export in parsed.exports:
+                var duplicate_export = false
+                for existing in exports:
+                    if existing.public_name == parsed_export.public_name:
+                        if not _coff_export_same(existing, parsed_export):
+                            return Err("conflicting COFF /EXPORT for '{parsed_export.public_name}'")
+                        duplicate_export = true
+                if not duplicate_export: exports = exports.push(parsed_export)
+    Ok(CoffDirectives(default_libraries: defaults,
+        excluded_default_libraries: excluded_defaults,
+        exclude_all_default_libraries: exclude_all_defaults,
+        fail_if_mismatch: mismatch,
+        includes: includes, alternate_names: alternates, exports: exports))
+
+fn _coff_library_key(name: text) -> text:
+    var key = name.trim().lower().replace("\\", "/")
+    val parts = key.split("/")
+    if parts.len() > 0: key = parts[parts.len() - 1]
+    if key.ends_with(".lib"): key = key.substring(0, key.len() - 4)
+    key
+
+fn coff_effective_default_libraries(directives: CoffDirectives) -> [text]:
+    if directives.exclude_all_default_libraries: return []
+    var excluded: [text] = []
+    for name in directives.excluded_default_libraries:
+        val key = _coff_library_key(name)
+        if not excluded.contains(key): excluded = excluded.push(key)
+    var result: [text] = []
+    for name in directives.default_libraries:
+        if not excluded.contains(_coff_library_key(name)):
+            result = _coff_directive_add_unique(result, name)
+    result
+
+fn coff_resolve_alternate_name(name: text, aliases: {text: text}) -> Result<text, text>:
+    var current = name
+    var visited: {text: bool} = {}
+    while aliases.has(current):
+        if visited.has(current):
+            return Err("COFF /ALTERNATENAME cycle reaches '{current}'")
+        visited[current] = true
+        current = aliases[current]
+    Ok(current)
+
+fn coff_alternate_name_map(directives: CoffDirectives) -> Result<{text: text}, text>:
+    var aliases: {text: text} = {}
+    for alternate in directives.alternate_names:
+        if aliases.has(alternate.weak_name) and
+                aliases[alternate.weak_name] != alternate.default_name:
+            return Err("conflicting COFF /ALTERNATENAME for '{alternate.weak_name}'")
+        aliases[alternate.weak_name] = alternate.default_name
+    for alternate in directives.alternate_names:
+        val resolved = coff_resolve_alternate_name(alternate.weak_name, aliases)
+        if resolved.is_err(): return Err(resolved.unwrap_err())
+    Ok(aliases)
+
+export CoffAlternateName, CoffExportDirective, CoffDirectives
+export coff_parse_directives, coff_collect_directives
+export coff_parse_export_directive
+export coff_resolve_alternate_name, coff_alternate_name_map
+export coff_effective_default_libraries

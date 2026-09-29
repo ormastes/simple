@@ -8,25 +8,39 @@ fail() {
     echo "FAIL: $1" >&2
     exit 1
 }
-digest_file() { sha256sum "$1" | awk '{print $1}'; }
+digest_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "FAIL: no SHA-256 tool is available" >&2
+        return 1
+    fi
+}
 
-simple=${SIMPLE_BINARY:-}
-[ -n "$simple" ] || fail "SIMPLE_BINARY must name a provenance-admitted Stage-4 compiler"
-[ -x "$simple" ] || fail "missing Pure Simple compiler: $simple"
-case "$simple" in *compiler_rust*|*'/bootstrap/'*) fail "Rust/bootstrap seed is forbidden" ;; esac
+SIMPLE_BINARY=${SIMPLE_BINARY:-}
+[ -n "$SIMPLE_BINARY" ] ||
+    fail "SIMPLE_BINARY must name a provenance-admitted Stage-4 compiler"
+[ -x "$SIMPLE_BINARY" ] || fail "missing Pure Simple compiler: $SIMPLE_BINARY"
+case "$SIMPLE_BINARY" in
+    *compiler_rust*|*'/bootstrap/'*) fail "Rust/bootstrap seed is forbidden" ;;
+esac
 
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 STAGE4_PROVENANCE_HELPER_PATH="$root/scripts/check/lib/stage4-candidate-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
-simple=$(bootstrap_stage3_canonical_file "$simple") || fail "Stage-4 compiler is not canonical"
-provenance="${simple}.provenance.env"
-stage4_verify_candidate_provenance "$provenance" "$simple" "$root" ||
+SIMPLE_BINARY=$(bootstrap_stage3_canonical_file "$SIMPLE_BINARY") ||
+    fail "Stage-4 compiler is not canonical"
+provenance="${SIMPLE_BINARY}.provenance.env"
+stage4_verify_candidate_provenance "$provenance" "$SIMPLE_BINARY" "$root" ||
     fail "Stage-4 compiler provenance is invalid"
-compiler_sha_before=$(digest_file "$simple")
+export SIMPLE_BINARY
+compiler_sha_before=$(digest_file "$SIMPLE_BINARY")
 
-if ! compiler_version=$("$simple" --version 2>&1); then
+if ! compiler_version=$("$SIMPLE_BINARY" --version 2>&1); then
     fail "compiler identity command failed"
 fi
 [ -n "$compiler_version" ] || fail "compiler identity is empty"
@@ -46,7 +60,7 @@ object="$work/cosmos_fsbl_candidate.o"
 combined="$work/cosmos_fsbl_candidate_linked.o"
 log="$work/native-build.log"
 
-SIMPLE_NO_STUB_FALLBACK=1 "$simple" native-build --backend llvm \
+SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BINARY" native-build --backend llvm \
     --source src \
     --entry src/os/kernel/arch/arm32/cosmos/cosmos_fsbl.spl \
     --entry-closure --target armv7-unknown-none-eabihf --emit-object \
@@ -106,7 +120,7 @@ for symbol in cosmos_fsbl_validate_handoff cosmos_fsbl_selftest; do
 done
 undefined=$(nm -u "$combined" || true)
 [ -z "$undefined" ] || fail "combined Cosmos object retains undefined symbols: $undefined"
-[ "$(digest_file "$simple")" = "$compiler_sha_before" ] ||
+[ "$(digest_file "$SIMPLE_BINARY")" = "$compiler_sha_before" ] ||
     fail "compiler changed during acceptance"
 
 echo "Pure Simple ARM32 FSBL candidate emit-object Cosmos link: PASS"

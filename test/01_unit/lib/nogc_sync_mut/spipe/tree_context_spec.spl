@@ -1,0 +1,316 @@
+use std.spec.*
+
+fn assert(cond: bool):
+    expect(cond).to_equal(true)
+
+use std.nogc_sync_mut.spipe.tree_context.{spipe_parse_text, spipe_render_tree, spipe_raw_range, spipe_match_parser, spipe_context_store_new, spipe_context_put, spipe_context_get, spipe_context_search, spipe_context_raw, spipe_raw_context, spipe_source_blob}
+
+fn test_level_grouping_and_raw_pointers():
+    val raw = "[ERROR] src/app/mcp/main.spl:441: undefined symbol\nplain line"
+    val doc = spipe_parse_text("command_output", "simple build", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@group level=ERROR count=1"))
+    assert(rendered.contains("@group level=NONE count=1"))
+    assert(rendered.contains("@node id=n1 d=5 kind=file level=ERROR"))
+    assert(rendered.contains("@parent d=1 kind=dir path=\"src\""))
+    assert(rendered.contains("raw=raw:src:1#L1-L1"))
+
+fn test_no_level_skips_grouping():
+    val doc = spipe_parse_text("command_output", "find .", "./src/app\n./src/lib")
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("level_detected=false"))
+    assert(not rendered.contains("@group level="))
+
+fn test_find_output_classifies_parent_paths_as_dirs():
+    val doc = spipe_parse_text("command_output", "find .", "./src\n./src/app\n./src/app/main.spl")
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=2 kind=dir"))
+    assert(rendered.contains("@node id=n2 d=3 kind=dir"))
+    assert(rendered.contains("@node id=n3 d=4 kind=file"))
+    assert(rendered.contains("@parent d=2 kind=dir path=\"src/app\""))
+
+fn test_tree_command_preserves_parent_dirs():
+    val raw = ".\n├── src\n│   └── app\n│       └── main.spl"
+    val doc = spipe_parse_text("command_output", "tree", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n2 d=2 kind=dir"))
+    assert(rendered.contains("@node id=n3 d=3 kind=dir"))
+    assert(rendered.contains("@node id=n4 d=4 kind=file"))
+    assert(rendered.contains("@parent d=1 kind=dir path=\"src\""))
+    assert(rendered.contains("@parent d=2 kind=dir path=\"src/app\""))
+    assert(rendered.contains("@parent d=3 kind=file path=\"src/app/main.spl\""))
+
+fn test_ls_long_output_extracts_entries():
+    val raw = "total 8\ndrwxr-xr-x 2 user group 64 Jul 1 00:00 src\n-rw-r--r-- 1 user group 12 Jul 1 00:00 README.md"
+    val doc = spipe_parse_text("command_output", "ls -l", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n2 d=2 kind=dir"))
+    assert(rendered.contains("@node id=n3 d=2 kind=file"))
+    assert(rendered.contains("path=\"src\""))
+    assert(rendered.contains("path=\"README.md\""))
+
+fn test_git_status_extracts_paths():
+    val raw = "Changes not staged for commit:\n\tmodified:   src/app/main.spl\n\trenamed:    old.spl -> src/app/new.spl"
+    val doc = spipe_parse_text("command_output", "git status", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n2 d=4 kind=file"))
+    assert(rendered.contains("path=\"src/app/main.spl\""))
+    assert(rendered.contains("path=\"src/app/new.spl\""))
+
+fn test_git_diff_extracts_header_path():
+    val raw = "diff --git a/src/app/main.spl b/src/app/main.spl\nindex 111..222 100644"
+    val doc = spipe_parse_text("command_output", "git diff", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=4 kind=file"))
+    assert(rendered.contains("path=\"src/app/main.spl\""))
+
+fn test_git_log_extracts_name_only_paths():
+    val raw = "commit abc123\nAuthor: A <a@example.com>\n\nsrc/app/main.spl"
+    val doc = spipe_parse_text("command_output", "git log --name-only", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n4 d=4 kind=file"))
+    assert(rendered.contains("path=\"src/app/main.spl\""))
+
+fn test_pytest_extracts_summary_paths():
+    val raw = "FAILED tests/test_app.py::test_main - AssertionError"
+    val doc = spipe_parse_text("command_output", "pytest", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"tests/test_app.py\""))
+
+fn test_cargo_extracts_rust_location_paths():
+    val raw = "error[E0425]: cannot find value `x`\n --> src/main.rs:2:5"
+    val doc = spipe_parse_text("command_output", "cargo test", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n2 d=3 kind=file"))
+    assert(rendered.contains("path=\"src/main.rs\""))
+
+fn test_npm_extracts_node_stack_paths():
+    val raw = "TypeError: boom\n    at src/app/main.js:10:5"
+    val doc = spipe_parse_text("command_output", "npm test", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n2 d=4 kind=file"))
+    assert(rendered.contains("path=\"src/app/main.js\""))
+
+fn test_cmake_extracts_diagnostic_paths():
+    val raw = "CMake Error at src/CMakeLists.txt:10 (add_executable):"
+    val doc = spipe_parse_text("command_output", "cmake --build .", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"src/CMakeLists.txt\""))
+
+fn test_ninja_extracts_quoted_error_paths():
+    val raw = "ninja: error: 'build/app.o', needed by 'app', missing and no known rule to make it"
+    val doc = spipe_parse_text("command_output", "ninja", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"build/app.o\""))
+
+fn test_make_extracts_bracket_error_paths():
+    val raw = "make[1]: *** [src/Makefile:10: all] Error 2"
+    val doc = spipe_parse_text("command_output", "make", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"src/Makefile\""))
+
+fn test_shell_extracts_script_error_paths():
+    val raw = "src/script.sh: line 3: bad: command not found"
+    val doc = spipe_parse_text("command_output", "bash src/script.sh", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("parser=\"shell\""))
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"src/script.sh\""))
+
+fn test_ctest_extracts_failure_paths():
+    val raw = "1/1 Test #1: app_test ...***Failed src/test/app_test.cpp:42"
+    val doc = spipe_parse_text("command_output", "ctest", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=4 kind=file"))
+    assert(rendered.contains("path=\"src/test/app_test.cpp\""))
+
+fn test_python_traceback_extracts_file_and_error():
+    val raw = "Traceback (most recent call last):\n  File \"src/app/main.py\", line 2, in <module>\nValueError: bad"
+    val doc = spipe_parse_text("command_output", "python src/app/main.py", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("parser=\"python_traceback\""))
+    assert(rendered.contains("@group level=ERROR count=1"))
+    assert(rendered.contains("path=\"src/app/main.py\""))
+
+fn test_ld_extracts_referenced_paths():
+    val raw = "/usr/bin/ld: build/app.o: in function `main':"
+    val doc = spipe_parse_text("command_output", "ld", raw)
+    val rendered = spipe_render_tree(doc)
+    assert(rendered.contains("@node id=n1 d=3 kind=file"))
+    assert(rendered.contains("path=\"build/app.o\""))
+
+fn test_package_manager_extracts_paths_and_levels():
+    val apt_raw = "E: Sub-process /usr/bin/dpkg returned an error code (1)"
+    val apt_doc = spipe_parse_text("command_output", "apt install app", apt_raw)
+    val apt_rendered = spipe_render_tree(apt_doc)
+    assert(apt_rendered.contains("parser=\"apt\""))
+    assert(apt_rendered.contains("@group level=ERROR count=1"))
+    assert(apt_rendered.contains("path=\"/usr/bin/dpkg\""))
+
+    val dpkg_raw = "dpkg: error processing archive /tmp/pkg.deb (--install):"
+    val dpkg_doc = spipe_parse_text("command_output", "dpkg -i /tmp/pkg.deb", dpkg_raw)
+    val dpkg_rendered = spipe_render_tree(dpkg_doc)
+    assert(dpkg_rendered.contains("parser=\"dpkg\""))
+    assert(dpkg_rendered.contains("path=\"/tmp/pkg.deb\""))
+
+fn test_system_tools_extract_units():
+    val systemctl_doc = spipe_parse_text("command_output", "systemctl status ssh.service", "● ssh.service - OpenSSH server")
+    val systemctl_rendered = spipe_render_tree(systemctl_doc)
+    assert(systemctl_rendered.contains("parser=\"systemctl\""))
+    assert(systemctl_rendered.contains("path=\"ssh.service\""))
+
+    val journal_doc = spipe_parse_text("command_output", "journalctl -u ssh.service", "Jul 01 host systemd[1]: ssh.service: Failed with result 'exit-code'.")
+    val journal_rendered = spipe_render_tree(journal_doc)
+    assert(journal_rendered.contains("parser=\"journalctl\""))
+    assert(journal_rendered.contains("path=\"ssh.service\""))
+
+fn test_repomix_extracts_file_markers():
+    val xml = "<file path=\"src/app/main.spl\">\nfn main()"
+    val xml_doc = spipe_parse_text("repomix", "repomix", xml)
+    val xml_rendered = spipe_render_tree(xml_doc)
+    assert(xml_rendered.contains("@node id=n1 d=4 kind=file"))
+    assert(xml_rendered.contains("path=\"src/app/main.spl\""))
+
+    val md = "## File: src/lib/mod.spl\ncode"
+    val md_doc = spipe_parse_text("repomix", "repomix", md)
+    val md_rendered = spipe_render_tree(md_doc)
+    assert(md_rendered.contains("@node id=n1 d=4 kind=file"))
+    assert(md_rendered.contains("path=\"src/lib/mod.spl\""))
+
+fn test_raw_context_exact_lines():
+    val raw = "a\nb\nc\nd"
+    val out = spipe_raw_range(raw, "exec:9", 2, 2, 1, 1)
+    assert(out.contains("@raw id=exec:9 range=L1-L3 mode=exact"))
+    assert(out.contains("| a"))
+    assert(out.contains("| c"))
+
+fn test_direct_raw_context_includes_parent_chain():
+    val raw = "[ERROR] src/app/mcp/main.spl:441: undefined symbol\nplain line"
+    val out = spipe_raw_context("exec:9", "command_output", "simple build", raw, 1, 1, 0, 0)
+    assert(out.contains("@context line=1"))
+    assert(out.contains("@parent d=1 kind=dir path=\"src\""))
+    assert(out.contains("@raw id=exec:9 range=L1-L1 mode=exact"))
+
+fn test_parser_matcher_common_ubuntu_tools():
+    assert(spipe_match_parser("command_output", "", "plain output").to_string() == "generic_text")
+    assert(spipe_match_parser("command_output", "", "[INFO] ready").to_string() == "generic_log_level")
+    assert(spipe_match_parser("command_output", "", "./src\n./src/app").to_string() == "file_tree")
+    assert(spipe_match_parser("command_output", "find .", "./src/app/main.spl").to_string() == "find")
+    assert(spipe_match_parser("command_output", "ls -la", "drwxr-xr-x 2 me me 4096 Jul 1 src").to_string() == "ls")
+    assert(spipe_match_parser("command_output", "tree", ".\n`-- src").to_string() == "tree")
+    assert(spipe_match_parser("command_output", "rg TODO src", "src/a:1:TODO").to_string() == "rg")
+    assert(spipe_match_parser("command_output", "grep TODO src", "src/a:TODO").to_string() == "grep")
+    assert(spipe_match_parser("command_output", "git status", "Changes not staged for commit").to_string() == "git_status")
+    assert(spipe_match_parser("command_output", "git diff", "diff --git a/a b/a").to_string() == "git_diff")
+    assert(spipe_match_parser("command_output", "git log --name-only", "commit abc").to_string() == "git_log")
+    assert(spipe_match_parser("command_output", "gcc main.c", "main.c:1: error").to_string() == "gcc_clang")
+    assert(spipe_match_parser("command_output", "ld", "/usr/bin/ld: build/app.o: missing").to_string() == "ld_linker")
+    assert(spipe_match_parser("command_output", "cmake --build .", "CMake Error at src/CMakeLists.txt:1").to_string() == "cmake")
+    assert(spipe_match_parser("command_output", "ninja", "ninja: error: 'build/app.o'").to_string() == "ninja")
+    assert(spipe_match_parser("command_output", "make", "make[1]: *** [src/Makefile:1: all]").to_string() == "make")
+    assert(spipe_match_parser("command_output", "bash src/script.sh", "src/script.sh: line 3: bad").to_string() == "shell")
+    assert(spipe_match_parser("command_output", "python app.py", "Traceback (most recent call last):").to_string() == "python_traceback")
+    assert(spipe_match_parser("command_output", "pytest", "FAILED tests/test_app.py::test_main").to_string() == "pytest")
+    assert(spipe_match_parser("command_output", "ctest", "1/1 Test #1").to_string() == "ctest")
+    assert(spipe_match_parser("command_output", "cargo test", "error: fail").to_string() == "cargo")
+    assert(spipe_match_parser("command_output", "npm test", "Error: fail").to_string() == "npm")
+    assert(spipe_match_parser("command_output", "apt install simple", "E: Sub-process /usr/bin/dpkg returned an error code").to_string() == "apt")
+    assert(spipe_match_parser("command_output", "dpkg -i pkg.deb", "dpkg: error processing archive /tmp/pkg.deb").to_string() == "dpkg")
+    assert(spipe_match_parser("command_output", "tar -tf app.tar", "src/app/main.spl").to_string() == "tar")
+    assert(spipe_match_parser("command_output", "zip -r app.zip src", "adding: src/app/main.spl").to_string() == "zip")
+    assert(spipe_match_parser("command_output", "unzip app.zip", "inflating: src/app/main.spl").to_string() == "unzip")
+    assert(spipe_match_parser("command_output", "rsync -av src dst", "src/app/main.spl").to_string() == "rsync")
+    assert(spipe_match_parser("command_output", "journalctl -u app", "Jul 1 app[1]: started").to_string() == "journalctl")
+    assert(spipe_match_parser("command_output", "systemctl status app", "Loaded: loaded").to_string() == "systemctl")
+    assert(spipe_match_parser("command_output", "repomix", "<file path=\"src/app/main.spl\">").to_string() == "repomix_xml")
+    assert(spipe_match_parser("repomix", "repomix", "## File: src/app/main.spl").to_string() == "repomix_markdown")
+    assert(spipe_match_parser("markdown", "notes.md", "# Title\n\n## Next").to_string() == "markdown_headings")
+
+fn test_archive_and_copy_tools_extract_paths():
+    val tar_doc = spipe_parse_text("command_output", "tar -tf app.tar", "src/\nsrc/app/main.spl")
+    val tar_rendered = spipe_render_tree(tar_doc)
+    assert(tar_rendered.contains("parser=\"tar\""))
+    assert(tar_rendered.contains("path=\"src/app/main.spl\""))
+    val zip_doc = spipe_parse_text("command_output", "zip -r app.zip src", "adding: src/app/main.spl")
+    val zip_rendered = spipe_render_tree(zip_doc)
+    assert(zip_rendered.contains("parser=\"zip\""))
+    assert(zip_rendered.contains("path=\"src/app/main.spl\""))
+    val unzip_doc = spipe_parse_text("command_output", "unzip app.zip", "inflating: src/app/main.spl")
+    val unzip_rendered = spipe_render_tree(unzip_doc)
+    assert(unzip_rendered.contains("parser=\"unzip\""))
+    assert(unzip_rendered.contains("path=\"src/app/main.spl\""))
+    val rsync_doc = spipe_parse_text("command_output", "rsync -av src dst", "src/app/main.spl")
+    val rsync_rendered = spipe_render_tree(rsync_doc)
+    assert(rsync_rendered.contains("parser=\"rsync\""))
+    assert(rsync_rendered.contains("path=\"src/app/main.spl\""))
+
+fn test_context_store_get_search_and_raw():
+    var store = spipe_context_store_new()
+    store = spipe_context_put(store, spipe_source_blob("exec:7", "command_output", "simple build", "[ERROR] src/main.spl:1: no\nok"))
+    val got = spipe_context_get(store, "exec:7")
+    assert(got.contains("@source id=exec:7"))
+    assert(got.contains("@parent d=1 kind=dir path=\"src\""))
+    val found = spipe_context_search(store, "no")
+    assert(found.contains("@group level=ERROR count=1"))
+    val raw = spipe_context_raw(store, "exec:7", 1, 1, 0, 1)
+    assert(raw.contains("@context line=1"))
+    assert(raw.contains("@parent d=1 kind=dir path=\"src\""))
+    assert(raw.contains("@raw id=exec:7 range=L1-L2 mode=exact"))
+
+describe "spipe tree_context":
+    it "level grouping and raw pointers":
+        test_level_grouping_and_raw_pointers()
+    it "no level skips grouping":
+        test_no_level_skips_grouping()
+    it "find output classifies parent paths as dirs":
+        test_find_output_classifies_parent_paths_as_dirs()
+    it "tree command preserves parent dirs":
+        test_tree_command_preserves_parent_dirs()
+    it "ls long output extracts entries":
+        test_ls_long_output_extracts_entries()
+    it "git status extracts paths":
+        test_git_status_extracts_paths()
+    it "git diff extracts header path":
+        test_git_diff_extracts_header_path()
+    it "git log extracts name only paths":
+        test_git_log_extracts_name_only_paths()
+    it "pytest extracts summary paths":
+        test_pytest_extracts_summary_paths()
+    it "cargo extracts rust location paths":
+        test_cargo_extracts_rust_location_paths()
+    it "npm extracts node stack paths":
+        test_npm_extracts_node_stack_paths()
+    it "cmake extracts diagnostic paths":
+        test_cmake_extracts_diagnostic_paths()
+    it "ninja extracts quoted error paths":
+        test_ninja_extracts_quoted_error_paths()
+    it "make extracts bracket error paths":
+        test_make_extracts_bracket_error_paths()
+    it "shell extracts script error paths":
+        test_shell_extracts_script_error_paths()
+    it "ctest extracts failure paths":
+        test_ctest_extracts_failure_paths()
+    it "python traceback extracts file and error":
+        test_python_traceback_extracts_file_and_error()
+    it "ld extracts referenced paths":
+        test_ld_extracts_referenced_paths()
+    it "package manager extracts paths and levels":
+        test_package_manager_extracts_paths_and_levels()
+    it "system tools extract units":
+        test_system_tools_extract_units()
+    it "repomix extracts file markers":
+        test_repomix_extracts_file_markers()
+    it "raw context exact lines":
+        test_raw_context_exact_lines()
+    it "direct raw context includes parent chain":
+        test_direct_raw_context_includes_parent_chain()
+    it "parser matcher common ubuntu tools":
+        test_parser_matcher_common_ubuntu_tools()
+    it "archive and copy tools extract paths":
+        test_archive_and_copy_tools_extract_paths()
+    it "context store get search and raw":
+        test_context_store_get_search_and_raw()

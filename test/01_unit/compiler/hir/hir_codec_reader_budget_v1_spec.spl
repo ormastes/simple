@@ -1,0 +1,102 @@
+# B02: bounded FlatPoolReader behavior used by canonical HIR decoding.
+# Bounds are representation-ledger evidence, not allocator/RSS evidence.
+# @req REQ-CSM-024
+
+use std.spec.*
+use std.spec.step
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+
+fn reader(blob: text, input: i64, allocation: i64, nodes: i64,
+          depth: i64, work: i64) -> FlatPoolReader:
+    FlatPoolReader.new_bounded(blob, input, allocation, nodes, depth, work)
+
+describe "B02 bounded HIR reader [OPT-L07-T002]":
+    it "should decode canonical scalar lines within exact limits":
+        step("Freeze the exact source and required case universe")
+        var r = reader("7\n", 2, 1024, 8, 4, 100)
+        expect(r.ok).to_equal(true)
+        expect(r.next_i64()).to_equal(7)
+        expect(r.ok).to_equal(true)
+        expect(r.entered_nodes).to_equal(0)
+
+    it "should preserve empty and escaped text values at the edge":
+        step("Exercise the production owner with a real typed input")
+        var nil_reader = reader("", 0, 1024, 8, 4, 100)
+        match nil_reader.decode_text("\\N"):
+            case nil: expect(nil).to_equal(nil)
+            case _: fail("nil text tag decoded as non-nil")
+        var text_reader = reader("", 0, 1024, 8, 4, 100)
+        expect(text_reader.decode_text("a\\n\\\\b")).to_equal("a\n\\b")
+        expect(text_reader.decode_text("")).to_equal("")
+        expect(text_reader.ok).to_equal(true)
+        # Non-optional legacy scalar methods still accept concrete values.
+        var scalar_reader = reader("", 0, 1024, 8, 4, 100)
+        expect(scalar_reader.decode_nullable_i64("7")).to_equal(7)
+        expect(scalar_reader.decode_nullable_bool("0")).to_equal(false)
+        expect(scalar_reader.ok).to_equal(true)
+
+    it "should accept exact input, allocation, and work limits at equality":
+        step("Exercise the production owner with a real typed input")
+        var exact = reader("7\n", 2, 130, 8, 4, 6)
+        expect(exact.next_i64()).to_equal(7)
+        expect(exact.ok).to_equal(true)
+        var extrema = reader(
+            "9223372036854775807\n-9223372036854775808\n",
+            41, 233, 8, 4, 123)
+        expect(extrema.next_i64()).to_equal(9223372036854775807)
+        expect(extrema.next_i64()).to_equal(-9223372036854775807 - 1)
+        expect(extrema.ok).to_equal(true)
+
+    it "should reject one-short input, allocation, node, depth, or work limits":
+        step("Inject one missing case or invalid boundary")
+        val input_short = reader("7\n", 1, 1024, 8, 4, 100)
+        expect(input_short.ok).to_equal(false)
+        expect(input_short.failure_kind).to_equal("bounds")
+        expect(input_short.failure_detail).to_equal("input_bytes")
+        val allocation_short = reader("7\n", 2, 1, 8, 4, 100)
+        expect(allocation_short.ok).to_equal(false)
+        val work_short = reader("7\n", 2, 1024, 8, 4, 1)
+        expect(work_short.ok).to_equal(false)
+        var node_short = reader("", 0, 1024, 0, 4, 100)
+        expect(node_short.enter_node()).to_equal(false)
+        var depth_short = reader("", 0, 1024, 8, 0, 100)
+        expect(depth_short.enter_node()).to_equal(false)
+
+    it "should poison the cursor on malformed integer and truncation":
+        step("Require the exact refusal before publication or execution")
+        var integer_reader = reader("", 0, 1024, 8, 4, 100)
+        _ = integer_reader.next_i64()
+        expect(integer_reader.ok).to_equal(false)
+        var bool_reader = reader("", 0, 1024, 8, 4, 100)
+        _ = bool_reader.decode_nullable_bool("2")
+        expect(bool_reader.failure_kind).to_equal("malformed")
+        expect(bool_reader.failure_detail).to_equal("boolean")
+        val bool_events = bool_reader.audit_events
+        expect(bool_reader.charge_work(1)).to_equal(false)
+        expect(bool_reader.audit_events).to_equal(bool_events)
+        var text_reader = reader("", 0, 1024, 8, 4, 100)
+        _ = text_reader.decode_text("bad\\q")
+        expect(text_reader.failure_kind).to_equal("malformed")
+        expect(text_reader.failure_detail).to_equal("text_escape")
+        val text_events = text_reader.audit_events
+        expect(text_reader.charge_work(1)).to_equal(false)
+        expect(text_reader.audit_events).to_equal(text_events)
+        var trailing_reader = reader("bad\\", 4, 1024, 8, 4, 100)
+        _ = trailing_reader.decode_text("bad\\")
+        expect(trailing_reader.failure_kind).to_equal("malformed")
+        expect(trailing_reader.failure_detail).to_equal("text_escape")
+        val trailing_events = trailing_reader.audit_events
+        expect(trailing_reader.charge_work(1)).to_equal(false)
+        expect(trailing_reader.audit_events).to_equal(trailing_events)
+        var count_reader = reader("-1\n", 4, 1024, 8, 4, 100)
+        _ = count_reader.next_len()
+        expect(count_reader.ok).to_equal(false)
+        expect(count_reader.failure_kind).to_equal("malformed")
+        expect(count_reader.failure_detail).to_equal("negative_container_count")
+        var truncation_reader = reader("3\n1\n", 4, 1024, 8, 4, 100)
+        _ = truncation_reader.next_len()
+        expect(truncation_reader.failure_detail).to_equal("truncated_container")
+
+    it "should bind executed reader outcomes to the admitted build":
+        step("Bind executed branch hits to the admitted build")
+        fail("MissingEvidence: B02 qualified branch instrumentation and runner")

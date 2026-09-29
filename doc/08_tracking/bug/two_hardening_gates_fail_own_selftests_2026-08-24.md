@@ -1,4 +1,8 @@
 # Two hardening gates fail their own selftests once the file_read overflow is gone
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** MEDIUM (two Phase 5 / Phase 8 exit gates report `ERROR — nothing was checked`, so neither can produce evidence)
@@ -78,3 +82,4 @@ so other colliding pairs remain latent process-aborts. This is a live example.
 - **Owner:** Phase 5 loader lane (`72ddebf2094`) and Phase 8 assurance lane (`2db75e0d35a`); the SDN question belongs to the sdn/parser owner.
 - **Command:** the census invocation above, plus `sh scripts/check/check-critical-package-pins.shs` in a clean worktree.
 - **Done when:** both gates print a `PASS —` verdict line, and the waiver negatives report non-zero counts.
+

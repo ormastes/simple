@@ -1,0 +1,422 @@
+# Full-width generation and pin owner for environment-selected providers.
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.EnvironmentDigest256V1
+use std.common.crypto.sha256.sha256_bytes
+
+pub const PROVIDER_GENERATION_V2_MAX_RECORDS: u64 = 256u64
+pub const PROVIDER_GENERATION_V2_MAX_PINS: u64 = 256u64
+
+pub enum ProviderGenerationErrorV2:
+    InvalidEvidence
+    CapacityExceeded
+    CounterOverflow
+    ProviderNotActive
+    GenerationMismatch
+    PinUnknown
+    PinCapacityExceeded
+    AlreadyRetired
+    PinsLive
+    ReservationUnknown
+    ReservationConflict
+
+pub struct ProviderActivationEvidenceV2:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    plan_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    mapped_handle: u64
+    callable_binding_identity: EnvironmentDigest256V1
+    activation_authority_identity: EnvironmentDigest256V1
+
+pub struct ProviderPrePublicationEvidenceV2:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    mapped_handle: u64
+    callable_binding_identity: EnvironmentDigest256V1
+    activation_authority_identity: EnvironmentDigest256V1
+
+pub struct ProviderGenerationReservationV2:
+    reservation_id: u64
+    manager_identity: u64
+    provider_handle: u64
+    generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+struct _ProviderGenerationReservationRecordV2:
+    token: ProviderGenerationReservationV2
+    evidence: ProviderPrePublicationEvidenceV2
+
+pub struct ProviderGenerationV2:
+    provider_handle: u64
+    generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    plan_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    mapped_handle: u64
+    callable_binding_identity: EnvironmentDigest256V1
+    activation_authority_identity: EnvironmentDigest256V1
+    pin_count: u64
+    active: bool
+    retired: bool
+
+pub struct ProviderGenerationActivationV2:
+    provider_handle: u64
+    generation: u64
+    previous_generation: u64
+
+pub struct ProviderGenerationPinV2:
+    pin_id: u64
+    manager_identity: u64
+    provider_handle: u64
+    generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+
+# Owner-derived cache projection. The private mapping handle participates in
+# authority_digest but is deliberately not exposed.
+pub struct ProviderGenerationPinnedCacheAuthorityV2:
+    pin_id: u64
+    provider_handle: u64
+    generation: u64
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_identity: EnvironmentDigest256V1
+    abi_identity: EnvironmentDigest256V1
+    contract_identity: EnvironmentDigest256V1
+    semantic_identity: EnvironmentDigest256V1
+    grammar_identity: EnvironmentDigest256V1
+    program_identity: EnvironmentDigest256V1
+    plan_identity: EnvironmentDigest256V1
+    environment_identity: EnvironmentDigest256V1
+    environment_generation: u64
+    authority_digest: EnvironmentDigest256V1
+
+struct _ProviderPinRecordV2:
+    pin: ProviderGenerationPinV2
+
+pub class ProviderGenerationManagerV2:
+    var manager_identity: u64
+    var generations: [ProviderGenerationV2]
+    var pins: [_ProviderPinRecordV2]
+    var reservations: [_ProviderGenerationReservationRecordV2]
+    var next_provider_handle: u64
+    var next_generation: u64
+    var next_pin_id: u64
+    var next_reservation_id: u64
+
+    pub static fn create() -> ProviderGenerationManagerV2:
+        val candidate = _next_provider_generation_manager_identity_v2
+        val identity = if candidate == 0u64 or candidate == 0xffffffffffffffffu64: 0u64 else: candidate
+        if identity != 0u64: _next_provider_generation_manager_identity_v2 = identity + 1u64
+        ProviderGenerationManagerV2(manager_identity: identity,
+            generations: [], pins: [], reservations: [],
+            next_provider_handle: 1u64, next_generation: 1u64, next_pin_id: 1u64,
+            next_reservation_id: 1u64)
+
+var _next_provider_generation_manager_identity_v2: u64 = 1u64
+
+fn _declared(v: EnvironmentDigest256V1) -> bool:
+    v.w0 != 0u64 or v.w1 != 0u64 or v.w2 != 0u64 or v.w3 != 0u64
+fn _same(a: EnvironmentDigest256V1, b: EnvironmentDigest256V1) -> bool:
+    a.w0 == b.w0 and a.w1 == b.w1 and a.w2 == b.w2 and a.w3 == b.w3
+fn _push64_pc(out: [i64], value: u64):
+    for i in 0..8: out.push(((value >> ((i as u64) * 8u64)) & 255u64) as i64)
+fn _pushd_pc(out: [i64], value: EnvironmentDigest256V1):
+    _push64_pc(out, value.w0); _push64_pc(out, value.w1)
+    _push64_pc(out, value.w2); _push64_pc(out, value.w3)
+fn _read64_pc(raw: [i64], at: i64) -> u64:
+    var value = 0u64
+    for i in 0..8: value = value | ((raw[at + i] as u64) << ((i as u64) * 8u64))
+    value
+fn _cache_authority_digest_v2(r: ProviderGenerationV2, pin_id: u64,
+    manager_identity: u64) -> EnvironmentDigest256V1:
+    var bytes: [i64] = []; _push64_pc(bytes, 1u64)
+    _push64_pc(bytes, manager_identity); _push64_pc(bytes, pin_id)
+    _push64_pc(bytes, r.provider_handle); _push64_pc(bytes, r.generation)
+    for value in [r.provider_identity, r.variant_identity, r.artifact_identity,
+                  r.abi_identity, r.contract_identity, r.semantic_identity,
+                  r.grammar_identity, r.program_identity, r.plan_identity,
+                  r.environment_identity]: _pushd_pc(bytes, value)
+    _push64_pc(bytes, r.environment_generation); _push64_pc(bytes, r.mapped_handle)
+    _pushd_pc(bytes, r.callable_binding_identity)
+    _pushd_pc(bytes, r.activation_authority_identity)
+    val raw = sha256_bytes(bytes)
+    EnvironmentDigest256V1(w0: _read64_pc(raw, 0), w1: _read64_pc(raw, 8),
+        w2: _read64_pc(raw, 16), w3: _read64_pc(raw, 24))
+fn _evidence_valid(e: ProviderActivationEvidenceV2) -> bool:
+    _declared(e.provider_identity) and _declared(e.variant_identity) and
+    _declared(e.artifact_identity) and _declared(e.abi_identity) and
+    _declared(e.contract_identity) and _declared(e.semantic_identity) and
+    _declared(e.grammar_identity) and _declared(e.program_identity) and
+    _declared(e.plan_identity) and _declared(e.environment_identity) and
+    e.environment_generation > 0u64 and e.mapped_handle > 0u64 and
+    _declared(e.callable_binding_identity) and _declared(e.activation_authority_identity)
+fn _pre_evidence_valid(e: ProviderPrePublicationEvidenceV2) -> bool:
+    _declared(e.provider_identity) and _declared(e.variant_identity) and
+    _declared(e.artifact_identity) and _declared(e.abi_identity) and
+    _declared(e.contract_identity) and _declared(e.semantic_identity) and
+    _declared(e.grammar_identity) and _declared(e.program_identity) and
+    _declared(e.environment_identity) and e.environment_generation > 0u64 and
+    e.mapped_handle > 0u64 and _declared(e.callable_binding_identity) and
+    _declared(e.activation_authority_identity)
+fn _reservation_index_v2(m: ProviderGenerationManagerV2, id: u64) -> i64:
+    var i = 0
+    while i < m.reservations.len():
+        if m.reservations[i].token.reservation_id == id: return i
+        i = i + 1
+    -1
+
+pub fn provider_generation_reserve_v2(m: ProviderGenerationManagerV2,
+    e: ProviderPrePublicationEvidenceV2
+) -> Result<ProviderGenerationReservationV2, ProviderGenerationErrorV2>:
+    if m.manager_identity == 0u64 or not _pre_evidence_valid(e): return Err(ProviderGenerationErrorV2.InvalidEvidence)
+    if (m.generations.len() + m.reservations.len()) as u64 >= PROVIDER_GENERATION_V2_MAX_RECORDS:
+        return Err(ProviderGenerationErrorV2.CapacityExceeded)
+    for pending in m.reservations:
+        if _same(pending.evidence.provider_identity, e.provider_identity):
+            return Err(ProviderGenerationErrorV2.ReservationConflict)
+    if m.next_provider_handle == 0u64 or m.next_provider_handle == 0xffffffffffffffffu64 or
+       m.next_generation == 0u64 or m.next_generation == 0xffffffffffffffffu64 or
+       m.next_reservation_id == 0u64 or m.next_reservation_id == 0xffffffffffffffffu64:
+        return Err(ProviderGenerationErrorV2.CounterOverflow)
+    val active = _active_index_v2(m, e.provider_identity)
+    val handle = if active >= 0: m.generations[active].provider_handle else: m.next_provider_handle
+    val token = ProviderGenerationReservationV2(reservation_id: m.next_reservation_id,
+        manager_identity: m.manager_identity,
+        provider_handle: handle, generation: m.next_generation,
+        provider_identity: e.provider_identity, variant_identity: e.variant_identity)
+    m.reservations.push(_ProviderGenerationReservationRecordV2(token: token, evidence: e))
+    if active < 0: m.next_provider_handle = m.next_provider_handle + 1u64
+    m.next_generation = m.next_generation + 1u64
+    m.next_reservation_id = m.next_reservation_id + 1u64
+    Ok(token)
+
+pub fn provider_generation_cancel_reservation_v2(m: ProviderGenerationManagerV2,
+    token: ProviderGenerationReservationV2) -> Result<(), ProviderGenerationErrorV2>:
+    val index = _reservation_index_v2(m, token.reservation_id)
+    if token.manager_identity != m.manager_identity or index < 0 or m.reservations[index].token != token:
+        return Err(ProviderGenerationErrorV2.ReservationUnknown)
+    var kept: [_ProviderGenerationReservationRecordV2] = []
+    var i = 0
+    while i < m.reservations.len():
+        if i != index: kept.push(m.reservations[i])
+        i = i + 1
+    m.reservations = kept; Ok(())
+
+pub fn provider_generation_finalize_reservation_v2(m: ProviderGenerationManagerV2,
+    token: ProviderGenerationReservationV2, plan_identity: EnvironmentDigest256V1
+) -> Result<ProviderGenerationActivationV2, ProviderGenerationErrorV2>:
+    if not _declared(plan_identity): return Err(ProviderGenerationErrorV2.InvalidEvidence)
+    val index = _reservation_index_v2(m, token.reservation_id)
+    if token.manager_identity != m.manager_identity or index < 0 or m.reservations[index].token != token:
+        return Err(ProviderGenerationErrorV2.ReservationUnknown)
+    val pending = m.reservations[index]; val e = pending.evidence
+    val old = _active_index_v2(m, e.provider_identity)
+    val previous = if old >= 0: m.generations[old].generation else: 0u64
+    m.generations.push(ProviderGenerationV2(provider_handle: token.provider_handle,
+        generation: token.generation, provider_identity: e.provider_identity,
+        variant_identity: e.variant_identity, artifact_identity: e.artifact_identity,
+        abi_identity: e.abi_identity, contract_identity: e.contract_identity,
+        semantic_identity: e.semantic_identity, grammar_identity: e.grammar_identity,
+        program_identity: e.program_identity, plan_identity: plan_identity,
+        environment_identity: e.environment_identity, environment_generation: e.environment_generation,
+        mapped_handle: e.mapped_handle, callable_binding_identity: e.callable_binding_identity,
+        activation_authority_identity: e.activation_authority_identity,
+        pin_count: 0u64, active: true, retired: false))
+    if old >= 0:
+        var prior = m.generations[old]; prior.active = false; prior.retired = true; m.generations[old] = prior
+    _ = provider_generation_cancel_reservation_v2(m, token)
+    Ok(ProviderGenerationActivationV2(provider_handle: token.provider_handle,
+        generation: token.generation, previous_generation: previous))
+fn _active_index_v2(m: ProviderGenerationManagerV2, provider: EnvironmentDigest256V1) -> i64:
+    var i = 0
+    while i < m.generations.len():
+        if m.generations[i].active and _same(m.generations[i].provider_identity, provider): return i
+        i = i + 1
+    -1
+fn _generation_index_v2(m: ProviderGenerationManagerV2, handle: u64, generation: u64) -> i64:
+    var i = 0
+    while i < m.generations.len():
+        if m.generations[i].provider_handle == handle and m.generations[i].generation == generation: return i
+        i = i + 1
+    -1
+fn _pin_index(m: ProviderGenerationManagerV2, pin_id: u64) -> i64:
+    var i = 0
+    while i < m.pins.len():
+        if m.pins[i].pin.pin_id == pin_id: return i
+        i = i + 1
+    -1
+
+pub fn provider_generation_activate_v2(m: ProviderGenerationManagerV2,
+    e: ProviderActivationEvidenceV2) -> Result<ProviderGenerationActivationV2, ProviderGenerationErrorV2>:
+    if not _evidence_valid(e): return Err(ProviderGenerationErrorV2.InvalidEvidence)
+    val pre = ProviderPrePublicationEvidenceV2(provider_identity: e.provider_identity,
+        variant_identity: e.variant_identity, artifact_identity: e.artifact_identity,
+        abi_identity: e.abi_identity, contract_identity: e.contract_identity,
+        semantic_identity: e.semantic_identity, grammar_identity: e.grammar_identity,
+        program_identity: e.program_identity, environment_identity: e.environment_identity,
+        environment_generation: e.environment_generation, mapped_handle: e.mapped_handle,
+        callable_binding_identity: e.callable_binding_identity,
+        activation_authority_identity: e.activation_authority_identity)
+    val reservation = provider_generation_reserve_v2(m, pre)?
+    match provider_generation_finalize_reservation_v2(m, reservation, e.plan_identity):
+        case Ok(value): Ok(value)
+        case Err(reason):
+            _ = provider_generation_cancel_reservation_v2(m, reservation)
+            Err(reason)
+
+pub fn provider_generation_active_matches_v2(m: ProviderGenerationManagerV2,
+    activation: ProviderGenerationActivationV2, e: ProviderActivationEvidenceV2) -> bool:
+    val i = _generation_index_v2(m, activation.provider_handle, activation.generation)
+    i >= 0 and m.generations[i].active and _same(m.generations[i].provider_identity, e.provider_identity) and
+    _same(m.generations[i].variant_identity, e.variant_identity) and
+    _same(m.generations[i].artifact_identity, e.artifact_identity) and
+    _same(m.generations[i].abi_identity, e.abi_identity) and
+    _same(m.generations[i].contract_identity, e.contract_identity) and
+    _same(m.generations[i].semantic_identity, e.semantic_identity) and
+    _same(m.generations[i].grammar_identity, e.grammar_identity) and
+    _same(m.generations[i].program_identity, e.program_identity) and
+    _same(m.generations[i].plan_identity, e.plan_identity) and
+    _same(m.generations[i].environment_identity, e.environment_identity) and
+    m.generations[i].environment_generation == e.environment_generation and
+    _same(m.generations[i].callable_binding_identity, e.callable_binding_identity) and
+    _same(m.generations[i].activation_authority_identity, e.activation_authority_identity) and
+    m.generations[i].mapped_handle == e.mapped_handle
+
+pub fn provider_generation_pin_v2(m: ProviderGenerationManagerV2,
+    activation: ProviderGenerationActivationV2) -> Result<ProviderGenerationPinV2, ProviderGenerationErrorV2>:
+    val index = _generation_index_v2(m, activation.provider_handle, activation.generation)
+    if index < 0 or not m.generations[index].active: return Err(ProviderGenerationErrorV2.ProviderNotActive)
+    if m.pins.len() as u64 >= PROVIDER_GENERATION_V2_MAX_PINS or
+       m.generations[index].pin_count >= PROVIDER_GENERATION_V2_MAX_PINS:
+        return Err(ProviderGenerationErrorV2.PinCapacityExceeded)
+    if m.next_pin_id == 0u64 or m.next_pin_id == 0xffffffffffffffffu64:
+        return Err(ProviderGenerationErrorV2.CounterOverflow)
+    val pin = ProviderGenerationPinV2(pin_id: m.next_pin_id,
+        manager_identity: m.manager_identity,
+        provider_handle: activation.provider_handle, generation: activation.generation,
+        provider_identity: m.generations[index].provider_identity,
+        variant_identity: m.generations[index].variant_identity)
+    m.next_pin_id = m.next_pin_id + 1u64
+    m.pins.push(_ProviderPinRecordV2(pin: pin))
+    var record = m.generations[index]; record.pin_count = record.pin_count + 1u64; m.generations[index] = record
+    Ok(pin)
+
+pub fn provider_generation_pin_live_v2(m: ProviderGenerationManagerV2, pin: ProviderGenerationPinV2) -> bool:
+    if pin.manager_identity != m.manager_identity: return false
+    val pi = _pin_index(m, pin.pin_id)
+    if pi < 0: return false
+    val stored = m.pins[pi].pin
+    if stored.manager_identity != pin.manager_identity or
+       stored.provider_handle != pin.provider_handle or stored.generation != pin.generation or
+       not _same(stored.provider_identity, pin.provider_identity) or not _same(stored.variant_identity, pin.variant_identity): return false
+    val gi = _generation_index_v2(m, pin.provider_handle, pin.generation)
+    gi >= 0 and m.generations[gi].pin_count > 0u64
+
+pub fn provider_generation_pinned_cache_authority_v2(
+    m: ProviderGenerationManagerV2, pin: ProviderGenerationPinV2
+) -> Result<ProviderGenerationPinnedCacheAuthorityV2, ProviderGenerationErrorV2>:
+    if not provider_generation_pin_live_v2(m, pin): return Err(ProviderGenerationErrorV2.PinUnknown)
+    val index = _generation_index_v2(m, pin.provider_handle, pin.generation)
+    if index < 0: return Err(ProviderGenerationErrorV2.GenerationMismatch)
+    val r = m.generations[index]
+    Ok(ProviderGenerationPinnedCacheAuthorityV2(pin_id: pin.pin_id,
+        provider_handle: r.provider_handle, generation: r.generation,
+        provider_identity: r.provider_identity, variant_identity: r.variant_identity,
+        artifact_identity: r.artifact_identity, abi_identity: r.abi_identity,
+        contract_identity: r.contract_identity, semantic_identity: r.semantic_identity,
+        grammar_identity: r.grammar_identity, program_identity: r.program_identity,
+        plan_identity: r.plan_identity, environment_identity: r.environment_identity,
+        environment_generation: r.environment_generation,
+        authority_digest: _cache_authority_digest_v2(r, pin.pin_id, pin.manager_identity)))
+
+pub fn provider_generation_pinned_cache_authority_live_v2(
+    m: ProviderGenerationManagerV2, pin: ProviderGenerationPinV2,
+    authority: ProviderGenerationPinnedCacheAuthorityV2
+) -> bool:
+    match provider_generation_pinned_cache_authority_v2(m, pin):
+        case Ok(expected): expected == authority
+        case Err(_): false
+
+pub fn provider_generation_pin_release_v2(m: ProviderGenerationManagerV2,
+    pin: ProviderGenerationPinV2) -> Result<(), ProviderGenerationErrorV2>:
+    if not provider_generation_pin_live_v2(m, pin): return Err(ProviderGenerationErrorV2.PinUnknown)
+    val pi = _pin_index(m, pin.pin_id); val gi = _generation_index_v2(m, pin.provider_handle, pin.generation)
+    var kept: [_ProviderPinRecordV2] = []
+    var i = 0
+    while i < m.pins.len():
+        if i != pi: kept.push(m.pins[i])
+        i = i + 1
+    m.pins = kept
+    var record = m.generations[gi]; record.pin_count = record.pin_count - 1u64; m.generations[gi] = record
+    Ok(())
+
+fn provider_generation_retire_active_v2(m: ProviderGenerationManagerV2,
+    provider: EnvironmentDigest256V1) -> Result<(), ProviderGenerationErrorV2>:
+    val index = _active_index_v2(m, provider)
+    if index < 0: return Err(ProviderGenerationErrorV2.ProviderNotActive)
+    var record = m.generations[index]; record.active = false; record.retired = true; m.generations[index] = record
+    Ok(())
+
+fn provider_generation_sweep_v2(m: ProviderGenerationManagerV2) -> u64:
+    var kept: [ProviderGenerationV2] = []; var removed = 0u64
+    for record in m.generations:
+        if record.retired and record.pin_count == 0u64: removed = removed + 1u64
+        else: kept.push(record)
+    m.generations = kept
+    removed
+
+pub fn provider_generation_exact_pin_count_v2(m: ProviderGenerationManagerV2,
+    activation: ProviderGenerationActivationV2, evidence: ProviderActivationEvidenceV2
+) -> Result<u64, ProviderGenerationErrorV2>:
+    val i = _generation_index_v2(m, activation.provider_handle, activation.generation)
+    if i < 0 or not _same(m.generations[i].provider_identity, evidence.provider_identity) or
+       not _same(m.generations[i].variant_identity, evidence.variant_identity) or
+       not _same(m.generations[i].artifact_identity, evidence.artifact_identity) or
+       not _same(m.generations[i].abi_identity, evidence.abi_identity) or
+       not _same(m.generations[i].contract_identity, evidence.contract_identity) or
+       not _same(m.generations[i].semantic_identity, evidence.semantic_identity) or
+       not _same(m.generations[i].grammar_identity, evidence.grammar_identity) or
+       not _same(m.generations[i].program_identity, evidence.program_identity) or
+       not _same(m.generations[i].plan_identity, evidence.plan_identity) or
+       not _same(m.generations[i].environment_identity, evidence.environment_identity) or
+       m.generations[i].environment_generation != evidence.environment_generation or
+       m.generations[i].mapped_handle != evidence.mapped_handle or
+       not _same(m.generations[i].callable_binding_identity, evidence.callable_binding_identity) or
+       not _same(m.generations[i].activation_authority_identity,
+           evidence.activation_authority_identity):
+        return Err(ProviderGenerationErrorV2.GenerationMismatch)
+    Ok(m.generations[i].pin_count)
+
+pub fn provider_generation_retire_exact_v2(m: ProviderGenerationManagerV2,
+    activation: ProviderGenerationActivationV2, evidence: ProviderActivationEvidenceV2
+) -> Result<(), ProviderGenerationErrorV2>:
+    val count = provider_generation_exact_pin_count_v2(m, activation, evidence)?
+    if count > 0u64: return Err(ProviderGenerationErrorV2.PinsLive)
+    val i = _generation_index_v2(m, activation.provider_handle, activation.generation)
+    var record = m.generations[i]; record.active = false; record.retired = true
+    m.generations[i] = record
+    _ = provider_generation_sweep_v2(m)
+    Ok(())

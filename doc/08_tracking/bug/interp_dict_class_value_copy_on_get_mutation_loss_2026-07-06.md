@@ -1,20 +1,18 @@
 # Interpreter: `Dict<K, ClassInstance>.get()`/`.set()` copies the value — mutations through the fetched instance are silently lost
+## Resolved by ruling 2026-09-27 — copy is the specified behaviour (not a defect)
 
-> **Family root cause — see
-> `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17.md`**,
-> the canonical record for class-value identity in the interpreter (list index /
-> field bind / dict get). This record keeps its own symptom, repro and history in
-> full; it is cross-referenced, not superseded. Its CLOSED verdict is unchanged —
-> it rests on two independent execution re-measurements and was not re-litigated
-> by source reading. Note that the underlying engine defect (source `class`
-> values are the copy-on-write `Value::Object` carrier; `Value::ClassInstance` has
-> zero producers, verified 2026-08-17) is **still open** — this surface is masked
-> by path-based write-back, not fixed, so the `caches.set(...)` write-backs in
-> `host_compositor_entry.spl` should stay until option A in the canonical record
-> lands.
+Owner ruling 2026-09-27: classes are value types
+(`doc/07_guide/language/capability_library_authoring.md:33`, "`val b = a`
+copies"). The interpreter's copy-on-`get` is therefore correct, and the
+in-tree `caches.set(id, cache)` write-backs in `host_compositor_entry.spl` are
+the required idiom, not a workaround. Gate retargeted to value semantics:
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl`
+(interpreter engine 16/16). The JIT engine still aliases — filed separately as
+`doc/08_tracking/bug/jit_class_instances_alias_instead_of_copy_2026-09-27.md`.
+## Open 2026-09-16 — needs owner triage
 
-Status: CLOSED — NOT REPRODUCED 2026-08-17 (P1). Independently re-confirmed by EXECUTION; see the two 2026-08-17 sections below.
-- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** the surface no longer reproduces, but the underlying engine defect is only MASKED by write-back and remains open as `interp_list_class_element_read_returns_copy_mutation_loss_2026-08-17`; workarounds are still in `host_compositor_entry.spl`. `bug_db.sdn` row is `fix-implemented-verification-pending`.
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-07-06
 - Severity: high (silent state loss — any cache/accumulator held in a Dict misbehaves)
@@ -46,74 +44,85 @@ spec: mutate-through-get persists without manual write-back.
 2. `d.set(1, C(n: 0))`; `val c = d.get(1)`; `c.n = 5`
 3. `d.get(1).n` → expected 5, observed 0.
 
+## Re-probed 2026-09-06 — REPRODUCED, NOT FIXED
 
-## Re-measurement 2026-08-17 (P0-core silent-wrong triage lane) — NOT REPRODUCED
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
 
-Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59,536,728 bytes, mtime
-2026-08-16 22:59:37 UTC (Rust seed). Probes run under both
-`SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
-
-The filed "Repro sketch" was executed verbatim:
-
-```
-class C:
-    var n: i64
-var d: Dict<i64, C> = {}
-d.set(1, C(n: 0))
-val c = d.get(1)
-c.n = 5
-print d.get(1).n
-```
-
-Prints `5` on BOTH engines (the doc's expected value); the reported observation
-was `0`. Mutation through a `Dict`-fetched class instance now persists without
-the manual `caches.set(id, cache)` write-back the doc describes as the in-tree
-workaround.
-
-**Scope of this close.** This disproves the defect on the two Rust-seed engines
-only, which is where it was originally observed (interpreter). It says nothing
-about the pure-Simple self-hosted interpreter — no self-hosted binary is
-deployed in this tree (`bin/simple` is the seed), so that lane could not be
-measured. It also does not re-verify the two original `host_compositor_entry.spl`
-call sites; the workaround write-backs there are now believed redundant but
-were NOT removed or re-tested, so do not treat this as authority to delete them
-without re-measuring that path.
-
-
----
-
-# 2026-08-17 — independent second re-measurement (CRITICAL lane) — CONFIRMS NOT REPRODUCED
-
-Independent of the triage-lane re-measurement above, re-run on
-`bin/release/x86_64-unknown-linux-gnu/simple` (59,536,728 bytes, mtime
-2026-08-16 22:59:37, Rust seed). The doc's own "Repro sketch" verbatim:
+Still live on the interpreter, exactly as the record's repro sketch predicts:
 
 ```
-class C:
-    var n: i64
-
-fn main():
-    var d: Dict<i64, C> = {}
-    d.set(1, C(n: 0))
-    val c = d.get(1)
-    c.n = 5
-    print(d.get(1).n.to_text())
+DICT_MUT=0        # expected 1
 ```
 
+after `d["a"] = Counter(n: 0)`, `d.get("a").unwrap().bump()`, re-`get`. Probe
+`_scratch/p_cls.spl`. (The JIT lane could not be compared on the same probe: it
+stops earlier on an unrelated `Option<ClassInstance>` receiver-resolution defect
+— `.is_some()` on a `Dict.get()` result of class type binds as
+`Counter.is_some`. That is noted in
+`doc/08_tracking/bug/jit_is_some_is_none_method_dispatch_gap_2026-08-17.md`
+under "Still open, adjacent".)
+
+**Deliberately not fixed here, and why.** The value representation already has
+the right carrier: `Value::ClassInstance(Arc<ClassInstance>)` shares identity,
+while `Value::Object { fields: Arc<HashMap<..>> }` is copy-on-write and is what
+class values actually use. Switching classes onto `ClassInstance` is not a local
+edit — `compiler/src/value.rs:1756-1765` records that neither primary resolution
+path has a `ClassInstance` arm (field access in `interpreter/expr/calls.rs` and
+method dispatch in `interpreter_method/mod.rs` both match only `Value::Object`),
+so flipping the constructor without adding both arms plus an audit of every
+remaining `Value::Object` site would trade silent state loss for silent
+resolution failure. That is a semantics change with its own verification pass,
+not a bug fix to fold into an unrelated session.
+## Re-verification 2026-09-06 (bug-db closeout pass) — FIXED under JIT, STILL BROKEN under the interpreter
+
+A regression spec already exists for this exact bug:
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl`. Ran it
+on this host's deployed seed:
+
 ```
-$ bin/simple run repro.spl                                 -> 5
-$ SIMPLE_EXECUTION_MODE=interpreter bin/simple run repro.spl -> 5
+✓ persists a mutation made through Dict.get without a manual write-back
+✓ persists a mutation made inside a callee through a dict-valued field
+✓ keeps identity through other container kinds, not just Dict.get
+✗ behaves identically on both engines and reports no failure
+    expected true to equal false
+Results: 4 total, 3 passed, 1 failed
 ```
 
-Expected 5, observed 5, on both engines. The filed observation was `0`.
-Mutation through a `Dict`-fetched class instance persists with no manual
-`caches.set(id, cache)` write-back.
+The three JIT-mode checks (run under `SIMPLE_EXECUTION_MODE=jit`) all pass —
+`Dict.get()`/callee-field-dict/array-element identity are all fixed under
+JIT. The failing fourth example compares BOTH engines. Running the sibling
+probe directly under `SIMPLE_EXECUTION_MODE=interpreter`:
 
-Verdict rests on **EXECUTION**, not source reading. Consistent with the
-`merge_shared_collection_fields` COW write-back work already in-tree
-(`interpreter_call/core/function_exec.rs`).
+```
+FAIL dict_get_mutate_int got=0 want=5
+PASS dict_get_mutate_text
+FAIL dict_text_key got=10 want=99
+FAIL callee_field_dict_hits got=0 want=2
+FAIL callee_field_dict_last got=none want=seen
+FAIL array_elem_identity got=1 want=42
+FAIL two_handles_alias got=0 want=77
+DICT_CLASS_IDENTITY PROBE: FAILURES=6
+```
 
-**Not proven:** the native/AOT (`native-build`) lane was not exercised, and the
-original `HostCompositor.content_caches` call site was not re-run in situ. The
-`caches.set(...)` write-back workaround is still present in
-`host_compositor_entry.spl` and was not removed.
+The tree-walk interpreter — the ORIGINAL reported lane, per this doc's title
+and its "Root cause direction" section — still reproduces the defect almost
+completely (6 of 7 checks fail). **Conclusion: PARTIALLY FIXED.** The
+production-relevant JIT path (`bin/simple run`, the default engine) is fixed;
+the interpreter path (what `bin/simple test` spec BODIES execute, and what
+this bug was originally filed against) is not.
+
+
+## Suite-fix rerun 2026-09-20 — REPRODUCED on post-spawn-fix seed
+
+Suite-fix lane (`suite-2026-09-18`, Windows) re-ran
+`test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl` with the
+rebuilt seed carrying the test-mode child-spawn fix (0b28248caa3,
+1f557a02987). Child spawns now work, so the real residual pin is visible
+unmasked: examples 1-3 (JIT probe) pass; example 4 (both-engines parity) fails
+with `expected true to equal false` because the direct interpreter probe still
+prints the identical 6-of-7 failure block quoted above. No change vs the
+2026-09-06 verdict — the interpreter-lane class-instance copy remains a
+semantics-change debt, deliberately not folded into the spawn-fix lane.

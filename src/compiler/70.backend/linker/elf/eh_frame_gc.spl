@@ -1,0 +1,158 @@
+# FDE-granular `.eh_frame` garbage collection.
+
+use compiler.backend.linker.elf_parser.{
+    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_symbol_binding,
+    SHN_UNDEF, STB_LOCAL
+}
+use compiler.backend.linker.elf_inspect.{ElfSectionHeader}
+use compiler.backend.linker.sym_resolver.{SymResolution}
+
+val SHN_COMMON_EH: i64 = 0xfff2
+
+fn _ehgc_u32(raw: [u8], off: i64) -> i64:
+    (raw[off] as i64) | ((raw[off + 1] as i64) << 8) |
+        ((raw[off + 2] as i64) << 16) | ((raw[off + 3] as i64) << 24)
+
+fn _ehgc_put_u32(raw: [u8], off: i64, value: i64) -> [u8]:
+    var out = raw
+    out[off] = (value & 0xff) as u8
+    out[off + 1] = ((value >> 8) & 0xff) as u8
+    out[off + 2] = ((value >> 16) & 0xff) as u8
+    out[off + 3] = ((value >> 24) & 0xff) as u8
+    out
+
+fn _ehgc_target_live(obj: ElfObject, reloc: ElfRelocation, oi: i64,
+        live: [[bool]], res: SymResolution) -> bool:
+    val sym_idx = elf_reloc_sym(reloc)
+    if sym_idx <= 0 or sym_idx >= obj.symbols.len():
+        return false
+    val sym = obj.symbols[sym_idx]
+    var target_obj = oi
+    var target_sec = sym.st_shndx
+    if elf_symbol_binding(sym) != STB_LOCAL and sym.name != "" and res.defined.has(sym.name):
+        val e = res.defined[sym.name]
+        target_obj = e.obj_idx
+        target_sec = e.section_idx
+    if target_sec == SHN_UNDEF or target_sec == SHN_COMMON_EH:
+        return false
+    target_obj >= 0 and target_obj < live.len() and target_sec > 0 and
+        target_sec < live[target_obj].len() and live[target_obj][target_sec]
+
+fn _ehgc_record_index(offsets: [i64], value: i64) -> i64:
+    var i: i64 = 0
+    while i < offsets.len():
+        if offsets[i] == value:
+            return i
+        i = i + 1
+    -1
+
+fn _ehgc_transform_object(obj: ElfObject, oi: i64, live: [[bool]],
+        res: SymResolution) -> ElfObject:
+    var eh_si: i64 = -1
+    var si: i64 = 1
+    while si < obj.sections.len():
+        if elf_section_name(obj, si) == ".eh_frame":
+            eh_si = si
+        si = si + 1
+    if eh_si < 0:
+        return obj
+    val sec = obj.sections[eh_si]
+    val start = sec.sh_addr
+    var offsets: [i64] = []
+    var sizes: [i64] = []
+    var cie_offsets: [i64] = []
+    var keep: [bool] = []
+    var off: i64 = 0
+    while off + 4 <= sec.sh_size:
+        val length = _ehgc_u32(obj.raw, start + off)
+        if length == 0:
+            off = off + 4
+            continue
+        if length == 0xffffffff or length < 4 or off + 4 + length > sec.sh_size:
+            return obj  # the strict header builder will report the malformed record later
+        val id = _ehgc_u32(obj.raw, start + off + 4)
+        offsets = offsets.push(off)
+        sizes = sizes.push(4 + length)
+        cie_offsets = cie_offsets.push(if id == 0: -1 else: off + 4 - id)
+        keep = keep.push(false)
+        off = off + 4 + length
+
+    var ri: i64 = 0
+    while ri < offsets.len():
+        if cie_offsets[ri] >= 0:
+            for reloc in obj.relocations:
+                if reloc.target_section_idx == eh_si and reloc.r_offset == offsets[ri] + 8 and
+                        _ehgc_target_live(obj, reloc, oi, live, res):
+                    keep[ri] = true
+            if keep[ri]:
+                val ci = _ehgc_record_index(offsets, cie_offsets[ri])
+                if ci >= 0:
+                    keep[ci] = true
+        ri = ri + 1
+
+    var new_offsets: [i64] = []
+    var compact: [u8] = []
+    ri = 0
+    while ri < offsets.len():
+        new_offsets = new_offsets.push(compact.len())
+        if keep[ri]:
+            var bi: i64 = 0
+            while bi < sizes[ri]:
+                compact = compact.push(obj.raw[start + offsets[ri] + bi])
+                bi = bi + 1
+        ri = ri + 1
+    compact = compact.push(0u8)
+    compact = compact.push(0u8)
+    compact = compact.push(0u8)
+    compact = compact.push(0u8)
+
+    ri = 0
+    while ri < offsets.len():
+        if keep[ri] and cie_offsets[ri] >= 0:
+            val ci = _ehgc_record_index(offsets, cie_offsets[ri])
+            if ci >= 0:
+                val field = new_offsets[ri] + 4
+                compact = _ehgc_put_u32(compact, field, field - new_offsets[ci])
+        ri = ri + 1
+
+    var relocs: [ElfRelocation] = []
+    for reloc in obj.relocations:
+        if reloc.target_section_idx != eh_si:
+            relocs = relocs.push(reloc)
+            continue
+        ri = 0
+        while ri < offsets.len():
+            if reloc.r_offset >= offsets[ri] and reloc.r_offset < offsets[ri] + sizes[ri]:
+                if keep[ri]:
+                    relocs = relocs.push(ElfRelocation(r_offset: new_offsets[ri] + reloc.r_offset - offsets[ri],
+                        r_info: reloc.r_info, r_addend: reloc.r_addend,
+                        section_idx: reloc.section_idx, target_section_idx: reloc.target_section_idx))
+                break
+            ri = ri + 1
+
+    var raw = obj.raw
+    val new_start = raw.len()
+    for byte in compact:
+        raw = raw.push(byte)
+    var sections: [ElfSectionHeader] = []
+    si = 0
+    while si < obj.sections.len():
+        val old = obj.sections[si]
+        if si == eh_si:
+            sections = sections.push(ElfSectionHeader(sh_name: old.sh_name, sh_type: old.sh_type,
+                sh_flags: old.sh_flags, sh_addr: new_start, sh_size: compact.len(), sh_info: old.sh_info))
+        else:
+            sections = sections.push(old)
+        si = si + 1
+    ElfObject(header: obj.header, sections: sections, symbols: obj.symbols,
+        relocations: relocs, strtab: obj.strtab, shstrtab: obj.shstrtab, raw: raw)
+
+fn elf_gc_eh_frames(objects: [ElfObject], live: [[bool]], res: SymResolution) -> [ElfObject]:
+    var out: [ElfObject] = []
+    var oi: i64 = 0
+    while oi < objects.len():
+        out = out.push(_ehgc_transform_object(objects[oi], oi, live, res))
+        oi = oi + 1
+    out
+
+export elf_gc_eh_frames

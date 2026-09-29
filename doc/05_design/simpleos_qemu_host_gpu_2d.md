@@ -39,13 +39,8 @@ admission and cached promotion use this owner.
    bounded capabilities through its control header. Mapping evidence must
    precede every negotiation attempt and final decision.
 2. Canonical RECT/TEXT/IMAGE Draw IR semantics and ProcessingIR `FillU32` use the payload area.
-   Production WM frames first form one host-target `DrawIrComposition`; the
-   local fallback resolves checksum-valid top-level `WmContentFrame` pixels as
-   IMAGE resources. On a failed host attempt, only when the negotiated target
-   differs from the immutable CPU/CPU-SIMD target, the executor lazily
-   recomposes identical filtered scene/taskbar/content inputs for that local
-   target before Engine2D presentation. A local-only or equal-target path
-   builds one local composition and skips recomposition.
+   Production WM frames first form one `DrawIrComposition`; the local fallback
+   resolves checksum-valid top-level `WmContentFrame` pixels as IMAGE resources.
    The guest encodes unique referenced top-level IMAGE pixels as bounded,
    checksummed little-endian records in the negotiated readback arena and
    publishes their count, byte length, and checksum with the request. Clipped
@@ -56,11 +51,7 @@ admission and cached promotion use this owner.
    before overwriting the shared arena with result pixels.
 4. The guest validates provenance and exact CPU-oracle parity.
 5. Any unavailable service/backend or invalid receipt returns a stable reason
-   and selects the existing software/CPU path without preventing boot. The
-   fallback composition carries CPU material capability and receipt semantics;
-   it never reuses Metal device-glass metadata. Vulkan requests
-   CPU-composited material through its host presentation path rather than a
-   Vulkan device-glass receipt.
+   and selects the existing software/CPU path without preventing boot.
 
 The RV64 production input loop has no new runtime need. After module
 initialization it calls the existing `serial_init`, polls `serial_read_byte`,
@@ -107,14 +98,11 @@ and GROUP remain rejected. A Vulkan child must return checked device readback an
 is composited through the checked parent src-over path before its retained
 session is released.
 
-With a negotiated host, one host-target production composition feeds the host
-attempt. A validated host receipt presents through the framebuffer MMIO owner
-and returns. On host failure, a different CPU/CPU-SIMD target causes one lazy
-recomposition from identical filtered inputs before
-`engine2d_draw_ir_adv_composition_present_with_images`; an equal-target or
-local-only path reuses its single local composition. Metal is the only
-device-glass material target. Vulkan requests CPU-composited material through
-its host presentation path. The shared internal
+One `DRAW_IR_BACKEND_AUTO` production composition feeds both routes. A validated
+host receipt presents through the framebuffer MMIO owner; any host failure falls
+through to `engine2d_draw_ir_adv_composition_present_with_images` without a
+second producer or composition. Local production composition calls
+`engine2d_draw_ir_adv_composition_present_with_images`. The shared internal
 executor takes independent `present_frame` and `readback_frame` controls:
 regular composition is `(true, true)`, fresh-device execution is
 `(false, true)`, and the production present-only path is `(true, false)`. When
@@ -203,26 +191,6 @@ a positive framebuffer handle, and the same stable identity. ProcessingIR and
 all three QEMU ISA rows still need prepared macOS receipts before they can be
 marked verified.
 
-### Metal-only daemon dependency seam
-
-The executor now uses the internal `DrawIrRenderTarget` contract with only:
-
-- dimensions and strict backend/device identity;
-- clear and existing primitive/image/text draw operations;
-- present plus checked `Engine2DReadback`;
-- shutdown and poisoned/unknown-completion state.
-
-The normal `Engine2D` path and a Metal-only host adapter implement this same
-contract. The adapter must call the existing `MetalBackend`/`MetalSession`
-owners and canonical `draw_text`/`FontRenderer` material; it must not reimplement
-rasterization, maintain a second framebuffer policy, or change
-`DrawIrComposition`. A dependency check must prove that the macOS daemon closure
-does not retain non-Metal backend providers before native-build admission.
-The implemented `main_macos.spl` closure satisfies that dependency gate:
-202 files with no `engine.spl`, Vulkan, CUDA, DirectX, OpenGL, WebGPU, or other
-non-Metal provider. The bounded provisional native build still timed out before
-producing a daemon, so live Metal and QEMU gates remain open.
-
 ## Checked DirectX D3D11 source
 
 On Windows, `DirectXBackend` keeps the CPU mirror for fallback semantics but
@@ -242,14 +210,11 @@ open while TODO 548 blocks Simple compiler execution.
 
 CUDA device provenance comes from preferred `cuDeviceGetUuid_v2` with legacy
 symbol fallback behind the canonical CUDA runtime facade. The runtime rejects
-the all-zero sentinel and otherwise returns a stable nonzero 60-bit UUID hash
-that remains positive through Simple's three-bit integer tagging.
+the all-zero sentinel and otherwise returns a stable nonzero 63-bit UUID hash.
 The ProcessingIR executor and daemon both reject zero identity; the native
 readback gate checks the shared fixed hash vector, repeatability, and pairwise
 distinction when multiple devices are present. Aggregate PASS also requires a
 positive identity and a nonempty backend report.
-ROCm and DirectX apply the same 60-bit bound to native UUID/adapter hashes;
-Vulkan and Metal keep their existing tagged-safe 31-bit identities.
 
 ## Observability and NFRs
 
@@ -261,10 +226,8 @@ uses the synchronous checked Metal compute owner, performs pointer-based device
 readback through the canonical Metal I/O facade, and returns a positive
 historical resource handle plus stable device metadata identity only after
 exact output recovery. The shared runtime accepts completion only when the
-command reaches `MTLCommandBufferStatus::Completed` with no error. Production
-requests validate the bounded FillU32 result directly without allocating a
-duplicate CPU output. Evidence runs pass `--processing-verify-cpu` to retain
-the independent CPU-oracle parity gate and timing comparison.
+command reaches `MTLCommandBufferStatus::Completed` with no error. A separate
+CPU oracle remains the daemon's final parity gate.
 
 Each row records host OS, guest ISA, QEMU version/arguments, selected QEMU
 accelerator, protocol/backend, device identity, IDs, timing, concurrently
@@ -298,9 +261,8 @@ not the NFR-006 interval. TODO 566 remains open until fresh matching-native-ISA
 execution proves the complete guest-observed interval within the budget. The
 clock owner reports two valid equal microsecond samples as 1 us, keeping zero
 reserved for invalid or backward samples.
-The evidence daemon measures the current FillU32(256, 7) CPU oracle and device
-executor independently with the canonical time facade when launched with
-`--processing-verify-cpu`. Its single-request,
+The daemon measures the current FillU32(256, 7) CPU oracle and device executor
+independently with the canonical time facade. Its single-request,
 post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,
 generation, run, and frame. Cached validation recomputes the overflow-safe
 1.5x boundary; positive correct-but-slower evidence remains

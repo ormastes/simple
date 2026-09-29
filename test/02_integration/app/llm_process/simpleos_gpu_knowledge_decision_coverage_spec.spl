@@ -1,0 +1,79 @@
+# @req NFR-003
+"""Measured source decision inventory for the SimpleOS GPU and knowledge lane."""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+
+fn decision_ids() -> [text]:
+    ["KS_FEATURE_COUNT_ZERO", "KS_FEATURE_COUNT_MULTI", "KS_SOURCE_EMPTY",
+     "KS_BEST_MISSING", "KS_BEST_AMBIG", "KS_FORCE_MDSOC",
+     "KS_UNSAFE_PROFILE", "KS_EXPERT_PRESENT", "CUDA_NEGOTIATED",
+     "CUDA_INVALID_SUBMIT", "VULKAN_NEGOTIATED", "VULKAN_INVALID_SUBMIT",
+     "VD_CLASS", "VD_CORRELATION", "VD_PROVENANCE", "VD_INTEGRITY",
+     "AD_PROVENANCE", "AD_LINUX_ID", "AD_PROBE_CACHE",
+     "AD_LOWER_VALID", "AD_SUBMIT_VALID", "VN_FEATURES", "VN_CAPSET",
+     "VN_CONTEXT", "VN_BLOB", "VN_PLAN_FEATURES", "VN_PLAN_CAPSET",
+     "VN_PLAN_CONTEXT", "VN_PLAN_BLOB", "VN_PLAN_SUBMIT", "VN_PLAN_FENCE"]
+        + ["VN_WIRE_CONTEXT", "VN_WIRE_BLOB", "VN_WIRE_SUBMIT", "VN_WIRE_MAP",
+           "VN_RESPONSE_LENGTH", "VN_RESPONSE_ERROR", "VN_RESPONSE_TYPE",
+           "VN_RESPONSE_FLAGS", "VN_RESPONSE_FENCE_REQUIRED",
+           "VN_RESPONSE_FENCE_UNEXPECTED", "VQ_DRIVER", "VQ_BUFFERS",
+           "VQ_QUEUE", "VQ_REQUEST_SIZE", "VQ_RESPONSE_SIZE",
+           "VN_ENV_HOST_FEATURES", "VN_ENV_NEGOTIATED_FEATURES",
+           "VN_ENV_NEGOTIATED_SUBSET", "VN_ENV_CAPSET_COUNT",
+           "VN_ENV_CAPSET_ROW", "VN_ENV_CAPSET_VALID", "VN_ENV_SHM_ROW",
+           "VN_ENV_SHM_VALID", "VN_ENV_QUERY_FIX_ROW",
+           "VN_ENV_QUERY_FIX_ENABLED", "VP_CHAIN", "VP_CYCLE",
+           "VP_TRUNCATED", "VP_DEVICE_ROW", "VP_DEVICE_VALID", "VP_SHM_ROW",
+           "VP_SHM_VALID", "VP_DUP_SHM", "VP_BAR_ROW", "VP_BAR_VALID",
+           "VP_GRANT_ROW", "VP_GRANT_VALID", "VP_RANGE_ADD",
+           "VP_APERTURE_CONTAIN", "VP_GRANT_CONTAIN"]
+
+fn decision_source_blob() -> text:
+    file_read("src/lib/common/llm/knowledge_selector.spl") +
+        file_read("src/os/lib/gpu_bridge/cuda_host_offload_adapter.spl") +
+        file_read("src/os/lib/gpu_bridge/vulkan_host_offload_adapter.spl") +
+        file_read("src/os/drivers/gpu/vulkan_device_port.spl") +
+        file_read("src/os/drivers/gpu/adreno_turnip_adapter.spl") +
+        file_read("src/os/drivers/virtio/virtio_gpu_venus_protocol.spl") +
+        file_read("src/os/drivers/virtio/virtio_gpu_venus_controlq.spl") +
+        file_read("src/os/drivers/virtio/virtio_gpu_venus_environment.spl") +
+        file_read("src/os/drivers/virtio/virtio_gpu_venus_pci_caps.spl")
+
+fn decision_witness_blob() -> text:
+    file_read("test/01_unit/lib/common/llm/knowledge_selector_spec.spl") +
+        file_read("test/01_unit/os/lib/gpu_bridge/cuda_host_offload_adapter_spec.spl") +
+        file_read("test/01_unit/os/lib/gpu_bridge/vulkan_host_offload_adapter_spec.spl") +
+        file_read("test/01_unit/os/drivers/gpu/vulkan_device_port_spec.spl") +
+        file_read("test/01_unit/os/drivers/virtio/virtio_gpu_venus_protocol_spec.spl") +
+        file_read("test/01_unit/os/drivers/virtio/virtio_gpu_venus_wire_spec.spl") +
+        file_read("test/01_unit/os/drivers/virtio/virtio_gpu_venus_controlq_spec.spl") +
+        file_read("test/01_unit/os/drivers/virtio/virtio_gpu_venus_environment_spec.spl") +
+        file_read("test/01_unit/os/drivers/virtio/virtio_gpu_venus_pci_caps_spec.spl")
+
+describe "SimpleOS GPU and knowledge decision coverage":
+    it "should measure at least eighty percent of tracked branch outcomes":
+        val source = decision_source_blob()
+        val witnesses = decision_witness_blob()
+        val ids = decision_ids()
+        var covered: i64 = 0
+        for id in ids:
+            val declaration = "# @decision " + id
+            expect(source.split(declaration).len()).to_equal(2)
+            if witnesses.contains("# @covers " + id + ":true") or
+                    witnesses.contains(" " + id + ":true"):
+                covered = covered + 1
+            if witnesses.contains("# @covers " + id + ":false") or
+                    witnesses.contains(" " + id + ":false"):
+                covered = covered + 1
+        val total = ids.len().to_i64() * 2
+        val percent = covered * 100 / total
+        expect(total).to_equal(142)
+        expect(covered).to_equal(140)
+        expect(percent).to_equal(98)
+        expect(percent).to_be_greater_than(79)
+
+    it "should expose the two live-MMIO outcomes instead of inventing witnesses":
+        val witnesses = decision_witness_blob()
+        expect(witnesses.contains("CUDA_INVALID_SUBMIT:false")).to_equal(false)
+        expect(witnesses.contains("VULKAN_INVALID_SUBMIT:false")).to_equal(false)

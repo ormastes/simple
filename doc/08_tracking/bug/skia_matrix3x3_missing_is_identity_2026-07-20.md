@@ -1,19 +1,8 @@
 # Skia Matrix3x3 missing `is_identity()` method
+## Open 2026-09-16 — needs owner triage
 
-## Status: ALREADY-FIXED (verified by content 2026-08-17)
-
-The triage evidence line ("git grep is_identity in matrix.spl returns zero
-hits") is a false negative: `src/lib/skia/entity/matrix.spl` is now a 17-line
-re-export shim (`use std.common.drawing.vector.{Matrix3x3}` / `export
-Matrix3x3`). The real class moved to `src/lib/common/drawing/vector.spl`, where
-`fn is_identity(self) -> bool` is defined at **line 224**.
-
-Executed: `bin/simple run` on a probe calling
-`Matrix3x3.identity().is_identity()` prints `identity? true`, and
-`test/unit/lib/skia/matrix_spec.spl` reports
-`declared>=18 executed=18 passed=18 failed=0 dropped=0` -- not the 5-of-18
-failures this doc records. No source change needed.
-
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-07-20
 **Category:** GENUINE-BUG (missing method, not a rename)
@@ -51,3 +40,4 @@ Trivial to add, but per the cluster-fix guide's hard prohibition
 ("No src/** edits unless the fix is unambiguously a one-line import/rename"),
 adding a brand-new method is out of scope for this pass even though it's
 short — filed here instead.
+

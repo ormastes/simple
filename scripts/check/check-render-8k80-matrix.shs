@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Require every rendering lane named by the 8K/80 campaign to pass admission.
+set -euo pipefail
+
+if [[ $# != 1 ]]; then
+    echo "usage: $0 <normalized-receipt-file>" >&2
+    exit 2
+fi
+
+root="$(cd "$(dirname "$0")/../.." && pwd)"
+gate="$root/scripts/check/check-render-8k80-receipt.shs"
+receipt="$1"
+failed=0
+
+check_lane() {
+    local prefix="$1" kind="$2"
+    if bash "$gate" "$receipt" "$prefix" "$kind"; then
+        echo "render_8k80_matrix_lane=$prefix status=pass kind=$kind"
+    else
+        echo "render_8k80_matrix_lane=$prefix status=fail kind=$kind" >&2
+        failed=1
+    fi
+}
+
+# CPU ISA/bare execution lanes.
+check_lane cpu_simd_x86_64 cpu
+check_lane cpu_simd_aarch64 cpu
+check_lane cpu_simd_riscv64 cpu
+check_lane bare_x86_64 bare
+check_lane bare_aarch64 bare
+check_lane bare_riscv64 bare
+
+# Canonical Engine2D/DrawIR producer-consumer lanes.
+check_lane vulkan_engine2d device
+check_lane draw_ir_cpu cpu
+check_lane draw_ir_vulkan device
+check_lane web_draw_ir_cpu cpu
+check_lane web_draw_ir_vulkan device
+check_lane gui_draw_ir_cpu cpu
+check_lane gui_draw_ir_vulkan device
+check_lane wm_draw_ir_cpu cpu
+check_lane wm_draw_ir_vulkan device
+
+if [[ "$failed" != 0 ]]; then
+    echo "render_8k80_matrix_status=fail" >&2
+    exit 1
+fi
+echo "render_8k80_matrix_status=pass"

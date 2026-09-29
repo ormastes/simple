@@ -1,4 +1,8 @@
 # module_surface_projected_type_shape undefined — every --hir-shard child dies E1002 (2026-08-22)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** FIXED (this commit). **Severity:** blocker for stage1 sharded native build.
 
@@ -37,3 +41,4 @@ module_surface_projected_type_shape not found`); post-fix: 4/4 pass. Neighbor
 ## Lesson
 A landing that adds callers must carry their definitions in the same commit; this is
 the third "missing half" landing this week (cf. `origin_main_unbuildable_missing_half_1e40de916bb_2026-08-18.md`).
+

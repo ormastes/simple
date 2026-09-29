@@ -1,0 +1,274 @@
+# Environment-variant admission and bounded deterministic selection.
+#
+# The order is deliberate: validate and establish eligibility for every
+# candidate first, then rank the eligible subset.  This keeps preference from
+# becoming a capability or trust bypass.
+
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, EnvironmentGpuDeviceV1,
+    EnvironmentArenaRangeV1, EnvironmentFeatureSetV1,
+    VariantDependencyV1, VariantDescriptorV1, VariantFacetBindingV1,
+    VariantRejectionV1, BindingPlanV1,
+    environment_snapshot_validate_v1, variant_descriptor_validate_v1,
+    binding_plan_validate_v1, ENV_VARIANT_SCHEMA_V1,
+    ENV_VARIANT_MAX_FACET_BINDINGS_V1, ENV_VARIANT_MAX_REJECTIONS_V1
+}
+use std.nogc_sync_mut.composition.environment_variants.policy.{
+    variant_policy_allows_v1, variant_policy_reason_v1, variant_policy_rank_v1
+}
+
+pub const ENV_ADMISSION_OK_V1: u32 = 0u32
+pub const ENV_ADMISSION_DESCRIPTOR_INVALID_V1: u32 = 1u32
+pub const ENV_ADMISSION_ARCHITECTURE_MISMATCH_V1: u32 = 2u32
+pub const ENV_ADMISSION_CPU_FEATURES_MISSING_V1: u32 = 3u32
+pub const ENV_ADMISSION_OS_STATE_MISSING_V1: u32 = 4u32
+pub const ENV_ADMISSION_DEVICE_UNAVAILABLE_V1: u32 = 5u32
+pub const ENV_ADMISSION_DEPENDENCY_INVALID_V1: u32 = 6u32
+pub const ENV_ADMISSION_TRUST_MISSING_V1: u32 = 7u32
+pub const ENV_ADMISSION_POLICY_REJECTED_V1: u32 = 8u32
+pub const ENV_ADMISSION_CATALOG_BOUNDED_V1: u32 = 9u32
+pub const ENV_ADMISSION_NO_CANDIDATE_V1: u32 = 10u32
+pub const ENV_ADMISSION_PLAN_INVALID_V1: u32 = 11u32
+pub const ENV_ADMISSION_ABI_MISMATCH_V1: u32 = 12u32
+pub const ENV_ADMISSION_LOADER_PERMISSION_MISSING_V1: u32 = 13u32
+pub const ENV_ADMISSION_VECTOR_STATE_MISMATCH_V1: u32 = 14u32
+pub const ENV_ADMISSION_EFFECT_NOT_ALLOWED_V1: u32 = 15u32
+pub const ENV_ADMISSION_NUMERICAL_CONTRACT_MISMATCH_V1: u32 = 16u32
+pub const ENV_ADMISSION_RESOURCE_LAYOUT_MISMATCH_V1: u32 = 17u32
+
+pub const ENV_PHASE_DESCRIPTOR_V1: u16 = 1u16
+pub const ENV_PHASE_ARCHITECTURE_V1: u16 = 2u16
+pub const ENV_PHASE_FEATURES_V1: u16 = 3u16
+pub const ENV_PHASE_OS_STATE_V1: u16 = 4u16
+pub const ENV_PHASE_DEVICE_V1: u16 = 5u16
+pub const ENV_PHASE_POLICY_V1: u16 = 6u16
+pub const ENV_PHASE_BINDING_V1: u16 = 7u16
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _vector_contract_matches_v1(snapshot: EnvironmentSnapshotV1, descriptor: VariantDescriptorV1) -> bool:
+    if descriptor.required_vector_state_mode == 0u16:
+        return true
+    snapshot.vector_state_mode == descriptor.required_vector_state_mode and
+        snapshot.vector_length_bits >= descriptor.required_vector_length_bits
+
+fn _range_subset_v1(
+    required_offset: u32, required_count: u32,
+    available_offset: u32, available_count: u32, words: [u64]
+) -> bool:
+    # Requiring no feature/state words is satisfied by every available set.
+    # This is needed for baseline providers that require no extra OS-managed
+    # vector state while the host still reports usable feature words.
+    if required_count == 0u32:
+        return true
+    if required_count != available_count:
+        return false
+    if required_offset > words.len() as u32 or available_offset > words.len() as u32:
+        return false
+    if required_count > words.len() as u32 - required_offset or
+       available_count > words.len() as u32 - available_offset:
+        return false
+    var i: u32 = 0u32
+    while i < required_count:
+        val required = words[(required_offset + i) as i64]
+        val available = words[(available_offset + i) as i64]
+        if required & available != required:
+            return false
+        i = i + 1u32
+    true
+
+fn _device_features_match_v1(
+    descriptor: VariantDescriptorV1, snapshot: EnvironmentSnapshotV1,
+    feature_words: [u64], gpu_devices: [EnvironmentGpuDeviceV1]
+) -> bool:
+    if descriptor.required_device_api == 0u32:
+        return true
+    var i: u32 = 0u32
+    while i < snapshot.gpu_devices.count:
+        val device = gpu_devices[(snapshot.gpu_devices.offset + i) as i64]
+        if device.api_id == descriptor.required_device_api and
+           device.api_version >= descriptor.minimum_device_api_version and
+           (descriptor.required_memory_domain_bits & device.memory_domain_bits) == descriptor.required_memory_domain_bits and
+           device.max_buffer_bytes >= descriptor.minimum_device_buffer_bytes and
+           device.max_workgroup_invocations >= descriptor.minimum_workgroup_invocations and
+           device.queue_family_count >= descriptor.minimum_queue_family_count and
+           _range_subset_v1(
+               descriptor.required_device_features.offset,
+               descriptor.required_device_features.count,
+               device.enabled_feature_words.offset,
+               device.enabled_feature_words.count,
+               feature_words
+           ):
+            return true
+        i = i + 1u32
+    false
+
+pub fn variant_eligibility_reason_v1(
+    snapshot: EnvironmentSnapshotV1, descriptor: VariantDescriptorV1,
+    feature_words: [u64], dependencies: [VariantDependencyV1],
+    gpu_devices: [EnvironmentGpuDeviceV1]
+) -> u32:
+    val snapshot_check = environment_snapshot_validate_v1(snapshot, feature_words, gpu_devices)
+    if snapshot_check != Ok(()):
+        return ENV_ADMISSION_DESCRIPTOR_INVALID_V1
+    if descriptor.target_architecture != snapshot.execution_architecture:
+        return ENV_ADMISSION_ARCHITECTURE_MISMATCH_V1
+    val descriptor_check = variant_descriptor_validate_v1(
+        descriptor, 1048576u32, feature_words.len() as u32,
+        dependencies.len() as u32, dependencies
+    )
+    if descriptor_check != Ok(()):
+        return ENV_ADMISSION_DESCRIPTOR_INVALID_V1
+    if descriptor.required_os_id != snapshot.os_id or descriptor.required_abi_id != snapshot.abi_id or
+       descriptor.required_object_format_id != snapshot.object_format_id or
+       descriptor.required_endian_id != snapshot.endian_id or
+       descriptor.required_pointer_width_bits != snapshot.pointer_width_bits:
+        return ENV_ADMISSION_ABI_MISMATCH_V1
+    if descriptor.required_loader_permission_bits & snapshot.loader_permission_bits !=
+       descriptor.required_loader_permission_bits:
+        return ENV_ADMISSION_LOADER_PERMISSION_MISSING_V1
+    if not _vector_contract_matches_v1(snapshot, descriptor):
+        return ENV_ADMISSION_VECTOR_STATE_MISMATCH_V1
+    if descriptor.required_effect_bits & snapshot.allowed_effect_bits != descriptor.required_effect_bits:
+        return ENV_ADMISSION_EFFECT_NOT_ALLOWED_V1
+    if descriptor.numerical_contract_id != snapshot.numerical_contract_id:
+        return ENV_ADMISSION_NUMERICAL_CONTRACT_MISMATCH_V1
+    if not _digest_equal_v1(descriptor.resource_layout_digest, snapshot.resource_layout_digest):
+        return ENV_ADMISSION_RESOURCE_LAYOUT_MISMATCH_V1
+    if not _digest_declared_v1(descriptor.assurance_receipt_digest):
+        return ENV_ADMISSION_TRUST_MISSING_V1
+    if not _range_subset_v1(
+        descriptor.required_cpu_features.words.offset,
+        descriptor.required_cpu_features.words.count,
+        snapshot.policy_allowed_features.words.offset,
+        snapshot.policy_allowed_features.words.count,
+        feature_words
+    ):
+        return ENV_ADMISSION_CPU_FEATURES_MISSING_V1
+    if not _range_subset_v1(
+        descriptor.required_os_state_words.offset,
+        descriptor.required_os_state_words.count,
+        snapshot.os_usable_features.words.offset,
+        snapshot.os_usable_features.words.count,
+        feature_words
+    ):
+        return ENV_ADMISSION_OS_STATE_MISSING_V1
+    if descriptor.required_device_api != 0u32 and
+       not _device_features_match_v1(descriptor, snapshot, feature_words, gpu_devices):
+        return ENV_ADMISSION_DEVICE_UNAVAILABLE_V1
+    ENV_ADMISSION_OK_V1
+
+pub fn variant_eligible_v1(
+    snapshot: EnvironmentSnapshotV1, descriptor: VariantDescriptorV1,
+    feature_words: [u64], dependencies: [VariantDependencyV1],
+    gpu_devices: [EnvironmentGpuDeviceV1]
+) -> bool:
+    variant_eligibility_reason_v1(snapshot, descriptor, feature_words, dependencies, gpu_devices) == ENV_ADMISSION_OK_V1
+
+pub fn variant_select_index_v1(
+    snapshot: EnvironmentSnapshotV1, descriptors: [VariantDescriptorV1],
+    feature_words: [u64], dependencies: [VariantDependencyV1],
+    gpu_devices: [EnvironmentGpuDeviceV1], mode: u16,
+    preferred_variant: EnvironmentDigest256V1, max_architecture: u16,
+    max_startup_budget_us: u64, max_placement: u16,
+    max_feature_ceiling: EnvironmentFeatureSetV1
+) -> i64:
+    if descriptors.len() > ENV_VARIANT_MAX_FACET_BINDINGS_V1 as i64:
+        return -2
+    # First pass is eligibility only.  No candidate is ranked before this
+    # pass has completed, including a preferred candidate.
+    var best_index: i64 = -1
+    var best_rank: i64 = 9223372036854775807
+    var i: i64 = 0
+    while i < descriptors.len():
+        val descriptor = descriptors[i]
+        if variant_eligible_v1(snapshot, descriptor, feature_words, dependencies, gpu_devices) and
+           variant_policy_allows_v1(
+               mode, descriptor, snapshot, preferred_variant, max_architecture,
+               max_startup_budget_us, max_placement, max_feature_ceiling, feature_words
+           ):
+            val rank = variant_policy_rank_v1(mode, descriptor, preferred_variant)
+            if rank < best_rank or
+               (rank == best_rank and (best_index < 0 or
+                _variant_identity_less_v1(
+                    descriptor.variant_identity,
+                    descriptors[best_index].variant_identity))):
+                best_rank = rank
+                best_index = i
+        i = i + 1
+    best_index
+
+fn _variant_identity_less_v1(
+    left: EnvironmentDigest256V1, right: EnvironmentDigest256V1
+) -> bool:
+    if left.w0 != right.w0: return left.w0 < right.w0
+    if left.w1 != right.w1: return left.w1 < right.w1
+    if left.w2 != right.w2: return left.w2 < right.w2
+    left.w3 < right.w3
+
+pub fn variant_collect_rejections_v1(
+    snapshot: EnvironmentSnapshotV1, descriptors: [VariantDescriptorV1],
+    feature_words: [u64], dependencies: [VariantDependencyV1],
+    gpu_devices: [EnvironmentGpuDeviceV1], mode: u16,
+    preferred_variant: EnvironmentDigest256V1, max_architecture: u16,
+    max_startup_budget_us: u64, max_placement: u16,
+    max_feature_ceiling: EnvironmentFeatureSetV1
+) -> [VariantRejectionV1]:
+    var result: [VariantRejectionV1] = []
+    var i: i64 = 0
+    while i < descriptors.len() and result.len() < ENV_VARIANT_MAX_REJECTIONS_V1 as i64:
+        val descriptor = descriptors[i]
+        val eligibility = variant_eligibility_reason_v1(snapshot, descriptor, feature_words, dependencies, gpu_devices)
+        var reason = eligibility
+        var phase: u16 = ENV_PHASE_DESCRIPTOR_V1
+        if eligibility == ENV_ADMISSION_OK_V1:
+            reason = variant_policy_reason_v1(
+                mode, descriptor, snapshot, preferred_variant, max_architecture,
+                max_startup_budget_us, max_placement, max_feature_ceiling, feature_words
+            )
+            phase = ENV_PHASE_POLICY_V1
+        if reason != ENV_ADMISSION_OK_V1:
+            result.push(VariantRejectionV1(
+                provider_identity: descriptor.provider_identity,
+                variant_identity: descriptor.variant_identity,
+                reason_code: reason,
+                phase_code: phase
+            ))
+        i = i + 1
+    result
+
+pub fn binding_plan_create_v1(
+    plan_digest: EnvironmentDigest256V1, environment_identity: EnvironmentDigest256V1,
+    environment_generation: u64, catalog_digest: EnvironmentDigest256V1,
+    catalog_generation: u64, policy_digest: EnvironmentDigest256V1,
+    dependency_lock_digest: EnvironmentDigest256V1, publication_generation: u64,
+    bindings: [VariantFacetBindingV1], selected_variant_identities: [EnvironmentDigest256V1],
+    rejections: [VariantRejectionV1]
+) -> Result<BindingPlanV1, u32>:
+    if bindings.len() > ENV_VARIANT_MAX_FACET_BINDINGS_V1 as i64 or
+       selected_variant_identities.len() > ENV_VARIANT_MAX_FACET_BINDINGS_V1 as i64 or
+       rejections.len() > ENV_VARIANT_MAX_REJECTIONS_V1 as i64:
+        return Err(ENV_ADMISSION_CATALOG_BOUNDED_V1)
+    val plan = BindingPlanV1(
+        descriptor_size: 224u32,
+        schema_version: ENV_VARIANT_SCHEMA_V1,
+        plan_digest: plan_digest,
+        environment_identity: environment_identity,
+        environment_generation: environment_generation,
+        catalog_digest: catalog_digest,
+        catalog_generation: catalog_generation,
+        policy_digest: policy_digest,
+        dependency_lock_digest: dependency_lock_digest,
+        publication_generation: publication_generation,
+        facet_bindings: EnvironmentArenaRangeV1(offset: 0u32, count: bindings.len() as u32),
+        selected_variant_identities: EnvironmentArenaRangeV1(offset: 0u32, count: selected_variant_identities.len() as u32),
+        rejections: EnvironmentArenaRangeV1(offset: 0u32, count: rejections.len() as u32)
+    )
+    val check = binding_plan_validate_v1(plan, bindings, selected_variant_identities.len() as u32, rejections)
+    if check != Ok(()):
+        return Err(ENV_ADMISSION_PLAN_INVALID_V1)
+    Ok(plan)

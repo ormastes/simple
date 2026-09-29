@@ -1,4 +1,8 @@
 # Pre-existing test-tree divergence record — enterprise-suite landing 2026-08-14
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Required record for the test-tree-divergence scoped-delta escape (vcs.md):
 landing range `425fdcc69c76..<enterprise-suite tip>` passed
@@ -97,3 +101,4 @@ delta guard was run against. The result is base-independent by construction:
 this commit adds three documentation files and touches **zero** `test/` paths
 (`git diff --name-only <base> <tip> | grep -c '^test/'` = 0), so it cannot
 introduce test-tree divergence against any base.
+

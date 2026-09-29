@@ -1,0 +1,873 @@
+# codex-impl
+# Immutable generation preparation plus a deliberately closed publication
+# boundary.  This file contains no legacy action lookup or SQL write path.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_valid_v1, generation_manifest_digest_v1,
+    generation_manifest_encode_v1
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectRefV1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    three_payload_contract_digest_valid_v1, three_payload_contract_max_items_v1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.common.cache_contract.three_payload_worker_v1.{ThreePayloadWorkerResultV1}
+use compiler.common.cache_contract.three_payload_worker_v1.{
+    three_payload_worker_result_valid_v1, three_payload_worker_result_encode_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{
+    semantic_query_read_manifest_encode_v1
+}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{
+    verified_cas_kind_available_v1, verified_cas_kind_digest_v1,
+    VERIFIED_CAS_REGISTRY_MAX_BYTES_V1
+}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.{
+    VerifiedGenerationRootV1, VerifiedGenerationPinSnapshotV1,
+    VerifiedCasReadObjectV1, VerifiedCasClosureReceiptV1,
+    VerifiedGenerationDurableBindingV1, verify_generation_closure_v1
+}
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, recover_action_root_journal_v1
+}
+use compiler.driver.cache.journal.checkpoint_superblock_v1.{
+    CheckpointSlotV1, CheckpointSuperblockV1, CheckpointSelectionStateV1,
+    checkpoint_slot_valid_v1
+}
+
+val THREE_PAYLOAD_GENERATION_MAX_RETAINED_BYTES_V1: i64 = 134217728
+val THREE_PAYLOAD_GENERATION_MAX_JOURNAL_BYTES_V1: i64 = 16777216
+val THREE_PAYLOAD_GENERATION_MAX_RECOVERY_PACKETS_V1: i64 = 3
+
+pub struct ThreePayloadImmutableObjectV1:
+    digest: text
+    kind: text
+    bytes: [u8]
+
+pub struct ThreePayloadGenerationPrepareInputV1:
+    snapshot_digest: text
+    catalog_digest: text
+    summary_refs: [text]
+    scope_refs: [text]
+    rr_shard_refs: [text]
+    forward_manifest_refs: [text]
+    target_refs: [text]
+    diagnostic_refs: [text]
+    worker_result: ThreePayloadWorkerResultV1
+    immutable_objects: [ThreePayloadImmutableObjectV1]
+
+pub struct PreparedThreePayloadGenerationV1:
+    manifest: GenerationManifestV1
+    manifest_digest: text
+    immutable_objects: [ThreePayloadImmutableObjectV1]
+
+pub struct ThreePayloadGenerationPublicationReceiptV1:
+    generation_digest: text
+    journal_receipt_digest: text
+    lookup_projection_digest: text
+
+pub enum ThreePayloadGenerationTransitionFailureV1:
+    InvalidCandidate
+    StaleGeneration
+    ClosureRejected
+    JournalBindingRejected
+
+pub struct ActiveThreePayloadGenerationV1:
+    generation: i64
+    action_digest: text
+    receipt: ThreePayloadGenerationPublicationReceiptV1
+    closure_receipt: VerifiedCasClosureReceiptV1
+
+# Single-domain owner for the rebuildable in-memory active-generation
+# projection.  It is not host mutation authority and is deliberately separate
+# from the still-closed durable publication entrypoint below.
+pub class ThreePayloadGenerationPublicationOwnerV1:
+    active: ActiveThreePayloadGenerationV1?
+
+    pub static fn empty() -> ThreePayloadGenerationPublicationOwnerV1:
+        ThreePayloadGenerationPublicationOwnerV1(active: nil)
+
+fn _bytes_digest_v1(value: [u8]) -> text:
+    sha256_u8_hex(value)
+
+fn _immutable_object_digest_v1(object: ThreePayloadImmutableObjectV1) -> text:
+    if verified_cas_kind_available_v1(object.kind):
+        return verified_cas_kind_digest_v1(object.kind, object.bytes)
+    _bytes_digest_v1(object.bytes)
+
+fn _digest_v1(value: text) -> bool:
+    three_payload_contract_digest_valid_v1(value)
+
+fn _all_digests_v1(values: [text]) -> bool:
+    for value in values:
+        if not _digest_v1(value): return false
+    true
+
+fn _object_present_v1(objects: [ThreePayloadImmutableObjectV1], digest: text) -> bool:
+    for object in objects:
+        if object.digest == digest: return true
+    false
+
+fn _immutable_objects_bounded_v1(objects: [ThreePayloadImmutableObjectV1]) -> bool:
+    if objects.len() > three_payload_contract_max_items_v1(): return false
+    var retained_bytes: i64 = 0
+    for object in objects:
+        val size = object.bytes.len()
+        if (size < 0 or size > VERIFIED_CAS_REGISTRY_MAX_BYTES_V1 or
+                retained_bytes > THREE_PAYLOAD_GENERATION_MAX_RETAINED_BYTES_V1 - size):
+            return false
+        retained_bytes = retained_bytes + size
+    true
+
+fn _verified_objects_bounded_v1(objects: [VerifiedCasReadObjectV1]) -> bool:
+    if objects.len() > three_payload_contract_max_items_v1(): return false
+    var retained_bytes: i64 = 0
+    for object in objects:
+        val size = object.canonical_bytes.len()
+        if (size < 0 or size > VERIFIED_CAS_REGISTRY_MAX_BYTES_V1 or
+                retained_bytes > THREE_PAYLOAD_GENERATION_MAX_RETAINED_BYTES_V1 - size):
+            return false
+        retained_bytes = retained_bytes + size
+    true
+
+fn _objects_canonical_v1(objects: [ThreePayloadImmutableObjectV1]) -> bool:
+    if not _immutable_objects_bounded_v1(objects): return false
+    var seen: Dict<text, ThreePayloadImmutableObjectV1> = {}
+    for object in objects:
+        if object.kind == "" or not _digest_v1(object.digest) or
+                _immutable_object_digest_v1(object) != object.digest:
+            return false
+        if seen.contains_key(object.digest):
+            val prior = seen[object.digest]
+            if prior.kind != object.kind or prior.bytes != object.bytes:
+                return false
+        else:
+            seen[object.digest] = object
+    true
+
+fn _typed_object_present_v1(objects: [VerifiedCasReadObjectV1],
+        expected: ThreePayloadImmutableObjectV1) -> bool:
+    for object in objects:
+        if (object.identity.kind == expected.kind and
+                object.identity.digest == expected.digest and
+                object.canonical_bytes == expected.bytes):
+            return true
+    false
+
+fn _identity_present_v1(receipt: VerifiedCasClosureReceiptV1,
+        kind: text, digest: text) -> bool:
+    for identity in receipt.ordered_closure:
+        if identity.kind == kind and identity.digest == digest: return true
+    false
+
+fn _prepared_objects_in_verified_read_set_v1(
+    prepared: PreparedThreePayloadGenerationV1,
+    objects: [VerifiedCasReadObjectV1],
+) -> bool:
+    for object in prepared.immutable_objects:
+        if (not verified_cas_kind_available_v1(object.kind) or
+                not _typed_object_present_v1(objects, object)):
+            return false
+    true
+
+fn _prepared_objects_in_closure_v1(
+    prepared: PreparedThreePayloadGenerationV1,
+    receipt: VerifiedCasClosureReceiptV1,
+) -> bool:
+    for object in prepared.immutable_objects:
+        if not _identity_present_v1(receipt, object.kind, object.digest): return false
+    true
+
+fn _generation_manifest_object_matches_v1(
+    prepared: PreparedThreePayloadGenerationV1,
+    objects: [VerifiedCasReadObjectV1],
+) -> bool:
+    val expected = generation_manifest_encode_v1(prepared.manifest)
+    for object in objects:
+        if (object.identity.kind == "generation_manifest" and
+                object.identity.digest == prepared.manifest_digest and
+                object.canonical_bytes == expected):
+            return true
+    false
+
+fn _journal_binds_action_closure_v1(
+    journal: ActionRootJournalV1,
+    durable: VerifiedGenerationDurableBindingV1,
+    action_digest: text,
+    manifest_digest: text,
+    receipt: VerifiedCasClosureReceiptV1,
+) -> bool:
+    val recovery = recover_action_root_journal_v1(journal.bytes, journal.generation)
+    if recovery.quarantined_tail or recovery.accepted_bytes != journal.bytes.len():
+        return false
+    for record in recovery.records:
+        if record.sequence == durable.sequence:
+            return (record.action_digest == action_digest and
+                record.manifest_digest == manifest_digest and
+                _identity_present_v1(receipt, record.object_kind,
+                    record.object_digest))
+    false
+
+pub fn three_payload_generation_active_v1(
+    owner: ThreePayloadGenerationPublicationOwnerV1,
+) -> ActiveThreePayloadGenerationV1?:
+    owner.active
+
+# Atomic owner-side projection transition.  All candidate bytes, pins, and the
+# durable journal binding are validated before the one active-root assignment.
+# Any error returns without changing the prior active generation.  This is an
+# in-memory consumer of existing authority receipts, not a filesystem writer.
+pub fn publish_verified_three_payload_generation_v1(
+    owner: ThreePayloadGenerationPublicationOwnerV1,
+    prepared: PreparedThreePayloadGenerationV1,
+    action_digest: text,
+    root: VerifiedGenerationRootV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    objects: [VerifiedCasReadObjectV1],
+    journal: ActionRootJournalV1,
+    durable: VerifiedGenerationDurableBindingV1,
+) -> Result<ThreePayloadGenerationPublicationReceiptV1,
+            ThreePayloadGenerationTransitionFailureV1>:
+    if (not _digest_v1(action_digest) or not _prepared_valid_v1(prepared) or
+            not _verified_objects_bounded_v1(objects) or
+            root.generation < 0 or root.manifest_digest != prepared.manifest_digest or
+            not _generation_manifest_object_matches_v1(prepared, objects) or
+            not _prepared_objects_in_verified_read_set_v1(prepared, objects)):
+        return Err(ThreePayloadGenerationTransitionFailureV1.InvalidCandidate)
+    if val active = owner.active:
+        if (root.generation < active.generation or
+                (root.generation == active.generation and
+                 (action_digest != active.action_digest or
+                  root.manifest_digest != active.receipt.generation_digest))):
+            return Err(ThreePayloadGenerationTransitionFailureV1.StaleGeneration)
+    val verified = verify_generation_closure_v1(root, pins, objects, journal, durable)
+    if not verified.ok or verified.receipt == nil:
+        return Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected)
+    val closure = verified.receipt.unwrap()
+    if (closure.generation != root.generation or
+            closure.root_manifest_digest != prepared.manifest_digest or
+            closure.pin_epoch != durable.writer_epoch or
+            not _prepared_objects_in_closure_v1(prepared, closure)):
+        return Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected)
+    if not _journal_binds_action_closure_v1(journal, durable, action_digest,
+            prepared.manifest_digest, closure):
+        return Err(ThreePayloadGenerationTransitionFailureV1.JournalBindingRejected)
+    val publication = ThreePayloadGenerationPublicationReceiptV1(
+        generation_digest: prepared.manifest_digest,
+        journal_receipt_digest: closure.durable_journal_receipt_digest,
+        lookup_projection_digest: durable.projection_digest)
+    if val active = owner.active:
+        if root.generation == active.generation:
+            if (closure.owner_seal_digest != active.closure_receipt.owner_seal_digest or
+                    publication.journal_receipt_digest !=
+                        active.receipt.journal_receipt_digest or
+                    publication.lookup_projection_digest !=
+                        active.receipt.lookup_projection_digest):
+                return Err(ThreePayloadGenerationTransitionFailureV1.ClosureRejected)
+            return Ok(active.receipt)
+    owner.active = Some(ActiveThreePayloadGenerationV1(
+        generation: root.generation, action_digest: action_digest,
+        receipt: publication, closure_receipt: closure))
+    Ok(publication)
+
+fn _prepared_valid_v1(prepared: PreparedThreePayloadGenerationV1) -> bool:
+    if (not generation_manifest_valid_v1(prepared.manifest) or
+            generation_manifest_digest_v1(prepared.manifest) != prepared.manifest_digest or
+            not _objects_canonical_v1(prepared.immutable_objects)):
+        return false
+    for digest in prepared.manifest.summary_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    for digest in prepared.manifest.scope_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    for digest in prepared.manifest.rr_shard_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    for digest in prepared.manifest.forward_manifest_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    for reference in prepared.manifest.portable_refs:
+        if not _object_present_v1(prepared.immutable_objects, reference.content_digest): return false
+    for digest in prepared.manifest.target_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    for digest in prepared.manifest.diagnostic_refs:
+        if not _object_present_v1(prepared.immutable_objects, digest): return false
+    true
+
+fn _worker_receipt_valid_v1(result: ThreePayloadWorkerResultV1) -> bool:
+    three_payload_worker_result_valid_v1(result)
+
+pub fn prepare_three_payload_generation_v1(
+    input: ThreePayloadGenerationPrepareInputV1,
+) -> Result<PreparedThreePayloadGenerationV1, ThreePayloadFallbackV1>:
+    if (not _digest_v1(input.snapshot_digest) or not _digest_v1(input.catalog_digest) or
+            not _all_digests_v1(input.summary_refs) or not _all_digests_v1(input.scope_refs) or
+            not _all_digests_v1(input.rr_shard_refs) or
+            not _all_digests_v1(input.forward_manifest_refs) or
+            not _all_digests_v1(input.target_refs) or not _all_digests_v1(input.diagnostic_refs) or
+            not _worker_receipt_valid_v1(input.worker_result)):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if not _objects_canonical_v1(input.immutable_objects):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val query_manifest_digest = sha256_u8_hex(
+        semantic_query_read_manifest_encode_v1(input.worker_result.query_reads))
+    val worker_result_digest = sha256_u8_hex(
+        three_payload_worker_result_encode_v1(input.worker_result))
+    if input.summary_refs.index_of(input.worker_result.new_summary_digest) < 0 or
+            input.diagnostic_refs.index_of(input.worker_result.diagnostic_digest) < 0 or
+            input.forward_manifest_refs.index_of(query_manifest_digest) < 0 or
+            input.scope_refs.index_of(worker_result_digest) < 0:
+        return Err(ThreePayloadFallbackV1.WitnessIncomplete)
+    for digest in input.summary_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for digest in input.scope_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for digest in input.rr_shard_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for digest in input.forward_manifest_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for reference in input.worker_result.portable_refs:
+        if not _object_present_v1(input.immutable_objects, reference.content_digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for digest in input.target_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    for digest in input.diagnostic_refs:
+        if not _object_present_v1(input.immutable_objects, digest):
+            return Err(ThreePayloadFallbackV1.CorruptPayload)
+    val manifest = GenerationManifestV1(schema: 1, snapshot_digest: input.snapshot_digest,
+        catalog_digest: input.catalog_digest, summary_refs: input.summary_refs,
+        scope_refs: input.scope_refs, rr_shard_refs: input.rr_shard_refs,
+        forward_manifest_refs: input.forward_manifest_refs,
+        portable_refs: input.worker_result.portable_refs, target_refs: input.target_refs,
+        diagnostic_refs: input.diagnostic_refs)
+    if not generation_manifest_valid_v1(manifest):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    Ok(PreparedThreePayloadGenerationV1(manifest: manifest,
+        manifest_digest: generation_manifest_digest_v1(manifest),
+        immutable_objects: input.immutable_objects))
+
+# Canonical non-authorizing identity for a fully validated prepared candidate.
+# The live scope owner may retain this digest, but it never treats the digest as
+# a publication ticket or reconstructs a missing attempt from it.
+pub fn prepared_three_payload_generation_binding_digest_v2(
+    prepared: PreparedThreePayloadGenerationV1,
+) -> text:
+    if not _prepared_valid_v1(prepared): return ""
+    var canonical = "simple.cache.three-payload.prepared-generation.v2\n" +
+        prepared.manifest_digest + "\n"
+    for object in prepared.immutable_objects:
+        canonical = canonical + object.kind + "\u0000" + object.digest +
+            "\u0000" + _bytes_digest_v1(object.bytes) + "\n"
+    sha256_u8_hex(canonical.bytes())
+
+# Read-only precommit validation used by the V2 coordinator before requesting
+# a guarded publication.  It does not write the journal or active root.
+pub fn prepared_three_payload_generation_publish_candidate_valid_v2(
+    prepared: PreparedThreePayloadGenerationV1,
+    action_digest: text,
+    root: VerifiedGenerationRootV1,
+    pins: VerifiedGenerationPinSnapshotV1,
+    objects: [VerifiedCasReadObjectV1],
+) -> bool:
+    if (not _digest_v1(action_digest) or not _prepared_valid_v1(prepared) or
+            not _verified_objects_bounded_v1(objects) or
+            root.generation < 0 or
+            root.manifest_digest != prepared.manifest_digest or
+            not _generation_manifest_object_matches_v1(prepared, objects) or
+            not _prepared_objects_in_verified_read_set_v1(prepared, objects)):
+        return false
+    if pins.epoch < 0 or pins.epoch % 2 != 0: return false
+    for pinned in pins.roots:
+        if pinned.generation == root.generation and
+                pinned.manifest_digest == root.manifest_digest:
+            return true
+    false
+
+# Pure-Simple semantic owner for an already host-admitted durability packet.
+# It writes no files and mints no host receipts.  The physical writer remains
+# responsible for producing the exact pin, CAS, journal, and durability values.
+pub struct ThreePayloadDurablePublicationPacketV1:
+    prepared: PreparedThreePayloadGenerationV1
+    action_digest: text
+    root: VerifiedGenerationRootV1
+    pins: VerifiedGenerationPinSnapshotV1
+    objects: [VerifiedCasReadObjectV1]
+    journal: ActionRootJournalV1
+    durable: VerifiedGenerationDurableBindingV1
+pub struct ThreePayloadRetainedDurableGenerationV1:
+    prepared: PreparedThreePayloadGenerationV1
+    action_digest: text
+    root: VerifiedGenerationRootV1
+    pins: VerifiedGenerationPinSnapshotV1
+    objects: [VerifiedCasReadObjectV1]
+    journal_bytes: text
+    journal_generation: i64
+    durable: VerifiedGenerationDurableBindingV1
+pub struct ThreePayloadGenerationDurableSnapshotV1:
+    checkpoint_slot_a: CheckpointSlotV1?
+    checkpoint_slot_b: CheckpointSlotV1?
+    durable_journal: text
+    retained_generations: [ThreePayloadRetainedDurableGenerationV1]
+pub enum ThreePayloadDurablePublicationStateV1:
+    Ready
+    Prepared
+    BlobsDurable
+    JournalDurable
+    RecoveryRequired
+    Revoked
+pub enum ThreePayloadDurablePublicationFailureV1:
+    InvalidCandidate
+    Busy
+    ReaderPinRevoked
+    JournalPrefixRejected
+    CheckpointRejected
+    ActivationRejected
+    RecoveryRejected
+    NondeterministicAction
+pub enum ThreePayloadReaderPinRevocationV1:
+    Revoked
+    AlreadyRevoked
+pub enum ThreePayloadPublicationAttemptEventV1:
+    PrecommitRefusal
+    CasConflict
+    CasAcknowledged
+    CasAcknowledgmentLost
+    CancellationAfterCas
+pub enum ThreePayloadPublicationAttemptStatusV1:
+    RefusedBeforeCommit
+    CommittedActive
+    CommittedSuperseded
+    DurableOutcomeUnknown
+pub struct ThreePayloadPublicationAttemptResolutionV1:
+    status: ThreePayloadPublicationAttemptStatusV1
+    candidate_generation: i64
+    candidate_manifest_digest: text
+    active_generation: i64
+    active_manifest_digest: text
+fn _retained_generation_v1(
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> ThreePayloadRetainedDurableGenerationV1:
+    ThreePayloadRetainedDurableGenerationV1(prepared: packet.prepared,
+        action_digest: packet.action_digest, root: packet.root, pins: packet.pins,
+        objects: packet.objects, journal_bytes: packet.journal.bytes,
+        journal_generation: packet.journal.generation, durable: packet.durable)
+fn _retained_packet_v1(
+    retained: ThreePayloadRetainedDurableGenerationV1,
+) -> Result<ThreePayloadDurablePublicationPacketV1,
+            ThreePayloadDurablePublicationFailureV1>:
+    if retained.journal_bytes.len() > THREE_PAYLOAD_GENERATION_MAX_JOURNAL_BYTES_V1:
+        return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+    val journal = match ActionRootJournalV1.recovered(retained.journal_bytes,
+            retained.journal_generation):
+        case Ok(value): value
+        case Err(_):
+            return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+    Ok(ThreePayloadDurablePublicationPacketV1(prepared: retained.prepared,
+        action_digest: retained.action_digest, root: retained.root,
+        pins: retained.pins, objects: retained.objects, journal: journal,
+        durable: retained.durable))
+fn _packet_checked_v1(
+    active: ActiveThreePayloadGenerationV1?,
+    packet: ThreePayloadDurablePublicationPacketV1,
+) -> Result<ThreePayloadGenerationPublicationReceiptV1,
+            ThreePayloadDurablePublicationFailureV1>:
+    if (packet.journal.bytes.len() > THREE_PAYLOAD_GENERATION_MAX_JOURNAL_BYTES_V1 or
+            packet.journal.generation != packet.root.generation or
+            not prepared_three_payload_generation_publish_candidate_valid_v2(
+                packet.prepared, packet.action_digest, packet.root, packet.pins,
+                packet.objects)):
+        return Err(ThreePayloadDurablePublicationFailureV1.InvalidCandidate)
+    val recovery = recover_action_root_journal_v1(packet.journal.bytes,
+        packet.journal.generation)
+    var expected_kind = ""
+    var expected_object = ""
+    var expected_manifest = ""
+    for record in recovery.records:
+        if record.sequence == packet.durable.sequence:
+            expected_kind = record.object_kind
+            expected_object = record.object_digest
+            expected_manifest = record.manifest_digest
+    if expected_kind == "":
+        return Err(ThreePayloadDurablePublicationFailureV1.InvalidCandidate)
+    for record in recovery.records:
+        if record.action_digest == packet.action_digest and
+                (record.object_kind != expected_kind or
+                 record.object_digest != expected_object or
+                 record.manifest_digest != expected_manifest):
+            return Err(ThreePayloadDurablePublicationFailureV1.NondeterministicAction)
+    val validator = ThreePayloadGenerationPublicationOwnerV1(active: active)
+    match publish_verified_three_payload_generation_v1(validator,
+            packet.prepared, packet.action_digest, packet.root, packet.pins,
+            packet.objects, packet.journal, packet.durable):
+        case Ok(receipt): Ok(receipt)
+        case Err(_): Err(ThreePayloadDurablePublicationFailureV1.InvalidCandidate)
+fn _journal_extends_v1(prior: text, candidate: text) -> bool:
+    prior.len() <= candidate.len() and candidate.slice(0, prior.len()) == prior
+fn _slot_matches_retained_v1(slot: CheckpointSlotV1,
+        retained: ThreePayloadRetainedDurableGenerationV1) -> bool:
+    checkpoint_slot_valid_v1(slot, retained.journal_bytes) and
+        slot.journal_bytes == retained.journal_bytes.len() and
+        slot.journal_digest == _bytes_digest_v1(retained.journal_bytes.bytes()) and
+        slot.catalog_digest == retained.durable.projection_digest
+fn _retained_same_v1(a: ThreePayloadRetainedDurableGenerationV1,
+        b: ThreePayloadRetainedDurableGenerationV1) -> bool:
+    if (a.root.generation != b.root.generation or
+            a.root.manifest_digest != b.root.manifest_digest or
+            a.action_digest != b.action_digest or
+            a.journal_bytes != b.journal_bytes or
+            a.journal_generation != b.journal_generation or
+            prepared_three_payload_generation_binding_digest_v2(a.prepared) !=
+                prepared_three_payload_generation_binding_digest_v2(b.prepared) or
+            a.pins.epoch != b.pins.epoch or
+            a.pins.snapshot_digest != b.pins.snapshot_digest or
+            a.objects.len() != b.objects.len() or
+            a.durable.generation != b.durable.generation or
+            a.durable.sequence != b.durable.sequence or
+            a.durable.writer_epoch != b.durable.writer_epoch or
+            a.durable.operation_digest != b.durable.operation_digest or
+            a.durable.host_receipt_digest != b.durable.host_receipt_digest or
+            a.durable.journal_digest != b.durable.journal_digest or
+            a.durable.accepted_journal_bytes != b.durable.accepted_journal_bytes or
+            a.durable.accepted_journal_prefix_digest !=
+                b.durable.accepted_journal_prefix_digest or
+            a.durable.projection_applied != b.durable.projection_applied or
+            a.durable.projection_digest != b.durable.projection_digest):
+        return false
+    if a.pins.roots.len() != b.pins.roots.len(): return false
+    for index in 0..a.pins.roots.len():
+        if (a.pins.roots[index].generation != b.pins.roots[index].generation or
+                a.pins.roots[index].manifest_digest !=
+                    b.pins.roots[index].manifest_digest):
+            return false
+    for index in 0..a.objects.len():
+        if (a.objects[index].identity.kind != b.objects[index].identity.kind or
+                a.objects[index].identity.digest != b.objects[index].identity.digest or
+                a.objects[index].canonical_bytes != b.objects[index].canonical_bytes):
+            return false
+    true
+fn _pin_snapshots_same_v1(a: VerifiedGenerationPinSnapshotV1,
+        b: VerifiedGenerationPinSnapshotV1) -> bool:
+    if (a.epoch != b.epoch or a.snapshot_digest != b.snapshot_digest or
+            a.roots.len() != b.roots.len()):
+        return false
+    for index in 0..a.roots.len():
+        if (a.roots[index].generation != b.roots[index].generation or
+                a.roots[index].manifest_digest != b.roots[index].manifest_digest):
+            return false
+    true
+fn _retained_packet_valid_v1(
+    retained: ThreePayloadRetainedDurableGenerationV1,
+) -> bool:
+    match _retained_packet_v1(retained):
+        case Err(_): false
+        case Ok(packet): _packet_checked_v1(nil, packet).is_ok()
+fn _append_retained_unique_v1(
+    values: [ThreePayloadRetainedDurableGenerationV1],
+    retained: ThreePayloadRetainedDurableGenerationV1,
+) -> [ThreePayloadRetainedDurableGenerationV1]:
+    var out = values
+    for existing in out:
+        if _retained_same_v1(existing, retained): return out
+    out.push(retained)
+    out
+pub class ThreePayloadGenerationDurableOwnerV1:
+    publication_owner: ThreePayloadGenerationPublicationOwnerV1
+    checkpoint: CheckpointSuperblockV1
+    durable_journal: text
+    retained_generations: [ThreePayloadRetainedDurableGenerationV1]
+    pending: ThreePayloadDurablePublicationPacketV1?
+    guard_epoch: i64
+    guard_snapshot_digest: text
+    state: ThreePayloadDurablePublicationStateV1
+    pub static fn empty() -> ThreePayloadGenerationDurableOwnerV1:
+        ThreePayloadGenerationDurableOwnerV1(
+            publication_owner: ThreePayloadGenerationPublicationOwnerV1.empty(),
+            checkpoint: CheckpointSuperblockV1.empty(), durable_journal: "",
+            retained_generations: [], pending: nil, guard_epoch: -1,
+            guard_snapshot_digest: "",
+            state: ThreePayloadDurablePublicationStateV1.Ready)
+    pub static fn recover_v1(snapshot: ThreePayloadGenerationDurableSnapshotV1
+    ) -> Result<ThreePayloadGenerationDurableOwnerV1,
+                ThreePayloadDurablePublicationFailureV1>:
+        if (snapshot.durable_journal.len() > THREE_PAYLOAD_GENERATION_MAX_JOURNAL_BYTES_V1 or
+                snapshot.retained_generations.len() >
+                    THREE_PAYLOAD_GENERATION_MAX_RECOVERY_PACKETS_V1):
+            return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+        val checkpoint = CheckpointSuperblockV1(
+            slot_a: snapshot.checkpoint_slot_a, slot_b: snapshot.checkpoint_slot_b)
+        val selected = match checkpoint.select_checked(snapshot.durable_journal):
+            case CheckpointSelectionStateV1.Selected(slot): slot
+            case CheckpointSelectionStateV1.Empty:
+                if snapshot.durable_journal != "" or
+                        snapshot.retained_generations.len() != 0:
+                    return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+                return Ok(ThreePayloadGenerationDurableOwnerV1.empty())
+            case _:
+                return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+        var selected_retained: ThreePayloadRetainedDurableGenerationV1? = nil
+        var checkpointed: [ThreePayloadRetainedDurableGenerationV1] = []
+        for retained in snapshot.retained_generations:
+            val matches_a = if val slot = snapshot.checkpoint_slot_a:
+                _slot_matches_retained_v1(slot, retained)
+            else:
+                false
+            val matches_b = if val slot = snapshot.checkpoint_slot_b:
+                _slot_matches_retained_v1(slot, retained)
+            else:
+                false
+            val matches_selected = _slot_matches_retained_v1(selected, retained)
+            val valid = if matches_a or matches_b:
+                _retained_packet_valid_v1(retained)
+            else:
+                false
+            if (matches_a or matches_b) and valid:
+                checkpointed = _append_retained_unique_v1(checkpointed, retained)
+            if matches_selected:
+                if not valid or selected_retained != nil:
+                    return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+                selected_retained = Some(retained)
+        if selected_retained == nil:
+            return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+        val packet = _retained_packet_v1(selected_retained?)?
+        val publication_owner = ThreePayloadGenerationPublicationOwnerV1.empty()
+        match publish_verified_three_payload_generation_v1(publication_owner,
+                packet.prepared, packet.action_digest, packet.root, packet.pins,
+                packet.objects, packet.journal, packet.durable):
+            case Err(_):
+                return Err(ThreePayloadDurablePublicationFailureV1.RecoveryRejected)
+            case Ok(_): pass
+        Ok(ThreePayloadGenerationDurableOwnerV1(
+            publication_owner: publication_owner, checkpoint: checkpoint,
+            durable_journal: snapshot.durable_journal.slice(0, selected.journal_bytes),
+            retained_generations: checkpointed, pending: nil, guard_epoch: -1,
+            guard_snapshot_digest: "",
+            state: ThreePayloadDurablePublicationStateV1.Ready))
+impl ThreePayloadGenerationDurableOwnerV1:
+    me _guard_current_v1(pins: VerifiedGenerationPinSnapshotV1) -> bool:
+        if (self.state == ThreePayloadDurablePublicationStateV1.Revoked or
+                pins.epoch != self.guard_epoch or
+                pins.snapshot_digest != self.guard_snapshot_digest):
+            return false
+        match self.pending:
+            case Some(packet): _pin_snapshots_same_v1(pins, packet.pins)
+            case nil: false
+    me _revoke_pending_v1():
+        self.pending = nil
+        self.guard_epoch = -1
+        self.guard_snapshot_digest = ""
+        self.state = ThreePayloadDurablePublicationStateV1.Revoked
+    pub me publication_state_v1() -> ThreePayloadDurablePublicationStateV1:
+        self.state
+    pub me active_generation_v1() -> ActiveThreePayloadGenerationV1?:
+        three_payload_generation_active_v1(self.publication_owner)
+    pub me durable_snapshot_v1() -> ThreePayloadGenerationDurableSnapshotV1:
+        ThreePayloadGenerationDurableSnapshotV1(
+            checkpoint_slot_a: self.checkpoint.slot_a,
+            checkpoint_slot_b: self.checkpoint.slot_b,
+            durable_journal: self.durable_journal,
+            retained_generations: self.retained_generations)
+    pub me begin_guarded_publication_v1(
+        packet: ThreePayloadDurablePublicationPacketV1,
+    ) -> Result<(), ThreePayloadDurablePublicationFailureV1>:
+        if self.state == ThreePayloadDurablePublicationStateV1.Revoked:
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        if self.state != ThreePayloadDurablePublicationStateV1.Ready:
+            return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        if not _journal_extends_v1(self.durable_journal, packet.journal.bytes):
+            return Err(ThreePayloadDurablePublicationFailureV1.JournalPrefixRejected)
+        _ = _packet_checked_v1(self.active_generation_v1(), packet)?
+        val retained = _retained_generation_v1(packet)
+        val copied = _retained_packet_v1(retained)?
+        self.pending = Some(copied)
+        self.guard_epoch = copied.pins.epoch
+        self.guard_snapshot_digest = copied.pins.snapshot_digest
+        self.state = ThreePayloadDurablePublicationStateV1.Prepared
+        Ok(())
+
+    pub me mark_blobs_durable_v1(
+        pins: VerifiedGenerationPinSnapshotV1,
+    ) -> Result<(), ThreePayloadDurablePublicationFailureV1>:
+        if self.state == ThreePayloadDurablePublicationStateV1.Revoked:
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        if self.state != ThreePayloadDurablePublicationStateV1.Prepared:
+            return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        if not self._guard_current_v1(pins):
+            self._revoke_pending_v1()
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        val packet = match self.pending:
+            case Some(value): value
+            case nil: return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        _ = _packet_checked_v1(self.active_generation_v1(), packet)?
+        self.state = ThreePayloadDurablePublicationStateV1.BlobsDurable
+        Ok(())
+
+    pub me mark_journal_durable_v1(
+        pins: VerifiedGenerationPinSnapshotV1,
+    ) -> Result<(), ThreePayloadDurablePublicationFailureV1>:
+        if self.state == ThreePayloadDurablePublicationStateV1.Revoked:
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        if self.state != ThreePayloadDurablePublicationStateV1.BlobsDurable:
+            return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        if not self._guard_current_v1(pins):
+            self._revoke_pending_v1()
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        val packet = match self.pending:
+            case Some(value): value
+            case nil: return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        _ = _packet_checked_v1(self.active_generation_v1(), packet)?
+        if not _journal_extends_v1(self.durable_journal, packet.journal.bytes):
+            return Err(ThreePayloadDurablePublicationFailureV1.JournalPrefixRejected)
+        val retained = _retained_generation_v1(packet)
+        val updated = _append_retained_unique_v1(self.retained_generations, retained)
+        if updated.len() > THREE_PAYLOAD_GENERATION_MAX_RECOVERY_PACKETS_V1:
+            return Err(ThreePayloadDurablePublicationFailureV1.InvalidCandidate)
+        self.durable_journal = retained.journal_bytes
+        self.retained_generations = updated
+        self.pending = Some(_retained_packet_v1(retained)?)
+        self.state = ThreePayloadDurablePublicationStateV1.JournalDurable
+        Ok(())
+
+    pub me commit_checkpoint_and_activate_v1(
+        pins: VerifiedGenerationPinSnapshotV1,
+    ) -> Result<ThreePayloadGenerationPublicationReceiptV1,
+                ThreePayloadDurablePublicationFailureV1>:
+        if self.state == ThreePayloadDurablePublicationStateV1.Revoked:
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        if self.state != ThreePayloadDurablePublicationStateV1.JournalDurable:
+            return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        if not self._guard_current_v1(pins):
+            self._revoke_pending_v1()
+            return Err(ThreePayloadDurablePublicationFailureV1.ReaderPinRevoked)
+        val packet = match self.pending:
+            case Some(value): value
+            case nil: return Err(ThreePayloadDurablePublicationFailureV1.Busy)
+        _ = _packet_checked_v1(self.active_generation_v1(), packet)?
+        match self.checkpoint.publish(self.durable_journal,
+                packet.durable.projection_digest):
+            case Err(_):
+                return Err(ThreePayloadDurablePublicationFailureV1.CheckpointRejected)
+            case Ok(_): pass
+        val receipt = match publish_verified_three_payload_generation_v1(
+                self.publication_owner, packet.prepared, packet.action_digest,
+                packet.root, packet.pins, packet.objects, packet.journal,
+                packet.durable):
+            case Ok(value): value
+            case Err(_):
+                self.pending = nil
+                self.guard_epoch = -1
+                self.guard_snapshot_digest = ""
+                self.state = ThreePayloadDurablePublicationStateV1.RecoveryRequired
+                return Err(ThreePayloadDurablePublicationFailureV1.ActivationRejected)
+        var checkpointed: [ThreePayloadRetainedDurableGenerationV1] = []
+        for retained in self.retained_generations:
+            val keep_a = if val slot = self.checkpoint.slot_a:
+                _slot_matches_retained_v1(slot, retained)
+            else:
+                false
+            val keep_b = if val slot = self.checkpoint.slot_b:
+                _slot_matches_retained_v1(slot, retained)
+            else:
+                false
+            if keep_a or keep_b:
+                checkpointed = _append_retained_unique_v1(checkpointed, retained)
+        self.retained_generations = checkpointed
+        self.pending = nil
+        self.guard_epoch = -1
+        self.guard_snapshot_digest = ""
+        self.state = ThreePayloadDurablePublicationStateV1.Ready
+        Ok(receipt)
+
+    pub me revoke_reader_pin_guard_v1() -> ThreePayloadReaderPinRevocationV1:
+        if self.state == ThreePayloadDurablePublicationStateV1.Revoked:
+            return ThreePayloadReaderPinRevocationV1.AlreadyRevoked
+        self._revoke_pending_v1()
+        ThreePayloadReaderPinRevocationV1.Revoked
+
+fn _durable_generation_retained_v1(
+        owner: ThreePayloadGenerationDurableOwnerV1,
+        candidate: VerifiedGenerationRootV1) -> bool:
+    for retained in owner.retained_generations:
+        if (retained.root.generation == candidate.generation and
+                retained.root.manifest_digest == candidate.manifest_digest):
+            return true
+    false
+
+# Resolve an attempt from the durable checkpoint and retained commit identities.
+# Precommit refusal/conflict is attempt-local; it reports the actual durable
+# active generation, which may belong to another publisher.  Post-CAS
+# cancellation and lost acknowledgment cannot roll back a retained commit.
+pub fn resolve_three_payload_durable_outcome_v1(
+    snapshot: ThreePayloadGenerationDurableSnapshotV1,
+    candidate: VerifiedGenerationRootV1,
+    event: ThreePayloadPublicationAttemptEventV1,
+) -> Result<ThreePayloadPublicationAttemptResolutionV1,
+            ThreePayloadDurablePublicationFailureV1>:
+    if candidate.generation < 0 or not _digest_v1(candidate.manifest_digest):
+        return Err(ThreePayloadDurablePublicationFailureV1.InvalidCandidate)
+    val recovered = ThreePayloadGenerationDurableOwnerV1.recover_v1(snapshot)?
+    val active = recovered.active_generation_v1()
+    val active_generation = match active:
+        case Some(value): value.generation
+        case nil: -1
+    val active_digest = match active:
+        case Some(value): value.receipt.generation_digest
+        case nil: ""
+    val retained = _durable_generation_retained_v1(recovered, candidate)
+    val candidate_active = active_generation == candidate.generation and
+        active_digest == candidate.manifest_digest
+    val status = match event:
+        case ThreePayloadPublicationAttemptEventV1.PrecommitRefusal:
+            if retained: ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown
+            else: ThreePayloadPublicationAttemptStatusV1.RefusedBeforeCommit
+        case ThreePayloadPublicationAttemptEventV1.CasConflict:
+            if retained: ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown
+            else: ThreePayloadPublicationAttemptStatusV1.RefusedBeforeCommit
+        case ThreePayloadPublicationAttemptEventV1.CasAcknowledged:
+            if candidate_active: ThreePayloadPublicationAttemptStatusV1.CommittedActive
+            elif retained: ThreePayloadPublicationAttemptStatusV1.CommittedSuperseded
+            else: ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown
+        case ThreePayloadPublicationAttemptEventV1.CasAcknowledgmentLost:
+            if candidate_active: ThreePayloadPublicationAttemptStatusV1.CommittedActive
+            elif retained: ThreePayloadPublicationAttemptStatusV1.CommittedSuperseded
+            else: ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown
+        case ThreePayloadPublicationAttemptEventV1.CancellationAfterCas:
+            if candidate_active: ThreePayloadPublicationAttemptStatusV1.CommittedActive
+            elif retained: ThreePayloadPublicationAttemptStatusV1.CommittedSuperseded
+            else: ThreePayloadPublicationAttemptStatusV1.DurableOutcomeUnknown
+    Ok(ThreePayloadPublicationAttemptResolutionV1(status: status,
+        candidate_generation: candidate.generation,
+        candidate_manifest_digest: candidate.manifest_digest,
+        active_generation: active_generation,
+        active_manifest_digest: active_digest))
+
+# The host ABI cannot yet hold reader-pin validation across durable append and
+# active-root assignment.  A point-in-time pin check must not open V2 publish.
+pub fn three_payload_generation_reader_pin_commit_guard_available_v2() -> bool:
+    false
+
+pub fn three_payload_generation_publication_available_v1() -> bool:
+    false
+
+pub fn three_payload_generation_publication_blocker_v1() -> text:
+    "host_reader_pin_commit_scope_unavailable"
+
+# Publication must become one mutation-scoped host operation that durably
+# journals roots before projecting any action lookup.  The current writer has
+# no such capability, so this port refuses without writing even immutable CAS
+# bytes.  In particular it never calls result_manifest_put.
+pub fn publish_three_payload_generation_v1(
+    prepared: PreparedThreePayloadGenerationV1,
+    action_digest: text,
+) -> Result<ThreePayloadGenerationPublicationReceiptV1, ThreePayloadFallbackV1>:
+    # Revalidate the immutable value; callers cannot gain authority by directly
+    # constructing PreparedThreePayloadGenerationV1.
+    if not _digest_v1(action_digest) or not _prepared_valid_v1(prepared):
+        return Err(ThreePayloadFallbackV1.CorruptPayload)
+    if not three_payload_generation_publication_available_v1():
+        return Err(ThreePayloadFallbackV1.AuthorityUnavailable)
+    Err(ThreePayloadFallbackV1.AuthorityUnavailable)

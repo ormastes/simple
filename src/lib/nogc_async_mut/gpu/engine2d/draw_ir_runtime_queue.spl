@@ -13,12 +13,42 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use common.contracts.execution.simple_ring_async_v1.{
+    RingGeneration,
+    RingPayloadLease,
+    RingPayloadOwnership,
+    RingToken
+}
+use common.gpu.engine2d.gpu_epoch.{
+    ENGINE2D_GPU_PHASE_COMPLETED,
+    ENGINE2D_GPU_PHASE_GPU_FINISHED,
+    ENGINE2D_GPU_PHASE_QUEUED,
+    ENGINE2D_GPU_PHASE_RETIRED,
+    ENGINE2D_GPU_PHASE_SUBMITTED,
+    Engine2dGpuEpochReceipt,
+    Engine2dGpuEpochRequest,
+    engine2d_gpu_device_evidence_none,
+    engine2d_gpu_epoch_admit,
+    engine2d_gpu_epoch_advance,
+    engine2d_gpu_truth_none
+}
+use std.nogc_async_mut.gpu.engine2d.packed_completion_authority_v1.{
+    Engine2dPackedCompletionAuthorityV1,
+    Engine2dPackedCompletionLedgerV1,
+    Engine2dPackedCompletionOutcomeV1,
+    engine2d_packed_authority_refusal,
+    engine2d_packed_authority_spend,
+    engine2d_packed_completion_admitted,
+    engine2d_packed_completion_refused
+}
 use std.nogc_async_mut.gpu.engine2d.backend_lane.{
     ENGINE2D_HOST_GPU_LANE_GPU,
     ENGINE2D_HOST_GPU_LANE_HOST,
     engine2d_host_gpu_lane_schedule
 }
 use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR,
+    ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU,
     Engine2dHostGpuRuntimeDispatchResult,
     Engine2dHostGpuRuntimeDrainResult,
     Engine2dHostGpuRuntimeQueue,
@@ -26,7 +56,10 @@ use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
     engine2d_host_gpu_event,
     engine2d_host_gpu_event_handler_decision,
     engine2d_host_gpu_event_submit_to_runtime_payload_text,
+    engine2d_host_gpu_runtime_emit_packet,
     engine2d_host_gpu_runtime_submit_with_payload,
+    engine2d_host_gpu_runtime_submit_pending,
+    engine2d_host_gpu_runtime_complete_pending,
     engine2d_host_gpu_runtime_drain,
     engine2d_host_gpu_runtime_dispatch_draw_ir
 }
@@ -53,6 +86,40 @@ struct Engine2dDrawIrQueueDispatchResult:
     queued_for_gpu: bool
     payload: Engine2dDrawIrPayloadSummary
 
+struct Engine2dDrawIrDeferredReceipt:
+    batch_id: text
+    queue_handle: i64
+    backend_handle: i64
+    packet_id: i64
+    packet_bytes: i64
+    command_count: i64
+    command_checksum: i64
+    accepted: bool
+    queued: bool
+    terminal: bool
+    status: text
+    routing_evidence_only: bool
+    device_execution_proven: bool
+    diagnostic: text
+
+fn _engine2d_draw_ir_deferred_receipt(batch: DrawIrBatch, queue: Engine2dHostGpuRuntimeQueue, packet_id: i64, packet_bytes: i64, command_count: i64, command_checksum: i64, accepted: bool, queued: bool, terminal: bool, status: text, diagnostic: text) -> Engine2dDrawIrDeferredReceipt:
+    Engine2dDrawIrDeferredReceipt(
+        batch_id: batch.batch_id,
+        queue_handle: queue.queue_handle,
+        backend_handle: queue.backend_handle,
+        packet_id: packet_id,
+        packet_bytes: packet_bytes,
+        command_count: command_count,
+        command_checksum: command_checksum,
+        accepted: accepted,
+        queued: queued,
+        terminal: terminal,
+        status: status,
+        routing_evidence_only: true,
+        device_execution_proven: false,
+        diagnostic: diagnostic
+    )
+
 fn _engine2d_draw_ir_empty_submit(unit_id: text, status: text, diagnostic: text) -> Engine2dHostGpuRuntimeSubmitResult:
     Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: status, queue_handle: 0, event_id: unit_id, packet_id: 0, packet_bytes: 0, payload_summary: "", diagnostic: diagnostic)
 
@@ -62,24 +129,45 @@ fn _engine2d_draw_ir_empty_drain(status: text, diagnostic: text) -> Engine2dHost
 fn _engine2d_draw_ir_empty_dispatch(status: text, diagnostic: text) -> Engine2dHostGpuRuntimeDispatchResult:
     Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: status, backend_name: "", queue_handle: 0, backend_handle: 0, payload_hash: 0, payload_size: 0, payload_text: "", diagnostic: diagnostic)
 
+fn _engine2d_draw_ir_text_fold(seed: i64, value: text, weight: i64) -> i64:
+    """Fold a text field's actual characters, not merely its length.
+
+    Length alone collides on every same-length swap, so two different scenes
+    would share a content hash and be treated as the same payload.
+    """
+    var acc = (seed + value.len().to_i64() * weight) % 2147483647
+    var j = 0
+    while j < value.len():
+        acc = (acc * 31 + value.char_code_at(j).to_i64() + weight) % 2147483647
+        j = j + 1
+    acc
+
 fn engine2d_draw_ir_payload_checksum(batch: DrawIrBatch) -> i64:
     var checksum: i64 = 0
     var i = 0
     while i < batch.commands.len():
         val command = batch.commands[i]
         checksum = (checksum + (i.to_i64() + 1) * 17) % 2147483647
-        checksum = (checksum + command.kind.len().to_i64() * 31) % 2147483647
-        checksum = (checksum + command.component_id.len().to_i64() * 37) % 2147483647
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.kind, 31)
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.component_id, 37)
         checksum = (checksum + command.x.to_i64() * 41) % 2147483647
         checksum = (checksum + command.y.to_i64() * 43) % 2147483647
         checksum = (checksum + command.width.to_i64() * 47) % 2147483647
         checksum = (checksum + command.height.to_i64() * 53) % 2147483647
         checksum = (checksum + command.color.to_i64() * 59) % 2147483647
-        checksum = (checksum + command.text_value.len().to_i64() * 61) % 2147483647
+        checksum = _engine2d_draw_ir_text_fold(checksum, command.text_value, 61)
         i = i + 1
     checksum
 
-fn engine2d_draw_ir_payload_summary(batch: DrawIrBatch, packet_bytes: i64) -> Engine2dDrawIrPayloadSummary:
+fn engine2d_draw_ir_payload_summary_sdn_compat(batch: DrawIrBatch, packet_bytes: i64) -> Engine2dDrawIrPayloadSummary:
+    """Compatibility/diagnostic payload adapter: serializes the batch to SDN text.
+
+    This is the ONLY producer of DrawIR SDN text on this seam and it is retained
+    for the legacy immediate-dispatch route and for human-readable diagnostics.
+    It is not the packed hot path: it allocates a full SDN rendering of the
+    batch per call. Registered packed ownership goes through
+    `engine2d_draw_ir_runtime_queue_submit_packed`, which never serializes text.
+    """
     val checksum = engine2d_draw_ir_payload_checksum(batch)
     val payload_sdn = draw_ir_to_sdn(draw_ir_composition("runtime-{batch.batch_id}", batch.batch_id, batch.backend_target, [batch]))
     val payload_sdn_bytes = payload_sdn.len().to_i64()
@@ -143,12 +231,207 @@ fn engine2d_draw_ir_runtime_queue_dispatch(batch: DrawIrBatch, selected_backend:
 fn engine2d_draw_ir_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrQueueDispatchResult:
     val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
     val packet_bytes = plan.command_count * 64
-    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    val payload = engine2d_draw_ir_payload_summary_sdn_compat(batch, packet_bytes)
     engine2d_draw_ir_runtime_queue_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
+
+fn engine2d_draw_ir_runtime_queue_submit_deferred(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrDeferredReceipt:
+    """Enqueue one bounded DrawIR route without draining or completing it.
+
+    The packet contains only bounded routing metadata plus the caller-owned
+    backend handle. It neither serializes DrawIR text nor claims that a packed
+    payload is registered at that handle. The returned receipt proves queue
+    admission only; callers advance the canonical runtime queue with
+    `engine2d_host_gpu_runtime_submit_pending` and
+    `engine2d_host_gpu_runtime_complete_pending`.
+    """
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val packet_bytes = plan.command_count * 64
+    val checksum = engine2d_draw_ir_payload_checksum(batch)
+    if plan.selected_backend != DRAW_IR_BACKEND_GPU:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "host", "Draw IR batch selected CPU path")
+    val lane_result = engine2d_host_gpu_lane_schedule(
+        ENGINE2D_HOST_GPU_LANE_HOST,
+        ENGINE2D_HOST_GPU_LANE_GPU,
+        "draw_ir_delta",
+        packet_bytes,
+        queue.max_packet_bytes,
+        false,
+        false,
+        queue.runtime_available,
+        plan.command_count
+    )
+    val event = engine2d_host_gpu_event(batch.batch_id, ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", packet_bytes, queue.max_packet_bytes, false, false, false, queue.runtime_available)
+    val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
+    if not decision.accepted or not decision.queue_required:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "rejected", decision.reason)
+    # Strict profile: an unavailable GPU backend schedules ok with
+    # fallback_explicit set, which means "the caller may run this on the CPU".
+    # A deferred GPU route has no CPU lane to fall back to, so it must reject
+    # here instead of queueing a packet no device will ever execute.
+    if lane_result.fallback_explicit:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "rejected", "GPU backend unavailable; deferred routing has no CPU fallback lane")
+    if queue.queue_handle <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "runtime_unavailable", "runtime queue handle is not registered")
+    if queue.backend_handle <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "invalid_backend_handle", "positive backend handle required for deferred Draw IR routing")
+    if packet_bytes > queue.max_packet_bytes:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "packet_too_large", "packet exceeds runtime queue limit")
+    val packet_id = engine2d_host_gpu_runtime_emit_packet(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, packet_bytes, queue.backend_handle)
+    if packet_id <= 0:
+        return _engine2d_draw_ir_deferred_receipt(batch, queue, 0, packet_bytes, plan.command_count, checksum, false, false, true, "queue_full_or_emit_failed", "bounded runtime queue rejected the packet")
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "queued_deferred")
+        dbg_event_hop(batch.batch_id, "enqueue", "status=queued packet_id={packet_id} bytes={packet_bytes} deferred=true")
+    dbg_count("host_gpu.queued", 1)
+    _engine2d_draw_ir_deferred_receipt(batch, queue, packet_id, packet_bytes, plan.command_count, checksum, true, true, false, "queued", "Draw IR routing metadata queued for deferred completion")
+
+# --- Registered packed payload ownership (no SDN text on this path) ----------
+
+fn engine2d_draw_ir_epoch_request_from_batch(batch: DrawIrBatch, profile: text, queue: Engine2dHostGpuRuntimeQueue, arena_handle: u64, queue_generation: u64, operation_generation: u64, scene_generation: u64, surface_generation: u64, arena_generation: u64) -> Engine2dGpuEpochRequest:
+    """Freeze one DrawIR batch into a bounded epoch request with a registered payload lease.
+
+    The lease names the arena the packed rows already live in; the request
+    carries the batch's content hash, never its bytes and never its SDN text.
+    """
+    val command_count = batch.commands.len().to_i64()
+    val packet_bytes = command_count * 64
+    Engine2dGpuEpochRequest(
+        profile: profile,
+        queue_handle: queue.queue_handle,
+        backend_handle: queue.backend_handle,
+        queue_generation: queue_generation,
+        operation_generation: operation_generation,
+        scene_generation: scene_generation,
+        surface_generation: surface_generation,
+        arena_generation: arena_generation,
+        payload_lease: RingPayloadLease(
+            ownership: RingPayloadOwnership.RegisteredLease,
+            owner_id: queue.backend_handle as u64,
+            handle: arena_handle,
+            generation: RingGeneration(value: arena_generation),
+            byte_length: packet_bytes as u64
+        ),
+        command_count: command_count,
+        packet_bytes: packet_bytes,
+        content_hash: engine2d_draw_ir_payload_checksum(batch) as u64
+    )
+
+fn _engine2d_packed_refuse(request: Engine2dGpuEpochRequest, device_available: bool, available_capabilities: u32, diagnostic: text) -> Engine2dGpuEpochReceipt:
+    var refused = engine2d_gpu_epoch_admit(request, nil, device_available, available_capabilities)
+    refused.diagnostic = diagnostic
+    refused
+
+fn engine2d_draw_ir_runtime_queue_submit_packed(request: Engine2dGpuEpochRequest, queue: Engine2dHostGpuRuntimeQueue, device_available: bool, available_capabilities: u32) -> Engine2dGpuEpochReceipt:
+    """Submit a registered packed payload as one bounded epoch; no text is serialized.
+
+    Policy admission runs BEFORE the packet is emitted, so a refused profile
+    never strands an orphan packet in the bounded queue. The emitted packet
+    carries only routing metadata and the caller-owned backend handle: the
+    packed rows stay in the arena named by the request's payload lease.
+    """
+    val preflight_token = RingToken(ring_id: queue.queue_handle as u64, slot: 0u64, generation: RingGeneration(value: request.queue_generation))
+    val preflight = engine2d_gpu_epoch_admit(request, preflight_token, device_available, available_capabilities)
+    if preflight.phase != ENGINE2D_GPU_PHASE_QUEUED:
+        # A refused epoch owns no queue slot, so it must not carry a token that
+        # names one. Slot 0 is not a packet id (ids start at 1) and a caller that
+        # trusted it would be reading a slot this request never held.
+        return engine2d_gpu_epoch_admit(request, nil, device_available, available_capabilities)
+    if queue.queue_handle <= 0:
+        return _engine2d_packed_refuse(request, device_available, available_capabilities, "runtime queue handle is not registered")
+    if queue.backend_handle <= 0:
+        return _engine2d_packed_refuse(request, device_available, available_capabilities, "positive backend handle required for packed DrawIR routing")
+    if request.packet_bytes > queue.max_packet_bytes:
+        return _engine2d_packed_refuse(request, device_available, available_capabilities, "packet exceeds runtime queue limit")
+    val packet_id = engine2d_host_gpu_runtime_emit_packet(ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU, ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR, request.packet_bytes, queue.backend_handle)
+    if packet_id <= 0:
+        return engine2d_gpu_epoch_admit(request, nil, device_available, available_capabilities)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_stage("gpu_queue", "queued_packed")
+        dbg_event_hop("packed", "enqueue", "status=queued packet_id={packet_id} bytes={request.packet_bytes} packed=true")
+    dbg_count("host_gpu.queued", 1)
+    val token = RingToken(ring_id: queue.queue_handle as u64, slot: packet_id as u64, generation: RingGeneration(value: request.queue_generation))
+    engine2d_gpu_epoch_admit(request, token, device_available, available_capabilities)
+
+fn engine2d_draw_ir_runtime_queue_complete_packed(receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dGpuEpochReceipt:
+    """Advance one queued packed epoch through the compatibility provider phases.
+
+    Routing evidence only: the provider exposes no queue-scoped fence or device
+    timestamp, so the epoch advances with `engine2d_gpu_device_evidence_none()`
+    and never claims device execution.
+    """
+    # TODO: [gpu][P2] with a real device attached, replace engine2d_gpu_device_evidence_none() here with provider evidence (binary identity, device name, driver identity, monotonic host submit/complete ns, negative control) and advance through ENGINE2D_GPU_PHASE_GPU_FINISHED so device_execution_proven can legitimately flip true
+    val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+    if submitted.count <= 0:
+        return receipt
+    val advanced = engine2d_gpu_epoch_advance(receipt, ENGINE2D_GPU_PHASE_SUBMITTED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+    val completed = engine2d_host_gpu_runtime_complete_pending(queue, 1)
+    if completed.count <= 0:
+        return advanced
+    engine2d_gpu_epoch_advance(advanced, ENGINE2D_GPU_PHASE_COMPLETED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
+
+fn engine2d_draw_ir_runtime_queue_complete_packed_with_authority(receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue, ledger: Engine2dPackedCompletionLedgerV1, authority: Engine2dPackedCompletionAuthorityV1?) -> Engine2dPackedCompletionOutcomeV1:
+    """Complete one queued packed epoch against a backend owner's callback authority.
+
+    This is the authority route; `engine2d_draw_ir_runtime_queue_complete_packed`
+    above stays the compatibility route and stays routing-only. The difference is
+    only where the device facts come from: here they are the authority's own
+    evidence, forwarded verbatim, so `device_execution_proven` flips exactly when
+    the OWNER's evidence qualifies and never because this queue said so. Nothing
+    here constructs evidence, and `engine2d_gpu_device_evidence_none()` is
+    deliberately absent from this path.
+
+    Callers gate on `outcome.admitted`, never on the receipt's phase alone: if
+    the host queue fails to complete the packet the authority named, the refused
+    outcome still carries a receipt already advanced to `gpu_finished` (proven,
+    when the owner's evidence qualifies) because the fence really had signalled.
+    A validated authority is spent even when the host queue then disagrees —
+    one-shot means one presentation, not one success.
+
+    The epoch advances queued -> submitted -> gpu_finished -> completed: the
+    authority exists because the owner's fence signalled, which is what the
+    `gpu_finished` phase means. Truth labels stay `engine2d_gpu_truth_none()` —
+    residency and scheduling assurance belong to the profile owner, and inventing
+    them here would be the same fabrication this seam refuses for evidence.
+    """
+    val refusal = engine2d_packed_authority_refusal(receipt: receipt, queue_handle: queue.queue_handle, backend_handle: queue.backend_handle, ledger: ledger, authority: authority)
+    if refusal != "":
+        return engine2d_packed_completion_refused(ledger, receipt, refusal)
+    val spent = engine2d_packed_authority_spend(ledger, authority)
+    val submitted = engine2d_host_gpu_runtime_submit_pending(queue, 1)
+    if submitted.count <= 0:
+        return engine2d_packed_completion_refused(spent, receipt, "runtime queue holds no pending packet for this authority")
+    val advanced = engine2d_gpu_epoch_advance(receipt, ENGINE2D_GPU_PHASE_SUBMITTED, authority.evidence, engine2d_gpu_truth_none())
+    val finished = engine2d_gpu_epoch_advance(advanced, ENGINE2D_GPU_PHASE_GPU_FINISHED, authority.evidence, engine2d_gpu_truth_none())
+    val completed = engine2d_host_gpu_runtime_complete_pending(queue, 1)
+    if completed.count <= 0:
+        return engine2d_packed_completion_refused(spent, finished, "runtime queue did not complete the packet this authority names")
+    engine2d_packed_completion_admitted(spent, engine2d_gpu_epoch_advance(finished, ENGINE2D_GPU_PHASE_COMPLETED, authority.evidence, engine2d_gpu_truth_none()))
+
+fn engine2d_draw_ir_runtime_queue_retire_packed(receipt: Engine2dGpuEpochReceipt, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dGpuEpochReceipt:
+    """Release the packed epoch's queue storage after completion; retirement is terminal.
+
+    The compatibility provider retires a packet during completion, so the drain
+    legitimately reports 0 here. Retirement is therefore gated on the completed
+    phase and on the queue still being available, never on a drained count.
+    """
+    # TODO: [gpu][P2] with a real device attached, verify the arena named by the payload lease is only released after the device has signalled it is done with it; the compatibility provider has no fence, so this drain cannot prove that today
+    if receipt.phase != ENGINE2D_GPU_PHASE_COMPLETED:
+        return receipt
+    val drained = engine2d_host_gpu_runtime_drain(queue, 1)
+    if drained.status == "runtime_unavailable":
+        return receipt
+    engine2d_gpu_epoch_advance(receipt, ENGINE2D_GPU_PHASE_RETIRED, engine2d_gpu_device_evidence_none(), engine2d_gpu_truth_none())
 
 export Engine2dDrawIrPayloadSummary
 export Engine2dDrawIrQueueDispatchResult
+export Engine2dDrawIrDeferredReceipt
 export engine2d_draw_ir_payload_checksum
-export engine2d_draw_ir_payload_summary
+export engine2d_draw_ir_payload_summary_sdn_compat
 export engine2d_draw_ir_runtime_queue_dispatch
 export engine2d_draw_ir_runtime_queue_dispatch_only
+export engine2d_draw_ir_runtime_queue_submit_deferred
+export engine2d_draw_ir_epoch_request_from_batch
+export engine2d_draw_ir_runtime_queue_submit_packed
+export engine2d_draw_ir_runtime_queue_complete_packed
+export engine2d_draw_ir_runtime_queue_complete_packed_with_authority
+export engine2d_draw_ir_runtime_queue_retire_packed

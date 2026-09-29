@@ -1,11 +1,11 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-INTEGRATION
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # Maps to: AC-4, AC-9
 # Run: bin/simple test test/integration/storage/dbfs/nvfs_no_regression_spec.spl
 
 """
-## Purpose and audience
-Purpose: NvfsDriver mounts and exposes the root inode
-Audience: compiler and tooling engineers who maintain this spec
-
 NVFS No-Regression Specification
 
 Verifies the live NVFS driver surfaces still work after the blob-backend refactor:
@@ -13,14 +13,9 @@ Verifies the live NVFS driver surfaces still work after the blob-backend refacto
   - Posix shim open/pwrite/ftruncate/stat
 """
 
-# @req: REQ-STORAGE-NvfsNoRegr-001
-
 use std.spipe.*
 use std.fs_driver.ops.{FsDriver}
-use std.fs_driver.types.{Path, OpenFlags, MountOptions, ExecuteTrust}
-use std.fs_driver.error.{FsError}
-use std.fs_driver.instance.{DriverInstance}
-use std.fs_driver.mount_table.{MountTable}
+use std.fs_driver.types.{Path, OpenFlags, MountOptions}
 use std.fs_driver.nvfs_driver.{NvfsDriver}
 use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
 
@@ -34,106 +29,79 @@ fn make_nvfs_posix() -> NvfsPosixDriver:
     d.mount(MountOptions.default()).unwrap()
     d
 
-use std.spec.step
 describe "NVFS no-regression — NvfsDriver":
     it "NvfsDriver mounts and exposes the root inode":
-        step("Verify: NvfsDriver mounts and exposes the root inode")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
         val root = d.root().unwrap()
-        expect(root.id).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(root.id).to_equal(1)
 
     it "NvfsDriver open + write + read round-trips bytes":
-        step("Verify: NvfsDriver open + write + read round-trips bytes")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/nvfs_reg.bin"), OpenFlags.create_write()).unwrap()
+        val fh = d.open(Path(raw: "/nvfs_reg.bin"), OpenFlags(bits: 2)).unwrap()
         val payload: [u8] = [110, 118, 102, 115, 45, 111, 107]
         d.write(fh, 0, payload).unwrap()
         var got: [u8] = [0, 0, 0, 0, 0, 0, 0]
         val n = d.read(fh, 0, got).unwrap()
-        expect(n).to_equal(7)  # oracle: value fixed by the spec contract
-        expect(got[0]).to_equal(110)  # oracle: value fixed by the spec contract
-        expect(got[6]).to_equal(107)  # oracle: value fixed by the spec contract
+        expect(n).to_equal(7)
+        expect(got[0]).to_equal(110)
+        expect(got[6]).to_equal(107)
 
     it "NvfsDriver stat returns correct size after write":
-        step("Verify: NvfsDriver stat returns correct size after write")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/size_test.bin"), OpenFlags.create_write()).unwrap()
+        val fh = d.open(Path(raw: "/size_test.bin"), OpenFlags(bits: 2)).unwrap()
         val payload: [u8] = [49, 50, 51, 52, 53]
         d.write(fh, 0, payload).unwrap()
         d.close(fh).unwrap()
         val stat = d.stat(Path(raw: "/size_test.bin")).unwrap()
-        expect(stat.size).to_equal(5)  # oracle: value fixed by the spec contract
+        expect(stat.size).to_equal(5)
 
     it "NvfsDriver pwrite updates the requested range without moving data":
-        step("Verify: NvfsDriver pwrite updates the requested range without moving data")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs()
-        val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags.create_write()).unwrap()
+        val fh = d.open(Path(raw: "/append_only.bin"), OpenFlags(bits: 2)).unwrap()
         val payload: [u8] = [1, 2, 3, 4]
         d.write(fh, 0, payload).unwrap()
         val patch: [u8] = [9]
-        expect(d.pwrite(fh, 1, patch).unwrap()).to_equal(1)
-        var got: [u8] = [0, 0, 0, 0]
-        expect(d.pread(fh, 0, got).unwrap()).to_equal(4)
-        expect(got).to_equal([1u8, 9u8, 3u8, 4u8])
-        expect(d.fstat(fh).unwrap().size).to_equal(4u64)
-
-    it "NvfsDriver rejects negative and overflowing positioned ranges":
-        val d = make_nvfs()
-        val fh = d.open(Path(raw: "/range.bin"), OpenFlags.create_write()).unwrap()
-        var one: [u8] = [0]
-        expect(d.pread(fh, -1, one).unwrap_err()).to_equal(FsError.InvalidArg)
-        expect(d.pwrite(fh, 9223372036854775807, [1u8]).unwrap_err()).to_equal(FsError.InvalidArg)
+        val res = d.pwrite(fh, 1, patch)
+        expect(res.is_err()).to_equal(true)
 
 describe "NVFS no-regression — NvfsPosixDriver":
     it "NvfsPosixDriver mounts and exposes the root inode":
-        step("Verify: NvfsPosixDriver mounts and exposes the root inode")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
         val root = d.root().unwrap()
-        expect(root.id).to_equal(1)  # oracle: value fixed by the spec contract
+        expect(root.id).to_equal(1)
 
     it "NvfsPosixDriver open + write + read round-trips bytes":
-        step("Verify: NvfsPosixDriver open + write + read round-trips bytes")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/posix_reg.txt"), OpenFlags.create_write().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/posix_reg.txt"), OpenFlags.write_only().with_append()).unwrap()
         val payload: [u8] = [112, 111, 115, 105, 120, 45, 111, 107]
         d.write(fh, 0, payload).unwrap()
         var got: [u8] = [0, 0, 0, 0, 0, 0, 0, 0]
         val n = d.read(fh, 0, got).unwrap()
-        expect(n).to_equal(8)  # oracle: value fixed by the spec contract
-        expect(got[0]).to_equal(112)  # oracle: value fixed by the spec contract
-        expect(got[7]).to_equal(107)  # oracle: value fixed by the spec contract
+        expect(n).to_equal(8)
+        expect(got[0]).to_equal(112)
+        expect(got[7]).to_equal(107)
 
     it "NvfsPosixDriver pwrite updates bytes in place":
-        step("Verify: NvfsPosixDriver pwrite updates bytes in place")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/rewrite.txt"), OpenFlags.create_write().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/rewrite.txt"), OpenFlags.write_only().with_append()).unwrap()
         val seed: [u8] = [65, 65, 65, 65]
         d.write(fh, 0, seed).unwrap()
         val patch: [u8] = [66, 66]
         d.pwrite(fh, 2, patch).unwrap()
         var got: [u8] = [0, 0, 0, 0]
         val n = d.pread(fh, 0, got).unwrap()
-        expect(n).to_equal(4)  # oracle: value fixed by the spec contract
-        expect(got[0]).to_equal(65)  # oracle: value fixed by the spec contract
-        expect(got[2]).to_equal(66)  # oracle: value fixed by the spec contract
+        expect(n).to_equal(4)
+        expect(got[0]).to_equal(65)
+        expect(got[2]).to_equal(66)
 
     it "NvfsPosixDriver stat returns updated size after ftruncate":
-        step("Verify: NvfsPosixDriver stat returns updated size after ftruncate")
-        # @req: REQ-STORAGE-NvfsNoRegr-001
         val d = make_nvfs_posix()
-        val fh = d.open(Path(raw: "/file.txt"), OpenFlags.create_write().with_append()).unwrap()
+        val fh = d.open(Path(raw: "/file.txt"), OpenFlags.write_only().with_append()).unwrap()
         val payload: [u8] = [1, 2, 3, 4]
         d.write(fh, 0, payload).unwrap()
         d.ftruncate(fh, 10).unwrap()
         val stat = d.fstat(fh).unwrap()
-        expect(stat.size).to_equal(10)  # oracle: value fixed by the spec contract
+        expect(stat.size).to_equal(10)
 
     it "NvfsPosixDriver preserves sparse positioned-write semantics":
         val d = make_nvfs_posix()

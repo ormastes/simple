@@ -1,0 +1,89 @@
+"""Pure ownership policy for device-MMIO virtual memory areas."""
+
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_DEVICE}
+
+val VMM_DEVICE_PAGE_SIZE: u64 = 4096u64
+val VMM_DEVICE_USER_BASE: u64 = 0x0000000000400000u64
+val VMM_DEVICE_USER_LIMIT: u64 = 0x0000800000000000u64
+
+struct VmmDeviceWindowPlan:
+    ok: bool
+    code: i32
+    reason: text
+    physical_page: u64
+    page_delta: u64
+    map_start: u64
+    map_len: u64
+    user_addr: u64
+
+fn _vmm_device_plan_error(code: i32, reason: text) -> VmmDeviceWindowPlan:
+    VmmDeviceWindowPlan(ok: false, code: code, reason: reason,
+        physical_page: 0u64, page_delta: 0u64, map_start: 0u64,
+        map_len: 0u64, user_addr: 0u64)
+
+fn vmm_device_plan_window(physical_addr: u64, byte_len: u64,
+        hint_page: u64, automatic_page: u64) -> VmmDeviceWindowPlan:
+    # @decision DVM_PLAN_LEN
+    if byte_len == 0u64:
+        return _vmm_device_plan_error(-22, "blocked:empty-window")
+    val physical_page = (physical_addr / VMM_DEVICE_PAGE_SIZE) * VMM_DEVICE_PAGE_SIZE
+    val delta = physical_addr - physical_page
+    # @decision DVM_PLAN_ENVELOPE
+    val full_pages = byte_len / VMM_DEVICE_PAGE_SIZE
+    # Bound arithmetic before adding or multiplying.  This page count is exact
+    # under the bootstrap interpreter and no supported user mapping can contain
+    # this many pages.
+    val max_window_pages = VMM_DEVICE_USER_LIMIT / VMM_DEVICE_PAGE_SIZE
+    if full_pages >= max_window_pages:
+        return _vmm_device_plan_error(-75, "blocked:alignment-overflow")
+    val tail = byte_len % VMM_DEVICE_PAGE_SIZE
+    val covered_tail = delta + tail
+    val extra_pages = if covered_tail == 0u64: 0u64 else:
+        if covered_tail <= VMM_DEVICE_PAGE_SIZE: 1u64 else: 2u64
+    val page_count = full_pages + extra_pages
+    if page_count < full_pages:
+        return _vmm_device_plan_error(-75, "blocked:envelope-overflow")
+    val physical_page_index = physical_addr / VMM_DEVICE_PAGE_SIZE
+    val physical_end_index = physical_page_index + page_count
+    if physical_end_index <= physical_page_index or
+            physical_end_index - page_count != physical_page_index:
+        return _vmm_device_plan_error(-75, "blocked:physical-end-overflow")
+    val map_len = page_count * VMM_DEVICE_PAGE_SIZE
+    if page_count == 0u64 or map_len == 0u64 or
+            map_len / page_count != VMM_DEVICE_PAGE_SIZE:
+        return _vmm_device_plan_error(-75, "blocked:alignment-overflow")
+    val map_start = if hint_page != 0u64: hint_page else: automatic_page
+    # @decision DVM_PLAN_VADDR
+    if map_start < VMM_DEVICE_USER_BASE or
+            (map_start % VMM_DEVICE_PAGE_SIZE) != 0u64:
+        return _vmm_device_plan_error(-22, "blocked:virtual-base-invalid")
+    if map_start > VMM_DEVICE_USER_LIMIT or
+            map_len > VMM_DEVICE_USER_LIMIT - map_start:
+        return _vmm_device_plan_error(-75, "blocked:virtual-range-overflow")
+    VmmDeviceWindowPlan(ok: true, code: 0, reason: "ok:device-window-plan",
+        physical_page: physical_page, page_delta: delta,
+        map_start: map_start, map_len: map_len,
+        user_addr: map_start + delta)
+
+fn vmm_vma_kind_releases_leaf(kind: u32) -> bool:
+    """Whether unmap must drop a PMM reference for a detached leaf."""
+    # @decision DVM_RELEASE
+    kind != VMA_DEVICE
+
+fn vmm_space_has_device_vma(space: ProcessVmSpace) -> bool:
+    # @decision DVM_PRESENT
+    var index: i64 = 0
+    while index.to_u64() < space.vma_count and index < space.areas.len():
+        if space.areas[index].kind == VMA_DEVICE:
+            return true
+        index = index + 1
+    false
+
+fn vmm_space_fork_allowed(space: ProcessVmSpace) -> bool:
+    """Device authority is never inherited implicitly across fork/COW."""
+    # @decision DVM_FORK
+    not vmm_space_has_device_vma(space)
+
+export vmm_vma_kind_releases_leaf, vmm_space_has_device_vma,
+    vmm_space_fork_allowed, VmmDeviceWindowPlan, vmm_device_plan_window,
+    VMM_DEVICE_PAGE_SIZE, VMM_DEVICE_USER_BASE, VMM_DEVICE_USER_LIMIT

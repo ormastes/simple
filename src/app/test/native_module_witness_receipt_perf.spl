@@ -1,0 +1,210 @@
+# Pure-Simple admission harness for retained native-module cache evidence.
+use std.nogc_sync_mut.sffi.cli.{cli_get_args}
+use std.io_runtime.{time_now_unix_micros}
+use app.io.mod.{file_read, file_write}
+use std.common.crypto.sha256.{sha256_text}
+
+struct NativeWitnessPerfReceiptV2:
+    valid: bool = false
+    reason: text = ""
+    compiler_sha256: text = ""
+    closure_sha256: text = ""
+    target: text = ""
+    manifest: text = ""
+    action_count: i64 = 0
+    hit_count: i64 = 0
+    mismatch_count: i64 = 0
+    hit_rate_ppm: i64 = 0
+    mismatch_rate_ppm: i64 = 0
+    build_cache_row_count: i64 = 0
+    receipt_parse_us: i64 = 0
+    witness_key_us: i64 = 0
+    witness_key_checksum: text = ""
+    wall_time_us: i64 = 0
+    max_rss_kib: i64 = 0
+    warm_build_wall_us: i64 = 0
+    witness_overhead_ppm: i64 = 0
+    nfr_pass: bool = false
+
+fn receipt_value(text_: text, key: text) -> text:
+    val prefix = key + "="
+    for line in text_.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len()).trim()
+    ""
+
+fn receipt_i64(text_: text, key: text) -> i64:
+    receipt_value(text_, key).to_i64() ?? -1
+
+fn shadow_receipt_valid_v1(text_: text) -> bool:
+    val lines = text_.split("\n")
+    if lines.len() == 0 or lines[0].trim() != "native-module-cache-shadow-receipt-v1":
+        return false
+    if receipt_value(text_, "phase") != "prelookup-attempt" or
+       receipt_value(text_, "non_authoritative") != "true" or
+       receipt_value(text_, "authority") == "" or
+       receipt_value(text_, "closure") == "":
+        return false
+    val matches = receipt_i64(text_, "matches")
+    val mismatches = receipt_i64(text_, "mismatches")
+    val retained = receipt_i64(text_, "retained")
+    val truncated = receipt_i64(text_, "truncated")
+    if matches < 0 or mismatches < 0 or retained < 0 or truncated < 0:
+        return false
+    var details = 0
+    for line in lines:
+        if line.starts_with("module="):
+            details = details + 1
+    details == retained
+
+fn build_cache_witnesses(text_: text) -> [text]:
+    val marker = "module_witness: \""
+    var witnesses: [text] = []
+    for line in text_.split("\n"):
+        val start = line.index_of(marker) ?? -1
+        if start < 0:
+            continue
+        val rest = line.substring(start + marker.len(), line.len())
+        val finish = rest.index_of("\"") ?? -1
+        if finish > 0:
+            witnesses.push(rest.substring(0, finish))
+    witnesses
+
+fn lowercase_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn native_witness_peak_rss_from_status_v1(status_text: text) -> i64:
+    """Decode Linux VmHWM without requiring an optional runtime symbol."""
+    for line in status_text.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with("VmHWM:"):
+            var payload = trimmed.substring("VmHWM:".len(), trimmed.len())
+                .trim().replace("\t", " ")
+            while payload.contains("  "):
+                payload = payload.replace("  ", " ")
+            val fields = payload.split(" ")
+            if fields.len() < 2:
+                return -1
+            val value = fields[0].to_i64() ?? -1
+            if value <= 0:
+                return -1
+            if fields[1] != "kB":
+                return -1
+            return value
+    -1
+
+fn native_witness_peak_rss_kib_v1(status_override: text = "") -> i64:
+    val status_text = if status_override != "":
+        status_override
+    else:
+        file_read("/proc/self/status")
+    native_witness_peak_rss_from_status_v1(status_text)
+
+fn native_witness_perf_measure_v2(
+    shadow_texts: [text], cache_texts: [text], compiler_sha256: text,
+    target: text, manifest: text, warm_build_wall_us: i64,
+    process_status_override: text = ""
+) -> NativeWitnessPerfReceiptV2:
+    val started = time_now_unix_micros()
+    var matches = 0
+    var mismatches = 0
+    var closure = ""
+    for shadow in shadow_texts:
+        if not shadow_receipt_valid_v1(shadow):
+            return NativeWitnessPerfReceiptV2(valid: false, reason: "invalid-shadow-receipt")
+        val next_closure = receipt_value(shadow, "closure")
+        if closure != "" and closure != next_closure:
+            return NativeWitnessPerfReceiptV2(valid: false, reason: "mixed-closure-identity")
+        closure = next_closure
+        matches = matches + receipt_i64(shadow, "matches")
+        mismatches = mismatches + receipt_i64(shadow, "mismatches")
+    var witnesses: [text] = []
+    for cache in cache_texts:
+        for witness in build_cache_witnesses(cache):
+            witnesses.push(witness)
+    val parse_us = time_now_unix_micros() - started
+    val key_started = time_now_unix_micros()
+    var checksum_material = ""
+    for witness in witnesses:
+        checksum_material = checksum_material + sha256_text(witness)
+    val checksum = sha256_text(checksum_material)
+    val key_us = time_now_unix_micros() - key_started
+    val actions = matches + mismatches
+    val metadata_valid = lowercase_sha256(compiler_sha256) and target != "" and
+        manifest != "" and warm_build_wall_us > 0 and actions > 0
+    val hit_rate = if actions > 0: matches * 1000000 / actions else: 0
+    val mismatch_rate = if actions > 0: mismatches * 1000000 / actions else: 1000000
+    val overhead = if warm_build_wall_us > 0:
+        (parse_us + key_us) * 1000000 / warm_build_wall_us
+    else: 1000000
+    val pass_ = metadata_valid and actions >= 1000 and hit_rate >= 990000 and
+        mismatch_rate == 0 and overhead < 50000
+    NativeWitnessPerfReceiptV2(
+        valid: metadata_valid, reason: if metadata_valid: "ok" else: "incomplete-nfr-schema",
+        compiler_sha256: compiler_sha256, closure_sha256: closure,
+        target: target, manifest: manifest, action_count: actions,
+        hit_count: matches, mismatch_count: mismatches,
+        hit_rate_ppm: hit_rate, mismatch_rate_ppm: mismatch_rate,
+        build_cache_row_count: witnesses.len(), receipt_parse_us: parse_us,
+        witness_key_us: key_us, witness_key_checksum: checksum,
+        wall_time_us: parse_us + key_us,
+        max_rss_kib: native_witness_peak_rss_kib_v1(process_status_override),
+        warm_build_wall_us: warm_build_wall_us,
+        witness_overhead_ppm: overhead, nfr_pass: pass_)
+
+fn native_witness_perf_json_v2(row: NativeWitnessPerfReceiptV2) -> text:
+    "{\n" +
+    "  \"schema\": \"native-module-cache-witness-perf-v2\",\n" +
+    "  \"shadow_schema\": \"native-module-cache-shadow-receipt-v1\",\n" +
+    "  \"source_kind\": \"retained-shadow-and-build-cache\",\n" +
+    "  \"compiler_sha256\": \"{row.compiler_sha256}\",\n" +
+    "  \"closure_sha256\": \"{row.closure_sha256}\",\n" +
+    "  \"target\": \"{row.target}\",\n" +
+    "  \"mode\": \"shadow-prelookup-attempt\",\n" +
+    "  \"manifest\": \"{row.manifest}\",\n" +
+    "  \"cache_schema\": \"native-module-cache-witness-v1\",\n" +
+    "  \"action_count\": {row.action_count},\n" +
+    "  \"hit_count\": {row.hit_count},\n" +
+    "  \"mismatch_count\": {row.mismatch_count},\n" +
+    "  \"hit_rate_ppm\": {row.hit_rate_ppm},\n" +
+    "  \"mismatch_rate_ppm\": {row.mismatch_rate_ppm},\n" +
+    "  \"build_cache_row_count\": {row.build_cache_row_count},\n" +
+    "  \"receipt_parse_us\": {row.receipt_parse_us},\n" +
+    "  \"witness_key_us\": {row.witness_key_us},\n" +
+    "  \"witness_key_checksum\": \"{row.witness_key_checksum}\",\n" +
+    "  \"wall_time_us\": {row.wall_time_us},\n" +
+    "  \"max_rss_kib\": {row.max_rss_kib},\n" +
+    "  \"warm_build_wall_us\": {row.warm_build_wall_us},\n" +
+    "  \"witness_overhead_ppm\": {row.witness_overhead_ppm},\n" +
+    "  \"target_hit_rate_ppm\": 990000,\n" +
+    "  \"target_mismatch_rate_ppm\": 0,\n" +
+    "  \"target_witness_overhead_ppm\": 50000,\n" +
+    "  \"nfr_schema_complete\": {row.valid},\n" +
+    "  \"nfr_pass\": {row.nfr_pass}\n}"
+
+fn main() -> i64:
+    val args = cli_get_args()
+    if args.len() != 8:
+        print("usage: native_module_witness_receipt_perf <shadow-receipt> <build-cache-or-dash> <compiler-sha256> <target> <manifest> <warm-build-wall-us> <output.json>")
+        return 2
+    val shadow = file_read(args[1])
+    val caches: [text] = if args[2] == "-": [] else: [file_read(args[2])]
+    val result = native_witness_perf_measure_v2(
+        [shadow], caches, args[3], args[4], args[5],
+        args[6].to_i64() ?? 0)
+    file_write(args[7], native_witness_perf_json_v2(result) + "\n")
+    print(native_witness_perf_json_v2(result))
+    if result.nfr_pass: 0 else: 2
+
+export NativeWitnessPerfReceiptV2, shadow_receipt_valid_v1
+export build_cache_witnesses, native_witness_perf_measure_v2
+export native_witness_perf_json_v2
+export native_witness_peak_rss_from_status_v1, native_witness_peak_rss_kib_v1

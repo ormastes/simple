@@ -1,4 +1,8 @@
 # `std.simd` lane ops reject values produced by `as f32` (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN. **Binary:** 08-23 seed (`/mnt/data/worktrees/goal-main-1/bin/release/x86_64-unknown-linux-gnu/simple`).
 
@@ -20,3 +24,4 @@ exactly the data a GPU/SIMD comparison works with.
 ## Where to look
 The `rt_simd_*_f32x4` argument extraction in the Rust runtime (field type check that names
 `Float32`) — accept `Float32` alongside `Float`/`Float64`, or coerce.
+

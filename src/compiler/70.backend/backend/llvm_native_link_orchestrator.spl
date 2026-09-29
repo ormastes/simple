@@ -9,35 +9,94 @@
 # Usage:
 #   val result = link_llvm_native(user_objects, output, config, verbose)
 
-use app.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
+use compiler.driver.perf.compiler_work_counters.{compiler_work_link_schedule_v1}
 use compiler.backend.backend.entry_point.{generate_entry_point_ir}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
 use compiler.backend.backend.llvm_backend_tools.{compile_ir_to_object, extract_symbols_nm, llc_available}
 use compiler.backend.backend.llvm_capability.{find_archive_portable, find_nm_portable, find_objcopy_portable, find_objdump_portable}
 use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
 use compiler.backend.backend.runtime_compiler.{compile_runtime_objects, cleanup_runtime_objects, find_c_compiler, hosted_c_compiler_plan, _get_temp_dir, _obj_ext, _is_windows, _is_mingw, _is_msvc_cc}
-use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error}
+use compiler.backend.linker.linker_wrapper.{link_to_native, NativeLinkConfig, hosted_native_link_arch_supported, hosted_native_link_unsupported_arch_error, native_linker_abi_for_target}
 use compiler.backend.backend.stage4_symbol_closure.{stage4_compiler_backfill_archive_file, stage4_compiler_backfill_object_format, stage4_derive_compiler_backfill_manifest, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_symbol_table_fingerprint, stage4_validate_compiler_backfill_provider_disjoint, stage4_projection_localization_symbols, stage4_validate_projection_symbol_contract, stage4_runtime_native_archive_file, stage4_runtime_native_object_format, stage4_runtime_native_localization_symbols, stage4_validate_runtime_native_core_symbol_contract, stage4_runtime_legacy_compat_archive_file, stage4_runtime_legacy_compat_object_format, stage4_runtime_legacy_compat_localization_symbols, stage4_validate_runtime_legacy_compat_symbol_contract, stage4_contracts_provider_archive_file, stage4_contracts_provider_object_format, stage4_validate_contracts_provider_symbol_contract, stage4_process_provider_archive_file, stage4_process_provider_object_format, stage4_validate_process_provider_symbol_contract, stage4_dynload_provider_archive_file, stage4_dynload_provider_object_format, stage4_font_provider_archive_file, stage4_font_provider_object_format, stage4_memtrack_provider_archive_file, stage4_memtrack_provider_object_format, stage4_time_provider_archive_file, stage4_time_provider_object_format, stage4_fork_provider_archive_file, stage4_fork_provider_object_format, stage4_windows_c_object_uses_msvc_abi, stage4_runtime_provider_object_matches, stage4_forbidden_archive_sections, stage4_requested_from_nm_output, stage4_resolve_requested_archive_owners, stage4_link_profile_fingerprint_input, stage4_validate_candidate_archive_inputs_for_platform, stage4_validate_dynload_provider_symbol_contract, stage4_validate_font_provider_symbol_contract, stage4_validate_memtrack_provider_symbol_contract, stage4_validate_time_provider_symbol_contract, stage4_validate_fork_provider_symbol_contract}
 use std.platform.{host_arch, host_os, is_macos}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use compiler.common.assurance.policy.{strictness_for_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
-use compiler.tools.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
+use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_profile, object_undefined_symbol_names}
 # Routed through the canonical std.nogc_sync_mut.io_runtime facade (same
 # facade already used by the sibling llvm_backend_tools.spl for process_run);
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_size_raw, remove_file_if_exists, process_run, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_stage4_projection.{llvm_link_trace_enabled, llvm_configured_external_link_objects, llvm_external_provider_rpath_flags, llvm_external_provider_retained_symbols, llvm_stage4_final_requested_symbols, llvm_stage4_file_hash_rows, llvm_stage4_selected_archive_hash_rows, llvm_stage4_cleanup_candidate_inputs, llvm_stage4_profile_failure, llvm_stage4_receipt_failure, llvm_stage4_candidate_archive_inventory, llvm_stage4_project_selected_archives}
-use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
+use compiler.common.cache.reverse_reference_facts.{
+    reverse_reference_owner_mark_known_v1,
+    reverse_reference_register_runtime_provider_v1
+}
+
+pub fn llvm_native_link_orchestrator_publish_runtime_provider_v1(
+        subject: text, consumer: text, evidence: text):
+    reverse_reference_owner_mark_known_v1("runtime-provider")
+    reverse_reference_register_runtime_provider_v1(subject, consumer, evidence)
+use compiler.backend.backend.llvm_native_link_stage4_archives.{llvm_stage4_compiler_backfill_failure, llvm_stage4_build_compiler_backfill_capsule, llvm_stage4_build_runtime_native_archive, llvm_stage4_build_runtime_legacy_compat_archive, llvm_stage4_build_contracts_provider_archive, llvm_stage4_build_process_provider_archive, llvm_stage4_build_dynload_provider_archive, llvm_stage4_build_sqlite_demand_archive, llvm_stage4_build_font_provider_archive, llvm_stage4_build_memtrack_provider_archive, llvm_stage4_build_time_provider_archive, llvm_stage4_build_fork_provider_archive}
 use compiler.backend.backend.llvm_native_link_hosted_support.{NativeLinkOptions, compile_entry_point_c, native_all_allowed_for_runtime_bundle}
 use compiler.backend.backend.simpleos_native_symbols.{is_simpleos_x86_64_link, is_simpleos_arm64_link, is_simpleos_riscv64_link, is_simpleos_riscv32_link}
 use compiler.backend.backend.simpleos_native_linkers.{link_simpleos_x86_64, link_simpleos_arm64, link_simpleos_riscv64, link_simpleos_riscv32}
+use compiler.common.cache.darwin_runtime_provider_manifest.{darwin_runtime_provider_manifest_v1}
 # ============================================================================
 # Main Orchestrator
 # ============================================================================
 
+fn _llvm_bootstrap_native_all_path(stage4_requested: bool, runtime_path: text,
+        runtime_bundle: text, requires_cross: bool, hosted_os: text,
+        mingw: bool) -> text:
+    """Select native-all without relying on nested branch writeback."""
+    if stage4_requested or runtime_path == "" or requires_cross:
+        return ""
+    if not native_all_allowed_for_runtime_bundle(runtime_bundle):
+        return ""
+    val name = if hosted_os == "windows" and not mingw:
+        "simple_native_all.lib"
+    else:
+        "libsimple_native_all.a"
+    val archive = runtime_path + "/" + name
+    if file_exists(archive):
+        return archive
+    ""
+
+fn _llvm_append_link_input_if_present(inputs: [text], path: text) -> [text]:
+    """Append one optional provider through return-value ownership."""
+    if path == "":
+        return inputs
+    inputs.push(path)
+
+fn _llvm_darwin_snapshot_link_inputs(
+    inputs: [text], cache_root: text
+) -> Result<[text], text>:
+    val snapshot_root = cache_root + "/darwin_link_inputs"
+    if not dir_create_all(snapshot_root):
+        return Err("darwin-link-input-snapshot-directory-failed")
+    var snapshots: [text] = []
+    var index: i64 = 0
+    for input in inputs:
+        if not file_exists(input): return Err("darwin-link-input-missing:" + input)
+        val digest = file_hash_sha256(input)
+        if digest.len() != 64: return Err("darwin-link-input-digest-failed:" + input)
+        val snapshot = snapshot_root + "/" + index.to_text() + "-" + digest
+        if file_exists(snapshot):
+            if file_hash_sha256(snapshot) != digest:
+                return Err("darwin-link-input-snapshot-corrupt:" + snapshot)
+        elif not file_copy(input, snapshot) or file_hash_sha256(snapshot) != digest:
+            return Err("darwin-link-input-snapshot-copy-failed:" + input)
+        snapshots.push(snapshot)
+        index = index + 1
+    if snapshots.len() != inputs.len():
+        return Err("darwin-link-input-snapshot-count-mismatch")
+    Ok(snapshots)
+
 fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptions) -> Result<text, text>:
+    compiler_work_link_schedule_v1(user_objects.len())
     """Link LLVM-compiled user objects with C runtime into a native executable.
 
     Pipeline:
@@ -87,7 +146,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err("Stage4 strict profile does not support SimpleOS link routes")
         return link_simpleos_riscv32(user_objects, output, verbose)
 
-    val hosted_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val hosted_target = options.target_triple
     val hosted_os = host_os()
     val hosted_arch = host_arch()
     val hosted_plan = hosted_c_compiler_plan(hosted_target, hosted_os, hosted_arch)
@@ -99,7 +158,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         return Err("Stage4 strict profile requires a native host target; cross-target compiler capsules are unavailable")
     val hosted_cc = find_c_compiler()
     if hosted_cc == "":
-        return Err("No C compiler found. Install clang or gcc.")
+        return Err("No C compiler found (hosted native link, target '{hosted_target}'). Install clang or gcc.")
 
     var stage4_msvc_linker = false
     var stage4_msvc_objects = false
@@ -114,15 +173,17 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # modules calling seed-owned externs (e.g. bootstrap_main's
     # rt_native_build), which the C runtime objects do not define; without it
     # the link dies with "undefined symbol: rt_native_build" (#146/#79).
-    var bootstrap_native_all = ""
-    val runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
-    val runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
-    if not stage4_requested and runtime_path != "" and not hosted_plan.requires_cross:
-        if native_all_allowed_for_runtime_bundle(runtime_bundle):
-            val native_all_name = if hosted_os == "windows" and not _is_mingw(): "simple_native_all.lib" else: "libsimple_native_all.a"
-            val native_all = runtime_path + "/" + native_all_name
-            if file_exists(native_all):
-                bootstrap_native_all = native_all
+    val runtime_path = if options.runtime_path != "":
+        options.runtime_path
+    else:
+        env_get("SIMPLE_RUNTIME_PATH") ?? ""
+    val runtime_bundle = if options.runtime_bundle != "":
+        options.runtime_bundle
+    else:
+        env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+    val bootstrap_native_all = _llvm_bootstrap_native_all_path(
+        stage4_requested, runtime_path, runtime_bundle,
+        hosted_plan.requires_cross, hosted_os, _is_mingw())
 
     # Step 1: Always compile the FRESH C runtime to object files, even when the
     # native_all archive is linked (including under SIMPLE_BOOTSTRAP=1). ld
@@ -328,83 +389,53 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
                 if bootstrap_support_obj != "":
                     file_delete(bootstrap_support_obj)
                 return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 contract provider failed: " + err)
+        var sqlite_demand_archive = ""
+        if hosted_os == "linux":
+            match llvm_stage4_build_sqlite_demand_archive(runtime_objects, hosted_os, pid):
+                case Ok(path): sqlite_demand_archive = path
+                case Err(err):
+                    var prior_candidates = [compiler_backfill_capsule, runtime_native_archive,
+                        contracts_provider_archive, runtime_legacy_compat_archive,
+                        process_provider_archive, dynload_provider_archive,
+                        font_provider_archive, memtrack_provider_archive,
+                        time_provider_archive]
+                    if fork_provider_archive != "":
+                        prior_candidates.push(fork_provider_archive)
+                    return llvm_stage4_profile_failure(runtime_objects, entry_obj_path,
+                        prior_candidates, compiler_backfill_stage_dir,
+                        bootstrap_support_obj, "Stage4 SQLite demand bridge failed: " + err)
         var candidate_labels = ["compiler_backfill", "runtime_native", "runtime_contracts", "runtime_legacy_compat", "runtime_process", "runtime_dynload", "runtime_font", "runtime_memtrack", "runtime_timestamp"]
         var candidate_paths = [compiler_backfill_capsule, runtime_native_archive, contracts_provider_archive, runtime_legacy_compat_archive, process_provider_archive, dynload_provider_archive, font_provider_archive, memtrack_provider_archive, time_provider_archive]
         if fork_provider_archive != "":
             candidate_labels = candidate_labels.push("runtime_fork")
             candidate_paths = candidate_paths.push(fork_provider_archive)
+        if sqlite_demand_archive != "":
+            candidate_labels = candidate_labels.push("runtime_sqlite_demand")
+            candidate_paths = candidate_paths.push(sqlite_demand_archive)
         val candidate_scans = match llvm_stage4_candidate_archive_inventory(candidate_labels, candidate_paths):
             case Ok(scans): scans
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 combined candidate inventory failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 combined candidate inventory failed: " + err)
         val compiler_backfill_object_format = match stage4_compiler_backfill_object_format(hosted_os):
             case Ok(format): format
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, err)
         match stage4_validate_compiler_backfill_provider_disjoint(candidate_scans[0], candidate_labels[1:], candidate_scans[1:], compiler_backfill_object_format):
             case Ok(()): ()
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, err)
         val (selected_archive_indices, owner_rows) = match stage4_resolve_requested_archive_owners(stage4_requested_symbols, candidate_labels, candidate_scans, hosted_os == "macos"):
             case Ok(resolution): resolution
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 requested-owner resolution failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 requested-owner resolution failed: " + err)
         if trace:
             print "[LLVM-LINK] Stage4 selected archives: {selected_archive_indices.len()}, owners: {owner_rows.len()}"
         val source_hash_rows = match llvm_stage4_file_hash_rows(final_simple_objects):
@@ -427,21 +458,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         val (projected_capsule, projected_dir) = match llvm_stage4_project_selected_archives(candidate_labels, candidate_paths, selected_archive_indices, stage4_requested_symbols, hosted_os, hosted_cc, pid, output):
             case Ok(value): value
             case Err(err):
-                cleanup_runtime_objects(runtime_objects)
-                file_delete(entry_obj_path)
-                file_delete(runtime_native_archive)
-                file_delete(contracts_provider_archive)
-                file_delete(runtime_legacy_compat_archive)
-                file_delete(process_provider_archive)
-                file_delete(dynload_provider_archive)
-                file_delete(font_provider_archive)
-                file_delete(memtrack_provider_archive)
-                file_delete(time_provider_archive)
-                if fork_provider_archive != "":
-                    file_delete(fork_provider_archive)
-                if bootstrap_support_obj != "":
-                    file_delete(bootstrap_support_obj)
-                return llvm_stage4_compiler_backfill_failure(compiler_backfill_stage_dir, compiler_backfill_capsule, "Stage4 selected-archive projection failed: " + err)
+                return llvm_stage4_profile_failure(runtime_objects,
+                    entry_obj_path, candidate_paths, compiler_backfill_stage_dir,
+                    bootstrap_support_obj, "Stage4 selected-archive projection failed: " + err)
         stage4_projection_capsule = projected_capsule
         stage4_projection_dir = projected_dir
         cleanup_runtime_objects(runtime_objects)
@@ -454,7 +473,9 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     # Step 3: Combine all objects and link
     if trace:
         print "[LLVM-LINK] step 3: combining objects..."
+    reverse_reference_owner_mark_known_v1("runtime-provider")
     var all_objects: [text] = []
+    var runtime_provider_inputs: [text] = []
     var user_object_i = 0
     while user_object_i < user_objects.len():
         val user_object: text = user_objects[user_object_i]
@@ -463,16 +484,24 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
     if stage4_requested:
         all_objects = all_objects.push(entry_obj_path)
         all_objects = all_objects.push(stage4_projection_capsule)
+        runtime_provider_inputs = runtime_provider_inputs.push(stage4_projection_capsule)
     else:
         var runtime_object_i = 0
         while runtime_object_i < runtime_objects.len():
             val runtime_object: text = runtime_objects[runtime_object_i]
             all_objects = all_objects.push(runtime_object)
+            runtime_provider_inputs = runtime_provider_inputs.push(runtime_object)
             runtime_object_i = runtime_object_i + 1
         if bootstrap_support_obj != "":
             all_objects = all_objects.push(bootstrap_support_obj)
-        if bootstrap_native_all != "":
-            all_objects = all_objects.push(bootstrap_native_all)
+            runtime_provider_inputs = runtime_provider_inputs.push(bootstrap_support_obj)
+        # Caller objects precede the archive so their undefined symbols drive
+        # normal member extraction. Keep the optional append outside a nested
+        # branch: self-hosted branch writeback previously dropped this input.
+        all_objects = _llvm_append_link_input_if_present(
+            all_objects, bootstrap_native_all)
+        runtime_provider_inputs = _llvm_append_link_input_if_present(
+            runtime_provider_inputs, bootstrap_native_all)
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.
@@ -491,6 +520,55 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err(err)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
+        runtime_provider_inputs = runtime_provider_inputs.push(provider)
+    for provider in runtime_provider_inputs:
+        for user_object in user_objects:
+            llvm_native_link_orchestrator_publish_runtime_provider_v1(
+                user_object, user_object,
+                "runtime-link-input:{provider}:output:{output}")
+    if hosted_os == "macos" or hosted_os == "darwin":
+        val requested_arch = if hosted_target == "" or hosted_target == "host" or hosted_target == "native":
+            mir_target_context_normalize_arch(hosted_arch)
+        else:
+            mir_target_context_normalize_arch(hosted_target.split("-")[0])
+        val configured_cache_root = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+        val runtime_manifest_root = if configured_cache_root == "":
+            "build/native_cache"
+        else:
+            configured_cache_root
+        val snapshotted_inputs = match _llvm_darwin_snapshot_link_inputs(
+            all_objects, runtime_manifest_root):
+            case Ok(paths): paths
+            case Err(error):
+                dir_create_all(runtime_manifest_root)
+                file_write(
+                    runtime_manifest_root + "/native_runtime_provider_manifest.failure",
+                    "simple-darwin-runtime-provider-manifest-failure-v1\nreason=" + error + "\n"
+                )
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                return Err("Darwin link-input snapshot failed: " + error)
+        all_objects = snapshotted_inputs
+        val runtime_manifest = match darwin_runtime_provider_manifest_v1(
+            all_objects, requested_arch):
+            case Ok(body): body
+            case Err(error):
+                dir_create_all(runtime_manifest_root)
+                file_write(
+                    runtime_manifest_root + "/native_runtime_provider_manifest.failure",
+                    "simple-darwin-runtime-provider-manifest-failure-v1\nreason=" + error + "\n"
+                )
+                cleanup_runtime_objects(runtime_objects)
+                file_delete(entry_obj_path)
+                return Err("Darwin runtime/provider admission failed: " + error)
+        if not dir_create_all(runtime_manifest_root) or not file_write(
+            runtime_manifest_root + "/native_runtime_provider_manifest.receipt",
+            runtime_manifest
+        ):
+            cleanup_runtime_objects(runtime_objects)
+            file_delete(entry_obj_path)
+            return Err("Darwin runtime/provider manifest publication failed")
+
     val retained_symbols = match llvm_external_provider_retained_symbols(external_providers):
         case Ok(symbols): symbols
         case Err(err):
@@ -513,11 +591,15 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         runtime_path: "none",
         pie: options.pie,
         debug: options.debug,
+        strip_output: options.strip_output,
+        prefer_size_linker: options.opt_level == 1,
         verbose: options.verbose,
         allow_duplicate_definitions: not stage4_requested,
         allow_cc_fallback: not stage4_requested,
         retained_symbols: retained_symbols,
-        extra_flags: llvm_external_provider_rpath_flags(external_providers)
+        extra_flags: llvm_external_provider_rpath_flags(external_providers),
+        target_triple: hosted_target,
+        linker_abi: native_linker_abi_for_target(hosted_target)
     )
     if trace:
         print "[LLVM-LINK] calling link_to_native..."
@@ -570,6 +652,15 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             if stage4_requested:
                 if not remove_file_if_exists(output):
                     stage4_cleanup_ok = false
+            # Never format an unusable payload as the whole diagnosis: on
+            # 2026-09-13 this line produced `Linking failed: nil` for a macOS
+            # Stage 2 sanity link and named neither the site nor the reason.
+            val rendered = "{e}"
+            val detail = if rendered == "" or rendered == "nil":
+                "no error payload from link_to_native (rendered " + rendered +
+                    "); see the unconditional [linker-wrapper] prints for the failing site"
+            else:
+                rendered
             if not stage4_cleanup_ok:
-                return Err("Linking failed: {e}; Stage4 strict cleanup also failed")
-            Err("Linking failed: {e}")
+                return Err("Linking failed: " + detail + "; Stage4 strict cleanup also failed")
+            Err("Linking failed: " + detail)

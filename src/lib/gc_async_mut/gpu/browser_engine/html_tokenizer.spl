@@ -177,12 +177,20 @@ pub fn html_tokenizer_tokenize_with_limits(
     var pos = 0
     val html = t.html
     val n = html.len()
+    # Decode the WHOLE document to bytes exactly once. The main scan loop and
+    # its `_find_*_b`/`_scan_char_data_b` helpers below index into this same
+    # array by byte offset instead of each re-decoding `html.bytes()` (or
+    # allocating a length-1 `text` via `html.slice(i, i+1)`) per character —
+    # see doc/10_metrics/ui/web_perf_round6_2026-09-13.md for the regression
+    # this avoids (a prior attempt called `.bytes()` inside `_find_char`
+    # itself, redecoding the full remaining document on every invocation).
+    val hb = text_to_bytes(html)
     var retained_attrs = 0
     # Raw-text mode for script/style and RCDATA mode for textarea.
     var raw_text_tag = ""
     var raw_text_decodes_entities = false
     while pos < n and not sink.truncated:
-        val ch = html.slice(pos, pos + 1)
+        val chb = hb[pos]
         if raw_text_tag != "":
             val current_raw_tag = raw_text_tag
             val found_end = _find_raw_end_tag(html, current_raw_tag, pos)
@@ -213,7 +221,7 @@ pub fn html_tokenizer_tokenize_with_limits(
             else:
                 pos = found_end
                 # Emit the end tag
-                val close_end = _find_char(html, ">", pos)
+                val close_end = _find_byte(hb, n, 62, pos)
                 if close_end < 0:
                     pos = n
                 else:
@@ -221,15 +229,15 @@ pub fn html_tokenizer_tokenize_with_limits(
                 val _ = sink.push(_tok_end(current_raw_tag))
             raw_text_tag = ""
             raw_text_decodes_entities = false
-        elif ch == "<":
+        elif chb == 60:
             # Peek at next char
             if pos + 1 >= n:
                 # Lone < at end — emit as character
                 val _ = sink.push(_tok_char("<"))
                 pos = pos + 1
             else:
-                val next = html.slice(pos + 1, pos + 2)
-                if next == "!":
+                val nextb = hb[pos + 1]
+                if nextb == 33:
                     # Comment or doctype
                     if pos + 3 < n and html.slice(pos + 2, pos + 4) == "--":
                         # Comment: <!-- ... -->
@@ -261,7 +269,7 @@ pub fn html_tokenizer_tokenize_with_limits(
                                 pos = comment_end + 3
                     elif pos + 8 < n and html.slice(pos + 2, pos + 9).lower() == "doctype":
                         # Doctype
-                        val gt = _find_char(html, ">", pos)
+                        val gt = _find_byte(hb, n, 62, pos)
                         if gt < 0:
                             pos = n
                         else:
@@ -271,14 +279,14 @@ pub fn html_tokenizer_tokenize_with_limits(
                             pos = gt + 1
                     else:
                         # Unknown <! sequence — skip to >
-                        val gt2 = _find_char(html, ">", pos)
+                        val gt2 = _find_byte(hb, n, 62, pos)
                         if gt2 < 0:
                             pos = n
                         else:
                             pos = gt2 + 1
-                elif next == "/":
+                elif nextb == 47:
                     # End tag
-                    val gt = _find_char(html, ">", pos + 2)
+                    val gt = _find_byte(hb, n, 62, pos + 2)
                     if gt < 0:
                         val _ = sink.push(_tok_char("<"))
                         pos = pos + 1
@@ -287,22 +295,22 @@ pub fn html_tokenizer_tokenize_with_limits(
                         val tag_name = _strip_tag_name(tag_raw)
                         val _ = sink.push(_tok_end(tag_name))
                         pos = gt + 1
-                elif next == "?":
+                elif nextb == 63:
                     # Processing instruction — skip to >
-                    val gt3 = _find_char(html, ">", pos)
+                    val gt3 = _find_byte(hb, n, 62, pos)
                     if gt3 < 0:
                         pos = n
                     else:
                         pos = gt3 + 1
-                elif _is_alpha_char(next):
+                elif _is_alpha_byte(nextb):
                     # Start tag
-                    val gt4 = _find_tag_close(html, pos + 1)
+                    val gt4 = _find_tag_close_b(hb, n, pos + 1)
                     if gt4 < 0:
                         val _ = sink.push(_tok_char("<"))
                         pos = pos + 1
                     else:
                         val self_closing = (
-                            gt4 > 0 and html.slice(gt4 - 1, gt4) == "/"
+                            gt4 > 0 and hb[gt4 - 1] == 47
                         )
                         val inner = html.slice(pos + 1, if self_closing: gt4 - 1 else: gt4).trim()
                         val parsed = _parse_start_tag(
@@ -326,14 +334,14 @@ pub fn html_tokenizer_tokenize_with_limits(
                     # Stray < — emit as character
                     val _ = sink.push(_tok_char("<"))
                     pos = pos + 1
-        elif ch == "&":
+        elif chb == 38:
             # Named entity reference
             val entity_result = _parse_entity(html, pos, false)
             val _ = sink.push(_tok_char(entity_result.decoded))
             pos = entity_result.end_pos
         else:
             # Regular character data — accumulate until < or &
-            val end_pos = _scan_char_data(html, pos)
+            val end_pos = _scan_char_data_b(hb, n, pos)
             val char_data = html.slice(pos, end_pos)
             if char_data.len() > 0:
                 val _ = sink.push(_tok_char(char_data))
@@ -677,6 +685,50 @@ fn _decode_character_references(value: text) -> text:
 # =========================================================================
 # String scanning utilities
 # =========================================================================
+
+fn _find_byte(hb: [u8], n: i32, target: u8, start: i32) -> i32:
+    """Find first occurrence of byte `target` in `hb` (already decoded once
+    by the caller) starting at `start`. Returns -1 if not found. Indexing an
+    already-decoded byte array is O(1) per probe, unlike re-slicing `text`
+    or re-decoding `.bytes()` per call — see the round-6 regression note at
+    `html_tokenizer_tokenize_with_limits` above."""
+    var i = start
+    while i < n:
+        if hb[i] == target:
+            return i
+        i = i + 1
+    -1
+
+fn _scan_char_data_b(hb: [u8], n: i32, start: i32) -> i32:
+    """Byte-array twin of `_scan_char_data`: scan from start until < or &."""
+    var i = start
+    while i < n:
+        val c = hb[i]
+        if c == 60 or c == 38:
+            return i
+        i = i + 1
+    n
+
+fn _find_tag_close_b(hb: [u8], n: i32, start: i32) -> i32:
+    """Byte-array twin of `_find_tag_close`: find the closing > of a tag,
+    respecting quoted attribute values."""
+    var i = start
+    var in_quote: u8 = 0
+    while i < n:
+        val c = hb[i]
+        if in_quote != 0:
+            if c == in_quote:
+                in_quote = 0
+        elif c == 34 or c == 39:
+            in_quote = c
+        elif c == 62:
+            return i
+        i = i + 1
+    -1
+
+fn _is_alpha_byte(c: u8) -> bool:
+    """True if byte c is an ASCII letter a-z or A-Z."""
+    (c >= 97 and c <= 122) or (c >= 65 and c <= 90)
 
 fn _find_char(s: text, ch: text, start: i32) -> i32:
     """Find first occurrence of single char ch in s starting at start. Returns -1 if not found."""

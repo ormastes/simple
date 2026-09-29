@@ -68,11 +68,10 @@ impl<'a> Parser<'a> {
             && self.pending_tokens.len() < 2
             && matches!(self.current.kind, TokenKind::LBracket)
             && matches!(self.previous.kind, TokenKind::Identifier { .. })
-            && self
-                .pending_tokens
-                .front()
-                .is_some_and(|t| matches!(&t.kind, TokenKind::Identifier { name, .. }
-                    if name.chars().next().is_some_and(|c: char| c.is_uppercase())))
+            && self.pending_tokens.front().is_some_and(|t| {
+                matches!(&t.kind, TokenKind::Identifier { name, .. }
+                    if name.chars().next().is_some_and(|c: char| c.is_uppercase()))
+            })
         {
             self.pending_tokens.push_back(self.lexer.next_token());
         }
@@ -82,7 +81,7 @@ impl<'a> Parser<'a> {
         if !skip_check {
             if let Some(mistake) =
                 detect_common_mistake_lookahead(&self.current, &self.previous, next_token, after_next_token)
-                .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
+                    .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
             {
                 // Determine error hint level based on mistake type.
                 // Shared classification - see CommonMistake::hint_level.
@@ -161,6 +160,17 @@ impl<'a> Parser<'a> {
     /// here instead, leaving the diagnostic intact everywhere `=>` is NOT a
     /// valid arm separator. bug doc:
     /// doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md
+    ///
+    /// TODO(seed_parser_arrow_lambda_block_expr_wrapped_return_type_2026-08-23):
+    /// this filter is currently VESTIGIAL. `detect_common_mistake` no longer
+    /// emits `TsArrowFunction` for `) =>` at all — the parenthesised arrow
+    /// lambda became valid grammar on 2026-08-23, so the lexical rule could
+    /// only match correct code and was retired — which means this predicate
+    /// can no longer return true. It is kept, not deleted, because it is the
+    /// correct scoping the moment any `=>` diagnostic is reintroduced (the
+    /// bare `x => e` form is still unimplemented and would want exactly this
+    /// arm-context guard). Remove it only together with the decision that no
+    /// `=>` diagnostic will ever return.
     fn is_spurious_match_arm_fat_arrow(&self, mistake: &CommonMistake) -> bool {
         matches!(mistake, CommonMistake::TsArrowFunction) && self.match_arm_depth > 0
     }
@@ -190,7 +200,9 @@ impl<'a> Parser<'a> {
             self.reconcile_inline_body_deferred_dedents();
             Ok(block)
         } else {
-            self.parse_condition_block()
+            // Match-arm and other inline-or-block bodies keep the empty-body
+            // arm (`case nil:`); only the conditional headers lose it.
+            self.parse_condition_block_allowing_empty(true)
         }
     }
 
@@ -960,6 +972,11 @@ impl<'a> Parser<'a> {
             TokenKind::Context => "context".to_string(),
             // Allow 'default' to be used as identifier (field name, variable, trait name)
             TokenKind::Default => "default".to_string(),
+            // Soft keywords: `case` is only a keyword as a match-ARM marker, and
+            // `invariant` only as a contract-clause marker. Both are consumed
+            // explicitly at those positions, so they are ordinary names elsewhere.
+            TokenKind::Case => "case".to_string(),
+            TokenKind::Invariant => "invariant".to_string(),
             // Allow 'common' to be used as identifier (directory name in stdlib)
             TokenKind::Common => "common".to_string(),
             // Allow logical/conversion operators as trait names or identifiers

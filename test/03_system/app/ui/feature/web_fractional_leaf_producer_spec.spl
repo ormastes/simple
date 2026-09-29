@@ -1,0 +1,258 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-002
+# @req REQ-2D-006
+# @tag: system, web, draw_ir, fractional, fail_closed
+"""Bounded real-Web fractional leaf producer and explicit legacy rejection.
+
+These scenes use an integer relative parent and one opaque absolute leaf.
+They prove f64 transport and fail-closed behavior, not physical GPU pixels.
+"""
+
+use std.spec.{describe, it, expect, fail_test}
+use std.spec.step
+use common.ui.draw_ir.{DrawIrCommand}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
+use common.ui.ui_ir.{draw_ir_to_ui_ir}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_fractional_result}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+
+fn _page(parent_left: text, parent_top: text,
+    class_rule: text, leaf_class: text, leaf_style: text) -> text:
+    "<html><head><style>html,body{margin:0;padding:0;width:16px;height:16px}" +
+        class_rule + "</style></head><body>" +
+        "<div id='parent' style='position:relative;left:" + parent_left +
+        ";top:" + parent_top + ";width:12px;height:12px'>" +
+        "<div id='leaf' class='" + leaf_class + "' style='" + leaf_style +
+        "'></div></div></body></html>"
+
+fn _direct_leaf() -> text:
+    "position:absolute;box-sizing:border-box;left:1.25px;top:2.5px;" +
+        "width:4.75px;height:3.125px;background:#336699"
+
+fn _page_with_extra_head(extra_head: text) -> text:
+    "<html><head><style>html,body{margin:0;padding:0;width:16px;height:16px}" +
+        "</style>" + extra_head + "</head><body>" +
+        "<div id='parent' style='position:relative;left:0px;top:0px;" +
+        "width:12px;height:12px'>" +
+        "<div id='leaf' style='" + _direct_leaf() +
+        "'></div></div></body></html>"
+
+fn _leaf(result: SimpleWebLayoutDrawIrResult) -> DrawIrCommand?:
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == "leaf":
+                return Some(command)
+    nil
+
+fn _fractional_count(result: SimpleWebLayoutDrawIrResult) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.fractional_geometry != nil:
+                count = count + 1
+    count
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    "<missing>"
+
+fn _expect_leaf(result: SimpleWebLayoutDrawIrResult,
+    x: f64, y: f64, width: f64, height: f64):
+    expect(result.render_degraded).to_equal(false)
+    expect(result.fractional_scene_rejection_reason).to_equal("")
+    if val command = _leaf(result):
+        expect(command.x).to_equal(0)
+        expect(command.y).to_equal(0)
+        expect(command.width).to_equal(0)
+        expect(command.height).to_equal(0)
+        if val geometry = command.fractional_geometry:
+            expect(geometry.x).to_equal(x)
+            expect(geometry.y).to_equal(y)
+            expect(geometry.width).to_equal(width)
+            expect(geometry.height).to_equal(height)
+        else:
+            fail_test("leaf has no authoritative fractional geometry")
+    else:
+        fail_test("fractional Web producer omitted leaf")
+
+describe "real Web fractional absolute leaf producer":
+    it "emits exact f64 geometry from direct decimal longhands":
+        step("Render an opaque absolute leaf under an integer parent")
+        val html = _page("0px", "0px", "", "", _direct_leaf())
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(html, 16, 16)
+        expect(result.document_html).to_equal(html)
+        _expect_leaf(result, 1.25, 2.5, 4.75, 3.125)
+
+    it "preserves class fast-path and full-path geometry equally":
+        step("Put only four geometry declarations in the class rule")
+        val direct = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf()), 16, 16)
+        val fast = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px",
+                ".fractional{width:4.75px;height:3.125px}",
+                "fractional",
+                "position:absolute;box-sizing:border-box;left:1.25px;top:2.5px;" +
+                    "background:#336699"),
+            16, 16)
+        val full = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px",
+                ".fractional{position:absolute;box-sizing:border-box;" +
+                    "left:1.25px;top:2.5px;width:4.75px;height:3.125px;" +
+                    "background:#336699}",
+                "fractional", ""),
+            16, 16)
+        _expect_leaf(direct, 1.25, 2.5, 4.75, 3.125)
+        _expect_leaf(fast, 1.25, 2.5, 4.75, 3.125)
+        _expect_leaf(full, 1.25, 2.5, 4.75, 3.125)
+        if val direct_leaf = _leaf(direct):
+            if val fast_leaf = _leaf(fast):
+                expect(_style_value(direct_leaf, "box-geometry-raw-tokens")).to_contain(
+                    "left=1.25px")
+                expect(_style_value(fast_leaf, "box-geometry-raw-tokens")).to_contain(
+                    "left=1.25px")
+                expect(_style_value(fast_leaf, "box-geometry-raw-tokens")).to_contain(
+                    "width=4.75px")
+                expect(_style_value(fast_leaf, "box-geometry-raw-tokens")).to_contain(
+                    "height=3.125px")
+
+    it "uses the winning same-property decimal declaration":
+        step("Override an earlier left value before f64 resolution")
+        val html = _page("0px", "0px", "", "",
+            "position:absolute;box-sizing:border-box;left:0.5px;top:2.5px;" +
+            "width:4.75px;height:3.125px;left:1.25px;background:#336699")
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(html, 16, 16)
+        _expect_leaf(result, 1.25, 2.5, 4.75, 3.125)
+        if val command = _leaf(result):
+            val tokens = _style_value(command, "box-geometry-raw-tokens")
+            expect(tokens).to_contain("left=1.25px")
+            expect(tokens.contains("left=0.5px")).to_equal(false)
+
+    it "adds a nonzero integer parent border-box origin":
+        step("Resolve the absolute leaf from its immediate containing block")
+        val html = _page("3px", "4px", "", "", _direct_leaf())
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(html, 16, 16)
+        _expect_leaf(result, 4.25, 6.5, 4.75, 3.125)
+
+    it "retains a half-pixel leaf that integer visibility would cull":
+        step("Resolve and emit the positive f64 extent before integer culling")
+        val html = _page("0px", "0px", "", "",
+            "position:absolute;box-sizing:border-box;left:1px;top:1px;" +
+            "width:0.5px;height:0.5px;background:#336699")
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(html, 16, 16)
+        _expect_leaf(result, 1.0, 1.0, 0.5, 0.5)
+
+    it "round-trips Web f64 geometry through SDN and UiIr":
+        step("Serialize the real producer composition and lower the decoded value")
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf()), 16, 16)
+        _expect_leaf(result, 1.25, 2.5, 4.75, 3.125)
+        val encoded = draw_ir_to_sdn(result.composition)
+        val decoded = sdn_to_draw_ir(encoded)
+        expect(draw_ir_to_sdn(decoded)).to_equal(encoded)
+        var decoded_leaf_count = 0
+        for batch in decoded.batches:
+            for command in batch.commands:
+                if command.component_id == "leaf":
+                    decoded_leaf_count = decoded_leaf_count + 1
+                    if val geometry = command.fractional_geometry:
+                        expect(geometry.x).to_equal(1.25)
+                        expect(geometry.y).to_equal(2.5)
+                        expect(geometry.width).to_equal(4.75)
+                        expect(geometry.height).to_equal(3.125)
+                    else:
+                        fail_test("SDN lost fractional leaf geometry")
+        expect(decoded_leaf_count).to_equal(1)
+        val lowered = draw_ir_to_ui_ir(decoded)
+        expect(lowered.accepted).to_equal(true)
+        var lowered_leaf_count = 0
+        for command in lowered.commands:
+            if command.component_id == "leaf":
+                lowered_leaf_count = lowered_leaf_count + 1
+                expect(command.x).to_equal(1.25)
+                expect(command.y).to_equal(2.5)
+                expect(command.width).to_equal(4.75)
+                expect(command.height).to_equal(3.125)
+        expect(lowered_leaf_count).to_equal(1)
+
+    it "rejects fractional ancestors and unsupported rotation without partial f64 commands":
+        step("Reject an unresolved parent before emitting the leaf")
+        val ancestor = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0.5px", "0px", "", "", _direct_leaf()), 16, 16)
+        expect(ancestor.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(_fractional_count(ancestor)).to_equal(0)
+        step("Reject a rotated leaf before emitting the leaf")
+        val rotated = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf() +
+                ";transform:rotate(7deg)"), 16, 16)
+        expect(rotated.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(_fractional_count(rotated)).to_equal(0)
+
+    it "rejects authored blur before emitting any fractional batch":
+        step("Keep an otherwise admitted leaf but add a CSS filter")
+        val filtered = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf() +
+                ";filter:blur(3px)"), 16, 16)
+        expect(filtered.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(filtered.composition.batches.len()).to_equal(0)
+
+    it "rejects other authored compositing and clip effects atomically":
+        step("Keep the real leaf geometry while adding one unsupported property")
+        val effects: [text] = [
+            "clip-path:inset(1px)", "mask:none", "mix-blend-mode:multiply"]
+        for effect in effects:
+            val result = simple_web_layout_render_html_draw_ir_fractional_result(
+                _page("0px", "0px", "", "", _direct_leaf() + ";" + effect),
+                16, 16)
+            expect(result.fractional_scene_rejection_reason == "").to_equal(false)
+            expect(result.composition.batches.len()).to_equal(0)
+
+    it "rejects list marker paint omitted by the fractional leaf slice":
+        step("Keep an otherwise admitted leaf but author list-item display")
+        val listed = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf() +
+                ";display:list-item"), 16, 16)
+        expect(listed.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(listed.composition.batches.len()).to_equal(0)
+
+    it "rejects pseudo-element stylesheet paint before style matching":
+        step("Author a before pseudo-element that the selector engine may drop")
+        val pseudo = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px",
+                "div::before{content:'x';background:#ff0000}",
+                "", _direct_leaf()), 16, 16)
+        expect(pseudo.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(pseudo.composition.batches.len()).to_equal(0)
+
+    it "rejects external stylesheet links before fractional admission":
+        step("Add an external stylesheet link to an otherwise admitted page")
+        val linked = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page_with_extra_head(
+                "<link rel='stylesheet' href='theme.css'>"), 16, 16)
+        expect(linked.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(linked.composition.batches.len()).to_equal(0)
+
+    it "rejects CSS imports before fractional admission":
+        step("Add an imported stylesheet to an otherwise admitted page")
+        val imported = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page_with_extra_head(
+                "<style>@import url(theme.css);</style>"), 16, 16)
+        expect(imported.fractional_scene_rejection_reason == "").to_equal(false)
+        expect(imported.composition.batches.len()).to_equal(0)
+
+    it "makes legacy CPU execution explicitly reject fractional commands":
+        step("Submit admitted fractional DrawIR to the existing CPU executor")
+        val result = simple_web_layout_render_html_draw_ir_fractional_result(
+            _page("0px", "0px", "", "", _direct_leaf()), 16, 16)
+        _expect_leaf(result, 1.25, 2.5, 4.75, 3.125)
+        var engine = Engine2D.create_with_backend(16, 16, "cpu")
+        val cpu = engine2d_draw_ir_adv_composition(engine, result.composition, false)
+        expect(cpu.fallback_required).to_equal(true)
+        expect(cpu.skipped_command_count).to_be_greater_than(0)
+        expect(cpu.fallback_reason).to_contain("fractional-geometry-unsupported")
+        engine.shutdown()

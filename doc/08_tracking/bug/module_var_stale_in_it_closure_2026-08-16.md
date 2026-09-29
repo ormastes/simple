@@ -1,4 +1,8 @@
 # A module-level `var` read directly inside an `it` block sees a stale value
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-16
 **Status:** OPEN
@@ -83,3 +87,4 @@ Make an `it` closure reference the live module-level binding rather than a
 snapshot. Re-run the reproduction above; both examples must pass. Then drop the
 `_get_metrics()` indirection in `test/03_system/tools/smux_system_spec.spl` and
 confirm all 56 examples still pass.
+

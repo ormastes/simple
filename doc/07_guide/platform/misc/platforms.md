@@ -103,22 +103,15 @@ Override with `SIMPLE_LINKER=<name>` environment variable.
 ## Building from Source
 
 ```bash
-# Normal edit/bugfix loop: changed pure-Simple dynload artifacts only
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Relink and deploy the full CLI without rebuilding Rust
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --deploy
+# Build the Rust seed bootstrap
+cd src/compiler_rust
+cargo build --profile bootstrap -p simple-driver
 
-# Conservative monolithic pure-Simple output
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary --deploy
-
-# Explicit Rust seed/runtime rebuild, then pure-Simple stages
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy
+# Use the seed to compile the full Simple compiler
 ```
-
-The Rust compiler under `src/compiler_rust/` is a seed only. Normal source
-builds reuse the existing seed/runtime and must not run cargo; use
-`--full-bootstrap` when the seed/runtime itself must be rebuilt.
 
 ### Cross-Compilation
 
@@ -278,10 +271,11 @@ cmake ../seed -DCMAKE_TOOLCHAIN_FILE=../src/compiler_seed/cmake/toolchains/freeb
 sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 ```
 
-Smoke mode checks the VM, SSH, and guest C toolchain. Full mode additionally
-installs rsync/build dependencies, syncs the workspace into the guest, and runs
-the canonical wrapper with `--full-bootstrap --mode=dynload` before retrieving
-the Stage 3 FreeBSD dynload binary. For manual VM setup debugging, run:
+This checks prerequisites, downloads/validates the VM image when needed, starts
+QEMU, verifies SSH connectivity, verifies rsync/toolchain access, syncs the
+workspace into the guest, and runs the FreeBSD bootstrap smoke inside the
+FreeBSD guest. Use `--full` when you need the repeated bootstrap verification
+pass. For manual VM setup debugging, run:
 
 ```bash
 bin/simple run src/app/test/freebsd_qemu_setup.spl --download --quick

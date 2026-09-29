@@ -1,0 +1,175 @@
+# Caret workbench — manager -> SessionView adapter + live publication (lane A8).
+#
+# Seam 1 of the end-to-end wiring: `multi_caret_manager.spl` owns the real
+# parent-owned process table; every workbench surface renders `SessionView`
+# (session_contract.spl). This file is the ONLY place that translates one into
+# the other, so the TUI and the GUI cannot disagree about what a child's state
+# means.
+#
+# Deliberately does NOT import `os.apps.smux.api`. `gui.spl` imports this file
+# and `gui.spl` is imported by `main.spl`, which already co-compiles the whole
+# `app.llm_caret.provider` backend graph; pulling smux's five distinct
+# `Result<T, text>` instantiations into that closure is the same shape as the
+# filed generic-resolution defect
+# (doc/08_tracking/bug/option_generic_unresolvable_under_large_cocompiled_program_2026-09-05.md).
+# The terminal capture adapter lives in `pane_source.spl` instead, and only a
+# publisher imports it.
+
+use app.llm_caret.multi_caret_manager.{MultiCaretManager, ManagedAgent,
+    list_multi_caret_agents}
+use app.llm_caret.workbench.session_contract.{SessionId, SessionView,
+    ProcessLifecycle, AgentTurn, Transport, CapabilityEvidence,
+    new_session_id}
+
+# ============================================================================
+# State mapping
+# ============================================================================
+
+# The manager's per-child status text (from `agent_runtime.agent_process_status`
+# / `stop_agent_process`) mapped onto the lifecycle axis. Never defaults to
+# Running: an unrecognised status means ownership is UNCERTAIN, which is
+# exactly what `Lost` is for.
+pub fn lifecycle_for_agent(agent: ManagedAgent) -> ProcessLifecycle:
+    if agent.status == "started" or agent.status == "running":
+        return ProcessLifecycle.Running
+    if agent.status == "stopped":
+        return ProcessLifecycle.Exited
+    if agent.status == "not_running":
+        if agent.pid > 0:
+            return ProcessLifecycle.Exited
+        # invalid_pid: the slot never spawned at all.
+        return ProcessLifecycle.NotStarted
+    if agent.status == "not_started":
+        return ProcessLifecycle.NotStarted
+    if agent.status == "error":
+        # A kill that failed on a live pid leaves an unowned running child --
+        # the same rule `_leaked_processes` uses. Claiming it exited would
+        # invite a double-spawn.
+        if agent.pid > 0:
+            return ProcessLifecycle.Lost
+        return ProcessLifecycle.Failed
+    ProcessLifecycle.Lost
+
+# Derived from the lifecycle this file already computed, NOT from
+# `ManagedAgent.alive`: that flag only excludes the statuses "stopped" and
+# "exited", so a reaped child reported as "not_running" still reads as alive.
+# "Ready" here means the parent holds a live handle, not that any provider
+# handshake completed.
+fn _transport_for(lifecycle: ProcessLifecycle) -> Transport:
+    match lifecycle:
+        case ProcessLifecycle.Running: Transport.Ready
+        case ProcessLifecycle.Starting: Transport.Connecting
+        case ProcessLifecycle.NotStarted: Transport.Connecting
+        case ProcessLifecycle.Stopping: Transport.Stale
+        # Ownership uncertain: the handle may still be live, so neither
+        # "Ready" nor "Closed" is honest.
+        case ProcessLifecycle.Lost: Transport.Stale
+        case _: Transport.Closed
+
+fn _evidence_for(agent: ManagedAgent) -> CapabilityEvidence:
+    # The one thing actually exercised end to end is "this child was spawned".
+    if agent.pid > 0:
+        return CapabilityEvidence.Available
+    CapabilityEvidence.Declared
+
+# ponytail: `ManagedAgent` (and `AgentProcess` beneath it) does not retain the
+# launch request's provider, so the roster cannot name it. upgrade: carry
+# `provider` on `AgentProcess` from `launch_agent_plan_with_all`.
+val MANAGED_PROVIDER: text = "process"
+
+# ponytail: generation is fixed at 1 — `new_session_id` always starts there and
+# the manager has no restart path, so a slot's pid can only change by being
+# relaunched from outside. Until that exists the contract's stale-draft refusal
+# can never fire through this adapter. upgrade: bump the generation when a
+# slot's pid changes.
+pub fn session_view_for_agent(agent: ManagedAgent) -> SessionView:
+    val lifecycle = lifecycle_for_agent(agent)
+    SessionView(
+        id: new_session_id(agent.agent_id),
+        label: agent.agent_id,
+        provider: MANAGED_PROVIDER,
+        lifecycle: lifecycle,
+        # A raw child process exposes no semantic turn state. Guessing
+        # `Working` from "the process is alive" is precisely the axis
+        # collapse session_contract.spl exists to prevent.
+        turn: AgentTurn.Unknown,
+        transport: _transport_for(lifecycle),
+        evidence: _evidence_for(agent),
+        needs_attention: false)
+
+pub fn manager_session_views(manager: MultiCaretManager) -> [SessionView]:
+    var views: [SessionView] = []
+    for agent in list_multi_caret_agents(manager):
+        views.push(session_view_for_agent(agent))
+    views
+
+# ============================================================================
+# Live publication
+# ============================================================================
+
+# The surfaces that render the workbench (`caret_gui_html()` over HTTP, the
+# TUI entry) are called with no manager in hand, so the owner of the manager
+# publishes here after each launch/poll and the surfaces read it back. Empty
+# until something publishes -- an empty roster is the honest render of "no
+# agents launched", never a fabricated one.
+var _live_sessions: [SessionView] = []
+var _live_selected: text = ""
+
+pub fn publish_manager_sessions(manager: MultiCaretManager):
+    val views = manager_session_views(manager)
+    _live_sessions = views
+    if views.len() > 0:
+        var still_present = false
+        for v in views:
+            if v.id.value == _live_selected:
+                still_present = true
+        if not still_present:
+            _live_selected = views[0].id.value
+    else:
+        _live_selected = ""
+
+pub fn select_live_session(id: SessionId):
+    _live_selected = id.value
+
+pub fn live_sessions() -> [SessionView]:
+    _live_sessions
+
+pub fn live_selected() -> SessionId:
+    if _live_selected == "":
+        return new_session_id("none")
+    new_session_id(_live_selected)
+
+pub fn clear_live_sessions():
+    var empty: [SessionView] = []
+    _live_sessions = empty
+    _live_selected = ""
+
+# ============================================================================
+# Live terminal output for the active pane
+# ============================================================================
+
+# Published by whoever owns the smux pane (see `pane_source.spl`), read by
+# both surfaces. Kept as plain lines so this module needs no smux import.
+var _live_pane_id: text = ""
+var _live_pane_lines: [text] = []
+
+pub fn publish_pane_output(pane_id: text, lines: [text]):
+    _live_pane_id = pane_id
+    _live_pane_lines = lines
+
+pub fn live_pane_id() -> text:
+    _live_pane_id
+
+pub fn live_pane_lines() -> [text]:
+    _live_pane_lines
+
+pub fn clear_pane_output():
+    var empty: [text] = []
+    _live_pane_id = ""
+    _live_pane_lines = empty
+
+export lifecycle_for_agent, session_view_for_agent, manager_session_views,
+    MANAGED_PROVIDER
+export publish_manager_sessions, select_live_session, live_sessions,
+    live_selected, clear_live_sessions
+export publish_pane_output, live_pane_id, live_pane_lines, clear_pane_output

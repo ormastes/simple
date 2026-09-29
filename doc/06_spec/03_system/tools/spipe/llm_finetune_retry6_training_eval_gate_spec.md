@@ -41,7 +41,6 @@ Retry6 is the real training/eval handoff gate after retry5 licensed cache review
 | Field | Value |
 |-------|-------|
 | Feature IDs | #SP-FINETUNE-RETRY6-001 |
-| Requirement IDs | REQ-SP-FINETUNE-RETRY6-001 |
 | Category | Tooling |
 | Difficulty | 2/5 |
 | Status | Implemented |

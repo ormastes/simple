@@ -1,5 +1,4 @@
 #include <stdint.h>
-#include <stdbool.h>
 #include <stdlib.h>
 
 #if defined(_WIN32)
@@ -77,9 +76,9 @@ static int steam_bridge_has_required_symbols(void) {
     return 1;
 }
 
-bool simple_steam_bridge_is_mock(void) { return false; }
-bool simple_steam_bridge_real_backend_ready(void) {
-    return steam_bridge_has_required_symbols() != 0;
+int32_t simple_steam_bridge_is_mock(void) { return 0; }
+int32_t simple_steam_bridge_real_backend_ready(void) {
+    return steam_bridge_has_required_symbols() ? 1 : 0;
 }
 
 int32_t SteamAPI_Init(void) {

@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+owner="$root/examples/09_embedded/simple_os/arch/arm32/boot/arm32_user_transition_v13.c"
+entry="$root/examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl"
+assembly="$root/examples/09_embedded/simple_os/arch/arm32/boot/arm32_user_transition_v14.S"
+
+for pair in \
+    "$owner|arm32_fsexec_loan_v16(&elf, &elf_len)" \
+    "$owner|arm32_stage_elf32_v15(asid, kernel_root, cpu, elf, elf_len, &staged)" \
+    "$owner|arm32_fsexec_release_v16(elf, elf_len)" \
+    "$owner|arm32_fsexec_resume_prepare_v16(" \
+    "$owner|arm32_token_issue_v11(" \
+    "$owner|arm32_enter_user_v1(" \
+    "$entry|FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=arm32" \
+    "$entry|[arm32-fsexec] unsafe unexpected return" \
+    "$assembly|mov r0,#0"; do
+    file=${pair%%|*}; literal=${pair#*|}
+    rg -F "$literal" "$file" >/dev/null || { echo "missing ARM32 real-exec wiring: $literal" >&2; exit 1; }
+done
+
+if tail -20 "$entry" | rg -n 'serial_println\("TEST PASSED"\)' >/dev/null; then
+    echo "unconditional ARM32 final PASS detected" >&2
+    exit 1
+fi
+echo "arm32 real FSEXEC wiring v16: PASS"

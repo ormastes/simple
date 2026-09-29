@@ -1,0 +1,43 @@
+# Regression for P2 (stage2_cli_link_undefined.md): a call through a struct
+# FIELD that holds a function value (`port.op_fn(x)`) used to be lowered by
+# HIR as an ordinary METHOD call (`Type.op_fn`), which resolution can never
+# satisfy -- producing an undefined link symbol on a strict native-build
+# linker instead of an indirect call through the field's runtime value.
+# Discriminates the fix: without it, `native-build` on the probe below either
+# fails to link (undefined `FnPort.op_fn`/`FnPort.tag_fn` symbols) or -- on a
+# lane that papers over unresolved externs with a stub object (see
+# scratchpad/stage2_cli_link_undefined.md's Unix stub-fallback note) -- links
+# but calls through a nil/trap stub at runtime, so the printed values would
+# not match the interpret lane. With the fix, the native binary matches the
+# interpret lane exactly.
+use std.spec
+use std.io_runtime.{process_run, env_get, dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+val PROBE = "test/02_integration/compiler/backend/probe_struct_field_fn_call.spl"
+
+fn simple_bin() -> text:
+    val b = env_get("SIMPLE_BIN")
+    if b == "": "bin/simple" else: b
+
+describe "calling through a struct field that holds a function value (native lane)":
+    slow_it "native-builds, links, and runs the field's function -- not a bogus Type.field method symbol":
+        step("interpret lane is the reference")
+        val interp = process_run("sh", ["-c", "SIMPLE_RUST_SEED_WARNING=0 " + simple_bin() + " run " + PROBE + " 2>/dev/null"])
+        expect(interp.0).to_contain("opfn_a 11")
+        expect(interp.0).to_contain("opfn_b 12")
+        expect(interp.0).to_contain("tagfn port")
+
+        step("native-build must link cleanly (no undefined Type.field_fn symbol)")
+        val root = "build/tmp/struct_field_fn_call_{getpid()}"
+        expect(dir_create_all(root)).to_equal(true)
+        val out = root + "/probe"
+        val build = process_run("sh", ["-c", simple_bin() + " native-build --runtime-bundle core-c-bootstrap --threads 2 -o " + out + " " + PROBE + " 2>&1"])
+        expect(build.0.contains("undefined")).to_equal(false)
+        expect(build.2).to_equal(0)
+
+        step("the native binary calls through the field, matching the interpret lane")
+        val run = process_run("sh", ["-c", out + " 2>&1"])
+        expect(run.0).to_contain("opfn_a 11")
+        expect(run.0).to_contain("opfn_b 12")
+        expect(run.0).to_contain("tagfn port")

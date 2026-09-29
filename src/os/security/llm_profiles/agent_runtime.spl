@@ -1,0 +1,105 @@
+# Agent runtime launch — binds a compiled agent policy to the live workload
+# launcher without creating an agent-specific authority path.
+
+use os.security.llm_profiles.agent_workload_policy.{CompiledAgentPolicy}
+use os.kernel.types.capability_types.{CapabilityKind}
+use os.kernel.loader.managed_workload_launch.{launch_compiled_workload_into_scheduler}
+use os.kernel.loader.fs_exec_spawn.{FsExecPrepareResult}
+use os.kernel.security.execution_context.{KernelCallContext}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.arch.arch_context.{Architecture}
+use os.kernel.types.task_types.{TaskPriority, TaskId}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.lifecycle.task_exit_teardown.{teardown_exited_task_authority}
+
+pub struct AgentTerminationResult:
+    scheduler: Scheduler
+    ipc: IpcManager
+    terminated: u64
+    reason: text
+
+fn _runtime_policy_is_admissible(policy: CompiledAgentPolicy) -> bool:
+    # Recheck the agent-only fields at the mutable compiled-policy boundary.
+    # The generic workload launcher independently rechecks image/CSpace policy.
+    if policy.allowed_child_depth == 0u64 or
+        policy.allowed_child_depth > 9223372036854775807u64 or
+        policy.model_token_budget == 0u64 or policy.tool_call_budget == 0u64 or
+        policy.approval_policy == "":
+        return false
+    for grant in policy.execution.spawn_spec.grants:
+        match grant.requested:
+            case CapabilityKind.ProcessSpawn:
+                # A mutable compiled policy cannot silently replace the
+                # compiler-injected finite attenuation with unlimited (-1) or
+                # a wider child-depth budget before the live launcher sees it.
+                if grant.atten.depth_limit < 0 or
+                    grant.atten.depth_limit > policy.allowed_child_depth as i64:
+                    return false
+            case _:
+                pass
+    true
+
+pub fn launch_compiled_agent_into_scheduler(
+    context: KernelCallContext,
+    policy: CompiledAgentPolicy,
+    bytes: [u8],
+    arch: Architecture,
+    argv: [text],
+    envp: [text],
+    priority: TaskPriority,
+    scheduler: Scheduler
+) -> FsExecPrepareResult:
+    """Launch a compiled agent through the sole managed CSpace mint seam.
+
+    This function deliberately delegates process creation to
+    `launch_compiled_workload_into_scheduler`; an agent receives neither an
+    ambient authority pouch nor a parallel spawn implementation. Model, tool,
+    secret, and approval operations remain broker capabilities and are still
+    rejected at policy compilation until those brokers exist.
+    """
+    if not _runtime_policy_is_admissible(policy):
+        return FsExecPrepareResult(scheduler: scheduler, pid: -13, entry: 0)
+    launch_compiled_workload_into_scheduler(
+        context, policy.execution, bytes, arch, argv, envp, priority, scheduler)
+
+pub fn terminate_agent_subtree(
+    controller: KernelCallContext,
+    agent_pid: i64,
+    exit_code: i32,
+    scheduler: Scheduler,
+    ipc: IpcManager
+) -> AgentTerminationResult:
+    """Stop an agent and all of its subagents through the live job tree.
+
+    Only an ancestor job may terminate a target agent job. This keeps an agent
+    from killing a sibling or an unrelated tenant merely by guessing its PID;
+    the scheduler's recursive job transition performs the actual lifetime
+    change. Every member is first passed through the same resource teardown as
+    a forced syscall exit, then the scheduler clears its participating CSpace.
+    """
+    if agent_pid <= 0:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "invalid agent pid")
+    val current = scheduler.get_current()
+    if current.id != controller.task_id.id:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "controller is not current task")
+    val controller_task = scheduler.get_task(controller.task_id)
+    if controller_task == nil:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "controller task unavailable")
+    val target = scheduler.get_task(TaskId(id: agent_pid as u64))
+    if target == nil:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "agent task unavailable")
+    val controller_job = controller_task.unwrap().security.job_id
+    val target_job = target.unwrap().security.job_id
+    if controller_job == target_job:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "controller may not terminate its own job")
+    if scheduler.job_is_ancestor(controller_job, target_job) == false:
+        return AgentTerminationResult(scheduler: scheduler, ipc: ipc, terminated: 0u64, reason: "agent is outside controller job subtree")
+    var live_scheduler = scheduler
+    var cleaned_ipc = ipc
+    val members = live_scheduler.live_job_member_ids(target_job)
+    for member in members:
+        val member_tcb = live_scheduler.get_task(member)
+        if member_tcb != nil:
+                cleaned_ipc = teardown_exited_task_authority(member, cleaned_ipc)
+    val terminated = live_scheduler.terminate_job(target_job, exit_code)
+    AgentTerminationResult(scheduler: live_scheduler, ipc: cleaned_ipc, terminated: terminated, reason: "")

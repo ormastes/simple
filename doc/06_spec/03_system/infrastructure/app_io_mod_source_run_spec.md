@@ -45,6 +45,8 @@ app_io_mod_source_run_spec -> std
 3. fixture = fixture + "    val
    - Expected: file_write("/tmp/app_io_mod_source_run_fixture.spl", fixture) is true
    - Expected: result.exit_code equals `0`
+   - Expected: the fixture reports the inherited working directory as a complete `CWD=<path>` line
+   - Expected: the shell tuple reports `ok`
    - Expected: result.stderr equals ``
 
 
@@ -61,13 +63,13 @@ var fixture = "use app.io.mod.{cwd, shell_tuple}\n\n"
 fixture = fixture + "fn main():\n"
 fixture = fixture + "    val here = cwd()\n"
 fixture = fixture + "    val (out, err, code) = shell_tuple({quote}printf ok{quote})\n"
-fixture = fixture + "    print here\n"
+fixture = fixture + "    print {quote}CWD={quote} + here\n"
 fixture = fixture + "    print out\n"
 expect(file_write("/tmp/app_io_mod_source_run_fixture.spl", fixture)).to_equal(true)
 
 val result = shell(simple + " run /tmp/app_io_mod_source_run_fixture.spl")
 expect(result.exit_code).to_equal(0)
-expect(result.stdout).to_contain("/home/ormastes/dev/pub/simple")
+expect(result.stdout).to_contain("CWD={cwd()}\n")
 expect(result.stdout).to_contain("ok")
 expect(result.stderr).to_equal("")
 ```

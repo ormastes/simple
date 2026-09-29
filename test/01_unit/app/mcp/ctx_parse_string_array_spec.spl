@@ -1,0 +1,109 @@
+"""
+# MCP Context Tools — ctx_parse_string_array linear scanner
+
+**Requirements:** N/A
+
+## Overview
+
+`ctx_parse_string_array` parses the `commands` / `queries` JSON arrays out of
+a raw `tools/call` request body. It used to scan the body with a
+per-character `for ch in t` loop; the module's scale contract forbids that
+because the interpreter's for-in crashes on `StrBytes` (a request body can
+carry arbitrary, non-UTF-8 bytes). The scanner is now built from native
+`index_of` / `substring` passes, with quote closing decided by the parity of
+the backslash run in front of a candidate quote.
+
+Every scenario points `SIMPLE_CTX_DIR` at a scratch directory so the repo's
+own `.simple/ctx/` is never written by a test run.
+
+## Behavior
+
+- A JSON array of strings parses to its unescaped elements, in order.
+- Escaped quotes (`\\\"`) do not close an element; escaped backslashes
+  (`\\\\`) keep the following quote escaped or not by run parity.
+- A bare quoted string is a one-element list; `[]`, `null`, empty and
+  non-JSON input parse to zero elements (same contract as the old scanner,
+  which also skipped unquoted tokens).
+- A request body carrying non-UTF-8 bytes parses without a StrBytes crash.
+"""
+
+# @feature mcp_ctx_tools
+# tag: unit
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_set, env_get, dir_create, dir_remove_all, time_now_unix_micros}
+use app.mcp.main_lazy_ctx_tools.{ctx_parse_string_array, handle_simple_ctx_batch_execute}
+
+fn _fresh_store() -> text:
+    var base = env_get("SIMPLE_TEST_TMP") ?? ""
+    if base == "":
+        base = "build/tmp"
+    val dir = base + "/simple_ctx_parse_spec_" + str(time_now_unix_micros())
+    dir_remove_all(dir)
+    dir_create(dir, true)
+    env_set("SIMPLE_CTX_DIR", dir)
+    env_set("SIMPLE_CTX_CAPTURE_MAX_BYTES", "")
+    dir
+
+describe "ctx_parse_string_array":
+    it "parses arrays, escapes, and bare strings":
+        step("Parse a plain two-element array")
+        expect(ctx_parse_string_array("[\"a\", \"b\"]").len()).to_equal(2)
+        step("Parse escaped quotes, escaped backslashes, and commas inside elements")
+        val r = ctx_parse_string_array("[\"say \\\"hi\\\"\", \"x\\\\y\", \"c,d\"]")
+        expect(r.len()).to_equal(3)
+        expect(r[0]).to_equal("say \"hi\"")
+        expect(r[1]).to_equal("x\\y")
+        expect(r[2]).to_equal("c,d")
+        step("Parse a bare quoted string as a one-element list")
+        val single = ctx_parse_string_array("\"just one\"")
+        expect(single.len()).to_equal(1)
+        expect(single[0]).to_equal("just one")
+        step("Parse empty and non-JSON input to zero elements")
+        expect(ctx_parse_string_array("[]").len()).to_equal(0)
+        expect(ctx_parse_string_array("null").len()).to_equal(0)
+        expect(ctx_parse_string_array("").len()).to_equal(0)
+        expect(ctx_parse_string_array("not json").len()).to_equal(0)
+        step("Verify an escaped quote does not close the element early")
+        val e = ctx_parse_string_array("[\"a\\\"b\\\"c\", \"tail\"]")
+        expect(e.len()).to_equal(2)
+        expect(e[0]).to_equal("a\"b\"c")
+        expect(e[1]).to_equal("tail")
+
+    it "parses an element with many escaped quotes correctly and fast":
+        # Regression for a quadratic parse: the old scanner recomputed
+        # backslash parity by re-slicing `t.substring(open + 1, cand)` for
+        # EVERY candidate closing quote and stripping "\\" pairs off it,
+        # which re-copies and re-scans the whole prefix each time — O(n^2)
+        # in the number of escaped quotes inside one element. Build one
+        # element with many `\"` escapes and confirm it still parses to the
+        # exact unescaped text (correctness) well within a generous bound
+        # (a quadratic scanner would blow well past this on a few hundred
+        # escapes).
+        val n = 400
+        var parts: [text] = []
+        var expected: [text] = []
+        var i = 0
+        while i < n:
+            parts.push("\\\"q" + str(i) + "\\\"")
+            expected.push("\"q" + str(i) + "\"")
+            i = i + 1
+        val element = parts.join("")
+        val expected_text = expected.join("")
+        val body = "[\"" + element + "\"]"
+        val started = time_now_unix_micros()
+        val r = ctx_parse_string_array(body)
+        val elapsed_ms = (time_now_unix_micros() - started) / 1000
+        assert_equal(r.len(), 1)
+        assert_equal(r[0], expected_text)
+        assert_true(elapsed_ms < 2000)
+
+    it "scans a request body carrying non-UTF-8 bytes without a StrBytes crash":
+        step("Send a batch body whose command emits raw non-UTF-8 bytes")
+        _fresh_store()
+        # \377\376 is never valid UTF-8: the raw body text is a StrBytes
+        # value and every pass over it must be a native string op.
+        val body = "{\"commands\":[\"printf 'pre \\377\\376 post\\n'\",\"echo done\"],\"queries\":[],\"source\":\"parse:bytes\"}"
+        val r = handle_simple_ctx_batch_execute("1", body)
+        expect(r).to_contain("[0] exit 0")
+        expect(r).to_contain("[1] exit 0")

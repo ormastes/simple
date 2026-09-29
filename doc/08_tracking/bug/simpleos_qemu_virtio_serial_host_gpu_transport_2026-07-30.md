@@ -1,6 +1,10 @@
 <!-- codex-design -->
 
 # SimpleOS QEMU VirtIO-serial host-GPU transport gap
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Date: 2026-07-30
 Reviewed revision: `9cd238428b4ea0c1481c153cae66b8b017629994`
@@ -8,6 +12,66 @@ Reviewed revision: `9cd238428b4ea0c1481c153cae66b8b017629994`
 ## Status
 
 `BLOCKED` for x86_64 and RISC-V.
+
+### 2026-09-22 source progress (still OPEN)
+
+An isolated source slice adds a bounded 64-byte stream-header codec and unit
+contract in `src/lib/common/gpu/simpleos_host_gpu_stream_protocol.spl` and
+`test/01_unit/lib/common/gpu/simpleos_host_gpu_stream_protocol_spec.spl`.
+The decoder rejects malformed fixed headers, reserved fields, unknown message
+types, invalid backend/kind fields, and body lengths above the existing
+payload/readback limits before a body can be allocated. A correlation helper
+requires exact request generation, run, frame, and backend identity. The
+checksum helper supports incremental body reads.
+
+The stream ABI symbols are explicitly exported and the focused interpreter
+spec now covers fixed ABI constants, encode/decode, malformed headers, bounded
+fields (including exact payload boundaries and multi-byte values), type-specific
+request-kind/status/reason enums with undefined reasons 4–6 rejected,
+HELLO/SUBMIT/ERROR correlation, cross-session rejection, and
+incremental checksum behavior. The ERROR response path preserves the exact
+pending request identity instead of being rejected unconditionally.
+
+This remains source-only progress. There is no socket endpoint, guest VirtIO console
+queue driver, WM session integration, or live x86_64/RISC-V QEMU evidence.
+The wrapper must continue reporting `virtio-serial-unimplemented`; the bug
+remains open. The isolated checkout has no admitted pure-Simple `bin/simple`;
+the focused 8-example interpreter spec passed with the available bootstrap-only
+runtime as bounded development evidence. Its final measured maximum RSS was 333,372
+KiB versus 340,404 KiB for the earlier 4-example run in the same lane. Codec
+cost is constant for a header; body checksum is linear in bytes and requires no
+body-sized scratch buffer. Exact command, diagnostics, verdict, timing, and RSS
+output is retained at `build/evidence/virtio_stream_codec/focused-test-time.log`
+in the isolated lane.
+
+TODO(phase-environment): when an admitted pure-Simple phase runtime and the
+SimpleOS QEMU environment are available, run the focused stream-codec spec on
+that runtime, then implement and verify the bounded socket endpoint, guest-owned
+VirtIO descriptor queues, one-in-flight session reset, and correlated x86_64 and
+RISC-V QEMU round trips. Codec-only evidence must not close this bug.
+
+### 2026-09-23 integration prerequisite audit
+
+The transport-neutral source slice now also contains an immutable single-owner
+session state machine. It admits only one request, requires HELLO before submit,
+enforces monotonic generation/frame identity and a stable run identity, and
+resets on unsolicited or mismatched responses without allocating body buffers.
+
+Production integration remains blocked on two concrete missing owner surfaces:
+
+- `src/lib/nogc_sync_mut/service/extern.spl` declares Unix listen/accept/send/
+  receive functions as requiring runtime implementation. The declared send and
+  receive types are `text`, so they cannot safely carry arbitrary framed bytes.
+  Only client connect plus QMP-oriented text I/O exist in the runtime.
+- `src/os/drivers/virtio/` has no console driver. The shared MMIO helper owns
+  only queue zero, while a named multiport console requires control RX/TX and
+  dynamically selected data RX/TX queues. The x86 PCI manager only recognizes
+  the console device name; it does not configure or own its queues or IRQs.
+
+Implementing either endpoint atop the current declarations would create a fake
+transport or ambiguous descriptor ownership. Required next work is a bounded,
+binary-safe Unix socket facade and a console-specific multi-queue owner for both
+x86 PCI and RISC-V MMIO, followed by WM composition with this session state.
 
 The current wrapper correctly reports `virtio-serial-unimplemented` when
 `ivshmem-plain` and the AArch64-only file-backed RAM tail are unavailable but
@@ -90,7 +154,7 @@ starts with one fixed 64-byte header:
 | 32 | 8 | session `run_id_hash` (`0` only for HELLO request/response) |
 | 40 | 8 | frame ID (`0` only for HELLO request/response) |
 | 48 | 8 | backend code |
-| 56 | 8 | request kind for requests; status/reason packing for responses |
+| 56 | 8 | request kind for HELLO/SUBMIT requests; status enum for HELLO/SUBMIT responses; reason enum for ERROR responses |
 
 The body is the canonical request or response codec, not a native struct dump.
 It has explicit field order and lengths followed by payload/image-resource or
@@ -245,6 +309,26 @@ unbounded software queue.
   assertion can satisfy a live host-GPU row.
 
 ## Bounded source-only checks
+
+### Queue-owner increment (2026-09-23)
+
+`src/os/drivers/virtio/virtio_console_queue_owner.spl` now provides one shared,
+fixed-storage owner for the control RX/TX and negotiated-port RX/TX queues used
+by x86 PCI and RISC-V MMIO adapters. Descriptor leases are queue-local and
+generation-bound and device-owner-bound; IRQ ingress only records ready queues
+inside an architecture-owned IRQ critical section, while fair draining runs in
+driver/session task context. Reset refuses to invalidate leases unless the
+adapter reports the device DMA/IRQ path quiesced. This increment does not claim discovery,
+DMA mapping, live interrupt delivery, control-event parsing, or framed GPU I/O.
+
+TODO(simpleos-qemu-virtio-console-owner): when the admitted phase environment
+and Q-LIVE executor are ready, run the focused unit spec plus bounded x86_64
+`virtio-serial-pci` and RISC-V `virtio-serial-device` QEMU rows. Prove PCI/PLIC
+registration, DMA descriptor lifecycle, DEVICE_READY/PORT_READY/PORT_OPEN,
+split-frame RX, queue-full backpressure, IRQ wakeup, reset invalidation, and
+stable throughput/RSS against the existing ivshmem baseline. Integration must
+mint non-reused device-owner identities, negotiate `VIRTIO_CONSOLE_F_MULTIPORT`,
+and prove there is exactly one owner of the device-global control queues.
 
 Executed exactly once in the isolated clean worktree:
 

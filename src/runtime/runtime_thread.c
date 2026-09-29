@@ -154,6 +154,155 @@ static void free_handle(int64_t handle) {
     HANDLE_WRUNLOCK();
 }
 
+/* Scalar TLS has a raw i64 ABI, distinct from the tagged RuntimeValue TLS.
+ * Each live handle owns one OS TLS key. Values are kept in the key itself,
+ * without a heap allocation on the get/set path. Public handles combine a
+ * monotonically increasing serial with a reusable table slot: stale handles
+ * never address a recycled OS key, and table memory tracks peak live slots.
+ * The table lock stays held across OS key access, so free cannot race it. */
+#define SCALAR_TLS_SLOT_BITS 20
+#define SCALAR_TLS_SLOT_COUNT (UINT64_C(1) << SCALAR_TLS_SLOT_BITS)
+#define SCALAR_TLS_SLOT_MASK (SCALAR_TLS_SLOT_COUNT - 1)
+typedef struct {
+#ifdef SPL_THREAD_PTHREAD
+    pthread_key_t key;
+#else
+    DWORD key;
+#endif
+    int64_t handle;
+    size_t next_free;
+    bool active;
+} ScalarTlsEntry;
+
+static ScalarTlsEntry* g_scalar_tls_entries = NULL;
+static size_t g_scalar_tls_capacity = 0;
+static size_t g_scalar_tls_used = 0;
+static size_t g_scalar_tls_free_head = SIZE_MAX;
+static uint64_t g_scalar_tls_serial = 0;
+#ifdef SPL_THREAD_PTHREAD
+static pthread_rwlock_t g_scalar_tls_lock = PTHREAD_RWLOCK_INITIALIZER;
+#define SCALAR_TLS_RDLOCK() pthread_rwlock_rdlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_RDUNLOCK() pthread_rwlock_unlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRLOCK() pthread_rwlock_wrlock(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRUNLOCK() pthread_rwlock_unlock(&g_scalar_tls_lock)
+#else
+static SRWLOCK g_scalar_tls_lock = SRWLOCK_INIT;
+#define SCALAR_TLS_RDLOCK() AcquireSRWLockShared(&g_scalar_tls_lock)
+#define SCALAR_TLS_RDUNLOCK() ReleaseSRWLockShared(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRLOCK() AcquireSRWLockExclusive(&g_scalar_tls_lock)
+#define SCALAR_TLS_WRUNLOCK() ReleaseSRWLockExclusive(&g_scalar_tls_lock)
+#endif
+
+/* The hosted runtime represents i64 scalar values as pointer-sized TLS bits. */
+_Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "scalar TLS requires 64-bit pointers");
+
+int64_t rt_thread_local_new(void) {
+    SCALAR_TLS_WRLOCK();
+    size_t index = g_scalar_tls_free_head != SIZE_MAX
+        ? g_scalar_tls_free_head : g_scalar_tls_used;
+    if (index >= SCALAR_TLS_SLOT_COUNT ||
+        g_scalar_tls_serial > ((uint64_t)INT64_MAX - index - 1) / SCALAR_TLS_SLOT_COUNT) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+    if (index >= g_scalar_tls_capacity) {
+        size_t capacity = g_scalar_tls_capacity ? g_scalar_tls_capacity * 2 : 16;
+        if (capacity <= index || capacity > SCALAR_TLS_SLOT_COUNT ||
+            capacity > SIZE_MAX / sizeof(ScalarTlsEntry)) {
+            SCALAR_TLS_WRUNLOCK();
+            return 0;
+        }
+        ScalarTlsEntry* entries = (ScalarTlsEntry*)SPL_REALLOC(
+            g_scalar_tls_entries, capacity * sizeof(ScalarTlsEntry), "scalar_tls_keys");
+        if (!entries) {
+            SCALAR_TLS_WRUNLOCK();
+            return 0;
+        }
+        memset(entries + g_scalar_tls_capacity, 0,
+               (capacity - g_scalar_tls_capacity) * sizeof(ScalarTlsEntry));
+        g_scalar_tls_entries = entries;
+        g_scalar_tls_capacity = capacity;
+    }
+
+#ifdef SPL_THREAD_PTHREAD
+    if (pthread_key_create(&g_scalar_tls_entries[index].key, NULL) != 0) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+#else
+    DWORD key = TlsAlloc();
+    if (key == TLS_OUT_OF_INDEXES) {
+        SCALAR_TLS_WRUNLOCK();
+        return 0;
+    }
+    g_scalar_tls_entries[index].key = key;
+#endif
+    if (g_scalar_tls_free_head != SIZE_MAX) {
+        g_scalar_tls_free_head = g_scalar_tls_entries[index].next_free;
+    } else {
+        g_scalar_tls_used++;
+    }
+    int64_t handle = (int64_t)(g_scalar_tls_serial * SCALAR_TLS_SLOT_COUNT + index + 1);
+    g_scalar_tls_entries[index].handle = handle;
+    g_scalar_tls_entries[index].active = true;
+    g_scalar_tls_serial++;
+    SCALAR_TLS_WRUNLOCK();
+    return handle;
+}
+
+int64_t rt_thread_local_get_i64(int64_t handle) {
+    if (handle <= 0) return 0;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_RDLOCK();
+    int64_t value = 0;
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+#ifdef SPL_THREAD_PTHREAD
+        uintptr_t bits = (uintptr_t)pthread_getspecific(g_scalar_tls_entries[index].key);
+#else
+        uintptr_t bits = (uintptr_t)TlsGetValue(g_scalar_tls_entries[index].key);
+#endif
+        memcpy(&value, &bits, sizeof(value));
+    }
+    SCALAR_TLS_RDUNLOCK();
+    return value;
+}
+
+void rt_thread_local_set_i64(int64_t handle, int64_t value) {
+    if (handle <= 0) return;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_RDLOCK();
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+        uintptr_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+#ifdef SPL_THREAD_PTHREAD
+        (void)pthread_setspecific(g_scalar_tls_entries[index].key, (void*)bits);
+#else
+        (void)TlsSetValue(g_scalar_tls_entries[index].key, (void*)bits);
+#endif
+    }
+    SCALAR_TLS_RDUNLOCK();
+}
+
+void rt_thread_local_free(int64_t handle) {
+    if (handle <= 0) return;
+    size_t index = (size_t)(((uint64_t)handle - 1) & SCALAR_TLS_SLOT_MASK);
+    SCALAR_TLS_WRLOCK();
+    if (index < g_scalar_tls_used && g_scalar_tls_entries[index].active &&
+        g_scalar_tls_entries[index].handle == handle) {
+#ifdef SPL_THREAD_PTHREAD
+        (void)pthread_key_delete(g_scalar_tls_entries[index].key);
+#else
+        (void)TlsFree(g_scalar_tls_entries[index].key);
+#endif
+        g_scalar_tls_entries[index].active = false;
+        g_scalar_tls_entries[index].next_free = g_scalar_tls_free_head;
+        g_scalar_tls_free_head = index;
+    }
+    SCALAR_TLS_WRUNLOCK();
+}
+
 /* ================================================================
  * Thread Management
  * ================================================================ */
@@ -1904,8 +2053,50 @@ void spl_condvar_destroy(spl_condvar_handle handle) {
 /* The core-C capsule already gets this compatibility ABI from
  * runtime_legacy_core.c.  Keep one owner when runtime_thread.c is added to
  * that archive; regular hosted runtime builds still use this implementation.
- */
-#if !defined(SIMPLE_CORE_C_STANDALONE)
+ *
+ * A `_WIN32` exception used to widen this to `#if !defined(
+ * SIMPLE_CORE_C_STANDALONE) || defined(_WIN32)`, on the premise that "the
+ * hosted Windows lane compiles with -DSIMPLE_CORE_C_STANDALONE=1 but does
+ * NOT include runtime_legacy_core.c". That premise does not hold for any
+ * lane that actually exists: every caller that defines
+ * SIMPLE_CORE_C_STANDALONE (native_project/tools.rs's build_c_runtime_library,
+ * used by both build_core_c_runtime_library and build_stage4_c_runtime_library,
+ * and the standalone script build-core-c-bootstrap-runtime-capsule.shs) puts
+ * runtime_legacy_core.c in the SAME unconditional input list, on every
+ * platform including Windows -- so on Windows this TU's own copy collided
+ * with legacy_core.c's, both landing in simple_runtime.lib and both getting
+ * pulled into the same link: `error LNK2005: spl_thread_cpu_count ... already
+ * defined in simple_runtime.lib(runtime_thread.obj)` (measured 2026-08-31,
+ * once the Stage 2 sanity gate's Windows-ABI-env bug was fixed and it could
+ * finally exercise the MSVC/clang-cl lane instead of silently falling back to
+ * GNU). Restored to the single, unconditional guard below; legacy_core.c is
+ * the sole owner on every platform whenever SIMPLE_CORE_C_STANDALONE is set.
+ *
+ * AMENDED 2026-09-02. "Every caller that defines SIMPLE_CORE_C_STANDALONE puts
+ * runtime_legacy_core.c in the SAME unconditional input list" is true of the
+ * two callers it names -- both are Rust/seed-side -- and FALSE of the
+ * pure-Simple one. compile_runtime_objects
+ * (src/compiler/70.backend/backend/runtime_compiler.spl) pushes
+ * runtime_legacy_core only when include_stage4_legacy_compat is set, while it
+ * passes -DSIMPLE_CORE_C_STANDALONE=1 whenever include_dynload is set. The
+ * core-c-bootstrap bundle used by the Stage 2 receiver probe sets the second
+ * and not the first, so NOBODY owned this symbol and the link failed with
+ * `runtime_thread.obj : error LNK2019: unresolved external symbol
+ * spl_thread_cpu_count referenced in function rt_pool_get_parallelism`
+ * -> LNK1120 (measured 2026-09-02, clang-cl/link.exe 14.44). Another instance
+ * of the self-hosted-vs-seed source-list divergence recorded in
+ * doc/08_tracking/bug/c_runtime_source_list_divergence_2026-08-30.md.
+ *
+ * Rather than guess from the platform -- which is what produced the reverted
+ * _WIN32 exception above -- ownership is now stated by the only component that
+ * actually knows the source list: a caller that sets SIMPLE_CORE_C_STANDALONE
+ * WITHOUT including runtime_legacy_core.c defines
+ * SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER=1 and gets the definition here.
+ * CROSS-PLATFORM: every existing caller leaves the new macro undefined, so the
+ * condition is byte-identical to before on all of them, Unix and Windows
+ * alike; the LNK2005 collision the paragraph above describes cannot return,
+ * because the lanes that ship legacy_core.c never define it. */
+#if !defined(SIMPLE_CORE_C_STANDALONE) ||     defined(SIMPLE_RUNTIME_THREAD_CPU_COUNT_OWNER)
 int64_t spl_thread_cpu_count(void) {
 #ifdef SPL_THREAD_PTHREAD
     #if defined(__APPLE__) || defined(__MACH__)
@@ -1937,7 +2128,28 @@ int64_t spl_thread_cpu_count(void) {
  * This function is defined in thread_pool.spl and compiled to C.
  * In interpreter mode, this function may not be available.
  */
+#if defined(__APPLE__)
+/* Mach-O rejects an unresolved `weak` declaration while linking a dylib.
+ * `weak_import` is Darwin's spelling for an optional undefined provider: the
+ * address is null when the Simple thread-pool module is outside the retained
+ * shared-library closure. */
+extern void worker_loop_entry(int64_t pool_id) __attribute__((weak_import));
+#elif defined(_MSC_VER)
+/* MSVC has no weak symbols and rejects __attribute__ outright, so this
+ * declaration had never compiled under cl.exe. /alternatename is the supported
+ * equivalent: the linker binds worker_loop_entry to the fallback below ONLY
+ * when nothing else defines it, which is exactly the "optional provider"
+ * contract the weak declaration expresses. The `if (worker_loop_entry)` guards
+ * at the call sites stay correct -- they exist to avoid calling through a null
+ * address, and here the address is a do-nothing stub with the same effect as
+ * skipping the call. x64 C symbols are undecorated, so the name needs no
+ * leading underscore. */
+void worker_loop_entry_default(int64_t pool_id) { (void)pool_id; }
+#pragma comment(linker, "/alternatename:worker_loop_entry=worker_loop_entry_default")
+extern void worker_loop_entry(int64_t pool_id);
+#else
 extern void worker_loop_entry(int64_t pool_id) __attribute__((weak));
+#endif
 
 /* Thread worker wrapper for pthread */
 #ifdef SPL_THREAD_PTHREAD

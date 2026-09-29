@@ -1,0 +1,360 @@
+# codex-impl: public-only deterministic summary and virtual source projection.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.frontend.core.parser (parse_module_silent_checked)
+use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
+use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1}
+
+pub enum FrontendPublicFactKindV1:
+    ForwardDeclaration
+    Declaration
+    LayoutAbi
+    TraitImplCoherence
+    ExtensionReexport
+    AopSelector
+    MacroSignature
+    BodyReference
+    ReverseReferenceRoot
+
+pub struct FrozenPublicFactV1:
+    fact_kind: FrontendPublicFactKindV1
+    stable_symbol_id: text
+    canonical_bytes: text
+    is_public: bool
+    contains_executable_body: bool
+    contains_private_source: bool
+    dependency_symbol_ids: [text]
+
+pub struct PublicSummaryProjectionInputV1:
+    snapshot_id: text
+    logical_path: LogicalSourcePathV1
+    source_blob_digest: text
+    compiler_owner_digest: text
+    grammar_digest: text
+    facts: [FrozenPublicFactV1]
+
+fn _entry_key_v1(entry: PublicSummaryEntryV1) -> text:
+    "{entry.stable_symbol_id}\u0000{entry.canonical_bytes}"
+
+fn _entry_index_v1(entries: [PublicSummaryEntryV1], symbol: text) -> i64:
+    for index in 0..entries.len():
+        if entries[index].stable_symbol_id == symbol:
+            return index
+    -1
+
+fn _entry_count_v1(entries: [PublicSummaryEntryV1], symbol: text) -> i64:
+    var count = 0
+    for entry in entries:
+        if entry.stable_symbol_id == symbol:
+            count = count + 1
+    count
+
+fn _sorted_unique_text_v1(values: [text]) -> [text]:
+    var result: [text] = []
+    for value in values:
+        if result.contains(value):
+            continue
+        var inserted = false
+        var next: [text] = []
+        for current in result:
+            if not inserted and value < current:
+                next.push(value)
+                inserted = true
+            next.push(current)
+        if not inserted:
+            next.push(value)
+        result = next
+    result
+
+fn _insert_summary_entry_v1(
+    entries: [PublicSummaryEntryV1],
+    value: PublicSummaryEntryV1,
+) -> Result<[PublicSummaryEntryV1], text>:
+    val key = _entry_key_v1(value)
+    var inserted = false
+    var result: [PublicSummaryEntryV1] = []
+    for current in entries:
+        val current_key = _entry_key_v1(current)
+        if current_key == key:
+            return Ok(entries)
+        if not inserted and key < current_key:
+            result.push(value)
+            inserted = true
+        result.push(current)
+    if not inserted:
+        result.push(value)
+    Ok(result)
+
+fn _fact_key_v1(fact: FrozenPublicFactV1) -> text:
+    "{fact.stable_symbol_id}\u0000{fact.canonical_bytes}"
+
+fn _insert_fact_v1(facts: [FrozenPublicFactV1], value: FrozenPublicFactV1) -> [FrozenPublicFactV1]:
+    val key = _fact_key_v1(value)
+    var inserted = false
+    var result: [FrozenPublicFactV1] = []
+    for current in facts:
+        if not inserted and key < _fact_key_v1(current):
+            result.push(value)
+            inserted = true
+        result.push(current)
+    if not inserted:
+        result.push(value)
+    result
+
+fn _fact_index_v1(facts: [FrozenPublicFactV1], symbol: text) -> i64:
+    for index in 0..facts.len():
+        if facts[index].stable_symbol_id == symbol:
+            return index
+    -1
+
+fn _dependency_key_v1(fact: FrozenPublicFactV1) -> text:
+    _sorted_unique_text_v1(fact.dependency_symbol_ids).join("\u0000")
+
+fn _reachable_v1(facts: [FrozenPublicFactV1], start: i64, target: i64) -> bool:
+    var seen: [bool] = [for _index in 0..facts.len(): false]
+    var pending: [i64] = [start]
+    var cursor = 0
+    while cursor < pending.len():
+        val index = pending[cursor]
+        cursor = cursor + 1
+        if index == target:
+            return true
+        if seen[index]:
+            continue
+        seen[index] = true
+        for dependency in facts[index].dependency_symbol_ids:
+            val dependency_index = _fact_index_v1(facts, dependency)
+            if dependency_index >= 0 and not seen[dependency_index]:
+                pending.push(dependency_index)
+    false
+
+fn _forward_graph_order_v1(facts: [FrozenPublicFactV1]) -> Result<[FrozenPublicFactV1], text>:
+    var sorted: [FrozenPublicFactV1] = []
+    for fact in facts:
+        sorted = _insert_fact_v1(sorted, fact)
+    var unique: [FrozenPublicFactV1] = []
+    for fact in sorted:
+        if unique.len() > 0 and unique[unique.len() - 1].stable_symbol_id == fact.stable_symbol_id:
+            val prior = unique[unique.len() - 1]
+            if prior.canonical_bytes != fact.canonical_bytes or _dependency_key_v1(prior) != _dependency_key_v1(fact):
+                return Err("public summary has conflicting duplicate forward declarations")
+            continue
+        unique.push(fact)
+    sorted = unique
+    for index in 0..sorted.len():
+        for dependency in sorted[index].dependency_symbol_ids:
+            if _fact_index_v1(sorted, dependency) < 0:
+                return Err("public summary forward declaration names a missing dependency")
+
+    # Mutual reachability defines the SCC. The smallest stable symbol is its
+    # deterministic group representative.
+    var group_for: [i64] = [for index in 0..sorted.len(): index]
+    for index in 0..sorted.len():
+        for other in 0..sorted.len():
+            if _reachable_v1(sorted, index, other) and _reachable_v1(sorted, other, index):
+                if other < group_for[index]:
+                    group_for[index] = other
+
+    var emitted: [bool] = [for _index in 0..sorted.len(): false]
+    var output: [FrozenPublicFactV1] = []
+    while output.len() < sorted.len():
+        var selected_group = -1
+        for index in 0..sorted.len():
+            val group = group_for[index]
+            if group != index or emitted[index]:
+                continue
+            var ready = true
+            for member in 0..sorted.len():
+                if group_for[member] != group:
+                    continue
+                for dependency in sorted[member].dependency_symbol_ids:
+                    val dependency_index = _fact_index_v1(sorted, dependency)
+                    if group_for[dependency_index] != group and not emitted[dependency_index]:
+                        ready = false
+            if ready:
+                selected_group = group
+                break
+        if selected_group < 0:
+            return Err("public summary dependency graph cannot be ordered")
+        for index in 0..sorted.len():
+            if group_for[index] == selected_group:
+                output.push(sorted[index])
+                emitted[index] = true
+    Ok(output)
+
+fn _summary_comment_text_v1(value: text) -> text:
+    val without_cr = value.replace("\r", " ")
+    without_cr.replace("\n", " ")
+
+fn _render_summary_parts_v1(
+    snapshot_id: text,
+    logical_path: LogicalSourcePathV1,
+    source_blob_digest: text,
+    forward_declarations: [PublicSummaryEntryV1],
+    declarations: [PublicSummaryEntryV1],
+    layouts_abi: [PublicSummaryEntryV1],
+    traits_impls_coherence: [PublicSummaryEntryV1],
+    extensions_reexports: [PublicSummaryEntryV1],
+    aop_selectors: [PublicSummaryEntryV1],
+    macro_signatures: [PublicSummaryEntryV1],
+    body_refs: [PublicSummaryEntryV1],
+    reverse_reference_roots: [PublicSummaryEntryV1],
+) -> text:
+    var lines: [text] = [
+        "# @generated simple public summary v1",
+        "# @snapshot {snapshot_id}",
+        "# @source {logical_path.module_relative_utf8}",
+        "# @source_digest {source_blob_digest}",
+    ]
+    for entry in forward_declarations:
+        lines.push(entry.canonical_bytes)
+    for entry in declarations:
+        lines.push("# @declaration {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in layouts_abi:
+        lines.push("# @layout {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in traits_impls_coherence:
+        lines.push("# @coherence {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in extensions_reexports:
+        lines.push("# @extension {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in aop_selectors:
+        lines.push("# @aop {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in macro_signatures:
+        lines.push("# @macro {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in body_refs:
+        lines.push("# @body_ref {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    for entry in reverse_reference_roots:
+        lines.push("# @reverse_ref {entry.stable_symbol_id} {_summary_comment_text_v1(entry.canonical_bytes)}")
+    lines.join("\n") + "\n"
+
+pub fn render_public_summary_tldr_v1(summary: PublicSummaryV1) -> text:
+    _render_summary_parts_v1(
+        summary.snapshot_id,
+        summary.logical_path,
+        summary.source_blob_digest,
+        summary.forward_declarations,
+        summary.declarations,
+        summary.layouts_abi,
+        summary.traits_impls_coherence,
+        summary.extensions_reexports,
+        summary.aop_selectors,
+        summary.macro_signatures,
+        summary.body_refs,
+        summary.reverse_reference_roots,
+    )
+
+pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Result<PublicSummaryV1, text>:
+    if input.snapshot_id == "" or input.source_blob_digest == "" or input.compiler_owner_digest == "" or input.grammar_digest == "":
+        return Err("public summary identity is incomplete")
+
+    var declarations: [PublicSummaryEntryV1] = []
+    var forward_facts: [FrozenPublicFactV1] = []
+    var layouts_abi: [PublicSummaryEntryV1] = []
+    var traits_impls_coherence: [PublicSummaryEntryV1] = []
+    var extensions_reexports: [PublicSummaryEntryV1] = []
+    var aop_selectors: [PublicSummaryEntryV1] = []
+    var macro_signatures: [PublicSummaryEntryV1] = []
+    var body_refs: [PublicSummaryEntryV1] = []
+    var reverse_reference_roots: [PublicSummaryEntryV1] = []
+
+    for fact in input.facts:
+        if not fact.is_public:
+            continue
+        if fact.stable_symbol_id == "" or fact.canonical_bytes == "":
+            return Err("public summary fact identity is incomplete")
+        if fact.contains_private_source:
+            return Err("public summary fact contains private source")
+        if fact.contains_executable_body:
+            return Err("public summary fact contains an executable body")
+        val entry = PublicSummaryEntryV1(
+            stable_symbol_id: fact.stable_symbol_id,
+            canonical_bytes: fact.canonical_bytes,
+            dependency_symbol_ids: public_summary_sorted_dependencies_v1(fact.dependency_symbol_ids),
+        )
+        match fact.fact_kind:
+            case FrontendPublicFactKindV1.ForwardDeclaration:
+                forward_facts.push(fact)
+            case FrontendPublicFactKindV1.Declaration:
+                declarations = _insert_summary_entry_v1(declarations, entry)?
+            case FrontendPublicFactKindV1.LayoutAbi:
+                layouts_abi = _insert_summary_entry_v1(layouts_abi, entry)?
+            case FrontendPublicFactKindV1.TraitImplCoherence:
+                traits_impls_coherence = _insert_summary_entry_v1(traits_impls_coherence, entry)?
+            case FrontendPublicFactKindV1.ExtensionReexport:
+                extensions_reexports = _insert_summary_entry_v1(extensions_reexports, entry)?
+            case FrontendPublicFactKindV1.AopSelector:
+                aop_selectors = _insert_summary_entry_v1(aop_selectors, entry)?
+            case FrontendPublicFactKindV1.MacroSignature:
+                macro_signatures = _insert_summary_entry_v1(macro_signatures, entry)?
+            case FrontendPublicFactKindV1.BodyReference:
+                body_refs = _insert_summary_entry_v1(body_refs, entry)?
+            case FrontendPublicFactKindV1.ReverseReferenceRoot:
+                reverse_reference_roots = _insert_summary_entry_v1(reverse_reference_roots, entry)?
+
+    val ordered_forward_facts = _forward_graph_order_v1(forward_facts)?
+    for fact in input.facts:
+        if not fact.is_public:
+            continue
+        for dependency in fact.dependency_symbol_ids:
+            if _fact_index_v1(ordered_forward_facts, dependency) < 0:
+                return Err("public summary fact names a dependency without a forward declaration")
+    var forward_declarations: [PublicSummaryEntryV1] = []
+    for forward in ordered_forward_facts:
+        val declaration_index = _entry_index_v1(declarations, forward.stable_symbol_id)
+        if declaration_index < 0:
+            return Err("public forward declaration has no full declaration")
+        if _entry_count_v1(declarations, forward.stable_symbol_id) != 1:
+            return Err("public summary has conflicting full declarations")
+        if (public_summary_normalized_signature_v1(declarations[declaration_index].canonical_bytes) !=
+                public_summary_normalized_signature_v1(forward.canonical_bytes)):
+            return Err("public forward and full signatures differ")
+        forward_declarations.push(PublicSummaryEntryV1(
+            stable_symbol_id: forward.stable_symbol_id,
+            canonical_bytes: forward.canonical_bytes,
+            dependency_symbol_ids: public_summary_sorted_dependencies_v1(forward.dependency_symbol_ids),
+        ))
+    for declaration in declarations:
+        if _fact_index_v1(ordered_forward_facts, declaration.stable_symbol_id) < 0:
+            return Err("public declaration is missing a forward declaration")
+    val declaration_graph_digest = public_summary_declaration_graph_digest_v1(
+        forward_declarations, declarations)
+
+    val virtual_text = _render_summary_parts_v1(
+        input.snapshot_id,
+        input.logical_path,
+        input.source_blob_digest,
+        forward_declarations,
+        declarations,
+        layouts_abi,
+        traits_impls_coherence,
+        extensions_reexports,
+        aop_selectors,
+        macro_signatures,
+        body_refs,
+        reverse_reference_roots,
+    )
+    val virtual_text_digest = sha256_text("simple.public.summary.text.v1\u0000" + virtual_text)
+    if parse_module_silent_checked(virtual_text, "simple-summary/generated/_tldr.spl"):
+        return Err("public summary rendering is not grammar-valid Simple")
+
+    Ok(PublicSummaryV1(
+        snapshot_id: input.snapshot_id,
+        logical_path: input.logical_path,
+        source_blob_digest: input.source_blob_digest,
+        schema: 1,
+        compiler_owner_digest: input.compiler_owner_digest,
+        grammar_digest: input.grammar_digest,
+        forward_declarations: forward_declarations,
+        declarations: declarations,
+        layouts_abi: layouts_abi,
+        traits_impls_coherence: traits_impls_coherence,
+        extensions_reexports: extensions_reexports,
+        aop_selectors: aop_selectors,
+        macro_signatures: macro_signatures,
+        body_refs: body_refs,
+        reverse_reference_roots: reverse_reference_roots,
+        declaration_graph_digest: declaration_graph_digest,
+        virtual_text_digest: virtual_text_digest,
+    ))
+
+export FrontendPublicFactKindV1, FrozenPublicFactV1, PublicSummaryProjectionInputV1
+export render_public_summary_tldr_v1, project_public_summary_v1

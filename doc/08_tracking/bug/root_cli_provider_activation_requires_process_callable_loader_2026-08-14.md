@@ -1,4 +1,8 @@
 # Root CLI provider activation requires a process-callable loader
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -59,3 +63,4 @@ root executable. Source and Rust-runtime checks do not prove deployed dispatch.
 Do not call `dynsmf_dispatch_background_compiles` from startup or command
 dispatch, construct shell commands for missing providers, import provider
 implementations into the root CLI, or fall back to the Rust seed.
+

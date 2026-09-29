@@ -1,4 +1,9 @@
 # native-build resolves `libsimple_runtime.a` via a CWD-relative path with no staleness check
+## Closed 2026-09-16 — ... with no staleness check - Status: FIXED - Status re-verified 2026-08-17 by source inspect
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - Status: FIXED
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
@@ -86,3 +91,4 @@ balance` and superuser privileges, out of scope for this fix. `cargo check` was
 attempted 4 times (plain, `-j2`, `CARGO_INCREMENTAL=0`) and failed the same way each
 time, including on `simple-runtime`'s build script — a crate this change does not
 touch — confirming the failure is environmental, not from this diff.
+

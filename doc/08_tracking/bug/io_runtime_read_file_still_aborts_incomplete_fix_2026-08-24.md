@@ -1,4 +1,8 @@
 # `io_runtime.read_file` still aborts the process — the 2026-08-23 fix was incomplete
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-24
 **Severity:** HIGH (process abort on the first read of any file, from a single import)
@@ -189,3 +193,4 @@ reason — the recursion is native JIT code, not interpreter frames.
   (`compiler_cross_module_private_symbol_collision`); `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`
   lists 16 same-signature collisions in this closure alone
   (`file_read`, `file_write`, `file_exists`, `process_run`, `shell`, …).
+

@@ -1,0 +1,55 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Zero-work native request: unset env must fall back, not blank the identity
+
+`driver_native_noop_request_v1` derives the no-op cache root and the delivery
+output from two environment variables. Both were read through
+`std.nogc_sync_mut.io.env_ops.env_get`, which is TOTAL: it returns `""` for an
+unset variable (`env_ops.spl:48`, `env_get_opt(key) ?? ""`). `??` therefore
+never selects the fallback, so with the variables unset the request was built
+with an empty cache root AND an empty output path, `native_noop_request_v1`
+blanked the identity, and publication refused the whole build with
+`request-invalid`.
+
+Measured 2026-09-12 on BOOT-3's rejected Stage-2 binary under gdb: at
+`native_noop_publish_built_v1` entry all three request fields were the same
+empty-string object, and the environment fingerprint was VALID — so the blank
+was the cache root and the output path, not the environment digest.
+
+The fix is to read those two through a nil-for-unset reader
+(`std.io_runtime.env_get_opt`) so `??` reaches its fallback.
+"""
+
+use std.spec.step
+use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+extern fn rt_file_read_text(path: text) -> text
+
+describe "Zero-work native request env fallback":
+    it "shows the total env_get reader swallows its own ?? fallback":
+        # @req REQ-SSPEC-COMPILER
+        step("total env_get returns \"\" for an unset name, so ?? never fires")
+        val unset_name = "SIMPLE_NATIVE_NOOP_UNSET_PROBE_2026_09_13"
+        expect(env_get(unset_name) ?? "fallback").to_equal("")
+        expect(env_get_opt(unset_name) ?? "fallback").to_equal("fallback")
+
+    it "reads the no-op cache root and delivery output through a nil-for-unset reader":
+        # @req REQ-SSPEC-COMPILER
+        step("driver_orchestration resolves both env fallbacks with env_get_opt")
+        val source = rt_file_read_text(
+            "src/compiler/80.driver/driver_orchestration.spl") ?? ""
+        # Fail closed on a vacuous read: an empty or truncated file must FAIL,
+        # never silently satisfy a to_not_contain assertion.
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain("fn driver_native_noop_request_v1")
+        expect(source).to_contain(
+            "env_get_opt(\"SIMPLE_NATIVE_NOOP_CACHE_ROOT\")")
+        expect(source).to_contain(
+            "env_get_opt(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\")")
+        expect(source).to_not_contain(
+            "env_get(\"SIMPLE_NATIVE_NOOP_CACHE_ROOT\")")
+        expect(source).to_not_contain(
+            "env_get(\"SIMPLE_NATIVE_NOOP_FINAL_OUTPUT\")")

@@ -129,6 +129,26 @@ selftest() {
     selftest_assert_equal "old content hash becomes stale" 1 \
         "$(wc -l < "$fixture_dir/modified_stale" | tr -d ' ')"
 
+    # A reviewed fingerprint refresh admits only those exact bytes; a later
+    # edit must still produce both new debt and a stale baseline row.
+    classify_forbidden_extension_debt "$fixture_dir/modified" "$fixture_dir/modified" \
+        "$fixture_dir/refreshed_new" "$fixture_dir/refreshed_stale" "$fixture_dir/refreshed_known"
+    selftest_assert_equal "refreshed exact fingerprints have no new debt" 0 \
+        "$(wc -l < "$fixture_dir/refreshed_new" | tr -d ' ')"
+    selftest_assert_equal "refreshed exact fingerprints have no stale debt" 0 \
+        "$(wc -l < "$fixture_dir/refreshed_stale" | tr -d ' ')"
+    selftest_assert_equal "refreshed exact fingerprints retain known paths" 2 \
+        "$(wc -l < "$fixture_dir/refreshed_known" | tr -d ' ')"
+    printf 'print("modified again")\n' > "$fixture_dir/known.py"
+    printf './known.py\n./linked.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
+        | LC_ALL=C sort > "$fixture_dir/modified_again"
+    classify_forbidden_extension_debt "$fixture_dir/modified_again" "$fixture_dir/modified" \
+        "$fixture_dir/again_new" "$fixture_dir/again_stale" "$fixture_dir/again_known"
+    selftest_assert_equal "edit after fingerprint refresh is new debt" 1 \
+        "$(wc -l < "$fixture_dir/again_new" | tr -d ' ')"
+    selftest_assert_equal "edit after fingerprint refresh leaves stale debt" 1 \
+        "$(wc -l < "$fixture_dir/again_stale" | tr -d ' ')"
+
     grep '  \./linked\.py$' "$fixture_dir/baseline" > "$fixture_dir/symlink_baseline"
     ln -snf new.sh "$fixture_dir/linked.py"
     printf './linked.py\n' | (cd "$fixture_dir" && fingerprint_forbidden_extension_files) \
@@ -168,7 +188,7 @@ selftest() {
         echo "check-repo-hygiene: SELFTEST FAILED ($SELFTEST_FAILURES assertion(s))"
         return 1
     fi
-    echo "check-repo-hygiene: selftest 13/13 fixtures correct"
+    echo "check-repo-hygiene: selftest 18/18 fixtures correct"
     return 0
 }
 

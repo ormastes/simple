@@ -19,6 +19,7 @@ use compiler.hir.hir_lowering.hir_phase_profile.{
 }
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
+use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
@@ -71,6 +72,12 @@ impl HirLowering:
         # elided, and every root still expands its own closure from scratch.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         val prof_glob_started = hir_phase_profile_now()
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
         hir_phase_profile_add(HIR_PROF_GLOB, prof_glob_started)
@@ -82,7 +89,57 @@ impl HirLowering:
         # implementation details of the sibling that wrote them.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
+        # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
+        self.glob_expand_memo_keys = []
+        self.glob_expand_memo_values = []
+        self.glob_expand_memo_hash_buckets = []
+        self.glob_expand_memo_hash_next = []
+        self.glob_expand_memo_hash_mask = 0
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, false, false)
+
+    me glob_expand_memo_lookup(key: text) -> i64:
+        """Slot of `key` in the scalar glob-expansion chain table, or -1.
+        Never reads the {text: i64} Dict: contains_key on it mis-reports
+        under Stage-2 native codegen (BOOT-20 2026-09-18, the driver.spl
+        9h/100%-CPU/flat-RSS wedge)."""
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            return -1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        var index = self.glob_expand_memo_hash_buckets[bucket]
+        while index >= 0:
+            if self.glob_expand_memo_keys[index] == key:
+                return index
+            index = self.glob_expand_memo_hash_next[index]
+        -1
+
+    me glob_expand_memo_record(key: text, depth: i64):
+        """Insert or refresh one (key -> shallowest depth) pair in the scalar
+        glob-expansion table; the legacy Dict is written in lockstep. Unlike
+        the append-only memos this one is refreshed in place: a shallower
+        arrival re-expands and overwrites the depth, exactly as the Dict did.
+        """
+        val existing = self.glob_expand_memo_lookup(key)
+        if existing >= 0:
+            self.glob_expand_memo_values[existing] = depth
+            self.glob_expand_memo[key] = depth
+            return
+        if self.glob_expand_memo_hash_buckets.len() == 0:
+            # 1024 buckets per root expansion; the reachable set of one root
+            # is bounded by the frozen registry size and chains absorb the
+            # cyclic-graph volume.
+            val glob_bucket_count: i64 = 1024
+            self.glob_expand_memo_hash_mask = glob_bucket_count - 1
+            var fill = 0
+            while fill < glob_bucket_count:
+                self.glob_expand_memo_hash_buckets = self.glob_expand_memo_hash_buckets.push(-1)
+                fill = fill + 1
+        val bucket = hash_text(key) & self.glob_expand_memo_hash_mask
+        self.glob_expand_memo_hash_next = self.glob_expand_memo_hash_next.push(
+            self.glob_expand_memo_hash_buckets[bucket])
+        self.glob_expand_memo_hash_buckets[bucket] = self.glob_expand_memo_keys.len()
+        self.glob_expand_memo_keys = self.glob_expand_memo_keys.push(key)
+        self.glob_expand_memo_values = self.glob_expand_memo_values.push(depth)
+        self.glob_expand_memo[key] = depth
 
     me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
@@ -91,13 +148,14 @@ impl HirLowering:
         # hir_lowering/types.spl. Skip only when this key was ALREADY expanded
         # at the same or a shallower depth; a shallower arrival re-expands
         # because it can reach further before the depth cap bites.
-        # Bracket-index read after contains_key: Dict.get() on the self-hosted
-        # native path corrupts/mis-reports present values.
-        if self.glob_expand_memo.contains_key(imported_mod_name):
-            val seen_depth: i64 = self.glob_expand_memo[imported_mod_name]
+        # BOOT-20 (2026-09-18): answered from the scalar chain table; the
+        # Dict is no longer consulted (native-path Dict.get caveat).
+        val expand_slot = self.glob_expand_memo_lookup(imported_mod_name)
+        if expand_slot >= 0:
+            val seen_depth: i64 = self.glob_expand_memo_values[expand_slot]
             if seen_depth <= depth:
                 return
-        self.glob_expand_memo[imported_mod_name] = depth
+        self.glob_expand_memo_record(imported_mod_name, depth)
         hir_phase_profile_count_glob_expansion()
         var keys = imported_mod.composite_names
         var idx = 0
@@ -245,26 +303,74 @@ impl HirLowering:
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
-        var importer_key = module.name
-        if importer_key.ends_with(".spl"):
-            importer_key = importer_key[0:importer_key.len() - 4]
-        importer_key = importer_key.replace("/", ".")
-        if importer_key.starts_with("src."):
-            importer_key = importer_key.substring(4)
-        val importer_surface_index = self.surface_index_for_name(importer_key)
-        if importer_surface_index < 0:
-            self.error("missing importing module surface for {module.name}", Span.empty())
+        # A module with NO imports has nothing to resolve, so it must not need a
+        # registered surface of its own. Requiring one made
+        # `HirLowering.with_filename(path).lower_module(parsed)` — the public
+        # single-module entry, used by the in-guest riscv64/x86_64 interpreter
+        # rows and by any embedder that drives the frontend directly without the
+        # module loader — fail with "missing importing module surface" on a
+        # self-contained hello world. The import-item rows read below are the
+        # ONLY consumer of the importer's own surface; a module WITH imports
+        # whose own surface is still absent (unit fixtures, single-module
+        # embedders) reads the identical rows from the live parser import
+        # decls instead — the surface rows are a verbatim flatten of
+        # `owner.value.imports` (module_surface_declarations.spl), built in
+        # the same per-import order — so both shapes stay semantics-equal and
+        # only the imported TARGET's surface is load-bearing either way.
+        if module.imports.len() == 0:
             return
-        val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+        # Use the same owner as source discovery and native symbol naming.
+        # A positional entry can be absolute and contain host punctuation
+        # (`/tmp/probe-dir/main.spl`). The old local slash-only rewrite kept
+        # the hyphen while the surface registry key sanitized it to `_`, so
+        # the importing module could not find its own already-frozen surface.
+        val importer_key = module_logical_name_from_path(module.name)
+        var importer_surface_index = self.surface_index_for_name(importer_key)
+        if importer_surface_index < 0:
+            # The logical key elides host punctuation but the registry keys its
+            # surfaces with `module_surface_canonical_module_name`
+            # (module_surface_registry.spl:79), whose canonical spelling also
+            # drops all-digit tier segments and folds `std.` -> `lib.`;
+            # `hir_pkg_canonical_module_name` (module_lowering.spl:90) is the
+            # in-scope twin of that rule and is already used on `module.name`
+            # below. Under SIMPLE_BOOTSTRAP `ParserModule.name` is the
+            # raw physical path, so `src/compiler/60.mir_opt/mir_opt/mod.spl`
+            # yields a numbered key here while the surface is registered
+            # de-numbered -> exact miss -> the file gets NO import surface at
+            # all, and every name it imports is later reported as
+            # `unresolved type`/`unresolved name`. In the Stage 3 log of
+            # 2026-09-01 all 78 files whose FIRST HIR error was
+            # `missing importing module surface` carried a numbered path, and
+            # those 78 files account for 4796 of the run's 5024 HIR fatals.
+            importer_surface_index = self.surface_index_for_name(
+                hir_pkg_canonical_module_name(module.name))
+        if importer_surface_index < 0:
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                # Cheap insurance for the next lane if this ever resurfaces:
+                # print both tried keys and the registry size so a failed
+                # rebuild names whether the key is genuinely unregistered vs.
+                # a scan miss, instead of being a dead end. See
+                # bootstrap_s3_missing_importing_module_surface_2026-09-14.
+                eprint("[surface-miss] module={module.name} key1={importer_key} key2={hir_pkg_canonical_module_name(module.name)} registry_size={self.module_surfaces.ordered_names.len()}")
+            # NOT a hard error: the per-import item rows are re-derived from
+            # the live parser import decls at the use site below (they are a
+            # verbatim flatten of `owner.value.imports` by construction —
+            # module_surface_declarations.spl). Single-module embedders and
+            # unit fixtures that drive lower_module() without registering the
+            # importing module's own surface used to die here with every
+            # import silently unresolved (regressed the
+            # module_namespace_retained_surface fixture family; see
+            # doc/08_tracking/bug/stage4_env_paths_llvm_undeclared_variables_2026_08_03.md).
+            # The real entry closure is unaffected: every closure module has
+            # a registered importer surface, so this branch never fires there.
+            importer_surface_index = -1
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
+            var fallback_item_name = ""
             # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
             var imported_key = if self.surface_index_for_name(imp.module) >= 0: imp.module else: ""
-            if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                val diag_item_count = importer_surface.import_item_offsets[import_idx + 1] - importer_surface.import_item_offsets[import_idx]
-                eprint("[imp] importer={module.name} module={imp.module} items={diag_item_count} found={imported_key != ""}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
@@ -276,12 +382,7 @@ impl HirLowering:
                 # so a raw leading-dot key always misses. Normalize against the
                 # importing module's own name. The entry module's name can be a
                 # FILE PATH (src/app/mcp/main.spl) — canonicalize to dotted.
-                var rel_base = module.name
-                if rel_base.ends_with(".spl"):
-                    rel_base = rel_base[0:rel_base.len() - 4]
-                rel_base = rel_base.replace("/", ".")
-                if rel_base.starts_with("src."):
-                    rel_base = rel_base.substring(4)
+                val rel_base = module_logical_name_from_path(module.name)
                 var rel_dots = 0
                 while rel_dots < imp.module.len() and imp.module.substring(rel_dots, rel_dots + 1) == ".":
                     rel_dots = rel_dots + 1
@@ -307,12 +408,74 @@ impl HirLowering:
                 # files register ONLY under path-derived names, keeping
                 # resolved_module_name canonical so call symbols match the
                 # definition's mangled name.
-                val fb_key = self.resolve_module_key(imp.module)
+                #
+                # RELBASE (2026-09-01): use the RELATIVE-aware twin. The
+                # hand-rolled `rel_base` splice above (:299-315) drops `.spl`,
+                # `/`->`.` and a leading `src.` but NOT the all-digit tier
+                # segment, so for the 89 relative `use .` lines under
+                # src/compiler/ (all in numbered tiers: 99.loader, 70.backend,
+                # 40.mono) it builds `compiler.99.loader.x` while the registry
+                # keys surfaces tier-stripped -> that branch always misses, and
+                # this fallback then re-missed too because `resolve_module_key`
+                # has no relative handling at all (registration.spl:583-620):
+                # a leading-dot key can never match. `resolve_module_key_relative`
+                # (registration.spl:622) splices via
+                # `hir_module_logical_name_from_path`, which delegates to
+                # `module_logical_name_from_path` (module_path_naming.spl:61,
+                # tier strip at :93) -- the SAME derivation the flat bootstrap
+                # accumulator uses to NAME DEFINITIONS
+                # (bootstrap_globals.spl:82) -- and then still runs the
+                # absolute fallbacks. Inert for non-relative imports: its first
+                # line delegates straight to `resolve_module_key`.
+                val fb_key = self.resolve_module_key_relative(imp.module, module.name)
                 if fb_key != "" and self.surface_index_for_name(fb_key) >= 0:
                     imported_key = fb_key
                     resolved_module_name = fb_key
-            if imported_key == "" and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[import-miss] importer={module.name} module={imp.module}")
+            if imported_key == "" and importer_surface_index >= 0:
+                # The frozen importer owns the full-module versus parent-item
+                # decision. Reuse its selected target and normalized item row
+                # instead of independently guessing from the parser spelling.
+                val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+                if import_idx < importer_surface.import_target_names.len():
+                    val frozen_target = importer_surface.import_target_names[import_idx]
+                    if frozen_target != "" and self.surface_index_for_name(frozen_target) >= 0:
+                        imported_key = frozen_target
+                        resolved_module_name = frozen_target
+            if imported_key == "" and importer_surface_index < 0 and imp.items.len() == 1:
+                # Single-module embedders omit their own frozen surface. Keep
+                # their import behavior aligned with the registry freeze.
+                val item = imp.items[0]
+                if item.has_alias and item.name == imp.module:
+                    val path_parts = imp.module.split(".")
+                    if path_parts.len() > 1:
+                        val member_name = path_parts[path_parts.len() - 1]
+                        var parent_name = ""
+                        var part_index = 0
+                        while part_index < path_parts.len() - 1:
+                            if part_index > 0:
+                                parent_name = parent_name + "."
+                            parent_name = parent_name + path_parts[part_index]
+                            part_index = part_index + 1
+                        var parent_lookup = parent_name
+                        var leading_dots = 0
+                        while leading_dots < imp.module.len() and
+                              imp.module.substring(leading_dots, leading_dots + 1) == ".":
+                            leading_dots = leading_dots + 1
+                        if leading_dots > 0 and leading_dots == parent_name.len() + 1:
+                            parent_lookup = hir_pkg_canonical_module_name(module.name)
+                            var dot_index = 0
+                            while dot_index < leading_dots:
+                                val package_parts = parent_lookup.split(".")
+                                parent_lookup = if package_parts.len() > 1:
+                                    package_parts[0:package_parts.len() - 1].join(".")
+                                else: ""
+                                dot_index = dot_index + 1
+                        if parent_lookup != "" and member_name != "":
+                            val parent_key = self.resolve_module_key_relative(parent_lookup, module.name)
+                            if parent_key != "" and self.surface_index_for_name(parent_key) >= 0:
+                                imported_key = parent_key
+                                resolved_module_name = parent_key
+                                fallback_item_name = member_name
             if imported_key != "":
                 val imported_index = self.surface_index_for_name(imported_key)
                 if imported_index < 0:
@@ -320,9 +483,76 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
-                val item_start = importer_surface.import_item_offsets[import_idx]
-                val item_end = importer_surface.import_item_offsets[import_idx + 1]
-                if item_start == item_end:
+                # Per-import item rows: the frozen importer surface's flattened
+                # copy when the importing module has a registered surface, the
+                # live parser import decls otherwise (identical data and order;
+                # see the note on the importer_surface_index branch above).
+                var item_start = 0
+                var item_end = 0
+                var item_names: [text] = []
+                var item_aliases: [text] = []
+                var item_has_alias: [bool] = []
+                if importer_surface_index >= 0:
+                    val importer_surface = self.module_surfaces.surfaces[importer_surface_index]
+                    item_start = importer_surface.import_item_offsets[import_idx]
+                    item_end = importer_surface.import_item_offsets[import_idx + 1]
+                    item_names = importer_surface.import_item_names
+                    item_aliases = importer_surface.import_item_aliases
+                    item_has_alias = importer_surface.import_item_has_alias
+                else:
+                    for import_item in imp.items:
+                        val projected_item_name = if fallback_item_name != "":
+                            fallback_item_name
+                        else: import_item.name
+                        item_names = item_names.push(projected_item_name)
+                        item_aliases = item_aliases.push(import_item.alias)
+                        item_has_alias = item_has_alias.push(import_item.has_alias)
+                    item_end = item_names.len()
+                # `use full.module as local` is encoded by the parser as one
+                # aliased import item whose source equals the complete module
+                # path. Once that module resolves, the item is a namespace
+                # alias, not a request for an exported item literally named
+                # `full.module`. Keep its defining module identity for
+                # qualified calls such as `local.function()`.
+                var is_complete_module_alias = false
+                if item_end == item_start + 1:
+                    is_complete_module_alias = item_has_alias[item_start] and
+                        item_names[item_start] == imp.module
+                if is_complete_module_alias:
+                    val module_alias = item_aliases[item_start]
+                    if module_alias != "" and not self.symbols.lookup_or_invalid(module_alias).is_valid():
+                        self.symbols.define(module_alias, SymbolKind.Module, nil,
+                            imp.span, Visibility.Private, false,
+                            Some(imported_surface.module_name))
+                    # A namespace alias also needs qualified projections of
+                    # the target's declarations. Registering a glob here
+                    # would leak bare names and let unrelated imports win.
+                    if module_alias != "":
+                        for name in imported_surface.callable_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.constant_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.composite_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.enum_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.trait_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                        for name in imported_surface.type_alias_names:
+                            self.register_imported_symbol(imported_index,
+                                resolved_module_name, name,
+                                module_alias + "." + name, imp.span, true)
+                elif item_start == item_end:
                     self.register_glob_imported_symbols(imported_surface, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`. Its owner
@@ -341,12 +571,41 @@ impl HirLowering:
                 else:
                     var item_idx = item_start
                     while item_idx < item_end:
-                        val item_name = importer_surface.import_item_names[item_idx]
-                        val local_name = if importer_surface.import_item_has_alias[item_idx]:
-                            importer_surface.import_item_aliases[item_idx]
+                        val item_name = item_names[item_idx]
+                        val local_name = if item_has_alias[item_idx]:
+                            item_aliases[item_idx]
                         else: item_name
+                        # An explicit named import is a declaration about its
+                        # target surface.  Do not use the local symbol table
+                        # as the oracle here: an unrelated local declaration
+                        # (or an alias collision) can already occupy the local
+                        # name while item_name is absent from the imported
+                        # module.  The generic registration helper deliberately
+                        # permits speculative misses for lazy dependency
+                        # probes, so make the hard diagnostic only here.
+                        if not self.surface_declares_item_indexed(imported_surface, item_name):
+                            val reexport = self.find_reexport_source(
+                                imported_surface.physical_index, item_name)
+                            # A truncated or invalid walk is not proof that
+                            # the frozen target lacks the requested export.
+                            # Preserve the registration path in that case;
+                            # only a complete re-export miss is diagnostic.
+                            if not reexport.found and self.reexport_walk_complete and
+                               self.reexport_walk_valid:
+                                val alias_suffix = if item_has_alias[item_idx]:
+                                    " as {local_name}"
+                                else: ""
+                                self.error(
+                                    "module {imp.module} has no exported item {item_name}{alias_suffix}",
+                                    imp.span)
                         self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
                         item_idx = item_idx + 1
+            else:
+                # Do not change unresolved module-only/glob behavior. Named
+                # imports name a required source item and therefore diagnose
+                # an absent target module at this boundary.
+                if imp.items.len() > 0:
+                    self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
 
     me resolve_package_sibling_symbols(module: ParserModule):
@@ -357,12 +616,7 @@ impl HirLowering:
         module's public symbols explicitly, or every bare cross-file call in a
         package dies with "unresolved name" (fatal since HIR lowering errors
         became build errors)."""
-        var self_name = module.name
-        if self_name.ends_with(".spl"):
-            self_name = self_name[0:self_name.len() - 4]
-            self_name = self_name.replace("/", ".")
-            if self_name.starts_with("src."):
-                self_name = self_name.substring(4)
+        val self_name = module_logical_name_from_path(module.name)
         val self_segs = self_name.split(".")
         if self_segs.len() < 2:
             return

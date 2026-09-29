@@ -1,0 +1,326 @@
+"""
+## Purpose and audience
+This is the fail-closed end-to-end acceptance suite for L07 physical
+three-file compilation. It uses real packer, physical broker, worker,
+portable-HIR verifier and publisher ports. It contains no source scan,
+caller-created worker receipt, or synthetic publication success.
+
+The current worker, portable verifier, and publisher are intentionally
+inactive. The unavailable-owner scenarios therefore prove refusal only; they
+do not award L07 acceptance credit. When those owners are admitted, the
+primary scenarios must be revised to validate their issuer-measured results
+and durable receipts; an availability bit never promotes this suite.
+
+## Operator workflow
+bin/simple test test/03_system/optimization/l07_three_file_acceptance_v2_spec.spl --native
+
+## Compatibility and limitations
+This suite exposes eight primary activation scenarios, each with three
+independent success/boundary/error checks. A physical facade read is not a
+compiler-worker result. A typed unavailable result is correct fail-closed
+behavior, but is not a successful L07 compilation.
+"""
+# codex-system-test
+# @tag:in-development
+# doc-path: doc/03_plan/sys_test/l7_l8_three_file_compile_activation_contract.md
+# @req REQ-CSM-006 REQ-CSM-008 REQ-CSM-017 REQ-CSM-023 REQ-CSM-027 REQ-CSM-028 REQ-CSM-029
+
+use std.spec.{describe, context, it, expect, step}
+use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use compiler.common.cache_contract.three_payload_compile_v1.{ThreePayloadSemanticRefKindV1}
+use compiler.common.cache_contract.three_payload_compile_v2.{ThreePayloadFallbackV1}
+use compiler.driver.cache.worker.three_payload_physical_file_broker_v1.{
+    ThreePayloadPhysicalFileSetV1, read_three_payload_physical_files_v1
+}
+use compiler.driver.cache.worker.three_payload_worker_io_v1.{run_three_payload_worker_v1}
+use compiler.hir.portable_object_profile_v1.{
+    PortableHirObjectV1, portable_hir_semantic_verifier_digest_v1,
+    portable_hir_native_loader_admit_v1, verify_portable_hir_object_v1
+}
+use compiler.common.cache_contract.portable_object_ref_v1.{
+    PortableObjectRefV1, PortableObjectStageV1, PortablePortabilityV1
+}
+use test.system.optimization.fixtures.l07_three_file_acceptance_v2.{
+    l07_fixture_for_case_v2, l07_fixture_with_body_marker_v2, l07_digest_v2,
+    l07_embedded_body_reference_v2, l07_symbolic_call_reference_v2,
+    l07_physical_worker_active_v2, l07_portable_hir_active_v2,
+    l07_publication_active_v2, l07_all_activation_owners_active_v2,
+    l07_live_evidence_required_v2, l07_publication_blocker_v2, l07_reference_valid_v2,
+    l07_fixture_rr_delta_changes_v2, l07_publisher_rejects_untrusted_candidate_v2
+}
+
+describe "L07 three-file compilation activation v2 [importance=critical; importance_weight=3]":
+
+    context "L07-A01: cold source and initializer [importance=critical; importance_weight=3]":
+        # @req L07-A01: cold two-file physical compilation
+        it "should read exactly the cold source and initializer files through the physical broker [importance=critical; importance_weight=3]":
+            step("Compile a cold source with source and initializer physical inputs")
+            val fixture = l07_fixture_for_case_v2("l07-a01-broker", false).unwrap()
+            val evidence = read_three_payload_physical_files_v1(fixture.files,
+                fixture.prepared, fixture.prepared.seal, fixture.policy).unwrap()
+            expect(evidence.physical.ordinary_input_count).to_equal(2)
+            expect(evidence.physical.distinct_source).to_equal(1)
+            expect(evidence.physical.distinct_init).to_equal(1)
+            expect(evidence.physical.distinct_prior).to_equal(0)
+            expect(evidence.physical.rr_file_reads).to_equal(0)
+
+        it "should produce clean-equivalent summary and diagnostic output from the admitted cold worker [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before accepting cold compilation")
+            val fixture = l07_fixture_for_case_v2("l07-a01-primary", false).unwrap()
+            match l07_live_evidence_required_v2("L07-A01"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    val result = run_three_payload_worker_v1(fixture.prepared,
+                        fixture.prepared.seal, fixture.policy).unwrap()
+                    expect(result.new_summary_digest.len()).to_equal(64)
+                    expect(result.diagnostic_digest.len()).to_equal(64)
+
+        it "should require all live owners before treating cold input evidence as an accepted compilation [importance=critical; importance_weight=3]":
+            step("Reject facade-only evidence as L07 acceptance")
+            expect(l07_all_activation_owners_active_v2()).to_equal(false)
+
+    context "L07-A02: warm source prior TLD and initializer [importance=critical; importance_weight=3]":
+        # @req L07-A02: warm three-file physical compilation
+        it "should read exactly source prior TLD and initializer in the warm path [importance=critical; importance_weight=3]":
+            step("Compile a warm source with source prior and initializer physical inputs")
+            val fixture = l07_fixture_for_case_v2("l07-a02-broker", true).unwrap()
+            val evidence = read_three_payload_physical_files_v1(fixture.files,
+                fixture.prepared, fixture.prepared.seal, fixture.policy).unwrap()
+            expect(evidence.physical.ordinary_input_count).to_equal(3)
+            expect(evidence.physical.distinct_source).to_equal(1)
+            expect(evidence.physical.distinct_prior).to_equal(1)
+            expect(evidence.physical.distinct_init).to_equal(1)
+            expect(evidence.physical.successful_bounded_facade_read_operations).to_equal(3)
+
+        it "should keep prior and initializer role identities distinct when both begin at section zero [importance=critical; importance_weight=3]":
+            step("Preserve role identity across equal section indices")
+            val fixture = l07_fixture_for_case_v2("l07-a02-roles", true).unwrap()
+            expect(fixture.files.prior_tld_path.is_some()).to_equal(true)
+            expect(fixture.files.prior_tld_path.unwrap()).to_equal(fixture.root + "/module.tld")
+            expect(fixture.files.effective_init_tld_path).to_equal(fixture.root + "/__init__.tld")
+            expect(fixture.prepared.seal.prior_tld_digest.is_some()).to_equal(true)
+            expect(fixture.prepared.seal.prior_tld_digest.unwrap() == fixture.prepared.seal.init_tld_digest).to_equal(false)
+
+        it "should preserve output and diagnostics across clean and warm compilation [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before comparing clean and warm compilation")
+            val cold = l07_fixture_for_case_v2("l07-a02-primary-cold", false).unwrap()
+            val warm = l07_fixture_for_case_v2("l07-a02-primary-warm", true).unwrap()
+            match l07_live_evidence_required_v2("L07-A02"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    val clean = run_three_payload_worker_v1(cold.prepared, cold.prepared.seal,
+                        cold.policy).unwrap()
+                    val incremental = run_three_payload_worker_v1(warm.prepared, warm.prepared.seal,
+                        warm.policy).unwrap()
+                    expect(incremental.new_summary_digest).to_equal(clean.new_summary_digest)
+                    expect(incremental.diagnostic_digest).to_equal(clean.diagnostic_digest)
+
+    context "L07-A03: reverse-reference confinement [importance=critical; importance_weight=3]":
+        # @req L07-A03: RR stays at the coordinator boundary
+        it "should reject a reverse-reference request before the worker opens ordinary inputs [importance=critical; importance_weight=3]":
+            step("Deny reverse-reference and fourth-input access at the worker boundary")
+            val fixture = l07_fixture_for_case_v2("l07-a03-rr-policy", false).unwrap()
+            var policy = fixture.policy
+            policy.request_reverse_reference = true
+            match read_three_payload_physical_files_v1(fixture.files, fixture.prepared,
+                    fixture.prepared.seal, policy):
+                case Err(ThreePayloadFallbackV1.ExternalFacetRequired):
+                    expect(policy.request_reverse_reference).to_equal(true)
+                case _: fail("physical broker accepted coordinator-only RR access")
+
+        it "should reject a fourth RR file disguised as a source payload [importance=critical; importance_weight=3]":
+            step("Offer an RR file at the worker source role")
+            val fixture = l07_fixture_for_case_v2("l07-a03-rr-disguise", false).unwrap()
+            val rr_path = fixture.root + "/module.rr"
+            if not file_write_bytes(rr_path, text_to_bytes("coordinator-only-rr")):
+                fail("RR fixture write failed")
+            val disguised = ThreePayloadPhysicalFileSetV1(source_path: rr_path,
+                prior_tld_path: nil, effective_init_tld_path: fixture.files.effective_init_tld_path)
+            match read_three_payload_physical_files_v1(disguised, fixture.prepared,
+                    fixture.prepared.seal, fixture.policy):
+                case Err(ThreePayloadFallbackV1.ExternalFacetRequired):
+                    expect(disguised.source_path.ends_with(".rr")).to_equal(true)
+                    expect(l07_fixture_rr_delta_changes_v2()).to_equal(true)
+                case _: fail("RR file crossed the three-payload role gate")
+
+        it "should run coordinator-confined affected-file scheduling without widening worker inputs [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before RR-driven affected-file scheduling")
+            val fixture = l07_fixture_for_case_v2("l07-a03-primary", false).unwrap()
+            var policy = fixture.policy
+            policy.request_external_input = true
+            match l07_live_evidence_required_v2("L07-A03"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    match run_three_payload_worker_v1(fixture.prepared, fixture.prepared.seal, policy):
+                        case Err(ThreePayloadFallbackV1.ExternalFacetRequired):
+                            expect(policy.request_external_input).to_equal(true)
+                        case _: fail("worker accepted an undeclared external input")
+
+    context "L07-A04: embedded macro generic and default-trait bodies [importance=critical; importance_weight=3]":
+        # @req L07-A04: embedded body closure and invalidation
+        it "should retain macro generic and default-trait bodies as verified embedded sections [importance=critical; importance_weight=3]":
+            step("Resolve macro generic and default-trait bodies from sealed TLD sections")
+            val fixture = l07_fixture_for_case_v2("l07-a04-embedded", true).unwrap()
+            expect(l07_reference_valid_v2(fixture.prepared.seal.semantic_refs[1], 3, 1048576)).to_equal(true)
+            expect(l07_reference_valid_v2(fixture.prepared.seal.semantic_refs[2], 3, 1048576)).to_equal(true)
+            expect(l07_reference_valid_v2(fixture.prepared.seal.semantic_refs[4], 3, 1048576)).to_equal(true)
+            expect(fixture.prepared.seal.semantic_refs[1].embedded.is_some()).to_equal(true)
+            expect(fixture.prepared.seal.semantic_refs[2].embedded.is_some()).to_equal(true)
+            expect(fixture.prepared.seal.semantic_refs[4].embedded.is_some()).to_equal(true)
+
+        it "should reject an embedded body whose section is outside the declared closure [importance=critical; importance_weight=3]":
+            step("Reject an out-of-range embedded body reference")
+            val fixture = l07_fixture_for_case_v2("l07-a04-invalid", false).unwrap()
+            val section = fixture.prepared.init_tld_header.sections[0]
+            val invalid = l07_embedded_body_reference_v2(ThreePayloadSemanticRefKindV1.MacroExpansion,
+                "macro.out-of-range", section)
+            expect(l07_reference_valid_v2(invalid, 0, 1048576)).to_equal(false)
+
+        it "should invalidate compiled output when a consumed embedded body changes [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before body-change invalidation")
+            val before = l07_fixture_with_body_marker_v2("l07-a04-primary-before", true,
+                "before").unwrap()
+            val after = l07_fixture_with_body_marker_v2("l07-a04-primary-after", true,
+                "after").unwrap()
+            match l07_live_evidence_required_v2("L07-A04"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    val before_result = run_three_payload_worker_v1(before.prepared,
+                        before.prepared.seal, before.policy).unwrap()
+                    val after_result = run_three_payload_worker_v1(after.prepared,
+                        after.prepared.seal, after.policy).unwrap()
+                    expect(before_result.input_identity.init_tld_digest ==
+                        after_result.input_identity.init_tld_digest).to_equal(false)
+                    expect(before_result.new_summary_digest ==
+                        after_result.new_summary_digest).to_equal(false)
+
+    context "L07-A05: symbolic trait and aspect calls [importance=critical; importance_weight=3]":
+        # @req L07-A05: call-only trait/aspect contract and invalidation
+        it "should retain ordinary trait and aspect calls as symbolic contract records [importance=critical; importance_weight=3]":
+            step("Keep ordinary trait and aspect calls symbolic and contract-bound")
+            val fixture = l07_fixture_for_case_v2("l07-a05-symbolic", true).unwrap()
+            val aspect = fixture.prepared.seal.semantic_refs[0]
+            val trait = fixture.prepared.seal.semantic_refs[3]
+            expect(l07_reference_valid_v2(aspect, 3, 1048576)).to_equal(true)
+            expect(l07_reference_valid_v2(trait, 3, 1048576)).to_equal(true)
+            expect(aspect.embedded.is_none()).to_equal(true)
+            expect(trait.embedded.is_none()).to_equal(true)
+            expect(aspect.selection_contract_digest.len()).to_equal(64)
+
+        it "should reject an ordinary trait call that smuggles an implementation section [importance=critical; importance_weight=3]":
+            step("Reject implementation bytes on a symbolic trait call")
+            val fixture = l07_fixture_for_case_v2("l07-a05-smuggle", false).unwrap()
+            val bad = l07_embedded_body_reference_v2(ThreePayloadSemanticRefKindV1.TraitCallable,
+                "trait.body-smuggle", fixture.prepared.init_tld_header.sections[0])
+            expect(l07_reference_valid_v2(bad, 3, 1048576)).to_equal(false)
+
+        it "should recompile only the affected call contract after aspect selection changes [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before aspect contract invalidation")
+            val old_ref = l07_symbolic_call_reference_v2(ThreePayloadSemanticRefKindV1.AspectCallable,
+                "aspect.call", "old-contract")
+            val new_ref = l07_symbolic_call_reference_v2(ThreePayloadSemanticRefKindV1.AspectCallable,
+                "aspect.call", "new-contract")
+            match l07_live_evidence_required_v2("L07-A05"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    expect(old_ref.callable_signature_digest == new_ref.callable_signature_digest).to_equal(false)
+                    expect(old_ref.selection_contract_digest == new_ref.selection_contract_digest).to_equal(false)
+                    expect(old_ref.embedded.is_none()).to_equal(true)
+
+    context "L07-A06: advice profile [importance=critical; importance_weight=3]":
+        # @req L07-A06: verified advice profile/refusal matrix
+        it "should refuse advice execution while no admitted physical worker exists [importance=critical; importance_weight=3]":
+            step("Refuse around and body-observing advice outside the verified profile")
+            val fixture = l07_fixture_for_case_v2("l07-a06-refusal", true).unwrap()
+            match run_three_payload_worker_v1(fixture.prepared, fixture.prepared.seal, fixture.policy):
+                case Err(ThreePayloadFallbackV1.AuthorityUnavailable):
+                    expect(l07_physical_worker_active_v2()).to_equal(false)
+                case _: fail("advice-capable compilation escaped the inactive worker boundary")
+
+        it "should preserve a call-only aspect reference without an advice body section [importance=critical; importance_weight=3]":
+            step("Inspect the call-only aspect boundary")
+            val aspect = l07_symbolic_call_reference_v2(ThreePayloadSemanticRefKindV1.AspectCallable,
+                "aspect.before", "before-contract")
+            expect(l07_reference_valid_v2(aspect, 0, 0)).to_equal(true)
+            expect(aspect.embedded.is_none()).to_equal(true)
+            expect(aspect.effect_digest.len()).to_equal(64)
+
+        it "should preserve before-after advice semantics only after verified worker execution [importance=critical; importance_weight=3]":
+            step("Require admitted evidence before advice execution")
+            val fixture = l07_fixture_for_case_v2("l07-a06-primary", true).unwrap()
+            match l07_live_evidence_required_v2("L07-A06"):
+                case Err(reason): fail(reason)
+                case Ok(_):
+                    val result = run_three_payload_worker_v1(fixture.prepared,
+                        fixture.prepared.seal, fixture.policy).unwrap()
+                    expect(result.diagnostic_digest.len()).to_equal(64)
+                    expect(result.read_receipt.rr_input_count).to_equal(0)
+
+    context "L07-A07: bounded portable HIR [importance=critical; importance_weight=3]":
+        # @req L07-A07: portable HIR verification before native admission
+        it "should validate bounded portable HIR before native loader admission [importance=critical; importance_weight=3]":
+            step("Require admitted portable-HIR verification before native loading")
+            val unverified = PortableHirObjectV1(encoded_hir: "",
+                verifier_digest: portable_hir_semantic_verifier_digest_v1(),
+                reference: PortableObjectRefV1(content_digest: l07_digest_v2("forged-portable"),
+                    stage: PortableObjectStageV1.Base,
+                    portability: PortablePortabilityV1.Portable, ir_schema: 2,
+                    required_semantics_digest: l07_digest_v2("forged-semantics"),
+                    target_contract_digest: nil,
+                    verification_receipt_digest: l07_digest_v2("forged-receipt")))
+            expect(verify_portable_hir_object_v1(unverified, nil)).to_equal(false)
+            match portable_hir_native_loader_admit_v1(unverified):
+                case Err("portable_hir_verification_failed"): pass
+                case _: fail("native loader admitted unverified portable HIR")
+            match l07_live_evidence_required_v2("L07-A07"):
+                case Err(reason): fail(reason)
+                case Ok(_): fail("primary gate may only open from an admitted verifier receipt")
+
+        it "should keep a physical three-file broker receipt distinct from portable-HIR verification [importance=critical; importance_weight=3]":
+            step("Reject substitution of physical input evidence for portable verification")
+            val fixture = l07_fixture_for_case_v2("l07-a07-broker", false).unwrap()
+            val evidence = read_three_payload_physical_files_v1(fixture.files,
+                fixture.prepared, fixture.prepared.seal, fixture.policy).unwrap()
+            expect(evidence.physical.ordinary_input_count).to_equal(2)
+            expect(l07_portable_hir_active_v2()).to_equal(false)
+            expect(evidence.semantic.semantic_object_file_reads).to_equal(0)
+
+        it "should refuse native admission when the portable verifier is unavailable [importance=critical; importance_weight=3]":
+            step("Require portable verification before native loading")
+            val unverified = PortableHirObjectV1(encoded_hir: "",
+                verifier_digest: portable_hir_semantic_verifier_digest_v1(),
+                reference: PortableObjectRefV1(content_digest: l07_digest_v2("forged-portable"),
+                    stage: PortableObjectStageV1.Base,
+                    portability: PortablePortabilityV1.Portable, ir_schema: 2,
+                    required_semantics_digest: l07_digest_v2("forged-semantics"),
+                    target_contract_digest: nil,
+                    verification_receipt_digest: l07_digest_v2("forged-receipt")))
+            match portable_hir_native_loader_admit_v1(unverified):
+                case Err("portable_hir_verification_failed"):
+                    expect(l07_portable_hir_active_v2()).to_equal(false)
+                case _: fail("native loader admitted an unverified portable object")
+
+    context "L07-A08: atomic generation publication [importance=critical; importance_weight=3]":
+        # @req L07-A08: atomic worker result to durable active-root publication
+        it "should publish one verified worker result without changing the old root on failure [importance=critical; importance_weight=3]":
+            step("Publish summary scope forward reads reverse delta and objects atomically")
+            expect(l07_publisher_rejects_untrusted_candidate_v2()).to_equal(true)
+            expect(l07_publication_active_v2()).to_equal(false)
+            match l07_live_evidence_required_v2("L07-A08"):
+                case Err(reason): fail(reason)
+                case Ok(_): fail("primary gate may only open from an atomic root publication receipt")
+
+        it "should reject publication credit when no worker result can be produced by the live worker [importance=critical; importance_weight=3]":
+            step("Require a verified worker result before publication")
+            val fixture = l07_fixture_for_case_v2("l07-a08-worker-refusal", true).unwrap()
+            match run_three_payload_worker_v1(fixture.prepared, fixture.prepared.seal, fixture.policy):
+                case Err(ThreePayloadFallbackV1.AuthorityUnavailable):
+                    expect(l07_publication_active_v2()).to_equal(false)
+                case _: fail("publication precondition received an unadmitted worker result")
+
+        it "should retain the explicit durable-publication blocker instead of synthesizing an atomic receipt [importance=critical; importance_weight=3]":
+            step("Expose the publication blocker for the activation owner")
+            expect(l07_publication_blocker_v2()).to_equal(
+                "verified_cas_generation_kinds_and_gc_reachability_unavailable")
+            expect(l07_publication_active_v2()).to_equal(false)

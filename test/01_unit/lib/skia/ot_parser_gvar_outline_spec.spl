@@ -1,0 +1,95 @@
+# @cover src/lib/skia/feature/glyph/ot_parser_gvar.spl 60%
+# apply_glyph_deltas must actually move the outline: it decodes the packed
+# TupleVariation stream from the blob GvarTable was parsed from, addressing the
+# glyph variation data array relative to the gvar table's own offset.
+#
+# The delta assertions use SkPath.contains(), which returns bool, so no foreign
+# struct is built from an `it` block and no struct field is read there.
+
+use std.spipe.*
+use std.skia.entity.path.{sk_path_new}
+use std.skia.feature.glyph.ot_parser.{parse_offset_table}
+use std.skia.feature.glyph.ot_parser_gvar.{parse_gvar, apply_glyph_deltas}
+
+# A minimal sfnt carrying a single 'gvar' table placed at byte 28 — deliberately
+# NOT at offset 0, so a reader that ignores the table offset addresses the wrong
+# bytes and produces no deltas at all.
+#
+#   0  offset table: version 1.0, numTables 1
+#  12  table record: tag 'gvar', checksum 0, offset 28, length 42
+#  28  gvar header (20 bytes) + short offsets [0, 18] (4 bytes)
+#  52  glyph 0 variation data (18 bytes): one tuple, peak +1.0 on axis 0,
+#      x deltas 200/200/200 as an i16 run, y deltas as a zero run
+fn variable_font_blob() -> [u8]:
+    [
+        0x00, 0x01, 0x00, 0x00,              # sfntVersion 1.0
+        0x00, 0x01,                          # numTables = 1
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # searchRange / entrySelector / rangeShift
+        0x67, 0x76, 0x61, 0x72,              # tag 'gvar'
+        0x00, 0x00, 0x00, 0x00,              # checksum
+        0x00, 0x00, 0x00, 0x1C,              # offset = 28
+        0x00, 0x00, 0x00, 0x2A,              # length = 42
+        # --- gvar table (base = 28) ---
+        0x00, 0x01, 0x00, 0x00,              # majorVersion 1, minorVersion 0
+        0x00, 0x01,                          # axisCount = 1
+        0x00, 0x00,                          # sharedTupleCount = 0
+        0x00, 0x00, 0x00, 0x00,              # sharedTuplesOffset = 0
+        0x00, 0x01,                          # glyphCount = 1
+        0x00, 0x00,                          # flags = 0 (short offsets)
+        0x00, 0x00, 0x00, 0x18,              # glyphVariationDataArrayOffset = 24
+        0x00, 0x00,                          # offsets[0] = 0
+        0x00, 0x09,                          # offsets[1] = 9 (x2 = 18 bytes)
+        # --- glyph 0 variation data (absolute 52) ---
+        0x00, 0x01,                          # tupleVariationCount = 1
+        0x00, 0x0A,                          # dataOffset = 10
+        0x00, 0x08,                          # variationDataSize = 8
+        0x80, 0x00,                          # flags: EMBEDDED_PEAK_TUPLE
+        0x40, 0x00,                          # peak F2DOT14 = 1.0
+        0x42, 0x00, 0xC8, 0x00, 0xC8, 0x00, 0xC8,  # x: i16 run of 3 -> 200, 200, 200
+        0x82                                 # y: zero run of 3
+    ]
+
+fn sample_triangle() -> SkPath:
+    var p = sk_path_new()
+    p = p.move_to(0.0, 0.0)
+    p = p.line_to(100.0, 0.0)
+    p = p.line_to(0.0, 100.0)
+    p = p.close()
+    p
+
+describe "apply_glyph_deltas — outline application from the parsed blob":
+    it "parses the gvar table out of a non-zero table offset":
+        val font = parse_offset_table(variable_font_blob()).unwrap()
+        expect(parse_gvar(font) == None).to_equal(false)
+
+    it "shifts every outline point by the decoded delta":
+        val font = parse_offset_table(variable_font_blob()).unwrap()
+        val gvar = parse_gvar(font).unwrap()
+        val original = sample_triangle()
+        expect(original.contains(10.0, 10.0)).to_equal(true)
+        expect(original.contains(210.0, 10.0)).to_equal(false)
+        val moved = apply_glyph_deltas(original, gvar, 0, [1.0])
+        expect(moved.contains(210.0, 10.0)).to_equal(true)
+        expect(moved.contains(10.0, 10.0)).to_equal(false)
+
+    it "applies a half-weight delta at half the axis coordinate":
+        val font = parse_offset_table(variable_font_blob()).unwrap()
+        val gvar = parse_gvar(font).unwrap()
+        val moved = apply_glyph_deltas(sample_triangle(), gvar, 0, [0.5])
+        expect(moved.contains(110.0, 10.0)).to_equal(true)
+        expect(moved.contains(210.0, 10.0)).to_equal(false)
+
+    it "leaves the outline untouched when no axis coordinates are supplied":
+        val font = parse_offset_table(variable_font_blob()).unwrap()
+        val gvar = parse_gvar(font).unwrap()
+        val coords: [f64] = []
+        val same = apply_glyph_deltas(sample_triangle(), gvar, 0, coords)
+        expect(same.contains(10.0, 10.0)).to_equal(true)
+        expect(same.contains(210.0, 10.0)).to_equal(false)
+
+    it "leaves the outline untouched for a glyph id past glyphCount":
+        val font = parse_offset_table(variable_font_blob()).unwrap()
+        val gvar = parse_gvar(font).unwrap()
+        val same = apply_glyph_deltas(sample_triangle(), gvar, 7, [1.0])
+        expect(same.contains(10.0, 10.0)).to_equal(true)
+        expect(same.contains(210.0, 10.0)).to_equal(false)

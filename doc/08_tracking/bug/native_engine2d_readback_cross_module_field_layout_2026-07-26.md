@@ -1,4 +1,8 @@
 # Native Engine2DReadback Cross-Module Field Layout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
 
@@ -98,3 +102,4 @@ An explicit historical runtime directory also introduced unresolved
 `spl_*`/filesystem/process dependencies but did not admit
 `libsimple_native_all.a`; using that removed fallback is forbidden. No new
 driver, `73`, `84`, or Vulkan receipt was produced.
+

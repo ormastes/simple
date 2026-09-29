@@ -28,7 +28,7 @@ simpleos_riscv_smf_fs_launch_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -54,8 +54,6 @@ val scenario = scenario_riscv64_virtio_fat32_smf()
 expect(scenario.name).to_equal("riscv64-virtio-fat32-smf")
 expect(scenario.arch).to_equal(Architecture.Riscv64)
 expect(scenario.qemu_extra).to_contain("virtio-blk-device,drive=rvdisk")
-expect(scenario.qemu_extra).to_contain("-no-user-config")
-expect(scenario.qemu_extra).to_contain("-monitor")
 expect(scenario_test_timeout_ms(scenario)).to_equal(60000)
 ```
 
@@ -63,9 +61,30 @@ expect(scenario_test_timeout_ms(scenario)).to_equal(60000)
 
 #### boots RV64 through the explicit OpenSBI provider without an interactive monitor
 
-The generated QEMU command must select `qemu-system-riscv64`, request the
-default OpenSBI firmware provider, ignore ambient user configuration, and
-disable the interactive monitor.
+- boots RV64 through the explicit OpenSBI provider without an interactive monitor
+
+#### registers the RV32 filesystem SMF scenario
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("boots RV64 through the explicit OpenSBI provider without an interactive monitor")
+val scenario = scenario_riscv64_virtio_fat32_smf()
+val command = build_scenario_command(scenario, "build/os/simpleos_riscv64_smf_fs.elf")
+expect(command).to_contain("qemu-system-riscv64")
+expect(command).to_contain("-bios")
+expect(command).to_contain("default")
+expect(command).to_contain("-no-user-config")
+expect(command).to_contain("-monitor")
+expect(command).to_contain("none")
+```
+
+</details>
 
 #### registers the RV32 filesystem SMF scenario
 
@@ -117,9 +136,25 @@ expect(scenario_target(scenario_riscv32_virtio_fat32_smf()).entry).to_equal("exa
 
 #### requires the hosted RV64 entry to execute and collect filesystem processes
 
-The hosted acceptance entry uses the RV64 blocking filesystem-exec bridge. A
-tool is accepted only after its user task exits successfully; the receipt also
-records the bounded captured-stdout byte count.
+- requires the hosted RV64 entry to execute and collect filesystem processes
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-SSPEC-SYSTEM
+step("requires the hosted RV64 entry to execute and collect filesystem processes")
+val source = file_read("examples/09_embedded/simple_os/arch/riscv64/hosted_entry.spl")
+expect(source).to_contain("riscv64_fs_exec_spawn_capture(app_path, [app_path], [])")
+expect(source).to_contain("if result.exit_code != 0:")
+expect(source).to_contain("stdout_bytes={result.bytes.len()}")
+```
+
+</details>
 
 ## At a Glance
 
@@ -128,7 +163,7 @@ records the bounded captured-stdout byte count.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simpleos/feature/simpleos_riscv_smf_fs_launch_spec.spl` |
-| Updated | 2026-08-21 |
+| Updated | 2026-08-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -141,8 +176,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

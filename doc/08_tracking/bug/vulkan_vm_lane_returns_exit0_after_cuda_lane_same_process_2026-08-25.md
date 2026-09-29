@@ -1,4 +1,8 @@
 # VulkanVmExecutor returns ok=true / exit=0 / 0 records when run after a CUDA lane in the same process (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN — `examples/08_gpu/backends/backends_spec.spl` is deliberately RED on this host
 (`Results: 4 total, 3 passed, 1 failed, 1 skipped`), per the "correct spec that fails" rule.
@@ -29,3 +33,4 @@ Either fix the shared state so both lanes run in one process, or make the second
 loudly (never `ok=true exit=0`). Keep `backends_spec.spl` strict; it goes green when fixed.
 Related (different symptom, same area):
 `doc/08_tracking/bug/vulkan_instance_init_fails_under_run_but_not_test_2026-08-25.md`.
+

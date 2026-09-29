@@ -1,49 +1,6 @@
 # Lint Guide
 
-Lint retains ownership of `SPIPE001..007`. For professional SSpec/manual
-quality, also run `simple sspec-maintain scan <spec>`; it references those IDs
-without cloning them and adds seven-dimensional `SSDOC-*` scoring.
-
 The Simple compiler includes a multi-layer lint system for detecting code quality issues, performance anti-patterns, and stub/dummy implementations.
-
-Lint configuration is fail-closed: inside `simple.sdn`'s `[lints]` section,
-unknown profiles or rule names, and levels other than `allow`, `warn`, or
-`deny`, make `simple lint` return usage status 2.
-
-## Lint fails closed on files that do not parse
-
-`bin/simple lint` parses every `.spl` target before running any semantic pass.
-A file that does not parse is reported as `PARSE001` at `deny` level and lint
-exits non-zero:
-
-```
-$ bin/simple lint broken.spl
-broken.spl:1:0: error[PARSE001]: Source did not parse
-
-Lint failed in 1 file(s)
-$ echo $?
-1
-```
-
-So `bin/simple lint` exit 0 *is* evidence that a file is syntactically valid.
-
-This was not true before 2026-07-28. The `PARSE001` gate existed but read the
-parse-failure flag back out of a module-level `var` after `parse_module_silent`
-returned; that write does not survive the return across a module boundary, so
-the gate always saw "no errors" and lint printed `Lint passed: all files clean`
-on files the compiler rejects outright. Lint now calls
-`parse_module_silent_checked()`, which **returns** the flag by value. Any future
-caller checking for parse failure must use the `*_checked` form —
-`parse_module_silent(...)` followed by `parser_has_errors()` silently fails
-open. See
-[../../08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md](../../08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md).
-
-Regression guard (checks both directions — rejects unparseable, still passes
-valid):
-
-```bash
-sh scripts/check/check-lint-rejects-unparseable.shs
-```
 
 ---
 
@@ -53,12 +10,10 @@ sh scripts/check/check-lint-rejects-unparseable.shs
 # Run linter on a file
 bin/simple lint file.spl
 
-# Run the essential pure-Simple quality gates
-bin/simple test <scope>
-bin/simple lint <changed .spl files>
-bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
+# Run lint via build system
+bin/simple build lint
 
-# Check the Rust workspace with clippy/rustfmt/Rust tests
+# Run all quality checks (includes lint)
 bin/simple build check
 
 # Guard against new LLM-style numbered duplicate artifacts
@@ -68,10 +23,6 @@ sh scripts/audit/numbered-artifact-guard.shs --changed-from origin/main
 
 # Check repo script/bin layout policy
 sh scripts/check_script_layout.shs
-
-# Find imports of deleted modules, undefined self.<method> calls, and imported
-# names no file declares (the class of rot that only a full bootstrap reveals)
-sh scripts/check/check-dangling-references.shs [--quiet] [--path FILE|DIR]
 ```
 
 Related guide:
@@ -87,42 +38,16 @@ not treated as duplicate artifacts.
 
 ---
 
-## Strictness Profiles
-
-The lint system enforces different rule sets per strictness profile (2026-07-28):
-
-| Profile | Old name | Contract | Default |
-|---------|----------|----------|---------|
-| `moderate` | `moderate` | Safety always on; discipline relaxed | `run`/`test` on interpreter |
-| `strict` | `lib` | Public-API discipline at warn | — |
-| `robust` | `reliable` | Rust-level enforced: all escapes denied | compiler/loader native build |
-| `critical` | `mission-critical` | Beyond Rust: proofs, evidence, internal-primitive ban, fail-closed | — |
-
-Old profile spellings are deprecated aliases (warn once on parse). See `doc/02_requirements/language/mission_critical_profile.md` for full requirements per tier and engine-default pairing (interpreter→moderate; compiler/loader→robust at WARN severity during migration).
-
----
-
 ## Lint Layers
 
 The lint system operates at three layers:
 
 ### 1. AST-Based Semantic Lints (`src/compiler/35.semantics/lint/`)
 
-Deep analysis using the arena-based AST. Query/LSP diagnostics dispatch the ARG,
-COLL, DTYP, STUB, wildcard-import/export, and wide-public leaves through
-`src/app/cli/query_lint.spl`. Production `simple lint` now runs parser-backed
-ARG001/ARG002, COLL001-COLL008, STUB001/STUB002, and module-level W0404 in its
-CLI-owned path. The generic EasyFix rule remains the public duplicate-typed
-argument owner, while the DTYP query/LSP leaf ignores already-named calls. The
-generic `pass_todo` source lint remains the STUB003 owner so each finding is
-emitted once. The CLI-owned parsed adapter also reports wildcard import/export
-and fails closed with PARSE001 when source cannot be parsed.
-Query/LSP applies `visibility_boundary` to W0404 too: `@allow` suppresses the
-module diagnostic and `@deny` promotes it to an error.
+Deep analysis using the arena-based AST. Runs during compilation.
 
 | Code | Category | Severity | Description |
 |------|----------|----------|-------------|
-| PARSE001 | Correctness | ERROR | Source did not parse; parser-backed lint results are unavailable |
 | COLL001 | Collection | CRITICAL | Array concat in loop `arr = arr + [x]` — use `.push()` |
 | COLL002 | Collection | HIGH | `.contains()` on array in loop — use Dict/Set |
 | COLL003 | Collection | HIGH | `.remove(0)` queue drain in loop |
@@ -132,10 +57,9 @@ module diagnostic and `@deny` promotes it to an error.
 | COLL007 | Collection | HIGH | Array rebuild to pop last — use `.pop()` |
 | COLL008 | Collection | MEDIUM | Unbounded global `.push()` with no reset |
 | DTYP001 | Type Safety | WARNING | Positional args sharing type — use named args |
-| STUB001 | Stub Impl | WARN → ERROR by default config | Function with params returns trivial value, params unused |
-| STUB002 | Stub Impl | ALLOW → ERROR by default config | Zero-param function returns default value (possible stub) |
+| STUB001 | Stub Impl | ERROR | Function with params returns trivial value, params unused |
+| STUB002 | Stub Impl | INFO | Zero-param function returns default value (possible stub) |
 | STUB003 | Stub Impl | ERROR | Whole-function explicit placeholder body (`pass_todo`, `pass_do_nothing`, `pass_dn`) in production code |
-| W0404 | Warning | WARN | Module exports more than 30 distinct public names |
 | ACC001 | Accessor Quality | ERROR | Getter/setter pair is a dummy field wrapper with no real contract or behavior |
 | NAME001 | Naming Correctness | ERROR | Child method name is suspiciously similar to inherited parent API; use `@name_checked` for intentional shims |
 | SPIPE001 | Test Quality | ERROR | Tautological literal assertion in spec/example |
@@ -214,10 +138,7 @@ compatibility surface.
 
 ## Argument Count Lint (ARG001/ARG002)
 
-Detects functions with too many parameters, which hurts readability and is often
-a sign the function should be refactored. Counts come from parsed function AST
-declarations, not regex or line scanning. Generic in-process `Linter.lint_source`
-stays parser-free; the public `simple lint` CLI owns this AST pass.
+Detects functions with too many parameters, which hurts readability and is often a sign the function should be refactored.
 
 ### ARG001: Too Many Parameters (WARNING)
 
@@ -279,12 +200,8 @@ fn create_user(info: UserInfo, manager: text, office: text):
 ## Stub Implementation Lint (STUB001-STUB003)
 
 Detects functions with trivial/dummy implementations that may be unintentional stubs.
-The public CLI parses once and adds STUB001/STUB002 with declaration spans;
-their base levels are Warn/Allow, and the default `stub_impl = deny` setting
-promotes both to errors. `@warn(stub_impl)` downgrades them and
-`@allow(stub_impl)` suppresses them.
 
-### STUB001: Trivial Return with Unused Parameters (default ERROR)
+### STUB001: Trivial Return with Unused Parameters (ERROR)
 
 Fires when a function has parameters but its body is a single trivial expression that doesn't reference any of them.
 
@@ -303,7 +220,7 @@ fn run_backend(module: text) -> Result:
     Ok(nil)
 ```
 
-### STUB002: Zero-Param Default Return (default ERROR)
+### STUB002: Zero-Param Default Return (INFO)
 
 Fires when a zero-parameter function returns a type-default value. Lower confidence since it could be a legitimate constant.
 
@@ -335,13 +252,6 @@ fn not_done(port: i64) -> i64:
 fn noop_handler(event: text):
     pass_do_nothing("event is intentionally ignored by this sink")
 ```
-
-## Wide Public Lint (W0404)
-
-The public CLI runs W0404 after its single parse. It counts distinct exported
-names and reports one module-level diagnostic at line 1 when more than 30 are
-exported. Facade files named `__init__.spl` or `mod.spl` are intentionally
-suppressed. Configure it with `visibility_boundary = "allow" | "warn" | "deny"`.
 
 ### Required Comment Lints (REQC001-REQC004)
 
@@ -500,7 +410,6 @@ wildcard_match = "allow"
 |------|---------|-------------|
 | `primitive_api` | warn | Bare primitives in public APIs |
 | `bare_bool` | warn | Boolean parameters (suggest enum) |
-| `const_ref_default` | warn | Unannotated parameter mutation (W-MC-REF-001); critical profile v2 (formerly mission-critical) escalates to deny |
 | `print_in_test_spec` | warn | `print()` in test specs |
 | `todo_format` | warn | TODO/FIXME format compliance |
 | `spipe_no_print_based_tests` | **deny** | Print-based BDD tests |
@@ -533,13 +442,8 @@ Use attributes to override lint levels per-file:
 fn complex_fn(a, b, c, d, e, f, g, h):
     ...
 
-#[allow(unknown_annotation)]          # Generic source fallback; aliases both legacy annotation policies
+#[allow(unknown_annotation)]          # Meta-lint: suppresses both unknown_decorator + unknown_attribute
 ```
-
-Source-only lint emits one `unknown_annotation` warning because `@name` does not encode
-whether a name is a decorator or attribute. The legacy `unknown_decorator` and
-`unknown_attribute` settings remain bidirectional aliases until typed HIR owns the
-category-specific check.
 
 ---
 
@@ -553,10 +457,10 @@ bin/simple fix file.spl --dry-run
 bin/simple fix file.spl
 
 # Apply all fixes (including uncertain)
-bin/simple fix file.spl --fix-all
+bin/simple fix file.spl --all
 
-# Apply only an ID-prefix-selected fix
-bin/simple fix file.spl --fix-id=L:deprecated_if_let
+# Interactive mode
+bin/simple fix file.spl --interactive
 ```
 
 ---
@@ -567,27 +471,16 @@ bin/simple fix file.spl --fix-id=L:deprecated_if_let
 |-------|----------|
 | Deny | Exit code 1, blocks build |
 | Warn | Reported, doesn't block by default |
-| Allow | Suppressed by default |
+| Allow | Info level, not enforced by default |
 
 Override with flags:
 
 ```bash
-bin/simple lint file.spl --deny-all    # Treat all deniable warnings as errors
+bin/simple lint file.spl --deny-all    # Treat all warnings as errors
 bin/simple lint file.spl --warn-all    # Raise configured allow rules to warnings
 bin/simple lint file.spl --json        # Emit JSON Lines diagnostics and summaries
 bin/simple lint file.spl --fix-dry-run # Preview safe lint fixes without writing
 ```
-
-`--json` cannot be combined with `--all` or `--mcp-perf`; those modes invoke
-repository scripts that do not provide structured output. It may be combined
-with `--fix`, `--fix-all`, or `--fix-dry-run`; fixes use the atomic file owner
-and emit a `lint-fix-summary` JSON line instead of human progress.
-Unknown options and bare or empty `--profile` values are usage errors; they are
-rejected with exit 2 before any file is linted.
-
-For `simple fix`, only `--dry-run`, `--fix-all`, and a nonempty `--fix-id=ID`
-are accepted. Unknown or malformed options exit 2 before source files are read
-or written.
 
 ---
 
@@ -601,7 +494,6 @@ or written.
 | Argument count lint (AST) | `src/compiler/35.semantics/lint/argument_count.spl` |
 | Argument count lint (Rust) | `src/compiler_rust/compiler/src/lint/checker.rs` |
 | Stub impl lint (AST) | `src/compiler/35.semantics/lint/stub_impl.spl` |
-| Query AST lint adapter | `src/app/cli/query_lint.spl` |
 | Stub impl lint (text) | `src/compiler/90.tools/fix/rules/impl/lint_stub.spl` |
 | EasyFix registry | `src/compiler/90.tools/fix/rules/registry.spl` |
 | Semantic linter + LintConfig | `src/compiler/90.tools/lint/main.spl` |
@@ -646,10 +538,6 @@ lint-wrapper segfault tracked in repo bug docs.
 - Rust workflow targets `src/compiler_rust` (not removed legacy `rust/` tree)
 - Simple strict workflow exists and uses `--deny-all`
 - Primitive-sort runtime defines NEON threshold constants
-
-A Stage 4 full-CLI candidate is not qualified by lint alone. Bootstrap must run
-the shared [Stage 4 essential-tools gate](../tooling/pure_simple_tooling.md#stage-4-essential-tools-gate)
-once against the exact fresh binary; it covers test, lint, and duplicate-check.
 
 ### Suppressing Warnings
 
@@ -738,7 +626,7 @@ failure the pin exists to prevent.
 
 ## Related Commands
 
-- `simple build check` — Rust workspace clippy/rustfmt/test aggregate
+- `simple build check` — All quality checks
 - `simple build fmt` — Code formatting
 - `simple duplicate-check` — Code duplication detection
 - `simple doc-coverage` — Documentation coverage

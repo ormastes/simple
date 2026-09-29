@@ -1,0 +1,50 @@
+# @cover src/app/devhub/adapter_confluence.spl
+#
+# Regression: every `itf wiki` Confluence command overflowed the stack. The
+# adapter's first call went through std http_client's `add_header` shim,
+# which recursed into itself. The adapter now uses curl on the v1 content API
+# (Cloud and Data Center). "Returns at all" is the proof: before the fix
+# the process died inside confluence_get_page.
+
+use app.devhub.config.{ItfConfig, _apply_config_value}
+use app.devhub.adapter_confluence.{confluence_get_page, confluence_list_pages, confluence_content_root, confluence_search_cql, _confluence_curl_argv, _confluence_split_response}
+
+
+fn cfg(url: text) -> ItfConfig:
+    val c = _apply_config_value(ItfConfig.default(), "confluence", "url", url)
+    _apply_config_value(c, "confluence", "user", "me@x.com")
+
+
+describe "wiki confluence adapter":
+
+    context "no stack overflow":
+
+        it "get_page against an unreachable host returns a failure":
+            val (ok, _content, msg) = confluence_get_page(cfg("http://127.0.0.1:9/wiki"), "123")
+            expect(ok).to_equal(false)
+            expect(msg.contains("transport error")).to_equal(true)
+
+        it "list_pages against an unreachable host returns a failure":
+            val (ok, items, _raw) = confluence_list_pages(cfg("http://127.0.0.1:9"), "ENG", 5)
+            expect(ok).to_equal(false)
+            expect(items.len()).to_equal(0)
+
+    context "request shape":
+
+        it "cloud and data center both use the v1 content root":
+            expect(confluence_content_root(cfg("https://x.atlassian.net/wiki/"))).to_equal("https://x.atlassian.net/wiki/rest/api/content")
+            expect(confluence_content_root(cfg("https://host:8090/confluence"))).to_equal("https://host:8090/confluence/rest/api/content")
+
+        it "sends the bearer header and url-encoded query":
+            val argv = _confluence_curl_argv("Bearer pat", "GET", "https://h/rest/api/content/search", "", ["cql=title~\"a b\""])
+            expect(argv.contains("Authorization: Bearer pat")).to_equal(true)
+            expect(argv.contains("--data-urlencode")).to_equal(true)
+            expect(argv[argv.len() - 1]).to_equal("https://h/rest/api/content/search")
+
+        it "builds space-scoped CQL":
+            expect(confluence_search_cql("x", "ENG")).to_equal("type=page and title~\"x\" and space=\"ENG\"")
+
+        it "splits the trailing http code":
+            val (body, code) = _confluence_split_response("\{\}\n200")
+            expect(code).to_equal(200)
+            expect(body).to_equal("\{\}")

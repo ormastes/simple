@@ -12,7 +12,9 @@
 #   - log_raw_println (extern, freestanding)
 #   - CNvmeBlockAdapterFs from c_nvme_adapter (development C NVMe bridge only)
 #   - nvfs_superblock (BlockDevice-level NVFS probe, no hosted driver)
-#   - dbfs_engine.superblock (BlockDevice-level DBFS probe, no hosted driver)
+#   - nvfs_root_mount_transaction (validated DBFS-backed NVFS/VFS publication)
+#   - dbfs_root_mount_transaction (validated pure-Simple DBFS/VFS publication)
+#   - dbfs_engine.superblock (development BlockDevice-level DBFS probe)
 #   - os.kernel.fs.fat32 parse_bpb (sector-level FAT32 BPB probe, no hosted VFS)
 #
 # MDSOC: feature dimension, kernel boot layer.
@@ -29,8 +31,7 @@ use os.kernel.boot.boot_nvme_production_handoff.{
     boot_nvme_production_handoff_ready,
     boot_nvme_production_handoff_device,
     boot_nvme_production_handoff_evidence,
-    boot_nvme_production_handoff_lease,
-    boot_nvme_production_handoff_binding
+    boot_nvme_production_handoff_lease
 }
 use os.drivers.nvme.nvme_storage_model.{
     NvmeTransferEvidence, NvmeFilesystemLease, NvmeFilesystemConsumer,
@@ -169,6 +170,10 @@ fn boot_fs_mount_pure_nvme_from_lease_device(dev: BlockDevice, evidence: NvmeTra
     val nvfs_r = boot_fs_mount_nvfs_from_lease_device(dev, lease)
     if nvfs_r.is_ok():
         return nvfs_r
+    # A missing NVFS signature permits DBFS fallback. Once NVFS identity is
+    # present, backing validation/open/publication failures are authoritative.
+    if nvfs_r.unwrap_err() != "boot-fs-mount: no NVFS superblock":
+        return nvfs_r
 
     val dbfs_r = boot_fs_mount_dbfs_from_lease_device(dev, lease)
     if dbfs_r.is_ok():
@@ -196,7 +201,26 @@ fn boot_fs_mount_nvfs_from_lease_device(dev: BlockDevice, lease: NvmeFilesystemL
     val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Nvfs)
     if reason != "ready":
         return Err("boot-fs-mount: nvfs-lease-not-ready:" + reason)
-    boot_fs_mount_nvfs_from_device(dev, freestanding_nvme_adapter_provider(), true)
+    if dev.sector_size() != lease.namespace_identity.lba_size:
+        return Err("boot-fs-mount: nvfs-device-sector-size-mismatch")
+    if lease.lba_count <= NVFS_BOOT_ARENA_BASE_LBA_V1 as u64:
+        return Err("boot-fs-mount: nvfs-lease-too-small")
+    val max_arena_blocks = lease.lba_count - NVFS_BOOT_ARENA_BASE_LBA_V1 as u64
+    val mounted = boot_nvfs_root_mount_transaction_v1(dev, max_arena_blocks)
+    if mounted.is_err():
+        if mounted.unwrap_err() == "nvfs-root: no-superblock":
+            return Err("boot-fs-mount: no NVFS superblock")
+        _fs_mount_done = false
+        _fs_mount_type = FsMountType.None_
+        return Err("boot-fs-mount: NVFS root transaction failed:" + mounted.unwrap_err())
+    _fs_mount_done = true
+    _fs_mount_type = FsMountType.Nvfs
+    log_raw_println("[boot-fs-mount] NVFS filesystem mounted through canonical VFS root")
+    Ok(FsMountResult(
+        mounted: true,
+        fs_type: FsMountType.Nvfs,
+        provider: freestanding_nvme_adapter_provider(),
+        pure_simple: true))
 
 fn boot_fs_mount_dbfs_from_lease_device(dev: BlockDevice, lease: NvmeFilesystemLease) -> Result<FsMountResult, text>:
     val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Dbfs)
@@ -208,16 +232,7 @@ fn boot_fs_mount_fat32_from_lease_device(dev: BlockDevice, lease: NvmeFilesystem
     val reason = nvme_filesystem_lease_reason(lease, NvmeFilesystemConsumer.Fat32)
     if reason != "ready":
         return Err("boot-fs-mount: fat32-lease-not-ready:" + reason)
-    val mounted = boot_fs_mount_fat32_from_device(dev, freestanding_nvme_adapter_provider(), true)
-    if not mounted.?: return mounted
-    val capsule = fat32_boot_bind_capsule_device_v1(
-        dev, boot_nvme_production_handoff_binding())
-    if not capsule.?:
-        fat32_mount_clear()
-        _fs_mount_done = false
-        _fs_mount_type = FsMountType.None_
-        return Err("boot-fs-mount: " + capsule.unwrap_err())
-    mounted
+    boot_fs_mount_fat32_from_device(dev, freestanding_nvme_adapter_provider(), true)
 
 fn boot_fs_mount_nvfs_from_device(dev: BlockDevice, provider: text, pure_simple: bool) -> Result<FsMountResult, text>:
     """Probe NVFS using a caller-provided freestanding-safe BlockDevice."""
@@ -255,33 +270,44 @@ fn boot_fs_mount_fat32_from_device(dev: BlockDevice, provider: text, pure_simple
     """Probe FAT32 from sector 0 using the same provider-neutral BlockDevice."""
     log_raw_println("[boot-fs-mount] Probing NVMe for FAT32 BPB...")
     val read_result = dev.read_sector(0u64)
-    if read_result.is_err():
+    # Pattern-match the Result instead of `.unwrap()`: the native-build lane
+    # mis-lowers enum-payload extraction through unwrap for extern-sourced
+    # array payloads (same defect family as app_registry_lookup's Option
+    # guard, doc on app_registry_leaf_for_canonical). `if val Ok(..) =` is the
+    # proven-erased form.
+    if val Ok(sector0_raw) = read_result:
+        # Typed intermediate: the pattern-bound payload is an erased receiver
+        # for .len()/indexing under the native-build lane (stage3
+        # erased-receiver family, see direct_fat32_boot_reader); binding to an
+        # explicit [u8] val restores the inlined loads.
+        val sector0: [u8] = sector0_raw
+        log_raw_println("[boot-fs-mount] sector0 len={sector0.len()} b0={sector0[0]} b1={sector0[1]} b2={sector0[2]} sig510={sector0[510]} sig511={sector0[511]} label82={sector0[82]}")
+        val bpb = parse_bpb(sector0)
+        if bpb.is_err():
+            log_raw_println("[boot-fs-mount] No FAT32 BPB at LBA 0")
+            return Err("boot-fs-mount: no FAT32 BPB")
+        # Beyond the BPB probe above (geometry validation only), actually mount a
+        # driver instance and publish it as kernel-global state so freestanding
+        # IPC syscall handlers (os.kernel.ipc.syscall_file) have a real
+        # Fat32Filesystem to call open_at/stat/mkdir_at/readdir_at/unlink_at/
+        # rmdir_at on. See doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md.
+        # Fat32Filesystem is a value-semantic owner.  `mount` is a mutable (`me`)
+        # operation and must update this caller-owned instance before publication;
+        # binding it as `val` silently published the pristine pre-mount value in
+        # freestanding native builds even though the internal probe succeeded.
+        var fs = Fat32Filesystem.new(0u64)
+        val mount_r = fs.mount(dev)
+        if mount_r.is_err():
+            log_raw_println("[boot-fs-mount] FAT32 BPB parsed but mount() failed")
+            return Err("boot-fs-mount: FAT32 mount failed")
+        fat32_mount_publish(fs, dev)
+        _fs_mount_done = true
+        _fs_mount_type = FsMountType.Fat32
+        log_raw_println("[boot-fs-mount] FAT32 BPB confirmed and filesystem mounted")
+        Ok(FsMountResult(mounted: true, fs_type: FsMountType.Fat32, provider: provider, pure_simple: pure_simple))
+    else:
         log_raw_println("[boot-fs-mount] FAT32 BPB read failed")
-        return Err("boot-fs-mount: no FAT32 BPB")
-    val sector0 = read_result.unwrap()
-    val bpb = parse_bpb(sector0)
-    if bpb.is_err():
-        log_raw_println("[boot-fs-mount] No FAT32 BPB at LBA 0")
-        return Err("boot-fs-mount: no FAT32 BPB")
-    # Beyond the BPB probe above (geometry validation only), actually mount a
-    # driver instance and publish it as kernel-global state so freestanding
-    # IPC syscall handlers (os.kernel.ipc.syscall_file) have a real
-    # Fat32Filesystem to call open_at/stat/mkdir_at/readdir_at/unlink_at/
-    # rmdir_at on. See doc/08_tracking/bug/path_based_fs_syscalls_fake_success_2026-08-06.md.
-    # Fat32Filesystem is a value-semantic owner.  `mount` is a mutable (`me`)
-    # operation and must update this caller-owned instance before publication;
-    # binding it as `val` silently published the pristine pre-mount value in
-    # freestanding native builds even though the internal probe succeeded.
-    var fs = Fat32Filesystem.new(0u64)
-    val mount_r = fs.mount(dev)
-    if mount_r.is_err():
-        log_raw_println("[boot-fs-mount] FAT32 BPB parsed but mount() failed")
-        return Err("boot-fs-mount: FAT32 mount failed")
-    fat32_mount_publish(fs, dev)
-    _fs_mount_done = true
-    _fs_mount_type = FsMountType.Fat32
-    log_raw_println("[boot-fs-mount] FAT32 BPB confirmed and filesystem mounted")
-    Ok(FsMountResult(mounted: true, fs_type: FsMountType.Fat32, provider: provider, pure_simple: pure_simple))
+        Err("boot-fs-mount: no FAT32 BPB")
 
 fn boot_fs_mount_provider_is_pure_simple(provider: text) -> bool:
     provider == "simple-driver"

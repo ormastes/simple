@@ -4,9 +4,14 @@ use compiler.hir.hir_types.{SymbolId, HirType}
 use compiler.hir.hir_definitions.{HirContractBlock}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.attributes.{DriverManifestAttr, VhdlHardwareMetadata}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.*
+# Preserve terminal providers when this graph is re-exported by mir_data.
+use compiler.mir.mir_types.{MirType}
+use compiler.mir.mir_instruction_support.{mir_operand_const_int}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
 
 struct MirInst:
     """MIR instruction."""
@@ -38,6 +43,24 @@ impl MirInst:
     fn bootstrap_load_global_symbol_id() -> i64:
         match self.kind:
             case LoadGlobal(_, symbol): symbol.id
+            case _: -1
+
+    # Call's destination is OPTIONAL (a void call has none), so -1 means
+    # "no destination to account for" as well as "not a Call" -- both are
+    # non-answers for the emitted-destination guards in _MirToLlvm, which is
+    # why they share one sentinel.
+    # Typed match, NOT raw `rt_enum_payload` + `rt_tuple_get(payload, 0)`
+    # decoding: measured 2026-08-24 (see bootstrap_load_global_dest_local_id
+    # above) the seed's tree-walk interpreter keeps payload slots as live
+    # Objects, so raw decoding fails with `cannot convert object to int`.
+    # `??`, NOT `.unwrap()` -- the STOLEN UNWRAP: a bare `unwrap` published by
+    # another module can steal every Option.unwrap binding on this lane and
+    # return raw 0, which would report local 0 as the destination. `dest.?`
+    # already proves presence, so the fallback below is unreachable.
+    fn bootstrap_call_dest_local_id() -> i64:
+        match self.kind:
+            case Call(dest, _, _):
+                if dest.?: (dest ?? LocalId(id: -1)).id else: -1
             case _: -1
 
     fn bootstrap_global_addr_dest_local_id() -> i64:
@@ -243,6 +266,23 @@ struct MirFunction:
     memory_banks: i64       # @memory(n)/@memory(banks=n) port banking count
     verification_contract: HirContractBlock?
 
+    # Asm-embedding contract (doc/05_design/os/hal/asm_embedded_hal_and_dual_run.md A.2)
+    # threaded from @naked/@section/@align/@global. Defaults keep every
+    # existing MirFunction constructor valid.
+    is_naked: bool = false       # emit `naked noinline`, body = one raw asm block, `unreachable` terminator
+    section: text = ""           # `section "<name>"` on the define; "" = target default
+    align: i64 = 0               # `align <n>` on the define; 0 = target default
+    is_global: bool = false      # unmangled symbol, external linkage
+
+    # SIMD optimization requirement transport (@must/@prefer/@error_not/@warn_not).
+    # Parsed into OptimizationReq by 00.common/_Attributes/decl_attrs.spl and
+    # threaded here so the auto-vectorizer can actually enforce the tag instead
+    # of ignoring it. Empty strings mean "no requirement"; defaults keep every
+    # existing MirFunction constructor valid.
+    simd_req_level: text = ""    # "" | must | prefer | error_not | warn_not
+    simd_req_backend: text = ""  # "" | simd | avx2 | avx512 | sse | neon | ...
+    simd_disabled: bool = false  # @simd(disable) — pass must not vectorize
+
 impl MirFunction:
     # update field list when MirFunction gains fields — spread operator fails cross-module
     static fn with_blocks(func: MirFunction, new_blocks: [MirBlock]) -> MirFunction:
@@ -272,7 +312,14 @@ impl MirFunction:
             unroll_factor: func.unroll_factor,
             pipeline_ii: func.pipeline_ii,
             memory_banks: func.memory_banks,
-            verification_contract: func.verification_contract
+            verification_contract: func.verification_contract,
+            is_naked: func.is_naked,
+            section: func.section,
+            align: func.align,
+            is_global: func.is_global,
+            simd_req_level: func.simd_req_level,
+            simd_req_backend: func.simd_req_backend,
+            simd_disabled: func.simd_disabled
         )
 
 """Function body wrapper for borrow checking."""
@@ -400,5 +447,6 @@ struct MirModule:
     statics: Dict<SymbolId, MirStatic>
     constants: Dict<SymbolId, MirConstant>
     types: Dict<SymbolId, MirTypeDef>
+    external_layout_traces: [MirExternalLayoutTraceV1] = []
 
 export MirInst, MirBlock, MirFunction, MirBody, MirModule, mir_fold_binop

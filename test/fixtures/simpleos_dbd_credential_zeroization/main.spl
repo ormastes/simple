@@ -1,0 +1,68 @@
+# Native executable reproducer for DBD credential ownership and zeroization.
+# It emits no credential, digest, or address; the exit code is the oracle.
+
+use os.apps.dbd.dbd_provisioning.{DbdProvisioningOwnerV1}
+use os.apps.dbd.dbd_protocol.{DbdAuthSession}
+use std.common.crypto.secure_memory.{secure_zero_u8_slots}
+
+fn _bytes(value: u8, count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(value)
+        i = i + 1
+    out
+
+fn _all_zero(bytes: [u8]) -> bool:
+    for byte in bytes:
+        if byte != 0u8:
+            return false
+    true
+
+fn main() -> i64:
+    var rejected = DbdProvisioningOwnerV1.new()
+    var invalid_principal = _bytes(71u8, 32)
+    if rejected.admit(" ", invalid_principal, [[1u8]], [2u8], 0x0807u16):
+        return 10
+    if not _all_zero(invalid_principal):
+        return 11
+
+    var short_owner = DbdProvisioningOwnerV1.new()
+    var short_credential = _bytes(72u8, 31)
+    if short_owner.admit(
+        "operator", short_credential, [[1u8]], [2u8], 0x0807u16
+    ):
+        return 20
+    if not _all_zero(short_credential):
+        return 21
+
+    var accepted = DbdProvisioningOwnerV1.new()
+    var live_credential = _bytes(73u8, 32)
+    if not accepted.admit(
+        "operator", live_credential, [[1u8]], [2u8], 0x0807u16
+    ):
+        return 30
+    if not _all_zero(live_credential) or not accepted.ready():
+        return 31
+
+    var replacement = _bytes(74u8, 32)
+    if accepted.admit(
+        "replacement", replacement, [[3u8]], [4u8], 0x0807u16
+    ):
+        return 40
+    if not _all_zero(replacement) or not accepted.ready():
+        return 41
+
+    # Representative request loop for latency/RSS evidence. Each session
+    # hashes through the zeroizing workspace and the caller wipes its mutable
+    # wire candidate before the next request.
+    var request_index: i64 = 0
+    while request_index < 10000:
+        var session = DbdAuthSession.new(request_index + 1)
+        var candidate = _bytes(73u8, 32)
+        if not session.authenticate(accepted.provider, "operator", candidate):
+            return 50
+        if not secure_zero_u8_slots(candidate).verified():
+            return 51
+        request_index = request_index + 1
+    0

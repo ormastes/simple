@@ -1,0 +1,56 @@
+use std.spec.*
+use compiler.driver.canonical_target_registry_owner_v1.*
+
+describe "canonical target registry owner V1":
+    it "assigns stable registered IDs and canonicalizes declared aliases":
+        val owner = canonical_target_registry_owner_v1()
+        val x86 = canonical_target_registry_resolve_v1(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        expect(x86.canonical_target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(x86.row.target_profile_id).to_equal(1u32)
+        val arm = canonical_target_registry_resolve_v1(owner,
+            "arm64-unknown-linux-gnu").unwrap()
+        expect(arm.row.target_profile_id).to_equal(2u32)
+        expect(canonical_target_registry_token_live_v1(owner, x86.token).is_ok()).to_be(true)
+        expect(canonical_target_registry_resolution_live_v1(owner, x86).is_ok()).to_be(true)
+
+    it "fails closed for unknown or noncanonical target spellings":
+        val owner = canonical_target_registry_owner_v1()
+        expect(canonical_target_registry_resolve_v1(owner,
+            "X86_64-unknown-linux-gnu")).to_equal(
+                Err(CanonicalTargetRegistryErrorV1.UnknownTargetTriple))
+        expect(canonical_target_registry_resolve_v1(owner,
+            "x86_64-pc-windows-msvc")).to_equal(
+                Err(CanonicalTargetRegistryErrorV1.UnknownTargetTriple))
+
+    it "rejects mutated owners and stale generation digest tokens":
+        var owner = canonical_target_registry_owner_v1()
+        var token = canonical_target_registry_token_v1(owner).unwrap()
+        token.mapping_generation = token.mapping_generation + 1u64
+        expect(canonical_target_registry_token_live_v1(owner, token)).to_equal(
+            Err(CanonicalTargetRegistryErrorV1.StaleToken))
+        owner.candidate.mapping_digest =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(canonical_target_registry_token_v1(owner)).to_equal(
+            Err(CanonicalTargetRegistryErrorV1.InvalidOwner))
+
+    it "rejects substituted rows canonical names and binding digests":
+        val owner = canonical_target_registry_owner_v1()
+        var resolution = canonical_target_registry_resolve_v1(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        var substituted_row = resolution.row
+        substituted_row.target_profile_id = 2u32
+        resolution.row = substituted_row
+        expect(canonical_target_registry_resolution_live_v1(owner, resolution)).to_equal(
+            Err(CanonicalTargetRegistryErrorV1.StaleToken))
+        resolution = canonical_target_registry_resolve_v1(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        resolution.canonical_target_triple = "aarch64-unknown-linux-gnu"
+        expect(canonical_target_registry_resolution_live_v1(owner, resolution)).to_equal(
+            Err(CanonicalTargetRegistryErrorV1.StaleToken))
+        resolution = canonical_target_registry_resolve_v1(owner,
+            "amd64-unknown-linux-gnu").unwrap()
+        resolution.resolution_digest =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(canonical_target_registry_resolution_live_v1(owner, resolution)).to_equal(
+            Err(CanonicalTargetRegistryErrorV1.StaleToken))

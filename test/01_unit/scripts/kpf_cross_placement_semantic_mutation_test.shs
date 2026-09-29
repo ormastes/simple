@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+cd "$ROOT"
+probe=src/app/test/kpf_cross_placement_conformance.spl
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/kpf-xplacement-mutation.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+sed 's/val EXPECTED = "native-provider-ok"/val EXPECTED = "mutated-provider-result"/' "$probe" > "$tmp/probe.spl"
+if grep -q 'val EXPECTED = "native-provider-ok"' "$tmp/probe.spl"; then
+    echo 'mutation did not alter semantic oracle' >&2
+    exit 1
+fi
+if grep -q 'semantic=native-provider-ok' "$tmp/probe.spl"; then
+    echo 'semantic result is hardcoded outside the oracle' >&2
+    exit 1
+fi
+grep -q 'if native(provider_path, artifact_digest, generations, publication.current) != EXPECTED: return 12' "$probe"
+grep -q 'if worker(payload, publication.current.epoch as i64) != payload: return 13' "$probe"
+grep -q 'if wasm(payload, publication.current.epoch as i64) != payload: return 14' "$probe"
+printf '%s\n' 'PASS kpf cross-placement semantic mutations remain observable'

@@ -1,9 +1,12 @@
 # KV260 NaxRiscv bitstream exposes no JTAG/PS path to softcore — physical RISC-V system test blocked
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **ID:** kv260_naxriscv_bitstream_no_jtag_observability
 **Severity:** P2 (blocks physical-FPGA SimpleOS/RISC-V observation, not emulation)
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** Open
 **Found:** 2026-06-13 (telnet-over-serial system-test bring-up)
 
 ## Finding (verified from the loaded netlist, not docs)
@@ -59,3 +62,4 @@ silicon I/O is blocked.
 Option A is the least-risk path to a physical SimpleOS/RISC-V telnet-serial
 system test; point `QEMU_RX`/`SERIAL_PORT` at the resulting tty and reuse the
 existing bridge + probe harness unchanged.
+

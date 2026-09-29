@@ -95,8 +95,13 @@ work="$(mktemp -d)" || oops "mktemp failed"
 trap 'rm -rf "$work"' EXIT INT TERM
 
 # Probe 1 — the defect itself. Must be REJECTED.
-implicit="$work/implicit_field_assign.spl"
-cat > "$implicit" <<'IMPLICIT_EOF'
+# TWO method forms are probed, not one. Until 2026-08-31 only the `me` form was
+# here, and the guard reported PASS while the plain `fn` form was a SILENT
+# no-op: method dispatch pre-binds every receiver field as a local, so the
+# interpreter's `is_first_assignment` test was false and the trap never fired.
+# doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+implicit_me="$work/implicit_field_assign_me.spl"
+cat > "$implicit_me" <<'IMPLICIT_ME_EOF'
 class C:
     flag: bool
     me set_it():
@@ -107,8 +112,23 @@ fn main():
     a.set_it()
     print "implicit -> {a.flag}"
 main()
-IMPLICIT_EOF
-[ -s "$implicit" ] || oops "implicit probe was not written"
+IMPLICIT_ME_EOF
+[ -s "$implicit_me" ] || oops "implicit `me` probe was not written"
+
+implicit_fn="$work/implicit_field_assign_fn.spl"
+cat > "$implicit_fn" <<'IMPLICIT_FN_EOF'
+class C:
+    flag: bool
+    fn set_it(self):
+        flag = true
+
+fn main():
+    var a = C(flag: false)
+    a.set_it()
+    print "implicit -> {a.flag}"
+main()
+IMPLICIT_FN_EOF
+[ -s "$implicit_fn" ] || oops "implicit `fn` probe was not written"
 
 # Probe 2 — the sentinel. Must still COMPILE AND RUN correctly. Without this a
 # compiler that rejected every assignment would pass the guard.
@@ -129,6 +149,7 @@ EXPLICIT_EOF
 
 checked=0
 engines=""
+probes=""
 
 for mode in interpreter jit; do
   eout="$work/explicit.$mode"
@@ -142,34 +163,80 @@ for mode in interpreter jit; do
   /usr/bin/grep -aq '^explicit -> true$' "$eout" \
     || oops "engine '$mode': explicit \`self.flag = true\` did not set the field; expected 'explicit -> true', got: $(tr '\n' '|' < "$eout")"
 
-  iout="$work/implicit.$mode"
+  for form in me fn; do
+  eval 'implicit=$implicit_'"$form"
+  iout="$work/implicit.$mode.$form"
   SIMPLE_EXECUTION_MODE="$mode" "$SIMPLE_BIN" run "$implicit" > "$iout" 2>&1
   irc=$?
 
   # 1. The silent-no-op signature must never appear.
   if /usr/bin/grep -aq '^implicit -> false$' "$iout"; then
-    fail "engine '$mode': implicit field assignment SILENTLY NO-OPPED — the program ran to completion and printed 'implicit -> false', so the write to \`flag\` was discarded with no diagnostic"
+    fail "engine '$mode', form '$form': implicit field assignment SILENTLY NO-OPPED — the program ran to completion and printed 'implicit -> false', so the write to \`flag\` was discarded with no diagnostic"
   fi
   # Nor may it "succeed" by accidentally routing the write to the field: the
   # chosen fix direction is a hard error, not implicit-self resolution. If this
   # ever becomes the desired contract, change the bug doc and this guard
   # together — do not let it drift silently.
   if /usr/bin/grep -aq '^implicit -> true$' "$iout"; then
-    fail "engine '$mode': implicit field assignment was ACCEPTED and routed to the field; the recorded contract (fix direction 2) is a hard error — see the bug doc before changing this"
+    fail "engine '$mode', form '$form': implicit field assignment was ACCEPTED and routed to the field; the recorded contract (fix direction 2) is a hard error — see the bug doc before changing this"
   fi
 
   # 2. It must actually be rejected.
   [ "$irc" -ne 0 ] \
-    || fail "engine '$mode': implicit field assignment exited 0 — it must be a hard error"
+    || fail "engine '$mode', form '$form': implicit field assignment exited 0 — it must be a hard error"
 
   # 3. The diagnostic must name the field, so the user can act on it.
   /usr/bin/grep -aq 'flag' "$iout" \
-    || fail "engine '$mode': the program was rejected but the diagnostic does not mention the field \`flag\`; an anonymous error is not an acceptable fix: $(tr '\n' '|' < "$iout")"
+    || fail "engine '$mode', form '$form': the program was rejected but the diagnostic does not mention the field \`flag\`; an anonymous error is not an acceptable fix: $(tr '\n' '|' < "$iout")"
 
   checked=$((checked + 1))
+  probes="${probes:+$probes,}$mode/$form"
+  done
+
   engines="${engines:+$engines,}$mode"
 done
 
+# THIRD PROBE — the shape the 2026-08-31 bug was actually filed on:
+# `fn m():` with NO `self` parameter at all. The PARSER marks such a method
+# implicitly `static` (`parser/src/types_def/mod.rs`, "No self/me param and not
+# a `me` method — treat as static"), so HIR lowering sets `ctx.has_self = false`
+# and `check_implicit_self_field_assignment` returns early — the JIT/native lane
+# still lowers the write to a throwaway local. The AST INTERPRETER, by contrast,
+# dispatches it as an instance method with the receiver's fields pre-bound, and
+# since 2026-08-31 rejects the bare write. That divergence is a genuine open
+# design question (is a self-less `fn` in a class body static or an instance
+# method?) and is recorded as a residual in
+# doc/08_tracking/bug/implicit_self_field_assignment_still_silent_in_plain_fn_methods_2026-08-31.md
+# — so this probe is asserted on the interpreter ONLY, deliberately and
+# visibly, rather than being omitted.
+implicit_fn_noself="$work/implicit_field_assign_fn_noself.spl"
+cat > "$implicit_fn_noself" <<'IMPLICIT_FN_NOSELF_EOF'
+class C:
+    flag: bool
+    fn set_it():
+        flag = true
+
+fn main():
+    var a = C(flag: false)
+    a.set_it()
+    print "implicit -> {a.flag}"
+main()
+IMPLICIT_FN_NOSELF_EOF
+[ -s "$implicit_fn_noself" ] || oops "implicit self-less `fn` probe was not written"
+
+nout="$work/implicit.interpreter.fn_noself"
+SIMPLE_EXECUTION_MODE=interpreter "$SIMPLE_BIN" run "$implicit_fn_noself" > "$nout" 2>&1
+nrc=$?
+if /usr/bin/grep -aq '^implicit -> false$' "$nout"; then
+  fail "engine 'interpreter', form 'fn_noself': implicit field assignment SILENTLY NO-OPPED in a self-less \`fn\` method — this is the exact 2026-08-31 regression"
+fi
+[ "$nrc" -ne 0 ] \
+  || fail "engine 'interpreter', form 'fn_noself': implicit field assignment exited 0 — it must be a hard error"
+/usr/bin/grep -aq 'flag' "$nout" \
+  || fail "engine 'interpreter', form 'fn_noself': rejected but the diagnostic does not name \`flag\`: $(tr '\n' '|' < "$nout")"
+checked=$((checked + 1))
+probes="${probes:+$probes,}interpreter/fn_noself"
+
 [ "$checked" -gt 0 ] || oops "no engine was exercised"
-printf 'PASS — %d engine setting(s) checked: %s — implicit `field = ...` in a method is a hard error naming the field, and explicit `self.field = ...` still works\n' "$checked" "$engines"
+printf 'PASS — %d probe(s) checked across engine settings %s (%s) — implicit `field = ...` in a method is a hard error naming the field for BOTH the `me` and plain `fn` forms, and explicit `self.field = ...` still works\n' "$checked" "$engines" "$probes"
 exit 0

@@ -2,6 +2,8 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_provider_function_name}
+use std.nogc_sync_mut.sffi.system.{env_get}
 # MIR Lowering - HIR to MIR Transformation
 #
 # This module handles lowering from HIR (High-level IR) to MIR (Mid-level IR).
@@ -30,7 +32,8 @@ use compiler.core.types.{TYPE_BOOL, TYPE_I64, TYPE_F64}
 use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
-use compiler.common.attributes.{FunctionAttr}
+use compiler.common.attributes.{FunctionAttr, ExportAttr}
+use compiler.common._Attributes.decl_attrs.{OptimizationReqLevel, OptimizationBackend}
 use compiler.common.assurance.policy_names.{normalize_profile_name}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
@@ -38,14 +41,48 @@ use compiler.mir.mir_types.{MirConstant}
 
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: Any) -> i64
+# Formation probe: true only for a well-formed heap object. Distinguishes a
+# ZEROED slot (raw 0) from the nil sentinel (raw 3), which `== nil` cannot.
+extern fn rt_heap_ref_wellformed(value: Any) -> bool
 
 @always_inline
 fn _sffi_hir_type_discriminant(value: Any) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+val MIR_TYPE_TRANSPORT_RECEIPT_LIMIT: i64 = 16
+
+# Cached two-sided HirType transport probe. Default OFF; the dedicated gate
+# avoids enabling the broad MIR trace that previously generated enough output
+# to make the diagnostic run memory-bound.
+var mir_tag_probe_state: i64 = -1
+
+fn _mir_tag_probe_enabled() -> bool:
+    if mir_tag_probe_state < 0:
+        if (env_get("SIMPLE_MIR_TAG_PROBE") ?? "") == "1":
+            mir_tag_probe_state = 1
+        else:
+            mir_tag_probe_state = 0
+    mir_tag_probe_state == 1
+
 # Cached [mir-optional-inner] trace gate (-1 unknown, 0 off, 1 on). Default OFF.
 var mir_optional_inner_trace_state: i64 = -1
+
+# Cached [mir-lower-type-probe] gate (-1 unknown, 0 off, 1 on). Default OFF.
+# `mir_trace_enabled` (mir_data.spl:89) states in its own docstring that hot-path
+# callers MUST read it once and cache it, never per receipt; `lower_type` is the
+# hottest such path, so the env read happens at most once per process.
+var mir_lower_type_probe_state: i64 = -1
+
+# Monotonic record counter for the probe, and a hard output bound so a
+# pathological run cannot flood the log.
+var mir_lower_type_probe_seq: i64 = 0
+
+# Bound for the E-MIR-TYPE-ZeroKind RAISE-SITE probe (see
+# `unreachable_hir_type_kind`). The probe only fires in the ZeroKind branch, so
+# it is already bounded by the fatal count (2-6 per Stage-3 run), but a cap is
+# cheap insurance against a run that raises far more than observed.
+var mir_zerokind_raise_probe_seq: i64 = 0
 
 # Import struct definitions from types module
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
@@ -144,6 +181,12 @@ impl MirLowering:
         self.local_map = {}
         self.local_symbol_ids = []
         self.local_symbol_values = []
+        # The open-addressed index over local_symbol_ids must reset with it.
+        # Stale slots whose value is < the new ids.len() look live, so they
+        # pile up across functions until the table has no empty bucket and
+        # bind_local's insertion probe never terminates (Windows stage-2
+        # route hang, site 11 of stage2_stage3_route_native_compile_timeout).
+        self.local_symbol_index_slots = []
         self.local_hir_type_ids = []
         self.local_hir_type_values = []
         self.local_hir_type_isolation_states = []
@@ -171,6 +214,11 @@ impl MirLowering:
     me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = fn_.name + ""
+        self.type_transport_owner = fn_.name + ""
+        self.type_transport_context = "signature"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = trace_enabled and self.ambient_bootstrap_enabled()
         if trace_enabled:
@@ -198,12 +246,89 @@ impl MirLowering:
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
+            val signature_param = fn_.params[pmi]
+            val signature_param_type = signature_param.type_
+            self.type_transport_context = "signature-param"
+            self.type_transport_param_index = pmi
+            self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+                signature_param_type.kind)
             val lowered_param = if gpu_kernel_target == "vulkan":
-                self.lower_vulkan_kernel_param_type(fn_.params[pmi])
+                self.lower_vulkan_kernel_param_type(signature_param)
             elif gpu_kernel_target == "cuda":
-                self.lower_cuda_kernel_param_type(fn_.params[pmi])
+                self.lower_cuda_kernel_param_type(signature_param)
             else:
-                self.lower_type(fn_.params[pmi].type_)
+                # TWO-SIDED TAG PROBE (2026-09-02, OFF unless
+                # SIMPLE_MIR_TAG_PROBE=1; zero cost and zero reads when unset).
+                # This is the crossing E-MIR-TYPE-ZeroKind is suspected to be
+                # minted at: a HirType read out of an ARRAY ELEMENT and passed
+                # BY VALUE into a method -- the exact shape
+                # mir_lowering_types.spl:574-580 documents as unsafe under the
+                # admitted Stage 2 native ABI.
+                # Reading the discriminant HERE and comparing with what
+                # lower_type sees separates the two candidate roots that have
+                # opposite fixes:
+                #   caller non-zero, callee 0  -> dead copy MINTED IN FLIGHT
+                #                                 (repair the ABI crossing)
+                #   caller 0 too               -> already dead upstream
+                #                                 (the producer is earlier)
+                # Deliberately reads only the discriminant of the SAME field
+                # lower_type is about to read -- no extra fields, no `.span`.
+                # A previous "diagnostic-only" round that read five extra
+                # fields off `.span` was NOT behaviour-neutral (see :1112), so
+                # this stays minimal and default-off.
+                # SCOPE BY THE ANOMALY, NOT BY A NAME (2026-09-03). The filter
+                # here used to be `fn_.name.contains("compile_specialized_
+                # template")`, i.e. scoped by the name the ZeroKind fatal
+                # reports. Lines 1144-1150 of THIS SAME FILE document that name
+                # as a fixed TAIL LABEL of an installed `current_function_names`
+                # array -- never pushed/popped, identical for every fatal raised
+                # while that list is installed, and explicitly "NOT the function
+                # being lowered". So the one remaining experiment was scoped by
+                # a label its own file declares carries no victim information:
+                # it can only fire if the producer happens to sit inside one of
+                # the three `compile_specialized_template*` wrappers, which is
+                # precisely the reading runs B-F of
+                # zerokind_roams_between_victims_avoidance_edits_are_not_fixes
+                # _2026-09-02.md refuted five times over.
+                #
+                # The real constraint the old scoping was solving is OUTPUT
+                # VOLUME: an unscoped probe printed one line per parameter per
+                # function across all 760 modules and drove RSS to 10 GB in 3
+                # minutes. Filtering on the DISCRIMINANT instead of on a name
+                # keeps that bound and drops the false premise -- the probe now
+                # reads every parameter (a cheap SFFI discriminant, no output)
+                # and prints only when the caller side is ALREADY anomalous.
+                # `_sffi_hir_type_discriminant` returns -1 for a non-enum
+                # argument, which is exactly what a raw-0 (never-written) or nil
+                # `kind` produces, so the print count is bounded by the number of
+                # ZeroKind/NilType fatals (2 in the current Stage-3 run), not by
+                # 760 modules. Still default-off behind SIMPLE_MIR_TAG_PROBE=1.
+                #
+                # ARGUMENT FIX, same date and load-bearing for the above.
+                # `_sffi_hir_type_discriminant` is `rt_enum_discriminant(value)`
+                # (:46-49) -- it discriminates its OWN ARGUMENT, so it answers -1
+                # for anything that is not an enum. The probe used to pass
+                # `fn_.params[pmi].type_`, a HirType STRUCT, which is never an
+                # enum: that call returned -1 unconditionally and carried no
+                # information at all, in addition to being scoped by a
+                # meaningless name. Pass `.kind` -- the enum -- mirroring the two
+                # existing correct uses, :1189 (`type_.kind`) and :735 (`kind`).
+                # Without this the anomaly filter below would match every
+                # parameter of every function and reproduce the exact 10 GB
+                # output flood the old name filter existed to prevent.
+                # `.kind` is the SAME field `lower_type` is about to read and
+                # round 1 proved safe to touch; `fn_.name` and
+                # `fn_.params[pmi].name` belong to HirFunction/HirParam, not to
+                # the suspect HirType, so the :1112 round-2 hazard (reading
+                # further fields OFF THE CORRUPT OBJECT) is not reintroduced.
+                if _mir_tag_probe_enabled():
+                    val probe_disc = _sffi_hir_type_discriminant(fn_.params[pmi].type_.kind)
+                    if probe_disc == -1:
+                        eprint("[mir-tag-probe] ZERO-OR-NIL-KIND AT CALLER module={self.current_module_id} fn={fn_.name} param={pmi} param_name={fn_.params[pmi].name} caller_disc={probe_disc}")
+                if _mir_tag_probe_enabled():
+                    self.mir_tag_probe_pending_site = "param:{pmi}"
+                    self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+                self.lower_type(signature_param_type)
             params = params.push(lowered_param)
             pmi = pmi + 1
 
@@ -224,7 +349,15 @@ impl MirLowering:
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
-        val return_type = self.lower_type(fn_.return_type)
+        val signature_return_type = fn_.return_type
+        self.type_transport_context = "return"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = _sffi_hir_type_discriminant(
+            signature_return_type.kind)
+        if _mir_tag_probe_enabled():
+            self.mir_tag_probe_pending_site = "return"
+            self.mir_tag_probe_pending_caller_disc = self.type_transport_caller_disc
+        val return_type = self.lower_type(signature_return_type)
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-done {fn_.name}"
         if bootstrap_trace:
@@ -251,14 +384,18 @@ impl MirLowering:
         # optimisation -- it reclaims nothing on its own.
         # `+ ""` is the fresh-copy idiom proven by the alias oracle; plain
         # interpolation "{s}" does NOT copy (measured verdict=0).
-        var mir_fn_name = fn_.name + ""
-        # Static impl methods (`static fn` — is_static, NOT is_method) need the
-        # same owner qualification: two impls each declaring `static fn code()`
-        # otherwise both emit a bare `code` symbol and llc rejects the module
-        # with "invalid redefinition of function".
-        if fn_.is_method or fn_.is_static:
-            val display_name = self.symbols.symbol_display_name(fn_.symbol, fn_.name)
-            mir_fn_name = display_name.replace("::", ".")
+        var function_owner = self.current_module_id
+        val function_symbol = self.symbols.get_symbol_raw(fn_.symbol.id)
+        if function_symbol != nil:
+            val declared_owner = function_symbol.defining_module ?? ""
+            if declared_owner != "":
+                function_owner = declared_owner
+        # Pass the entry flag explicitly. With it omitted, an entry `main`
+        # whose symbol is absent from this table (the SIMPLE_BOOTSTRAP=1
+        # positional lane) fell back to `<module>.main`, so the object never
+        # defined `__simple_main` and the entry shim failed to link (LNK2019).
+        val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_, self.lowering_entry_module)
+        val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + ""
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, mir_fn_name, signature, fn_.span)
         if trace_enabled:
@@ -374,6 +511,12 @@ impl MirLowering:
                                     self.array_element_struct_syms[local.id] = element.name
                             case _:
                                 ()
+                case HirTypeKind.Any:
+                    # An Any parameter arrives as a tagged RuntimeValue. Keep
+                    # that representation fact after its MIR type erases to
+                    # i64 so comparison and rendering consumers do not treat
+                    # the tag bits as a raw scalar.
+                    self.mark_runtime_value_local(local.id)
                 case Isolated(inner):
                     # WP-F0 (resource ownership unblock, 2026-08-06): an
                     # iso-wrapped struct param (`x: iso S`) has type
@@ -398,14 +541,29 @@ impl MirLowering:
                     match inner.kind:
                         case Named(type_symbol, _):
                             val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
-                            val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                            var parameter_type_name = ""
+                            if parameter_type != nil:
+                                parameter_type_name = parameter_type.name
+                                match parameter_type.kind:
+                                    case Class: parameter_type_name = mir_class_identity(parameter_type)
+                                    case _: ()
+                            val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                             if is_named_struct:
-                                self.struct_value_syms[local.id] = parameter_type.name
+                                self.struct_value_syms[local.id] = parameter_type_name
                         case _:
                             ()
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
-                    val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
+                    var parameter_type_name = ""
+                    var is_class_param = false
+                    if parameter_type != nil:
+                        parameter_type_name = parameter_type.name
+                        match parameter_type.kind:
+                            case Class:
+                                parameter_type_name = mir_class_identity(parameter_type)
+                                is_class_param = self.class_type_names.has(parameter_type_name)
+                            case _: ()
+                    val is_named_struct = parameter_type_name != "" and self.struct_field_order.has(parameter_type_name)
                     # bug s19_class_free_fn_mutation_dropped_native_2026-07-17:
                     # a plain (non-`mut`, non-`me`) `class`-typed param used to
                     # fall into the `elif is_named_struct` Bug #167 value-copy
@@ -423,7 +581,6 @@ impl MirLowering:
                     # caller's instance. Only a genuine `struct` param keeps
                     # the defensive per-call copy when it's neither a `me`
                     # receiver nor an explicit `mut` param.
-                    val is_class_param = parameter_type != nil and self.class_type_names.has(parameter_type.name)
                     if is_named_struct and (is_me_receiver or is_mut_param or is_class_param):
                         # Bind the receiver/mut-param/class-param directly to
                         # the raw incoming arg local (already mapped via
@@ -432,9 +589,9 @@ impl MirLowering:
                         # `mut s: S` store / a plain class-param mutation
                         # inside the callee body writes through to the exact
                         # same memory the caller passed.
-                        self.struct_value_syms[local.id] = parameter_type.name
+                        self.struct_value_syms[local.id] = parameter_type_name
                     elif is_named_struct:
-                        self.struct_value_syms[local.id] = parameter_type.name
+                        self.struct_value_syms[local.id] = parameter_type_name
                         # Bug #167: structs have VALUE semantics (mirrors the HIR
                         # interpreter's Value.Struct -- see backend/objects.spl,
                         # "instances get value semantics (copied on bind/assign)
@@ -473,7 +630,7 @@ impl MirLowering:
                         # copy now applies only to a genuine `struct` param
                         # that is neither a `me` receiver nor `mut`-marked,
                         # which is exactly Bug #167's original, correct scope.
-                        val copy_local = self.copy_struct_value_recursive(local, parameter_type.name, type_symbol, [parameter_type.name])
+                        val copy_local = self.copy_struct_value_recursive(local, parameter_type_name, type_symbol, [parameter_type_name])
                         self.bind_local(param_symbol_id, copy_local)
                 case _:
                     ()
@@ -491,6 +648,9 @@ impl MirLowering:
             print "[mir-lower] lower_function:body-start {fn_.name}"
         if bootstrap_trace:
             print "[mir-lower] real-lower:body {fn_.name}"
+        self.type_transport_context = "body"
+        self.type_transport_param_index = -1
+        self.type_transport_caller_disc = -2
         # Thread the declared return type into the body ONLY for `-> bool`
         # functions, so lower_block_expected can put a bare trailing `.?` in
         # bool position (see its tail_bool_position block). Deliberately not
@@ -535,10 +695,19 @@ impl MirLowering:
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
+                var returned_tail_local = tail_local
+                match fn_.return_type.kind:
+                    case HirTypeKind.Any:
+                        # `-> Any` is a tagged ABI boundary. A raw scalar tail
+                        # must be boxed before the caller records the result as
+                        # a RuntimeValue local.
+                        returned_tail_local = self.box_runtime_value(tail_local)
+                    case _:
+                        ()
                 # WP-E: the function's own tail value moves the resource out
                 # to the caller on this exit -- exclude it from the drop
                 # sweep (see emit_pending_resource_drops's `returned_local`).
-                self.emit_pending_resource_drops(Some(tail_local))
+                self.emit_pending_resource_drops(Some(returned_tail_local))
                 bldr2 = self.builder
                 # Bug iso_transfer_sites_missing_move_return_assign_field
                 # (2026-08-06), item #1: a function's tail-expression return
@@ -557,12 +726,12 @@ impl MirLowering:
                 # matters beyond the simple `val c = a; a` tail-return case,
                 # which the checker's terminator arm alone already covers
                 # via record_use).
-                var tail_operand = mir_operand_copy(tail_local)
-                if self.local_hir_type_isolation_state(tail_local.id) == 1:
+                var tail_operand = mir_operand_copy(returned_tail_local)
+                if self.local_hir_type_isolation_state(returned_tail_local.id) == 1:
                     var b_rmove = self.builder
-                    val rmove_ty = self.local_mir_type_of(tail_local) ?? MirType.i64()
+                    val rmove_ty = self.local_mir_type_of(returned_tail_local) ?? MirType.i64()
                     val rmove_local = b_rmove.new_temp(rmove_ty)
-                    b_rmove.emit_move(rmove_local, tail_local)
+                    b_rmove.emit_move(rmove_local, returned_tail_local)
                     self.builder = b_rmove
                     bldr2 = self.builder
                     tail_operand = mir_operand_copy(rmove_local)
@@ -602,15 +771,20 @@ impl MirLowering:
                 gpu_selection.backend_order
 
         # Propagate @export("C") from HIR export_attr
-        match fn_.export_attr:
-            case Some(ea):
-                if ea.is_export_c:
-                    fn_result.is_export_c = true
-                    # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
-                    # above (hazard 4).
-                    fn_result.export_name = ea.export_name + ""
-            case None:
-                ()
+        # `export_attr` is a plain (non-optional) `ExportAttr` field paired
+        # with a `has_export_attr` presence flag -- the desugared shape noted
+        # at hir_definitions.spl:85-87, NOT `ExportAttr?`. Matching `Some(ea)`
+        # against it left `ea` receiver-typed ANY (the same class of bug
+        # fixed at link.spl's `read_note_sdn` call, a non-Option value
+        # mistaken for one). Use the established `has_export_attr` idiom
+        # (e.g. abi_interface.spl:174) instead.
+        if fn_.has_export_attr:
+            val ea: ExportAttr = fn_.export_attr
+            if ea.is_export_c:
+                fn_result.is_export_c = true
+                # Fresh copy, same MIR-owns-its-names rule as mir_fn_name
+                # above (hazard 4).
+                fn_result.export_name = ea.export_name + ""
 
         # Propagate @driver/@native_lib manifest metadata for backend registry
         # synthesis and manifest emission.
@@ -624,6 +798,7 @@ impl MirLowering:
             fn_result.vhdl_metadata = fn_.vhdl_metadata
 
         self.unsafe_depth = 0
+        self.mir_tag_probe_active_function = ""
         fn_result
 
     me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
@@ -697,6 +872,25 @@ impl MirLowering:
             result.pipeline_ii = fa.pipeline_ii
         if fa.memory_banks > 0:
             result.memory_banks = fa.memory_banks
+        # Asm-embedding contract (design A.2): placement + naked flags.
+        if fa.is_naked:
+            result.is_naked = true
+        match fa.section:
+            Some(section_name):
+                result.section = section_name
+            nil:
+                ()
+        if fa.align > 0:
+            result.align = fa.align
+        if fa.is_global:
+            result.is_global = true
+        # SIMD optimization requirement transport. Without this the
+        # @must(simd)/@prefer(avx512) tags reached HIR and stopped there, so
+        # the auto-vectorizer had nothing to enforce.
+        result.simd_req_level = _simd_req_level_text(fa.optimization_req.level)
+        result.simd_req_backend = _simd_req_backend_text(fa.optimization_req.backend)
+        if fa.simd_disable:
+            result.simd_disabled = true
         result
 
     me lower_const(const_: HirConst):
@@ -770,6 +964,73 @@ impl MirLowering:
         if type_ == nil:
             self.error_fatal("missing HIR type during MIR lowering", nil)
             return MirType(kind: MirTypeKind.I64)
+        val callee_disc = _sffi_hir_type_discriminant(type_.kind)
+        if (_mir_tag_probe_enabled()
+                and self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT):
+            val probe_site = self.mir_tag_probe_pending_site
+            val caller_disc = self.mir_tag_probe_pending_caller_disc
+            self.mir_tag_probe_pending_site = "recursive-or-other"
+            self.mir_tag_probe_pending_caller_disc = -2
+            if type_.kind == 0:
+                eprint("[mir-tag-probe] fn={self.mir_tag_probe_active_function} site={probe_site} caller_disc={caller_disc} callee_disc={callee_disc} kindzero=true\n")
+        if type_.kind == 0:
+            if self.type_transport_receipts < MIR_TYPE_TRANSPORT_RECEIPT_LIMIT:
+                self.type_transport_receipts = self.type_transport_receipts + 1
+                eprint("[mir-type-invariant] receipt={self.type_transport_receipts}/{MIR_TYPE_TRANSPORT_RECEIPT_LIMIT} owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} kindzero=true\n")
+                val relation = if self.type_transport_caller_disc > 0:
+                    "changed-at-call-boundary"
+                else:
+                    "already-zero-at-caller"
+                self.error_fatal("E-MIR-TYPE-Transport: raw-zero HirType kind observed at MIR boundary owner={self.type_transport_owner} context={self.type_transport_context} param_index={self.type_transport_param_index} caller_disc={self.type_transport_caller_disc} callee_disc={callee_disc} relation={relation}", nil)
+            return MirType.i64()
+        # [mir-lower-type-probe] -- DIAGNOSTIC, default OFF, gated by
+        # SIMPLE_MIRB_TRACE via mir_trace_enabled().
+        #
+        # Why here: three independent 20-vs-4 log pairs differ ONLY in the
+        # E-MIR-TYPE error lines (OTHER=0), so the run-to-run divergence is
+        # invisible to every existing receipt. The sequence of lower_type calls
+        # is the only thing between the last agreeing line and the disagreeing
+        # ones, so that sequence is what has to be recorded.
+        #
+        # SAFETY: this reads `type_.kind` and NOTHING else off `type_` -- no
+        # `.span`, no other field. Round 1 proved rendering the kind and its
+        # discriminant is safe even when the object is corrupt; round 2
+        # dereferenced `.span`'s fields as well and killed the worker silently.
+        # The nil guard above runs first, so `.kind` is never read off nil.
+        #
+        # FORMAT is fixed and greppable for mechanical diffing -- exactly three
+        # fields, always in this order, no timings and no addresses:
+        #   [mir-lower-type-probe] seq=<n> fn=<name> disc=<d>
+        if mir_lower_type_probe_state < 0:
+            if mir_trace_enabled():
+                mir_lower_type_probe_state = 1
+            else:
+                mir_lower_type_probe_state = 0
+        if mir_lower_type_probe_state == 1 and mir_lower_type_probe_seq < 50000:
+            mir_lower_type_probe_seq = mir_lower_type_probe_seq + 1
+            val probe_fn = if self.current_function_names.len() > 0:
+                self.current_function_names[self.current_function_names.len() - 1]
+            else:
+                "<none>"
+            if mir_lower_type_probe_seq == 50000:
+                eprint("[mir-lower-type-probe] truncated seq=50000\n")
+            else:
+                # kindzero / kindnil discriminate the two candidate mechanisms without
+                # adding a runtime accessor. There is NO scalar tag accessor in the C
+                # runtime (no rt_value_tag / rt_raw_bits), so `type_ & 7` is not
+                # expressible from Simple, and reaching into the object to synthesise one
+                # is the round-2 mistake. Instead use the idiom the codebase already
+                # relies on: copy_local_hir_type_metadata (mir_lowering_types.spl:595)
+                # tests `source_type == nil or source_type == 0` to reject a
+                # "staged-native raw zero". Same test here:
+                #   disc=-1 with kindzero=true  -> the arm-binding guard FAILED and the
+                #     copy came from the freshly rt_alloc'd ZEROED block; the migration is
+                #     the cause and the fix is the tagging / the guard's assumption.
+                #   disc=-1 with kindzero=false -> the guard PASSED and the copy is wrong
+                #     for some other reason; the zeroed-block story is refuted.
+                # Both operands are compared by value; neither reads a field of the
+                # suspect object beyond `kind`, which round 1 proved safe to touch.
+                eprint("[mir-lower-type-probe] seq={mir_lower_type_probe_seq} fn={probe_fn} disc={_sffi_hir_type_discriminant(type_.kind)} kindzero={type_.kind == 0} kindnil={type_.kind == nil}\n")
         val dict_type_disc = _sffi_hir_type_discriminant(HirTypeKind.Dict(type_, type_))
         if _sffi_hir_type_discriminant(type_.kind) == dict_type_disc:
             match type_.kind:
@@ -781,6 +1042,7 @@ impl MirLowering:
         if _sffi_hir_type_discriminant(type_.kind) == named_type_disc:
             match type_.kind:
                 case HirTypeKind.Named(symbol, _):
+                    self.record_external_layout_reference(symbol)
                     val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                     if underlying == TYPE_BOOL:
                         return MirType(kind: MirTypeKind.Bool)
@@ -892,6 +1154,7 @@ impl MirLowering:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
             case HirTypeKind.Named(symbol, _):
+                self.record_external_layout_reference(symbol)
                 val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
                     return MirType(kind: MirTypeKind.Bool)
@@ -1025,6 +1288,26 @@ impl MirLowering:
             if bootstrap_trace:
                 print "[mir-lower] block:stmt {blk_i}"
             val stmt: HirStmt = block_stmts[blk_i]
+            # [mir-lower-stmt-probe] -- DIAGNOSTIC, default OFF, same memoised gate as
+            # [mir-lower-type-probe]. Interleaving statement boundaries with the
+            # lower_type records shows WHICH STATEMENT the disc=-1 transition lands in:
+            # in both measured runs the first N lower_type calls returned valid
+            # discriminants and then every subsequent one returned -1, so the question is
+            # what happens at that boundary.
+            # SAFETY: `stmt` is the caller's own, well-formed HirStmt (already typed-rebound
+            # on the line above and successfully matched by lower_stmt); this reads only its
+            # `kind` discriminant and touches nothing belonging to the suspect HirType.
+            if mir_lower_type_probe_state < 0:
+                if mir_trace_enabled():
+                    mir_lower_type_probe_state = 1
+                else:
+                    mir_lower_type_probe_state = 0
+            if mir_lower_type_probe_state == 1 and mir_lower_type_probe_seq < 50000:
+                val stmt_probe_fn = if self.current_function_names.len() > 0:
+                    self.current_function_names[self.current_function_names.len() - 1]
+                else:
+                    "<none>"
+                eprint("[mir-lower-stmt-probe] stmt={blk_i} fn={stmt_probe_fn} kind_disc={_sffi_hir_type_discriminant(stmt.kind)}\n")
             self.lower_stmt(stmt)
             if trace_enabled:
                 print "[mir-lower] block:stmt-done {blk_i}"
@@ -1293,15 +1576,46 @@ impl MirLowering:
                             return q_idx
                         q_idx = q_idx + 1
             val sym_id = self.symbol_id_value(found_type_sym)
+            val fm_type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
             if self.field_map.has(sym_id):
                 val fields = self.field_map[sym_id]
-                val n = fields.len()
-                var idx = 0
-                while idx < n:
-                    if fields[idx] == field_name:
-                        return idx
-                    idx = idx + 1
-            val type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
+                # FAIL CLOSED on a cross-module SymbolId collision. field_map is
+                # keyed by per-module numeric SymbolIds, which collide in an
+                # entry-closure build, and the qualified tier above cannot save
+                # us because its key is not normalized across the import
+                # boundary (see mir_qualified_field_key_namespace_mismatch
+                # _2026-08-08.md). A collision here does not fail loudly: it
+                # returns SOME index, so the field is read at another type's
+                # offset. Measured 2026-08-30: CompilerConfig (14 fields, 112
+                # bytes, mcdc_owner_bytes at #10/0x50) was read at #26/0xd0 --
+                # MirLowering's layout -- i.e. 96 bytes past the end of the
+                # allocation, silently.
+                # The name-keyed tier immediately below is right in exactly the
+                # cases this one is wrong, so when the two disagree the honest
+                # move is to distrust the ambiguous key rather than the specific
+                # one. When they agree, or no name-keyed entry exists, behaviour
+                # is unchanged.
+                var fm_trusted = true
+                if fm_type_symbol != nil and self.struct_field_order.has(fm_type_symbol.name):
+                    val fm_named = self.struct_field_order[fm_type_symbol.name]
+                    if fm_named.len() != fields.len():
+                        fm_trusted = false
+                    else:
+                        var fm_i = 0
+                        while fm_i < fm_named.len():
+                            if fm_named[fm_i] != fields[fm_i]:
+                                fm_trusted = false
+                            fm_i = fm_i + 1
+                if fm_trusted:
+                    val n = fields.len()
+                    var idx = 0
+                    while idx < n:
+                        if fields[idx] == field_name:
+                            return idx
+                        idx = idx + 1
+                elif (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                    print "[field-idx-collision] type={fm_type_symbol.name} field={field_name} sym_id={sym_id} field_map_len={fields.len()}"
+            val type_symbol = fm_type_symbol
             if type_symbol != nil and self.struct_field_order.has(type_symbol.name):
                 val named_fields = self.struct_field_order[type_symbol.name]
                 var named_idx = 0
@@ -1310,7 +1624,7 @@ impl MirLowering:
                         return named_idx
                     named_idx = named_idx + 1
 
-        if (rt_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+        if (env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
             print "[field-idx-fallback0] field={field_name} base_local={base_local.id} in_svs={self.struct_value_syms.contains(base_local.id)}"
         0  # Default fallback when type is unknown
 
@@ -1354,3 +1668,27 @@ impl MirLowering:
 # ============================================================================
 # Target-Qualified Assembly
 # ============================================================================
+
+fn _simd_req_level_text(level: OptimizationReqLevel) -> text:
+    """Stable wire text for the requirement level; "" means no requirement."""
+    match level:
+        case None_:     ""
+        case Must:      "must"
+        case Prefer:    "prefer"
+        case ErrorNot:  "error_not"
+        case WarnNot:   "warn_not"
+
+fn _simd_req_backend_text(backend: OptimizationBackend) -> text:
+    """Stable wire text for the requested backend; "" means none/unknown."""
+    match backend:
+        case Unknown:  ""
+        case Simd:     "simd"
+        case Avx2:     "avx2"
+        case Avx512:   "avx512"
+        case Sse:      "sse"
+        case Neon:     "neon"
+        case RiscvV:   "riscv_v"
+        case Cuda:     "cuda"
+        case Metal:    "metal"
+        case OpenCL:   "opencl"
+        case Gpu:      "gpu"

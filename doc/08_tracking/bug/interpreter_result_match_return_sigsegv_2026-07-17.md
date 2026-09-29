@@ -1,10 +1,13 @@
 # seed driver: `RunningType::Interpreter` SIGSEGVs on `match` over a
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 # `Result`-returning call with `return` in each arm
 
 **Severity:** medium (crash, not silent-wrong -- found while regression-testing task #170)
 **Found:** 2026-07-17, task #170 (BoxInt<<3 tag-shift verification) lane
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+**Status:** filed, not yet root-caused or fixed -- out of scope for #170
 
 ## Symptom
 
@@ -95,3 +98,4 @@ fn main() -> i64:
    handling (`compiler/src/interpreter_patterns.rs`,
    `compiler/src/interpreter_call/block_execution.rs`) or in the test
    harness's `Interpreter::new()` per-test isolation.
+

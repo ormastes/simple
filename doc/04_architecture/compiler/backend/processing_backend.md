@@ -1,8 +1,21 @@
 <!-- codex-architecture -->
 # Processing Backend Architecture
 
+## SimpleOS QEMU and Adreno port composition (2026-08-02)
+
+SimpleOS guest processing composes backend-neutral `ProcessingDevicePort`
+adapters below canonical `ProcessingIr`. The QEMU guest probe uses
+`CudaHostOffloadAdapter` or `VulkanHostOffloadAdapter` over ivshmem; both retain
+their real backend code and require correlated device-origin receipts.
+Rendering selection remains independent.
+
+UNO Q uses `AdrenoTurnipAdapter` at the Vulkan device boundary. It shares
+Vulkan semantics and evidence policy but not QEMU transport code, and remains
+blocked from `simpleos-native` promotion until firmware, MMU/cache, queue,
+fence, and device-readback owners exist.
+
 **Date:** 2026-06-14
-**Status:** Partial — shared FillU32/FillRect contract and focused native Vulkan slice implemented
+**Status:** Partial — validated `FillU32` vertical slice implemented
 **Scope:** Portable compute, draw, tensor, RV64 vector, and FPGA soft-accelerator backend lane.
 
 ## Bottom Line
@@ -29,26 +42,6 @@ Backends
 
 ## Current State
 
-The first runtime-neutral slice now exists. `src/lib/common/processing/processing_ir.spl`
-owns a validated `FillU32` value and CPU oracle;
-`src/lib/gc_async_mut/processing/vulkan_fill_u32.spl` executes that value through
-the existing Vulkan SFFI. Its storage-buffer dispatch shares the Vulkan owner's
-fenced tri-state lifecycle with Engine2D: only status `1` permits readback,
-status `0` is safe to tear down but ineligible for a receipt, and status `-1`
-transfers its uniquely owned buffer, pipeline, and shader to the canonical
-Vulkan dependency quarantine while the native runtime retains command/fence
-ownership. The owner reaps only after device-idle and gates shutdown until all
-releases succeed. Storage-buffer transfer work shares the compute queue and its
-single submission mutex, and
-readback inserts a buffer memory barrier from compute shader writes (and prior
-transfer writes) to transfer reads before copying into host-visible staging
-memory. This ordering is part of the portable readback contract; a completed
-fence without the access dependency is insufficient. The SimpleOS host service accepts the existing bounded
-wire command only after Vulkan negotiation, compares device readback with the
-CPU oracle, and reports device provenance. Native CUDA and Metal FillU32
-adapters also exist; the compiler MIR bridge, public `std.processing` API, and
-`simplegpu64` remain open.
-
 | Area | Existing repo evidence | Design consequence |
 |------|------------------------|--------------------|
 | CUDA/Vulkan runtime | `src/compiler_rust/runtime/src/cuda_runtime.rs`, `src/compiler_rust/runtime/src/value/gpu_vulkan/`, `src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` | Reuse runtime handles and fail-closed backend diagnostics. |
@@ -63,7 +56,6 @@ adapters also exist; the compiler MIR bridge, public `std.processing` API, and
 
 ```text
 src/lib/processing/                         public Simple processing API
-src/lib/common/processing/                  runtime-neutral validated IR values and CPU oracles
 src/compiler/00.common/processing/          shared IR contracts and diagnostics
 src/compiler/50.mir/processing/             MIR-to-ProcessingIR bridge
 src/compiler/70.backend/backend/processing/ backend selection and lowering
@@ -104,30 +96,6 @@ q.wait()
 ```
 
 ## Processing IR Contract
-
-The executable v2 boundary is
-`src/lib/common/processing/{processing_ir,backend_contract}.spl`. Producers
-submit `ProcessingIr`; routing returns `ProcessingBackendArtifact`,
-`ProcessingCompileEvidence`, and `ProcessingDeviceReadbackEvidence` for a
-`ProcessingBackendTarget`. No backend-specific renderer API crosses this
-boundary.
-
-`FillRectU32` is row-major with explicit stride and half-open bounds. Operation,
-target, value, count, dimensions, stride, and every rectangle coordinate are
-part of the semantic key. Compiler, validator, ABI, driver, and device identity
-are additional native cache dimensions. Only immutable source/binary artifacts
-may be cached; buffers, pipelines, fences, handles, and readback authority stay
-transient and backend-owned.
-
-Startup probes report capability only. The hot path validates IR and artifact
-identity, submits through the native owner, waits for known completion, captures
-typed device readback, and compares it with the CPU oracle. Unsupported
-semantics, compiler/validator failure, unknown completion, CPU fallback, missing
-device identity, or non-device readback fail closed. External compilation and
-repository scans are cold-path operations and forbidden per dispatch.
-
-Operational targets are warm artifact selection below 1 ms and less than 4 MiB
-additional steady-state RSS excluding driver-owned allocations.
 
 ProcessingIR is separate from ordinary MIR and only accepts GPU-safe operations:
 
@@ -175,8 +143,7 @@ mobile and desktop GPUs.
 
 ## Build Stages
 
-1. Define ProcessingIR plus CPU golden backend. (`FillU32` runtime slice done;
-   compiler lowering remains.)
+1. Define ProcessingIR plus CPU golden backend.
 2. Lower `@kernel` and `@vulkan_kernel` to Vulkan/SPIR-V.
 3. Add `std.processing` buffers, queues, fences, and events.
 4. Add matops: tiled GEMM, reduce, softmax, layernorm.

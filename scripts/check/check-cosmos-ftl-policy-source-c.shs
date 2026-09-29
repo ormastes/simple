@@ -1,0 +1,105 @@
+#!/bin/sh
+# Non-release source/frozen-C diagnostics.  This gate never writes a receipt
+# and never substitutes for check-cosmos-ftl-policy.shs with admitted Stage 4.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+CC_BIN=${CC:-clang}
+POLICY=$ROOT/src/os/kernel/arch/arm32/cosmos/cosmos_ftl_policy.spl
+BRIDGE=$ROOT/src/os/kernel/arch/arm32/cosmos/cosmos_ftl.c
+SOURCE_DIR=$ROOT/src/os/kernel/arch/arm32/cosmos
+ORACLE=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_frozen_oracle.c
+ORACLE_DUMP=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_oracle_dump.c
+C_COVERAGE=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_policy_c_coverage_test.c
+CONTRACT=$ROOT/test/02_integration/os/cosmos/cosmos_ftl_contract_test.c
+PIN=$ROOT/test/fixtures/os/cosmos_ftl_policy_coverage_pin.env
+SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-ftl-source-c.XXXXXX")
+trap 'case ${SCRATCH:-} in /tmp/cosmos-ftl-source-c.*|${TMPDIR:-/tmp}/cosmos-ftl-source-c.*) [ ! -d "$SCRATCH" ] || rm -r -- "$SCRATCH" ;; esac' EXIT HUP INT TERM
+
+fail() {
+    echo "FAIL cosmos-ftl-policy-source-c: $*" >&2
+    exit 1
+}
+
+CLANG_MAJOR=$($CC_BIN -dumpversion | sed 's/\..*//')
+LLVM_PROFDATA_BIN=${LLVM_PROFDATA:-llvm-profdata-$CLANG_MAJOR}
+LLVM_COV_BIN=${LLVM_COV:-llvm-cov-$CLANG_MAJOR}
+for tool in "$CC_BIN" "$LLVM_PROFDATA_BIN" "$LLVM_COV_BIN" \
+    awk diff grep sed sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || fail "required tool unavailable: $tool"
+done
+
+[ "$(grep -c '^@export("C")' "$POLICY")" = 41 ] || fail export-count
+grep -n -o 'COSMOS-FTL-D[0-9][0-9][0-9]' "$POLICY" >"$SCRATCH/ids"
+[ "$(wc -l <"$SCRATCH/ids" | tr -d ' ')" = 185 ] || fail decision-site-count
+awk -F: '{ print $2 }' "$SCRATCH/ids" | LC_ALL=C sort >"$SCRATCH/observed"
+awk 'BEGIN { for (i = 1; i <= 185; i++) printf "COSMOS-FTL-D%03d\n", i }' \
+    >"$SCRATCH/required"
+diff -u "$SCRATCH/required" "$SCRATCH/observed" || fail decision-id-set
+[ "$(sed -n 's/^decision_ids_sha256=//p' "$PIN")" = \
+  "$(sha256sum "$SCRATCH/ids" | awk '{print $1}')" ] || fail decision-location-pin-stale
+[ "$(sed -n 's/^compiler_location_lines_sha256=//p' "$PIN")" = \
+  "$(sha256sum "$SCRATCH/ids" | awk '{print $1}')" ] || fail compiler-location-pin-stale
+[ "$(sed -n 's/^owner_source_sha256=//p' "$PIN")" = \
+  "$(sha256sum "$POLICY" | awk '{print $1}')" ] || fail source-pin-stale
+[ "$(sed -n 's/^decision_sites=//p' "$PIN")" = 185 ] || fail decision-pin
+[ "$(sed -n 's/^branch_outcomes_total=//p' "$PIN")" = 370 ] || fail outcome-pin
+[ "$(sed -n 's/^c_oracle_source_sha256=//p' "$PIN")" = \
+  "$(sha256sum "$ORACLE" | awk '{print $1}')" ] || fail c-oracle-pin-stale
+[ "$(sed -n 's/^c_coverage_driver_sha256=//p' "$PIN")" = \
+  "$(sha256sum "$C_COVERAGE" | awk '{print $1}')" ] || fail c-driver-pin-stale
+[ "$(sed -n 's/^clang_coverage_functions_total=//p' "$PIN")" = 41 ] ||
+    fail c-function-total-pin
+[ "$(sed -n 's/^clang_coverage_lines_total=//p' "$PIN")" = 278 ] ||
+    fail c-line-total-pin
+[ "$(sed -n 's/^clang_coverage_branch_edges_total=//p' "$PIN")" = 352 ] ||
+    fail c-branch-total-pin
+if grep -Eq 'coverage_(hit|mask|required|reset)|COVERAGE_REQUIRED|decisions_hit' "$POLICY"; then
+    fail owner-authored-coverage-counter
+fi
+
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wconversion -Wstrict-prototypes -I"$SOURCE_DIR" "$ORACLE" \
+    "$ORACLE_DUMP" -o "$SCRATCH/oracle-dump"
+"$SCRATCH/oracle-dump" >"$SCRATCH/oracle.full"
+grep '^FTL|' "$SCRATCH/oracle.full" >"$SCRATCH/oracle.out"
+[ "$(wc -l <"$SCRATCH/oracle.out" | tr -d ' ')" = 41 ] || fail oracle-row-count
+grep '^FTL-ALLOC|' "$SCRATCH/oracle.full" >"$SCRATCH/allocator.out"
+printf '%s\n' \
+    'FTL-ALLOC|scan-410|19' \
+    'FTL-ALLOC|final-409|19' \
+    'FTL-ALLOC|final-410|20' \
+    'FTL-ALLOC|gc-final-409|20' >"$SCRATCH/allocator.required"
+diff -u "$SCRATCH/allocator.required" "$SCRATCH/allocator.out" ||
+    fail allocator-mode-results
+
+"$CC_BIN" -std=c11 -O0 -g -fprofile-instr-generate -fcoverage-mapping \
+    -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion \
+    -Wstrict-prototypes -I"$SOURCE_DIR" "$ORACLE" "$C_COVERAGE" \
+    -o "$SCRATCH/c-coverage-driver"
+LLVM_PROFILE_FILE="$SCRATCH/c.profraw" "$SCRATCH/c-coverage-driver" \
+    >"$SCRATCH/c-coverage-driver.out" || fail c-coverage-driver
+"$LLVM_PROFDATA_BIN" merge -sparse "$SCRATCH/c.profraw" \
+    -o "$SCRATCH/c.profdata"
+"$LLVM_COV_BIN" report "$SCRATCH/c-coverage-driver" \
+    -instr-profile="$SCRATCH/c.profdata" -show-branch-summary "$ORACLE" \
+    >"$SCRATCH/c-coverage.txt"
+set -- $(awk -v oracle="$ORACLE" '$1 == oracle { print $5, $6, $8, $9, $11, $12 }' \
+    "$SCRATCH/c-coverage.txt")
+[ "$#" = 6 ] || fail c-coverage-summary-shape
+[ "$1" = "$(sed -n 's/^clang_coverage_functions_total=//p' "$PIN")" ] &&
+    [ "$2" = 0 ] || fail "c-llvm-functions:$(( $1 - $2 ))/$1"
+[ "$3" = "$(sed -n 's/^clang_coverage_lines_total=//p' "$PIN")" ] &&
+    [ "$4" = 0 ] || fail "c-llvm-lines:$(( $3 - $4 ))/$3"
+[ "$5" = "$(sed -n 's/^clang_coverage_branch_edges_total=//p' "$PIN")" ] &&
+    [ "$6" = 0 ] || fail "c-llvm-branches:$(( $5 - $6 ))/$5"
+
+"$CC_BIN" -std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow \
+    -Wstrict-prototypes -Wformat=2 -Wno-unused-function \
+    -DCOSMOS_MMIO_TEST=1 -I"$SOURCE_DIR" "$CONTRACT" "$BRIDGE" "$ORACLE" \
+    -o "$SCRATCH/c-contract"
+"$SCRATCH/c-contract" >"$SCRATCH/c-contract.out" || fail c-contract
+grep -F 'cosmos FTL contract: PASS' "$SCRATCH/c-contract.out" >/dev/null ||
+    fail c-contract-receipt
+
+echo "cosmos_ftl_policy_source_c status=PASS exports=41/41 named_decisions=185/185 named_outcomes=370 source_only=true oracle_rows=41/41 allocator_modes=4/4 frozen_c_llvm_functions=41/41 frozen_c_llvm_lines=278/278 frozen_c_llvm_edges=352/352 c_contract=pass release_receipt=false"

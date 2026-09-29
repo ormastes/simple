@@ -1,4 +1,8 @@
 # Native: method returning text prints raw handle integer
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status (2026-07-16):** RESOLVED for strict-llvm (see Resolution below);
 strict-cranelift is blocked by a separate PRE-EXISTING backend failure
@@ -94,3 +98,4 @@ Evidence (worktree at eaee86e1e4d + fix):
 `method_text_return_cranelift` remains blocked by the pre-existing cranelift
 "Failed to declare module statics" backend failure (fires at unmodified
 baseline for the same source; separate root, not a text-return typing issue).
+

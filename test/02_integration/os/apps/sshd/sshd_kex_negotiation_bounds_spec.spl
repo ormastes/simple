@@ -1,0 +1,92 @@
+use std.spec.*
+
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_text, ssh_put_bool}
+use os.apps.sshd.ssh_session_helpers.{ssh_validate_production_kexinit_for_test, ssh_kex_guess_matches_for_test}
+use os.apps.sshd.ssh_transport.{SshKexInit, ssh_negotiate_algorithms}
+
+fn _kexinit(kex: text, host: text, cipher: text, first_follows: bool, reserved: u32) -> [u8]:
+    var out: [u8] = [20]
+    var i: u64 = 0
+    while i < 16:
+        out.push(0)
+        i = i + 1
+    out = ssh_put_text(out, kex)
+    out = ssh_put_text(out, host)
+    out = ssh_put_text(out, cipher)
+    out = ssh_put_text(out, cipher)
+    out = ssh_put_text(out, "none")
+    out = ssh_put_text(out, "none")
+    out = ssh_put_text(out, "none")
+    out = ssh_put_text(out, "none")
+    out = ssh_put_text(out, "")
+    out = ssh_put_text(out, "")
+    out = ssh_put_bool(out, first_follows)
+    ssh_put_u32(out, reserved)
+
+fn _valid() -> [u8]:
+    _kexinit(
+        "curve25519-sha256,kex-strict-c-v00@openssh.com",
+        "ssh-ed25519",
+        "aes256-gcm@openssh.com",
+        false,
+        0
+    )
+
+fn _proposal(ciphers: text) -> SshKexInit:
+    SshKexInit(
+        cookie: [],
+        kex_algorithms: "curve25519-sha256",
+        server_host_key_algorithms: "ssh-ed25519",
+        encryption_client_to_server: ciphers,
+        encryption_server_to_client: ciphers,
+        mac_client_to_server: "none",
+        mac_server_to_client: "none",
+        compression_client_to_server: "none",
+        compression_server_to_client: "none",
+        first_kex_packet_follows: false
+    )
+
+describe "SSHD bounded production KEXINIT negotiation":
+    it "accepts one bounded canonical proposal":
+        expect(ssh_validate_production_kexinit_for_test(_valid())).to_equal(true)
+
+    it "rejects empty duplicate and whitespace-bearing algorithm names":
+        expect(ssh_validate_production_kexinit_for_test(_kexinit(
+            "curve25519-sha256,,legacy", "ssh-ed25519", "aes256-gcm@openssh.com", false, 0))).to_equal(false)
+        expect(ssh_validate_production_kexinit_for_test(_kexinit(
+            "curve25519-sha256,curve25519-sha256", "ssh-ed25519", "aes256-gcm@openssh.com", false, 0))).to_equal(false)
+        expect(ssh_validate_production_kexinit_for_test(_kexinit(
+            "curve25519-sha256, legacy", "ssh-ed25519", "aes256-gcm@openssh.com", false, 0))).to_equal(false)
+
+    it "rejects a nonzero reserved word and trailing transcript bytes":
+        expect(ssh_validate_production_kexinit_for_test(_kexinit(
+            "curve25519-sha256", "ssh-ed25519", "aes256-gcm@openssh.com", false, 7))).to_equal(false)
+        var trailing = _valid()
+        trailing.push(0)
+        expect(ssh_validate_production_kexinit_for_test(trailing)).to_equal(false)
+
+    it "rejects a name-list beyond the byte cap":
+        var oversized = "x"
+        while oversized.len() <= 4096:
+            oversized = oversized + "x"
+        expect(ssh_validate_production_kexinit_for_test(_kexinit(
+            oversized, "ssh-ed25519", "aes256-gcm@openssh.com", false, 0))).to_equal(false)
+
+    it "selects the first client-preferred algorithm from the server allowlist":
+        val selected = ssh_negotiate_algorithms(
+            _proposal("aes128-gcm@openssh.com,aes256-gcm@openssh.com"),
+            _proposal("aes256-gcm@openssh.com,aes128-gcm@openssh.com"))
+        expect(selected.is_ok()).to_equal(true)
+        expect(selected.unwrap().cipher_c2s).to_equal("aes128-gcm@openssh.com")
+
+    it "fails closed when the first common name is outside the implemented allowlist":
+        val selected = ssh_negotiate_algorithms(
+            _proposal("legacy-cipher,aes256-gcm@openssh.com"),
+            _proposal("legacy-cipher,aes256-gcm@openssh.com"))
+        expect(selected.is_err()).to_equal(true)
+
+    it "distinguishes correct and wrong optimistic KEX guesses from raw list heads":
+        val correct = _kexinit("curve25519-sha256", "ssh-ed25519", "aes256-gcm@openssh.com", true, 0)
+        val wrong = _kexinit("legacy-kex,curve25519-sha256", "ssh-ed25519", "aes256-gcm@openssh.com", true, 0)
+        expect(ssh_kex_guess_matches_for_test(correct, "curve25519-sha256", "ssh-ed25519")).to_equal(true)
+        expect(ssh_kex_guess_matches_for_test(wrong, "curve25519-sha256", "ssh-ed25519")).to_equal(false)

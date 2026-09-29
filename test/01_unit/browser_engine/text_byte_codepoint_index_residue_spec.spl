@@ -1,0 +1,98 @@
+"""
+Every text helper in the renderer that is handed a BYTE range must step by
+CODEPOINT, not by byte, and must test bytes with byte accessors.
+
+This engine's text API is mixed, and that is the substrate cause behind round
+16's wrap defect: `len()` and `substring()` are BYTE-indexed, while
+`char_code_at()` and `char_at()` are CODEPOINT-indexed and DECODE — so
+`char_code_at` never returns a UTF-8 continuation byte (128..191), and a byte
+offset handed to it silently names a different character on any run past its
+first non-ASCII codepoint.
+
+Round 16 fixed the two wrap loops and `style_run_byte_advances`, and named the
+rest as still carrying the mix. This spec pins the rest, all six of them, each
+with an ASCII control that must NOT move:
+
+| helper (file)                                    | old behaviour on non-ASCII        |
+|--------------------------------------------------|-----------------------------------|
+| `text_line_advance_width` (…_layout)              | one advance charged per BYTE      |
+| `wrap_line_end` (…_layout)                        | char budget spent in bytes        |
+| `_lay_ellipsize_text_for_width_inner` (…_layout)  | measured one char, emitted another|
+| `_table_text_min_content_width` (…_layout)        | read past end, over-sized column  |
+| `reverse_text_for_paint` (…_paint_primitives)     | counted down from the BYTE length |
+| `fb_text_sparse_range` (…_paint_primitives)       | wrong glyph, advance per byte     |
+
+`fb_text_thin_scaled_clip_range` (…_paint_primitives) carried it too and takes
+the same fix — a private codepoint cursor, one glyph and one advance per
+codepoint, nothing on a continuation byte, identical in shape to the
+byte-advance twin `fb_text_thin_scaled_clip_range_adv` that round 16 already
+corrected. It and `fb_text_sparse_range` return a framebuffer rather than a
+value, so they are covered here only through the shared invariant the pure
+helpers assert; that limit is stated rather than papered over.
+
+`resolved_text_range_width` is NOT on the list because it no longer exists: the
+ellipsize loop was its only caller, and once that loop reads the per-byte
+advance table the function is dead, so it was deleted rather than left as an
+unused mixed-index helper for the next reader to trust.
+
+The em dash U+2014 is 3 bytes / 1 codepoint, which is what makes every row
+below discriminate: a byte-stepping implementation is wrong by exactly 2.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TEXT-INDEX-006 — renderer text helpers given byte ranges step by codepoint and test bytes with byte accessors, so a non-ASCII run measures and renders as its ASCII twin does.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.{
+    text_line_advance_width, wrap_line_end, next_codepoint_start
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    reverse_text_for_paint
+}
+
+# "a—b": 5 bytes, 3 codepoints. "axb": 3 bytes, 3 codepoints — the control.
+val DASH: text = "a—b"
+val ASCII: text = "axb"
+
+describe "byte ranges are stepped by codepoint, not by byte":
+    it "AC-1: text_line_advance_width charges one advance per codepoint":
+        step("3 codepoints at 10 px each; stepping bytes would charge 5 = 50")
+        expect(text_line_advance_width(DASH, 0, DASH.len(), 10, 4)).to_equal(30)
+
+    it "AC-2 (control): the ASCII twin is unchanged at 30":
+        step("same codepoint count, no multi-byte sequence")
+        expect(text_line_advance_width(ASCII, 0, ASCII.len(), 10, 4)).to_equal(30)
+
+    it "AC-3: the two agree, which is the property the byte stepping broke":
+        step("an em dash must not cost three glyph widths")
+        expect(text_line_advance_width(DASH, 0, DASH.len(), 10, 4))
+            .to_equal(text_line_advance_width(ASCII, 0, ASCII.len(), 10, 4))
+
+    it "AC-4: a space is charged the space advance, tested on the BYTE":
+        step("char_code_at could not see a byte; bytes() can")
+        expect(text_line_advance_width("a b", 0, 3, 10, 4)).to_equal(24)
+
+    it "AC-5: wrap_line_end spends its budget in CODEPOINTS":
+        step("a 3-codepoint budget must consume the whole 5-byte run")
+        expect(wrap_line_end(DASH, 0, 3)).to_equal(5)
+        expect(wrap_line_end(ASCII, 0, 3)).to_equal(3)
+
+    it "AC-6: wrap_line_end never returns an offset inside a codepoint":
+        step("a 2-codepoint budget stops after the em dash, at byte 4")
+        expect(wrap_line_end(DASH, 0, 2)).to_equal(4)
+        expect(next_codepoint_start(DASH, 1)).to_equal(4)
+
+    it "AC-7: wrap_line_end still breaks at the last space in the line":
+        step("the ASCII behaviour the flat fallback path depends on")
+        expect(wrap_line_end("ab cd ef", 0, 7)).to_equal(5)
+
+    it "AC-8: reverse_text_for_paint reverses codepoints, not bytes":
+        step("byte-reversing an em dash produces invalid UTF-8, not 'b—a'")
+        expect(reverse_text_for_paint(DASH)).to_equal("b—a")
+        expect(reverse_text_for_paint(ASCII)).to_equal("bxa")
+
+    it "AC-9 (control): reversing is still an involution on both":
+        step("the property a byte-length countdown silently lost")
+        expect(reverse_text_for_paint(reverse_text_for_paint(DASH))).to_equal(DASH)
+        expect(reverse_text_for_paint(reverse_text_for_paint(ASCII))).to_equal(ASCII)

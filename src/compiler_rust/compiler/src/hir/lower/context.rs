@@ -26,6 +26,21 @@ pub(super) struct FunctionContext {
     /// Whether this is a mutable method (uses `me` keyword instead of `fn`)
     /// Mutable methods can modify self and the changes persist
     pub is_me_method: bool,
+    /// local name -> DECLARED return type name of the static call that
+    /// initialized it (`var c = CompilerConfig.from_env()` -> "CompilerConfig").
+    ///
+    /// Deliberately NOT stored in `LocalVar::type_name_hint`: that field is also
+    /// read by DI resolution (`mir/lower/lowering_di.rs`) and `security.rs`, and
+    /// widening it with a call-derived name would change those unrelated
+    /// decisions. This map is consulted in exactly one place — the ANY-receiver
+    /// fallback in `expr/access.rs` — and is scoped to one function.
+    pub static_call_type_hints: HashMap<String, String>,
+    /// Declared payload types for Result locals, keyed by local slot.
+    ///
+    /// The ordinary local type stores the runtime carrier (i64), so property
+    /// lowering needs this metadata to preserve Result<T, E>.ok / .err.
+    /// Slots keep shadowed bindings distinct.
+    pub result_projection_types: HashMap<usize, (TypeId, TypeId)>,
 }
 
 impl FunctionContext {
@@ -38,6 +53,8 @@ impl FunctionContext {
             local_capabilities: HashMap::new(),
             has_self: false,
             is_me_method: false,
+            static_call_type_hints: HashMap::new(),
+            result_projection_types: HashMap::new(),
         }
     }
 
@@ -51,6 +68,8 @@ impl FunctionContext {
             local_capabilities: HashMap::new(),
             has_self: true,
             is_me_method,
+            static_call_type_hints: HashMap::new(),
+            result_projection_types: HashMap::new(),
         }
     }
 

@@ -1,0 +1,95 @@
+# crosslang_timing_normalization — ONE shared warmup/discard policy and clock
+# source for every cross-language profiling adapter.
+#
+# Gap this fills (L10 recorded rejection cause 1, plan
+# doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md
+# lines 735-769): the staged C/Rust/Go fixtures ran 1,024 warmup + 1,024 timed
+# passes per process while Simple/Python/Bun ran 1 warmup + 1,024 timed, and
+# the parity candidate was additionally rejected because "Simple and peer
+# `warm_ms` units differ". Each adapter owned its own normalization, so two
+# rows in the same matrix were never the same measurement.
+#
+# This module makes normalization a single piece of data — `crosslang_policy_v1`
+# — applied identically to every adapter's raw series. It is PURE: it takes an
+# already-captured array of durations and returns the normalized series or a
+# typed rejection. It runs no benchmark and starts no process; the plan forbids
+# a fourth collector cycle, and a normalization authority does not need one.
+#
+# Fail-closed by construction: an empty raw series, a shorter-than-policy
+# series, a foreign unit and a foreign clock source are each a rejection with a
+# named reason, never a truncated or coerced pass.
+
+pub struct NormalizationPolicy:
+    policy_id: text
+    warmup_discard: i64
+    timed_count: i64
+    clock_source: text
+    unit: text
+
+pub struct RawSeries:
+    adapter_id: text
+    clock_source: text
+    unit: text
+    values: [i64]
+
+pub struct NormalizedSeries:
+    adapter_id: text
+    policy_id: text
+    unit: text
+    values: [i64]
+    rejected: bool
+    reason: text
+
+pub fn crosslang_policy_v1() -> NormalizationPolicy:
+    """The single normalization authority shared by every adapter: discard the
+    first 5 samples as warmup, keep the next 15 timed samples, monotonic clock,
+    microseconds. 15 is the retained-sample floor the L10 gates already
+    require, so the policy cannot admit a series that the statistics gate would
+    then have to refuse."""
+    NormalizationPolicy(
+        policy_id: "crosslang-normalization-v1",
+        warmup_discard: 5,
+        timed_count: 15,
+        clock_source: "monotonic_micros",
+        unit: "us",
+    )
+
+fn _rejected(adapter_id: text, policy: NormalizationPolicy, reason: text) -> NormalizedSeries:
+    NormalizedSeries(
+        adapter_id: adapter_id,
+        policy_id: policy.policy_id,
+        unit: policy.unit,
+        values: [],
+        rejected: true,
+        reason: reason,
+    )
+
+pub fn crosslang_normalize(policy: NormalizationPolicy, raw: RawSeries) -> NormalizedSeries:
+    """Apply the shared policy to one adapter's raw series. Returns the timed
+    window with warmup discarded, or a rejection naming the cause."""
+    if raw.clock_source != policy.clock_source:
+        return _rejected(raw.adapter_id, policy,
+            "clock_source_mismatch: series={raw.clock_source} policy={policy.clock_source}")
+    if raw.unit != policy.unit:
+        return _rejected(raw.adapter_id, policy,
+            "unit_mismatch: series={raw.unit} policy={policy.unit}")
+    val n = raw.values.len()
+    if n == 0:
+        return _rejected(raw.adapter_id, policy, "empty_raw_series: adapter={raw.adapter_id}")
+    val needed = policy.warmup_discard + policy.timed_count
+    if n < needed:
+        return _rejected(raw.adapter_id, policy,
+            "insufficient_samples: n={n.to_text()} need={needed.to_text()}")
+    var kept: [i64] = []
+    var i: i64 = policy.warmup_discard
+    while i < needed:
+        kept.push(raw.values[i.to_i32()])
+        i = i + 1
+    NormalizedSeries(
+        adapter_id: raw.adapter_id,
+        policy_id: policy.policy_id,
+        unit: policy.unit,
+        values: kept,
+        rejected: false,
+        reason: "",
+    )

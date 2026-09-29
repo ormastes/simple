@@ -1,0 +1,39 @@
+# Regression: a `--coverage` run whose instrumentation wrapper fails to compile
+# must NEVER be reported as a pass. Before this fix the runner degraded to a
+# plain interpreter run of the unwrapped spec and returned its pass counts as a
+# normal green verdict, so every green `--coverage` result was potentially
+# unevidenced -- the "healthy-looking log over work that never happened" class.
+#
+# The degrade stays available, but only on an explicit
+# SIMPLE_COVERAGE_FALLBACK=interpreter opt-in.
+use std.test_runner.test_runner_execute.{
+    coverage_interpreter_fallback_opted_in, coverage_wrapper_abort_error
+}
+
+describe "coverage wrapper compile failure fails closed":
+
+    it "fails closed when SIMPLE_COVERAGE_FALLBACK is unset":
+        expect(coverage_interpreter_fallback_opted_in("")).to_equal(false)
+
+    it "fails closed for every value other than the exact opt-in":
+        expect(coverage_interpreter_fallback_opted_in("1")).to_equal(false)
+        expect(coverage_interpreter_fallback_opted_in("true")).to_equal(false)
+        expect(coverage_interpreter_fallback_opted_in("yes")).to_equal(false)
+        expect(coverage_interpreter_fallback_opted_in("Interpreter")).to_equal(false)
+
+    it "allows the degrade only on the exact explicit opt-in":
+        expect(coverage_interpreter_fallback_opted_in("interpreter")).to_equal(true)
+
+    it "states that nothing was executed, not that the spec passed":
+        val message = coverage_wrapper_abort_error("parse: Unexpected token")
+        expect(message.contains("ABORTED BEFORE EXECUTION")).to_equal(true)
+        expect(message.contains("NEVER run")).to_equal(true)
+        expect(message.contains("NOT a test result")).to_equal(true)
+
+    it "names the compiler diagnostic that caused the abort":
+        val message = coverage_wrapper_abort_error("parse: Unexpected token")
+        expect(message.contains("parse: Unexpected token")).to_equal(true)
+
+    it "tells the operator how to opt in to the uninstrumented degrade":
+        val message = coverage_wrapper_abort_error("boom")
+        expect(message.contains("SIMPLE_COVERAGE_FALLBACK=interpreter")).to_equal(true)

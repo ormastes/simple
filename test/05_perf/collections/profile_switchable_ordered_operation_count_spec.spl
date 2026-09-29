@@ -1,0 +1,37 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req NFR-PSC-002
+# @cover src/lib/nogc_sync_mut/src/collections/ordered_map.spl
+use std.spec.*
+use std.nogc_sync_mut.src.collections.ordered_map.OrderedMap
+
+describe "profile-switchable ordered-map operation counts":
+    it "keeps lookup and update comparisons logarithmic as size doubles":
+        val sizes = [128, 256, 512, 1024]
+        val exclusive_height_limits = [13, 15, 17, 19]
+        for sample in 0..sizes.len():
+            val size = sizes[sample]
+            val height_limit = exclusive_height_limits[sample]
+            var map: OrderedMap<i64, i64> = OrderedMap.new()
+            var peak_insert_comparisons: i64 = 0
+            for key in 0..size:
+                expect(map.put(key as i64, key as i64)).to_be(true)
+                val comparisons = map.update_comparisons()
+                if comparisons > peak_insert_comparisons:
+                    peak_insert_comparisons = comparisons
+            expect(map.len()).to_equal(size)
+            expect(map.allocated_slots()).to_equal(size)
+            expect(map.tree_height()).to_be_less_than(height_limit)
+            expect(peak_insert_comparisons).to_be_less_than(4 * height_limit + 3)
+            expect(map.lookup_comparisons((size - 1) as i64)).to_be_less_than(2 * height_limit + 2)
+            expect(map.lookup_comparisons(size as i64)).to_be_less_than(2 * height_limit + 2)
+            expect(map.get((size - 1) as i64) ?? -1).to_equal(size - 1)
+            expect(map.get(size as i64)).to_be_nil()
+            expect(map.remove((size / 2) as i64) ?? -1).to_equal(size / 2)
+            expect(map.update_comparisons()).to_be_less_than(6 * height_limit + 3)
+            expect(map.contains_key((size / 2) as i64)).to_be(false)
+            expect(map.len()).to_equal(size - 1)
+            expect(map.allocated_slots()).to_equal(size)
+            expect(map.put(size as i64, size as i64)).to_be(true)
+            expect(map.len()).to_equal(size)
+            expect(map.allocated_slots()).to_equal(size)

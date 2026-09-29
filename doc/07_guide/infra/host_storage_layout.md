@@ -138,3 +138,30 @@ is wasted.
 
 See also: `.claude/rules/commands.md` (fast path), `.claude/skills/spipe`
 (host preconditions).
+
+## Worktrees fill disks too — not just session dirs (2026-09-12)
+
+The round-2 macOS open-bugs fix pass ran ~30 parallel agent worktrees under
+`.claude/worktrees/` in one day and filled a 460 GB disk. Each worktree is a
+full checkout plus its own `build/` artifacts — `build/` is **not shared**
+across worktrees (it is untracked, per-worktree state, same as any other
+uncommitted directory), so N worktrees running a bootstrap or cargo build pay
+the disk cost N times over, not once.
+
+Mandatory hygiene for anyone spawning worktree-based agent lanes:
+
+- **Remove a worktree as soon as its PR lands.** A merged worktree is dead
+  weight from that point on — `git worktree remove <path>` (or `rm -rf` the
+  directory if the worktree was already force-removed) immediately after
+  `gh pr merge` confirms the merge landed, not at end-of-session cleanup.
+- **`git worktree prune` after manual removal.** Deleting a worktree directory
+  by hand leaves a stale admin entry under `.git/worktrees/`; prune it so
+  `git worktree list` reflects reality and future `add` calls don't collide.
+- **Never assume `build/` is shared.** If a lane needs a prebuilt seed or
+  cargo target, copy it in explicitly (`cp -Rc` on macOS APFS for
+  copy-on-write, per the 09-06 macOS-bootstrap memory note) — don't rely on a
+  sibling worktree's `build/` being visible or reusable in place.
+- **Check `df -h` / `btrfs filesystem usage /` before AND during a
+  many-worktree fan-out**, not just before a single long gate run (see
+  Operating rule above) — the failure mode here is cumulative across many
+  short-lived worktrees, not one long-running process.

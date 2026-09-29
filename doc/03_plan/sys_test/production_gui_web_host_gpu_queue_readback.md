@@ -18,9 +18,6 @@ Prove the production GUI/web host-GPU path with fail-closed evidence:
 - A nonzero backend-code drain may pass only the queue emit/drain subcheck; it is not evidence of backend-handle integration.
 - A nonzero backend-code payload drain must report `queue_nonzero_backend_last_payload_size=512`, `queue_nonzero_backend_last_payload_hash=98765`, and `queue_nonzero_backend_last_payload_text=queue probe payload command=draw_ir_rect id=runtime-backend` in the wrapper raw evidence.
 - On this Linux production lane, Vulkan, CUDA, and OpenCL child readback wrappers must report PASS; other hosts may record typed unavailable/runtime-unavailable child reasons only when the platform matrix explicitly marks that backend host-specific.
-- Child backend verdicts must come from each wrapper's final backend-specific
-  status key; a generic early `evidence_status=pass` is diagnostic only and
-  cannot override a later focused-spec or readback failure.
 - Metal and ROCm are recorded as host-unavailable on this Linux lane unless their required host runtime and tools are present.
 - Backend runtime queue integration may PASS when the joined BrowserBackend frame proves queue submit/drain metadata, a positive `browser_first_backend_handle` propagated from the Engine2D backend readback receipt, frame payload metadata/text (`browser_first_payload_size=12288`, positive `browser_first_payload_hash`, and `browser_first_payload_text=web-render-frame;backend=vulkan;pixels=3072;checksum=...`), `browser_first_readback_pixel_count`, `browser_first_readback_checksum`, `browser_first_readback_reason`, and same-frame backend device readback source `device_readback`. Synthetic runtime-queue handles remain isolated probe evidence.
 - `browser_host_event_roundtrip_status` must be `pass` so BrowserBackend host event ingress/dispatch/render telemetry is proven separately from frame readback.
@@ -72,7 +69,7 @@ Linux unavailable state when a platform child check passes on its required host.
 - macOS Metal: run the same wrapper on Darwin with `xcrun metal`, `xcrun metallib`, and native raw Metal readback evidence. Linux `host-unavailable` is not a Metal pass.
 - ROCm/HIP: run on an AMD ROCm host with `hipcc`, loader libraries, device visibility, and verified HSACO for `HIP_ARCH`; Linux hosts without that stack remain typed unavailable.
 - Windows DirectX: do not claim production readiness from DXVK setup alone. Run and promote the existing `scripts/check/check-directx-native-readback.shs` wrapper on a Windows `win32-real` host only when it returns `device_readback`, a positive backend handle, and matching checksums.
-- WebGPU: real `device_readback` evidence now passes through `scripts/check/check-webgpu-real-readback.shs`; that gate requires pass status, `device_readback` provenance, a positive backend handle, and positive matching checksums. The separate WebGPU `surface_upload` provenance remains useful but is still not a device-readback proof.
+- WebGPU: real `device_readback` evidence now passes through `scripts/check/check-webgpu-real-readback.shs`; the separate WebGPU `surface_upload` provenance remains useful but is still not a device-readback proof.
 
 The wrapper records DirectX structured/native-gate status and WebGPU `surface_upload`
 focused spec results as presentation/upload provenance. These fields are useful
@@ -80,5 +77,3 @@ for platform planning, but they are explicitly reported as `not_device_readback`
 and do not satisfy the production pass gate.
 The wrapper also fails if those DirectX/WebGPU provenance fields are relabeled
 as `device_readback` without a real backend readback receipt.
-The WebGPU readback wrapper's `--self-test` rejects zero or malformed handles,
-zero checksums, checksum mismatches, and upload-only provenance.

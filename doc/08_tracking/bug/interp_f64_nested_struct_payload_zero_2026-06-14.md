@@ -3,8 +3,7 @@
 - **ID:** interp_f64_nested_struct_payload_zero_2026-06-14
 - **Severity:** P1 (blocks numeric verification of the whole spreadsheet formula engine)
 - **Discovered:** 2026-06-14, while hardening `src/app/office/sheets/formula.spl`
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** OPEN — **root cause CORRECTED 2026-06-16** (see "Corrected root cause (2026-06-16)" below). The 2026-06-14 "shared frontend type layer / let-binding type from callee return type" conclusion is **REFUTED**: the emitted MIR is byte-identical between the correct Rust seed and the buggy self-hosted stage4, so the frontend is NOT at fault. The defect is in stage4's **post-MIR execution** (the self-hosted tree-walking interpreter) and, separately, its **native codegen**.
 
 ## Corrected root cause (2026-06-16 — differential bisection vs the Rust seed oracle)
 
@@ -163,7 +162,9 @@ runner's compiled mode returns empty for even literal arithmetic.
 `test/01_unit/app/office/sheets/formula_harden_spec.spl` asserts only the
 termination behavior that the runner can execute.
 
+## Triage 2026-09-13 — LEFT OPEN (the buggy executor is not deployed here)
 
-## 2026-08-17 CORE-P1 triage: UNPROVEN -- fix present in source, could not be executed
-
-UNCLEAR after re-triage, and NOT a member of the 2026-08-15/17 fix family. The Rust runtime float path IS now lossless -- `src/compiler_rust/runtime/src/value/core.rs:348` `from_float` heap-boxes, under a comment noting the old inline `TAG_FLOAT` form "stored only `bits >> 3`, silently zeroing the low 3 mantissa bits", and `as_float` (:391) still reads the legacy inline form as `payload() << 3` for compatibility. That hardening is real but is on a DIFFERENT lane from the one this doc blames.\n\nThe claimed defect lives on the stage4 `.spl` interpreter / native-codegen lane (`src/compiler/95.interp/mir_interpreter.spl`), where no f64-specific guard was found on nested struct/enum return boxing. As this doc itself already records, that lane cannot currently be exercised (no working instrumented stage4), so the row could not be reproduced or refuted. **Needs a working stage4 before it can be triaged further.**
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the minimal repro prints `pre` then `OK`. That is the EXPECTED answer and it clears nothing — the entry designates the Rust seed as the confirmed-correct oracle; the defect is in stage4's self-hosted executor (`bin/release/simple`), which is not deployed on this host.
+- **inferred**: closing this needs a deployed self-hosted stage4 binary to run the same probe and get `BAD`. Building one is out of bounds for this session (a bootstrap is running concurrently and `src/compiler/**` edits would desync it).
+- **inferred**: the two secondary defects the entry parks in `src/compiler/95.interp/mir_interpreter.spl` (unhandled `LocalAddr`, truncating `f64_to_bits = v as i64`) are separate latent issues, explicitly not this bug.
+- Verdict: OPEN — unverifiable on the Windows seed, not disproven.

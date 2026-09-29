@@ -1,0 +1,58 @@
+# Purpose: preserve exact diagnostic change projections; this DTO does not grant authority.
+# @req: REQ-CSM-003, REQ-CSM-005, REQ-CSM-029
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.semantic_facet_manifest_v1.{
+    SemanticCallableFacetV1, SemanticFacetManifestV1, semantic_facet_changes_v1,
+}
+
+fn digest(label: text) -> text: sha256_text(label)
+
+fn callable_manifest(signature: text) -> SemanticFacetManifestV1:
+    SemanticFacetManifestV1(schema: 1, producer_id: "fixture.module",
+        semantic_profile_digest: digest("profile"),
+        callable_coverage_digest: digest("callable-coverage"),
+        field_layout_coverage_digest: digest("field-layout-coverage"),
+        aspect_coverage_digest: digest("aspect-coverage"),
+        macro_coverage_digest: digest("macro-coverage"),
+        trait_coverage_digest: digest("trait-coverage"),
+        callable_facets: [SemanticCallableFacetV1(stable_entity_id: "fixture.call",
+            callable_signature_digest: signature, effect_digest: digest("call-effects"))],
+        field_layout_facets: [], aspect_facets: [], macro_facets: [], trait_facets: [])
+
+describe "Semantic facet manifest change projection V1 [importance=critical; importance_weight=3]":
+    it "should preserve the changed digest entity and producer kind [importance=critical; importance_weight=3]":
+        step("Project the exact old and new callable-signature digests")
+        val old_digest = digest("call-signature-v1")
+        val new_digest = digest("call-signature-v2")
+        val changes = semantic_facet_changes_v1(callable_manifest(old_digest),
+            callable_manifest(new_digest)).unwrap()
+        expect(changes.len()).to_equal(1)
+        val change = changes[0]
+        expect(change.producer_kind).to_equal("callable")
+        expect(change.stable_entity_id).to_equal("fixture.call")
+        expect(change.facet).to_equal("callable_signature")
+        expect(change.old_fingerprint.unwrap()).to_equal(old_digest)
+        expect(change.new_fingerprint.unwrap()).to_equal(new_digest)
+
+    it "should keep insertion and deletion nil directions distinct [importance=critical; importance_weight=3]":
+        step("Expose absence only on the side that does not contain the callable facet")
+        val present = callable_manifest(digest("call-signature"))
+        var absent = present
+        absent.callable_facets = []
+
+        val inserted = semantic_facet_changes_v1(absent, present).unwrap()[0]
+        expect(inserted.producer_kind).to_equal("callable")
+        expect(inserted.stable_entity_id).to_equal("fixture.call")
+        expect(inserted.facet).to_equal("callable_signature")
+        expect(inserted.old_fingerprint.is_none()).to_be(true)
+        expect(inserted.new_fingerprint.unwrap()).to_equal(digest("call-signature"))
+
+        val deleted = semantic_facet_changes_v1(present, absent).unwrap()[0]
+        expect(deleted.producer_kind).to_equal("callable")
+        expect(deleted.stable_entity_id).to_equal("fixture.call")
+        expect(deleted.facet).to_equal("callable_signature")
+        expect(deleted.old_fingerprint.unwrap()).to_equal(digest("call-signature"))
+        expect(deleted.new_fingerprint.is_none()).to_be(true)

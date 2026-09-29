@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$ROOT/scripts/lib/storage-roots.shs"
+BASE="$ROOT/.simple/storage/test/orchestration-storage-roots.$$"
+USER_ROOT="$BASE/user"
+WORKTREE_ROOT="$BASE/worktree"
+export SIMPLE_USER_STORAGE_ROOT="$USER_ROOT"
+export SIMPLE_WORKTREE_STORAGE_ROOT="$WORKTREE_ROOT"
+trap 'rm -rf -- "$BASE"' EXIT INT TERM
+
+storage_roots_init
+[ -f "$USER_ROOT/.simple-storage-root-v1" ]
+[ -f "$WORKTREE_ROOT/.simple-storage-root-v1" ]
+
+scratch=$(storage_roots_mktemp orchestration-test)
+case "$scratch" in "$WORKTREE_ROOT"/tmp/orchestration-test/run.*) ;; *) exit 1 ;; esac
+lease=$(storage_roots_acquire_lease "$scratch" owner)
+[ -f "$lease" ]
+storage_roots_release_lease "$lease"
+storage_roots_cleanup_scratch "$scratch"
+[ ! -e "$scratch" ]
+
+unsafe="$WORKTREE_ROOT/tmp/orchestration-test/not-owned"
+mkdir -p "$unsafe"
+if storage_roots_cleanup_scratch "$unsafe" 2>/dev/null; then
+    echo 'FAIL: unsafe cleanup was accepted' >&2
+    exit 1
+fi
+
+if SIMPLE_WORKTREE_STORAGE_ROOT=/ sh -c '. "$1"; storage_roots_init' sh "$ROOT/scripts/lib/storage-roots.shs" 2>/dev/null; then
+    echo 'FAIL: filesystem root was accepted' >&2
+    exit 1
+fi
+
+echo 'PASS orchestration storage roots: two-root placement, marker, lease, cleanup, and unsafe-root mutation'

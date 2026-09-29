@@ -472,3 +472,151 @@ fn sfnt_manifest_names_match(blob: [u8], family: text, style: text, full_name: t
     val expected_line: text = "|" + family + "|" + style + "|" + full_name + "|" +
         postscript_name + "|" + version
     decoded_line == expected_line
+
+# ---------------------------------------------------------------------------
+# TrueType Collections (`ttcf`)
+#
+# macOS ships its UI and terminal faces ONLY as collections: Menlo.ttc,
+# Helvetica.ttc. `parse_offset_table` accepts the `ttcf` tag as a version but
+# then reads `numTables` out of the collection header's version field, so a
+# collection has never actually parsed here.
+#
+# A collection's table records hold offsets that are ABSOLUTE from the start of
+# the FILE, not from the face's own offset table, so a face cannot be used by
+# slicing. Rather than teach every downstream consumer (glyf, cmap, hmtx, the
+# atlas composite) a base offset, one face is REPACKED into a standalone sfnt
+# blob with rewritten, face-relative offsets. Everything downstream then sees an
+# ordinary single-face TrueType file and needs no change at all.
+fn sfnt_is_ttc(blob: [u8]) -> bool:
+    blob.len() >= 12 and read_u32_be(blob, 0) == 1953784678u32
+
+fn sfnt_ttc_face_count(blob: [u8]) -> i64:
+    if not sfnt_is_ttc(blob): return 0
+    val count = read_u32_be(blob, 8) as i64
+    if count < 0 or count > 4096: return 0
+    if 12 + count * 4 > blob.len(): return 0
+    count
+
+fn sfnt_ttc_face_offset(blob: [u8], index: i64) -> i64:
+    val count = sfnt_ttc_face_count(blob)
+    if index < 0 or index >= count: return -1
+    val offset = read_u32_be(blob, 12 + index * 4) as i64
+    if offset < 0 or offset + 12 > blob.len(): return -1
+    offset
+
+fn _sfnt_put_u16_be(mut out: [u8], at: i64, value: i64):
+    out[at] = ((value >> 8) & 255) as u8
+    out[at + 1] = (value & 255) as u8
+
+fn _sfnt_put_u32_be(mut out: [u8], at: i64, value: i64):
+    out[at] = ((value >> 24) & 255) as u8
+    out[at + 1] = ((value >> 16) & 255) as u8
+    out[at + 2] = ((value >> 8) & 255) as u8
+    out[at + 3] = (value & 255) as u8
+
+# Repack face `index` of a collection as a standalone sfnt blob. Answers `[]`
+# for anything that is not a well-formed collection face — every bound is
+# checked against the real blob length before a byte is copied, so a truncated
+# or hostile collection can never produce a blob that merely LOOKS valid.
+fn sfnt_ttc_extract_face(blob: [u8], index: i64) -> [u8]:
+    val face = sfnt_ttc_face_offset(blob, index)
+    if face < 0: return []
+    val table_count = read_u16_be(blob, face + 4) as i64
+    if table_count <= 0 or table_count > 512: return []
+    val directory_end = 12 + table_count * 16
+    if face + directory_end > blob.len(): return []
+    # Pass 1: validate every record and total the padded payload size.
+    var payload: i64 = 0
+    var i: i64 = 0
+    while i < table_count:
+        val record = face + 12 + i * 16
+        val start = read_u32_be(blob, record + 8) as i64
+        val size = read_u32_be(blob, record + 12) as i64
+        if start < 0 or size < 0 or start > blob.len() or size > blob.len() - start: return []
+        payload = payload + ((size + 3) / 4) * 4
+        i = i + 1
+    val total = directory_end + payload
+    if total <= 0 or total > 268435456: return []
+    var out: [u8] = [0; total]
+    # sfnt header: the face's own scaler type and directory shape, copied.
+    _sfnt_put_u32_be(out, 0, read_u32_be(blob, face) as i64)
+    _sfnt_put_u16_be(out, 4, table_count)
+    _sfnt_put_u16_be(out, 6, read_u16_be(blob, face + 6) as i64)
+    _sfnt_put_u16_be(out, 8, read_u16_be(blob, face + 8) as i64)
+    _sfnt_put_u16_be(out, 10, read_u16_be(blob, face + 10) as i64)
+    var cursor = directory_end
+    i = 0
+    while i < table_count:
+        val record = face + 12 + i * 16
+        val start = read_u32_be(blob, record + 8) as i64
+        val size = read_u32_be(blob, record + 12) as i64
+        val dest = 12 + i * 16
+        _sfnt_put_u32_be(out, dest, read_u32_be(blob, record) as i64)
+        _sfnt_put_u32_be(out, dest + 4, read_u32_be(blob, record + 4) as i64)
+        _sfnt_put_u32_be(out, dest + 8, cursor)
+        _sfnt_put_u32_be(out, dest + 12, size)
+        var k: i64 = 0
+        while k < size:
+            out[cursor + k] = blob[start + k]
+            k = k + 1
+        cursor = cursor + ((size + 3) / 4) * 4
+        i = i + 1
+    out
+
+# One entry point for both shapes: a collection is repacked at `index`, a plain
+# single-face file is returned unchanged (any index other than 0 is rejected
+# rather than silently answering face 0).
+fn sfnt_face_blob(blob: [u8], index: i64) -> [u8]:
+    if sfnt_is_ttc(blob): return sfnt_ttc_extract_face(blob, index)
+    if index != 0: return []
+    blob
+
+# A font path may name one face of a collection as `<path>#<index>`. Only a
+# TRAILING run of decimal digits after the last `#` counts, so a real filename
+# containing `#` is left alone.
+fn _sfnt_face_spec_hash(spec: text) -> i64:
+    var at: i64 = spec.len() - 1
+    var digits: i64 = 0
+    while at >= 0:
+        val ch = spec.char_code_at(at)
+        if ch == 35:
+            if digits == 0: return -1
+            return at
+        if ch < 48 or ch > 57: return -1
+        digits = digits + 1
+        at = at - 1
+    -1
+
+fn font_face_spec_path(spec: text) -> text:
+    val hash = _sfnt_face_spec_hash(spec)
+    if hash < 0: return spec
+    spec.slice(0, hash)
+
+fn font_face_spec_index(spec: text) -> i64:
+    val hash = _sfnt_face_spec_hash(spec)
+    if hash < 0: return 0
+    var value: i64 = 0
+    var at = hash + 1
+    while at < spec.len():
+        value = value * 10 + (spec.char_code_at(at) - 48)
+        if value > 4096: return -1
+        at = at + 1
+    value
+
+# Cache identity for a face the pinned registry does not own. Built and parsed
+# in ONE place so the two can never drift: the paint path resolves a face back
+# from its identity string (engine2d `engine.spl`, `draw_ir_target_metal.spl`),
+# and an identity it cannot reverse silently drops that face to the vector
+# fallback instead of drawing it.
+fn font_unmanaged_face_identity(face_spec: text, byte_length: i64) -> text:
+    "unmanaged=" + face_spec + ";bytes=" + byte_length.to_text() + ";axes=default"
+
+# Answers the `<path>#<index>` spec an unmanaged identity was built from, or ""
+# for a managed (`sha256=…`) identity or anything malformed.
+fn font_unmanaged_identity_face_spec(identity: text) -> text:
+    val prefix = "unmanaged="
+    if not identity.starts_with(prefix): return ""
+    val rest = identity.slice(prefix.len(), identity.len())
+    val end = rest.index_of(";")
+    if end <= 0: return ""
+    rest.slice(0, end)

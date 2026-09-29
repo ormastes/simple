@@ -1,0 +1,128 @@
+# @req KPM-REQ-004 KPM-REQ-006 KPM-REQ-009 KPM-REQ-011 KPM-NFR-003 KPM-NFR-005
+use std.spec.*
+use common.plugin.iface_id.{IfaceId, ParamHeader}
+use common.plugin.negotiation.{HostOfferV1, PluginAnswerV1, negotiate}
+use std.common.aspect_pack.{
+    ApkModuleSourceV2, ApkCatalogEntryV2, apk_build_pack_v2,
+    apk_build_catalog_v2, apk_loader_new, apk_loader_register_pack,
+    apk_loader_set_host_offer_v1, apk_load_facet, apk_loader_generation,
+    apk_try_facet, APK_ENTRY_FACET, APK_ACT_LAZY_FACET
+}
+use std.sffi.dynamic_versioned.{VersionedDynLib, MultiVersionLoader}
+
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+
+val PHASE6_FIXTURE_SOURCE = "test/fixtures/sffi/plugin_entry_v1_fixture.c"
+val PHASE6_FIXTURE_DIR = "build/kpm-phase6-acceptance"
+
+fn phase6_host_abi(digests: [text]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0),
+        1, false, "phase6-acceptance",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        digests, ["image.decode"], [])
+
+fn phase6_host_deferred(digests: [text]) -> HostOfferV1:
+    HostOfferV1(ParamHeader("simple.plugin.HostOfferV1", 1, 0, 0),
+        0, true, "phase6-acceptance",
+        [IfaceId("simple.sffi.Image", 1, 4, "sha256:image-v4")],
+        digests, ["image.decode"], [])
+
+fn phase6_answer(abi: i64, digest: text) -> PluginAnswerV1:
+    PluginAnswerV1(ParamHeader("simple.plugin.PluginAnswerV1", 1, 0, 0),
+        IfaceId("simple.sffi.Image", 1, 4, digest), abi, false,
+        ["image.decode"], "sha256:phase6-plugin", [])
+
+fn phase6_pack(digest: text) -> [u8]:
+    apk_build_pack_v2([ApkModuleSourceV2(
+        module_id: "image.core", aspect_id: "simple.sffi.Image",
+        module_abi_hash: digest, required_core_public_abi_hash: "core-v1",
+        variant_fingerprint: "default", payload: [1u8, 2u8])]).bytes
+
+fn phase6_catalog() -> [u8]:
+    apk_build_catalog_v2([ApkCatalogEntryV2(
+        facet_key: "simple.sffi.Image", pack_path: "phase6.apk",
+        module_id: "image.core", entry_kind: APK_ENTRY_FACET,
+        activation: APK_ACT_LAZY_FACET, abi_hash: "sha256:image-v2")]).bytes
+
+fn phase6_apk_loader(digest: text, digests: [text]) -> i64:
+    val loader = apk_loader_new()
+    expect(apk_loader_register_pack(loader, "phase6.apk", phase6_pack(digest))).to_equal(true)
+    apk_loader_set_host_offer_v1(loader, phase6_host_deferred(digests))
+    loader
+
+fn phase6_build_provider(name: text, defines: text) -> text:
+    val path = "{PHASE6_FIXTURE_DIR}/{name}.dylib"
+    val command = ("mkdir -p '" + PHASE6_FIXTURE_DIR + "' && "
+        + "case \"$(uname -s)\" in Darwin) shared=-dynamiclib;; *) shared=-shared;; esac && "
+        + "cc $shared -fPIC " + defines + " '" + PHASE6_FIXTURE_SOURCE + "' -o '" + path + "'")
+    val (_out, err, code) = rt_process_run("/bin/sh", ["-c", command])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    path
+
+describe "kernel plugin Phase 6 end-to-end acceptance":
+    it "accepts ABI-v1 and refuses ABI or digest mismatches":
+        val accepted = negotiate(phase6_host_abi(["sha256:image-v2"]),
+            phase6_answer(1, "sha256:image-v2"))
+        expect(accepted.code()).to_equal("OK")
+
+        val abi_refused = negotiate(phase6_host_abi(["sha256:image-v2"]),
+            phase6_answer(2, "sha256:image-v2"))
+        expect(abi_refused.code()).to_equal("PLUG-E-ABI")
+
+        print("KPM_PHASE6_NEGOTIATION_ASSERTION_RECEIPT case=digest-refusal state=BEGIN expected=PLUG-E-DIGEST")
+        val digest_code = negotiate(phase6_host_abi([]),
+            phase6_answer(1, "sha256:mutated")).code()
+        if digest_code != "PLUG-E-DIGEST":
+            print("KPM_PHASE6_NEGOTIATION_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST actual={digest_code}")
+        expect(digest_code).to_equal("PLUG-E-DIGEST")
+        print("KPM_PHASE6_NEGOTIATION_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST")
+
+    it "admits a compatible APK and refuses mutation before publication":
+        val accepted_loader = phase6_apk_loader("sha256:image-v2", ["sha256:image-v2"])
+        expect(apk_load_facet(accepted_loader, phase6_catalog(), "simple.sffi.Image").ok).to_equal(true)
+        expect(apk_try_facet(accepted_loader, "simple.sffi.Image").found).to_equal(true)
+
+        val refused_loader = phase6_apk_loader("sha256:mutated", [])
+        print("KPM_PHASE6_APK_ASSERTION_RECEIPT case=digest-refusal state=BEGIN expected=PLUG-E-DIGEST")
+        val refused = apk_load_facet(refused_loader, phase6_catalog(), "simple.sffi.Image")
+        if refused.error_code != "PLUG-E-DIGEST":
+            print("KPM_PHASE6_APK_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST actual={refused.error_code}")
+        expect(refused.error_code).to_equal("PLUG-E-DIGEST")
+        expect(apk_loader_generation(refused_loader)).to_equal(0)
+        expect(apk_try_facet(refused_loader, "simple.sffi.Image").found).to_equal(false)
+        print("KPM_PHASE6_APK_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST publication=0")
+
+    it "loads a negotiated SFFI provider and refuses mutation before exposing a handle":
+        val accepted = VersionedDynLib.load_plugin_path(
+            phase6_build_provider("accepted", "-DPLUGIN_ABI=1 -DPLUGIN_DEFERRED=0"),
+            "phase6-accepted", phase6_host_abi(["sha256:image-v2"]))
+        expect(accepted.is_ok()).to_equal(true)
+        var accepted_library = accepted.unwrap()
+        unsafe(capabilities: [ffi]):
+            accepted_library.lib.close()
+
+        print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=BEGIN expected=PLUG-E-DIGEST")
+        val unload_marker = "{PHASE6_FIXTURE_DIR}/digest-refusal.closed"
+        rt_file_delete(unload_marker)
+        expect(rt_file_exists(unload_marker)).to_equal(false)
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", unload_marker)).to_equal(true)
+        val loaded_before = MultiVersionLoader.instance().loaded_keys().len()
+        val refused = VersionedDynLib.load_plugin_path(
+            phase6_build_provider("digest-mutant", "-DPLUGIN_ABI=1 -DPLUGIN_DEFERRED=0 -DPLUGIN_DIGEST='\"sha256:mutated\"'"),
+            "phase6-refused", phase6_host_abi([]))
+        val escaped_handle = refused.is_ok()
+        val refusal_code = if refused.is_err(): refused.unwrap_err().code() else: "OK"
+        val unloaded = rt_file_exists(unload_marker)
+        val loaded_after = MultiVersionLoader.instance().loaded_keys().len()
+        expect(rt_env_set("SIMPLE_PHASE6_UNLOAD_MARKER", "")).to_equal(true)
+        if refusal_code != "PLUG-E-DIGEST" or escaped_handle or not unloaded or loaded_after != loaded_before:
+            print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=FAIL expected=PLUG-E-DIGEST actual={refusal_code} handle={escaped_handle} unloaded={unloaded} loaded_before={loaded_before} loaded_after={loaded_after}")
+        expect(refusal_code).to_equal("PLUG-E-DIGEST")
+        expect(escaped_handle).to_equal(false)
+        expect(unloaded).to_equal(true)
+        expect(loaded_after).to_equal(loaded_before)
+        print("KPM_PHASE6_SFFI_ASSERTION_RECEIPT case=digest-refusal state=PASS expected=PLUG-E-DIGEST handle=false unloaded=true cache_delta=0")

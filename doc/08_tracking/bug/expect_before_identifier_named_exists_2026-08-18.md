@@ -1,4 +1,8 @@
 # `expect <ident>` fails when the identifier is named `exists` (2026-08-18)
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. test/{02_,}integration/lib/std/screenshot/screenshot_ffi_spe
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 OPEN — seed parser/desugar defect, found while fixing the screenshot SFFI externs.
@@ -33,3 +37,4 @@ renaming the local would hide the defect.
 ## Next step
 Find where `exists` is treated as a keyword/postfix operator in the seed parser
 and stop it from swallowing the `expect` statement head.
+

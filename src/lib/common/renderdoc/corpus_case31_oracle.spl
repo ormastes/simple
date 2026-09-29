@@ -1,0 +1,214 @@
+# Independent ideal-area pixels for pinned corpus case 31 (latin shaping).
+#
+# The expected image is built from LITERAL rectangles only — a white surface
+# plus one glyph-ink rectangle per rune of the pinned source string, with
+# geometry from the native glyph contract's resolved subset (real cmap glyph
+# ids and hmtx advances from the pinned Noto Sans Mono face). No Web DrawIR,
+# Chromium screenshot, Vulkan backend, 5x7 charset metric, or RenderDoc event
+# data enters this model. The pinned face ships no `kern` table, so every
+# kern_after value in the subset is 0; the kerning-relevant "AV"/"AT" pairs in
+# the source string still exercise the contract's kern lane.
+#
+# The fixture's authored serif stack is deliberately NOT reproduced here:
+# this oracle pins what the pinned Simple font must produce for the pinned
+# source string before any device exists (REQ-2D-006, NFR-2D-003).
+
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_hash_sha256}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex}
+use std.common.encoding.font_registry.{
+    simpleos_default_font_asset_candidate}
+use common.renderdoc.final_output_pixels.{
+    FinalOutputCapture, final_output_canonical_rgba}
+use common.renderdoc.native_glyph_contract.{
+    NativeGlyphContractSubset, native_glyph_contract_resolve,
+    native_glyph_contract_preflight}
+
+pub val CORPUS_CASE31_FIXTURE_ID: text = "corpus-31-latin-shaping-v1"
+pub val CORPUS_CASE31_SOURCE_PATH: text =
+    "test/fixtures/html_css/corpus/cases/31-latin-shaping.html"
+pub val CORPUS_CASE31_SOURCE_SHA256: text =
+    "78afa17cc8ab3c48076674940c75c524f7897279c2bbb603b510c9d2155910c3"
+pub val CORPUS_CASE31_WIDTH: i32 = 640
+pub val CORPUS_CASE31_HEIGHT: i32 = 480
+# The exact latin shaping input this oracle models, pinned as a constant.
+# "office affine AVATAR" carries the kerning-relevant AV/AT/AR/FA pairs.
+pub val CORPUS_CASE31_SOURCE_TEXT: text = "office affine AVATAR"
+pub val CORPUS_CASE31_TEXT_SIZE_PX: i64 = 34
+pub val CORPUS_CASE31_TEXT_ORIGIN_X: i64 = 30
+pub val CORPUS_CASE31_TEXT_TOP: i64 = 35
+pub val CORPUS_CASE31_TEXT_COLOR: i64 = 0x172033
+pub val CORPUS_CASE31_RGBA_SHA256: text =
+    "c460f4829c586611622852019b4b6ba2a02bd8b4585833ef25515e18411c98fc"
+pub val CORPUS_CASE31_EDGE_PIXELS: i64 = 13872
+
+# NFR-2D-003: font-edge tolerances declared BEFORE any device capture, in the
+# same policy as corpus case 02. They are fixture-specific and must never be
+# widened from observed mismatches; a failing capture fails, the declared
+# tolerance does not move.
+pub val CORPUS_CASE31_EDGE_MAX_CHANNEL_DELTA: i64 = 16
+pub val CORPUS_CASE31_EDGE_MAX_MEAN_CHANNEL_DELTA: i64 = 4
+
+struct Case31OracleImage:
+    rgba: [i64]
+    edge_mask: [bool]
+    edge_pixels: i64
+
+pub struct Case31OracleVerdict:
+    passed: bool
+    exact_mismatch_pixels: i64
+    edge_excess_pixels: i64
+    edge_channel_abs_sum: i64
+    edge_channel_count: i64
+    edge_max_channel_delta: i64
+
+fn _case31_abs(value: i64) -> i64:
+    if value < 0: 0 - value else: value
+
+fn _case31_snap(milli: i64) -> i64:
+    ((milli as f64 / 1000.0) + 0.5) as i64
+
+fn _case31_channel(color: i64, shift: i64) -> i64:
+    (color >> shift) & 255
+
+fn _case31_subset(text: text) -> Result<NativeGlyphContractSubset, text>:
+    val resolved = native_glyph_contract_resolve(
+        text, simpleos_default_font_asset_candidate(),
+        CORPUS_CASE31_TEXT_SIZE_PX, 0)?
+    native_glyph_contract_preflight(resolved)
+
+fn _case31_fill_rect(rgba: [i64], edge_mask: [bool],
+    x0: i64, y0: i64, x1: i64, y1: i64) -> i64:
+    var filled: i64 = 0
+    var y = y0
+    while y < y1 and y < CORPUS_CASE31_HEIGHT.to_i64():
+        var x = x0
+        while x < x1 and x < CORPUS_CASE31_WIDTH.to_i64():
+            if x >= 0 and y >= 0:
+                val offset = (y * CORPUS_CASE31_WIDTH.to_i64() + x) * 4
+                rgba[offset] = _case31_channel(CORPUS_CASE31_TEXT_COLOR, 16)
+                rgba[offset + 1] = _case31_channel(CORPUS_CASE31_TEXT_COLOR, 8)
+                rgba[offset + 2] = _case31_channel(CORPUS_CASE31_TEXT_COLOR, 0)
+                rgba[offset + 3] = 255
+                edge_mask[y * CORPUS_CASE31_WIDTH.to_i64() + x] = true
+                filled = filled + 1
+            x = x + 1
+        y = y + 1
+    filled
+
+fn case31_analytic_oracle() -> Result<Case31OracleImage, text>:
+    """Build the pinned expected image and self-check its digest."""
+    if not file_is_regular_no_follow(CORPUS_CASE31_SOURCE_PATH) or
+        file_hash_sha256(CORPUS_CASE31_SOURCE_PATH) !=
+            CORPUS_CASE31_SOURCE_SHA256:
+        return Err("case31-pinned-source-mismatch")
+    val subset = _case31_subset(CORPUS_CASE31_SOURCE_TEXT)?
+    var rgba: [i64] = []
+    var edge_mask: [bool] = []
+    var pixel: i64 = 0
+    while pixel <
+            CORPUS_CASE31_WIDTH.to_i64() * CORPUS_CASE31_HEIGHT.to_i64():
+        rgba.push(255)
+        rgba.push(255)
+        rgba.push(255)
+        rgba.push(255)
+        edge_mask.push(false)
+        pixel = pixel + 1
+    var edge_pixels: i64 = 0
+    var index: i64 = 0
+    while index < subset.glyphs.len():
+        val glyph = subset.glyphs[index]
+        val pen: i64 = glyph.pen_milli_px
+        val advance: i64 = glyph.advance_milli_px
+        val x0 = CORPUS_CASE31_TEXT_ORIGIN_X + _case31_snap(pen)
+        val x1 = CORPUS_CASE31_TEXT_ORIGIN_X +
+            _case31_snap(pen + advance)
+        edge_pixels = edge_pixels + _case31_fill_rect(rgba, edge_mask, x0,
+            CORPUS_CASE31_TEXT_TOP, x1,
+            CORPUS_CASE31_TEXT_TOP + CORPUS_CASE31_TEXT_SIZE_PX)
+        index = index + 1
+    if edge_pixels != CORPUS_CASE31_EDGE_PIXELS:
+        return Err("case31-oracle-region-count-mismatch")
+    if bytes_to_hex(sha256_bytes(rgba)) != CORPUS_CASE31_RGBA_SHA256:
+        return Err("case31-oracle-rgba-digest-mismatch")
+    Ok(Case31OracleImage(rgba: rgba, edge_mask: edge_mask,
+        edge_pixels: edge_pixels))
+
+fn case31_compare_canonical_rgba(actual: [i64]
+) -> Result<Case31OracleVerdict, text>:
+    """Tolerance-compare canonical RGBA bytes against the pinned oracle.
+
+    Pixels inside glyph ink cells are font-edge pixels and only carry the
+    declared per-channel and mean-channel deltas; every other pixel must be
+    exactly white with opaque alpha."""
+    val oracle = case31_analytic_oracle()?
+    if actual.len() != oracle.rgba.len():
+        return Err("case31-canonical-byte-length-mismatch")
+    var exact_mismatch: i64 = 0
+    var edge_excess: i64 = 0
+    var edge_sum: i64 = 0
+    var edge_count: i64 = 0
+    var edge_max: i64 = 0
+    var pixel: i64 = 0
+    while pixel < oracle.edge_mask.len():
+        val offset = pixel * 4
+        var channel = 0
+        while channel < 4:
+            val value = actual[offset + channel]
+            if value < 0 or value > 255:
+                return Err("case31-canonical-byte-out-of-range")
+            channel = channel + 1
+        if oracle.edge_mask[pixel]:
+            var pixel_excess = actual[offset + 3] != 255
+            channel = 0
+            while channel < 3:
+                val delta = _case31_abs(
+                    actual[offset + channel] - oracle.rgba[offset + channel])
+                edge_sum = edge_sum + delta
+                edge_count = edge_count + 1
+                if delta > edge_max: edge_max = delta
+                if delta > CORPUS_CASE31_EDGE_MAX_CHANNEL_DELTA:
+                    pixel_excess = true
+                channel = channel + 1
+            if pixel_excess: edge_excess = edge_excess + 1
+        elif (actual[offset] != oracle.rgba[offset] or
+                actual[offset + 1] != oracle.rgba[offset + 1] or
+                actual[offset + 2] != oracle.rgba[offset + 2] or
+                actual[offset + 3] != 255):
+            exact_mismatch = exact_mismatch + 1
+        pixel = pixel + 1
+    Ok(Case31OracleVerdict(
+        passed: exact_mismatch == 0 and edge_excess == 0 and
+            edge_sum <= edge_count * CORPUS_CASE31_EDGE_MAX_MEAN_CHANNEL_DELTA,
+        exact_mismatch_pixels: exact_mismatch,
+        edge_excess_pixels: edge_excess,
+        edge_channel_abs_sum: edge_sum,
+        edge_channel_count: edge_count,
+        edge_max_channel_delta: edge_max))
+
+fn case31_capture_matches_oracle(
+    capture: FinalOutputCapture) -> Result<Case31OracleVerdict, text>:
+    val metadata = capture.metadata
+    if metadata.fixture_id != CORPUS_CASE31_FIXTURE_ID or
+        metadata.fixture_digest != CORPUS_CASE31_SOURCE_SHA256 or
+        metadata.width != CORPUS_CASE31_WIDTH.to_i64() or
+        metadata.height != CORPUS_CASE31_HEIGHT.to_i64() or
+        metadata.crop_x != 0 or metadata.crop_y != 0 or
+        metadata.crop_width != CORPUS_CASE31_WIDTH.to_i64() or
+        metadata.crop_height != CORPUS_CASE31_HEIGHT.to_i64():
+        return Err("case31-capture-domain-mismatch")
+    val canonical = match final_output_canonical_rgba(capture):
+        case Ok(value): value
+        case Err(error): return Err("case31-capture-" + error.code)
+    case31_compare_canonical_rgba(canonical)
+
+export CORPUS_CASE31_FIXTURE_ID, CORPUS_CASE31_SOURCE_PATH,
+    CORPUS_CASE31_SOURCE_SHA256, CORPUS_CASE31_WIDTH, CORPUS_CASE31_HEIGHT,
+    CORPUS_CASE31_SOURCE_TEXT, CORPUS_CASE31_TEXT_SIZE_PX,
+    CORPUS_CASE31_TEXT_ORIGIN_X, CORPUS_CASE31_TEXT_TOP,
+    CORPUS_CASE31_TEXT_COLOR, CORPUS_CASE31_RGBA_SHA256,
+    CORPUS_CASE31_EDGE_PIXELS, CORPUS_CASE31_EDGE_MAX_CHANNEL_DELTA,
+    CORPUS_CASE31_EDGE_MAX_MEAN_CHANNEL_DELTA, Case31OracleImage,
+    Case31OracleVerdict,
+    case31_analytic_oracle, case31_compare_canonical_rgba,
+    case31_capture_matches_oracle

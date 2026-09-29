@@ -441,20 +441,92 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    // Additive operators: `+` and `-`. `indent_required` because these are the
-    // only binary operators that are also legal STATEMENT starts (unary sign).
-    // A same-indent `-1` line after `return 15` is a new statement, not a
-    // continuation — gluing it produced `return (15 - 1)` == 14.
+    // Additive operators: `+` and `-`. `indent_required` because these are also
+    // legal STATEMENT starts (unary sign). A same-indent `-1` line after
+    // `return 15` is a new statement, not a continuation — gluing it produced
+    // `return (15 - 1)` == 14. `*` is in the same set (deref lvalue); it is
+    // handled in the hand-written `parse_factor` below.
     parse_binary_multi!(indent_required parse_term, parse_factor,
         Plus => BinOp::Add,
         Minus => BinOp::Sub,
     );
 
-    parse_binary_multi!(parse_factor, parse_power,
-        Star => BinOp::Mul,
-        Slash => BinOp::Div,
-        Percent => BinOp::Mod,
-    );
+    /// Multiplicative operators: `*`, `/`, `%`.
+    ///
+    /// Hand-written instead of `parse_binary_multi!` (precedent:
+    /// `parse_bitwise_or`, `parse_matmul`) because the three tokens need
+    /// DIFFERENT leading-continuation rules:
+    ///
+    /// - `*` is also a legal STATEMENT start (`*ptr = value`), so its
+    ///   leading-continuation lookahead must require a strictly deeper indent,
+    ///   exactly like `+`/`-` in `parse_term` above. Without that,
+    ///   ```simple
+    ///   val s = g(
+    ///       1)
+    ///   *p = v
+    ///   ```
+    ///   parsed as `g(1) * p` and then failed with "expected expression, found
+    ///   Assign" at the `=`. The multi-line call is what exposes it: the
+    ///   preceding statement is still an open expression when the `*` line
+    ///   arrives. See doc/08_tracking/bug/
+    ///   deref_assign_after_multiline_call_parsed_as_multiply_2026-09-01.md.
+    /// - `/` and `%` are NOT statement starts, so they keep the original
+    ///   same-indent leading-continuation behaviour; narrowing them too would
+    ///   be an unrequested grammar change.
+    pub(crate) fn parse_factor(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_power()?;
+        loop {
+            // Case 1: trailing operator on this line — unchanged for all three.
+            let op = match &self.current.kind {
+                TokenKind::Star => Some(BinOp::Mul),
+                TokenKind::Slash => Some(BinOp::Div),
+                TokenKind::Percent => Some(BinOp::Mod),
+                _ => None,
+            };
+            if let Some(op) = op {
+                self.advance();
+                self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                let right = self.parse_power()?;
+                left = Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+                continue;
+            }
+
+            // Case 2: operator on the next line (leading continuation).
+            if matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                // `*` only continues from a strictly more deeply indented line.
+                let indented = self.peek_indented_operator_continuation();
+                let found_op = match indented {
+                    Some(TokenKind::Star) => Some(BinOp::Mul),
+                    Some(TokenKind::Slash) => Some(BinOp::Div),
+                    Some(TokenKind::Percent) => Some(BinOp::Mod),
+                    _ => match self.peek_through_newlines_and_indents() {
+                        // `/` and `%` keep same-indent continuation; `*` must not.
+                        Some(TokenKind::Slash) => Some(BinOp::Div),
+                        Some(TokenKind::Percent) => Some(BinOp::Mod),
+                        _ => None,
+                    },
+                };
+                if let Some(op) = found_op {
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                    self.advance(); // consume the operator
+                    self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+                    let right = self.parse_power()?;
+                    left = Expr::Binary {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
+            }
+            break;
+        }
+        Ok(left)
+    }
 
     pub(crate) fn parse_power(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_unary()?;

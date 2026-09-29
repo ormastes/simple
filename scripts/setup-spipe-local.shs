@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+fi
+COMMON_HOME="${SPIPE_HOME:-$HOME/spipe}"
+COMMON_ROUTE="$ROOT/.spipe/common"
+if [ -f "$COMMON_HOME/package.json" ] && grep -Eq '"name"[[:space:]]*:[[:space:]]*"@simple-lang/spipe"' "$COMMON_HOME/package.json"; then
+  mkdir -p "$ROOT/.spipe"
+  if [ ! -e "$COMMON_ROUTE" ] && [ ! -L "$COMMON_ROUTE" ]; then
+    ln -s "$COMMON_HOME" "$COMMON_ROUTE"
+  fi
+  if [ "$(CDPATH= cd -- "$COMMON_ROUTE" && pwd -P)" != "$(CDPATH= cd -- "$COMMON_HOME" && pwd -P)" ]; then
+    echo "setup-spipe-local: .spipe/common does not resolve to $COMMON_HOME" >&2
+    exit 3
+  fi
+  exec sh "$COMMON_HOME/scripts/setup-local-knowledge.sh" --mode project --destination "$ROOT" "$@"
+fi
+if git -C "$ROOT" ls-files --stage -- .spipe/spipe | grep -q '^160000 '; then
+  git -C "$ROOT" submodule update --init -- .spipe/spipe
+  exec sh "$ROOT/.spipe/spipe/scripts/setup-local-knowledge.sh" --mode project --destination "$ROOT" "$@"
+fi
+echo "setup-spipe-local: install canonical common at ${SPIPE_HOME:-$HOME/spipe}; no usable legacy submodule is recorded" >&2
+exit 3

@@ -1,4 +1,8 @@
 # `match` on enum — per-engine status verified 2026-08-07 (partial fix, not fully stale)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **ID:** BUG-2026-08-07-enum-match-native-lowering-status
 - **Date:** 2026-08-07
@@ -116,3 +120,4 @@ exempted (fixed) and payload-bearing still carries the fallback reason, which
 that require the interpreter". The doc status is accurate; no change made.
 Note: `compiler/src/codegen/**` and `compiler/src/mir/**` are owned by other
 workers in this pass, so no fix was attempted here.
+

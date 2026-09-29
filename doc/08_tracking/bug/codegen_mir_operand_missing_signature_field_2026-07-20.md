@@ -1,4 +1,9 @@
 # Bug: CUDA codegen direct-device-call lowering reads a `signature` field
+## Closed 2026-09-16 — Status ALREADY-FIXED, re-verified 2026-08-10; repro example passes
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 that `MirOperand` doesn't have
 
 **Status:** ALREADY-FIXED — re-verified 2026-08-10. `cuda_backend.spl`'s
@@ -75,3 +80,4 @@ Trace the direct-device-call lowering in the CUDA backend (likely under
 `src/compiler/70.backend/backend/cuda/` or similar) for the `.signature`
 access on a `MirOperand`-typed value and either fix the field access or add
 the missing field.
+

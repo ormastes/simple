@@ -1,4 +1,8 @@
 # CpuKernelTable `mut` write-back lost through nested free fn / self.field (interpreter)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-07
 - Status: OPEN (P2)
@@ -109,3 +113,4 @@ already-fixed-pending-rebuild-verification, not as executed-green.
 The production restructure in `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl`
 was left in place — it is correct code either way, and unwinding it is not this
 lane's call.
+

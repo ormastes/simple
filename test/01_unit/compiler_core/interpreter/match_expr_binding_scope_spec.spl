@@ -1,0 +1,114 @@
+# Executable proof for doc/08_tracking/bug/interp_match_expr_binding_scope_leak_2026-07-15.md
+#
+# The record has said since 2026-07-15: "source fixed; executable interpreter
+# proof pending a runnable pure-Simple compiler artifact". This spec IS that
+# proof — it drives `eval_match_expr` in
+# src/compiler/10.frontend/core/interpreter/eval.spl over a hand-built AST, so
+# no deployed self-hosted binary is needed.
+#
+# Original defect: `match` bound identifier patterns BEFORE opening the arm
+# scope, so a failed guard or a completed arm overwrote an outer variable of
+# the same name. That is silent caller-state mutation.
+
+use compiler.frontend.core.ast_expr.{expr_int_lit, expr_ident, expr_binary, expr_match_expr, expr_reset}
+use compiler.frontend.core.ast.{arm_new}
+use compiler.frontend.core.ast_stmt.{stmt_expr_stmt}
+use compiler.core.interpreter.eval.{eval_expr, eval_reset, eval_get_error}
+use compiler.core.interpreter.env.{env_reset, env_define, env_lookup, env_scope_depth}
+use compiler.core.interpreter.value.{val_reset, val_make_int, val_get_int}
+use compiler.core.interpreter.ops.{ops_clear_error}
+
+val OP_LT: i64 = 82       # TOK_LT
+val OP_GT: i64 = 83       # TOK_GT
+
+describe "Interpreter match-expression binding scope":
+    fn fresh():
+        expr_reset()
+        val_reset()
+        eval_reset()
+        env_reset()
+        ops_clear_error()
+
+    # ---- reproduction: a FAILED GUARD must not leave the binding behind ----
+
+    it "does not leak an arm binding when the arm's guard fails":
+        fresh()
+        env_define("x", val_make_int(99))
+        # match 5:
+        #     case x if x > 100: x        <- binds x = 5, guard fails
+        #     case _: 0
+        val arm_guarded = arm_new(
+            expr_ident("x", -1),
+            expr_binary(OP_GT, expr_ident("x", -1), expr_int_lit(100, -1), -1),
+            [stmt_expr_stmt(expr_ident("x", -1), -1)]
+        )
+        val arm_default = arm_new(expr_ident("_", -1), -1, [stmt_expr_stmt(expr_int_lit(0, -1), -1)])
+        val m = expr_match_expr(expr_int_lit(5, -1), [arm_guarded, arm_default], -1)
+        eval_expr(m)
+        expect(eval_get_error()).to_equal("")
+        expect(val_get_int(env_lookup("x"))).to_equal(99)
+
+    # ---- reproduction: a SUCCESSFUL arm must not leak its binding either ----
+
+    it "does not leak an arm binding when the arm succeeds":
+        fresh()
+        env_define("x", val_make_int(99))
+        # match 5:
+        #     case x if x < 100: x        <- binds x = 5, guard passes, arm runs
+        val arm_taken = arm_new(
+            expr_ident("x", -1),
+            expr_binary(OP_LT, expr_ident("x", -1), expr_int_lit(100, -1), -1),
+            [stmt_expr_stmt(expr_ident("x", -1), -1)]
+        )
+        val m = expr_match_expr(expr_int_lit(5, -1), [arm_taken], -1)
+        val r = eval_expr(m)
+        expect(eval_get_error()).to_equal("")
+        # The arm really ran and saw its own binding...
+        expect(val_get_int(r)).to_equal(5)
+        # ...and the caller's x is untouched.
+        expect(val_get_int(env_lookup("x"))).to_equal(99)
+
+    # ---- control: the binding IS visible INSIDE the arm ----
+
+    it "makes the binding visible inside the arm body":
+        fresh()
+        val arm_taken = arm_new(
+            expr_ident("captured", -1),
+            -1,
+            [stmt_expr_stmt(expr_ident("captured", -1), -1)]
+        )
+        val m = expr_match_expr(expr_int_lit(41, -1), [arm_taken], -1)
+        expect(val_get_int(eval_expr(m))).to_equal(41)
+
+    # ---- generalization: adjacent scope invariants on the same path ----
+
+    it "does not introduce the arm binding into the caller at all":
+        fresh()
+        val arm_taken = arm_new(
+            expr_ident("brand_new", -1),
+            -1,
+            [stmt_expr_stmt(expr_int_lit(1, -1), -1)]
+        )
+        val m = expr_match_expr(expr_int_lit(3, -1), [arm_taken], -1)
+        eval_expr(m)
+        # env_lookup returns a negative value id for an unbound name.
+        expect(env_lookup("brand_new") < 0).to_equal(true)
+
+    it "leaves the scope stack balanced after a taken arm":
+        fresh()
+        val depth_before = env_scope_depth()
+        val arm_taken = arm_new(expr_ident("b", -1), -1, [stmt_expr_stmt(expr_int_lit(1, -1), -1)])
+        eval_expr(expr_match_expr(expr_int_lit(3, -1), [arm_taken], -1))
+        expect(env_scope_depth()).to_equal(depth_before)
+
+    it "leaves the scope stack balanced after a rejected guard":
+        fresh()
+        val depth_before = env_scope_depth()
+        val arm_guarded = arm_new(
+            expr_ident("b", -1),
+            expr_binary(OP_GT, expr_ident("b", -1), expr_int_lit(100, -1), -1),
+            [stmt_expr_stmt(expr_int_lit(1, -1), -1)]
+        )
+        val arm_default = arm_new(expr_ident("_", -1), -1, [stmt_expr_stmt(expr_int_lit(0, -1), -1)])
+        eval_expr(expr_match_expr(expr_int_lit(3, -1), [arm_guarded, arm_default], -1))
+        expect(env_scope_depth()).to_equal(depth_before)

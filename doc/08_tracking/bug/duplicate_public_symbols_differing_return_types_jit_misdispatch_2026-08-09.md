@@ -1,5 +1,10 @@
 # Co-compiled symbol collisions — 373 in a single spec run, two distinct failure classes
 
+## Triage 2026-09-13
+SKIPPED per the doc's own header: "CLAIMED-OFFHOST 2026-08-17 -- do not work
+locally; assigned to a second host." Not touched, per that explicit
+instruction.
+
 > **CLAIMED-OFFHOST 2026-08-17** — do not work locally; assigned to a second host. See doc/03_plan/infra/priority_bug.md
 
 **Date:** 2026-08-09 (rewritten same day after measurement disproved the first version)

@@ -7,7 +7,7 @@ commit → rebase onto origin/main (adds-only) → non-force SSH push.
 ## Done (run-green, on origin/main)
 - `nvme_types.spl` — frozen shared interface (constants, Handle, NvmeCmd/Cpl, helpers, expect_eq).
 - **FIL complete**: `fil_nand` (sim NAND), `fil_ecc`, `fil_badblock`, `fil_fmc` (P1 — wired into FIL),
-  `fil_scheduler` (P2 — wired timing-floor scheduler), **`fil.spl`** (NAND+ECC+bad-block remap,
+  `fil_scheduler` (P2 — channel scheduler, done-but-shelf), **`fil.spl`** (NAND+ECC+bad-block remap,
   page API for FTL; `FilRead{data,lba,seq,code}`).
 - **FTL leaves**: `ftl_map` (DFTL write-back cache), `ftl_band` (log allocator + valid bitmap), `ftl_journal` (WAL+checkpoint+A/B superblock).
 - **HIL+core leaves**: `hil_queue` (SQ/CQ rings), `hil_command` (decode/validate), `fw_pool` (gen-handle task pool; accessors cid/lba/data/status/old_ppn/new_ppn/seq/phase).
@@ -51,9 +51,8 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
   command-dword decoders + `AdminCmd` builders, Identify Controller/Namespace + SMART builders.
 - **`nvme_qset.spl`** — `QueueSet`: up to `MAX_IO_QUEUES` IO SQ/CQ pairs in flat parallel
   arrays (ring of qid q at offset `q*MAX_QUEUE_SIZE`). Enforces NVMe-faithful semantics:
-  CQ-before-SQ, SQ binds to an existing CQ (`SC_CQ_INVALID`), no delete of an SQ/CQ with
-  pending work/completions (`SC_QUEUE_BUSY`), qid range / in-use / size checks; fair
-  round-robin `next_pending_sq`.
+  CQ-before-SQ, SQ binds to an existing CQ (`SC_CQ_INVALID`), no delete of a CQ with a bound
+  SQ (`SC_QUEUE_BUSY`), qid range / in-use / size checks; fair round-robin `next_pending_sq`.
 - **`nvme_controller.spl`** — `NvmeController{aq,qset,features,ftl,pool,last_id,smart,…}`:
   `admin_process` (Create/Delete IO SQ/CQ, Identify, Get/Set Features, Get Log Page) and
   `io_process` (round-robins active SQs → FTL → FIL, posts to each SQ's bound CQ).
@@ -64,22 +63,22 @@ The full-controller layer, on top of the FTL/FIL stack (legacy single-queue
   drop-in for `fil_nand.Nand`** — same `program/read_page/erase_block/erase_count/inject_*/set_bad`
   seam, each driving the ONFI bus internally.
 - **`nvme_main.spl`** — the controller acceptance e2e: host bring-up (Identify → Features →
-  Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, invalid
-  namespace, delete-bound-CQ) → reverse-order teardown → SMART log → power-cycle survival.
+  Create CQ→SQ) → multi-queue IO + round-robin → negative cases (SQ→missing-CQ, delete-bound-CQ)
+  → reverse-order teardown → SMART log → power-cycle survival.
 
 **The FIL runs on the ONFI device** (plan phase E3, done): `fil.spl` composes `NandDevice` (not the
 behavioural `fil_nand.Nand`), so every write/read/GC-erase/recovery-OOB-scan in `sim_main` and
 `nvme_main` goes through the real ONFI handshake. `fil_ecc` keeps the FIL-level ECC; NAND stores
-the SECDED payload-window ECC in spare-area state at program time, the FMC latches it on read, and
+the SECDED payload-ECC word in spare-area state at program time, the FMC latches it on read, and
 FIL decodes the stored value instead of recomputing from read data. One silent payload-bit error
-through bit 16 is corrected; double-bit payload and stored-ECC/OOB metadata corruption fail closed. The self-test
+is corrected; double-bit payload and stored-ECC/OOB metadata corruption fail closed. The self-test
 suite is green (gate
 `ALL FIRMWARE SELF-TESTS PASS`).
 
 Scope note (explicit): "full NVMe SSD fw" here = the host-runnable simulation (run-green).
 P9 — bare-metal **rv32** scalar firmware floor: `fw_rv32/entry.spl` is written as an array-free scalar
 re-expression of the RAIN reconstruct, SECDED ECC floor, fixed scheduler, fixed power/thermal model, fixed map cache, fixed band allocator, fixed journal ring, fixed HIL command/queue, fixed queue-phase handling, fixed io-opcode-read-zero-trim-flush handling, fixed admin/format/fw-log handling, fixed reactor handling, fixed policy/target handling, fixed DRAM/durability handling, fixed wear/scrub handling, fixed media-retire handling, fixed power-cycle handling, fixed backpressure/abort handling, fixed feature-guard handling, and fixed namespace-guard handling, `bin/simple check`-clean, host-verified, and wired through
-the stable Pure-Simple rv32 HAL provider. As of 2026-07-25,
+the rv32 boot hook (`rt_rv32_boot_optional_nvme_fw_selftest`). As of 2026-07-25,
 the direct rv32 QEMU smoke prints `RV32 NVME FW BEGIN` and
 `ALL RV32 NVME FW CHECKS PASS`; internal rv32 counters use bounded no-alloc caps
 while host simulation owns full-width counter stress. The full 22-module no-alloc firmware
@@ -127,29 +126,19 @@ See `PRODUCTION_STATUS.md` for the acceptance bar. Landed since the initial buil
   FTL GC victim selection, which only asks the hook to **score** its own CLOSED candidates (the
   hook never names a block). Tested by `policy_hooks_check.spl` + `hooks_selftest`/`sandbox_selftest`
   and proven by `proofs/Hooks.lean`.
-- **RAIN (req 8) — DONE (single-power-session scope)**: `rain_parity` field +
-  `rain_recover_channel()` wired into the live
+- **RAIN (req 8) — DONE**: `rain_parity` field + `rain_recover_channel()` wired into the live
   `Ftl`. Writes and GC relocations add new page payloads to parity; successful erases from GC/Format
-  remove old page payloads; `rain_seal` remains the scrub/repair pass. Parity is DRAM-only — not
-  persisted and not rebuilt by `recover()` — so channel recovery is not power-cycle-safe (see
-  `doc/08_tracking/bug/rain_parity_volatile_channel_recovery_dataloss_2026-07-18.md`). `rain_recover_channel`
+  remove old page payloads; `rain_seal` remains the scrub/repair pass. `rain_recover_channel`
   rebuilds a corrupted/failed channel in place (recovered = parity XOR survivors; erase the failed
   block; reprogram its live pages; L2P unchanged). Proven by `rain_ftl_check.spl` (256 LBAs survive
   a whole-channel uncorrectable failure without a pre-rebuild seal, gated `RAIN-FTL OK`), the
   standalone `rain_check.spl` (`RAIN OK`), `ftl_rain_selftest`, and `proofs/Rain.lean`.
-- **Reliability engine, rel_* v1 + nd_types (2026-07-19) — DONE, run-green**: typed NAND
-  coordinates (`nd_types.spl`) plus the `rel_types`/`rel_health`/`rel_vref`/`rel_ladder`/
-  `rel_refresh`/`rel_disturb`/`rel_wear` module family, wired into `fil.spl`/`ftl.spl`/
-  `nvme_controller.spl`/`firmware.spl` (recovery-ladder reads, one-reclaim-per-tick
-  scrub/WL/refresh, spare substitution on retire). Each module has its own
-  `rel_*_check.spl`/`nd_types_check.spl`; `rel_wiring_check.spl` is the integration gate.
-  See `PRODUCTION_STATUS.md` § "Reliability engine" for the full acceptance detail.
 
 Integration status (canonical: `doc/03_plan/hardware/nvme_fw_gap_closure_plan.md` § "Integration
-status", wired-vs-shelf table): P1 `fil_fmc`, P2 `fil_scheduler`, P7 `power_thermal`, and P8
-`rain` are all **WIRED** into the live controller/FTL; P2 remains a timing floor because
-channel-level parallelism is a model a single-threaded sim cannot physically exhibit; P3 has a
-**wired SECDED payload-window stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
+status", wired-vs-shelf table): P1 `fil_fmc`, P7 `power_thermal`, and P8 `rain` are all **WIRED**
+into the live controller/FTL; P2 `fil_scheduler` **landed but stays SHELF** — channel-level
+parallelism is a model a single-threaded sim cannot exhibit, so it is not flatly deferred but cannot
+be exercised; P3 has a **wired SECDED stored-ECC simulation floor** (full BCH/LDPC remains silicon/out of
 scope); P4 has a **wired segmented-PRP host-byte floor** (full HostMem/SGL/IOMMU remains out of scope);
 P5 has a **wired bounded-map-cache + fixed arena/free-list floor** (full DRAM subsystem remains out of scope);
 P6 has a **wired cooperative-owner floor** (true multicore/preemption remains out of scope);

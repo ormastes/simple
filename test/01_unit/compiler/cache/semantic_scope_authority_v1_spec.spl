@@ -1,0 +1,372 @@
+# Purpose: Slice C evidence for owner-revalidated but still inactive semantic scope authority.
+# @req REQ-CSM-003 REQ-CSM-006 REQ-CSM-008 REQ-CSM-012 REQ-CSM-017 REQ-CSM-024 REQ-CSM-027
+# @cover src/compiler/35.semantics/semantic_scope_contribution_v1.spl 80%
+# @cover src/compiler/80.driver/cache/gateway/semantic_scope_authority_v1.spl 80%
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.canonical_cache_codec_v1.{
+    canonical_cache_encode_envelope_v1, canonical_cache_kind_compile_snapshot_v1
+}
+use compiler.common.cache_contract.generation_manifest_v1.{
+    GenerationManifestV1, generation_manifest_encode_v1
+}
+use compiler.common.cache_contract.semantic_query_read_manifest_v1.{SemanticCoverageV1}
+use compiler.common.cache_contract.semantic_scope_live_port_contract_v1.*
+use compiler.common.cache_contract.public_summary_v1.*
+use compiler.common.cache_contract.snapshot_contract_v1.{
+    CacheObjectRefV1, LogicalSourcePathV1, PathSemanticsV1
+}
+use compiler.common.cache_contract.physical_tld_v1.{
+    PhysicalTldHeaderV1, TldPayloadRoleV1,
+    physical_tld_section_table_digest_v1
+}
+use compiler.common.cache_contract.three_payload_compile_v2.{
+    ClosureCoverageRootV1, ThreePayloadClosureSealV2, ThreePayloadFallbackV1,
+    closure_coverage_dimension_v1, three_payload_closure_seal_digest_v2
+}
+use compiler.driver.cache.cas.verified_cas_kind_registry_v1.{verified_cas_kind_digest_v1}
+use compiler.driver.cache.gc.verified_generation_reachability_v1.*
+use compiler.driver.cache.journal.action_root_journal_v1.{ActionRootJournalV1}
+use compiler.driver.cache.gateway.cache_writer_v1.{
+    cache_writer_semantic_scope_instance_digest_v1,
+    writer_validate_live_semantic_scope_v1
+}
+use compiler.frontend.cache_artifact.physical_tld_codec_v1.{
+    encode_physical_tld_v1
+}
+use compiler.driver.cache.closure.three_payload_closure_packer_v2.{
+    ThreePayloadSnapshotV2, ThreePayloadParentGenerationV2,
+    ThreePayloadModuleClosureV2, ThreePayloadVerifiedObjectsV2,
+    ThreePayloadPackBoundsV2, PreparedThreePayloadV2,
+    seal_three_payload_closure_v2, prepared_attempt_validate_live_v1
+}
+use compiler.semantics.semantic_scope_contribution_v1.*
+use compiler.driver.cache.gateway.semantic_scope_authority_v1.*
+
+fn d(label: text) -> text: sha256_text(label)
+
+fn coverage_roots() -> [ClosureCoverageRootV1]:
+    var values: [ClosureCoverageRootV1] = []
+    for index in 0..9:
+        values.push(ClosureCoverageRootV1(
+            dimension: closure_coverage_dimension_v1(index),
+            root_digest: d("coverage-{index}"),
+            coverage: SemanticCoverageV1.Complete))
+    values
+
+fn summary_profile() -> PublicSummaryTypedReferenceProfileV2:
+    val summary = PublicSummaryV1(snapshot_id: d("summary-snapshot"),
+        logical_path: LogicalSourcePathV1(
+            repository_namespace_digest: d("repository"),
+            module_relative_utf8: "pkg/dependency.spl",
+            path_semantics: PathSemanticsV1.CaseSensitiveNfc),
+        source_blob_digest: d("summary-source"), schema: 1,
+        compiler_owner_digest: d("summary-compiler"),
+        grammar_digest: d("summary-grammar"), forward_declarations: [],
+        declarations: [], layouts_abi: [], traits_impls_coherence: [],
+        extensions_reexports: [], aop_selectors: [], macro_signatures: [],
+        body_refs: [], reverse_reference_roots: [],
+        declaration_graph_digest: d("summary-graph"),
+        virtual_text_digest: d("summary-virtual-text"))
+    public_summary_typed_reference_profile_v2(summary, [
+        SummaryObjectReferenceV2(stable_symbol_id: "pkg.dependency.value",
+            role: SummaryObjectReferenceRoleV2.ReverseNavigation,
+            target: CacheObjectRefV1(kind: "reverse_reference_shard", schema: 1,
+                object_digest: d("summary-rr")),
+            access_policy_digest: d("summary-access"),
+            semantic_profile_digest: d("summary-semantics"))]).unwrap()
+
+class SemanticScopeFixtureV1:
+    binding: SemanticScopeWriterBindingV1
+    manifest: GenerationManifestV1
+    pins: VerifiedGenerationPinSnapshotV1
+    closure: VerifiedCasClosureReceiptV1
+    durable: VerifiedGenerationDurableBindingV1
+    prepared_attempt: PreparedThreePayloadV2
+
+fn fixture() -> SemanticScopeFixtureV1:
+    val snapshot_bytes = canonical_cache_encode_envelope_v1(
+        canonical_cache_kind_compile_snapshot_v1(), 1, [1 as u8, 2 as u8])
+    val snapshot_cas_digest = verified_cas_kind_digest_v1(
+        "compile_snapshot", snapshot_bytes)
+    val manifest = GenerationManifestV1(schema: 1,
+        snapshot_digest: snapshot_cas_digest, catalog_digest: d("catalog"),
+        summary_refs: [], scope_refs: [], rr_shard_refs: [],
+        forward_manifest_refs: [], portable_refs: [], target_refs: [],
+        diagnostic_refs: [])
+    val manifest_bytes = generation_manifest_encode_v1(manifest)
+    val manifest_digest = verified_cas_kind_digest_v1(
+        "generation_manifest", manifest_bytes)
+    val root = VerifiedGenerationRootV1(generation: 17,
+        manifest_digest: manifest_digest)
+    val pins = verified_generation_pin_snapshot_v1(29,
+        [VerifiedGenerationPinV1(pin_id: "semantic-scope-pin", root: root)],
+        []).unwrap()
+    val objects = [
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "generation_manifest", digest: manifest_digest),
+            canonical_bytes: manifest_bytes),
+        VerifiedCasReadObjectV1(identity: VerifiedCasTypedIdentityV1(
+            kind: "compile_snapshot", digest: snapshot_cas_digest),
+            canonical_bytes: snapshot_bytes)]
+    val journal = ActionRootJournalV1.empty(17)
+    val journal_prepared = journal.prepare(d("action"), "public_summary", d("object"),
+        manifest_digest).unwrap()
+    journal.accept_durable(journal_prepared).unwrap()
+    val journal_digest = sha256_text(journal.bytes)
+    val durable = VerifiedGenerationDurableBindingV1(generation: 17, sequence: 0,
+        writer_epoch: 29, operation_digest: journal_prepared.operation_digest,
+        host_receipt_digest: d("host-receipt"), journal_digest: journal_digest,
+        accepted_journal_bytes: journal.bytes.len(),
+        accepted_journal_prefix_digest: journal_digest, projection_applied: true,
+        projection_digest: manifest.catalog_digest)
+    val verified = verify_generation_closure_v1(root, pins, objects, journal,
+        durable)
+    val closure = verified.receipt.unwrap()
+    val source_bytes = text_to_bytes("fn semantic_scope_fixture() -> i64: 1\n")
+    val source_digest = sha256_u8_hex(source_bytes)
+    val snapshot_semantic_digest = d("snapshot-semantic")
+    val init_header = PhysicalTldHeaderV1(schema: 1,
+        role: TldPayloadRoleV1.PackageInitTld,
+        semantic_record_digest: d("semantic-scope-init-record"),
+        section_table_digest: physical_tld_section_table_digest_v1([]),
+        payload_bytes: 0, sections: [])
+    val init_bytes = encode_physical_tld_v1(init_header, []).unwrap()
+    val prepared_attempt = seal_three_payload_closure_v2(
+        ThreePayloadSnapshotV2(snapshot_digest: snapshot_semantic_digest,
+            source_digest: source_digest, source_bytes: source_bytes),
+        ThreePayloadParentGenerationV2(generation_digest: manifest_digest,
+            prior_tld_digest: nil, prior_tld_bytes: nil, prior_tld_header: nil),
+        ThreePayloadModuleClosureV2(module_id: "pkg.module",
+            init_tld_digest: sha256_u8_hex(init_bytes), init_tld_bytes: init_bytes,
+            init_tld_header: init_header, semantic_refs: [],
+            coverage_roots: coverage_roots()),
+        ThreePayloadVerifiedObjectsV2(
+            compiler_semantics_digest: d("compiler-semantics"),
+            consumed_inputs_digest: d("consumed-inputs"),
+            verified_semantic_object_digests: []),
+        ThreePayloadPackBoundsV2(max_sections: 8, max_payload_bytes: 4096,
+            max_decode_bytes: 4096)).unwrap()
+    val seal = prepared_attempt.seal
+    val binding = SemanticScopeWriterBindingV1(
+        writer_instance_digest: cache_writer_semantic_scope_instance_digest_v1(
+            durable, closure), root: root,
+        expected_parent_manifest_digest: manifest_digest,
+        snapshot_semantic_digest: snapshot_semantic_digest,
+        snapshot_cas_object_digest: snapshot_cas_digest,
+        source_content_digest: source_digest, module_id: "pkg.module",
+        query_domain_digest: d("query-domain"),
+        compiler_owner_digest: d("compiler-owner"), grammar_digest: d("grammar"),
+        semantic_rules_digest: d("semantic-rules"),
+        verifier_registry_digest: closure.verifier_registry_digest,
+        access_policy_digest: d("access-policy"), cancellation_epoch: 3,
+        attempt_seal: seal,
+        attempt_seal_digest: three_payload_closure_seal_digest_v2(seal),
+        body_use_profile: SemanticScopeBodyUseProfileV1.CallOnly,
+        dependency_enumeration: semantic_scope_empty_dependency_enumeration_v1(),
+        max_contributions: SEMANTIC_SCOPE_REQUIRED_CONTRIBUTIONS_V1,
+        max_body_objects: SEMANTIC_SCOPE_MAX_BODY_OBJECTS_V1,
+        max_dependency_edges: SEMANTIC_SCOPE_MAX_DEPENDENCY_EDGES_V1,
+        max_retained_bytes: SEMANTIC_SCOPE_MAX_RETAINED_BYTES_V1)
+    SemanticScopeFixtureV1(binding: binding, manifest: manifest, pins: pins,
+        closure: closure, durable: durable, prepared_attempt: prepared_attempt)
+
+fn live_identity(value: SemanticScopeFixtureV1,
+        preflight: SemanticScopePreflightV1) -> SemanticScopeLiveIdentityV1:
+    SemanticScopeLiveIdentityV1(
+        writer_instance_digest: value.binding.writer_instance_digest,
+        generation: preflight.generation,
+        manifest_digest: preflight.manifest_digest,
+        pin_snapshot_digest: preflight.pin_snapshot_digest,
+        generation_closure_digest: preflight.generation_closure_digest,
+        binding_digest: preflight.binding_digest,
+        query_domain_digest: value.binding.query_domain_digest,
+        semantic_rules_digest: value.binding.semantic_rules_digest,
+        cancellation_epoch: value.binding.cancellation_epoch)
+
+fn owner_contribution_bindings(value: SemanticScopeFixtureV1,
+        preflight: SemanticScopePreflightV1,
+) -> [SemanticScopeContributionLiveBindingV1]:
+    var bindings: [SemanticScopeContributionLiveBindingV1] = []
+    val universe = ["pkg.module"]
+    for index in 0..SEMANTIC_SCOPE_REQUIRED_CONTRIBUTIONS_V1:
+        var candidate = SemanticScopeContributionCandidateV1(
+            dimension: semantic_scope_required_dimension_v1(index).unwrap(),
+            scope_binding_digest: preflight.binding_digest,
+            query_domain_digest: value.binding.query_domain_digest,
+            owner_rules_digest: d("semantic-owner-rules-{index}"),
+            source_universe_digest: semantic_scope_source_universe_digest_v1(universe),
+            members: universe, negative_witnesses: [], source_universe: universe,
+            dependency_enumeration: semantic_scope_empty_dependency_enumeration_v1(),
+            coverage: SemanticCoverageV1.Complete, universe_complete: true,
+            contribution_digest: "")
+        candidate.contribution_digest =
+            semantic_scope_contribution_candidate_digest_v1(candidate)
+        bindings.push(SemanticScopeContributionLiveBindingV1(
+            candidate: candidate,
+            issuer_instance_digest: d("semantic-owner-{index}"),
+            issuer_generation: 4, authority_serial: index + 1))
+    bindings
+
+describe "portable semantic scope authority Slice C":
+    it "preflights the exact generation pin manifest attempt and empty dependency universe":
+        step("Verify exact embedded HIR")
+        step("Resolve complete body calls")
+        val value = fixture()
+        val result = writer_semantic_scope_preflight_v1(value.binding,
+            value.manifest, value.pins, value.closure, value.durable, [])
+        expect(result.is_ok()).to_be(true)
+        val preflight = result.unwrap()
+        expect(preflight.manifest_digest).to_equal(value.binding.root.manifest_digest)
+        expect(preflight.attempt_seal_digest).to_equal(
+            value.binding.attempt_seal_digest)
+        expect(preflight.dependency_enumeration_digest).to_equal(
+            value.binding.dependency_enumeration.enumeration_digest)
+
+    it "rejects a generation manifest substitution":
+        step("Reject stale or incomplete authority")
+        val value = fixture()
+        var changed = value.manifest
+        changed.catalog_digest = d("different-catalog")
+        expect(writer_semantic_scope_preflight_v1(value.binding, changed,
+            value.pins, value.closure, value.durable, [])).to_equal(
+                Err(SemanticScopePreflightErrorV1.ExactManifestMismatch))
+
+    it "rejects macro template default around and body-sensitive profiles":
+        step("Reject stale or incomplete authority")
+        expect(semantic_scope_body_use_profile_supported_v1(
+            SemanticScopeBodyUseProfileV1.MacroExpansion)).to_be(false)
+        expect(semantic_scope_body_use_profile_supported_v1(
+            SemanticScopeBodyUseProfileV1.GenericTemplate)).to_be(false)
+        expect(semantic_scope_body_use_profile_supported_v1(
+            SemanticScopeBodyUseProfileV1.TraitDefaultBody)).to_be(false)
+        expect(semantic_scope_body_use_profile_supported_v1(
+            SemanticScopeBodyUseProfileV1.AroundAdvice)).to_be(false)
+        expect(semantic_scope_body_use_profile_supported_v1(
+            SemanticScopeBodyUseProfileV1.BodySensitiveAdvice)).to_be(false)
+        val value = fixture()
+        var unsupported = value.binding
+        unsupported.body_use_profile = SemanticScopeBodyUseProfileV1.MacroExpansion
+        expect(writer_semantic_scope_preflight_v1(unsupported, value.manifest,
+            value.pins, value.closure, value.durable, [])).to_equal(
+                Err(SemanticScopePreflightErrorV1.UnsupportedProfile))
+
+    it "does not mint scope or completeness from copied receipt data":
+        step("Seal semantic scope from admitted owners")
+        val value = fixture()
+        expect(semantic_scope_contribution_port_available_v1()).to_be(false)
+        expect(semantic_scope_authority_available_v1()).to_be(false)
+        expect(writer_begin_semantic_scope_v1(value.binding, value.manifest,
+            value.pins, value.closure, value.durable, []).unwrap_err()).to_equal(
+                ThreePayloadFallbackV1.AuthorityUnavailable)
+
+    it "revalidates writer and summary requests against their existing owners":
+        step("Validate existing writer and public-summary owners")
+        val value = fixture()
+        val preflight = writer_semantic_scope_preflight_v1(value.binding,
+            value.manifest, value.pins, value.closure, value.durable, []).unwrap()
+        val identity = live_identity(value, preflight)
+        val writer_request = SemanticScopeWriterLiveRequestV1(
+            identity: identity,
+            durable_binding_digest: value.closure.durable_journal_receipt_digest)
+        expect(writer_validate_live_semantic_scope_v1(writer_request,
+            value.pins, value.closure, value.durable)).to_be(true)
+        var stale_identity = identity
+        stale_identity.generation = identity.generation + 1
+        expect(writer_validate_live_semantic_scope_v1(
+            SemanticScopeWriterLiveRequestV1(identity: stale_identity,
+                durable_binding_digest: writer_request.durable_binding_digest),
+            value.pins, value.closure, value.durable)).to_be(false)
+
+        val empty_set_digest = public_summary_live_set_digest_v1([], [])
+        val summary_request = SemanticScopeSummaryLiveRequestV1(
+            identity: identity, public_summary_set_digest: empty_set_digest,
+            summary_count: 0)
+        expect(public_summary_validate_live_set_v1(summary_request, [], [])).to_be(true)
+        expect(public_summary_validate_live_set_v1(
+            SemanticScopeSummaryLiveRequestV1(identity: identity,
+                public_summary_set_digest: empty_set_digest, summary_count: 1),
+            [], [])).to_be(false)
+
+        val object_digest = d("typed-summary-object")
+        val profile = summary_profile()
+        val typed_set_digest = public_summary_live_set_digest_v1(
+            [object_digest], [profile])
+        val typed_request = SemanticScopeSummaryLiveRequestV1(
+            identity: identity, public_summary_set_digest: typed_set_digest,
+            summary_count: 1)
+        expect(public_summary_validate_live_set_v1(typed_request,
+            [object_digest], [profile])).to_be(true)
+        var stale_reverse = profile
+        stale_reverse.reverse_navigation_references = []
+        expect(public_summary_validate_live_set_v1(typed_request,
+            [object_digest], [stale_reverse])).to_be(false)
+
+    it "revalidates prepared bytes and keeps the integrated gateway closed":
+        step("Validate the existing prepared-attempt owner")
+        val value = fixture()
+        val preflight = writer_semantic_scope_preflight_v1(value.binding,
+            value.manifest, value.pins, value.closure, value.durable, []).unwrap()
+        val attempt_request = SemanticScopeAttemptLiveRequestV1(
+            identity: live_identity(value, preflight),
+            attempt_seal_digest: preflight.attempt_seal_digest,
+            source_content_digest: value.binding.source_content_digest,
+            snapshot_semantic_digest: value.binding.snapshot_semantic_digest)
+        expect(prepared_attempt_validate_live_v1(attempt_request,
+            value.prepared_attempt)).to_be(true)
+        var tampered = value.prepared_attempt
+        tampered.source_bytes = [0 as u8]
+        expect(prepared_attempt_validate_live_v1(attempt_request,
+            tampered)).to_be(false)
+
+        step("Require five live semantic issuers at the gateway")
+        val contributions = owner_contribution_bindings(value, preflight)
+        expect(writer_validate_semantic_scope_owner_ports_v1(value.binding,
+            value.manifest, value.pins, value.closure, value.durable, [],
+            value.prepared_attempt, contributions)).to_be(false)
+        expect(semantic_scope_authority_available_v1()).to_be(false)
+
+    it "keeps structurally matching semantic candidates below live authority":
+        step("Reject copied semantic contribution authority")
+        val value = fixture()
+        val preflight = writer_semantic_scope_preflight_v1(value.binding,
+            value.manifest, value.pins, value.closure, value.durable, []).unwrap()
+        val identity = live_identity(value, preflight)
+        val universe = ["pkg.module"]
+        var candidate = SemanticScopeContributionCandidateV1(
+            dimension: SemanticScopeDimensionV1.DeclarationsReexports,
+            scope_binding_digest: preflight.binding_digest,
+            query_domain_digest: value.binding.query_domain_digest,
+            owner_rules_digest: d("declaration-rules"),
+            source_universe_digest: semantic_scope_source_universe_digest_v1(universe),
+            members: universe, negative_witnesses: [], source_universe: universe,
+            dependency_enumeration: semantic_scope_empty_dependency_enumeration_v1(),
+            coverage: SemanticCoverageV1.Complete, universe_complete: true,
+            contribution_digest: "")
+        candidate.contribution_digest =
+            semantic_scope_contribution_candidate_digest_v1(candidate)
+        val request = SemanticScopeContributionLiveRequestV1(
+            identity: identity, dimension_index: 0,
+            contribution_digest: candidate.contribution_digest,
+            issuer_instance_digest: d("declaration-owner"),
+            issuer_generation: 4, authority_serial: 1)
+        expect(semantic_owner_live_contribution_candidate_matches_v1(
+            candidate, request)).to_be(true)
+        expect(semantic_owner_validate_live_contribution_v1(
+            candidate, request)).to_be(false)
+        expect(semantic_scope_contribution_port_available_v1()).to_be(false)
+
+    it "keeps worker and publication activation closed":
+        step("Compile from the sealed payloads")
+        expect(semantic_scope_worker_activation_available_v1()).to_be(false)
+        expect(semantic_scope_publication_activation_available_v1()).to_be(false)
+
+    it "rejects copied dependency lists without their exact enumeration digest":
+        step("Resolve complete body calls")
+        val empty = semantic_scope_empty_dependency_enumeration_v1()
+        expect(semantic_scope_dependency_enumeration_valid_v1(empty)).to_be(true)
+        val forged = SemanticScopeDependencyEnumerationV1(
+            body_object_digests: [], edges: [], enumeration_digest: d("forged"))
+        expect(semantic_scope_dependency_enumeration_valid_v1(forged)).to_be(false)

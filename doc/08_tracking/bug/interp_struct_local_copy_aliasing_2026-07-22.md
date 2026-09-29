@@ -2,8 +2,7 @@
 
 - **ID:** interp_struct_local_copy_aliasing
 - **Date:** 2026-07-22
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** OPEN
 - **Severity:** high (silent state corruption)
 - **Component:** seed interpreter (value semantics for struct assignment)
 

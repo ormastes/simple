@@ -322,3 +322,15 @@ impl Saveable for Document:
 9. **No inheritance**: Use composition, traits, or mixins.
 
 10. **Use `Result`/`Option`**: Not try/catch for error handling.
+
+---
+
+## Implementation Language Policy (Pure Simple First)
+
+Never write a C version of a fix/feature when pure Simple can do it — the Rust
+seed and the 3 bootstrap scripts are the only sanctioned non-Simple code, and
+the C runtime is a boundary, not a place for logic. Bootstrap-required C keeps
+a pure-Simple twin verified by `scripts/check/check-dual-run-shadow.shs`.
+HAL/low-level code minimizes inline asm behind typed register views,
+optimization-restraining tags, and intrinsics. Full policy:
+`doc/07_guide/os/hal/pure_simple_hal.md`.

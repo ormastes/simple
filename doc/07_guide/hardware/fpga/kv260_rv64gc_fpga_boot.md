@@ -4,12 +4,12 @@ End-to-end guide for generating, validating, synthesizing, and booting an RV64GC
 
 ## Current Validation Status
 
-As of 2026-07-03, the current generated RV64 K26 bitstream can be synthesized and programmed on a physical KV260/K26 FPGA through the carrier's merged Xilinx USB JTAG interface. The same USB connection exposes FT4232H serial ports. The merged USB UART path is verified through ZynqMP PS UART1, but the loaded RV64 PL image routes its own console to PMOD pins H12/E10 rather than merged USB. The active generated core is still a placeholder and XSDB ELF download currently fails with `Invalid context`, so this is not yet SimpleOS execution proof.
+As of 2026-05-29, the NaxRiscv RV64 SoC bitstream has been synthesized and programmed on a physical KV260/K26 FPGA through the carrier's merged Xilinx USB JTAG interface. The same USB connection exposes FT4232H serial ports. The merged USB UART path is verified through ZynqMP PS UART1, but the loaded RV64 PL image routes its own console to PMOD pins H12/E10 rather than merged USB.
 
 Verified on physical hardware:
 
 - Vivado 2025.2 synthesis, implementation, timing closure, and bitstream generation — completed successfully.
-- Bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (7.8 MB, July 3 2026).
+- Bitstream: `build/build/xilinx_kv260/gateware/xilinx_kv260.bit` (4.3 MB, May 21 2026).
 - KV260/K26 FPGA detected via Vivado hw_server as `xck26_0 arm_dap_1` on target `localhost:3121/xilinx_tcf/Xilinx/XFL1OSWWFM2BA`.
 - KV260/K26 FPGA programmed via Vivado hw_server on 2026-05-29 — `End of startup status: HIGH`.
 - Programming log: `build/kv260_uart_program_20260529_124641/kv260_program_20260529_124641.log`.
@@ -19,7 +19,6 @@ Verified on physical hardware:
 - Merged USB UART sampling while programming checked `/dev/ttyUSB4`, `/dev/ttyUSB5`, and `/dev/ttyUSB6` for 30 seconds at 115200 8N1. All captures were zero bytes. Artifacts: `build/kv260_uart_program_20260529_124641/`.
 - Merged USB UART positive path verified with XSDB/JTAG write to ZynqMP PS UART1. The marker `KV260-PS-UART-JTAG` was captured from `/dev/ttyUSB4`. Artifacts: `build/kv260_ps_uart_jtag_probe_20260529_125214/`.
 - 2026-06-01 recheck loaded the current bitstream and passed the combined KV260 RV64 gate. Artifacts: `build/kv260_simple_rv64_linux_check_20260601_084520/`.
-- 2026-07-03 RV32 FPGA SimpleOS payload build passed with the local LLVM-enabled Rust Simple driver: `build/os/simpleos_riscv32_fpga.elf` and `build/rv32_bringup_check/hello_litex_rv32.bin`.
 
 Verified in test workspace:
 
@@ -107,45 +106,25 @@ The testbench (`tb_rv64_wb_soc_smoke.vhd`) drives clock at 100 MHz, asserts/deas
 
 ## 4. Vivado Synthesis
 
-Build the current generated RV64 K26 bitstream:
+Generate the Vivado TCL script from Simple:
 
 ```bash
-SIMPLE_BINARY=bin/release/simple bash scripts/fpga/build_k26_vexriscv.shs
+bin/simple run -e 'use std.hardware.fpga_linux.synthesis_wrapper.{generate_vivado_tcl_rv64}; print(generate_vivado_tcl_rv64())' > build/vhdl/rv64/synth_rv64.tcl
 ```
 
-The wrapper regenerates `build/vhdl/rv64/*.vhd`, writes
-`build/fpga/k26/build_vexriscv.tcl`, constrains `uart_tx` to PMOD H12
-(`LVCMOS33`), and now refuses to run Vivado if `rv64gc_core.vhd` is placeholder
-RTL. Use `ALLOW_PLACEHOLDER_RTL=1` only for Vivado plumbing diagnostics. With
-real executable core RTL, it runs Vivado synthesis/implementation/bitgen and
-copies:
-
-- `build/fpga/k26/k26_vexriscv.bit`
-- `build/build/xilinx_kv260/gateware/xilinx_kv260.bit`
-
-For synthesis only, pass `--synth-only`.
-
-Load the current SimpleOS RV64 FPGA ELF after programming:
+Generate XDC constraints:
 
 ```bash
-bash scripts/fpga/load_elf_k26.shs
+bin/simple run -e 'use std.hardware.fpga_k26.k26_xdc.{k26_generate_xdc}; print(k26_generate_xdc())' > build/vhdl/rv64/k26_constraints.xdc
 ```
 
-The helper defaults to `build/fpga/k26/k26_vexriscv.bit` and
-`build/os/simpleos_riscv64_fpga.elf`, and writes XSDB output to
-`build/fpga/k26/load_elf_k26.log`. A current `Invalid context` failure means
-the bitstream programmed successfully but does not expose a CPU/debug target
-that can accept `dow`.
-
-The production preflight separates these states:
+Run Vivado synthesis:
 
 ```bash
-SIMPLE_BINARY=bin/release/simple sh scripts/check/check-riscv-fpga-simpleos-preflight.shs --local-only
+source ~/Xilinx/2025.2/Vivado/settings64.sh
+cd build/vhdl/rv64
+vivado -mode batch -source synth_rv64.tcl
 ```
-
-- `artifact_simpleos_bitstream` only proves the `.bit` file exists.
-- `rv64_fpga_core_executable` must pass before treating the bitstream as a real SimpleOS-capable core.
-- `rv64_fpga_elf_load_context` must pass before treating XSDB ELF download as proven.
 
 ## 5. FPGA Programming
 
@@ -360,7 +339,7 @@ Target output: LiteX BIOS banner, then serialboot prompt. Linux boot requires Op
 | if02 | `/dev/ttyUSB5` | No bytes after PL programming |
 | if03 | `/dev/ttyUSB6` | No bytes after PL programming |
 
-No merged USB channel has been proven to provide PL UART access for this generated image. Use the PMOD adapter path for the PL UART until the carrier routing is changed or the design is rebuilt to target a routed serial channel. `scripts/fpga/check_kv260_simple_riscv_fpga.shs` now fails fast with `PHYSICAL_RUN_STATUS=blocked reason=pl_uart_adapter_missing` when no non-Xilinx adapter or existing `UART_EXTRA_PORTS` device is present; with `--with-ghdl` it still appends decoded-marker simulation evidence before returning the physical blocker. Set `ALLOW_XILINX_ONLY_UART_CAPTURE=1` only for diagnostic captures of the known-non-PL Xilinx USB ports.
+No merged USB channel has been proven to provide PL UART access for this generated image. Use the PMOD adapter path for the PL UART until the carrier routing is changed or the design is rebuilt to target a routed serial channel.
 
 ## 7. Troubleshooting
 

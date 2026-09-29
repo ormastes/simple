@@ -1,0 +1,103 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_lsu_owner.{strict_riscv_scalar_runtime_lsu_owner}
+
+describe "runtime scalar LSU sequential owner":
+    it "freezes the exact three-way request acceptance and held bus request":
+        val owner = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_owner",
+            CoreConfig.rv64(), LsuConfig.rv64_product_default()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.plan.rules[4].name).to_equal("local_completion")
+        expect(owner.plan.rules[5].name).to_equal("request_capture")
+        expect(owner.plan.rules[5].guards[0].lhs).to_equal("request_handshake")
+        expect(owner.plan.rules[5].guards[1].lhs).to_equal("request_tag_ok")
+        expect(owner.plan.port_direction(owner.ports, "request_accept")).to_equal("out")
+        expect(owner.plan.named_width(owner.ports, "request_provider_tag")).to_equal(3)
+        expect(owner.plan.outputs[1].result).to_equal("request_accept")
+        expect(owner.plan.outputs[1].guards[0].lhs).to_equal("request_valid")
+        expect(owner.plan.outputs[1].guards[1].lhs).to_equal("pending_reg")
+        expect(owner.plan.outputs[1].guards[5].lhs).to_equal("id_terminal")
+        expect(owner.plan.outputs[2].result).to_equal("bus_request_valid")
+        expect(owner.plan.outputs[2].guards[0].lhs).to_equal("pending_reg")
+        expect(owner.plan.outputs[2].guards[1].lhs).to_equal("issued_reg")
+
+    it "validates response identity and holds the complete provider payload":
+        val owner = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_completion",
+            CoreConfig.rv32(), LsuConfig.rv32_product_default()).unwrap()
+        expect(owner.plan.rules[0].name).to_equal("protocol_fault")
+        expect(owner.plan.rules[1].name).to_equal("completion_consume")
+        expect(owner.plan.rules[1].guards[0].lhs).to_equal("completion_ready")
+        expect(owner.plan.rules[2].guards[0].lhs).to_equal("response_good")
+        expect(owner.plan.outputs.len()).to_equal(37)
+        expect(owner.plan.named_width(owner.ports, "completion_provider_tag")).to_equal(3)
+        expect(owner.plan.named_width(owner.ports, "completion_provider_event_id")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "completion_illegal_valid")).to_equal(1)
+        expect(owner.plan.port_direction(owner.ports, "provider_protocol_fault")).to_equal("out")
+
+    it "binds x0 suppression, normalized effects, every load width, and size failure":
+        val owner = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_effects",
+            CoreConfig.rv64(), LsuConfig.rv64_product_default()).unwrap()
+        expect(owner.datapath_width("rd_zero")).to_equal(1)
+        expect(owner.datapath_width("rd_nonzero")).to_equal(1)
+        expect(owner.datapath_width("safe_load_effect")).to_equal(1)
+        expect(owner.datapath_width("safe_write_effect")).to_equal(1)
+        expect(owner.datapath_width("load8_s")).to_equal(64)
+        expect(owner.datapath_width("load16_s")).to_equal(64)
+        expect(owner.datapath_width("load32_s")).to_equal(64)
+        expect(owner.datapath_width("load32_z")).to_equal(64)
+        expect(owner.datapath_width("shifted_response")).to_equal(64)
+        expect(owner.datapath_width("size_is_8")).to_equal(1)
+        expect(owner.datapath_width("invalid_size_attempt")).to_equal(1)
+        expect(owner.datapath_width("normalized_mask")).to_equal(32)
+        expect(owner.datapath_width("normalized_write_data")).to_equal(64)
+        expect(owner.datapath_width("safe_load_value")).to_equal(64)
+        var rd_zero_compare = false; var rd_nonzero_inverse = false
+        var safe_load_select = false; var rd_value_select = false
+        for op in owner.datapath_compare_ops:
+            if op.result == "rd_zero" and op.lhs == "completion_rd_reg" and op.rhs == "zero5":
+                rd_zero_compare = true
+        for op in owner.datapath_select_ops:
+            if op.result == "rd_nonzero" and op.condition == "rd_zero" and op.when_true == "zero1":
+                rd_nonzero_inverse = true
+            if op.result == "safe_load_value" and op.condition == "safe_load_effect" and op.when_false == "zero_xlen":
+                safe_load_select = true
+            if op.result == "completion_rd_value_value" and op.condition == "completion_rd_write_value" and op.when_false == "zero_xlen":
+                rd_value_select = true
+        expect(rd_zero_compare).to_be(true)
+        expect(rd_nonzero_inverse).to_be(true)
+        expect(safe_load_select).to_be(true)
+        expect(rd_value_select).to_be(true)
+        var memory_data_safe = false
+        for assignment in owner.plan.rules[2].assignments:
+            if assignment.destination == "completion_memory_read_data_reg" and assignment.value.value == "safe_load_value":
+                memory_data_safe = true
+        expect(memory_data_safe).to_be(true)
+
+    it "fails closed at transaction id exhaustion before exposing ready":
+        val owner = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_ids",
+            CoreConfig.rv32(), LsuConfig.rv32_product_default()).unwrap()
+        expect(owner.plan.outputs[0].result).to_equal("request_ready")
+        expect(owner.plan.outputs[0].guards[4].lhs).to_equal("id_terminal")
+        expect(owner.datapath_width("id_exhaustion_attempt")).to_equal(1)
+        expect(owner.datapath_width("accepted_unprojected")).to_equal(1)
+        expect(owner.plan.rules[0].guards[0].lhs).to_equal("fault_any")
+
+    it "admits size eight only for RV64 and faults accepted absent projections":
+        val rv32 = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_size32",
+            CoreConfig.rv32(), LsuConfig.rv32_product_default()).unwrap()
+        val rv64 = strict_riscv_scalar_runtime_lsu_owner("runtime_lsu_size64",
+            CoreConfig.rv64(), LsuConfig.rv64_product_default()).unwrap()
+        var rv32_size8 = false; var rv64_size8 = false; var absent_chain = false
+        for op in rv32.datapath_comb_ops:
+            if op.result == "request_size_valid_48" and op.rhs == "request_size_is_8": rv32_size8 = true
+        for op in rv64.datapath_comb_ops:
+            if op.result == "request_size_valid_48" and op.rhs == "request_size_is_8": rv64_size8 = true
+            if op.result == "accepted_unprojected" and op.lhs == "request_handshake" and op.rhs == "unprojected_no_fault": absent_chain = true
+        expect(rv32_size8).to_be(false)
+        expect(rv64_size8).to_be(true)
+        expect(absent_chain).to_be(true)
+
+    it "rejects geometry that cannot preserve one-beat runtime semantics":
+        expect(strict_riscv_scalar_runtime_lsu_owner("narrow_runtime_lsu",
+            CoreConfig.rv64(), LsuConfig.rv32_product_default()).is_err()).to_be(true)

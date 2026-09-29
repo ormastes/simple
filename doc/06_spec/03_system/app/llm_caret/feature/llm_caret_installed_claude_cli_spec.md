@@ -1,8 +1,6 @@
 # LLM Caret Installed Claude CLI Compatibility
 
-> Checks the currently installed Claude CLI’s offline command contract and
-> records drift provenance without sending a prompt or inheriting provider
-> credentials.
+> Probe the currently installed Claude CLI without sending a prompt or allowing
 
 | Tests | Active | Skipped | Pending |
 |-------|-------:|--------:|--------:|
@@ -10,6 +8,10 @@
 
 <details>
 <summary>Full Scenario Manual</summary>
+
+# LLM Caret Installed Claude CLI Compatibility
+
+Probe the currently installed Claude CLI without sending a prompt or allowing
 
 ## At a Glance
 
@@ -20,28 +22,28 @@
 | Requirement support | REQ-LLM-CARET-CLI-HARDEN-006 |
 | Plan | `doc/03_plan/sys_test/llm_caret_cli_tui_hardening.md` |
 | Source | `test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl` |
-| Updated | 2026-07-24 |
-| Generator | Manual synchronization; installed probe execution is a separate gate |
+| Updated | 2026-08-27 |
+| Generator | `simple spipe-docgen` (Simple) |
 
 ## Scope
 
-The checker resolves the installed `claude` command and its canonical target,
-then records its version and SHA-256 without accepting either value as a pinned
-release requirement. Every child gets a fresh `HOME`, `CLAUDE_CONFIG_DIR`, and
-working directory under a per-invocation temporary root outside the repository.
-The child starts through `env -i` with only HOME/config, a command-search path,
-fixed locale/TERM, and nonessential-traffic disablement, so host provider
-credentials and repository-parent settings are not inherited.
+Probe the currently installed Claude CLI without sending a prompt or allowing
+provider credentials into the child environment. The checker records the
+resolved executable, canonical target, version, SHA-256, raw stdout, raw
+stderr, and exit status under:
 
-The executable cases use only `--version`, `--help`, missing `-p` input, the
-help-hidden `--max-turns` option, and the removed `--max-tokens` option. There
-is no successful prompt-bearing case, session resume, authentication,
-inherited provider credential, or accepted provider response.
-This is supplemental environmental compatibility evidence; direct
-production-declaration scenarios remain the authoritative requirement proof.
-
-**Artifacts:**
 `build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli/`
+
+The cases prove current help compatibility, variadic `--allowedTools`,
+rejection of missing print input, acceptance of the help-hidden `--max-turns`
+option, and safe rejection of the removed `--max-tokens` option. Version and
+hash are recorded as drift evidence; this specification does not pin their
+exact values.
+
+No case contains a prompt-bearing success path, authenticates, resumes a
+session, or accepts a provider response. A missing installed binary fails closed.
+This is supplemental environmental compatibility evidence; it does not replace
+the requirement's direct production-declaration scenarios.
 
 ## Scenarios
 
@@ -49,17 +51,20 @@ production-declaration scenarios remain the authoritative requirement proof.
 
 #### should resolve the installed executable and recorded provenance
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: executable path, canonical target, SHA-256, and raw artifacts are
-    present.
-  - Expected: missing or non-executable Claude fails closed.
+- should resolve the installed executable and recorded provenance
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
 ```simple
+# @req REQ-SSPEC-SYSTEM
+# @req REQ-LLM-CARET-CLI-HARDEN-006
+step("should resolve the installed executable and recorded provenance")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -87,16 +92,22 @@ check_probe_artifacts("prerequisites")
 
 #### should record the current version without pinning release drift
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: a nonempty version and zero raw exit are recorded.
-  - Expected: the scenario does not hardcode an exact version or hash.
+- should record the current version without pinning release drift
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should record the current version without pinning release drift")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -117,17 +128,22 @@ check_probe_artifacts("version")
 
 #### should advertise every required current flag and variadic allowed tools
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: Caret’s current Claude arguments are advertised.
-  - Expected: `--allowedTools` is variadic, `--max-tokens` is removed, and
-    supported `--max-turns` remains hidden.
+- should advertise every required current flag and variadic allowed tools
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should advertise every required current flag and variadic allowed tools")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -153,18 +169,22 @@ check_probe_artifacts("help")
 
 #### should reject missing print input without a prompt-bearing provider path
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: closed stdin with `-p` exits nonzero and names missing input,
-    prompt, or stdin.
-  - Expected: the result claims only input rejection, not unrelated verbose
-    validation.
+- should reject missing print input without a prompt-bearing provider path
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should reject missing print input without a prompt-bearing provider path")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -185,16 +205,22 @@ check_probe_artifacts("missing-input")
 
 #### should safely reject the removed maximum-token option
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: `--max-tokens` exits nonzero and is named in raw diagnostics.
-  - Expected: no prompt-bearing success is possible.
+- should safely reject the removed maximum-token option
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should safely reject the removed maximum-token option")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -217,17 +243,22 @@ check_probe_artifacts("removed-option")
 
 #### should accept the hidden maximum-turn option without a prompt
 
-- Load the accepted Claude feature map.
-- Invoke the installed Claude CLI with no prompt or provider credentials.
-- Check the structured CLI response.
-  - Expected: `--max-turns` is parsed rather than rejected as unknown.
-  - Expected: closed stdin still fails for missing input before any provider
-    request.
+- should accept the hidden maximum-turn option without a prompt
+- Load the accepted Claude feature map
+- Invoke the installed Claude CLI with no prompt or provider credentials
+- Check the structured CLI response
+   - Expected: result.exit_code equals `0`
+
 
 <details>
 <summary>Executable SSpec</summary>
 
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
 ```simple
+# @req REQ-SSPEC-SYSTEM
+step("should accept the hidden maximum-turn option without a prompt")
 step("Load the accepted Claude feature map")
 check_feature_map()
 
@@ -303,9 +334,72 @@ declares a leaf runtime extern.
 
 </details>
 
-## Evidence Boundary
+<!-- sspec-maintain:traceability:start -->
+## Traceability
 
-Passing evidence proves the installed executable’s current offline CLI surface
-matches the Caret wrapper’s bounded argument assumptions. It does not prove
-authentication, provider availability, model quality, billing, network
-behavior, or an exact pinned Claude release.
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-SYSTEM`
+- `REQ-LLM-CARET-CLI-HARDEN-006`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `615f0c07677d0ea3e741342dd48a38909f60c02025752f845836bb8cfe38a627`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **82/100**; effective score: **82/100**; blockers: **0**.
+
+SSpec documentization score: 82/100
+source: test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl
+mirror: doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md (current)
+findings: 12 blockers: 0
+  narrative=100 structure=70 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:79:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should resolve the installed executable and recorded provenance' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:79:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should resolve the installed executable and recorded provenance' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:105:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should record the current version without pinning release drift' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should record the current version without pinning release drift' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:123:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should advertise every required current flag and variadic allowed tools' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:123:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'should advertise every required current flag and variadic allowed tools' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:146:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should reject missing print input without a prompt-bearing provider path' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:164:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should safely reject the removed maximum-token option' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+test/03_system/app/llm_caret/feature/llm_caret_installed_claude_cli_spec.spl:184:1: advice SSDOC-BEH-002 [structure] (-5): scenario name 'should accept the hidden maximum-turn option without a prompt' describes the test rather than its outcome
+  why: Outcome names describe product behavior rather than test mechanics.
+  improve: Rename it to the observable product outcome.
+<!-- sspec-maintain:scorecard:end -->

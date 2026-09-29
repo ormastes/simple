@@ -49,31 +49,9 @@ claude plugin install simple-mcp@simple-local
 ### Direct MCP Registration (no marketplace)
 
 ```bash
-claude mcp add simple-mcp -- bin/simple src/app/mcp/main.spl
+claude mcp add simple-mcp -- bin/simple_mcp_server
 claude mcp add simple-lsp-mcp -- bin/simple_lsp_mcp_server
 ```
-
-Simple MCP is source-hosted: local registrations execute
-`bin/simple src/app/mcp/main.spl`, so app MCP changes require only a client
-restart. Do not native-build Simple MCP for local tool discovery. Run
-`sh config/mcp/install.shs` to register the same script for supported local AI
-CLIs.
-
-Simple LSP MCP and distribution/package artifacts retain the native admission
-and `.sha256` provenance rules below. Those rules do not change the local
-Simple MCP script contract.
-
-The LSP wrapper always changes to the canonical repository root before probing
-or executing its admitted native server. Admission is bounded and correlated:
-it requires successful `initialize`, a `tools/list` result advertising
-`lsp_symbols`, then a `tools/call(lsp_symbols)` result containing the usable
-`log_options_help` symbol. JSON-RPC `error`, MCP `isError`, child-command
-failure text, timeout, or nonzero child exit rejects the candidate.
-
-Before installation, `scripts/setup/setup.shs` admits the deployed
-`bin/release/<triple>/simple` with the shared frontend/provenance gate. A
-version string identifying a bootstrap seed, Rust build, or debug build is a
-hard failure.
 
 ### Package for Distribution
 
@@ -206,15 +184,6 @@ mcp-publisher publish tools/mcp-registry/server.json
 
 Check your server appears at:
 - `https://registry.modelcontextprotocol.io/servers/@simple-lang/mcp-server`
-
-For a local checkout, also run the launcher contract once:
-
-```bash
-sh scripts/check/check-mcp-wrapper-contract.shs
-```
-
-It checks generated/checked wrapper parity, native selection, argument
-forwarding, and fail-closed behavior when the cached artifact is absent.
 
 ### User Installation (after registration)
 

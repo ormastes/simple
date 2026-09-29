@@ -11,9 +11,6 @@
     .type _entry_asm, %function
 
 _entry_asm:
-    /* Preserve the firmware DTB pointer before any diagnostic call clobbers r2. */
-    mov r8, r2
-
     /* Early UART marker before stack/BSS setup. */
     ldr r0, =.Lcrt0_banner
     bl .Lserial_puts_early
@@ -32,10 +29,6 @@ _entry_asm:
     cmp r0, r1
     strlt r2, [r0], #4
     blt 1b
-
-    /* BSS is now stable: publish the exact firmware pointer for Pure Simple. */
-    ldr r0, =rt_arm32_boot_dtb_physical_storage
-    str r8, [r0]
 
     /* Call C _start */
     bl _start

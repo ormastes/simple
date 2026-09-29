@@ -1,0 +1,45 @@
+# Reproduces qualification false passes by executing the production shell runner.
+# Bug: doc/08_tracking/bug/tool_qual_meta_missing_compiler_false_pass_2026-09-21.md
+# @req TOR-FM-04
+use std.spec.*
+use std.spec.step
+use app.io.mod.{process_run, file_write, dir_create_all, dir_remove_all}
+
+val META_RUNNER = "scripts/check/cert/tool-qual-meta.shs"
+
+fn qualify_missing_compiler(count: text) -> (text, i64):
+    val (created, create_error, create_code) = process_run("mktemp", ["-d"])
+    expect(create_code).to_equal(0)
+    val work = created.trim()
+    expect(work.is_empty()).to_equal(false)
+    val corpus = work + "/corpus"
+    expect(dir_create_all(corpus)).to_equal(true)
+    expect(file_write(corpus + "/control.spl", "fn main():\n    print(42)\n")).to_equal(true)
+    val (output, errors, code) = process_run("env", [
+        "META_K=" + count,
+        "SIMPLE_BIN=" + work + "/absent-compiler",
+        "sh", META_RUNNER, corpus
+    ])
+    expect(dir_remove_all(work)).to_equal(true)
+    (output + errors, code)
+
+describe "Tool qualification requires executed compiler evidence":
+    it "rejects a missing compiler instead of accepting identical empty stdout":
+        step("Qualify a real corpus with two runs and an absent compiler executable")
+        val (output, code) = qualify_missing_compiler("2")
+        step("Both execution modes report the failed launch and qualification fails")
+        expect(code).to_equal(1)
+        expect(output).to_contain("mode=interpret EXECUTION ERROR run1 exit=127")
+        expect(output).to_contain("mode=compiled EXECUTION ERROR run1 exit=127")
+        expect(output).to_contain("RESULT: FAIL")
+        expect(output.contains("RESULT: PASS")).to_equal(false)
+
+    it "rejects hexadecimal repetition counts before a zero-execution pass":
+        step("Reproduce META_K=0x2 with the same absent compiler and real corpus")
+        val (output, code) = qualify_missing_compiler("0x2")
+        step("Reject the malformed count before entering corpus qualification")
+        expect(code).to_equal(1)
+        expect(output).to_contain("META_K must be a canonical decimal integer >= 2")
+        expect(output).to_contain("got 0x2")
+        expect(output.contains("RESULT: PASS")).to_equal(false)
+        expect(output.contains("runs   :")).to_equal(false)

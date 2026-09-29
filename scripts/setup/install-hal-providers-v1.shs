@@ -1,0 +1,43 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+source_dir=${1:-"$repo_root/build/bootstrap/hal-providers-v1"}
+prefix=${2:-/usr/libexec/simple}
+admit=${3:-copy-only}
+case "$admit" in copy-only|--admit) ;; *) echo 'usage: install-hal-providers-v1.shs [source-dir] [prefix] [copy-only|--admit]' >&2; exit 64;; esac
+for name in hal-provider-pure-v1 hal-provider-c-v1 hal-provider-rust-v1; do
+    source="$source_dir/$name"
+    [ -f "$source" ] && [ -x "$source" ] || { echo "FAIL: missing executable $source" >&2; exit 2; }
+done
+mkdir -p "$prefix"
+for name in hal-provider-pure-v1 hal-provider-c-v1 hal-provider-rust-v1; do
+    temp="$prefix/.$name.tmp.$$"
+    trap 'rm -f "$temp"' EXIT HUP INT TERM
+    cp "$source_dir/$name" "$temp"
+    chmod 0755 "$temp"
+    mv "$temp" "$prefix/$name"
+    trap - EXIT HUP INT TERM
+done
+if [ "$admit" = --admit ]; then
+    [ "$prefix" = /usr/libexec/simple ] || { echo 'FAIL: trusted admission requires /usr/libexec/simple' >&2; exit 2; }
+    [ "$(id -u)" -eq 0 ] || { echo 'FAIL: trusted admission requires root ownership' >&2; exit 2; }
+    command -v fsverity >/dev/null 2>&1 || { echo 'FAIL: fsverity tool unavailable' >&2; exit 2; }
+    policy="$prefix/hal-provider-policy-v1"
+    policy_tmp="$prefix/.hal-provider-policy-v1.tmp.$$"
+    trap 'rm -f "$policy_tmp"' EXIT HUP INT TERM
+    : > "$policy_tmp"
+    for name in hal-provider-pure-v1 hal-provider-c-v1 hal-provider-rust-v1; do
+        path="$prefix/$name"
+        fsverity enable "$path" >/dev/null
+        digest=$(fsverity digest "$path" | sed -n 's/^sha256:\([0-9a-f]\{64\}\).*/\1/p')
+        [ "${#digest}" -eq 64 ] || { echo "FAIL: could not measure fs-verity digest for $path" >&2; exit 2; }
+        identity=$(stat -c '%d|%i|%s' "$path")
+        printf 'HALPROV1|%s|%s|%s\n' "$path" "$identity" "$digest" >> "$policy_tmp"
+    done
+    chmod 0644 "$policy_tmp"
+    chown 0:0 "$policy_tmp"
+    mv "$policy_tmp" "$policy"
+    trap - EXIT HUP INT TERM
+fi
+printf '%s\n' "$prefix"

@@ -1,8 +1,14 @@
 # Bug: SdnValue cross-module variant dispatch fails in interpreter
 
+## Closed 2026-09-13 — cross-module SdnValue method dispatch works on primitive-bearing documents
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`, caller module != `std.sdn.value`): `parse("x: hello").unwrap().type_name()` printed `type=dict` and `.as_dict()` succeeded (`ok-as_dict`) — a Dict containing a String primitive, exactly the shape this entry says fails.
+- **measured**: no `unknown variant or method 'String' on enum SdnValue` error appeared.
+- **inferred**: the API also changed — `parse()` now returns a `Result`, so the entry's literal snippet fails with `Function 'Result.type_name' not found`; that is an API move, not the dispatch defect.
+- **inferred**: `test/01_unit/lib/common/roundtrip_spec.spl` was not re-run; `bin/simple test` is broken on this Windows host.
+
 **ID:** sdn_cross_module_variant_dispatch_2026-06-26
 **Severity:** P2 (test blocker)
-**Status:** Open
+**Status:** CLOSED 2026-09-13 (see Closed section above)
 
 ## Symptom
 
@@ -48,17 +54,3 @@ because they avoid the problematic dispatch.
 Seed interpreter fix in `src/compiler_rust/`: the method lookup for cross-module
 enum values must not walk contained-value variants to resolve dispatch. Intra-module
 method calls on SdnValue should bypass the cross-module variant registry.
-
-## NOT REPRODUCIBLE 2026-08-17 — appears FIXED BY CONTENT
-Two measurements, seed binary `bin/release/x86_64-unknown-linux-gnu/simple`,
-`--no-session-daemon`, exit code read directly:
-1. `test/01_unit/lib/common/roundtrip_spec.spl` (the cited spec, imports
-   `std.common.sdn.parser.{parse}` + `std.common.sdn.value.{SdnValue}` from a
-   different module) — `6 examples, 0 failures`, `executed=6 passed=6 failed=0`, rc=0.
-2. A targeted throwaway probe calling the method the doc names, on a document that
-   contains primitive values:
-   `match parse("name: \"x\"\ncount: 3\n") -> case Ok(v): v.type_name()`
-   printed `type_name=dict` and passed (rc=0). No `unknown variant or method`.
-Cross-module method dispatch on a parsed `SdnValue` therefore works today.
-Status: recommend CLOSED-not-reproducible; reopen with a fresh failing snippet if
-seen again.

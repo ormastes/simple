@@ -1,7 +1,8 @@
 # Freestanding Module Values Are Zero Before Early Hardware I/O
+## Open 2026-09-16 — needs owner triage
 
-Status: OPEN (P2)
-Status re-verified 2026-08-17 by source inspection (triage shard 01).
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Symptom
 
@@ -33,3 +34,4 @@ x86-only odd-address `0x1cf` compatibility port. Because both port paths still
 returned zero on the PCI stdvga device, the production owner now prefers the
 device's discovered BAR2 flat-register MMIO interface and retains port I/O only
 as the non-MMIO fallback.
+

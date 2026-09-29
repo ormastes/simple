@@ -1,0 +1,304 @@
+# @req REQ-CSM-007 REQ-CSM-008 REQ-CSM-009
+# Coverage is intentionally unmeasured until the successor runtime is admitted.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.gateway.cooperative_namespace_host_prerequisite_v1.*
+use compiler.driver.cache.journal.action_root_journal_v1.{
+    ActionRootJournalV1, action_root_journal_find_operation_v1}
+use compiler.driver.cache.publication.selected_head_reopen_validation.*
+
+fn reopen_digest(label: text) -> text: sha256_text(label)
+
+fn committed_trace() -> CacheCooperativeDurabilityTraceV1:
+    CacheCooperativeDurabilityTraceV1(writer_revalidated: true,
+        head_revalidated: true, immutable_blobs_synced: true,
+        immutable_directories_synced: true, journal_admitted: true,
+        head_replace_started: true, head_replace_confirmed: true,
+        head_directory_synced: true)
+
+fn selected_journal_and_head() -> (text, CacheCooperativeSelectedHeadV1):
+    val journal = ActionRootJournalV1.empty(6)
+    val operation = journal.prepare(reopen_digest("action"), "file_ast",
+        reopen_digest("object"), reopen_digest("manifest")).unwrap()
+    journal.accept_durable(operation).unwrap()
+    val head = cache_cooperative_selected_head_v1(3, 6, reopen_digest("manifest"),
+        journal.bytes.len(), sha256_text(journal.bytes), operation.operation_digest,
+        11, reopen_digest("closure"), reopen_digest("registry"))
+    (journal.bytes, head)
+
+fn encode_reopen_input(head: CacheCooperativeSelectedHeadV1, journal: text) -> text:
+    selected_head_reopen_input_encode_v1(
+        SelectedHeadReopenInputV1(selected_head: head, journal: journal)).unwrap()
+
+fn validate_reopen(encoded: text, expected: CacheCooperativeSelectedHeadV1,
+                   expected_live_writer: i64, observed_live_writer: i64,
+                   trace: CacheCooperativeDurabilityTraceV1
+) -> SelectedHeadReopenCandidateV1:
+    validate_selected_head_reopen_input_v1(encoded, expected,
+        expected_live_writer, observed_live_writer, trace)
+
+fn rejected_trace() -> CacheCooperativeDurabilityTraceV1:
+    CacheCooperativeDurabilityTraceV1(writer_revalidated: false,
+        head_revalidated: false, immutable_blobs_synced: false,
+        immutable_directories_synced: false, journal_admitted: false,
+        head_replace_started: false, head_replace_confirmed: false,
+        head_directory_synced: false)
+
+describe "descriptor-bound selected-head reopen validation":
+    it "round-trips the bounded canonical selected-head envelope exactly":
+        step("Decode only a complete canonical descriptor-bound input envelope")
+        val (journal, head) = selected_journal_and_head()
+        val encoded = encode_reopen_input(head, journal)
+        val decoded = selected_head_reopen_input_decode_v1(encoded).unwrap()
+        expect(decoded.selected_head.checksum).to_equal(head.checksum)
+        expect(decoded.journal).to_equal(journal)
+        expect(selected_head_reopen_input_decode_v1(encoded + "x").is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.slice(0, encoded.len() - 1)).is_err()).to_equal(true)
+        val first_newline = encoded.index_of("\n")
+        val noncanonical = encoded.slice(0, first_newline + 1) + "0" +
+            encoded.slice(first_newline + 1, encoded.len())
+        expect(selected_head_reopen_input_decode_v1(noncanonical).is_err()).to_equal(true)
+        val second_newline = encoded.index_of("\n", first_newline + 1)
+        val malformed_number = encoded.slice(0, first_newline + 1) + "nope" +
+            encoded.slice(second_newline, encoded.len())
+        expect(selected_head_reopen_input_decode_v1(malformed_number).is_err()).to_equal(true)
+        val crlf = encoded.slice(0, first_newline) + "\r" +
+            encoded.slice(first_newline, encoded.len())
+        expect(selected_head_reopen_input_decode_v1(crlf).is_err()).to_equal(true)
+        val nul_length = encoded.slice(0, first_newline + 1) + "\0" +
+            encoded.slice(first_newline + 1, encoded.len())
+        expect(selected_head_reopen_input_decode_v1(nul_length).is_err()).to_equal(true)
+        val overflow = SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1 +
+            "\n999999999999999999999999\n0\n"
+        expect(selected_head_reopen_input_decode_v1(overflow).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1("no-newline").is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1("wrong-magic\n0\n0\n").is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1 + "\n0").is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            SELECTED_HEAD_REOPEN_INPUT_MAGIC_V1 + "\n0\n0").is_err()).to_equal(true)
+        val head_encoded = cache_cooperative_selected_head_encode_v1(head).unwrap()
+        val head_length = head_encoded.len().to_string()
+        val journal_length = journal.len().to_string()
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.replace("\n" + head_length + "\n", "\n-1\n")).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.replace("\n" + journal_length + "\n", "\n-1\n")).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.replace("\n" + head_length + "\n", "\n1025\n")).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.replace("\n" + journal_length + "\n", "\n16777217\n")).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            encoded.replace(head.operation_digest, "bad")).is_err()).to_equal(true)
+        val largest = encode_reopen_input(head,
+            "x".repeat(SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1))
+        expect(largest.len()).to_be_less_than(SELECTED_HEAD_REOPEN_MAX_INPUT_BYTES_V1 + 1)
+        expect(selected_head_reopen_input_decode_v1(largest).unwrap().journal.len()).to_equal(
+            SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1)
+        val invalid_head = cache_cooperative_selected_head_v1(
+            -1, head.generation, head.manifest_digest, head.accepted_journal_bytes,
+            head.accepted_journal_digest, head.operation_digest, head.writer_incarnation,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(selected_head_reopen_input_encode_v1(
+            SelectedHeadReopenInputV1(selected_head: invalid_head, journal: journal)).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_encode_v1(
+            SelectedHeadReopenInputV1(selected_head: head,
+                journal: "x".repeat(SELECTED_HEAD_REOPEN_MAX_JOURNAL_BYTES_V1 + 1))).is_err()).to_equal(true)
+        expect(selected_head_reopen_input_decode_v1(
+            "x".repeat(SELECTED_HEAD_REOPEN_MAX_INPUT_BYTES_V1 + 1)).is_err()).to_equal(true)
+
+    it "reopens only the exact selected admitted journal prefix":
+        step("Compare the entire selected head before replaying its validated prefix")
+        val (journal, head) = selected_journal_and_head()
+        val record = action_root_journal_find_operation_v1(
+            journal, head.generation, head.operation_digest)
+        expect(record != nil).to_equal(true)
+        expect(record?.manifest_digest).to_equal(head.manifest_digest)
+        expect(action_root_journal_find_operation_v1(
+            journal, -1, head.operation_digest) == nil).to_equal(true)
+        expect(action_root_journal_find_operation_v1(
+            journal, head.generation, "bad") == nil).to_equal(true)
+        expect(action_root_journal_find_operation_v1(
+            journal + "torn", head.generation, head.operation_digest) == nil).to_equal(true)
+        expect(action_root_journal_find_operation_v1(
+            journal, head.generation, reopen_digest("absent-operation")) == nil).to_equal(true)
+        val result = validate_reopen(encode_reopen_input(head, journal), head,
+            19, 19, committed_trace())
+        expect(result.status).to_equal(SelectedHeadReopenStatusV1.Selected)
+        expect(result.selected_journal).to_equal(journal)
+        expect(result.ignored_suffix_bytes).to_equal(0)
+        expect(result.suffix_requires_quarantine).to_equal(false)
+
+    it "rejects normalized sequence spellings before operation lookup":
+        step("Require every selected journal frame to match canonical physical bytes")
+        val (journal, head) = selected_journal_and_head()
+        val first_noncanonical = "0" + journal
+        val first_head = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, first_noncanonical.len(),
+            sha256_text(first_noncanonical), head.operation_digest, 11,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(action_root_journal_find_operation_v1(first_noncanonical, 6,
+            head.operation_digest) == nil).to_equal(true)
+        expect(validate_reopen(encode_reopen_input(first_head, first_noncanonical),
+            first_head, 19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+
+        val later = ActionRootJournalV1.recovered(journal, 6).unwrap()
+        val append = later.prepare(reopen_digest("later-action"), "file_ast",
+            reopen_digest("later-object"), head.manifest_digest).unwrap()
+        later.accept_durable(append).unwrap()
+        val later_noncanonical = later.bytes.replace("\n1|", "\n01|")
+        val later_head = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, later_noncanonical.len(),
+            sha256_text(later_noncanonical), head.operation_digest, 11,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(action_root_journal_find_operation_v1(later_noncanonical, 6,
+            head.operation_digest) == nil).to_equal(true)
+        expect(validate_reopen(encode_reopen_input(later_head, later_noncanonical),
+            later_head, 19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+
+    it "reports rejected prefixes and malformed validator inputs before replacement":
+        step("Reject malformed expected state without claiming a physical host decision")
+        val (journal, head) = selected_journal_and_head()
+        expect(validate_reopen(encode_reopen_input(head, journal), head, 19, 19,
+            rejected_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.RejectedBeforeHeadReplacement)
+        val malformed_head = cache_cooperative_selected_head_v1(
+            -1, head.generation, head.manifest_digest, head.accepted_journal_bytes,
+            head.accepted_journal_digest, head.operation_digest, head.writer_incarnation,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(head, journal), malformed_head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.MalformedInput)
+        expect(validate_reopen("malformed", head, -1, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.MalformedInput)
+        expect(validate_reopen("malformed", head, 19, -1, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.MalformedInput)
+        expect(validate_reopen("malformed", head, 19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.MalformedInput)
+        val bad_digest_head = cache_cooperative_selected_head_v1(
+            head.revision, head.generation, head.manifest_digest,
+            head.accepted_journal_bytes, reopen_digest("wrong-prefix"),
+            head.operation_digest, head.writer_incarnation, head.closure_digest,
+            head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(bad_digest_head, journal), bad_digest_head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.InvalidSelectedPrefix)
+        expect(validate_reopen(encode_reopen_input(head,
+            journal.slice(0, journal.len() - 1)), head, 19, 19,
+            committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.InvalidSelectedPrefix)
+        val unrecoverable_prefix = "not-an-action-root-journal"
+        val unrecoverable_head = cache_cooperative_selected_head_v1(
+            head.revision, head.generation, head.manifest_digest,
+            unrecoverable_prefix.len(), sha256_text(unrecoverable_prefix),
+            head.operation_digest, head.writer_incarnation, head.closure_digest,
+            head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(unrecoverable_head,
+            unrecoverable_prefix), unrecoverable_head, 19, 19,
+            committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.InvalidSelectedPrefix)
+
+    it "refuses stale live writers plus operation and full-head mismatches":
+        step("Keep a restarted live writer receipt independent of recorded publisher identity")
+        val (journal, head) = selected_journal_and_head()
+        val encoded = encode_reopen_input(head, journal)
+        expect(validate_reopen(encoded, head, 19, 20, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.StaleWriter)
+        val operation_changed = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, head.accepted_journal_bytes, head.accepted_journal_digest,
+            reopen_digest("other-operation"), 11, head.closure_digest,
+            head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(operation_changed, journal), head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+        val revision_changed = cache_cooperative_selected_head_v1(4, 6,
+            head.manifest_digest, head.accepted_journal_bytes, head.accepted_journal_digest,
+            head.operation_digest, 11, head.closure_digest, head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(revision_changed, journal), head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.StaleDescriptor)
+        val copied_operation = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, head.accepted_journal_bytes,
+            head.accepted_journal_digest, reopen_digest("copied-operation"),
+            11, head.closure_digest, head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(copied_operation, journal),
+            copied_operation, 19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+        expect(selected_head_operation_matches_journal_v1(
+            copied_operation, journal)).to_equal(false)
+        val copied_manifest = cache_cooperative_selected_head_v1(3, 6,
+            reopen_digest("copied-manifest"), head.accepted_journal_bytes,
+            head.accepted_journal_digest, head.operation_digest, 11,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(copied_manifest, journal),
+            copied_manifest, 19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+        val empty_head = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, 0, sha256_text(""), head.operation_digest, 11,
+            head.closure_digest, head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(empty_head, ""), empty_head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.OperationMismatch)
+
+    it "retains a selected prefix while reporting complete or torn suffix bytes as unselected":
+        step("Never replay or promote journal data beyond the selected prefix")
+        val (journal, head) = selected_journal_and_head()
+        val trailing = ActionRootJournalV1.recovered(journal, 6).unwrap()
+        val append = trailing.prepare(reopen_digest("suffix-action"), "file_ast",
+            reopen_digest("suffix-object"), reopen_digest("suffix-manifest")).unwrap()
+        trailing.accept_durable(append).unwrap()
+        val complete = validate_reopen(encode_reopen_input(head, trailing.bytes), head,
+            19, 19, committed_trace())
+        expect(complete.status).to_equal(SelectedHeadReopenStatusV1.Selected)
+        expect(complete.selected_journal).to_equal(journal)
+        expect(complete.ignored_suffix_bytes).to_be_greater_than(0)
+        expect(complete.suffix_requires_quarantine).to_equal(false)
+        val torn = validate_reopen(encode_reopen_input(head, journal + "trailing-torn"),
+            head, 19, 19, committed_trace())
+        expect(torn.status).to_equal(SelectedHeadReopenStatusV1.Selected)
+        expect(torn.selected_journal).to_equal(journal)
+        expect(torn.suffix_requires_quarantine).to_equal(true)
+
+    it "rejects closure mismatch and preserves indeterminate replacement evidence":
+        step("Do not downgrade a possible replacement to definite input rejection")
+        val (journal, head) = selected_journal_and_head()
+        val closure_changed = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, head.accepted_journal_bytes, head.accepted_journal_digest,
+            head.operation_digest, 11, reopen_digest("other-closure"),
+            head.verifier_registry_digest)
+        expect(validate_reopen(encode_reopen_input(closure_changed, journal), head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.ClosureMismatch)
+        val verifier_changed = cache_cooperative_selected_head_v1(3, 6,
+            head.manifest_digest, head.accepted_journal_bytes, head.accepted_journal_digest,
+            head.operation_digest, 11, head.closure_digest,
+            reopen_digest("other-registry"))
+        expect(validate_reopen(encode_reopen_input(verifier_changed, journal), head,
+            19, 19, committed_trace()).status).to_equal(
+            SelectedHeadReopenStatusV1.ClosureMismatch)
+        val uncertain = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: false,
+            head_replace_confirmed: true, head_directory_synced: false)
+        val result = validate_reopen("malformed", head, 19, 19, uncertain)
+        expect(result.status).to_equal(SelectedHeadReopenStatusV1.Indeterminate)
+        val confirmed_unsynced = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: true, head_revalidated: true,
+            immutable_blobs_synced: true, immutable_directories_synced: true,
+            journal_admitted: true, head_replace_started: true,
+            head_replace_confirmed: true, head_directory_synced: false)
+        expect(validate_reopen("malformed", head, 19, 19,
+            confirmed_unsynced).status).to_equal(SelectedHeadReopenStatusV1.Indeterminate)
+        val invalid_order = CacheCooperativeDurabilityTraceV1(
+            writer_revalidated: false, head_revalidated: true,
+            immutable_blobs_synced: false, immutable_directories_synced: false,
+            journal_admitted: false, head_replace_started: false,
+            head_replace_confirmed: false, head_directory_synced: false)
+        expect(validate_reopen(encode_reopen_input(head, journal), head, 19, 19,
+            invalid_order).status).to_equal(SelectedHeadReopenStatusV1.InvalidDurabilityTrace)

@@ -1,0 +1,41 @@
+# # SPipe Simple migration — host-mirror system spec (stage 1)
+#
+# The canonical specs live in the SPipe worktree:
+#   .spipe/spipe-migration/test/spipe_mcp_handshake_spec.spl
+#   .spipe/spipe-migration/test/spipe_cli_parity_spec.spl
+# This host-mirror spec re-checks the release-critical gates from the host
+# checkout so host CI sees the migration surface without leaving the host
+# test tree. Set SPIPE_MIGRATION_ROOT when the worktree lives elsewhere.
+
+use std.spec
+use std.process.{run}
+use std.io_runtime.{env_get_opt}
+
+fn migration_root() -> text:
+    env_get_opt("SPIPE_MIGRATION_ROOT") ?? "/Users/ormastes/simple/.spipe/spipe-migration"
+
+describe "SPipe Simple migration stage 1 (host mirror)":
+    it "bin/spipe info agrees with the Node CLI":
+        val root = migration_root()
+        val node_r = run("/bin/sh", ["-c", "cd '" + root + "' && node cli/spipe.js info"])
+        val simple_r = run("/bin/sh", ["-c", "cd '" + root + "' && bin/spipe info"])
+        expect(node_r.exit_code).to_equal(0)
+        expect(simple_r.exit_code).to_equal(0)
+        expect(simple_r.stdout).to_equal(node_r.stdout)
+
+    it "bin/spipe-mcp answers a tools/list handshake with the full tool table":
+        val root = migration_root()
+        val r = run("/bin/sh", ["-c", "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}' '{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}' '{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}' | '" + root + "/bin/spipe-mcp'"])
+        expect(r.exit_code).to_equal(0)
+        expect(r.stdout.contains("\"protocolVersion\":\"2024-11-05\"")).to_equal(true)
+        expect(r.stdout.contains("\"name\":\"spipe_info\"")).to_equal(true)
+        expect(r.stdout.contains("\"name\":\"spipe_read_doc\"")).to_equal(true)
+        expect(r.stdout.contains("\"error\":")).to_equal(false)
+
+    it "unported surfaces fail closed with exit 3 and the Node pointer":
+        val root = migration_root()
+        val cli_r = run("/bin/sh", ["-c", "cd '" + root + "' && bin/spipe fine-tune-doctor attempt 2>/dev/null; printf '%s' \"$?\""])
+        expect(cli_r.stdout).to_equal("3")
+        val mcp_r = run("/bin/sh", ["-c", "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"spipe_release_capabilities\",\"arguments\":{}}}' | '" + root + "/bin/spipe-mcp'"])
+        expect(mcp_r.stdout.contains("\"code\":-32000")).to_equal(true)
+        expect(mcp_r.stdout.contains("not yet ported")).to_equal(true)

@@ -1,3 +1,4 @@
+# @cover src/app/simpleos_gpu_host/main.spl 0%
 # @tag: system, gpu, processing-ir, fault-injection, source-contract
 
 use std.io_runtime.{file_exists, file_read}
@@ -5,12 +6,14 @@ use std.spec.{describe, it, expect}
 
 val FAULT_HELPER = "src/lib/gc_async_mut/processing/fault_injection.spl"
 val CUDA_EXECUTOR = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
+val CUDA_DB_EXECUTOR = "src/lib/gc_async_mut/processing/cuda_db_filter_u32.spl"
 val VULKAN_EXECUTOR = "src/lib/gc_async_mut/processing/vulkan_fill_u32.spl"
 val METAL_EXECUTOR = "src/lib/gc_async_mut/processing/metal_fill_u32.spl"
 val METAL_LIVE_SPEC = "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl"
 
 val BACKENDS = [
     ["cuda", CUDA_EXECUTOR],
+    ["cuda", CUDA_DB_EXECUTOR],
     ["vulkan", VULKAN_EXECUTOR],
     ["metal", METAL_EXECUTOR]
 ]
@@ -120,24 +123,31 @@ describe "ProcessingIR GPU executor fault source contract":
 
     it "releases CUDA allocations before every post-context return":
         val cuda = file_read(CUDA_EXECUTOR)
-        expect(cuda).to_contain("fn _processing_cuda_cleanup")
-        expect(cuda).to_contain("if device > 0:\n        session.free(device)")
-        expect(cuda).to_contain("if values_ptr != 0:\n        raw_free(values_ptr, PROCESSING_CUDA_ARG_BYTES)")
-        expect(cuda).to_contain("if args_ptr != 0:\n        raw_free(args_ptr, PROCESSING_CUDA_ARG_BYTES)")
-        expect(cuda).to_contain("if host_ptr != 0:\n        raw_free(host_ptr, byte_count)")
-        val full = "_processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)"
-        _assert_cleanup_before_boundary(cuda, "if device <= 0 or values_ptr == 0 or args_ptr == 0 or host_ptr == 0:", full, "return ProcessingCudaResult(completed: false")
-        _assert_cleanup_before_boundary(cuda, "if submit_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
-        _assert_cleanup_before_boundary(cuda, "if synced and readback_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
-        _assert_cleanup_before_boundary(cuda, "if copied and mismatch_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
-        _assert_cleanup_before_boundary(cuda, "val handle = device_handle + 1", full, "if not dispatch_ok:")
+        expect(cuda).to_contain("me _ensure_capacity(byte_count: i64) -> text:")
+        expect(cuda).to_contain("self.buffer_capacity >= byte_count")
+        expect(cuda).to_contain("self.device_buffer = replacement_device")
+        expect(cuda).to_contain("self.host_buffer = replacement_host")
+        expect(cuda).to_contain("me _release_buffers():")
+        expect(cuda).to_contain("me shutdown():\n        self._release_buffers()")
+        expect(cuda).to_contain("if not dispatch_ok:\n        executor._release_buffers()")
+        expect(cuda).to_contain("if not copied:\n        executor._release_buffers()")
+        expect(cuda.contains("_release_buffers()\n        return ProcessingCudaResult(completed: false, reason: submit_fault")).to_equal(false)
+        expect(cuda.contains("_release_buffers()\n        return ProcessingCudaResult(completed: false, reason: readback_fault")).to_equal(false)
+
+    it "retains both CUDA DB data buffers across recoverable faults":
+        val cuda = file_read(CUDA_DB_EXECUTOR)
+        expect(cuda).to_contain("me _ensure_capacity(byte_count: i64) -> text:")
+        expect(cuda).to_contain("self.device_input = next_device_input")
+        expect(cuda).to_contain("self.device_output = next_device_output")
+        expect(cuda).to_contain("self.host_input = next_host_input")
+        expect(cuda).to_contain("self.host_output = next_host_output")
+        expect(cuda).to_contain("me shutdown():\n        self._release_buffers()")
+        expect(cuda.contains("if submit_fault != \"\":\n        executor._release_buffers()")).to_equal(false)
+        expect(cuda.contains("if synced and readback_fault != \"\":\n        executor._release_buffers()")).to_equal(false)
 
     it "releases or quarantines Vulkan dependencies before every owned return":
         val vulkan = file_read(VULKAN_EXECUTOR)
-        expect(vulkan).to_contain("device_type != \"discrete\" and device_type != \"integrated\"")
-        expect(vulkan).to_contain("reason: \"vulkan-physical-device-required\"")
         expect(vulkan).to_contain("if dispatch_status < 0:")
-        expect(vulkan).to_contain("processing_ir_fault_reason(\"vulkan\", \"dispatch-ineligible\")")
         _assert_cleanup_before_boundary(vulkan, "if not buffer.is_valid:", "vulkan_sffi_shutdown_reaped()", "return ProcessingVulkanResult(completed: false")
         val shader_failure = "vulkan_free_buffer(buffer)\n        vulkan_sffi_shutdown_reaped()"
         _assert_cleanup_before_boundary(vulkan, "if not shader.is_valid:", shader_failure, "return ProcessingVulkanResult(completed: false")

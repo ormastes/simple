@@ -1,0 +1,202 @@
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/pr1870_pr1830_unreviewed_merge_fallout_2026-09-28.md
+# @req REQ-2D-002
+# @req REQ-2D-006
+# @tag: system, web, draw_ir, geometry, fail_closed
+"""Authored decimal Web geometry must fail before integer culling can hide it.
+
+The HTML is bounded and inline. This spec checks the real Web producer and a
+scene-level admission reason; it does not claim fractional raster support.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult, simple_web_layout_render_html_draw_ir_result}
+use std.gc_async_mut.gpu.browser_engine.web_opaque_box_qualification.{
+    web_decimal_geometry_rejection_reason}
+
+fn _page(css: text, body: text) -> text:
+    "<html><head><style>html,body{margin:0;padding:0;width:16px;height:16px}" +
+        css + "</style></head><body>" + body + "</body></html>"
+
+fn _inline_box(left: text, top: text, width: text, height: text) -> text:
+    "<div id='box' style='position:absolute;left:" + left + ";top:" + top +
+        ";width:" + width + ";height:" + height +
+        ";background:#336699'></div>"
+
+fn _node_count(result: SimpleWebLayoutDrawIrResult, id: text) -> i64:
+    var count: i64 = 0
+    for node in result.hit_index.nodes:
+        if node.id_attr == id:
+            count = count + 1
+    count
+
+fn _node_geometry_unresolved(result: SimpleWebLayoutDrawIrResult, id: text) -> bool:
+    var index = 0
+    while index < result.hit_index.nodes.len():
+        if result.hit_index.nodes[index].id_attr == id:
+            return result.hit_index.styles[index].box_geometry_unresolved
+        index = index + 1
+    false
+
+fn _node_has_raw_token(result: SimpleWebLayoutDrawIrResult,
+    id: text, token: text) -> bool:
+    var index = 0
+    while index < result.hit_index.nodes.len():
+        if result.hit_index.nodes[index].id_attr == id:
+            for raw in result.hit_index.styles[index].box_geometry_raw_tokens:
+                if raw == token:
+                    return true
+        index = index + 1
+    false
+
+fn _command_count(result: SimpleWebLayoutDrawIrResult, id: text) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == id:
+                count = count + 1
+    count
+
+fn _command_geometry(result: SimpleWebLayoutDrawIrResult, id: text) -> text:
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == id:
+                return command.x.to_text() + "," + command.y.to_text() + "," +
+                    command.width.to_text() + "," + command.height.to_text()
+    "<missing>"
+
+fn _command_style_value(result: SimpleWebLayoutDrawIrResult,
+    id: text, key: text) -> text:
+    for batch in result.composition.batches:
+        for command in batch.commands:
+            if command.component_id == id:
+                for prop in command.computed_style:
+                    if prop.key == key:
+                        return prop.value
+    "<missing>"
+
+describe "Web decimal geometry scene admission":
+    it "rejects each direct decimal left, top, width and height":
+        step("Run four authored decimal longhands through the real Web producer")
+        val cases = [
+            _inline_box("0.25px", "2px", "4px", "3px"),
+            _inline_box("1px", "0.25px", "4px", "3px"),
+            _inline_box("1px", "2px", "4.5px", "3px"),
+            _inline_box("1px", "2px", "4px", "3.5px")
+        ]
+        val tokens = ["left=0.25px", "top=0.25px", "width=4.5px", "height=3.5px"]
+        var case_index = 0
+        while case_index < cases.len():
+            val html = _page("", cases[case_index])
+            val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+            expect(rendered.render_degraded).to_equal(false)
+            expect(rendered.document_html).to_equal(html)
+            expect(_node_count(rendered, "box")).to_equal(1)
+            expect(_node_geometry_unresolved(rendered, "box")).to_equal(true)
+            expect(_node_has_raw_token(rendered, "box", tokens[case_index])).to_equal(true)
+            expect(_command_count(rendered, "box")).to_be_greater_than(0)
+            expect(_command_style_value(rendered, "box", "box-geometry-raw-tokens")).to_contain(
+                tokens[case_index])
+            expect(_command_style_value(rendered, "box", "box-geometry-unresolved")).to_equal("true")
+            expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)
+            case_index = case_index + 1
+
+    it "rejects class-rule decimal width and height through fast declaration dispatch":
+        step("Apply compact stylesheet rules rather than inline declarations")
+        val width_html = _page(
+            ".fast{width:4.5px;height:3px}",
+            "<div id='box' class='fast' style='position:absolute;left:1px;" +
+            "top:2px;background:#336699'></div>")
+        val height_html = _page(
+            ".fast{width:4px;height:3.5px}",
+            "<div id='box' class='fast' style='position:absolute;left:1px;" +
+            "top:2px;background:#336699'></div>")
+        val htmls = [width_html, height_html]
+        val tokens = ["width=4.5px", "height=3.5px"]
+        var case_index = 0
+        while case_index < htmls.len():
+            val html = htmls[case_index]
+            val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+            expect(rendered.render_degraded).to_equal(false)
+            expect(_node_count(rendered, "box")).to_equal(1)
+            expect(_node_geometry_unresolved(rendered, "box")).to_equal(true)
+            expect(_node_has_raw_token(rendered, "box", tokens[case_index])).to_equal(true)
+            expect(_command_count(rendered, "box")).to_be_greater_than(0)
+            expect(_command_style_value(rendered, "box", "box-geometry-raw-tokens")).to_contain(
+                tokens[case_index])
+            expect(_command_style_value(rendered, "box", "box-geometry-unresolved")).to_equal("true")
+            expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)
+            case_index = case_index + 1
+
+    it "rejects a subpixel box even when integer culling emits no command":
+        step("Keep the source node visible to scene admission after zero-size layout")
+        val html = _page(
+            ".tiny{position:absolute;left:1px;top:1px;width:0.5px;height:0.5px;background:#336699}",
+            "<div id='tiny' class='tiny'></div>")
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(_node_count(rendered, "tiny")).to_equal(1)
+        expect(_node_geometry_unresolved(rendered, "tiny")).to_equal(true)
+        expect(_node_has_raw_token(rendered, "tiny", "width=0.5px")).to_equal(true)
+        expect(_node_has_raw_token(rendered, "tiny", "height=0.5px")).to_equal(true)
+        expect(_command_count(rendered, "tiny")).to_equal(0)
+        expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)
+
+    it "admits an integer-px control and retains its resolved DrawIR bounds":
+        step("Check an exact integer rectangle in the same bounded viewport")
+        val html = _page("", _inline_box("1px", "2px", "4px", "3px"))
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(_node_count(rendered, "box")).to_equal(1)
+        expect(_node_geometry_unresolved(rendered, "box")).to_equal(false)
+        expect(_node_has_raw_token(rendered, "box", "width=4px")).to_equal(true)
+        expect(_node_has_raw_token(rendered, "box", "height=3px")).to_equal(true)
+        expect(_command_count(rendered, "box")).to_equal(1)
+        expect(_command_geometry(rendered, "box")).to_equal("1,2,4,3")
+        expect(_command_style_value(rendered, "box", "box-geometry-raw-tokens")).to_contain(
+            "width=4px")
+        expect(_command_style_value(rendered, "box", "box-geometry-unresolved")).to_equal("false")
+        expect(web_decimal_geometry_rejection_reason(html)).to_equal("")
+
+    it "rejects decimal ancestor positioning of an integer child":
+        step("Make an integer child depend on an unresolved ancestor offset")
+        val html = _page("",
+            "<div id='ancestor' style='position:relative;left:0.5px;width:8px;height:8px'>" +
+            "<div id='child' style='position:absolute;left:1px;top:1px;" +
+            "width:3px;height:3px;background:#336699'></div></div>")
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(_node_count(rendered, "ancestor")).to_equal(1)
+        expect(_node_count(rendered, "child")).to_equal(1)
+        expect(_node_geometry_unresolved(rendered, "ancestor")).to_equal(true)
+        expect(_node_has_raw_token(rendered, "ancestor", "left=0.5px")).to_equal(true)
+        expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)
+
+    it "rejects an unresolved sizing constraint on an integer rectangle":
+        step("Keep authored min-width calc provenance across layout")
+        val html = _page("",
+            "<div id='box' style='position:absolute;left:1px;top:2px;" +
+            "width:4px;height:3px;min-width:calc(2px + .5px);" +
+            "background:#336699'></div>")
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(_node_count(rendered, "box")).to_equal(1)
+        expect(_node_geometry_unresolved(rendered, "box")).to_equal(true)
+        expect(_node_has_raw_token(rendered, "box", "min-width=calc(2px + .5px)")).to_equal(true)
+        expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)
+
+    it "rejects a decimal legacy clip rectangle before integer clip parsing":
+        step("Keep the authored top clip offset on a positioned box")
+        val html = _page("",
+            "<div id='box' style='position:absolute;left:1px;top:2px;" +
+            "width:4px;height:4px;clip:rect(0.5px, 4px, 4px, 0px);" +
+            "background:#336699'></div>")
+        val rendered = simple_web_layout_render_html_draw_ir_result(html, 16, 16)
+        expect(rendered.render_degraded).to_equal(false)
+        expect(_node_count(rendered, "box")).to_equal(1)
+        expect(_node_has_raw_token(rendered, "box",
+            "clip=rect(0.5px, 4px, 4px, 0px)")).to_equal(true)
+        expect(_node_geometry_unresolved(rendered, "box")).to_equal(true)
+        expect(web_decimal_geometry_rejection_reason(html) == "").to_equal(false)

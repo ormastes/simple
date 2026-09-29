@@ -2,8 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — deterministic false-red for any spec combining the two graphs
-- Status: OPEN (P2)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
+- **Status:** open
 - **Found via:** SE1 `safety-enforce` lane spec (12th example failed while 11 passed)
 
 ## Symptom
@@ -74,15 +73,33 @@ above, expecting BOTH green).
 - `reference_interpreter_dict_and_value_quirks` — interpreter Dict misbehavior
 - `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md` — engine-specific silent divergence family
 
-## ALREADY_FIXED — verified 2026-08-17 (P2 triage, compiler lane)
+## Resolution note (2026-09-20, no tracking-DB change)
 
-Reproduce-first re-run of the recorded reproducer at HEAD:
+The filed two-`it` repro (execute `parse_lint_profile("critical")`, then drive
+`parse_full_frontend → HirLowering.lower_module → safetychecker_check_module`)
+is green at HEAD under
+`SIMPLE_LIB=src bin/simple test <spec> --mode=interpreter`; the flat-registry
+poisoning it filed against was since addressed by the owner-aware cross-module
+resolution work (e.g. commit 83c8cb761b2) and the WP-3 assurance-table
+dedup that removed the duplicated profile/alias tables. What was still missing
+— and is now in place — is the permanent combined-session guard this record
+asks for: `test/01_unit/compiler/semantics/safety_checker_unsafe_boundary_spec.spl`
+gained the `safety checker unsafe boundary after lint-main module init`
+describe block (lint-main module init first, then the verbatim frontend
+fixture, BOTH asserted green).
 
-```
-$ bin/simple test test/01_unit/compiler/semantics/safety_checker_unsafe_boundary_spec.spl
-Results: 5 total, 5 passed, 0 failed          # rc=0
-```
-
-The `cannot convert dict to int` failure in a combined lint-main-then-frontend
-interpreter session does not reproduce. Closing as already fixed; no source
-change was made by this lane.
+The same investigation pinned one live remainder of this family inside the
+pure-Simple interpreter itself: `Type.method(args)` parses as a method call on
+the bare class NAME, and `eval_method_call` evaluated that name as an ordinary
+identifier, so any module-level `val X = SomeClass.new()` died with
+"undefined variable: Type" under `core_interpret` — the exact shape of
+`std.common.testing.mock.builder`'s `_global_mock_policy` that made the whole
+`std.spec` closure unloadable in one interpreter session. Fixed in
+`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl`
+(enum variant first, then `Type__method`, mirroring the `eval_call`
+field-access path); pinned behaviorally by
+`test/01_unit/compiler/interpreter/static_class_method_dispatch_spec.spl`.
+Broader pure-interpreter gaps that remain (separate defects, not this record):
+stale `compiler.core.*` import names (`compiler.core.parser`,
+`compiler.blocks.value`) do not resolve under the pure module resolver, so the
+full compiler graph still cannot load through `core_interpret`.

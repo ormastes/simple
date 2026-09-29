@@ -17,6 +17,7 @@
 
 #### captures a terminal screen as a cell grid, not a lossy string blob
 
+- captures a terminal screen as a cell grid, not a lossy string blob
 - Capture a 3-row, 12-column TUI frame the way the runner records one
 - Confirm the snapshot is structurally valid — cell count matches geometry
    - Expected: snapshot.rows equals `3`
@@ -26,10 +27,12 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("captures a terminal screen as a cell grid, not a lossy string blob")
 step("Capture a 3-row, 12-column TUI frame the way the runner records one")
 val rows = ["File  Edit  ", "> item one  ", "  item two  "]
 val snapshot = terminal_snapshot_from_rows(rows, 12)
@@ -44,6 +47,7 @@ expect(snapshot.columns).to_equal(12)
 
 #### rejects a capture with degenerate geometry instead of comparing garbage
 
+- rejects a capture with degenerate geometry instead of comparing garbage
 - Build a snapshot and break its geometry to zero columns
 - Confirm validity checking refuses it
 - Confirm a blanked width profile is refused too
@@ -52,10 +56,12 @@ expect(snapshot.columns).to_equal(12)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a capture with degenerate geometry instead of comparing garbage")
 # Fail-closed at the shape the validator ACTUALLY promises: nonpositive
 # geometry or a missing width profile fails. (Cell-count-vs-geometry
 # cross-checking is NOT part of terminal_snapshot_is_valid today — an
@@ -78,6 +84,7 @@ expect(terminal_snapshot_is_valid(no_profile)).to_be(false)
 
 #### compares a named screen region through the shared oracle model
 
+- compares a named screen region through the shared oracle model
 - Select the menu-bar region and assert its expected content
 - Confirm the region selector kept its TUI identity and both checks travelled
    - Expected: selector_kind_name(menu_bar.kind) equals `terminal_region`
@@ -87,10 +94,12 @@ expect(terminal_snapshot_is_valid(no_profile)).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("compares a named screen region through the shared oracle model")
 step("Select the menu-bar region and assert its expected content")
 val menu_bar = selector_terminal_region("screen#menu_bar")
 val checks = [
@@ -110,6 +119,7 @@ expect(spec.checks.len()).to_equal(2)
 
 #### declares a protocol frame as named bit fields with a validated layout
 
+- declares a protocol frame as named bit fields with a validated layout
 - Describe a header: 4-bit version, 12-bit length, 16 reserved bits
 - Confirm the layout validates — full coverage, no overlap
 
@@ -117,10 +127,12 @@ expect(spec.checks.len()).to_equal(2)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("declares a protocol frame as named bit fields with a validated layout")
 step("Describe a header: 4-bit version, 12-bit length, 16 reserved bits")
 val layout = BinaryLayout(
     layout_id: "frame.header.v1",
@@ -143,6 +155,7 @@ expect(layout_is_valid(layout)).to_be(true)
 
 #### rejects an overlapping field layout instead of checking through it
 
+- rejects an overlapping field layout instead of checking through it
 - Describe a layout whose two fields claim the same bits
 - Confirm validation fails and names the defect
 
@@ -150,10 +163,12 @@ expect(layout_is_valid(layout)).to_be(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects an overlapping field layout instead of checking through it")
 step("Describe a layout whose two fields claim the same bits")
 val layout = BinaryLayout(
     layout_id: "frame.broken.v1",
@@ -176,6 +191,7 @@ expect(layout_errors(layout).len()).to_be_greater_than(0)
 
 #### checks one protocol field through the shared oracle model
 
+- checks one protocol field through the shared oracle model
 - Select bits 4..15 of the frame as the length field and assert it
 - Confirm the selector carries its bit geometry, not just a name
    - Expected: selector_kind_name(length_field.kind) equals `binary_field`
@@ -187,10 +203,12 @@ expect(layout_errors(layout).len()).to_be_greater_than(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("checks one protocol field through the shared oracle model")
 step("Select bits 4..15 of the frame as the length field and assert it")
 val length_field = selector_binary_field("frame.header", 4, 12)
 val spec = oracle_spec("frame.header.v1", [
@@ -213,7 +231,7 @@ expect(spec.checks.len()).to_equal(1)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl` |
-| Updated | 2026-08-11 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -234,3 +252,54 @@ Tests covering TUI screen capture and compare, Binary protocol test infra.
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `7bd3a44c214cf40b44cece2d5846fa6b42b2fe5ca01cf670a271e8e70358affc`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `7bd3a44c214cf40b44cece2d5846fa6b42b2fe5ca01cf670a271e8e70358affc`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `7bd3a44c214cf40b44cece2d5846fa6b42b2fe5ca01cf670a271e8e70358affc`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
+
+SSpec documentization score: 86/100
+source: test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl
+mirror: doc/06_spec/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.md (current)
+findings: 6 blockers: 0
+  narrative=100 structure=100 oracle=70
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 6 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl:36:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'captures a terminal screen as a cell grid, not a lossy string blob' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl:48:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a capture with degenerate geometry instead of comparing garbage' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/spec/evidence/tui_binary_capture_infra_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'compares a named screen region through the shared oracle model' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

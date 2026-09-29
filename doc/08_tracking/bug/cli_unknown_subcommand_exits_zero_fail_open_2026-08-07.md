@@ -1,4 +1,9 @@
 # `bin/simple <unknown-subcommand>` prints an error and exits rc=0
+## Closed 2026-09-16 — NOT A BUG/RESOLVED, re-verified 2026-08-17 (exit 1); pure-Simple fix landed
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Filed:** 2026-08-07
 **Severity:** medium — a fail-open in the CLI, and it silently defeats scripts
@@ -155,3 +160,4 @@ restoring it (not committed, scratch-only):
   (test-runner treats `inspect` as a filter/path argument and appears to loop
   or block rather than reporting "no tests matched"). Not investigated
   further here; flagging for a dedicated bug report if not already tracked.
+

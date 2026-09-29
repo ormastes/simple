@@ -1,5 +1,9 @@
 <!-- codex-architecture -->
 # SPipe streaming SHA interpreter verification exceeds budget
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-08-25
 **Status:** Open — `FAIL`; `W4-SRCH-31` is not admitted
@@ -121,3 +125,4 @@ scenarios, infer RSS, or rerun this attempt unchanged.
 - `doc/03_plan/agent_tasks/spipe_knowledge_compiler.md`
 - `doc/03_plan/sys_test/spipe_knowledge_compiler.md`
 - `test/01_unit/app/spipe_knowledge_provider/provider_streaming_sha256_spec.spl`
+

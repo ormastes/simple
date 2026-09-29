@@ -1,4 +1,8 @@
 # Web CSS Package-Authority Adapter
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** source fixed and independently accepted / runtime unverified
 **Affected lane:** canonical `generate_css("aetheric_dark")`
@@ -46,3 +50,4 @@ run the focused specs and capture wrapper below.
   UI-access event, timing, revision, and hash evidence. The macOS Vulkan Web
   wrapper is optional backend evidence only; it is not package-authority proof.
   Do not bootstrap or substitute the Rust seed.
+

@@ -1,0 +1,161 @@
+use compiler.hir.import_materialization.state.{
+    FrozenImportCapabilityV1, ImportDemandV1, ImportMaterializationV1,
+    ImportSnapshotIdentityV1, import_materialization_new_v1
+}
+use compiler.hir.import_materialization.materializer.{import_materialize_v1}
+use compiler.hir.demand.deferred_body.{
+    DeferredHirBodyV1, HirDemandDependencyKindV1
+}
+use compiler.hir.demand.hir_demand_set.{
+    HirDemandRequestV1, HirDemandSetV1, hir_demand_close_v1
+}
+use compiler.mir.admission.mir_admission_v1.{
+    MirAdmissionV1, MirDependencyEvidenceV1, MirDependencyKindV1,
+    MirDependencyStateV1, mir_admission_prove_v1
+}
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{
+    PinnedArchiveCapability, pinned_archive_close_v1
+}
+use compiler.driver.perf.demand_compile_counters.{
+    DemandCompileCountersV1, demand_compile_counter_add_phase_v1,
+    demand_compile_counter_now_ns_v1
+}
+
+enum DemandMirIntegrationErrorV1:
+    invalid_snapshot
+    demand_closure_failed
+    missing_materialization
+    materialization_failed
+    materialization_snapshot_mismatch
+    admission_failed
+
+struct DemandMirIntegrationInputV1:
+    snapshot: ImportSnapshotIdentityV1
+    bodies: [DeferredHirBodyV1]
+    requests: [HirDemandRequestV1]
+    materializations: [ImportMaterializationV1]
+
+struct DemandMirIntegrationReceiptV1:
+    demand: HirDemandSetV1
+    admission: MirAdmissionV1
+    snapshot: ImportSnapshotIdentityV1
+
+struct DemandMirArchiveContextV1:
+    package_identity: text
+    semantic_digest: text
+    snapshot: ImportSnapshotIdentityV1
+    receipt: PackageArchiveReceiptV1
+    capability: PinnedArchiveCapability
+
+fn demand_mir_input_from_archives_v1(
+    snapshot: ImportSnapshotIdentityV1,
+    archives: [DemandMirArchiveContextV1]
+) -> Result<DemandMirIntegrationInputV1, DemandMirIntegrationErrorV1>:
+    if (snapshot.revision == "" or snapshot.tree_digest.len() != 64 or
+            snapshot.inventory_digest.len() != 64 or archives.len() == 0):
+        return Err(DemandMirIntegrationErrorV1.invalid_snapshot)
+    var bodies: [DeferredHirBodyV1] = []
+    var requests: [HirDemandRequestV1] = []
+    var materializations: [ImportMaterializationV1] = []
+    for archive in archives:
+        if (archive.snapshot.revision != snapshot.revision or
+                archive.snapshot.tree_digest != snapshot.tree_digest or
+                archive.snapshot.inventory_digest != snapshot.inventory_digest or
+                archive.package_identity == "" or archive.semantic_digest.len() != 64 or
+                archive.receipt.package_key != archive.package_identity or
+                not archive.capability.open):
+            return Err(DemandMirIntegrationErrorV1.invalid_snapshot)
+        bodies.push(DeferredHirBodyV1(
+            archive.package_identity, archive.package_identity,
+            snapshot.revision, archive.semantic_digest, false,
+            ["compile"], [], []))
+        requests.push(HirDemandRequestV1(archive.package_identity, "compile"))
+        materializations.push(import_materialization_new_v1(
+            archive.package_identity, archive.package_identity,
+            FrozenImportCapabilityV1(
+                archive.snapshot, archive.receipt, archive.capability)))
+    Ok(DemandMirIntegrationInputV1(snapshot, bodies, requests, materializations))
+
+fn demand_mir_find_materialization_v1(
+    materializations: [ImportMaterializationV1], identity: text
+) -> ImportMaterializationV1?:
+    for materialization in materializations:
+        if materialization.symbol_key == identity:
+            return Some(materialization)
+    nil
+
+fn demand_mir_dependency_kind_v1(
+    demand: HirDemandSetV1, identity: text
+) -> MirDependencyKindV1:
+    if demand.providers.contains(identity):
+        return MirDependencyKindV1.provider_dependency
+    MirDependencyKindV1.body_dependency
+
+fn demand_mir_integrate_v1(
+    input: DemandMirIntegrationInputV1
+) -> Result<DemandMirIntegrationReceiptV1, DemandMirIntegrationErrorV1>:
+    var ignored = DemandCompileCountersV1([], 0, 0, 0, 0, 0, 0)
+    demand_mir_integrate_measured_v1(input, &mut ignored, false)
+
+fn demand_mir_integrate_measured_v1(
+    input: DemandMirIntegrationInputV1,
+    counters: &mut DemandCompileCountersV1,
+    record_measurements: bool
+) -> Result<DemandMirIntegrationReceiptV1, DemandMirIntegrationErrorV1>:
+    if (input.snapshot.revision == "" or input.snapshot.tree_digest.len() != 64 or
+            input.snapshot.inventory_digest.len() != 64):
+        return Err(DemandMirIntegrationErrorV1.invalid_snapshot)
+    val hir_started_ns = demand_compile_counter_now_ns_v1()
+    val demand_result = hir_demand_close_v1(
+        input.snapshot.revision, input.bodies, input.requests)
+    if demand_result.is_err():
+        return Err(DemandMirIntegrationErrorV1.demand_closure_failed)
+    val demand = demand_result.unwrap()
+    if record_measurements:
+        _ = demand_compile_counter_add_phase_v1(
+            counters, "hir-demand", hir_started_ns)
+    var identities = demand.body_identities
+    for provider in demand.providers:
+        if not identities.contains(provider):
+            identities.push(provider)
+    var evidence: [MirDependencyEvidenceV1] = []
+    for identity in identities:
+        val materialization = demand_mir_find_materialization_v1(
+            input.materializations, identity)
+        if materialization == nil:
+            return Err(DemandMirIntegrationErrorV1.missing_materialization)
+        if (materialization!.snapshot.revision != input.snapshot.revision or
+                materialization!.snapshot.tree_digest != input.snapshot.tree_digest or
+                materialization!.snapshot.inventory_digest !=
+                    input.snapshot.inventory_digest):
+            return Err(
+                DemandMirIntegrationErrorV1.materialization_snapshot_mismatch)
+        val receipt = import_materialize_v1(materialization!, ImportDemandV1.mir)
+        if receipt.is_err():
+            _ = pinned_archive_close_v1(materialization!.capability)
+            return Err(DemandMirIntegrationErrorV1.materialization_failed)
+        val ready = receipt.unwrap()
+        if pinned_archive_close_v1(materialization!.capability).is_err():
+            return Err(DemandMirIntegrationErrorV1.materialization_failed)
+        evidence.push(MirDependencyEvidenceV1(
+            identity,
+            demand_mir_dependency_kind_v1(demand, identity),
+            MirDependencyStateV1.concrete,
+            ready.snapshot.revision,
+            ready.receipt_digest))
+    val mir_started_ns = demand_compile_counter_now_ns_v1()
+    val admission = mir_admission_prove_v1(
+        input.snapshot.revision, input.snapshot.tree_digest,
+        input.snapshot.inventory_digest, demand.digest, evidence)
+    if admission.is_err():
+        return Err(DemandMirIntegrationErrorV1.admission_failed)
+    if record_measurements:
+        _ = demand_compile_counter_add_phase_v1(
+            counters, "mir-admission", mir_started_ns)
+    Ok(DemandMirIntegrationReceiptV1(demand, admission.unwrap(), input.snapshot))
+
+export DemandMirIntegrationErrorV1, DemandMirIntegrationInputV1
+export DemandMirArchiveContextV1, demand_mir_input_from_archives_v1
+export DemandMirIntegrationReceiptV1, demand_mir_integrate_v1
+export demand_mir_integrate_measured_v1

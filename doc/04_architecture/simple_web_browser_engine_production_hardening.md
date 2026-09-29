@@ -443,12 +443,9 @@ or native TLS behavior.
   parse-error, and failed-TLS paths cannot supply an authentication boolean or
   seed policy. The broker
   derives resource mode from the broker's committed origin instead of the
-  renderer's kind. Renderer and direct-host credentialless CORS use the same
-  FetchEngine-owned Origin/preflight validation over public-only transport;
-  OPTIONS cannot mutate cookies, cache, HSTS, history, or page-visible state.
-  Direct-host `include` remains fail-closed until credentials and cookies have
-  one reviewed broker owner. Redirects receive one exact derived successor
-  permit with downgrade and hop-limit enforcement. Typed
+  renderer's kind, and authorizes only bounded simple CORS requests until
+  preflight uses the public-only broker transport. Redirects receive one exact
+  derived successor permit with downgrade and hop-limit enforcement. Typed
   parent-issued open/back/forward/home/reload/stop commands now cross the
   bounded protocol; the broker owns committed URL/origin plus a 256-entry
   history and commits only after a validated renderer frame. A fail-closed
@@ -574,26 +571,8 @@ bootstrap or Rust-seed result is production browser evidence.
 ## Shared-state and frame-work convergence (2026-07-29)
 
 - `opacity: 0` suppresses the element and its entire descendant subtree before
-  paint/Draw-IR emission. **PROPOSED / UNIMPLEMENTED:** fractional opacity is a
-  proven structural gap: flat
-  commands or an adjacent helper batch cannot preserve the parent's exact paint
-  slot while applying alpha once to the whole subtree. The composition must
-  remain flat, with one `group` command referencing a child batch at that slot.
-  Engine2D must recursively execute the referenced batch into transient
-  premultiplied material, then source-over composite it once. Before allocating
-  that material, admission must reject unknown, orphan, or duplicate batch IDs,
-  multiply referenced children, cycles, and depth above the existing
-  `HTML_MAX_TREE_DEPTH` of 512. The existing browser limits remain authoritative:
-  at most 1,024 commands across every batch (groups included), therefore at most
-  1,025 batches, at most 1,048,576 encoded payload bytes, and at most
-  `viewport_pixels * 16` painted or transient pixels. Each clipped group-bounds
-  pixel must be charged once to that same frame pixel counter; no second budget
-  will be added. The root must remain the one opaque HTML batch. CSS lowering
-  must keep `css_opacity_pct` separate from `filter_opacity_pct`; filter opacity
-  must stay unsupported rather than being silently treated as subtree opacity.
-  The nested pixel oracle must use a blue box at 50% inside a same-bounds,
-  transparent/no-paint parent at 50%, over white: only blue has effective 25%
-  alpha, yielding `0xFFBFBFFF`.
+  paint/Draw-IR emission. Fractional opacity remains incomplete until bounded group
+  compositing can apply one alpha to a subtree without double blending.
 - `BrowserProfileStore` remains the sole bookmark persistence owner. The host
   publishes one immutable snapshot plus monotonic revision to the primary
   renderer and keyed secondary registry; existing and newly admitted windows
@@ -916,10 +895,9 @@ a cached title. Production Favorite may still use the canonical-URL fallback,
 so compatibility does not create stale-title authority.
 
 Bookmark title handling remains in the existing BrowserSession/profile
-capsule—no new service or storage schema. The shared
-`hosted_browser_title_is_valid` validator admits a trimmed, nonempty title only
-when its UTF-8 size is at most 512 bytes; otherwise the stored title is the
-existing empty sentinel. One shared display helper uses
+capsule—no new service or storage schema. One shared validator preserves a
+trimmed, nonempty title only when its UTF-8 size is at most 512 bytes; otherwise
+the stored title is the existing empty sentinel. One shared display helper uses
 that stored title or the separately bounded canonical URL. The URL fallback is
 derived, not copied into the 512-byte title column or snapshot field. Profile
 schema version 1 therefore remains valid, old URL-as-title rows remain readable,
@@ -1041,8 +1019,8 @@ reply followed a completely delivered host wire.
 
 The exact owners stay narrow: `src/lib/common/web/browser_renderer_protocol.spl`
 owns SBR2 framing and canonical validation;
-`src/os/hosted/hosted_browser_renderer_process.spl` owns token creation,
-staging, issuance, admission, broker ordering, and retirement; and
+`src/os/hosted/hosted_browser_renderer_process.spl` owns staging, issuance,
+admission, broker ordering, and retirement; and
 `src/os/hosted/hosted_browser_renderer_worker.spl` owns complete-wire decode,
 one-use echo, and network-response sequencing. The parent reuses only the
 existing `src/lib/nogc_sync_mut/io/crypto_sffi.spl` `random_hex(16)` facade;

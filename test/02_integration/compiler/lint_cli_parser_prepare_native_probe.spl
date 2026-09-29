@@ -1,0 +1,130 @@
+"""Fresh-process production probe for standalone lint parser preparation.
+
+The first parser action in main is lint_cli_source.  No parser init or frontend
+streaming preparation is allowed before it, so a native run proves the direct
+lint entry prepares persistent parser owners outside transient scopes.
+"""
+
+use compiler.tools.lint.main.{Linter, LintRunResult, lint_cli_source}
+use compiler.core.ast.{
+    EXPR_IDENT, STMT_IF_CHAIN, decl_get_body, expr_get_str, expr_get_tag,
+    module_get_decls, stmt_get_tag, stmt_get_type
+}
+use compiler.frontend.core.if_chain_nodes.{
+    ARM_VALUE_BIND, flat_if_arm_head_get, flat_if_arm_kind_get,
+    flat_if_arm_next_get, flat_if_arm_rationale_get,
+    flat_if_chain_first_arm_get
+}
+
+fn diagnostic_count(results: [LintRunResult], code: text) -> i64:
+    var count = 0
+    for result in results:
+        if result.lint.code == code:
+            count = count + 1
+    count
+
+fn binding_metadata_is_well_formed(arm_offset: i64) -> bool:
+    val decls = module_get_decls()
+    if decls.len() != 1:
+        return false
+    val body = decl_get_body(decls[0])
+    if body.len() < 1 or stmt_get_tag(body[0]) != STMT_IF_CHAIN:
+        return false
+    val chain_id = stmt_get_type(body[0])
+    var arm_id = flat_if_chain_first_arm_get(chain_id)
+    var offset = 0
+    while offset < arm_offset and arm_id >= 0:
+        arm_id = flat_if_arm_next_get(arm_id)
+        offset = offset + 1
+    if arm_id < 0:
+        return false
+    val head = flat_if_arm_head_get(arm_id)
+    (flat_if_arm_kind_get(arm_id) == ARM_VALUE_BIND and
+        expr_get_tag(head) == EXPR_IDENT and
+        expr_get_str(head) == "_" and
+        flat_if_arm_rationale_get(arm_id) == "")
+
+fn run_binding_case(label: text, source: text, arm_offset: i64) -> bool:
+    var linter = Linter.new()
+    val results = lint_cli_source(linter, label + ".spl", source)
+    val reqc004 = diagnostic_count(results, "REQC004")
+    val parse001 = diagnostic_count(results, "PARSE001")
+    val metadata_ok = binding_metadata_is_well_formed(arm_offset)
+    if reqc004 != 1 or parse001 != 0 or not metadata_ok:
+        print("case=" + label + " REQC004=" + reqc004.to_text() +
+            " PARSE001=" + parse001.to_text() +
+            " metadata=" + metadata_ok.to_text())
+        return false
+    true
+
+fn run_rationalized_case() -> bool:
+    var linter = Linter.new()
+    val results = lint_cli_source(
+        linter,
+        "rationalized_wildcard.spl",
+        "fn f(value: i64?):\n    if val _(\"all values intentionally ignored here\") = value:\n        return\n")
+    diagnostic_count(results, "REQC004") == 0 and
+        diagnostic_count(results, "PARSE001") == 0
+
+fn run_malformed_case() -> bool:
+    var linter = Linter.new()
+    val results = lint_cli_source(linter, "malformed.spl", "fn broken(")
+    diagnostic_count(results, "REQC004") == 0 and
+        diagnostic_count(results, "PARSE001") == 1
+
+fn main() -> i32:
+    # Keep this as the first runtime parser action: the native executable must
+    # start without any prior parser_init/frontend preparation call.
+    if not run_binding_case(
+        "if_val_canonical",
+        "fn f(value: i64?):\n    if val _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "if_val_double_space",
+        "fn f(value: i64?):\n    if  val _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "if_val_tab",
+        "fn f(value: i64?):\n    if\tval _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "if_var_canonical",
+        "fn f(value: i64?):\n    if var _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "if_var_double_space",
+        "fn f(value: i64?):\n    if  var _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "if_var_tab",
+        "fn f(value: i64?):\n    if\tvar _ = value:\n        return\n",
+        0):
+        return 1
+    if not run_binding_case(
+        "elif_var_canonical",
+        "fn f(value: i64?):\n    if false:\n        return\n    elif var _ = value:\n        return\n",
+        1):
+        return 1
+    if not run_binding_case(
+        "elif_var_double_space",
+        "fn f(value: i64?):\n    if false:\n        return\n    elif  var _ = value:\n        return\n",
+        1):
+        return 1
+    if not run_binding_case(
+        "elif_var_tab",
+        "fn f(value: i64?):\n    if false:\n        return\n    elif\tvar _ = value:\n        return\n",
+        1):
+        return 1
+    if not run_rationalized_case():
+        print("case=rationalized_wildcard expected=REQC004:0,PARSE001:0")
+        return 1
+    if not run_malformed_case():
+        print("case=malformed expected=REQC004:0,PARSE001:1")
+        return 1
+    print("lint_cli_parser_prepare_probe=PASS binding_cases=9 metadata_cases=9 rationalized=1 malformed=1")
+    0

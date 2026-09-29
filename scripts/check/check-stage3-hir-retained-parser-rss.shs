@@ -1,0 +1,53 @@
+#!/bin/sh
+# Representative non-streaming Stage-3 HIR regression.  The probe compiles a
+# two-module retained-parser closure and emits correctness, elapsed-time, and
+# in-process peak RSS from one transaction.  /usr/bin/time independently
+# measures the process peak, so a broken runtime RSS accessor cannot admit it.
+
+set -eu
+cd "$(dirname "$0")/../.."
+
+BIN=${SIMPLE_BIN:-bin/simple}
+PROBE=test/02_integration/compiler/stage3_hir_retained_parser_rss_probe.spl
+MAX_ELAPSED_S=${STAGE3_HIR_RSS_MAX_ELAPSED_S:-120}
+MAX_RSS_KIB=${STAGE3_HIR_RSS_MAX_RSS_KIB:-1048576}
+TIME_BIN=${STAGE3_HIR_RSS_TIME_BIN:-/usr/bin/time}
+
+[ -x "$BIN" ] || { echo "ERROR: self-hosted compiler unavailable: $BIN"; exit 2; }
+[ -x "$TIME_BIN" ] || { echo "ERROR: GNU time unavailable: $TIME_BIN"; exit 2; }
+if "$BIN" --version 2>&1 | grep -q 'bootstrap seed only'; then
+    echo "ERROR: bootstrap seed is not admissible Stage-3 evidence"
+    exit 2
+fi
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/stage3-hir-retained-parser.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+
+run_case() {
+    label=$1 modules=$2
+    set +e
+    "$TIME_BIN" -f 'elapsed_seconds=%e\nmax_rss_kib=%M' -o "$WORK/$label.time" \
+        "$BIN" run "$PROBE" "--$label" >"$WORK/$label.out" 2>"$WORK/$label.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || { cat "$WORK/$label.out" "$WORK/$label.err"; echo "FAIL: $label probe exit=$rc"; exit 1; }
+    grep -E "^stage3_hir_retained_parser_modules=$modules semantic_ok=true elapsed_ms=[0-9]+$" "$WORK/$label.out" >/dev/null || { cat "$WORK/$label.out"; echo "FAIL: $label semantic correctness"; exit 1; }
+    receipts=$(grep -Ec '^\[M4 lower\] module=hir\.retained\.rss\.module_[0-9]+ work=1$' "$WORK/$label.out" || true)
+    [ "$receipts" -eq "$modules" ] || { cat "$WORK/$label.out"; echo "FAIL: $label forced cache-miss receipts=$receipts expected=$modules"; exit 1; }
+    grep -Fx 'stage3_hir_retained_parser_budget_ok=true' "$WORK/$label.out" >/dev/null || { cat "$WORK/$label.out"; echo "FAIL: $label in-process budget"; exit 1; }
+    rss=$(sed -n 's/^max_rss_kib=//p' "$WORK/$label.time" | tail -1)
+    elapsed=$(sed -n 's/^elapsed_seconds=//p' "$WORK/$label.time" | tail -1)
+    case "$rss" in ''|*[!0-9]*) echo "ERROR: $label invalid RSS receipt"; exit 2;; esac
+    ms=$(awk -v seconds="$elapsed" 'BEGIN { print int(seconds * 1000 + 0.5) }')
+    [ "$rss" -le "$MAX_RSS_KIB" ] || { echo "FAIL: $label peak_rss_kib=$rss exceeds $MAX_RSS_KIB"; exit 1; }
+    [ "$ms" -le $((MAX_ELAPSED_S * 1000)) ] || { echo "FAIL: $label elapsed_ms=$ms exceeds $((MAX_ELAPSED_S * 1000))"; exit 1; }
+    printf '%s %s %s\n' "$ms" "$rss" "$receipts" >"$WORK/$label.summary"
+}
+
+run_case baseline 2
+run_case scaled 16
+set -- $(cat "$WORK/baseline.summary")
+BASELINE_MS=$1 BASELINE_RSS=$2
+set -- $(cat "$WORK/scaled.summary")
+SCALED_MS=$1 SCALED_RSS=$2
+echo "PASS: stage3 retained-parser HIR baseline_ms=$BASELINE_MS baseline_rss_kib=$BASELINE_RSS scaled_ms=$SCALED_MS scaled_rss_kib=$SCALED_RSS"

@@ -62,6 +62,29 @@ Both are tier-1 extern blocks with tier-2 pass-through wrappers; the branching
 present (32 / 20 `if`/`for` lines) is availability and null-handle checking, not
 business logic.
 
+### 2026-08-19 — raw pointer owner and linalg leaf migration
+
+**ALLOWLISTED — genuine memory ABI owner:**
+`src/lib/nogc_sync_mut/ptr/raw.spl` is the one no-GC sync owner of
+`rt_alloc`, `rt_free`, and `rt_ptr_*`.  Its allowlist entry is exact-file scoped.
+The public `raw_*` helpers are inline, allocate no hidden storage, preserve the
+runtime pointer/i64 ABI, and keep the caller's existing one-staging-buffer-per-
+operand lifecycle.  Product leaves may import only those helpers; they may not
+declare or call the runtime symbols themselves.
+
+The refused linalg files were migrated rather than allowlisted:
+
+- `src/lib/nogc_async_mut/linalg/backend_ops.spl`: 177 direct raw-memory calls
+  removed; 35 explicit staging allocations remain behind `raw_alloc`.
+- `src/lib/nogc_sync_mut/linalg/blas_openblas.spl`: 99 direct raw-memory calls
+  removed; 20 explicit staging allocations remain behind `raw_alloc`.
+
+The four remaining lexical `rt_scilib_openblas_*(` matches in
+`blas_openblas.spl` are signature examples inside its module docstring, not
+calls or declarations.  They are deliberately not used to justify an
+allowlist entry for the linalg leaf.  Focused ownership/equivalence coverage is
+in `test/01_unit/lib/nogc_sync_mut/linalg/raw_memory_owner_spec.spl`.
+
 ### REFUSED — product code that must migrate
 
 - `src/lib/nogc_async_mut/linalg/backend_ops.spl` (177) and
@@ -184,3 +207,76 @@ should call that provider.
 allowlist unchanged (still 2 files / 222 sites from round 1); forbidden count
 unchanged at the round-1 figure of **18566** by the regex above. 10 candidates
 examined across two rounds, 2 allowlisted, 8 refused.
+
+---
+
+## Round 3 (2026-08-19) — Torch owner canonicalized and dynamic fork removed
+
+The round-2 Torch refusal premise is now stale. Inspection of the current tree
+shows that `gc_async_mut/torch/sffi.spl`, `gc_sync_mut/torch/sffi.spl`, and
+`nogc_async_mut/torch/sffi.spl` are compatibility re-exports; the no-GC
+synchronous module is the single concrete Simple owner of the libtorch ABI.
+Its stale "Duplicated" header was corrected.
+
+The product-side fork in `src/lib/common/torch/dyn_sffi_ops.spl` was migrated:
+
+- forbidden direct Torch calls: **137 -> 0**;
+- duplicate extern declarations: **52 -> 0**;
+- public `dyn_torch_*` functions: **70 -> 70**;
+- optional absence remains zero/`0.0`, free remains a no-op when unavailable,
+  and linalg solve retains explicit `unavailable` / `invalid` / `error` status;
+- fixed-shape constructors now lower through the owner's array ABI instead of
+  redeclaring nonexistent scalar-dimension variants.
+
+The canonical owner now exposes a non-raw `torch_sffi_*` provider surface that
+centralizes the availability policy. Its measured boundary is 136 extern
+declarations and 55 direct calls. The file is now allowlisted as the one Torch
+provider; no compatibility facade or common product module is allowlisted.
+
+### Ratchet honesty
+
+The focused file delta is exactly 137 forbidden calls removed. Sanctioning the
+canonical owner also reclassifies its two pre-existing calls as provider calls;
+the additional provider calls were introduced inside that same boundary. The
+full-tree recorded floor moved **12020 -> 11195**, but that 825 decrease also
+contains pre-existing reductions already present in this isolated lane, so it
+must not be attributed entirely to this Torch migration.
+
+---
+
+## Window SDL2 provider migration (2026-08-19)
+
+The window owner decision is now implemented:
+
+- `src/lib/nogc_sync_mut/sffi/window_abi.spl` is the sole Simple owner of the
+  66 `rt_sdl2_*` declarations. Its 66 expression-bodied native thunks preserve
+  the exact scalar/text/array arguments and return values; they allocate no
+  buffers and add no event-loop collection.
+- `src/lib/nogc_sync_mut/io/window_sffi.spl` owns the pure-Simple product
+  mapping: positive-handle validity, zero-or-one event batches, SDL event-code
+  decoding, modifier normalization, status conversion, and winit-shaped
+  compatibility helpers.
+- `src/app/io/window_ffi.spl` and `src/app/io/window_sffi.spl` are compatibility
+  facades over that product surface. Neither redeclares or directly calls the
+  native ABI.
+
+The three requested files moved from **91 + 71 + 71 forbidden sites to zero**
+under the ratchet scanner. This includes the 79 + 59 + 59 genuine calls
+identified above plus the twelve runtime-prefixed pure-Simple shim definitions
+in each copy. Updating the five existing SDL consumers to the provider/product
+names removed another 47 direct runtime-prefixed call sites, for a focused
+window-lane decrease of **280**.
+
+The recorded full-tree floor moved **12020 -> 10943**. Only 280 of that 1077
+decrease belongs to this migration; the remaining 797 was pre-existing work in
+the lane and is not attributed here.
+
+Executable coverage:
+
+- `test/01_unit/lib/nogc_sync_mut/io/window_winit_compat_mapping_spec.spl`
+  checks event-type and close-status parity.
+- `test/02_integration/rendering/window_sffi_ownership_contract_spec.spl`
+  checks single ownership, facade parity, positive handles, event counts, and
+  checked fullscreen status.
+- `test/02_integration/rendering/sdl_present_failure_contract_spec.spl` checks
+  that the provider/product split still propagates presentation failure.

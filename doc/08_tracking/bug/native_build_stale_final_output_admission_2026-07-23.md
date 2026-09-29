@@ -1,4 +1,9 @@
 # native-build stale final output admission
+## Closed 2026-09-16 — ...ess for and retain an older binary. ## Fix The shared pure-Simple CLI funnel now writes to
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** Fixed in source; focused qualification pending.
 
@@ -24,3 +29,4 @@ fresh-artifact admission, and publish path. Its new staging scenario passes
 through the temporary bootstrap interpreter; the enclosing legacy contract
 still has two unrelated failures, so behavioral native-build qualification is
 pending.
+

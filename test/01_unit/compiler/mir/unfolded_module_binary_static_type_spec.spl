@@ -1,0 +1,70 @@
+"""MIR static types for unannotated, runtime module binary initializers."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+
+fn static_type_label(source: text, wanted: text) -> text:
+    val path = "unfolded_module_binary_static_type_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+
+    var lowering = MirLowering.new(hir.symbols)
+    for constant in hir.constants.values():
+        lowering.lower_const(constant)
+    for constant in hir.constants.values():
+        lowering.lower_static(constant)
+    expect(lowering.errors.len()).to_equal(0)
+
+    for static_ in lowering.builder.module.statics.values():
+        if static_.name.ends_with("__" + wanted) or static_.name == wanted:
+            match static_.type_.kind:
+                case MirTypeKind.I64: return "i64"
+                case MirTypeKind.U32: return "u32"
+                case MirTypeKind.F64: return "f64"
+                case MirTypeKind.Bool: return "bool"
+                case MirTypeKind.Opaque(name): return "opaque:" + name
+                case _: return "other"
+    "missing"
+
+fn static_error_report(source: text) -> text:
+    val path = "unfolded_module_binary_static_error_fixture.spl"
+    val parsed = parse_full_frontend(source, path, path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(path)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new(hir.symbols)
+    for constant in hir.constants.values():
+        lowering.lower_const(constant)
+    for constant in hir.constants.values():
+        lowering.lower_static(constant)
+    var report = ""
+    for error in lowering.errors:
+        report = report + error.message + "\n"
+    report
+
+describe "unfolded module binary static type inference":
+    it "keeps unannotated integer arithmetic numeric before runtime initialization":
+        val source = "const BASE = 10\nvar DERIVED = BASE + 5\n"
+        expect(static_type_label(source, "DERIVED")).to_equal("i64")
+        val chained = "const BASE = 10\nvar FIRST = BASE + 5\nvar SECOND = FIRST + 5\n"
+        expect(static_type_label(chained, "SECOND")).to_equal("i64")
+
+    it "preserves folded arithmetic and adjacent numeric kinds":
+        expect(static_type_label("var FOLDED = 2 + 3\n", "FOLDED")).to_equal("i64")
+        expect(static_type_label("const BASE = 1.5\nvar FLOAT_DERIVED = BASE + 0.5\n", "FLOAT_DERIVED")).to_equal("f64")
+        expect(static_type_label("const BASE: u32 = 10\nvar NARROW_DERIVED: u32 = BASE + 5\n", "NARROW_DERIVED")).to_equal("u32")
+
+    it "keeps genuine text and comparisons out of numeric inference":
+        expect(static_type_label("const BASE = \"a\"\nvar TEXT_DERIVED = BASE + \"b\"\n", "TEXT_DERIVED")).to_equal("opaque:str")
+        expect(static_type_label("const BASE = 10\nvar IS_LARGER = BASE + 5 > 12\n", "IS_LARGER")).to_equal("bool")
+        expect(static_type_label("const LEFT = true\nconst RIGHT = false\nvar BOTH = LEFT and RIGHT\n", "BOTH")).to_equal("bool")
+
+    it "keeps genuinely unresolved binary initializers diagnostic":
+        val errors = static_error_report("var UNKNOWN = missing_value + 5\n")
+        expect(errors).to_contain("cannot derive module static type from unresolved binary initializer")

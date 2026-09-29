@@ -83,3 +83,9 @@ Use a SimpleOS-native key layer first:
 - keep pane headers textual and explicit
 - do not hide session/window identity
 - capture view should be line-based and predictable, not fancy
+# Named-session command routing
+
+Every pane-mutating CLI command treats its `<name>` argument as authoritative.
+An unknown name returns failure without reading or mutating another session.
+`send` joins all command arguments after the session name so quoted and
+multi-word commands reach the selected pane intact.

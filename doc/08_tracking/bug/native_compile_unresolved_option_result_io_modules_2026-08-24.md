@@ -1,4 +1,8 @@
 # `native-build` of an `io_runtime` importer: `Option`/`Result` unresolved in three io modules
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** RESOLVED 2026-08-24 — `native-build` reaches `NB_RC=0` and the binary runs. SEVENTH blocker in the `io_runtime` native-build chain
 **Observed:** 2026-08-24
@@ -293,3 +297,4 @@ It does **not** prove self-hosting. Scope honestly: one importer, one
 process under `bin/simple run` — a separate, still-open defect
 (`io_runtime_read_file_still_aborts_incomplete_fix_2026-08-24.md`) that this
 change does not touch and must not be read as having fixed.
+

@@ -1,31 +1,13 @@
 # interp: url_encode unusable in interpreter — "Cannot resolve module: utilities"
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - ID: interp_http_url_encode_utilities_unresolved_2026-06-14
 - Severity: P2
 - Area: interpreter / module resolution
 - Found: 2026-06-14 (writing test/01_unit/app/itf/adapter_outlook_curl_spec.spl)
-
-**Status:** RESOLVED — re-verified 2026-08-17, now covered by a spec
-
-## Resolution (2026-08-17, old-bug-backlog audit)
-
-The documented repro no longer reproduces. Running it verbatim under
-`bin/simple run` now prints both lines:
-
-```
-START
-ENC=ops%40acme.com
-```
-
-The module resolves and the calling function returns; the silent death after
-`CLIENT_OK` is gone. This doc had no `Status:` line and no surviving covering
-spec, so nothing had confirmed the fix since it was filed.
-
-Covered from now on by
-`test/01_unit/lib/nogc_sync_mut/http_client/url_encode_spec.spl`
-(`Results: 5 total, 5 passed, 0 failed`; sabotage-proved — corrupting the
-expected `%40` gives `5 total, 4 passed, 1 failed`). Run it with
-`--no-session-daemon`.
 
 ## Symptom
 
@@ -80,3 +62,12 @@ the chain resolves; only the interpreter's module resolver fails.
    way the native frontend does (path/alias mismatch most likely).
 2. Drop the deep `utilities` dependency from the `http.url`/`http.common` chain
    so `url_encode` has no unresolvable transitive import.
+
+## Triage 2026-09-13 — LEFT OPEN (reported error gone, a worse failure took its place)
+
+- **measured** (Rust seed `bin/simple` v1.0.0-rc.1, Windows): the reported `Cannot resolve module: utilities` warning no longer appears. But the repro still fails, now harder: `use std.nogc_sync_mut.http_client.types.{url_encode}` prints `START` and then **SIGSEGVs** (exit 139) at the call, with no diagnostic.
+- **measured**: `url_encode` does not exist in `src/lib/nogc_sync_mut/http_client/types.spl` at all — that file defines `url_encode_component` (`:44`). Importing the nonexistent name is accepted silently and only crashes at the call. `url_encode_component` from the same module SIGSEGVs identically, so the crash is the module, not the missing name.
+- **measured**: the `gc_async_mut` twin works — `use std.gc_async_mut.http_client.types.{url_encode}` prints `ENC=ops%64acme.com`, exit 0.
+- **measured**, adjacent defect found while verifying and NOT fixed here: that output is wrong. `@` is 0x40, so the correct encoding is `%40`. The cause is that `i64.to_string(radix)` ignores its radix — `val c = 64; c.to_string(16)` and `c.to_string(2)` both print `64`. Five stdlib percent-encoders depend on it (`gc_async_mut/http_client/types.spl:55`, `gc_async_mut/oauth2.spl:230`, `nogc_async_mut/http_client/types.spl:55`, `nogc_async_mut/oauth2.spl:230`, `nogc_sync_mut/oauth2.spl:230`), so every one of them emits decimal where hex is required. Deliberately not patched at the call sites: that would mask a broken primitive across the whole stdlib. Fix belongs in `to_string(radix)`.
+- Verdict: OPEN — the module-resolution half is fixed; a segfault and a wrong-output primitive remain.
+

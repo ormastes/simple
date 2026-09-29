@@ -1,0 +1,126 @@
+# Rendering showcases — TUI full tier.
+# lane: tui
+# tier: full
+# core: examples.ui.rendering_widgets_full
+#
+# Renders the buildable subset of the TUI renderer set through the char-grid
+# ScreenHost (app.ui_showcase.hosts.host_tui.ScreenTuiHost) and then prints a
+# coverage section over all 43 WidgetKind variants: kinds with a TUI renderer
+# are marked `rendered`, the kinds WITHOUT one carry an explicit `(no tui)`
+# marker -- labeled, not dropped. The widget tree, the coverage tables, and
+# the shared tab list all live in examples/ui/rendering_widgets_full and are
+# imported below; this entry keeps only env parse, host construct, run, and
+# the coverage print.
+#
+# COVERAGE FIGURE NOTE (for the L7 final review): the plan/design says "44
+# WidgetKinds, 25 with TUI renderers, 19 without", but the actual sources say
+# otherwise: the WidgetKind enum (common/ui/widget_kind.spl) has 43 variants,
+# and the render_tui dispatch (app/ui.render/_TuiWidgets/core_widgets.spl +
+# extended_widgets.spl) covers 30 of them -- 22 core (incl. label via the
+# text renderer and tree + treenode) + 8 extended -- leaving 13 kinds with no
+# TUI renderer. The lists in the shared module are derived from those
+# sources, not from the plan's figures, so the `(no tui)` markers stay
+# honest; the shared item list (rendering_items.ui.sdn, L6) should be
+# reconciled with THESE 13 names.
+#
+# Honest-fail contract: exits non-zero with
+#   showcase status=blocked <reason>
+# on capture write failure; success prints
+#   showcase status=pass examples/06_io/ui/rendering/rendering_tui_full.spl
+
+use std.io_runtime.{env_get, file_write, mkdir_p, exit}
+use common.ui.builder.{build_tree_with_title}
+use common.ui.widget.{UIState}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_cpu}
+use common.ui.draw_ir_v2_to_v3.{draw_ir_v2_to_v3}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use examples.ui.rendering_widgets_full.{
+    rendering_widgets_full_tree, rendering_all_kinds, rendering_kind_has_tui
+}
+use app.ui_showcase.showcase_core.{
+    showcase_apply, showcase_click_count, showcase_typed_text
+}
+use app.ui_showcase.hosts.host_tui.{ScreenTuiHost}
+
+fn _env_i32(key: text, fallback: i32) -> i32:
+    val raw = env_get(key).trim()
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _parent_dir(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx <= 0:
+        return ""
+    path.substring(0, idx)
+
+fn _scene(st: UIState, w: i32, h: i32) -> DrawIrV3Scene:
+    draw_ir_v2_to_v3(widget_tree_to_draw_ir_cpu(st.tree.root_node(), w, h))
+
+fn main():
+    # Default 80x40 (not 80x24): the full tree carries ~33 rows of widgets
+    # and a 24-row grid would compress every row to nothing. SIMPLE_SHOWCASE_H
+    # restores 24 (or any other height) when a smaller capture is wanted.
+    val w = _env_i32("SIMPLE_SHOWCASE_W", 80)
+    val h = _env_i32("SIMPLE_SHOWCASE_H", 40)
+    val max_frames = _env_i32("SIMPLE_SHOWCASE_FRAMES", 3).to_i64()
+    val script = env_get("SIMPLE_SHOWCASE_SCRIPT")
+
+    val prefix = "tui_full"
+    var st = UIState.new(build_tree_with_title(
+        rendering_widgets_full_tree(prefix), "rendering_tui_full", "dark"))
+    val host = ScreenTuiHost.open(w, h, script)
+    var frames: i64 = 0
+    while frames < max_frames:
+        if not host.present_scene(_scene(st, w, h)):
+            break
+        frames = frames + 1
+        var ev = host.poll_input()
+        while ev != nil:
+            st = showcase_apply(st, ev!, w, h)
+            ev = host.poll_input()
+    host.shutdown()
+
+    val frame = host.frame_text()
+    print frame
+
+    # Coverage section: every WidgetKind is either `rendered` (a TUI renderer
+    # exists in the render_tui dispatch) or explicitly `(no tui)`.
+    var coverage = ""
+    var rendered_count = 0
+    var no_tui_count = 0
+    for kind in rendering_all_kinds():
+        if rendering_kind_has_tui(kind):
+            rendered_count = rendered_count + 1
+            val line = "tui-coverage kind={kind} tui=rendered"
+            print line
+            coverage = "{coverage}{line}\n"
+        else:
+            no_tui_count = no_tui_count + 1
+            val line = "tui-coverage kind={kind} tui=(no tui)"
+            print line
+            coverage = "{coverage}{line}\n"
+    val total_kinds = rendering_all_kinds().len()
+    print "tui-coverage rendered={rendered_count} no_tui={no_tui_count} total={total_kinds}"
+
+    val clicks = showcase_click_count(prefix)
+    val typed = showcase_typed_text(prefix)
+    val painted = host.last_painted_commands()
+    val fills = host.last_fill_commands()
+    val unsupported = host.last_unsupported_commands()
+    print "showcase host=tui tier=full frames={frames} painted={painted} " +
+        "fills={fills} unsupported={unsupported} clicks={clicks} typed=\"{typed}\""
+
+    val capture = env_get("SIMPLE_SHOWCASE_CAPTURE").trim()
+    if capture != "":
+        val dir = _parent_dir(capture)
+        if dir != "":
+            mkdir_p(dir)
+        val artifact = "{frame}\n{coverage}"
+        if file_write(capture, artifact):
+            print "capture path={capture}"
+        else:
+            print "showcase status=blocked capture-write-failed {capture}"
+            exit(1)
+
+    print "showcase status=pass examples/06_io/ui/rendering/rendering_tui_full.spl"

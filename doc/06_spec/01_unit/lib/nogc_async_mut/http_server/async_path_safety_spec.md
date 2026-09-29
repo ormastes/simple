@@ -24,7 +24,7 @@ The async router must reject traversal/escape paths BEFORE location matching, so
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl` |
-| Updated | 2026-08-14 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -53,6 +53,8 @@ routable.
 ## Examples
 
 ```simple
+use std.spec.step
+
 val router = AsyncRouter.new([static_root_location])
 val r = router.route(request_for("/../x"))
 # Err(ParseError("400 Bad Request: unsafe path")) — no location was matched
@@ -79,6 +81,11 @@ Lane: .spipe/simple_enterprise_suite (Wave A, AC-3).
 
 #### routes a normal path to the static location
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- routes a normal path to the static location
 - Configure a catch-all static location
 - Route a safe document path
 
@@ -86,10 +93,12 @@ Lane: .spipe/simple_enterprise_suite (Wave A, AC-3).
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("routes a normal path to the static location")
 step("Configure a catch-all static location")
 val router = AsyncRouter.new([make_static_root()])
 step("Route a safe document path")
@@ -100,16 +109,19 @@ expect(route_rejected(router, "/index.html")).to_be(false)
 
 #### rejects a dot-dot traversal path
 
+- rejects a dot-dot traversal path
 - Route a traversal path aimed below the document root
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a dot-dot traversal path")
 val router = AsyncRouter.new([make_static_root()])
 step("Route a traversal path aimed below the document root")
 expect(route_rejected(router, "/static/../etc/passwd")).to_be(true)
@@ -119,13 +131,18 @@ expect(route_rejected(router, "/static/../etc/passwd")).to_be(true)
 
 #### rejects an encoded dot-dot traversal path
 
+- rejects an encoded dot-dot traversal path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects an encoded dot-dot traversal path")
 val router = AsyncRouter.new([make_static_root()])
 expect(route_rejected(router, "/static/%2e%2e/secret")).to_be(true)
 ```
@@ -134,13 +151,18 @@ expect(route_rejected(router, "/static/%2e%2e/secret")).to_be(true)
 
 #### rejects an encoded-slash traversal path
 
+- rejects an encoded-slash traversal path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects an encoded-slash traversal path")
 val router = AsyncRouter.new([make_static_root()])
 expect(route_rejected(router, "/..%2fsecret")).to_be(true)
 ```
@@ -149,13 +171,18 @@ expect(route_rejected(router, "/..%2fsecret")).to_be(true)
 
 #### rejects a double-slash bypass path
 
+- rejects a double-slash bypass path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a double-slash bypass path")
 val router = AsyncRouter.new([make_static_root()])
 expect(route_rejected(router, "//etc/passwd")).to_be(true)
 ```
@@ -164,13 +191,18 @@ expect(route_rejected(router, "//etc/passwd")).to_be(true)
 
 #### rejects a null-byte injection path
 
+- rejects a null-byte injection path
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects a null-byte injection path")
 val router = AsyncRouter.new([make_static_root()])
 expect(route_rejected(router, "/index.html%00.png")).to_be(true)
 ```
@@ -179,21 +211,19 @@ expect(route_rejected(router, "/index.html%00.png")).to_be(true)
 
 #### rejects the unsafe path even when a matching location exists
 
+- rejects the unsafe path even when a matching location exists
 - Verify rejection happens BEFORE location matching
-- Ok
-- fail
-- Err
-- HttpServerError ParseError
-- fail
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("rejects the unsafe path even when a matching location exists")
 step("Verify rejection happens BEFORE location matching")
 # The catch-all "/" prefix would match "/../x" if matching ran first;
 # the guard must fire before any location is considered.
@@ -214,13 +244,18 @@ match r:
 
 #### still allows dots inside legitimate filenames
 
+- still allows dots inside legitimate filenames
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 2 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-LIB
+step("still allows dots inside legitimate filenames")
 val router = AsyncRouter.new([make_static_root()])
 expect(route_rejected(router, "/release..notes.txt")).to_be(false)
 ```
@@ -245,3 +280,51 @@ expect(route_rejected(router, "/release..notes.txt")).to_be(false)
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-LIB`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `307bcd7db964848eca714ddf0c83184f8de5dcd81f0e82a34247833ab653d967`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `307bcd7db964848eca714ddf0c83184f8de5dcd81f0e82a34247833ab653d967`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `307bcd7db964848eca714ddf0c83184f8de5dcd81f0e82a34247833ab653d967`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+
+SSpec documentization score: 92/100
+source: test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl
+mirror: doc/06_spec/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.md (current)
+findings: 5 blockers: 0
+  narrative=100 structure=100 oracle=100
+  traceability=100 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+doc/06_spec/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'routes a normal path to the static location' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl:105:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a dot-dot traversal path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl:112:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects an encoded dot-dot traversal path' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

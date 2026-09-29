@@ -1,0 +1,328 @@
+# codex-impl
+# Safe publication admission for an environment-selected provider closure.
+#
+# This capsule proves metadata eligibility and authenticated artifact authority
+# before creating a generation-pinned binding plan.  It does not map, load, or
+# execute an artifact.  The plan digest is computed here from the complete
+# admitted authority set and is never accepted from a caller.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.nogc_sync_mut.composition.environment_variants.contracts_v1.{
+    EnvironmentDigest256V1, EnvironmentSnapshotV1, EnvironmentGpuDeviceV1,
+    VariantDependencyV1, VariantDescriptorV1, VariantFacetBindingV1,
+    BindingPlanV1
+}
+use std.nogc_sync_mut.composition.environment_variants.admission.{
+    ENV_ADMISSION_OK_V1, variant_eligibility_reason_v1, binding_plan_create_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.artifact_admission_v1.{
+    ArtifactTrustVerificationReceiptV1, artifact_map_load_eligible_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.dependency_resolver_v1.{
+    EnvironmentDependencyResolutionV1, EnvironmentResolvedDependencyV1,
+    environment_dependency_resolve_v1
+}
+use std.nogc_sync_mut.composition.environment_variants.catalog_identity_v1.{
+    environment_catalog_identity_compute_v1
+}
+
+pub const ENV_PUBLICATION_ADMISSION_SCHEMA_V1: u16 = 1u16
+
+pub enum EnvironmentPublicationAdmissionErrorV1:
+    InvalidAuthority
+    DependencyResolutionFailed
+    DependencyClosureMismatch
+    MissingArtifactEvidence
+    DuplicateArtifactEvidence
+    ArtifactIdentityMismatch
+    EnvironmentIneligible
+    ArtifactNotAuthenticated
+    InvalidProviderGeneration
+    FacetBindingMismatch
+    PlanCreationFailed
+    CatalogIdentityFailed
+    RootNotInCatalog
+
+pub struct PublicationArtifactEvidenceV1:
+    provider_identity: EnvironmentDigest256V1
+    variant_identity: EnvironmentDigest256V1
+    artifact_digest: EnvironmentDigest256V1
+    provider_generation: u64
+    observed_artifact_digest: EnvironmentDigest256V1
+    required_trust_policy_digest: EnvironmentDigest256V1
+    required_verifier_identity: EnvironmentDigest256V1
+    minimum_verifier_generation: u64
+    trust_receipt: ArtifactTrustVerificationReceiptV1
+
+pub struct EnvironmentPublicationAdmissionV1:
+    schema_version: u16
+    plan: BindingPlanV1
+    root_provider_identity: EnvironmentDigest256V1
+    root_variant_identity: EnvironmentDigest256V1
+    dependency_closure_digest: EnvironmentDigest256V1
+    admitted_artifacts: [PublicationArtifactEvidenceV1]
+
+fn _digest_declared_v1(value: EnvironmentDigest256V1) -> bool:
+    value.w0 != 0u64 or value.w1 != 0u64 or value.w2 != 0u64 or value.w3 != 0u64
+
+fn _digest_equal_v1(left: EnvironmentDigest256V1, right: EnvironmentDigest256V1) -> bool:
+    left.w0 == right.w0 and left.w1 == right.w1 and left.w2 == right.w2 and left.w3 == right.w3
+
+fn _descriptor_matches_resolved_v1(
+    descriptor: VariantDescriptorV1, resolved: EnvironmentResolvedDependencyV1
+) -> bool:
+    _digest_equal_v1(descriptor.provider_identity, resolved.provider_identity) and
+        _digest_equal_v1(descriptor.variant_identity, resolved.variant_identity) and
+        _digest_equal_v1(descriptor.contract_identity, resolved.contract_identity) and
+        descriptor.contract_major == resolved.contract_major and
+        descriptor.contract_minor == resolved.contract_minor and
+        _digest_equal_v1(descriptor.artifact_digest, resolved.artifact_digest)
+
+fn _find_resolved_descriptor_v1(
+    resolved: EnvironmentResolvedDependencyV1, descriptors: [VariantDescriptorV1]
+) -> i64:
+    var found: i64 = -1
+    var i = 0
+    while i < descriptors.len():
+        if _descriptor_matches_resolved_v1(descriptors[i], resolved):
+            if found >= 0:
+                return -2
+            found = i
+        i = i + 1
+    found
+
+fn _evidence_matches_descriptor_v1(
+    evidence: PublicationArtifactEvidenceV1, descriptor: VariantDescriptorV1
+) -> bool:
+    _digest_equal_v1(evidence.provider_identity, descriptor.provider_identity) and
+        _digest_equal_v1(evidence.variant_identity, descriptor.variant_identity) and
+        _digest_equal_v1(evidence.artifact_digest, descriptor.artifact_digest)
+
+fn _evidence_duplicate_v1(
+    evidence: PublicationArtifactEvidenceV1,
+    all_evidence: [PublicationArtifactEvidenceV1], before: i64
+) -> bool:
+    var i = 0
+    while i < before:
+        val prior = all_evidence[i]
+        if _digest_equal_v1(evidence.provider_identity, prior.provider_identity) and
+           _digest_equal_v1(evidence.variant_identity, prior.variant_identity):
+            return true
+        i = i + 1
+    false
+
+fn _push_u16_v1(out: [i64], value: u16):
+    out.push((value & 255u16) as i64)
+    out.push(((value >> 8u16) & 255u16) as i64)
+
+fn _push_u32_v1(out: [i64], value: u32):
+    out.push((value & 255u32) as i64)
+    out.push(((value >> 8u32) & 255u32) as i64)
+    out.push(((value >> 16u32) & 255u32) as i64)
+    out.push(((value >> 24u32) & 255u32) as i64)
+
+fn _push_u64_v1(out: [i64], value: u64):
+    _push_u32_v1(out, (value & 4294967295u64) as u32)
+    _push_u32_v1(out, ((value >> 32u64) & 4294967295u64) as u32)
+
+fn _push_digest_v1(out: [i64], value: EnvironmentDigest256V1):
+    _push_u64_v1(out, value.w0)
+    _push_u64_v1(out, value.w1)
+    _push_u64_v1(out, value.w2)
+    _push_u64_v1(out, value.w3)
+
+fn _read_u64_v1(bytes: [i64], offset: i64) -> u64:
+    (bytes[offset] as u64) |
+        ((bytes[offset + 1] as u64) << 8u64) |
+        ((bytes[offset + 2] as u64) << 16u64) |
+        ((bytes[offset + 3] as u64) << 24u64) |
+        ((bytes[offset + 4] as u64) << 32u64) |
+        ((bytes[offset + 5] as u64) << 40u64) |
+        ((bytes[offset + 6] as u64) << 48u64) |
+        ((bytes[offset + 7] as u64) << 56u64)
+
+fn _canonical_plan_digest_v1(
+    snapshot: EnvironmentSnapshotV1, catalog_digest: EnvironmentDigest256V1,
+    catalog_generation: u64, policy_digest: EnvironmentDigest256V1,
+    dependency_lock_digest: EnvironmentDigest256V1, publication_generation: u64,
+    root: VariantDescriptorV1, closure_digest: EnvironmentDigest256V1,
+    evidence: [PublicationArtifactEvidenceV1], bindings: [VariantFacetBindingV1]
+) -> EnvironmentDigest256V1:
+    var material: [i64] = []
+    _push_u16_v1(material, ENV_PUBLICATION_ADMISSION_SCHEMA_V1)
+    _push_digest_v1(material, snapshot.snapshot_identity)
+    _push_u64_v1(material, snapshot.snapshot_generation)
+    _push_digest_v1(material, catalog_digest)
+    _push_u64_v1(material, catalog_generation)
+    _push_digest_v1(material, policy_digest)
+    _push_digest_v1(material, dependency_lock_digest)
+    _push_u64_v1(material, publication_generation)
+    _push_digest_v1(material, root.provider_identity)
+    _push_digest_v1(material, root.variant_identity)
+    _push_digest_v1(material, root.artifact_digest)
+    _push_digest_v1(material, closure_digest)
+    _push_u32_v1(material, evidence.len() as u32)
+    var i = 0
+    while i < evidence.len():
+        val item = evidence[i]
+        _push_digest_v1(material, item.provider_identity)
+        _push_digest_v1(material, item.variant_identity)
+        _push_digest_v1(material, item.artifact_digest)
+        _push_u64_v1(material, item.provider_generation)
+        _push_digest_v1(material, item.observed_artifact_digest)
+        _push_digest_v1(material, item.required_trust_policy_digest)
+        _push_digest_v1(material, item.required_verifier_identity)
+        _push_u64_v1(material, item.minimum_verifier_generation)
+        _push_u16_v1(material, item.trust_receipt.authentication_status)
+        _push_digest_v1(material, item.trust_receipt.artifact_digest)
+        _push_digest_v1(material, item.trust_receipt.trust_policy_digest)
+        _push_digest_v1(material, item.trust_receipt.verifier_identity)
+        _push_u64_v1(material, item.trust_receipt.verifier_generation)
+        _push_digest_v1(material, item.trust_receipt.receipt_identity)
+        _push_digest_v1(material, item.trust_receipt.verification_evidence_digest)
+        i = i + 1
+    _push_u32_v1(material, bindings.len() as u32)
+    i = 0
+    while i < bindings.len():
+        val binding = bindings[i]
+        _push_u16_v1(material, binding.facet_id)
+        _push_u16_v1(material, binding.interface_major)
+        _push_u16_v1(material, binding.interface_minor)
+        _push_u32_v1(material, binding.slot_index)
+        _push_digest_v1(material, binding.provider_identity)
+        _push_digest_v1(material, binding.variant_identity)
+        _push_u64_v1(material, binding.provider_generation)
+        _push_u64_v1(material, binding.interface_handle)
+        _push_u64_v1(material, binding.provider_context)
+        i = i + 1
+    val raw = sha256_bytes(material)
+    EnvironmentDigest256V1(
+        w0: _read_u64_v1(raw, 0), w1: _read_u64_v1(raw, 8),
+        w2: _read_u64_v1(raw, 16), w3: _read_u64_v1(raw, 24))
+
+fn _binding_has_admitted_generation_v1(
+    binding: VariantFacetBindingV1, evidence: [PublicationArtifactEvidenceV1]
+) -> bool:
+    var i = 0
+    while i < evidence.len():
+        val item = evidence[i]
+        if _digest_equal_v1(binding.provider_identity, item.provider_identity) and
+           _digest_equal_v1(binding.variant_identity, item.variant_identity) and
+           binding.provider_generation == item.provider_generation:
+            return true
+        i = i + 1
+    false
+
+pub fn environment_publication_admit_v1(
+    snapshot: EnvironmentSnapshotV1, feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1],
+    claimed_resolution: EnvironmentDependencyResolutionV1,
+    artifact_evidence: [PublicationArtifactEvidenceV1],
+    catalog_digest: EnvironmentDigest256V1, catalog_generation: u64,
+    policy_digest: EnvironmentDigest256V1,
+    dependency_lock_digest: EnvironmentDigest256V1,
+    publication_generation: u64, bindings: [VariantFacetBindingV1]
+) -> Result<EnvironmentPublicationAdmissionV1, EnvironmentPublicationAdmissionErrorV1>:
+    if not _digest_declared_v1(catalog_digest) or catalog_generation == 0u64 or
+       not _digest_declared_v1(policy_digest) or not _digest_declared_v1(dependency_lock_digest) or
+       publication_generation == 0u64 or bindings.len() == 0:
+        return Err(EnvironmentPublicationAdmissionErrorV1.InvalidAuthority)
+    val actual_resolution = match environment_dependency_resolve_v1(root, descriptors, dependencies):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentPublicationAdmissionErrorV1.DependencyResolutionFailed)
+    if not _digest_equal_v1(actual_resolution.closure_identity, claimed_resolution.closure_identity) or
+       not _digest_equal_v1(actual_resolution.root_provider_identity, claimed_resolution.root_provider_identity) or
+       not _digest_equal_v1(actual_resolution.root_variant_identity, claimed_resolution.root_variant_identity) or
+       actual_resolution.resolved_dependencies != claimed_resolution.resolved_dependencies:
+        return Err(EnvironmentPublicationAdmissionErrorV1.DependencyClosureMismatch)
+    if artifact_evidence.len() != actual_resolution.resolved_dependencies.len() + 1:
+        return Err(EnvironmentPublicationAdmissionErrorV1.MissingArtifactEvidence)
+
+    var selected_descriptors: [VariantDescriptorV1] = [root]
+    var selected_identities: [EnvironmentDigest256V1] = [root.variant_identity]
+    var i = 0
+    while i < actual_resolution.resolved_dependencies.len():
+        val index = _find_resolved_descriptor_v1(actual_resolution.resolved_dependencies[i], descriptors)
+        if index < 0:
+            return Err(EnvironmentPublicationAdmissionErrorV1.DependencyClosureMismatch)
+        selected_descriptors.push(descriptors[index])
+        selected_identities.push(descriptors[index].variant_identity)
+        i = i + 1
+
+    i = 0
+    while i < selected_descriptors.len():
+        val descriptor = selected_descriptors[i]
+        val evidence = artifact_evidence[i]
+        if _evidence_duplicate_v1(evidence, artifact_evidence, i):
+            return Err(EnvironmentPublicationAdmissionErrorV1.DuplicateArtifactEvidence)
+        if not _evidence_matches_descriptor_v1(evidence, descriptor):
+            return Err(EnvironmentPublicationAdmissionErrorV1.ArtifactIdentityMismatch)
+        if evidence.provider_generation == 0u64:
+            return Err(EnvironmentPublicationAdmissionErrorV1.InvalidProviderGeneration)
+        if variant_eligibility_reason_v1(
+            snapshot, descriptor, feature_words, dependencies, gpu_devices) != ENV_ADMISSION_OK_V1:
+            return Err(EnvironmentPublicationAdmissionErrorV1.EnvironmentIneligible)
+        if not artifact_map_load_eligible_v1(
+            descriptor, evidence.observed_artifact_digest,
+            evidence.required_trust_policy_digest, evidence.required_verifier_identity,
+            evidence.minimum_verifier_generation, evidence.trust_receipt):
+            return Err(EnvironmentPublicationAdmissionErrorV1.ArtifactNotAuthenticated)
+        i = i + 1
+
+    var root_bound = false
+    i = 0
+    while i < bindings.len():
+        if not _binding_has_admitted_generation_v1(bindings[i], artifact_evidence):
+            return Err(EnvironmentPublicationAdmissionErrorV1.FacetBindingMismatch)
+        if _digest_equal_v1(bindings[i].provider_identity, root.provider_identity) and
+           _digest_equal_v1(bindings[i].variant_identity, root.variant_identity):
+            root_bound = true
+        i = i + 1
+    if not root_bound:
+        return Err(EnvironmentPublicationAdmissionErrorV1.FacetBindingMismatch)
+
+    val plan_digest = _canonical_plan_digest_v1(
+        snapshot, catalog_digest, catalog_generation, policy_digest,
+        dependency_lock_digest, publication_generation, root,
+        actual_resolution.closure_identity, artifact_evidence, bindings)
+    val plan = match binding_plan_create_v1(
+        plan_digest, snapshot.snapshot_identity, snapshot.snapshot_generation,
+        catalog_digest, catalog_generation, policy_digest, dependency_lock_digest,
+        publication_generation, bindings, selected_identities, []):
+        case Ok(value): value
+        case Err(_): return Err(EnvironmentPublicationAdmissionErrorV1.PlanCreationFailed)
+    Ok(EnvironmentPublicationAdmissionV1(
+        schema_version: ENV_PUBLICATION_ADMISSION_SCHEMA_V1, plan: plan,
+        root_provider_identity: root.provider_identity,
+        root_variant_identity: root.variant_identity,
+        dependency_closure_digest: actual_resolution.closure_identity,
+        admitted_artifacts: artifact_evidence))
+
+pub fn environment_publication_admit_canonical_v1(
+    snapshot: EnvironmentSnapshotV1, arena_bytes: [u8], feature_words: [u64],
+    gpu_devices: [EnvironmentGpuDeviceV1], root: VariantDescriptorV1,
+    descriptors: [VariantDescriptorV1], dependencies: [VariantDependencyV1],
+    claimed_resolution: EnvironmentDependencyResolutionV1,
+    artifact_evidence: [PublicationArtifactEvidenceV1],
+    catalog_generation: u64, policy_digest: EnvironmentDigest256V1,
+    publication_generation: u64, bindings: [VariantFacetBindingV1]
+) -> Result<EnvironmentPublicationAdmissionV1, EnvironmentPublicationAdmissionErrorV1>:
+    val identity = match environment_catalog_identity_compute_v1(
+        arena_bytes, feature_words, descriptors, dependencies):
+        case Ok(value): value
+        case Err(_):
+            return Err(EnvironmentPublicationAdmissionErrorV1.CatalogIdentityFailed)
+    var exact_root_count = 0
+    var i = 0
+    while i < descriptors.len():
+        if descriptors[i] == root:
+            exact_root_count = exact_root_count + 1
+        i = i + 1
+    if exact_root_count != 1:
+        return Err(EnvironmentPublicationAdmissionErrorV1.RootNotInCatalog)
+    environment_publication_admit_v1(
+        snapshot, feature_words, gpu_devices, root, descriptors, dependencies,
+        claimed_resolution, artifact_evidence, identity.catalog_content_digest,
+        catalog_generation, policy_digest, identity.dependency_lock_digest,
+        publication_generation, bindings)

@@ -184,8 +184,14 @@ impl ModuleResolver {
     /// Load and parse a directory manifest (__init__.spl)
     pub fn load_manifest(&mut self, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
         let init_path = dir_path.join("__init__.spl");
+        // Keyed by canonical realpath: `src/std` is a symlink to `lib` and
+        // `src/compiler/common` to `00.common`, so the same `__init__.spl` is
+        // reached under several spellings and a raw key re-read and re-parsed it
+        // once per spelling. `init_path` itself stays raw -- it is what the
+        // read/parse diagnostics below print.
+        let manifest_key = crate::interpreter::normalize_path_key(&init_path);
 
-        if let Some(cached) = self.manifests.get(&init_path) {
+        if let Some(cached) = self.manifests.get(&manifest_key) {
             return Ok(cached.clone());
         }
 
@@ -193,7 +199,7 @@ impl ModuleResolver {
             return Ok(DirectoryManifest::default());
         }
 
-        let mut source = std::fs::read_to_string(&init_path)
+        let mut source = crate::read_trace::rts(file!(), line!(), &init_path)
             .map_err(|e| crate::error::factory::failed_to_read_file(&init_path, &e))?;
         // Normalize CRLF → LF for cross-platform compatibility
         if source.contains('\r') {
@@ -201,7 +207,7 @@ impl ModuleResolver {
         }
 
         let manifest = self.parse_manifest(&source, dir_path)?;
-        self.manifests.insert(init_path, manifest.clone());
+        self.manifests.insert(manifest_key, manifest.clone());
 
         Ok(manifest)
     }

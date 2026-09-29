@@ -1,3 +1,7 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
 # MCP Task Lifecycle Tests
 # Feature: MCP Task Management
 # Category: MCP, Async
@@ -61,14 +65,14 @@ impl TaskPriority:
             case TaskPriority.High: 2
             case TaskPriority.Critical: 3
 
-enum TaskErrorCategory:
+enum ErrorCategory:
     Tool
     Transport
     Protocol
     RateLimit
 
 class McpError:
-    category: TaskErrorCategory
+    category: ErrorCategory
     msg: text
 
 class TaskProgress:
@@ -87,18 +91,18 @@ impl TaskProgress:
 
     fn to_dict() -> Dict<text, Any>:
         var d: Dict<text, Any> = {}
-        d["current"] = self.current
+        d.set("current", self.current)
         match self.total:
             case Some(t):
-                d["total"] = t
+                d.set("total", t)
             case nil: pass
         match self.message:
             case Some(m):
-                d["message"] = m
+                d.set("message", m)
             case nil: pass
         match self.percentage:
             case Some(p):
-                d["percentage"] = p
+                d.set("percentage", p)
             case nil: pass
         d
 
@@ -116,7 +120,7 @@ impl TaskError:
         TaskError(code: self.code, message: self.message, retryable: true, details: self.details)
 
     fn to_mcp_error() -> McpError:
-        McpError(category: TaskErrorCategory.Tool, msg: self.message)
+        McpError(category: ErrorCategory.Tool, msg: self.message)
 
 class Task:
     id: text
@@ -151,20 +155,22 @@ impl Task:
 
     fn to_dict() -> Dict<text, Any>:
         var d: Dict<text, Any> = {}
-        d["id"] = self.id
-        d["operation"] = self.operation
-        d["status"] = match self.status:
+        d.set("id", self.id)
+        d.set("operation", self.operation)
+        d.set("status", match self.status:
             case TaskStatus.Pending: "pending"
             case TaskStatus.Running: "running"
             case TaskStatus.Completed: "completed"
             case TaskStatus.Failed: "failed"
             case TaskStatus.Cancelled: "cancelled"
             case TaskStatus.TimedOut: "timed_out"
-        d["priority"] = match self.priority:
+        )
+        d.set("priority", match self.priority:
             case TaskPriority.Low: "low"
             case TaskPriority.Normal: "normal"
             case TaskPriority.High: "high"
             case TaskPriority.Critical: "critical"
+        )
         d
 
 class TaskManager:
@@ -178,14 +184,14 @@ impl TaskManager:
         val task_id = "task_{self.next_id}"
         self.next_id = self.next_id + 1
         val task = Task(id: task_id, operation: operation, status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
-        self.tasks[task_id] = task
+        self.tasks.set(task_id, task)
         task_id
 
     me create_task_with_options(operation: text, priority: TaskPriority, timeout: i64?) -> text:
         val task_id = "task_{self.next_id}"
         self.next_id = self.next_id + 1
         val task = Task(id: task_id, operation: operation, status: TaskStatus.Pending, priority: priority, timeout_ms: timeout, started_at: nil, completed_at: nil, progress: nil, error: nil)
-        self.tasks[task_id] = task
+        self.tasks.set(task_id, task)
         task_id
 
     fn get_task(task_id: text) -> Task?:
@@ -196,70 +202,70 @@ impl TaskManager:
 
     me start_task(task_id: text) -> Result<bool, McpError>:
         if self.running_count >= self.max_concurrent_tasks:
-            return Err(McpError(category: TaskErrorCategory.RateLimit, msg: "Max concurrent tasks reached"))
+            return Err(McpError(category: ErrorCategory.RateLimit, msg: "Max concurrent tasks reached"))
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             task.status = TaskStatus.Running
             task.started_at = Some("now")
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             self.running_count = self.running_count + 1
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me update_progress(task_id: text, current: i64, total: i64) -> Result<bool, McpError>:
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             val pct = (current * 100) / total
             task.progress = Some(TaskProgress(current: current, total: Some(total), message: nil, percentage: Some(pct.to_f64())))
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me update_progress_with_message(task_id: text, current: i64, total: i64, msg: text) -> Result<bool, McpError>:
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             val pct = (current * 100) / total
             task.progress = Some(TaskProgress(current: current, total: Some(total), message: Some(msg), percentage: Some(pct.to_f64())))
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me complete_task(task_id: text, result_msg: text) -> Result<bool, McpError>:
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             task.status = TaskStatus.Completed
             task.completed_at = Some("now")
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             self.running_count = self.running_count - 1
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me fail_task(task_id: text, err: TaskError) -> Result<bool, McpError>:
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             task.status = TaskStatus.Failed
             task.error = Some(err)
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             self.running_count = self.running_count - 1
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     me cancel_task(task_id: text) -> Result<bool, McpError>:
         if self.tasks.has(task_id):
             var task = self.tasks.get(task_id)
             val was_running = task.is_running()
             task.status = TaskStatus.Cancelled
-            self.tasks[task_id] = task
+            self.tasks.set(task_id, task)
             if was_running:
                 self.running_count = self.running_count - 1
             Ok(true)
         else:
-            Err(McpError(category: TaskErrorCategory.Tool, msg: "Task not found"))
+            Err(McpError(category: ErrorCategory.Tool, msg: "Task not found"))
 
     fn list_tasks() -> [Task]:
         var result: [Task] = []
@@ -288,8 +294,13 @@ impl TaskManager:
 # Tests
 # ============================================================================
 
+use std.spec.step
+
 describe "TaskStatus":
+    # @manual scenario evidence
     it "converts to string":
+        # @req REQ-SSPEC-UNIT
+        step("converts to string")
         expect(TaskStatus.Pending.to_string() == "pending")
         expect(TaskStatus.Running.to_string() == "running")
         expect(TaskStatus.Completed.to_string() == "completed")
@@ -298,6 +309,8 @@ describe "TaskStatus":
         expect(TaskStatus.TimedOut.to_string() == "timed_out")
 
     it "identifies terminal states":
+        # @req REQ-SSPEC-UNIT
+        step("identifies terminal states")
         expect(not TaskStatus.Pending.is_terminal())
         expect(not TaskStatus.Running.is_terminal())
         expect(TaskStatus.Completed.is_terminal())
@@ -307,12 +320,16 @@ describe "TaskStatus":
 
 describe "TaskPriority":
     it "converts to string":
+        # @req REQ-SSPEC-UNIT
+        step("converts to string")
         expect(TaskPriority.Low.to_string() == "low")
         expect(TaskPriority.Normal.to_string() == "normal")
         expect(TaskPriority.High.to_string() == "high")
         expect(TaskPriority.Critical.to_string() == "critical")
 
     it "converts to numeric":
+        # @req REQ-SSPEC-UNIT
+        step("converts to numeric")
         expect(TaskPriority.Low.to_i64() == 0)
         expect(TaskPriority.Normal.to_i64() == 1)
         expect(TaskPriority.High.to_i64() == 2)
@@ -320,10 +337,14 @@ describe "TaskPriority":
 
 describe "TaskProgress":
     it "creates basic progress":
+        # @req REQ-SSPEC-UNIT
+        step("creates basic progress")
         val progress = TaskProgress(current: 50, total: nil, message: nil, percentage: nil)
         expect(progress.current == 50)
 
     it "adds total for percentage":
+        # @req REQ-SSPEC-UNIT
+        step("adds total for percentage")
         var p0 = TaskProgress(current: 25, total: nil, message: nil, percentage: nil)
         val progress = p0.with_total(100)
         expect(progress.current == 25)
@@ -341,6 +362,8 @@ describe "TaskProgress":
                 expect(false)
 
     it "adds message":
+        # @req REQ-SSPEC-UNIT
+        step("adds message")
         var p0 = TaskProgress(current: 10, total: nil, message: nil, percentage: nil)
         val progress = p0.with_message("Processing...")
 
@@ -351,6 +374,8 @@ describe "TaskProgress":
                 expect(false)
 
     it "converts to dict":
+        # @req REQ-SSPEC-UNIT
+        step("converts to dict")
         var p0 = TaskProgress(current: 50, total: nil, message: nil, percentage: nil)
         var p1 = p0.with_total(100)
         val progress = p1.with_message("Half done")
@@ -363,16 +388,22 @@ describe "TaskProgress":
 
 describe "Task":
     it "creates new task":
+        # @req REQ-SSPEC-UNIT
+        step("creates new task")
         val task = Task(id: "task_1", operation: "test_operation", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         expect(task.id == "task_1")
         expect(task.operation == "test_operation")
 
     it "sets priority":
+        # @req REQ-SSPEC-UNIT
+        step("sets priority")
         var t0 = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         val task = t0.with_priority(TaskPriority.High)
         expect(task.priority == TaskPriority.High)
 
     it "sets timeout":
+        # @req REQ-SSPEC-UNIT
+        step("sets timeout")
         var t0 = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         val task = t0.with_timeout(5000)
 
@@ -383,6 +414,8 @@ describe "Task":
                 expect(false)
 
     it "checks running state":
+        # @req REQ-SSPEC-UNIT
+        step("checks running state")
         var task = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         expect(not task.is_running())
 
@@ -391,6 +424,8 @@ describe "Task":
         expect(task.is_running())
 
     it "checks complete state":
+        # @req REQ-SSPEC-UNIT
+        step("checks complete state")
         var task = Task(id: "task_1", operation: "op", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         expect(not task.is_complete())
 
@@ -401,6 +436,8 @@ describe "Task":
         expect(task.is_complete())
 
     it "converts to dict":
+        # @req REQ-SSPEC-UNIT
+        step("converts to dict")
         var t0 = Task(id: "task_1", operation: "test", status: TaskStatus.Pending, priority: TaskPriority.Normal, timeout_ms: nil, started_at: nil, completed_at: nil, progress: nil, error: nil)
         val task = t0.with_priority(TaskPriority.High)
         val dict = task.to_dict()
@@ -412,12 +449,16 @@ describe "Task":
 
 describe "TaskError":
     it "creates error":
+        # @req REQ-SSPEC-UNIT
+        step("creates error")
         val error = TaskError(code: "ERR_001", message: "Something went wrong", retryable: false, details: nil)
         expect(error.code == "ERR_001")
         expect(error.message == "Something went wrong")
         expect(not error.retryable)
 
     it "adds details":
+        # @req REQ-SSPEC-UNIT
+        step("adds details")
         var e0 = TaskError(code: "ERR", message: "msg", retryable: false, details: nil)
         val error = e0.with_details("extra info")
 
@@ -428,22 +469,30 @@ describe "TaskError":
                 expect(false)
 
     it "marks as retryable":
+        # @req REQ-SSPEC-UNIT
+        step("marks as retryable")
         var e0 = TaskError(code: "ERR", message: "msg", retryable: false, details: nil)
         val error = e0.as_retryable()
         expect(error.retryable)
 
     it "converts to MCP error":
+        # @req REQ-SSPEC-UNIT
+        step("converts to MCP error")
         val error = TaskError(code: "timeout", message: "Operation timed out", retryable: false, details: nil)
         val mcp_error = error.to_mcp_error()
-        expect(mcp_error.category == TaskErrorCategory.Tool)
+        expect(mcp_error.category == ErrorCategory.Tool)
 
 describe "TaskManager":
     it "creates task manager":
+        # @req REQ-SSPEC-UNIT
+        step("creates task manager")
         val manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         expect(manager.running_count == 0)
         expect(manager.max_concurrent_tasks == 10)
 
     it "creates task":
+        # @req REQ-SSPEC-UNIT
+        step("creates task")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("test_operation")
         expect(task_id.starts_with("task_"))
@@ -455,6 +504,8 @@ describe "TaskManager":
                 expect(false)
 
     it "creates task with options":
+        # @req REQ-SSPEC-UNIT
+        step("creates task with options")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task_with_options(
             "important_op",
@@ -474,6 +525,8 @@ describe "TaskManager":
                 expect(false)
 
     it "starts task":
+        # @req REQ-SSPEC-UNIT
+        step("starts task")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
 
@@ -494,6 +547,8 @@ describe "TaskManager":
         expect(manager.running_count == 1)
 
     it "updates progress":
+        # @req REQ-SSPEC-UNIT
+        step("updates progress")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
         manager.start_task(task_id)
@@ -516,6 +571,8 @@ describe "TaskManager":
                 expect(false)
 
     it "updates progress with message":
+        # @req REQ-SSPEC-UNIT
+        step("updates progress with message")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
         manager.start_task(task_id)
@@ -528,6 +585,8 @@ describe "TaskManager":
                 expect(false)
 
     it "completes task":
+        # @req REQ-SSPEC-UNIT
+        step("completes task")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
         manager.start_task(task_id)
@@ -549,6 +608,8 @@ describe "TaskManager":
         expect(manager.running_count == 0)
 
     it "fails task":
+        # @req REQ-SSPEC-UNIT
+        step("fails task")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
         manager.start_task(task_id)
@@ -570,6 +631,8 @@ describe "TaskManager":
                 expect(false)
 
     it "cancels task":
+        # @req REQ-SSPEC-UNIT
+        step("cancels task")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val task_id = manager.create_task("op")
         manager.start_task(task_id)
@@ -588,6 +651,8 @@ describe "TaskManager":
                 expect(false)
 
     it "lists all tasks":
+        # @req REQ-SSPEC-UNIT
+        step("lists all tasks")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         manager.create_task("op1")
         manager.create_task("op2")
@@ -597,6 +662,8 @@ describe "TaskManager":
         expect(tasks.len() == 3)
 
     it "lists tasks by status":
+        # @req REQ-SSPEC-UNIT
+        step("lists tasks by status")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val id1 = manager.create_task("op1")
         val id2 = manager.create_task("op2")
@@ -612,6 +679,8 @@ describe "TaskManager":
         expect(pending.len() == 1)
 
     it "respects max concurrent tasks":
+        # @req REQ-SSPEC-UNIT
+        step("respects max concurrent tasks")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 2, next_id: 0)
 
         val id1 = manager.create_task("op1")
@@ -626,9 +695,11 @@ describe "TaskManager":
             case Ok(_):
                 expect(false)
             case Err(e):
-                expect(e.category == TaskErrorCategory.RateLimit)
+                expect(e.category == ErrorCategory.RateLimit)
 
     it "cleans up completed tasks":
+        # @req REQ-SSPEC-UNIT
+        step("cleans up completed tasks")
         var manager = TaskManager(tasks: {}, running_count: 0, max_concurrent_tasks: 10, next_id: 0)
         val id1 = manager.create_task("op1")
         val id2 = manager.create_task("op2")

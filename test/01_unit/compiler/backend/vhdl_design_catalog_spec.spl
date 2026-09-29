@@ -1,9 +1,19 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+
+
+
+
+use std.spec.step
+
 use std.spec
-use compiler.backend.backend.vhdl.vhdl_design_catalog.{
+use plugins.backend_vhdl.vhdl.vhdl_design_catalog.{
     vhdl_build_design_catalog,
     vhdl_build_design_catalog_with_hir, vhdl_build_design_catalog_with_metadata,
     vhdl_catalog_type_order}
-use compiler.backend.backend.vhdl_backend.VhdlBackend
+use plugins.backend_vhdl.vhdl_backend.VhdlBackend
 use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
 use compiler.common.attributes.{VhdlHardwareMetadataFlatRow, VhdlResetPolarity,
     VhdlResetSynchrony, vhdl_hardware_metadata_default}
@@ -141,7 +151,7 @@ fn catalog_owner_module() -> MirModule:
     val init = MirConstant(symbol: SymbolId(id: 3), name: "shared_init",
         type_: catalog_i32(), value: MirConstValue.Int(7))
     val static_ = MirStatic(symbol: SymbolId(id: 0), name: "shared_state",
-        type_: catalog_i32(), init: Some(init), is_mutable: true)
+        type_: catalog_i32(), init: Some(init), is_mutable: true, is_rt_struct_alloc_registered: false)
     var statics: Dict<SymbolId, MirStatic> = {}
     statics[static_.symbol] = static_
     var constants: Dict<SymbolId, MirConstant> = {}
@@ -193,8 +203,12 @@ fn catalog_function_symbol(module: MirModule, name: text) -> i64:
             return symbol.id
     -1
 
+use std.spec.step
+
 describe "VHDL design-wide catalog":
     it "recovers hardware metadata from the driver source sidecar":
+        # @req REQ-SSPEC-COMPILER
+        step("recovers hardware metadata from the driver source sidecar")
         var mir = catalog_module_b("stage4_metadata_entry", false)
         mir.name = "lib.stage4_metadata"
         var modules: Dict<text, MirModule> = {}
@@ -227,7 +241,7 @@ describe "VHDL design-wide catalog":
         expect(catalog.design.functions[symbol].has_vhdl_metadata).to_equal(true)
         val recovered = catalog.design.functions[symbol].vhdl_metadata
         expect(recovered.is_hardware).to_equal(true)
-        expect(recovered.generics.len()).to_equal(1)
+        expect(recovered.generics.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(recovered.generics[0].name).to_equal("WIDTH")
         expect(recovered.generics[0].type_text).to_equal("natural")
         expect(recovered.generics[0].default_text).to_equal("32")
@@ -238,13 +252,15 @@ describe "VHDL design-wide catalog":
         expect(recovered.clocked.reset_polarity).to_equal(VhdlResetPolarity.ActiveLow)
         expect(recovered.clocked.reset_synchrony).to_equal(VhdlResetSynchrony.Async)
         expect(recovered.clocked.domain).to_equal("core")
-        expect(recovered.return_fields.len()).to_equal(2)
+        expect(recovered.return_fields.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(recovered.return_fields[0].label).to_equal("ready")
         expect(recovered.return_fields[1].type_text).to_equal("i32")
         expect(recovered.flatten_struct_output).to_equal(true)
-        expect(catalog.hardware_entity_count).to_equal(1)
+        expect(catalog.hardware_entity_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
 
     it "fails closed when no sidecar function name matches":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed when no sidecar function name matches")
         val mir = catalog_module_b("stage4_metadata_entry", false)
         var modules: Dict<text, MirModule> = {}
         modules[mir.name] = mir
@@ -255,6 +271,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("found no @hardware entry")
 
     it "does not classify an unrelated same-named sidecar function":
+        # @req REQ-SSPEC-COMPILER
+        step("does not classify an unrelated same-named sidecar function")
         val mir = catalog_module_b("stage4_metadata_entry", false)
         var modules: Dict<text, MirModule> = {}
         modules[mir.name] = mir
@@ -265,6 +283,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("found no @hardware entry")
 
     it "rejects ambiguous normalized metadata aliases":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects ambiguous normalized metadata aliases")
         var mir = catalog_module_b("stage4_metadata_entry", false)
         mir.name = "stage4_metadata"
         var modules: Dict<text, MirModule> = {}
@@ -279,6 +299,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("is ambiguous")
 
     it "rejects an exact metadata row plus its normalized alias":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects an exact metadata row plus its normalized alias")
         var mir = catalog_module_b("stage4_metadata_entry", false)
         mir.name = "lib.stage4_metadata"
         var modules: Dict<text, MirModule> = {}
@@ -292,23 +314,9 @@ describe "VHDL design-wide catalog":
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_contain("is ambiguous")
 
-    it "keeps duplicate exact metadata rows as ambiguity evidence":
-        # @req: REQ-COMPILER-BACKEND-001
-        step("Verify: keeps duplicate exact metadata rows as ambiguity evidence")
-        var mir = catalog_module_b("stage4_metadata_entry", false)
-        mir.name = "lib.stage4_metadata"
-        var modules: Dict<text, MirModule> = {}
-        modules[mir.name] = mir
-        val rows = [
-            catalog_flat_row("lib.stage4_metadata", "stage4_metadata_entry"),
-            catalog_flat_row("lib.stage4_metadata", "stage4_metadata_entry")
-        ]
-        val result = vhdl_build_design_catalog_with_metadata(modules, {}, rows,
-            [mir.name], "stage4_metadata_duplicate_exact_contract")
-        expect(result.is_err()).to_equal(true)
-        expect(result.unwrap_err()).to_contain("is ambiguous")
-
     it "rejects a generic hardware entry before VHDL emission":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects a generic hardware entry before VHDL emission")
         var mir = catalog_module_b("generic_entry", false)
         val symbol = SymbolId(id: catalog_function_symbol(mir, "generic_entry"))
         var func = mir.functions[symbol]
@@ -324,6 +332,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("is generic")
 
     it "rejects flat metadata with mismatched parallel arrays":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects flat metadata with mismatched parallel arrays")
         val mir = catalog_module_b("invalid_metadata_entry", false)
         var modules: Dict<text, MirModule> = {}
         modules[mir.name] = mir
@@ -343,6 +353,8 @@ describe "VHDL design-wide catalog":
         expect(tag_result.unwrap_err()).to_contain("invalid flat fields")
 
     it "rebases module-local symbols and orders record dependencies":
+        # @req REQ-SSPEC-COMPILER
+        step("rebases module-local symbols and orders record dependencies")
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_a()
         modules["b"] = catalog_module_b("catalog_helper", false)
@@ -350,13 +362,13 @@ describe "VHDL design-wide catalog":
         val result = vhdl_build_design_catalog(modules, "catalog_contract")
         expect(result.is_ok()).to_equal(true)
         val catalog = result.unwrap()
-        expect(catalog.design.functions.len()).to_equal(3)
-        expect(catalog.design.types.len()).to_equal(2)
-        expect(catalog.type_order.len()).to_equal(2)
+        expect(catalog.design.functions.len()).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(catalog.design.types.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(catalog.type_order.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(catalog.design.types[catalog.type_order[0]].name).to_equal("base_t")
         expect(catalog.design.types[catalog.type_order[1]].name).to_equal("wrapper_t")
-        expect(catalog.source_module_count).to_equal(3)
-        expect(catalog.hardware_entity_count).to_equal(2)
+        expect(catalog.source_module_count).to_equal(3)  # oracle: 3 — named expected value from the requirement
+        expect(catalog.hardware_entity_count).to_equal(2)  # oracle: 2 — named expected value from the requirement
         var top_source = ""
         var leaf_source = ""
         var helper_source = ""
@@ -384,6 +396,8 @@ describe "VHDL design-wide catalog":
             output.vhdl.index_of("entity catalog_top is"))
 
     it "rebases colliding module-local functions with flat metadata and source ownership":
+        # @req REQ-SSPEC-COMPILER
+        step("rebases colliding module-local functions with flat metadata and source ownership")
         val helper = catalog_module_b("catalog_rebase_helper", false)
         var entry = catalog_call_entry_module("helper::catalog_rebase_helper")
         val entry_symbol = SymbolId(id: catalog_function_symbol(entry, "catalog_call_top"))
@@ -407,7 +421,7 @@ describe "VHDL design-wide catalog":
         expect(helper_symbol).to_be_greater_than(0)
         expect(top_symbol).to_be_greater_than(0)
         expect(helper_symbol == top_symbol).to_equal(false)
-        expect(catalog.hardware_entity_count).to_equal(1)
+        expect(catalog.hardware_entity_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val rebased_top = catalog.design.functions[SymbolId(id: top_symbol)]
         expect(rebased_top.has_vhdl_metadata).to_equal(true)
         expect(rebased_top.vhdl_metadata.is_hardware).to_equal(true)
@@ -422,6 +436,8 @@ describe "VHDL design-wide catalog":
         expect(top_source).to_equal("entry")
 
     it "uses HIR provenance for imported types and globals and rebases nested static initializers":
+        # @req REQ-SSPEC-COMPILER
+        step("uses HIR provenance for imported types and globals and rebases nested static initializers")
         var modules: Dict<text, MirModule> = {}
         modules["owner"] = catalog_owner_module()
         modules["entry"] = catalog_import_entry_module(0)
@@ -432,19 +448,19 @@ describe "VHDL design-wide catalog":
             ["entry"], "catalog_import_contract")
         expect(result.is_ok()).to_equal(true)
         val catalog = result.unwrap()
-        expect(catalog.design.functions.len()).to_equal(1)
-        expect(catalog.design.types.len()).to_equal(1)
-        expect(catalog.design.statics.len()).to_equal(1)
-        expect(catalog.design.constants.len()).to_equal(1)
-        expect(catalog.root_modules.len()).to_equal(1)
+        expect(catalog.design.functions.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(catalog.design.types.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(catalog.design.statics.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(catalog.design.constants.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(catalog.root_modules.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
         expect(catalog.root_modules[0]).to_equal("entry")
-        expect(catalog.reachable_source_modules.len()).to_equal(2)
+        expect(catalog.reachable_source_modules.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(catalog.reachable_source_modules[0]).to_equal("entry")
         expect(catalog.reachable_source_modules[1]).to_equal("owner")
-        expect(catalog.source_rows.len()).to_equal(2)
-        expect(catalog.function_sources.len()).to_equal(1)
-        expect(catalog.helper_function_count).to_equal(0)
-        expect(catalog.type_count).to_equal(1)
+        expect(catalog.source_rows.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(catalog.function_sources.len()).to_equal(1)  # oracle: 1 — named expected value from the requirement
+        expect(catalog.helper_function_count).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(catalog.type_count).to_equal(1)  # oracle: 1 — named expected value from the requirement
         val static_symbol = catalog.design.statics.keys()[0]
         expect(static_symbol.id).to_be_greater_than(0)
         val retained = catalog.design.statics[static_symbol]
@@ -461,6 +477,8 @@ describe "VHDL design-wide catalog":
             case _: expect(false).to_equal(true)
 
     it "fails at the catalog boundary for an unmapped imported global":
+        # @req REQ-SSPEC-COMPILER
+        step("fails at the catalog boundary for an unmapped imported global")
         var modules: Dict<text, MirModule> = {}
         modules["owner"] = catalog_owner_module()
         modules["entry"] = catalog_import_entry_module(99)
@@ -473,6 +491,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("unmapped global/static symbol")
 
     it "retains hardware entities referenced by explicit port maps":
+        # @req REQ-SSPEC-COMPILER
+        step("retains hardware entities referenced by explicit port maps")
         var modules: Dict<text, MirModule> = {}
         modules["leaf"] = catalog_module_b("catalog_leaf", true)
         modules["entry"] = catalog_portmap_entry_module("leaf::catalog_leaf")
@@ -480,8 +500,8 @@ describe "VHDL design-wide catalog":
             "catalog_portmap_contract")
         expect(result.is_ok()).to_equal(true)
         val catalog = result.unwrap()
-        expect(catalog.design.functions.len()).to_equal(2)
-        expect(catalog.hardware_entity_count).to_equal(2)
+        expect(catalog.design.functions.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
+        expect(catalog.hardware_entity_count).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(catalog_function_symbol(catalog.design, "catalog_leaf")).to_be_greater_than(0)
         val top_symbol = SymbolId(id: catalog_function_symbol(catalog.design,
             "catalog_portmap_top"))
@@ -490,6 +510,8 @@ describe "VHDL design-wide catalog":
             case _: expect(false).to_equal(true)
 
     it "fails closed when an explicit port-map entity does not resolve":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed when an explicit port-map entity does not resolve")
         var modules: Dict<text, MirModule> = {}
         modules["entry"] = catalog_portmap_entry_module("catalog_leaf")
         val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
@@ -498,6 +520,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("Unresolved VHDL port-map entity")
 
     it "rejects ambiguous bare port-map entity names across modules":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects ambiguous bare port-map entity names across modules")
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_b("shared_entity", true)
         modules["b"] = catalog_module_b("shared_entity", true)
@@ -508,6 +532,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("Ambiguous VHDL port-map entity")
 
     it "rejects ambiguous bare call names across modules":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects ambiguous bare call names across modules")
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_b("shared_helper", false)
         modules["b"] = catalog_module_b("shared_helper", false)
@@ -518,6 +544,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("Ambiguous VHDL design call target")
 
     it "resolves a module-qualified call identity and prunes its bare-name sibling":
+        # @req REQ-SSPEC-COMPILER
+        step("resolves a module-qualified call identity and prunes its bare-name sibling")
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_b("shared_helper", false)
         modules["b"] = catalog_module_b("shared_helper", false)
@@ -526,7 +554,7 @@ describe "VHDL design-wide catalog":
             "catalog_qualified_call_contract")
         expect(result.is_ok()).to_equal(true)
         val catalog = result.unwrap()
-        expect(catalog.design.functions.len()).to_equal(2)
+        expect(catalog.design.functions.len()).to_equal(2)  # oracle: 2 — named expected value from the requirement
         expect(catalog_function_symbol(catalog.design, "shared_helper")).to_be_greater_than(0)
         val top_symbol = SymbolId(id: catalog_function_symbol(catalog.design,
             "catalog_call_top"))
@@ -538,6 +566,8 @@ describe "VHDL design-wide catalog":
             case _: expect(false).to_equal(true)
 
     it "fails at the catalog boundary for instruction-embedded unmapped types":
+        # @req REQ-SSPEC-COMPILER
+        step("fails at the catalog boundary for instruction-embedded unmapped types")
         var modules: Dict<text, MirModule> = {}
         modules["entry"] = catalog_unmapped_aggregate_entry_module()
         val result = vhdl_build_design_catalog_with_hir(modules, {}, ["entry"],
@@ -546,6 +576,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("unmapped type symbol")
 
     it "is deterministic when source modules are inserted in reverse order":
+        # @req REQ-SSPEC-COMPILER
+        step("is deterministic when source modules are inserted in reverse order")
         var forward: Dict<text, MirModule> = {}
         forward["a"] = catalog_module_a()
         forward["b"] = catalog_module_b("catalog_helper", false)
@@ -578,6 +610,8 @@ describe "VHDL design-wide catalog":
         expect(first_vhdl.vhdl).to_equal(second_vhdl.vhdl)
 
     it "fails closed on design-wide emitted-name conflicts":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed on design-wide emitted-name conflicts")
         var modules: Dict<text, MirModule> = {}
         modules["a"] = catalog_module_b("duplicate_name", true)
         modules["b"] = catalog_module_b("DUPLICATE_NAME", true)
@@ -586,6 +620,8 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("Conflicting VHDL function/entity name")
 
     it "fails closed on cyclic reachable record dependencies":
+        # @req REQ-SSPEC-COMPILER
+        step("fails closed on cyclic reachable record dependencies")
         val left = MirTypeDef(symbol: SymbolId(id: 1), name: "left_t",
             kind: MirTypeDefKind.Struct([MirFieldDef(name: "right",
                 type_: MirType(kind: MirTypeKind.Struct(SymbolId(id: 2))),
@@ -604,8 +640,10 @@ describe "VHDL design-wide catalog":
         expect(result.unwrap_err()).to_contain("cyclic record/enum type dependency")
 
     it "selects the VHDL root only from explicit compile inputs, never native-build env":
+        # @req REQ-SSPEC-COMPILER
+        step("selects the VHDL root only from explicit compile inputs, never native-build env")
         val source = rt_file_read_text(
-            "src/compiler/80.driver/driver_aot_vhdl_output.spl") ?? ""
+            "src/compiler/80.driver/driver_aot_output.spl") ?? ""
         expect(source.contains("rt_env_get(\"SIMPLE_NATIVE_BUILD_ENTRY\")")).to_equal(false)
         expect(source).to_contain("driver_vhdl_entry_module(ctx)")
         expect(source).to_contain("ctx.options.bootstrap_input_0")

@@ -1,0 +1,108 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_system_provider.{
+    strict_riscv_scalar_runtime_system_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_semantic_opcode}
+
+fn system_row(plan: RiscvScalarDecoderPlan, instruction: i64) -> i64:
+    var index = 0
+    for entry in plan.entries:
+        if entry.matches(instruction as u32, plan.xlen): return index + 1
+        index = index + 1
+    0
+
+fn system_inputs(plan: RiscvScalarDecoderPlan, instruction: i64,
+    privilege: i64) -> [HwHostInput]:
+    val entry = plan.lookup(instruction as u32).unwrap()
+    [HwHostInput.bits("uop_valid", 1), HwHostInput.bits("decode_legal", 1),
+        HwHostInput.bits("decoded_row_index", system_row(plan, instruction)),
+        HwHostInput.bits("decoded_execution_class", 5),
+        HwHostInput.bits("decoded_memory_effect", 0),
+        HwHostInput.bits("decoded_semantic_opcode", riscv_scalar_semantic_opcode(entry.semantic_operation)),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", 0),
+        HwHostInput.bits("canonical_instruction", instruction),
+        HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4),
+        HwHostInput.bits("instruction_rd_field", 0), HwHostInput.bits("instruction_rs1_field", 0),
+        HwHostInput.bits("instruction_rs2_field", if instruction == 0x00100073: 1 else: 0),
+        HwHostInput.bits("pc_before", 0x100), HwHostInput.bits("fallthrough_pc", 0x104),
+        HwHostInput.bits("privilege", privilege), HwHostInput.bits("provider_event_id", 23),
+        HwHostInput.bits("decode_event_id", 23), HwHostInput.bits("lineage_valid", 1)]
+
+describe "plan-bound runtime scalar SYSTEM provider":
+    it "projects ECALL causes for U S and M privilege with precise trap metadata":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_ecall", CoreConfig.rv32(), plan).unwrap()
+        for product in [(0, 8), (1, 9), (3, 11)]:
+            val result = evaluate_strict_comb_hwir(module,
+                system_inputs(plan, 0x00000073, product[0])).unwrap()
+            expect(result.value_of("completion_valid").unwrap()).to_equal(1)
+            expect(result.value_of("protocol_fault").unwrap()).to_equal(0)
+            expect(result.value_of("completion_execute_trap_valid").unwrap()).to_equal(1)
+            expect(result.value_of("completion_execute_trap_cause").unwrap()).to_equal(product[1])
+            expect(result.value_of("completion_execute_trap_tval").unwrap()).to_equal(0)
+            expect(result.value_of("completion_pc_after").unwrap()).to_equal(0x104)
+
+    it "projects EBREAK and converts reserved privilege to illegal instruction":
+        val plan = riscv_scalar_decoder_plan("rv64i").unwrap()
+        val module = strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_traps", CoreConfig.rv64(), plan).unwrap()
+        val breakpoint = evaluate_strict_comb_hwir(module,
+            system_inputs(plan, 0x00100073, 3)).unwrap()
+        expect(breakpoint.value_of("completion_execute_trap_cause").unwrap()).to_equal(3)
+        expect(breakpoint.value_of("completion_execute_trap_tval").unwrap()).to_equal(0)
+        expect(breakpoint.value_of("completion_illegal_valid").unwrap()).to_equal(0)
+        val reserved = evaluate_strict_comb_hwir(module,
+            system_inputs(plan, 0x00100073, 2)).unwrap()
+        expect(reserved.value_of("completion_execute_trap_cause").unwrap()).to_equal(2)
+        expect(reserved.value_of("completion_execute_trap_tval").unwrap()).to_equal(0x00100073)
+        expect(reserved.value_of("completion_valid").unwrap()).to_equal(1)
+        expect(reserved.value_of("protocol_fault").unwrap()).to_equal(0)
+        expect(reserved.value_of("completion_execute_trap_valid").unwrap()).to_equal(1)
+        expect(reserved.value_of("completion_illegal_valid").unwrap()).to_equal(0)
+
+    it "zeros all forbidden side effects and preserves exact identity fields":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_normalized", CoreConfig.rv32(), plan).unwrap()
+        val result = evaluate_strict_comb_hwir(module, system_inputs(plan, 0x00000073, 1)).unwrap()
+        for zero in ["completion_rd", "completion_rd_write", "completion_rd_value",
+                "completion_memory_address", "completion_memory_read_mask",
+                "completion_memory_write_mask", "completion_memory_read_data",
+                "completion_memory_write_data", "completion_memory_trap_valid",
+                "completion_memory_trap_cause", "completion_memory_trap_tval",
+                "completion_redirect_valid", "completion_redirect_target"]:
+            expect(result.value_of(zero).unwrap()).to_equal(0)
+        expect(result.value_of("completion_original_instruction").unwrap()).to_equal(0x00000073)
+        expect(result.value_of("completion_instruction_length_bytes").unwrap()).to_equal(4)
+        expect(result.value_of("completion_provider_event_id").unwrap()).to_equal(23)
+        expect(result.value_of("completion_decode_event_id").unwrap()).to_equal(23)
+
+    it "faults malformed legal SYSTEM claims and stays idle out of domain":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_contract", CoreConfig.rv32(), plan).unwrap()
+        for index in [2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 17, 18]:
+            var malformed = system_inputs(plan, 0x00000073, 3)
+            malformed[index] = HwHostInput.bits(malformed[index].name, malformed[index].value + 1)
+            val result = evaluate_strict_comb_hwir(module, malformed).unwrap()
+            expect(result.value_of("completion_valid").unwrap()).to_equal(0)
+            expect(result.value_of("protocol_fault").unwrap()).to_equal(1)
+        var outside = system_inputs(plan, 0x00000073, 3)
+        outside[3] = HwHostInput.bits("decoded_execution_class", 1)
+        outside[2] = HwHostInput.bits("decoded_row_index", 1)
+        val idle = evaluate_strict_comb_hwir(module, outside).unwrap()
+        expect(idle.value_of("completion_valid").unwrap()).to_equal(0)
+        expect(idle.value_of("protocol_fault").unwrap()).to_equal(0)
+
+    it "rejects missing identity mismatched plans and compressed v1":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        expect(strict_riscv_scalar_runtime_system_provider("", CoreConfig.rv32(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_wrong", CoreConfig.rv64(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_system_provider(
+            "runtime_system_compressed", CoreConfig.rv32_zca_integer(),
+            riscv_scalar_decoder_plan("rv32i_zca").unwrap()).is_err()).to_be(true)

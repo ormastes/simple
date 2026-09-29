@@ -1,0 +1,80 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# `SymbolTable.define` (src/compiler/20.hir/hir_types.spl) takes SEVEN
+# parameters; the `bind_lexical` flag lives on `define_with_binding`, split
+# out by 2aaea2ba0a9 because the seed does not fill omitted defaults on
+# cross-module method calls. Two callers in
+# src/compiler/50.mir/_MirLowering/provider_metadata.spl (from 59cba6907ad)
+# kept passing the eighth `false`, and nothing checks cross-module call
+# arity statically: the seed's interpreter rejected the call at RUNTIME,
+# inside the native-build worker, with no location, and it blocked the
+# `simple_lsp_mcp` server's native artifact. This spec pins the arity of
+# every real `symbols.define(` call under src/compiler so the next such
+# drift is a spec failure naming the file and line, not a six-minute build.
+
+use std.spec.step
+
+use std.io_runtime.{dir_walk, file_read}
+
+val NEEDLE = "symbols.define("
+val EXPECTED_ARGC = 7
+
+# Count top-level comma-separated arguments of the call whose `(` sits at
+# `open` in `source`. Nested `(`/`[` do not split arguments.
+fn call_argc(source: text, open: i64) -> i64:
+    var depth = 0
+    var argc = 1
+    var i = open + 1
+    val n = source.len()
+    while i < n:
+        val c = source.substring(i, i + 1)
+        if c == "(" or c == "[":
+            depth = depth + 1
+        elif c == ")" or c == "]":
+            if depth == 0:
+                return argc
+            depth = depth - 1
+        elif c == "," and depth == 0:
+            argc = argc + 1
+        i = i + 1
+    argc
+
+# A mention inside a `#` comment or a backtick-quoted docstring fragment is
+# not a call.
+fn is_real_call(line: text, col: i64) -> bool:
+    val prefix = line.substring(0, col)
+    if prefix.trim().starts_with("#"):
+        return false
+    not prefix.contains("`")
+
+describe "every real symbols.define( call passes exactly seven arguments":
+
+    """Scans src/compiler/**/*.spl. Non-vacuous: the scan must find real
+    call sites, and every one of them must match `define`'s declared arity."""
+
+    it "finds no call site whose argument count differs from the declaration":
+        step("scan src/compiler")
+        var checked = 0
+        var offenders: [text] = []
+        for path in dir_walk("src/compiler"):
+            if not path.ends_with(".spl"):
+                continue
+            val source = file_read(path)
+            var offset = 0
+            var line_no = 0
+            for line in source.split("\n"):
+                line_no = line_no + 1
+                val col = line.find(NEEDLE)
+                if col >= 0 and is_real_call(line, col):
+                    checked = checked + 1
+                    val argc = call_argc(source, offset + col + NEEDLE.len() - 1)
+                    if argc != EXPECTED_ARGC:
+                        offenders.push(path + ":" + line_no.to_text() + " argc=" + argc.to_text())
+                offset = offset + line.len() + 1
+
+        step("the scan was non-vacuous and clean")
+        assert_true(checked > 20)
+        assert_equal(offenders.len(), 0)
+        for offender in offenders:
+            print("arity offender: " + offender)

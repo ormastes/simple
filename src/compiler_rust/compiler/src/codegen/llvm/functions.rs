@@ -20,6 +20,7 @@ mod casts;
 mod collections;
 mod consts;
 mod memory;
+mod inline_asm;
 mod objects;
 
 /// Type alias for vreg map
@@ -88,6 +89,22 @@ fn primitive_type_symbol_name(ty: crate::hir::TypeId) -> Option<&'static str> {
     })
 }
 
+/// The receiver-blind LLVM method table may use the collection helper only for
+/// an erased receiver. Exact/import user targets are resolved before this gate;
+/// owner suffix scans are deliberately excluded because they can capture an
+/// unrelated `Owner.set` and turn the method lookup into an O(calls×functions)
+/// walk.
+#[cfg(feature = "llvm")]
+fn uses_erased_collection_set_fallback(
+    receiver_ty: Option<crate::hir::TypeId>,
+    method: &str,
+    arg_count: usize,
+) -> bool {
+    method == "set"
+        && arg_count == 2
+        && matches!(receiver_ty, None | Some(crate::hir::TypeId::ANY))
+}
+
 #[cfg(feature = "llvm")]
 fn build_vreg_types(
     func: &MirFunction,
@@ -98,8 +115,25 @@ fn build_vreg_types(
 
     let mut types_map = VRegTypes::new();
 
+    // Seed VReg(i) with param i's type ONLY when no instruction defines that
+    // VReg. MIR that reaches params through their locals (LocalAddr + Load)
+    // reuses v0/v1/... as ordinary temps; seeding them unconditionally left a
+    // LocalAddr dest (a pointer; no arm below) typed F64, so its spill slot was
+    // `double`, the address was unusable, and the Load through it lowered to
+    // `0.0`. Any function with >= 2 f64 params read its first param as 0.0 and
+    // LLVM folded the resulting poison branch to `unreachable` -> `int3`
+    // (the stage-2 test runner's `system_exceeds_threshold(f64, f64)`: exit
+    // 133 after exactly 20 specs on Windows, 2026-09-25).
+    let defined: std::collections::HashSet<crate::mir::VReg> = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter().flat_map(|inst| inst.defs()))
+        .collect();
     for (i, param) in func.params.iter().enumerate() {
-        types_map.insert(crate::mir::VReg(i as u32), param.ty);
+        let vreg = crate::mir::VReg(i as u32);
+        if !defined.contains(&vreg) {
+            types_map.insert(vreg, param.ty);
+        }
     }
 
     for block in &func.blocks {
@@ -107,6 +141,9 @@ fn build_vreg_types(
             match inst {
                 MirInst::ConstInt { dest, .. } => {
                     types_map.insert(*dest, TypeId::I64);
+                }
+                MirInst::ConstString { dest, .. } => {
+                    types_map.insert(*dest, TypeId::STRING);
                 }
                 MirInst::ConstFloat { dest, .. } => {
                     types_map.insert(*dest, TypeId::F64);
@@ -169,11 +206,29 @@ fn build_vreg_types(
                 MirInst::MethodCallStatic {
                     dest: Some(dest),
                     func_name,
-                    ..
+                    receiver,
+                    args,
                 } => {
+                    // char_at returns a one-character text value. Preserve this
+                    // proof for the following bare ord() without treating an
+                    // unknown receiver as text.
+                    let dotted = func_name.replace("_dot_", ".");
+                    if args.len() == 1
+                        && (matches!(dotted.as_str(), "str.char_at" | "text.char_at" | "String.char_at" | "string.char_at")
+                            || (dotted == "char_at" && types_map.get(receiver) == Some(&TypeId::STRING)))
+                    {
+                        types_map.insert(*dest, TypeId::STRING);
+                    }
                     if let Some(ty) = function_return_types.get(func_name.as_str()) {
                         if matches!(ty, &TypeId::F64 | &TypeId::F32) {
                             types_map.insert(*dest, *ty);
+                        }
+                    } else if args.is_empty() {
+                        let dotted = func_name.replace("_dot_", ".");
+                        if matches!(dotted.rsplit('.').next(), Some("floor" | "ceil" | "round")) {
+                            if let Some(ty @ (TypeId::F32 | TypeId::F64)) = types_map.get(receiver).copied() {
+                                types_map.insert(*dest, ty);
+                            }
                         }
                     }
                 }
@@ -297,7 +352,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("wrap membership needle", &e))?;
         Ok(call
             .try_as_basic_value()
-            .left()
+            .basic()
             .unwrap_or_else(|| i64_type.const_int(0, false).into()))
     }
 
@@ -383,7 +438,7 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_float", &e))?;
         let ret = call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CompileError::semantic("rt_value_float returned no value".to_string()))?
             .into_int_value();
         Ok(ret)
@@ -431,9 +486,147 @@ impl LlvmBackend {
             .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_float", &e))?;
         Ok(call
             .try_as_basic_value()
-            .left()
+            .basic()
             .ok_or_else(|| CompileError::semantic("rt_value_as_float returned no value".to_string()))?
             .into_float_value())
+    }
+
+    /// Emit one raw `asm { }` block as an LLVM inline-asm call
+    /// (design A.3 text contract + A.4 clobber lowering, see `raw_asm.rs`).
+    #[cfg(feature = "llvm")]
+    fn emit_raw_asm_block(
+        &self,
+        instructions: &[String],
+        constraints: &str,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let fn_type = self.context_ref().void_type().fn_type(&[], false);
+        let asm = self.context_ref().create_inline_asm(
+            fn_type,
+            super::raw_asm::raw_asm_template(instructions),
+            constraints.to_string(),
+            true,
+            false,
+            Some(InlineAsmDialect::ATT),
+            false,
+        );
+        builder
+            .build_indirect_call(fn_type, asm, &[], "")
+            .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+        Ok(())
+    }
+
+    /// Design A.2 `@naked`: the body MUST be exactly one raw `asm { }` block.
+    /// Nothing else is materialised — no vreg/local allocas, no parameter
+    /// spills, no `ret`; the block is followed by `unreachable` so LLVM
+    /// synthesises no epilogue (the survey measured a trailing `c3` + `int3`
+    /// padding with the plain path, fatal for stubs ending in jmp/iret/mret).
+    #[cfg(feature = "llvm")]
+    fn compile_naked_function(
+        &self,
+        func: &MirFunction,
+        function: inkwell::values::FunctionValue<'static>,
+        builder: &inkwell::builder::Builder<'static>,
+    ) -> Result<(), CompileError> {
+        let entry = self.context_ref().append_basic_block(function, "naked_entry");
+        builder.position_at_end(entry);
+        let mut asm_blocks = 0usize;
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    crate::mir::MirInst::InlineAsm {
+                        instructions,
+                        constraints,
+                        inputs,
+                        outputs,
+                        ..
+                    } => {
+                        // A `@naked` body owns the whole register file, so it
+                        // must not bind operands or declare clobbers. Under
+                        // the landed MIR shape the clobber list has already
+                        // been folded into the constraint string, so anything
+                        // beyond the implicit `~{memory}` is a violation.
+                        let declared: Vec<&str> = constraints
+                            .split(',')
+                            .filter(|c| !c.is_empty() && *c != "~{memory}")
+                            .collect();
+                        if !declared.is_empty() || !inputs.is_empty() || !outputs.is_empty() {
+                            return Err(CompileError::Codegen(format!(
+                                "E-NAKED-CLOBBER: `{}` is @naked; its raw asm block must not carry clobbers(...) \
+                                 or bound operands (the whole register file belongs to the author), found `{}`",
+                                func.name, constraints
+                            )));
+                        }
+                        self.emit_raw_asm_block(instructions, "~{memory}", builder)?;
+                        asm_blocks += 1;
+                    }
+                    other => {
+                        return Err(CompileError::Codegen(format!(
+                            "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {:?}",
+                            func.name, other
+                        )));
+                    }
+                }
+            }
+            match &block.terminator {
+                crate::mir::Terminator::Return(None) | crate::mir::Terminator::Unreachable => {}
+                other => {
+                    return Err(CompileError::Codegen(format!(
+                        "E-NAKED-BODY: `{}` is @naked; control flow other than fall-through is not allowed, found {:?}",
+                        func.name, other
+                    )));
+                }
+            }
+        }
+        if asm_blocks != 1 {
+            return Err(CompileError::Codegen(format!(
+                "E-NAKED-BODY: `{}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}",
+                func.name
+            )));
+        }
+        builder
+            .build_unreachable()
+            .map_err(|e| crate::error::factory::llvm_build_failed("naked_unreachable", &e))?;
+        Ok(())
+    }
+
+    /// LLVM type to use when spilling/reloading a vreg to/from its
+    /// per-instruction cross-block alloca.
+    ///
+    /// `compile_function` spills EVERY vreg's value to its own alloca after
+    /// the defining instruction and reloads it before the next use (a naive
+    /// SSA-without-liveness scheme; see `vreg_map.clear()` after each
+    /// instruction below). Every one of those reload/store sites used to
+    /// hardcode `self.runtime_int_type()` (i64 on 64-bit targets), which is
+    /// correct for the general tagged-RuntimeValue ABI but WRONG for a plain
+    /// unboxed `f64`/`f32` vreg: the round trip bitcasts the double to i64 on
+    /// store (bit-exact) but then reloads it as a bare `IntValue` with no
+    /// cast back, so the very next instruction sees an integer holding the
+    /// double's raw bits instead of a float. `compile_binop` dispatches on
+    /// the LLVM value's actual kind (`IntValue` vs `FloatValue`), so it took
+    /// the INTEGER add path and summed the two doubles' bit patterns.
+    ///
+    /// Measured before this fix (`zz_sum.spl`, `var x = 1.5; print(x + 2.5)`,
+    /// native `core-c-bootstrap`, `aarch64-apple-darwin`): `x` reloaded as
+    /// `IntValue(0x3ff8000000000000)` (bits of 1.5), the literal `2.5` as
+    /// `IntValue(0x4004000000000000)`, `BinOp::Add` computed
+    /// `0x3ff8000000000000 + 0x4004000000000000 = 0x7ffc000000000000`, and
+    /// the program printed `NaN`. Using the vreg's real type (via
+    /// `vreg_types`) for every spill/reload site below, the same program
+    /// prints `4`, and `dotp([1.0,2.0],[3.0,4.0])` prints `11`, both matching
+    /// the interpreter.
+    #[cfg(feature = "llvm")]
+    fn native_slot_type(
+        &self,
+        vreg_types: &VRegTypes,
+        vreg: &crate::mir::VReg,
+    ) -> inkwell::types::BasicTypeEnum<'static> {
+        use crate::hir::TypeId as T;
+        match vreg_types.get(vreg).copied() {
+            Some(T::F64) => self.context_ref().f64_type().into(),
+            Some(T::F32) => self.context_ref().f32_type().into(),
+            _ => self.runtime_int_type().into(),
+        }
     }
 
     /// Compile a MIR function to LLVM IR (feature-gated)
@@ -449,6 +642,11 @@ impl LlvmBackend {
                 .as_deref()
                 .map(|needle| func.name.contains(needle))
                 .unwrap_or_else(|| func.name.contains("native_build"));
+
+        // `@volatile` / `@no_reorder` memory-order mode for this function
+        // (read by compile_load / compile_store / compile_inline_asm).
+        self.mem_order_mode
+            .set(inline_asm::mem_order_mode_for(&func.attributes));
 
         // Debug: dump MIR for selected functions when SIMPLE_DUMP_IR is set.
         if should_dump {
@@ -504,6 +702,11 @@ impl LlvmBackend {
             module.add_function(resolved_name, fn_type, None)
         });
 
+        // Design A.2 `@naked`: no allocas, no prologue, no epilogue, no `ret`.
+        if func.attributes.iter().any(|attr| attr == "naked") {
+            return self.compile_naked_function(func, function, builder);
+        }
+
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
         for block in &func.blocks {
@@ -533,7 +736,7 @@ impl LlvmBackend {
         }
         for block in &func.blocks {
             for inst in &block.instructions {
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     all_vregs.insert(d);
                 }
                 for u in inst.uses() {
@@ -653,7 +856,8 @@ impl LlvmBackend {
                         let Some(&alloca) = local_allocas.get(local_index) else {
                             continue;
                         };
-                        let offset = 8 + (capture_index as u64 * 8);
+                        // Match the reserved kind word in compile_closure_create.
+                        let offset = 16 + (capture_index as u64 * 8);
                         let offset_val = self.context_ref().i32_type().const_int(offset, false);
                         let field_ptr = unsafe {
                             builder
@@ -701,11 +905,11 @@ impl LlvmBackend {
             // At the start of each block, reload the vregs that are live-in to
             // that block. For the entry block, seed parameter vregs.
             if Some(block.id) == is_entry_block_id {
-                let i64_type = self.runtime_int_type();
                 for (i, _param) in func.params.iter().enumerate() {
                     let vreg = crate::mir::VReg(i as u32);
+                    let slot_type = self.native_slot_type(&vreg_types, &vreg);
                     if let Some(&alloca) = vreg_allocas.get(&vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(vreg, val);
                         }
                     }
@@ -722,7 +926,7 @@ impl LlvmBackend {
                             live_in.insert(u);
                         }
                     }
-                    if let Some(d) = inst.dest() {
+                    for d in inst.defs() {
                         seen_defs.insert(d);
                     }
                 }
@@ -746,10 +950,10 @@ impl LlvmBackend {
                 }
 
                 // Load only live-in vregs from allocas
-                let i64_type = self.runtime_int_type();
                 for vreg in &live_in {
+                    let slot_type = self.native_slot_type(&vreg_types, vreg);
                     if let Some(&alloca) = vreg_allocas.get(vreg) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", vreg.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", vreg.0)) {
                             vreg_map.insert(*vreg, val);
                         }
                     }
@@ -763,13 +967,13 @@ impl LlvmBackend {
 
             // Compile each instruction by dispatching to helper methods
             for inst in &block.instructions {
-                let i64_type = self.runtime_int_type();
                 for used in inst.uses() {
                     if vreg_map.contains_key(&used) {
                         continue;
                     }
+                    let slot_type = self.native_slot_type(&vreg_types, &used);
                     if let Some(&alloca) = vreg_allocas.get(&used) {
-                        if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", used.0)) {
+                        if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", used.0)) {
                             vreg_map.insert(used, val);
                         }
                     }
@@ -778,13 +982,13 @@ impl LlvmBackend {
                 self.compile_instruction(inst, &mut vreg_map, &local_allocas, &vreg_types, builder, module)?;
 
                 // Store any newly defined vreg to its alloca (for cross-block access)
-                if let Some(d) = inst.dest() {
+                for d in inst.defs() {
                     if let (Some(&alloca), Some(&val)) = (vreg_allocas.get(&d), vreg_map.get(&d)) {
-                        let rv_type = self.runtime_int_type();
-                        let i64_val = self
-                            .coerce_value_to_type(val, Some(rv_type.into()), builder)
+                        let slot_type = self.native_slot_type(&vreg_types, &d);
+                        let slot_val = self
+                            .coerce_value_to_type(val, Some(slot_type), builder)
                             .unwrap_or(val);
-                        let _ = builder.build_store(alloca, i64_val);
+                        let _ = builder.build_store(alloca, slot_val);
                     }
                 }
 
@@ -792,12 +996,12 @@ impl LlvmBackend {
             }
 
             // Compile terminator
-            let i64_type = self.runtime_int_type();
             match &block.terminator {
                 crate::mir::Terminator::Return(Some(v)) => {
                     if !vreg_map.contains_key(v) {
+                        let slot_type = self.native_slot_type(&vreg_types, v);
                         if let Some(&alloca) = vreg_allocas.get(v) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", v.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", v.0)) {
                                 vreg_map.insert(*v, val);
                             }
                         }
@@ -805,8 +1009,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Branch { cond, .. } => {
                     if !vreg_map.contains_key(cond) {
+                        let slot_type = self.native_slot_type(&vreg_types, cond);
                         if let Some(&alloca) = vreg_allocas.get(cond) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", cond.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", cond.0)) {
                                 vreg_map.insert(*cond, val);
                             }
                         }
@@ -814,8 +1019,9 @@ impl LlvmBackend {
                 }
                 crate::mir::Terminator::Switch { discriminant, .. } => {
                     if !vreg_map.contains_key(discriminant) {
+                        let slot_type = self.native_slot_type(&vreg_types, discriminant);
                         if let Some(&alloca) = vreg_allocas.get(discriminant) {
-                            if let Ok(val) = builder.build_load(i64_type, alloca, &format!("v{}", discriminant.0)) {
+                            if let Ok(val) = builder.build_load(slot_type, alloca, &format!("v{}", discriminant.0)) {
                                 vreg_map.insert(*discriminant, val);
                             }
                         }
@@ -1001,20 +1207,15 @@ impl LlvmBackend {
             MirInst::Call { dest, target, args } => {
                 self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
-            MirInst::InlineAsm { instructions, .. } => {
-                let fn_type = self.context_ref().void_type().fn_type(&[], false);
-                let asm = self.context_ref().create_inline_asm(
-                    fn_type,
-                    instructions.join("\n"),
-                    String::new(),
-                    true,
-                    false,
-                    Some(InlineAsmDialect::ATT),
-                    false,
-                );
-                builder
-                    .build_indirect_call(fn_type, asm, &[], "")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("inline_asm", &e))?;
+            MirInst::InlineAsm {
+                instructions,
+                volatile,
+                constraints,
+                inputs,
+                outputs,
+            } => {
+                self.compile_inline_asm(instructions, *volatile, constraints, inputs, outputs, vreg_map, builder)?;
+                self.emit_no_reorder_fence(builder)?;
             }
             MirInst::IndirectCall {
                 dest,
@@ -1340,7 +1541,7 @@ impl LlvmBackend {
                                 .build_call(rt_string_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| format!("pattern string_new: {e}"))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             // rt_string_eq(a, b) -> i64
                             let rt_string_eq = module.get_function("rt_string_eq").unwrap_or_else(|| {
@@ -1351,7 +1552,7 @@ impl LlvmBackend {
                                 .build_call(rt_string_eq, &[subject_val.into(), lit_str.into()], "pat_str_eq")
                                 .map_err(|e| format!("pattern string_eq: {e}"))?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                                 .into_int_value()
                         }
@@ -1385,7 +1586,7 @@ impl LlvmBackend {
                             .build_call(rt_enum_disc, &[subject_val.into()], "disc")
                             .map_err(|e| format!("pattern disc: {e}"))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into())
                             .into_int_value();
                         let rt_enum_id = module.get_function("rt_enum_id").unwrap_or_else(|| {
@@ -1396,7 +1597,7 @@ impl LlvmBackend {
                             .build_call(rt_enum_id, &[subject_val.into()], "enum_id")
                             .map_err(|e| format!("pattern enum id: {e}"))?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(u64::MAX, false).into())
                             .into_int_value();
                         let expected = {
@@ -1451,7 +1652,7 @@ impl LlvmBackend {
                                     .build_call(rt_enum_payload, &[current.into()], "payload")
                                     .map_err(|e| format!("pattern bind payload: {e}"))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::TupleIndex(idx) => {
@@ -1464,7 +1665,7 @@ impl LlvmBackend {
                                     .build_call(rt_tuple_get, &[current.into(), idx_val.into()], "tuple_el")
                                     .map_err(|e| format!("pattern bind tuple: {e}"))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                             }
                             crate::mir::BindingStep::FieldName(_) => {
@@ -1484,7 +1685,7 @@ impl LlvmBackend {
                         .build_call(raw_fn, &[result.into()], "u64_payload")
                         .map_err(|e| CompileError::Semantic(format!("u64 payload call: {e}")))?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or(result);
                 }
                 vreg_map.insert(*dest, result);
@@ -1505,7 +1706,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "disc")
                     .map_err(|e| CompileError::Semantic(format!("enum disc call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1523,7 +1724,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "payload")
                     .map_err(|e| CompileError::Semantic(format!("enum payload call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1561,7 +1762,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("enum unit call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1602,7 +1803,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("enum with call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1621,7 +1822,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "union_disc")
                     .map_err(|e| CompileError::Semantic(format!("union disc call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1639,7 +1840,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "union_payload")
                     .map_err(|e| CompileError::Semantic(format!("union payload call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1664,7 +1865,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[enum_id_val.into(), disc_val.into(), val.into()], "union_wrap")
                     .map_err(|e| CompileError::Semantic(format!("union wrap call: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1712,7 +1913,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("option some: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1743,7 +1944,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("option none: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1775,7 +1976,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("result ok: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1807,7 +2008,7 @@ impl LlvmBackend {
                     )
                     .map_err(|e| CompileError::Semantic(format!("result err: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1831,7 +2032,7 @@ impl LlvmBackend {
                     .build_call(rt_fn, &[val.into()], "try_unwrap")
                     .map_err(|e| CompileError::Semantic(format!("try unwrap: {e}")))?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_t.const_int(0, false).into());
                 vreg_map.insert(*dest, result);
             }
@@ -1987,7 +2188,7 @@ impl LlvmBackend {
                         let call = builder
                             .build_call(func, &[int_val.into()], "box_int")
                             .map_err(|e| crate::error::factory::llvm_build_failed("box_int call", &e))?;
-                        let boxed = call.try_as_basic_value().left().ok_or_else(|| {
+                        let boxed = call.try_as_basic_value().basic().ok_or_else(|| {
                             crate::error::factory::llvm_build_failed("box_int call", &"rt_value_int returned void")
                         })?;
                         vreg_map.insert(*dest, boxed);
@@ -2020,7 +2221,7 @@ impl LlvmBackend {
                     let call = builder
                         .build_call(func, &[int_val.into()], "unbox_int")
                         .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int call", &e))?;
-                    let unboxed = call.try_as_basic_value().left().ok_or_else(|| {
+                    let unboxed = call.try_as_basic_value().basic().ok_or_else(|| {
                         crate::error::factory::llvm_build_failed("unbox_int call", &"rt_value_unbox_int returned void")
                     })?;
                     vreg_map.insert(*dest, unboxed.into_int_value().into());
@@ -2106,7 +2307,7 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?;
                 let mut result = empty_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
 
                 for part in parts {
@@ -2137,7 +2338,7 @@ impl LlvmBackend {
                                 .build_call(lit_new, &[str_ptr_int.into(), str_len.into()], "lit_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new_literal", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                         FStringPart::Expr(vreg) => {
@@ -2156,7 +2357,7 @@ impl LlvmBackend {
                                 .build_call(value_to_string, &[coerced.into()], "expr_str")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_to_string", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                         FStringPart::ExprWithFormat(vreg, format_spec) => {
@@ -2191,7 +2392,7 @@ impl LlvmBackend {
                                 )
                                 .map_err(|e| crate::error::factory::llvm_build_failed("rt_value_format_string", &e))?;
                             call.try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap_or_else(|| i64_type.const_int(0, false).into())
                         }
                     };
@@ -2201,7 +2402,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_concat", &e))?;
                     result = concat_call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                 }
 
@@ -2271,7 +2472,7 @@ impl LlvmBackend {
                 if let Some(d) = dest {
                     let value = call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_zero().into());
                     vreg_map.insert(*d, value);
                 }
@@ -2310,7 +2511,14 @@ impl LlvmBackend {
                     .or_else(|| resolved_direct.and_then(|n| module.get_function(&n.replace("_dot_", "."))))
                     .or_else(|| module.get_function(func_name))
                     .or_else(|| module.get_function(&dotted_direct));
-                if direct_func.is_some() && (func_name.contains('.') || func_name.contains("_dot_")) {
+                // `set` has an erased-collection runtime fallback below. A
+                // exact/import-mapped user method with this name is resolved
+                // before that fallback. Do not scan all module functions here:
+                // suffix discovery is both receiver-blind for Any and linear in
+                // module size on a hot codegen path.
+                if direct_func.is_some()
+                    && (func_name.contains('.') || func_name.contains("_dot_") || func_name == "set")
+                {
                     let mut all_args = vec![*receiver];
                     all_args.extend_from_slice(args);
                     let func = direct_func.unwrap();
@@ -2318,7 +2526,11 @@ impl LlvmBackend {
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .and_then(|ty| ty.try_into().ok())
+                            .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         arg_vals.push(casted.into());
                     }
@@ -2336,7 +2548,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("qualified method call", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -2390,7 +2602,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin method redirect", &e))?;
                         let mut result = rt_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap_or_else(|| i64_type.const_int(0, false).into());
                         if compare_zero {
                             let as_int = self
@@ -2426,7 +2638,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("rt_len for substring", &e))?;
                     let end_val = len_call
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap_or_else(|| i64_type.const_int(0, false).into());
                     let step_val = i64_type.const_int(1, false);
                     // rt_slice(collection, start, end, step) takes 4 args
@@ -2450,7 +2662,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice for substring", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = slice_call.try_as_basic_value().left() {
+                        if let Some(ret_val) = slice_call.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -2470,6 +2682,35 @@ impl LlvmBackend {
                         "to_u32" | "to_i32" => self.context_ref().i32_type(),
                         _ => self.context_ref().i64_type(),
                     };
+                    // See the twin block in emitter.rs (`emit_method_call_static`)
+                    // for the measured incident: `to_i64`/`to_int` on an
+                    // already-i64-wide value coerces to itself, and a `text`
+                    // handle IS an i64 here, so the receiver's own word was
+                    // returned instead of the parsed number. `rt_to_int_dynamic`
+                    // parses a registry-validated heap string and is the
+                    // IDENTITY for everything else, so the genuinely-i64 case is
+                    // bit-for-bit unchanged; the narrowing targets keep the
+                    // coercion because they really do change width.
+                    if matches!(method, "to_i64" | "to_int")
+                        && recv_val.is_int_value()
+                        && recv_val.into_int_value().get_type() == int_type
+                    {
+                        let dyn_fn_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let dyn_func = module
+                            .get_function("rt_to_int_dynamic")
+                            .unwrap_or_else(|| module.add_function("rt_to_int_dynamic", dyn_fn_type, None));
+                        let dyn_call = builder
+                            .build_call(dyn_func, &[recv_val.into_int_value().into()], "to_int_dyn")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("rt_to_int_dynamic", &e))?;
+                        let dyn_val = dyn_call
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap_or_else(|| i64_type.const_int(0, false).into());
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, dyn_val);
+                        }
+                        return Ok(());
+                    }
                     let converted = self.coerce_value_to_type(recv_val, Some(int_type.into()), builder)?;
                     if let Some(d) = dest {
                         vreg_map.insert(*d, converted);
@@ -2565,19 +2806,107 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // Scalar float methods are native operations, not unresolved
+                // user methods. The runtime math externs have a floating-point
+                // ABI, so they cannot use the i64 method-shim path below.
+                if args.is_empty()
+                    && matches!(method, "floor" | "ceil" | "round")
+                    && matches!(
+                        vreg_types.get(receiver).copied(),
+                        Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64)
+                    )
+                {
+                    let is_f32 = vreg_types.get(receiver) == Some(&crate::hir::TypeId::F32);
+                    let float_type = if is_f32 {
+                        self.context_ref().f32_type()
+                    } else {
+                        self.context_ref().f64_type()
+                    };
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self
+                        .coerce_value_to_type(recv, Some(float_type.into()), builder)?;
+                    let intrinsic = format!(
+                        "llvm.{}.{}",
+                        method,
+                        if is_f32 { "f32" } else { "f64" }
+                    );
+                    let fn_type = float_type.fn_type(&[float_type.into()], false);
+                    let func = module
+                        .get_function(&intrinsic)
+                        .unwrap_or_else(|| module.add_function(&intrinsic, fn_type, None));
+                    let call = builder
+                        .build_call(func, &[recv.into()], "scalar_float_method")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = call.try_as_basic_value().basic() {
+                            vreg_map.insert(*d, value);
+                        }
+                    }
+                    return Ok(());
+                }
+
                 if matches!(method, "chr" | "to_char") {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
                     let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                     let rt_func = module
-                        .get_function("char_from_code")
-                        .unwrap_or_else(|| module.add_function("char_from_code", fn_type, None));
+                        .get_function("rt_char_from_code")
+                        .unwrap_or_else(|| module.add_function("rt_char_from_code", fn_type, None));
                     let call_site = builder
                         .build_call(rt_func, &[recv_casted.into()], "char_from_code")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("char_from_code call", &e))?;
+                        .map_err(|e| crate::error::factory::llvm_build_failed("rt_char_from_code call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Text.ord() reads the first Unicode code point; the existing
+                // runtime helper returns zero for an empty string as well.
+                if matches!(method, "ord" | "codepoint" | "code_point") && args.is_empty()
+                    && (matches!(func_name.replace("_dot_", ".").split('.').next(), Some("str" | "text" | "String" | "string"))
+                        || (func_name == method
+                            && matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::STRING))))
+                {
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self.coerce_value_to_type(recv, Some(i64_type.into()), builder)?;
+                    let code_at_ty = i64_type.fn_type(&[i64_type.into(), i64_type.into()], false);
+                    let code_at = module.get_function("rt_string_char_code_at")
+                        .unwrap_or_else(|| module.add_function("rt_string_char_code_at", code_at_ty, None));
+                    let result = builder.build_call(code_at, &[recv.into(), i64_type.const_zero().into()], "ord")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("ord call", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = result.try_as_basic_value().basic() {
+                            vreg_map.insert(*d, value);
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Scalar float methods use LLVM's target intrinsics. Preserve
+                // the incoming float width; integer receivers have no such
+                // method and continue through normal method resolution.
+                if matches!(method, "floor" | "ceil" | "round") && args.is_empty()
+                    && matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64))
+                {
+                    let is_f32 = matches!(vreg_types.get(receiver).copied(), Some(crate::hir::TypeId::F32));
+                    let float_ty = if is_f32 { self.context_ref().f32_type() } else { self.context_ref().f64_type() };
+                    let suffix = if is_f32 { "f32" } else { "f64" };
+                    // Rust's f64::round and the interpreter round half away
+                    // from zero. LLVM nearbyint rounds ties to even.
+                    let intrinsic_name = format!("llvm.{method}.{suffix}");
+                    let recv = self.get_vreg(receiver, vreg_map)?;
+                    let recv = self.coerce_value_to_type(recv, Some(float_ty.into()), builder)?;
+                    let intrinsic_ty = float_ty.fn_type(&[float_ty.into()], false);
+                    let intrinsic = module.get_function(&intrinsic_name)
+                        .unwrap_or_else(|| module.add_function(&intrinsic_name, intrinsic_ty, None));
+                    let call = builder.build_call(intrinsic, &[recv.into()], "float_method")
+                        .map_err(|e| crate::error::factory::llvm_build_failed("scalar float method", &e))?;
+                    if let Some(d) = dest {
+                        if let Some(value) = call.try_as_basic_value().basic() {
+                            vreg_map.insert(*d, value);
                         }
                     }
                     return Ok(());
@@ -2607,9 +2936,92 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                // A qualified receiver is TYPE EVIDENCE and must not be thrown
+                // away in favour of a leaf-name shim. `XTri.to_text` names a
+                // USER method that merely shares its leaf with the builtin
+                // `to_text -> rt_to_string` alias below; rewriting it by leaf
+                // silently changes the call target, and `rt_to_string` renders
+                // any non-string receiver as `<enum@0x...>` / `<value:0x...>` /
+                // `<invalid-heap:0x...>` instead of running the user's method.
+                //
+                // This is the SAME predicate that already guards the sibling
+                // qualified-redirect site (`functions/calls.rs`, the
+                // `qualified_runtime_method_owner_is_builtin(func_name_raw)`
+                // gate) and the exact case its doc comment names: "Imported
+                // user methods can share leaves such as `to_text`, `get`, or
+                // `len`". The LLVM `MethodCallStatic` arm was left without it.
+                // The Cranelift twin (`codegen/instr/calls.rs`,
+                // `codegen/instr/closures_structs.rs`) carries the same
+                // unguarded leaf table and is NOT fixed here — it is off the
+                // LLVM-built Stage-2 path, but CI exercises both backends.
+                //
+                // The `direct_func` block above already returns whenever the
+                // target symbol is resolvable in THIS LLVM module — so the gap
+                // bites only a CROSS-UNIT call, which is why it is invisible in
+                // a single-file `native-build` and fatal in the multi-unit
+                // (`--source ... --entry ...`) project lane that emits Stage 2.
+                //
+                // Measured 2026-09-07 on the aarch64 Stage-2 candidate: the
+                // whole 152 MB binary carried only 4 `.to_text` symbols for 218
+                // `fn to_text` definitions in source, and
+                // `BuiltinBackendCompileAdapter.compile_aot_into_path` called
+                // `rt_to_string` where `BackendKind.to_text` should have been.
+                // `--backend cranelift` therefore reached
+                // `compile_module_with_backend_target_cpu_storage_bindings`
+                // with the backend NAME `<enum@0x2ced1710>`, fell through that
+                // function's `var kind = BackendKind.Llvm` default, and ran the
+                // LLVM lane; there `config.triple.to_text()` was hijacked the
+                // same way, so `llc` was invoked with
+                // `-mtriple=<invalid-heap:0x13dedef1>`, which `/bin/sh -c`
+                // parses as an input REDIRECT (`cannot open
+                // invalid-heap:0x...: No such file`, exit 2) -> "backend
+                // object-path status 1" on the Stage-2 hello-world probe.
+                //
+                // A bare (unqualified) name still reaches the table: that is a
+                // genuinely erased receiver, where `rt_to_string` is correct.
+                // ROUTE 4 of the `Poll.unwrap` rebind (2026-09-13, measured: 208
+                // `bl Poll.unwrap` sites across 109 functions survived the
+                // mangler-side guards because they are produced HERE, not by the
+                // mangler). A qualified enum helper such as `i64.unwrap` or
+                // `MirStaticInit.unwrap` is not a builtin OWNER, so this predicate
+                // called it a user-type method, `runtime_func` became `None`, and
+                // the fall-back below suffix-scanned the module for `.unwrap`,
+                // found the single `lib__nogc_async_mut__async__poll__Poll.unwrap`
+                // and bound to it -- returning 0 for every non-`Poll` receiver.
+                //
+                // For the enum helpers the qualifier names the PAYLOAD type, not
+                // an owner that has an `unwrap` method, so it is not type evidence
+                // at all and the builtin lowering is correct for every receiver --
+                // the same conclusion the bare-name guards already rest on.
+                //
+                // A GENUINE user method is still protected: by the time it reaches
+                // here the mangler has rewritten it to its full mangled spelling
+                // (`lib__x__Rival.unwrap`), whose owner carries `__`. A payload-type
+                // qualifier (`i64`, `text`, `T`, `MirStaticInit`) never does, so the
+                // `__` test separates the two without a name list.
+                let enum_helper_payload_qualifier = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    let leaf = dotted.rsplit('.').next().unwrap_or("");
+                    let owner = dotted.rsplit_once('.').map(|(o, _)| o).unwrap_or("");
+                    matches!(
+                        leaf,
+                        "unwrap" | "unwrap_or" | "unwrap_err" | "is_some" | "is_none" | "is_ok" | "is_err"
+                    ) && !owner.is_empty()
+                        && !owner.contains("__")
+                };
+                let qualified_owner_is_user_type = {
+                    let dotted = func_name.replace("_dot_", ".");
+                    dotted.contains('.')
+                        && !enum_helper_payload_qualifier
+                        && !super::qualified_runtime_method_owner_is_builtin(func_name)
+                };
+
                 // Map well-known methods to runtime functions
                 // MUST match Cranelift's exact mapping at src/codegen/instr/calls.rs:3162-3201
-                let runtime_func = match method {
+                let runtime_func = if qualified_owner_is_user_type {
+                    None
+                } else {
+                    match method {
                     // Copied verbatim from Cranelift lines 3163-3200
                     "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
                     "len" | "length" => Some("rt_len"),
@@ -2617,6 +3029,7 @@ impl LlvmBackend {
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
                     "char_at" => Some("rt_string_char_at"),
+                    "char_count" => Some("rt_string_char_count"),
                     // Receiver-polymorphic; see emitter.rs. `at` on an array
                     // receiver must reach `rt_array_at` (a real `Option`), not
                     // the string-only `rt_string_char_at`, which answers `nil`
@@ -2626,16 +3039,55 @@ impl LlvmBackend {
                     "at" => Some("rt_at"),
                     "char_code_at" => Some("rt_string_char_code_at"),
                     "byte_at" => Some("rt_string_byte_at"),
+                    "char_count" => Some("rt_string_char_count"),
                     "push" => Some("rt_array_push"),
+                    "write_span" => Some("rt_array_write_span"),
                     "pop" => Some("rt_array_pop"),
+                    // Keep the LLVM bootstrap table synchronized with the
+                    // Cranelift and pure-Simple lowerers. `write_span` is an
+                    // array-only mutator whose expression result is the count
+                    // copied, so the ordinary runtime-call result path below
+                    // is correct; interpreter write-back remains owned by its
+                    // dedicated mutating-method channel.
+                    "write_span" => Some("rt_array_write_span"),
                     "clear" => Some("rt_array_clear"),
+                    "enumerate" => Some("rt_array_enumerate"),
                     "join" => Some("rt_string_join"),
-                    "trim" => Some("rt_string_trim"),
+                    // "strip"/"trimmed" synonyms for "trim" (this table's own
+                    // comment below documents this exact class of gap for
+                    // lines/partition/is_*; strip fell through the same way,
+                    // undefined `str.strip` at the Stage-4 macOS link 2026-09-07).
+                    "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
                     "trim_start" => Some("rt_string_trim_start"),
                     "trim_end" => Some("rt_string_trim_end"),
                     "split" => Some("rt_string_split"),
                     "bytes" => Some("rt_string_bytes"),
                     "chars" => Some("rt_string_chars"),
+                    // Text methods below mirror the Cranelift table in
+                    // codegen/instr/calls.rs (same alias groups, same runtime
+                    // entry points). They were missing HERE — text method
+                    // calls arrive as MethodCallStatic, which never consults
+                    // the qualified_rt_redirect table in functions/calls.rs —
+                    // so `report.lines()` etc. fell through to the fail-closed
+                    // suffix scan and surfaced as undefined `str.lines` /
+                    // `str.partition` / `str.is_*` symbols at the Stage 2 link
+                    // (Windows was merely the first lane to link this way; the
+                    // gap is backend-wide, not platform-specific).
+                    "lines" | "split_lines" => Some("rt_string_lines"),
+                    // TEXT-ONLY by contract, loud on any other receiver —
+                    // matches the Cranelift comment: the array `partition`
+                    // takes a predicate and has a different shape.
+                    "partition" => Some("rt_string_partition"),
+                    "rpartition" => Some("rt_string_rpartition"),
+                    // Character-class predicates: seven spellings, four
+                    // runtime entry points, exactly as in the interpreter
+                    // (interpreter_method/string.rs) and Cranelift. All return
+                    // i64 0/1 — deliberately NOT in `returns_bool` below,
+                    // same as `starts_with`.
+                    "is_digit" | "is_numeric" => Some("rt_string_is_digit"),
+                    "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
+                    "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
+                    "is_whitespace" => Some("rt_string_is_whitespace"),
                     "replace" => Some("rt_string_replace"),
                     "to_upper" | "upper" => Some("rt_string_to_upper"),
                     "to_lower" | "lower" => Some("rt_string_to_lower"),
@@ -2657,6 +3109,15 @@ impl LlvmBackend {
                     "get" => Some("rt_index_get"),
                     "keys" => Some("rt_dict_keys"),
                     "values" => Some("rt_dict_values"),
+                    // The name-only fallback is safe only for the exact Dict
+                    // method shape. User methods were considered above.
+                    "set" if uses_erased_collection_set_fallback(
+                        vreg_types.get(receiver).copied(),
+                        method,
+                        args.len(),
+                    ) && resolved_direct.is_none() => {
+                        Some("rt_collection_set")
+                    }
                     // Receiver-dispatched — see the matching arm in
                     // codegen/instr/closures_structs.rs. Name-keyed table with
                     // no receiver type, so `rt_dict_remove` here silently
@@ -2675,11 +3136,27 @@ impl LlvmBackend {
                     "repeat" => Some("lib__common__string_core__str_repeat"),
                     "map" => Some("rt_option_map"),
                     // Option/Result methods (LLVM-specific)
-                    "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
+                    // `.unwrap()` must use the trap helper, NOT the raw payload reader.
+                    // `rt_enum_payload` returns NIL for any receiver that is not a boxed
+                    // heap Enum, and a FLAT nullable (`text?` holding a bare text pointer,
+                    // the representation `rt_is_some`/`rt_is_none` already accept) is not
+                    // one -- so every `.unwrap()` on a flat optional silently produced nil
+                    // under LLVM while Cranelift (`codegen/instr/closures_structs.rs`) and
+                    // the tree-walk interpreter returned the value. `rt_unwrap_or_trap`
+                    // implements the flat-nullable convention ("not a boxed enum: return
+                    // the value unchanged") and traps only on a genuine None/Err.
+                    // `.unwrap_or(d)` likewise needs the two-arg helper; mapping it here
+                    // dropped `d` entirely. `unwrap_err` keeps the raw reader: there is no
+                    // exported err-trap twin, and routing it through the Ok-trap helper
+                    // would abort on the very receiver it exists to read.
+                    "unwrap" => Some("rt_unwrap_or_trap"),
+                    "unwrap_or" => Some("rt_unwrap_or_value"),
+                    "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
                     "is_some" => Some("rt_is_some"),
                     "is_ok" | "is_err" => Some("rt_enum_check_discriminant"),
-                    _ => None,
+                        _ => None,
+                    }
                 };
 
                 if let Some(rt_name) = runtime_func {
@@ -2728,7 +3205,7 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             }
                         }
@@ -2742,7 +3219,9 @@ impl LlvmBackend {
                         let mut val = self.get_vreg(arg, vreg_map)?;
                         // Membership needle must be boxed to match the tagged
                         // store; see build_wrap_membership_needle.
-                        if rt_name == "rt_contains" && arg_idx == 1 {
+                        if (rt_name == "rt_contains" && arg_idx == 1)
+                            || (rt_name == "rt_collection_set" && arg_idx > 0)
+                        {
                             val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
                         }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
@@ -2750,10 +3229,12 @@ impl LlvmBackend {
                     }
                     let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                         all_args_vregs.iter().map(|_| i64_type.into()).collect();
+                    // FAM freestanding push ABI: rt_array_push returns the
+                    // possibly realloc-moved header (i64), not a bool.
+                    let fam_push_returns_header = self.target.array_push_returns_header();
                     let returns_bool = matches!(
                         rt_name,
-                        "rt_array_push"
-                            | "rt_array_clear"
+                        "rt_array_clear"
                             | "rt_array_reverse"
                             | "rt_array_sort"
                             | "rt_contains"
@@ -2762,7 +3243,7 @@ impl LlvmBackend {
                             | "rt_is_some"
                             | "rt_array_any"
                             | "rt_array_all"
-                    );
+                    ) || (rt_name == "rt_array_push" && !fam_push_returns_header);
                     let fn_type = if returns_bool {
                         self.context_ref().bool_type().fn_type(&param_types, false)
                     } else {
@@ -2788,7 +3269,7 @@ impl LlvmBackend {
                         if in_place {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
                             vreg_map.insert(*d, recv_val);
-                        } else if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
                             } else {
@@ -2899,13 +3380,28 @@ impl LlvmBackend {
                         .or_else(|| module.get_function(&dotted_name));
                     let called_func = if let Some(func) = called_func {
                         Some(func)
+                    } else if func_name == "set" && resolved.is_some() {
+                        // An explicit cross-unit mapping is authoritative. Do
+                        // not let a local, receiver-blind `.set` suffix steal
+                        // it before the existing external declaration path.
+                        None
                     } else {
                         suffix_match()?
                     };
 
-                    let fallback_name = resolved
-                        .map(|n| n.replace("_dot_", "."))
-                        .unwrap_or_else(|| dotted_name.clone());
+                    // `resolved` (from use_map/import_map) is already the correct,
+                    // final mangled symbol name for a genuine cross-module
+                    // function -- it must be declared verbatim. Blindly
+                    // replacing "_dot_" -> "." here corrupted any identifier that
+                    // merely CONTAINS that substring as ordinary text (not a
+                    // dot-escape marker), e.g. `cosine_from_dot_and_magnitudes`
+                    // -> `cosine_from.and_magnitudes`, producing an undefined
+                    // symbol at the final Stage-4 macOS link (2026-09-07). No
+                    // `RUNTIME_FUNCS` spec name ever contains a literal '.', so
+                    // the replace never helped a real lookup either -- only the
+                    // unresolved bare-name fallback (`dotted_name`) still needs
+                    // dot-unescaping, for genuine `Owner_dot_method` shims.
+                    let fallback_name = resolved.map(|n| n.to_string()).unwrap_or_else(|| dotted_name.clone());
                     let runtime_spec = crate::codegen::runtime_sffi::RUNTIME_FUNCS
                         .iter()
                         .find(|spec| spec.name == fallback_name || spec.name == func_name || spec.name == dotted_name);
@@ -2939,18 +3435,84 @@ impl LlvmBackend {
                     } else {
                         i64_type.fn_type(&fallback_param_types, false)
                     };
+                    // Project mangling runs before per-unit LLVM emission and may
+                    // already replace a cross-unit call target with its final
+                    // `module__path__function` symbol. Such a target is neither a
+                    // builtin receiver qualifier nor a name that use/import maps
+                    // are required to retain. Preserve it verbatim as an extern;
+                    // otherwise the builtin fail-closed branch below rejects every
+                    // already-mangled free-function call in Stage 2.
+                    let already_mangled_project_symbol =
+                        func_name.contains("__") && !func_name.contains('.') && !func_name.contains("_dot_");
                     let func = if let Some(spec) = runtime_spec {
                         module
                             .get_function(spec.name)
                             .unwrap_or_else(|| module.add_function(spec.name, fallback_fn_type, None))
+                    } else if let Some(f) = called_func {
+                        f
+                    } else if already_mangled_project_symbol {
+                        module.add_function(func_name, fallback_fn_type, None)
+                    } else if qualified_owner_is_user_type {
+                        // Owner is a genuine (non-builtin) user type -- e.g.
+                        // `DbValue.to_text`. `fallback_name` is load-bearing
+                        // here: real Stage-2 binaries carry symbols spelled
+                        // exactly this way for cross-unit qualified user
+                        // methods (see the #4 fix comment above). Preserve the
+                        // existing behaviour.
+                        module.add_function(&fallback_name, fallback_fn_type, None)
                     } else {
-                        called_func.unwrap_or_else(|| module.add_function(&fallback_name, fallback_fn_type, None))
+                        // Owner IS a builtin receiver (str/text/...), and
+                        // `runtime_func`/`called_func`/`runtime_spec` have all
+                        // already failed to find real backing for `method`.
+                        // `fallback_name` ("text.split_whitespace" etc.) was
+                        // never a real exported symbol -- it is MIR's
+                        // receiver-type qualifier, invented for builtin
+                        // dispatch, not a mangled name any compiled unit ever
+                        // emits. Blindly declaring it here is exactly the
+                        // "resolve by name, ignore the receiver type" defect
+                        // that hijacked `to_i64`, struct offsets, struct field
+                        // types, and `to_text` in this codebase: it silently
+                        // manufactures an extern that can never link, so a
+                        // real cross-unit UFCS method sharing a leaf with no
+                        // builtin (`str.split_whitespace`) surfaces as an
+                        // undefined symbol at Stage-2 link instead of running.
+                        //
+                        // The one resolution `use_map`/`import_map` can still
+                        // give us is by the BARE method name: those maps are
+                        // keyed on the imported symbol's own name (see
+                        // `collect_use_imports`), never on the "Type.method"
+                        // qualifier MIR synthesizes for a builtin-typed
+                        // receiver, so the `func_name`-keyed lookups above
+                        // never had a chance to find a real UFCS function
+                        // here. Try that lookup now; if it also comes up
+                        // empty, fail closed instead of guessing.
+                        let bare_resolved = self
+                            .use_map
+                            .get(method)
+                            .or_else(|| self.import_map.get(method))
+                            .map(|s| s.as_str());
+                        let bare_func = bare_resolved.and_then(|n| {
+                            module.get_function(n).or_else(|| module.get_function(&n.replace("_dot_", ".")))
+                        });
+                        match bare_func.or_else(|| bare_resolved.map(|n| module.add_function(n, fallback_fn_type, None)))
+                        {
+                            Some(f) => f,
+                            None => {
+                                return Err(CompileError::semantic(format!(
+                                    "cannot resolve method call `{func_name}`: receiver is a builtin type but `{method}` is neither a known runtime method nor a resolvable user definition (checked use_map/import_map for `{method}`)"
+                                )));
+                            }
+                        }
                     };
                     let declared_param_types = func.get_type().get_param_types();
                     let mut raw_arg_vals: Vec<inkwell::values::IntValue> = Vec::new();
                     for (i, arg) in all_args.iter().enumerate() {
                         let val = self.get_vreg(arg, vreg_map)?;
-                        let target_ty = declared_param_types.get(i).copied().or_else(|| Some(i64_type.into()));
+                        let target_ty = declared_param_types
+                            .get(i)
+                            .copied()
+                            .and_then(|ty| ty.try_into().ok())
+                            .or_else(|| Some(i64_type.into()));
                         let casted = self.coerce_value_to_type(val, target_ty, builder)?;
                         raw_arg_vals.push(casted.into_int_value());
                     }
@@ -2980,19 +3542,19 @@ impl LlvmBackend {
                                     .build_call(rt_string_data, &[(*val).into()], "sffi_boxed_text_ptr")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 let len = builder
                                     .build_call(rt_string_len, &[(*val).into()], "sffi_boxed_text_len")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 let boxed = builder
                                     .build_call(rt_string_new, &[ptr.into(), len.into()], "sffi_boxed_text_value")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_new", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap();
                                 arg_vals.push(boxed.into());
                             } else {
@@ -3014,13 +3576,13 @@ impl LlvmBackend {
                                     .build_call(rt_string_data, &[(*val).into()], "sffi_text_ptr")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_data", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                                 let len = builder
                                     .build_call(rt_string_len, &[(*val).into()], "sffi_text_len")
                                     .map_err(|e| crate::error::factory::llvm_build_failed("rt_string_len", &e))?
                                     .try_as_basic_value()
-                                    .left()
+                                    .basic()
                                     .unwrap_or_else(|| i64_type.const_int(0, false).into());
                                 arg_vals.push(ptr.into());
                                 arg_vals.push(len.into());
@@ -3047,7 +3609,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("method call", &e))?
                     };
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3088,7 +3650,9 @@ impl LlvmBackend {
                     | ("Dict" | "dict", "has") => Some("rt_contains"),
                     ("String" | "string", "substring") => Some("rt_slice"),
                     ("String" | "string", "split") => Some("rt_string_split"),
-                    ("String" | "string" | "str" | "text", "trim") => Some("rt_string_trim"),
+                    ("String" | "string" | "str" | "text", "trim" | "trimmed" | "strip") => {
+                        Some("rt_string_trim")
+                    }
                     ("String" | "string" | "str" | "text", "trim_start") => Some("rt_string_trim_start"),
                     ("String" | "string" | "str" | "text", "trim_end") => Some("rt_string_trim_end"),
                     ("String" | "string", "replace") => Some("rt_string_replace"),
@@ -3164,7 +3728,7 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_slice builtin call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             }
                         }
@@ -3187,7 +3751,7 @@ impl LlvmBackend {
                         .build_call(rt_func, &arg_vals, "bcall")
                         .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                     if let Some(d) = dest {
-                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                        if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             vreg_map.insert(*d, ret_val);
                         } else {
                             vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3209,7 +3773,7 @@ impl LlvmBackend {
                             .build_call(func, &arg_vals, "bcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("builtin call", &e))?;
                         if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                                 vreg_map.insert(*d, ret_val);
                             } else {
                                 vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3263,9 +3827,15 @@ impl LlvmBackend {
                 let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                     all_args.iter().map(|_| i64_type.into()).collect();
                 let fn_type = i64_type.fn_type(&param_types, false);
+                // Same defect class as the MethodCallStatic fallback above: a
+                // resolved use_map/import_map symbol is already the correct
+                // final mangled name and must not be dot-unescaped, or an
+                // identifier that merely contains "_dot_" as ordinary text
+                // gets corrupted into an undefined symbol at link time
+                // (2026-09-07).
                 let fallback_name = resolved_full
-                    .map(|n| n.replace("_dot_", "."))
-                    .or_else(|| resolved_method.map(|n| n.replace("_dot_", ".")))
+                    .map(|n| n.to_string())
+                    .or_else(|| resolved_method.map(|n| n.to_string()))
                     .unwrap_or_else(|| dotted_full.clone());
                 let func = func.unwrap_or_else(|| module.add_function(&fallback_name, fn_type, None));
                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
@@ -3286,7 +3856,7 @@ impl LlvmBackend {
                         .map_err(|e| crate::error::factory::llvm_build_failed("extern call", &e))?
                 };
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                         vreg_map.insert(*d, ret_val);
                     } else {
                         vreg_map.insert(*d, i64_type.const_int(0, false).into());
@@ -3326,7 +3896,7 @@ impl LlvmBackend {
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc", &e))?;
                         let closure_i64 = alloc_call
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .ok_or_else(|| CompileError::semantic("rt_alloc did not return closure storage"))?;
                         let closure_ptr = builder
                             .build_int_to_ptr(
@@ -3469,6 +4039,157 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn erased_collection_set_fallback_is_exact_arity_and_any_only() {
+        // This control prevents one or many unrelated Owner.set symbols from
+        // changing erased Dict dispatch: user targets are resolved directly,
+        // never by a module-wide leaf-name scan.
+        assert!(uses_erased_collection_set_fallback(None, "set", 2));
+        assert!(uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::I64), "set", 2));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "set", 1));
+        assert!(!uses_erased_collection_set_fallback(Some(crate::hir::TypeId::ANY), "push", 2));
+    }
+
+    #[test]
+    fn builtin_method_symbols_and_float_intrinsics() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("builtin_method_symbols").unwrap();
+        let cases = [
+            ("str.char_count", 0usize, "@rt_string_char_count("),
+            ("Array.write_span", 4, "@rt_array_write_span("),
+            ("Array.enumerate", 0, "@rt_array_enumerate("),
+            ("str.ord", 0, "@rt_string_char_code_at("),
+        ];
+        for (idx, (method, count, expected)) in cases.into_iter().enumerate() {
+            let mut f = MirFunction::new(format!("builtin_{idx}"), crate::hir::TypeId::I64,
+                simple_parser::ast::Visibility::Public);
+            for i in 0..=count {
+                f.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(i as u32), value: 0 });
+            }
+            let result = VReg((count + 1) as u32);
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(result), receiver: VReg(0), func_name: method.to_string(),
+                args: (1..=count).map(|i| VReg(i as u32)).collect(),
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(result));
+            backend.compile_function(&f).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(expected), "{method}: {ir}");
+            if method == "str.ord" {
+                assert!(ir.contains("i64 0)"), "ord must read codepoint zero: {ir}");
+            }
+        }
+        for (method, intrinsic) in [("floor", "floor"), ("ceil", "ceil"), ("round", "round")] {
+            let mut f = MirFunction::new(format!("float_{method}"), crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public);
+            f.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value: 1.5 });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("f64.{method}"), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(&format!("@llvm.{intrinsic}.f64(")), "{method}: {ir}");
+        }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn bare_ord_after_char_at_uses_unicode_runtime_helper() {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("bare_ord_after_char_at").unwrap();
+        let mut f = MirFunction::new("first_codepoint".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public);
+        f.blocks[0].instructions.push(MirInst::ConstString { dest: VReg(0), value: "é".to_string() });
+        f.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(1), value: 0 });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)), receiver: VReg(0), func_name: "str.char_at".to_string(), args: vec![VReg(1)],
+        });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(3)), receiver: VReg(2), func_name: "ord".to_string(), args: vec![],
+        });
+        f.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+        backend.compile_function(&f).unwrap();
+        backend.verify().unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_char_at("), "{ir}");
+        assert!(ir.contains("call i64 @rt_string_char_code_at("), "{ir}");
+        assert!(!ir.contains("@ord("), "bare ord must not become an unresolved extern: {ir}");
+        for (text, expected) in [("", 0), ("A", 65), ("é", 233), ("😀", 0x1f600)] {
+            let value = simple_runtime::value::rt_string_new(text.as_ptr(), text.len() as u64);
+            assert_eq!(simple_runtime::value::rt_string_char_code_at(value, 0), expected);
+        }
+    }
+
+    #[test]
+    fn bare_ord_on_unknown_user_receiver_keeps_user_resolution() {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("user_ord").unwrap();
+        let mut f = MirFunction::new("caller".to_string(), crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public);
+        f.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 0 });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)), receiver: VReg(0), func_name: "User.make".to_string(), args: vec![],
+        });
+        f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(2)), receiver: VReg(1), func_name: "ord".to_string(), args: vec![],
+        });
+        f.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+        let error = backend.compile_function(&f).unwrap_err().to_string();
+        assert!(error.contains("cannot resolve method call `ord`"), "{error}");
+        assert!(!backend.get_ir().unwrap().contains("@rt_string_char_code_at("));
+    }
+
+    #[test]
+    fn scalar_f32_rounding_preserves_width() {
+        let backend = LlvmBackend::new(Target::host()).unwrap();
+        backend.create_module("f32_rounding").unwrap();
+        for method in ["floor", "ceil", "round"] {
+            let mut f = MirFunction::new(format!("f32_{method}"), crate::hir::TypeId::F32,
+                simple_parser::ast::Visibility::Public);
+            f.params.push(MirLocal { name: "value".to_string(), ty: crate::hir::TypeId::F32,
+                kind: LocalKind::Parameter, is_ghost: false });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: format!("f32.{method}"), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+            assert!(backend.get_ir().unwrap().contains(&format!("@llvm.{method}.f32(")));
+        }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn scalar_round_halfway_values_execute_away_from_zero() {
+        // The generated code is executed below, so its triple must match
+        // the test runner host on Linux, macOS, Windows, and other hosts.
+        let target = Target::host();
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("scalar_round_halfway").unwrap();
+        for (name, value) in [("positive_halfway", 2.5), ("negative_halfway", -2.5)] {
+            let mut f = MirFunction::new(name.to_string(), crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public);
+            f.blocks[0].instructions.push(MirInst::ConstFloat { dest: VReg(0), value });
+            f.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: "f64.round".to_string(), args: vec![],
+            });
+            f.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&f).unwrap();
+        }
+        backend.verify().unwrap();
+        let module = backend.module.borrow();
+        let engine = module.as_ref().unwrap()
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
+        unsafe {
+            let positive = engine.get_function::<unsafe extern "C" fn() -> f64>("positive_halfway").unwrap();
+            let negative = engine.get_function::<unsafe extern "C" fn() -> f64>("negative_halfway").unwrap();
+            assert_eq!(positive.call(), 3.0);
+            assert_eq!(negative.call(), -3.0);
+        }
+    }
+
+    #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let mut backend = LlvmBackend::new(target).unwrap();
@@ -3536,6 +4257,82 @@ mod tests {
         assert!(ir.contains(symbol), "{ir}");
         assert!(ir.contains("virtual_call"), "{ir}");
         assert!(ir.contains("i64 16"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    /// Regression test for
+    /// doc/08_tracking/bug/windows_msvc_stage2_compilerconfig_by_value_return_corruption_2026-08-31.md
+    /// (and the sj-segv-2026-08-27 TODO it closed): copying a vtable-bearing
+    /// value type by value (`var x = y` where `y`'s type implements a trait)
+    /// must allocate and copy `byte_size + 8` bytes — the MIR `byte_size` is
+    /// the UNSHIFTED field-only size, and the extra 8 bytes is the vtable
+    /// header `StructInit` already prepends at offset 0. Without the
+    /// `owner_has_vtable` shift this fixed, the copy under-allocates by one
+    /// word, so the header pointer overwrites field 0 and the last field
+    /// lands outside the allocation entirely.
+    #[test]
+    fn aggregate_copy_of_vtable_bearing_struct_shifts_for_header() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        let symbol = "__vtable__Owner__for__Trait";
+
+        let mut caller = MirFunction::new(
+            "copy_owner".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 10,
+        });
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 20,
+        });
+        // Two i64 fields -> byte_size = 2 * 8 = 16, matching
+        // `copy_if_value_type`'s `(fields.len() as u32) * 8` at lowering.
+        caller.blocks[0].instructions.push(MirInst::StructInit {
+            dest: VReg(2),
+            type_id: crate::hir::TypeId::I64,
+            struct_name: Some("Owner".to_string()),
+            vtable_symbol: Some(symbol.to_string()),
+            struct_size: 16,
+            field_offsets: vec![0, 8],
+            field_types: vec![crate::hir::TypeId::I64, crate::hir::TypeId::I64],
+            field_values: vec![VReg(0), VReg(1)],
+        });
+        caller.blocks[0].instructions.push(MirInst::AggregateCopy {
+            dest: VReg(3),
+            src: VReg(2),
+            byte_size: 16,
+            type_name: Some("Owner".to_string()),
+            owner_has_vtable: Some(true),
+            deep_fields: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+
+        let mut mir = crate::mir::MirModule::new();
+        mir.name = Some("aggregate_copy_vtable".to_string());
+        mir.functions = vec![caller];
+        mir.vtable_impls.push((
+            crate::hir::TypeId::I64,
+            "Owner".to_string(),
+            symbol.to_string(),
+            vec![Some("Owner.method".to_string())],
+            true,
+        ));
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        // words = (16 + 8) / 8 = 3 -> alloc_bytes = 24. A pre-fix build
+        // (byte_size never shifted for the header) allocates only 16 here,
+        // losing the header shift entirely.
+        let alloc_line = ir
+            .lines()
+            .find(|l| l.contains("aggcopy_alloc") && l.contains("call"))
+            .unwrap_or_else(|| panic!("no aggcopy_alloc rt_alloc call in IR:\n{ir}"));
+        assert!(alloc_line.contains("i64 24"), "{alloc_line}\nfull ir:\n{ir}");
+        assert!(!alloc_line.contains("i64 16"), "{alloc_line}\nfull ir:\n{ir}");
         backend.verify().unwrap();
     }
 
@@ -3641,6 +4438,167 @@ mod tests {
             assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
         }
         backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_uses_bulk_and_text_runtime_entries() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_runtime_entries").unwrap();
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: VReg(0),
+            value: "hello".to_string(),
+        });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "str.char_count".to_string(),
+            args: vec![],
+        });
+        for (dest, value) in [(VReg(2), 0), (VReg(3), 1), (VReg(4), 2), (VReg(5), 3), (VReg(6), 4)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(7)),
+            receiver: VReg(2),
+            func_name: "Array.write_span".to_string(),
+            args: vec![VReg(3), VReg(4), VReg(5), VReg(6)],
+        });
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(8)),
+            receiver: VReg(2),
+            func_name: "i64.chr".to_string(),
+            args: vec![],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_string_char_count("), "{ir}");
+        assert!(ir.contains("call i64 @rt_array_write_span("), "{ir}");
+        assert!(ir.contains("call i64 @rt_char_from_code("), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_float_rounding_uses_float_intrinsics() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_float_rounding").unwrap();
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::F64,
+            simple_parser::ast::Visibility::Public,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstFloat {
+            dest: VReg(0),
+            value: 1.25,
+        });
+        for (dest, method) in [(VReg(1), "floor"), (VReg(2), "ceil"), (VReg(3), "round")] {
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(dest),
+                receiver: VReg(0),
+                func_name: format!("f64.{method}"),
+                args: vec![],
+            });
+        }
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        for name in ["llvm.floor.f64", "llvm.ceil.f64", "llvm.round.f64"] {
+            assert!(ir.contains(name), "missing {name}:\n{ir}");
+        }
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn method_call_static_chained_float_rounding_preserves_vreg_type() {
+        for (ty, owner, separator, suffix) in [
+            (crate::hir::TypeId::F64, "f64", ".", "f64"),
+            (crate::hir::TypeId::F64, "f64", "_dot_", "f64"),
+            (crate::hir::TypeId::F32, "f32", ".", "f32"),
+            (crate::hir::TypeId::F32, "f32", "_dot_", "f32"),
+        ] {
+            let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+            let backend = LlvmBackend::new(target).unwrap();
+            backend.create_module(&format!("method_chained_{owner}_{separator}")).unwrap();
+            let mut func = MirFunction::new(
+                "probe".to_string(),
+                ty,
+                simple_parser::ast::Visibility::Public,
+            );
+            func.params.push(MirLocal {
+                name: "value".to_string(),
+                ty,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+            for (receiver, dest, method) in [
+                (VReg(0), VReg(1), "floor"),
+                (VReg(1), VReg(2), "ceil"),
+                (VReg(2), VReg(3), "round"),
+            ] {
+                func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                    dest: Some(dest),
+                    receiver,
+                    func_name: format!("{owner}{separator}{method}"),
+                    args: vec![],
+                });
+            }
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+            backend.compile_function(&func).unwrap();
+            let ir = backend.get_ir().unwrap();
+            for name in ["floor", "ceil", "round"] {
+                assert!(ir.contains(&format!("llvm.{name}.{suffix}")), "missing {name}:\n{ir}");
+            }
+            backend.verify().unwrap();
+        }
+    }
+
+    #[test]
+    fn method_call_static_round_matches_interpreter_half_ties() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::host());
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("method_round_ties").unwrap();
+        let cases = [
+            ("round_pos_2_5", 2.5, 3.0),
+            ("round_pos_3_5", 3.5, 4.0),
+            ("round_neg_2_5", -2.5, -3.0),
+            ("round_neg_3_5", -3.5, -4.0),
+        ];
+        for (name, input, _) in cases {
+            let mut func = MirFunction::new(
+                name.to_string(),
+                crate::hir::TypeId::F64,
+                simple_parser::ast::Visibility::Public,
+            );
+            func.blocks[0].instructions.push(MirInst::ConstFloat {
+                dest: VReg(0),
+                value: input,
+            });
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)),
+                receiver: VReg(0),
+                func_name: "f64.round".to_string(),
+                args: vec![],
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&func).unwrap();
+        }
+        backend.verify().unwrap();
+        let module = backend.take_module().unwrap();
+        let engine = module
+            .create_jit_execution_engine(inkwell::OptimizationLevel::None)
+            .unwrap();
+        for (name, _, expected) in cases {
+            let addr = engine.get_function_address(name).unwrap();
+            let compiled: unsafe extern "C" fn() -> f64 = unsafe { std::mem::transmute(addr) };
+            assert_eq!(unsafe { compiled() }, expected, "{name}");
+        }
     }
 
     #[test]
@@ -3754,6 +4712,41 @@ mod tests {
         let ir = backend.get_ir().unwrap();
         assert!(ir.contains("@rt_dict_remove"), "missing runtime remove:\n{ir}");
         assert!(!ir.contains("Dict.remove"), "raw Dict.remove leaked:\n{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
+    fn static_array_write_span_uses_runtime_symbol() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("static_array_write_span_runtime").unwrap();
+
+        let mut func = MirFunction::new(
+            "probe".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        for (dest, value) in [(VReg(0), 101), (VReg(1), 202), (VReg(2), 1), (VReg(3), 0), (VReg(4), 2)] {
+            func.blocks[0].instructions.push(MirInst::ConstInt { dest, value });
+        }
+        func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(5)),
+            receiver: VReg(0),
+            func_name: "Array.write_span".to_string(),
+            args: vec![VReg(1), VReg(2), VReg(3), VReg(4)],
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(5)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @rt_array_write_span(i64"),
+            "missing runtime write_span call:\n{ir}"
+        );
+        assert!(
+            !ir.contains("Array.write_span"),
+            "raw Array.write_span leaked into LLVM IR:\n{ir}"
+        );
         backend.verify().unwrap();
     }
 
@@ -3889,6 +4882,44 @@ mod tests {
         assert!(ir.contains("define i32 @heap_init_shape(i32 %0, i32 %1)"));
         assert!(ir.contains("icmp slt i32"));
         assert!(ir.contains("br i1"));
+        backend.verify().unwrap();
+    }
+
+    /// Two f64 params reached through their locals: MIR reuses v0/v1 as temps
+    /// (v1 = LocalAddr a). Seeding v1 with param b's F64 type made the address
+    /// slot `double`, and the Load through it lowered to `store double 0.0` --
+    /// `a > b` compared 0.0 with b (2026-09-25, runner exit 133 at spec 20).
+    #[test]
+    fn two_f64_params_via_local_addr_load_the_real_first_param() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Windows);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("two_f64_params").unwrap();
+
+        let mut func = MirFunction::new(
+            "gt2".to_string(),
+            crate::hir::TypeId::BOOL,
+            simple_parser::ast::Visibility::Private,
+        );
+        for name in ["a", "b"] {
+            func.params.push(MirLocal {
+                name: name.to_string(),
+                ty: crate::hir::TypeId::F64,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+        }
+        let insts = &mut func.blocks[0].instructions;
+        insts.push(MirInst::LocalAddr { dest: VReg(1), local_index: 0 });
+        insts.push(MirInst::Load { dest: VReg(0), addr: VReg(1), ty: crate::hir::TypeId::F64 });
+        insts.push(MirInst::LocalAddr { dest: VReg(3), local_index: 1 });
+        insts.push(MirInst::Load { dest: VReg(2), addr: VReg(3), ty: crate::hir::TypeId::F64 });
+        insts.push(MirInst::BinOp { dest: VReg(4), op: crate::hir::BinOp::Gt, left: VReg(0), right: VReg(2) });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(4)));
+
+        backend.compile_function(&func).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("store double 0.000000e+00"), "first param lowered to 0.0:\n{ir}");
+        assert!(ir.contains("fcmp ogt double"), "{ir}");
         backend.verify().unwrap();
     }
 
@@ -4179,69 +5210,160 @@ mod tests {
         assert!(!suffix_owner_matches("Vec4f", "f64"));
         assert!(suffix_owner_matches("f64", "f64"));
     }
+
+    /// Regression test for the fifth instance of the "resolve UFCS calls by
+    /// name, ignoring the receiver type" defect family (see the four listed
+    /// in the #4 fix comment above `qualified_owner_is_user_type`): a real
+    /// user-defined free function (e.g. `mymod.wordtools.split_whitespace`,
+    /// a genuine stdlib-shaped UFCS method with NO compiler-builtin backing
+    /// on `text`) must still resolve to its real cross-unit symbol when the
+    /// receiver's static builtin type makes MIR qualify the call as
+    /// `text.split_whitespace`. `use_map`/`import_map` key on the BARE
+    /// imported name (see `collect_use_imports`), never on that
+    /// receiver-type qualifier, so every qualified lookup earlier in this
+    /// match arm (`direct_func`, the first `resolved` in the fallback) can
+    /// never find it -- only a bare-name lookup can.
     #[test]
-    fn aggregate_copy_of_vtable_bearing_struct_shifts_for_header() {
+    fn ufcs_builtin_receiver_user_method_resolves_via_bare_use_map() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let mut backend = LlvmBackend::new(target).unwrap();
-        let symbol = "__vtable__Owner__for__Trait";
+        backend.create_module("ufcs_builtin_receiver_resolve").unwrap();
+
+        // The real cross-unit definition, under its true mangled name --
+        // never spelled "text.split_whitespace" anywhere.
+        let mut real_fn = MirFunction::new(
+            "mymod__wordtools__split_whitespace".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        real_fn.params.push(MirLocal {
+            name: "s".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        real_fn.blocks[0].terminator = Terminator::Return(Some(VReg(0)));
 
         let mut caller = MirFunction::new(
-            "copy_owner".to_string(),
+            "main".to_string(),
             crate::hir::TypeId::I64,
             simple_parser::ast::Visibility::Public,
         );
         caller.blocks[0].instructions.push(MirInst::ConstInt {
             dest: VReg(0),
-            value: 10,
+            value: 999,
         });
-        caller.blocks[0].instructions.push(MirInst::ConstInt {
-            dest: VReg(1),
-            value: 20,
+        // MIR qualifies this the same way it qualifies a real
+        // `some_text.split_whitespace()` UFCS call on a builtin receiver --
+        // "text.split_whitespace" is not a real symbol anywhere.
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
         });
-        // Two i64 fields -> byte_size = 2 * 8 = 16, matching
-        // `copy_if_value_type`'s `(fields.len() as u32) * 8` at lowering.
-        caller.blocks[0].instructions.push(MirInst::StructInit {
-            dest: VReg(2),
-            type_id: crate::hir::TypeId::I64,
-            struct_name: Some("Owner".to_string()),
-            vtable_symbol: Some(symbol.to_string()),
-            struct_size: 16,
-            field_offsets: vec![0, 8],
-            field_types: vec![crate::hir::TypeId::I64, crate::hir::TypeId::I64],
-            field_values: vec![VReg(0), VReg(1)],
-        });
-        caller.blocks[0].instructions.push(MirInst::AggregateCopy {
-            dest: VReg(3),
-            src: VReg(2),
-            byte_size: 16,
-            type_name: Some("Owner".to_string()),
-            owner_has_vtable: Some(true),
-            deep_fields: vec![],
-        });
-        caller.blocks[0].terminator = Terminator::Return(Some(VReg(3)));
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
 
-        let mut mir = crate::mir::MirModule::new();
-        mir.name = Some("aggregate_copy_vtable".to_string());
-        mir.functions = vec![caller];
-        mir.vtable_impls.push((
-            crate::hir::TypeId::I64,
-            "Owner".to_string(),
-            symbol.to_string(),
-            vec![Some("Owner.method".to_string())],
-            true,
-        ));
+        let mut use_map = HashMap::new();
+        use_map.insert(
+            "split_whitespace".to_string(),
+            "mymod__wordtools__split_whitespace".to_string(),
+        );
+        backend.set_use_map(use_map);
 
-        backend.compile(&mir).unwrap();
+        backend.compile_function(&real_fn).unwrap();
+        backend.compile_function(&caller).unwrap();
+
         let ir = backend.get_ir().unwrap();
-        // words = (16 + 8) / 8 = 3 -> alloc_bytes = 24. A pre-fix build
-        // (byte_size never shifted for the header) allocates only 16 here,
-        // losing the header shift entirely.
-        let alloc_line = ir
-            .lines()
-            .find(|l| l.contains("aggcopy_alloc") && l.contains("call"))
-            .unwrap_or_else(|| panic!("no aggcopy_alloc rt_alloc call in IR:\n{ir}"));
-        assert!(alloc_line.contains("i64 24"), "{alloc_line}\nfull ir:\n{ir}");
-        assert!(!alloc_line.contains("i64 16"), "{alloc_line}\nfull ir:\n{ir}");
+        assert!(
+            ir.contains("call i64 @mymod__wordtools__split_whitespace(i64"),
+            "did not call the real cross-unit function:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@\"text.split_whitespace\""),
+            "declared a phantom extern for the MIR-synthesized qualifier instead of the real symbol:\n{ir}"
+        );
+        backend.verify().unwrap();
+    }
+
+    /// Sibling of the test above: when NEITHER a runtime shim NOR a real
+    /// user definition backs a builtin-receiver-qualified method call, this
+    /// must fail closed with a compile error rather than silently declaring
+    /// an extern spelled like the MIR qualifier -- a symbol no compiled unit
+    /// ever exports, and undefined at Stage-2 link. This is the check that
+    /// FAILS on the pre-fix shape: before this change, the fallback declared
+    /// `module.add_function("text.split_whitespace", ...)` unconditionally
+    /// and returned `Ok(())`.
+    #[test]
+    fn ufcs_builtin_receiver_unresolvable_method_fails_closed() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("ufcs_builtin_receiver_fail_closed").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "text.split_whitespace".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let result = backend.compile_function(&caller);
+        assert!(
+            result.is_err(),
+            "must fail closed instead of silently declaring a phantom extern for an unresolvable builtin-receiver method"
+        );
+    }
+
+    /// A resolved cross-unit free function can arrive in MethodCallStatic when
+    /// its first parameter is a builtin. Its fully mangled name is exact symbol
+    /// evidence, not a synthetic `text.method` qualifier.
+    #[test]
+    fn already_mangled_project_method_call_is_declared_verbatim() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("already_mangled_project_method").unwrap();
+
+        let mut caller = MirFunction::new(
+            "main".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 999,
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallStatic {
+            dest: Some(VReg(1)),
+            receiver: VReg(0),
+            func_name: "compiler__frontend__core__types__str_len".to_string(),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        backend.compile_function(&caller).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(
+            ir.contains("call i64 @compiler__frontend__core__types__str_len(i64"),
+            "canonical project symbol was not preserved:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@rt_len("),
+            "canonical free function was hijacked by the len builtin:\n{ir}"
+        );
+        assert!(
+            !ir.contains("@\"text.str_len\""),
+            "exact mangled free function was rewritten as a synthetic builtin qualifier: {ir}"
+        );
         backend.verify().unwrap();
     }
 }

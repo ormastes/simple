@@ -1,0 +1,136 @@
+# Typed column storage with an explicit missing mask. Numeric adapters retain
+# the existing dynamic Series layout and reject mismatched runtime dtypes.
+
+use std.ndarray.*
+use std.nogc_async_mut.df.mod.{Symbol, Series, DfError}
+
+struct TypedSeries<T>:
+    name: Symbol
+    values: [T]
+    missing: [Bool]
+
+    static fn from_values(name: Symbol, values: [T]) -> TypedSeries<T>:
+        var missing: [Bool] = []
+        var i = 0
+        while i < values.len():
+            missing.push(Bool.new(false))
+            i = i + 1
+        TypedSeries(name: name, values: values, missing: missing)
+
+    static fn from_masked(
+        name: Symbol, values: [T], missing: [Bool]
+    ) -> Result<TypedSeries<T>, DfError>:
+        if values.len() != missing.len():
+            return Err(DfError.ShapeMismatch)
+        Ok(TypedSeries(name: name, values: values, missing: missing))
+
+    fn len(self) -> Index:
+        Index.new(self.values.len())
+
+    fn get(self, index: Index) -> Result<T?, DfError>:
+        if self.missing.len() != self.values.len():
+            return Err(DfError.ShapeMismatch)
+        if index.value < 0 or index.value >= self.values.len():
+            return Err(DfError.ShapeMismatch)
+        if self.missing[index.value].value:
+            return Ok(nil)
+        Ok(Some(self.values[index.value]))
+
+    fn map_values(self, transform: fn(T) -> T) -> Result<TypedSeries<T>, DfError>:
+        """Apply a callback once per present value, retaining missing rows."""
+        if self.missing.len() != self.values.len():
+            return Err(DfError.ShapeMismatch)
+        var out: [T] = []
+        var i = 0
+        while i < self.values.len():
+            if self.missing[i].value:
+                out.push(self.values[i])
+            else:
+                out.push(transform(self.values[i]))
+            i = i + 1
+        Ok(TypedSeries(name: self.name, values: out, missing: self.missing))
+
+    fn filter(self, mask: [Bool]) -> Result<TypedSeries<T>, DfError>:
+        if (mask.len() != self.values.len() or
+            self.missing.len() != self.values.len()):
+            return Err(DfError.ShapeMismatch)
+        var out: [T] = []
+        var out_missing: [Bool] = []
+        var i = 0
+        while i < mask.len():
+            if mask[i].value:
+                out.push(self.values[i])
+                out_missing.push(self.missing[i])
+            i = i + 1
+        Ok(TypedSeries(name: self.name, values: out, missing: out_missing))
+
+    fn filter_present(self, predicate: fn(T) -> bool) -> Result<TypedSeries<T>, DfError>:
+        """Keep present values matching the predicate; drop missing rows."""
+        if self.missing.len() != self.values.len():
+            return Err(DfError.ShapeMismatch)
+        var out: [T] = []
+        var out_missing: [Bool] = []
+        var i = 0
+        while i < self.values.len():
+            if not self.missing[i].value:
+                if predicate(self.values[i]):
+                    out.push(self.values[i])
+                    out_missing.push(Bool.new(false))
+            i = i + 1
+        Ok(TypedSeries(name: self.name, values: out, missing: out_missing))
+
+    fn any_present(self, predicate: fn(T) -> bool) -> Result<bool, DfError>:
+        """Short circuit on the first present value matching the predicate."""
+        if self.missing.len() != self.values.len():
+            return Err(DfError.ShapeMismatch)
+        var i = 0
+        while i < self.values.len():
+            if not self.missing[i].value:
+                if predicate(self.values[i]):
+                    return Ok(true)
+            i = i + 1
+        Ok(false)
+
+    fn all_present(self, predicate: fn(T) -> bool) -> Result<bool, DfError>:
+        """Short circuit on the first present value failing the predicate."""
+        if self.missing.len() != self.values.len():
+            return Err(DfError.ShapeMismatch)
+        var i = 0
+        while i < self.values.len():
+            if not self.missing[i].value:
+                if not predicate(self.values[i]):
+                    return Ok(false)
+            i = i + 1
+        Ok(true)
+
+fn f64_typed_series_from_dynamic(series: Series) -> Result<TypedSeries<Float64>, DfError>:
+    if (series.dtype != DType.F64 or series.values.dtype != DType.F64 or
+        series.missing.len() != series.len().value):
+        return Err(DfError.ShapeMismatch)
+    var values: [Float64] = []
+    var i = 0
+    while i < series.len().value:
+        values.push(series.values.flat_f64(Index.new(i)))
+        i = i + 1
+    TypedSeries<Float64>.from_masked(series.name, values, series.missing)
+
+fn i64_typed_series_from_dynamic(series: Series) -> Result<TypedSeries<Int64>, DfError>:
+    if (series.dtype != DType.I64 or series.values.dtype != DType.I64 or
+        series.missing.len() != series.len().value):
+        return Err(DfError.ShapeMismatch)
+    var values: [Int64] = []
+    var i = 0
+    while i < series.len().value:
+        values.push(series.values.flat_i64(Index.new(i)))
+        i = i + 1
+    TypedSeries<Int64>.from_masked(series.name, values, series.missing)
+
+fn f64_typed_series_into_dynamic(series: TypedSeries<Float64>) -> Result<Series, DfError>:
+    Series.from_f64_masked(series.name, series.values, series.missing)
+
+fn i64_typed_series_into_dynamic(series: TypedSeries<Int64>) -> Result<Series, DfError>:
+    Series.from_i64_masked(series.name, series.values, series.missing)
+
+export TypedSeries
+export f64_typed_series_from_dynamic, i64_typed_series_from_dynamic
+export f64_typed_series_into_dynamic, i64_typed_series_into_dynamic

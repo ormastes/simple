@@ -1,7 +1,9 @@
 # Bug: `return` inside a match/if EXPRESSION is swallowed (becomes the expr value)
 
-Status: OPEN (P1)
-Status re-verified 2026-08-17 by source inspection (triage shard 02).
+## Closed 2026-09-13 — `return` inside a match expression now returns from the function
+
+- **measured** Binary: Rust seed `bin/simple` v1.0.0-rc.1 (16,347,136 bytes, 2026-09-02), Windows host.
+- **measured** The entry's minimal reproducer runs clean: `f(Err("bad"))` yields a Result with `is_ok=false` (no "cannot convert enum to int"), and `f(Ok(41))` yields `ok=true v=42`, proving the non-return arm still works.
 
 **Date:** 2026-06-30
 **Severity:** High — a whole CLASS of `Result`-handling failures. Any
@@ -65,8 +67,28 @@ The same pattern appears ~238 times across `compress/*` and elsewhere — most w
 (only the Err-arm-taken paths crash), so a blanket rewrite is unwarranted; the
 seed fix is the real solution.
 
+## Re-probed 2026-09-06 — NOT REPRODUCIBLE
 
-## 2026-08-17 CORE-P1 triage: DID NOT REPRODUCE / fix present in current source
+Binary probed: `bin/release/aarch64-unknown-linux-gnu/simple` (Rust seed,
+aarch64). Both engines exercised: `SIMPLE_EXECUTION_MODE=interpret` (tree-walk)
+and `env -u SIMPLE_EXECUTION_MODE` (default Cranelift JIT). Probe sources are
+listed with each entry; they were run on both lanes and compared.
 
-Verified against CURRENT SOURCE (content, not SHA ancestry) during the crit_01
-CORE-P1 sweep. The triage grep for `ControlFlow::Return` / `Flow::Return` returned zero hits because the enum is actually named `Control::Return(Value)` (`src/compiler_rust/compiler/src/interpreter/core_types.rs:117`). Propagation IS implemented, and not in the `expr/ops.rs` this doc names but in `src/compiler_rust/compiler/src/interpreter/expr/control.rs` -- If at :117, Match arms at :218/:242/:258 and :304, each doing `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`, under a comment that names this bug doc by filename: "A `return` inside an if/match EXPRESSION arm must propagate out of the function".
+The record's exact minimal reproducer now returns correctly from `f` on both
+lanes:
+
+```
+ERR_OK=bad     OK_OK=42      # interpret
+ERR_OK=bad     OK_OK=42      # jit
+```
+
+(`f(Err("bad"))` propagates the Err instead of binding `x` to it, and
+`f(Ok(41))` returns `Ok(42)`.) Probe `_scratch/retmatch.spl`.
+
+The "proper fix" this record specified — a control-flow-carrying error variant
+propagated to the function boundary — IS implemented, under a different name
+than the proposed `CompileError::EarlyReturn`: `interpreter/expr/control.rs`
+now does `Control::Return(v) => return Err(CompileError::TryError(Box::new(v)))`
+at five sites (`:167`, `:280`, `:304`, `:320`, `:362`). Grepping for
+`EarlyReturn` finds nothing, which is why this can look unfixed. Not fixed by
+this session.

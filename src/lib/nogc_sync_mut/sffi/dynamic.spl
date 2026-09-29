@@ -3,8 +3,8 @@
 # Provides convention-based dynamic loading of .so/.dll for SFFI.
 # Convention: rt_{prefix}_{fn} -> $SIMPLE_SFFI_PATH/libspl_{prefix}.so
 #
-# Works in C-compiled mode where spl_dlopen/spl_dlsym are available.
-# In interpreter mode, spl_dlopen is not whitelisted — use compiled binary.
+# The native runtime and Rust bootstrap interpreter both register the loader
+# externs; provider admission and callable lifetime still require this owner.
 #
 # Usage:
 #   val lib = DynLib.load("build/libspl_torch.so")
@@ -49,22 +49,108 @@ extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_wffi_call_i64_checked(fptr: i64, args: [i64], nargs: i64) -> [i64]
 @unsafe(reason: "allocation-free checked integer status/out ABI", capabilities: [ffi, raw_ptr])
 extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
+# Bounded OUT-byte-buffer dispatch.
+#
+# Its sibling `spl_wffi_call_i64_with_bytes` passes bytes IN only: the pointer
+# the callee receives is a frame-local copy, so anything written through it is
+# discarded. Providers that follow the `(buf, cap, out_len)` idiom -- the only
+# shape that keeps the allocation on the Simple side instead of handing Simple a
+# block of C memory to own -- therefore had no facade at all, which is what
+# pinned the chrome dynlib showcase to `frame_source=stub-pattern`.
+#
+# The callee is handed `prefix..., buf_ptr, cap, out_len_ptr, suffix...`;
+# `out_bytes[offset .. offset + cap]` is the writable window, `out_bytes.len()`
+# never changes, and the callee's own `i64` return is returned verbatim so a
+# provider status reaches Simple unaltered.
+@unsafe(reason: "bounded caller-allocated out-byte-buffer foreign call ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_call_i64_into_bytes(fptr: i64, prefix_args: [i64], out_bytes: &mut [u8],
+                                       offset: i64, capacity: i64, out_len: *mut i64,
+                                       suffix_args: [i64]) -> i64
 
-@unsafe(reason: "minimal allocation-free raw status/out scope", capabilities: [ffi, raw_ptr])
-fn _sffi_try_call_i64_out(fptr: i64, args: [i64], out_value: *mut i64) -> i64:
-    unsafe(capabilities: [ffi, raw_ptr]):
-        spl_wffi_try_call_i64_out(fptr, args, args.len(), out_value)
+@unsafe(reason: "minimal raw dynamic FFI scope; caller validates status and result shape", capabilities: [ffi])
+fn _sffi_call_i64_raw_checked(fptr: i64, args: [i64]) -> [i64]:
+    spl_wffi_call_i64_checked(fptr, args, args.len())
+
+# Does this lane actually deliver the `*mut i64` writeback?
+#
+# A null function pointer with a valid out slot is answered
+# SPL_WFFI_NULL_FUNCTION (2) by every provider that honours the contract: both
+# the C provider and the Rust provider zero the out slot and only then reject
+# the pointer, and neither enters foreign code, so the probe has no side
+# effects and costs no allocation. A lane that cannot carry the out parameter
+# rejects the argument shape first and answers SPL_WFFI_INVALID_ARGUMENT (1).
+#
+# Updated 2026-09-11: the interpreter lane no longer loses the writeback. `&mut x`
+# on an extern argument used to evaluate to a COPY that was never published back
+# to `x`, so every extern out slot was silently dead there while the native lane
+# wrote through a real pointer; `call_extern_function` now publishes the borrow
+# back. The older measurement recorded here (out slot untouched on the aarch64
+# seed) described exactly that defect and no longer holds on a seed built after
+# this date. See
+# `doc/08_tracking/bug/interpreter_refmut_extern_out_slots_never_written_back_2026-09-11.md`.
+@unsafe(reason: "probes the raw status/out ABI without entering foreign code", capabilities: [ffi, raw_ptr])
+fn _sffi_i64_out_transport_honoured() -> bool:
+    var probe: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(0, [], 0, &mut probe)
+    status == 2
+
+# Canonical checked integer dispatch. The scalar status/out transport itself
+# allocates nothing. Mapping-lifetime admission is a separate owner operation
+# and has not yet met the cached-call latency/allocation target. Only when the
+# out transport is not honoured by this lane does the call fall
+# back to the allocating `[status, value]` transport, which stays the public
+# API. A valid foreign zero remains distinct from a bridge failure either way.
+@unsafe(reason: "checked transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
+fn _sffi_call_i64_checked(fptr: i64, args: [i64], symbol: text) -> Result<i64, text>:
+    var value: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), &mut value)
+    if status == 0:
+        return Ok(value)
+    if _sffi_i64_out_transport_honoured():
+        return Err("E-SFFI-014: foreign bridge rejected {symbol} with status {status}")
+    val result = _sffi_call_i64_raw_checked(fptr, args)
+    if result.len() != 2:
+        return Err("E-SFFI-017: corrupt checked transport result: {symbol}")
+    val fallback_status = result[0]
+    if fallback_status == 0:
+        return Ok(result[1])
+    Err("E-SFFI-014: foreign bridge rejected {symbol} with status {fallback_status}")
 
 @unsafe(reason: "checked loader returns an unverified raw provider handle", capabilities: [ffi, raw_ptr])
 fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
+    # An absent provider artifact can never load. Reject it before entering the
+    # raw loader: the interpreter lane's `spl_dlopen` raises
+    # `spl_dlopen failed for '<path>'` and aborts instead of returning a
+    # non-positive handle, so without this the documented Err path is
+    # unobservable there and every checked caller dies rather than failing
+    # closed. Existence is probed through the typed `file_exists` alias of
+    # std.io_runtime (already imported here), not a new raw `rt_*` call site.
+    if path == "":
+        return Err("E-SFFI-001: failed to load provider: empty provider path")
+    # Only a path (one containing a separator) names a filesystem artifact. A
+    # bare soname such as `libsimple_audio_cuda.so` is resolved by the dynamic
+    # loader's own search path and must still be handed to it.
+    if path.contains("/") and not file_exists(path):
+        return Err("E-SFFI-001: failed to load provider: {path} (artifact not present)")
     var handle: i64 = 0
     val status = unsafe(capabilities: [ffi, raw_ptr]):
         spl_dlopen_checked(path, &mut handle)
+    if status == 0 and handle > 0:
+        return Ok(handle)
     if status != 0:
         return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
-    if handle <= 0:
-        return Err("E-SFFI-009: provider load succeeded with a null handle: {path}")
-    Ok(handle)
+    # status==0 with handle==0 is the &mut-out-param writeback-loss signature
+    # of the seed interpreter lane (spl_dlopen_checked sets the out slot through
+    # a BorrowMut the caller never observes). Fall back to the direct-return
+    # ABI, which works identically in compiled and interpreted modes; a genuine
+    # load failure still surfaces as handle<=0 here.
+    val direct = unsafe(capabilities: [ffi]):
+        spl_dlopen(path)
+    if direct <= 0:
+        return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
+    Ok(direct)
 
 @unsafe(reason: "checked resolver returns an unverified raw function pointer", capabilities: [ffi, raw_ptr])
 fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
@@ -73,11 +159,14 @@ fn _sffi_dlsym_checked(handle: i64, name: text) -> Result<i64, text>:
     var symbol: i64 = 0
     val status = unsafe(capabilities: [ffi, raw_ptr]):
         spl_dlsym_checked(handle, name, &mut symbol)
-    if status != 0:
+    if status == 0 and symbol > 0:
+        return Ok(symbol)
+    # Same writeback-loss fallback as _sffi_dlopen_checked above.
+    val direct = unsafe(capabilities: [ffi]):
+        spl_dlsym(handle, name)
+    if direct <= 0:
         return Err("E-SFFI-001: unresolved foreign symbol: {name} (status {status})")
-    if symbol <= 0:
-        return Err("E-SFFI-009: symbol resolution succeeded with a null pointer: {name}")
-    Ok(symbol)
+    Ok(direct)
 
 # Resolved, immutable integer-only call slot. Resolution happens once; calls do
 # not perform dlsym, path lookup, hashing, or signature verification. This is a
@@ -88,20 +177,30 @@ class DynI64FnSlot:
     symbol: text
     provider_path: text
     arity: i64
+    lifetime_identity: u64
 
 impl DynI64FnSlot:
     @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
     fn call_checked(args: [i64]) -> Result<i64, text>:
         if args.len() != self.arity:
             return Err("E-SFFI-003: {self.symbol} expects {self.arity} i64 arguments, got {args.len()}")
-        var value: i64 = 0
-        val status = _sffi_try_call_i64_out(self.fptr, args, &mut value)
-        if status == 0:
-            return Ok(value)
-        Err("E-SFFI-014: foreign bridge rejected {self.symbol} with status {status}")
+        val identity = self.lifetime_identity
+        if dynlib_lifetime_begin_v1(identity) <= 0:
+            return Err("E-SFFI-019: provider mapping is retired: {self.provider_path}")
+        val result = _sffi_call_i64_checked(self.fptr, args, self.symbol)
+        dynlib_lifetime_end_v1(identity)
+        result
 
 use std.common.structural.digest.hash256.{hash256_hex_valid}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, file_exists}
+use std.nogc_sync_mut.sffi.dynlib_lifetime_owner_v1.{
+    dynlib_lifetime_register_v1, dynlib_lifetime_begin_v1,
+    dynlib_lifetime_end_v1, dynlib_lifetime_retire_v1,
+    dynlib_lifetime_live_v1
+}
+use std.nogc_sync_mut.sffi.dynlib_snapshot_registry_v1.{
+    dynlib_snapshot_pin_process_v1
+}
 use std.sffi.admission.{
     SffiAdmissionTrustRootV1, SignatureVerifiedSffiAdmissionV1,
     verify_sffi_evidence_v2,
@@ -114,6 +213,16 @@ use std.sffi.admission.{
 class DynLib:
     handle: i64
     path: text
+    lifetime_identity: u64
+
+@unsafe(reason: "transfers a raw loaded handle into the revocable mapping owner", capabilities: [ffi])
+fn _dynlib_owned(handle: i64, path: text) -> Result<DynLib, text>:
+    val identity = dynlib_lifetime_register_v1(handle)
+    if identity == 0u64:
+        unsafe(capabilities: [ffi]):
+            spl_dlclose(handle)
+        return Err("E-SFFI-019: dynamic library lifetime owner is unavailable: {path}")
+    Ok(DynLib(handle: handle, path: path, lifetime_identity: identity))
 
 # Linux sealed-snapshot admission result. File-private fields confine aggregate
 # construction to this canonical loader owner while public methods expose only
@@ -196,171 +305,167 @@ impl ExactArtifactDynLib:
         if actual_sha256 != expected_sha256:
             rt_file_close(fd_i32)
             return Err("E-SFFI-004: provider artifact SHA-256 mismatch: {path}")
+        # The descriptor pathname is the loader's mapping identity. Reserve it
+        # before dlopen and keep it until process exit: dlclose does not prove
+        # that the loader discarded the name (for example RTLD_NODELETE).
+        if not dynlib_snapshot_pin_process_v1(fd):
+            rt_file_close(fd_i32)
+            return Err("E-SFFI-019: sealed provider snapshot registry is full: {path}")
         match _sffi_dlopen_checked(descriptor_path):
             case Ok(handle):
-                if not rt_file_close(fd_i32):
-                    spl_dlclose(handle)
-                    return Err("E-SFFI-018: failed to close provider admission descriptor: {path}")
-                Ok(ExactArtifactDynLib(
-                    lib: DynLib(handle: handle, path: path),
-                    artifact_sha256: actual_sha256,
-                ))
-            case Err(error):
-                if not rt_file_close(fd_i32):
-                    return Err("E-SFFI-018: failed to close provider admission descriptor: {path}")
-                Err(error)
+                match _dynlib_owned(handle, path):
+                    case Ok(lib):
+                        Ok(ExactArtifactDynLib(
+                            lib: lib, artifact_sha256: actual_sha256))
+                    case Err(error): Err(error)
+            case Err(error): Err(error)
 
 impl DynLib:
     @unsafe(reason: "loads an unverified dynamic provider", capabilities: [ffi])
     static fn load_checked(path: text) -> Result<DynLib, text>:
         match _sffi_dlopen_checked(path):
-            case Ok(handle): Ok(DynLib(handle: handle, path: path))
+            case Ok(handle): _dynlib_owned(handle, path)
             case Err(error): Err(error)
 
     # Load a shared library from the given path.
     # Returns nil if dlopen fails.
     @unsafe(reason: "loads an unverified dynamic provider", capabilities: [ffi])
     static fn load(path: text) -> DynLib?:
-        match _sffi_dlopen_checked(path):
-            case Ok(handle): Some(DynLib(handle: handle, path: path))
+        match DynLib.load_checked(path):
+            case Ok(lib): Some(lib)
             case Err(_): nil
 
     @unsafe(reason: "loads an unverified dynamic provider", capabilities: [ffi])
     static fn open(path: text) -> DynLib:
-        match _sffi_dlopen_checked(path):
-            case Ok(handle): DynLib(handle: handle, path: path)
+        match DynLib.load_checked(path):
+            case Ok(lib): lib
             case Err(error): panic(error)
 
     # Look up a symbol by name. Returns 0 if not found.
     @unsafe(reason: "resolves an unverified raw function pointer", capabilities: [ffi, raw_ptr])
     fn sym(name: text) -> i64:
-        if self.handle <= 0:
+        val identity = self.lifetime_identity
+        val handle = dynlib_lifetime_begin_v1(identity)
+        if handle <= 0:
             return 0
-        spl_dlsym(self.handle, name)
+        val symbol = spl_dlsym(handle, name)
+        dynlib_lifetime_end_v1(identity)
+        symbol
 
     @unsafe(reason: "resolves an unverified raw function pointer into a typed error channel", capabilities: [ffi, raw_ptr])
     fn sym_checked(name: text) -> Result<i64, text>:
-        _sffi_dlsym_checked(self.handle, name)
+        val identity = self.lifetime_identity
+        val handle = dynlib_lifetime_begin_v1(identity)
+        if handle <= 0:
+            return Err("E-SFFI-019: provider mapping is retired: {self.path}")
+        val result = _sffi_dlsym_checked(handle, name)
+        dynlib_lifetime_end_v1(identity)
+        result
 
     # Call a function with 0 arguments.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call0(name: text) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
-            case Ok(symbol): symbol
-            case Err(error): panic(error)
-        var args: [i64] = []
-        spl_wffi_call_i64(fptr, args, 0)
+        self.call_n(name, [])
 
     # Call a function with 1 argument.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call1(name: text, a0: i64) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
-            case Ok(symbol): symbol
-            case Err(error): panic(error)
-        var args: [i64] = []
-        args.push(a0)
-        spl_wffi_call_i64(fptr, args, 1)
+        self.call_n(name, [a0])
 
     # Call a function with 2 arguments.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call2(name: text, a0: i64, a1: i64) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
-            case Ok(symbol): symbol
-            case Err(error): panic(error)
-        var args: [i64] = []
-        args.push(a0)
-        args.push(a1)
-        spl_wffi_call_i64(fptr, args, 2)
+        self.call_n(name, [a0, a1])
 
     # Call a function with 3 arguments.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call3(name: text, a0: i64, a1: i64, a2: i64) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
-            case Ok(symbol): symbol
-            case Err(error): panic(error)
-        var args: [i64] = []
-        args.push(a0)
-        args.push(a1)
-        args.push(a2)
-        spl_wffi_call_i64(fptr, args, 3)
+        self.call_n(name, [a0, a1, a2])
 
     # Call a function with 4 arguments.
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call4(name: text, a0: i64, a1: i64, a2: i64, a3: i64) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
-            case Ok(symbol): symbol
-            case Err(error): panic(error)
-        var args: [i64] = []
-        args.push(a0)
-        args.push(a1)
-        args.push(a2)
-        args.push(a3)
-        spl_wffi_call_i64(fptr, args, 4)
+        self.call_n(name, [a0, a1, a2, a3])
 
     # Call a function with a pre-built args array (general case).
     @unsafe(reason: "invokes an untyped foreign function pointer", capabilities: [ffi, raw_ptr])
     fn call_n(name: text, args: [i64]) -> i64:
-        if self.handle <= 0:
-            panic("E-SFFI-001: provider is not loaded: {self.path}")
         if args.len() > 8:
             panic("E-SFFI-014: integer bridge supports at most 8 arguments")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
+        val identity = self.lifetime_identity
+        val handle = dynlib_lifetime_begin_v1(identity)
+        if handle <= 0:
+            panic("E-SFFI-019: provider mapping is retired: {self.path}")
+        val fptr = match _sffi_dlsym_checked(handle, name):
             case Ok(symbol): symbol
-            case Err(error): panic(error)
+            case Err(error):
+                dynlib_lifetime_end_v1(identity)
+                panic(error)
         val nargs = args.len()
-        spl_wffi_call_i64(fptr, args, nargs)
+        val result = spl_wffi_call_i64(fptr, args, nargs)
+        dynlib_lifetime_end_v1(identity)
+        result
 
-    # Canonical allocation-free checked dispatch. Scalar status/out preserves a
-    # valid foreign zero without allocating a result array.
+    # Canonical checked dispatch. A valid foreign zero stays distinct from a
+    # bridge failure, and the mapping stays retained throughout the call.
     @unsafe(reason: "checked transport cannot verify the foreign ABI", capabilities: [ffi, raw_ptr])
     fn call_checked(name: text, args: [i64]) -> Result<i64, text>:
-        if self.handle <= 0:
-            return Err("E-SFFI-001: provider is not loaded: {self.path}")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
+        val identity = self.lifetime_identity
+        val handle = dynlib_lifetime_begin_v1(identity)
+        if handle <= 0:
+            return Err("E-SFFI-019: provider mapping is retired: {self.path}")
+        val fptr = match _sffi_dlsym_checked(handle, name):
             case Ok(symbol): symbol
-            case Err(error): return Err(error)
-        var value: i64 = 0
-        val status = _sffi_try_call_i64_out(fptr, args, &mut value)
-        if status == 0:
-            return Ok(value)
-        Err("E-SFFI-014: foreign bridge rejected {name} with status {status}")
+            case Err(error):
+                dynlib_lifetime_end_v1(identity)
+                return Err(error)
+        val result = _sffi_call_i64_checked(fptr, args, name)
+        dynlib_lifetime_end_v1(identity)
+        result
 
     # Resolve one exact integer-only ABI slot. Callers cache the returned slot
     # and avoid dlsym/string lookup on every invocation.
     @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
     fn resolve_i64_checked(name: text, arity: i64) -> Result<DynI64FnSlot, text>:
-        if self.handle <= 0:
-            return Err("E-SFFI-001: provider is not loaded: {self.path}")
         if arity < 0 or arity > 8:
             return Err("E-SFFI-003: unsupported i64 ABI arity {arity} for {name}; expected 0..8")
-        val fptr = match _sffi_dlsym_checked(self.handle, name):
+        val identity = self.lifetime_identity
+        val handle = dynlib_lifetime_begin_v1(identity)
+        if handle <= 0:
+            return Err("E-SFFI-019: provider mapping is retired: {self.path}")
+        val fptr = match _sffi_dlsym_checked(handle, name):
             case Ok(symbol): symbol
-            case Err(error): return Err(error)
+            case Err(error):
+                dynlib_lifetime_end_v1(identity)
+                return Err(error)
+        dynlib_lifetime_end_v1(identity)
         Ok(DynI64FnSlot(
             fptr: fptr,
             symbol: name,
             provider_path: self.path,
-            arity: arity
+            arity: arity,
+            lifetime_identity: identity
         ))
 
-    # Close the library and zero the handle.
+    # Retire the mapping without mutating fields shared by class aliases.
+    # A later call uses the owner identity and refuses the retired mapping.
+    fn is_live() -> bool:
+        dynlib_lifetime_live_v1(self.lifetime_identity)
+
+    # Raw foreign calls that use a previously resolved symbol must reserve a
+    # use before entering the provider and end it on every return path. Closing
+    # another alias then defers unload until the call has left native code.
+    @unsafe(reason: "reserves an admitted raw provider call", capabilities: [ffi, raw_ptr])
+    fn begin_raw_call() -> bool:
+        dynlib_lifetime_begin_v1(self.lifetime_identity) > 0
+
+    @unsafe(reason: "ends an admitted raw provider call", capabilities: [ffi, raw_ptr])
+    fn end_raw_call():
+        dynlib_lifetime_end_v1(self.lifetime_identity)
+
     @unsafe(reason: "releases an unverified dynamic provider", capabilities: [ffi])
     me close():
-        if self.handle <= 0:
-            self.handle = 0
-            return
-        spl_dlclose(self.handle)
-        self.handle = 0
+        _ = dynlib_lifetime_retire_v1(self.lifetime_identity)
 
 # ============================================================================
 # Module-level singleton state for DynLoader
@@ -383,7 +488,8 @@ impl DynLoader:
     # Ensure the library at path is loaded. Returns true if available.
     @unsafe(reason: "legacy boolean load result omits provider admission evidence", capabilities: [ffi])
     me ensure_loaded(path: text) -> bool:
-        if self.libs.contains(path):
+        if self.libs.contains(path) and
+           dynlib_lifetime_live_v1(self.libs[path].lifetime_identity):
             true
         else:
             match DynLib.load(path):
@@ -401,7 +507,8 @@ impl DynLoader:
     # provider artifact or verified its ABI registry.
     @unsafe(reason: "checked load result cannot admit or verify the dynamic provider", capabilities: [ffi])
     me ensure_loaded_checked(path: text) -> Result<DynLib, text>:
-        if self.libs.contains(path):
+        if self.libs.contains(path) and
+           dynlib_lifetime_live_v1(self.libs[path].lifetime_identity):
             return Ok(self.libs[path])
         match DynLib.load_checked(path):
             case Ok(lib):
@@ -414,7 +521,8 @@ impl DynLoader:
     # Return the loaded DynLib for path, or nil.
     @unsafe(reason: "exposes an unverified dynamic provider handle", capabilities: [ffi, raw_ptr])
     fn get_lib(path: text) -> DynLib?:
-        if self.libs.contains(path):
+        if self.libs.contains(path) and
+           dynlib_lifetime_live_v1(self.libs[path].lifetime_identity):
             self.libs[path]
         else:
             nil
@@ -549,5 +657,5 @@ fn sffi_call_checked(func_name: text, args: [i64]) -> Result<i64, text>:
     loader.call_checked(lib_path, func_name, args)
 
 export spl_dlopen, spl_dlopen_checked, spl_dlsym, spl_dlsym_checked, spl_dlsym_process_checked, spl_dlclose
-export spl_wffi_call_i64, spl_wffi_call_i64_checked
+export spl_wffi_call_i64, spl_wffi_call_i64_checked, spl_wffi_try_call_i64_out
 export DynI64FnSlot, DynLib, DynLoader

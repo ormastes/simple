@@ -326,3 +326,13 @@ against `src/runtime/runtime_native.c`, not tracked here.
 Also correcting a stale note: `config/simpleos_arm64_servers_weak_undefined_allowlist.sdn`
 is PRESENT in the working tree (a deletion of it is staged in another session's
 shared index, which is not this lane's change).
+
+## Triage 2026-09-13
+
+Root causes #1 and #2 are already marked FIXED. Root cause #3 (dispatch-gap
+refusal firing with a nil receiver, `/usr/bin/simple hello.spl` rc=70) needs
+a rebuilt kernel + rebuilt `/usr/bin/simple`, run through the QEMU/OVMF-pflash
+board-proxy pipeline (`.claude/rules/board-runnable.md`) to re-verify — not a
+unit-spec-TDD-fixable defect in isolation, and well beyond this pass's
+per-bug budget (kernel + guest binary rebuild plus a boot cycle). Leaving
+OPEN as previously narrowed; no code change made this pass.

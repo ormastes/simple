@@ -9,6 +9,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.mir_target_context.{MirTargetContext}
+use compiler.common.native_layout_trace.{MirExternalLayoutTraceV1}
 
 # ============================================================================
 # MIR Lowering Types
@@ -57,12 +58,22 @@ struct MirLowering:
     # reference/address MIR semantics remain unchanged.
     unsafe_depth: i64
     errors: [MirError]
+    current_module_id: text
+    composite_layout_digests: Dict<text, text>
+    composite_layout_owner_counts: Dict<text, i64>
+    external_layout_traces: [MirExternalLayoutTraceV1]
     # Per-lowering-session malformed HirType receipt state. Keeping this on
     # the owner prevents one compilation's cap from making a later one pass.
     type_transport_receipts: i64
     type_transport_owner: text
     type_transport_context: text
     type_transport_param_index: i64
+    type_transport_caller_disc: i64
+    # Diagnostic-only HirType transport context. Owner-local state prevents a
+    # nested or future parallel lowerer from misattributing another function.
+    mir_tag_probe_active_function: text
+    mir_tag_probe_pending_site: text
+    mir_tag_probe_pending_caller_disc: i64
     # MC/DC instrumentation is compiler-owned and entirely absent when mode is
     # zero.  Modes 1/2 mean static recorder / dynamic-aspect patchpoint.
     # The active decision fields are compile-time lowering state only; they do
@@ -416,6 +427,18 @@ struct MirLowering:
     global_symbol_ids: Dict<i64, bool>
     # O(1), allocation-free hot lookup mirrors for the struct-keyed module
     # dictionaries. i64 identity avoids the seed's SymbolId-key lookup bug.
+    # CORRECTION 2026-09-02: the paragraph above claims that naming such a
+    # field in the `MirLowering(...)` constructor call STILL leaves it nil, and
+    # on that basis recommends a bool-set workaround. That claim does NOT
+    # reproduce on seed md5 286f66b8615dce0e0da788f0550c4008 for a
+    # struct-valued `Dict<i64, Struct>` field -- measured directly, see
+    # test/01_unit/compiler/50.mir/mir_lowering_global_maps_initialized_spec.spl
+    # (4 examples, 0 failures: `.contains()` on an empty map, index-assign,
+    # read-back, and `.len()` all behave). The two fields below were nil for a
+    # much more ordinary reason: they were simply MISSING from the constructor
+    # call, and no later assignment ever set them. Do not reach for the
+    # bool-set workaround here; initialise the field.
+    # Record: doc/08_tracking/bug/mcp_native_build_post_mono_nil_contains_2026-09-01.md
     global_statics_by_id: Dict<i64, MirStatic>
     global_constants_by_id: Dict<i64, MirConstant>
     # array_global_2026-07-25: companion map, symbol id -> the module-level
@@ -461,6 +484,13 @@ struct MirLowering:
     # dropped at an earlier `?`/`return` exit, or closed via `.close()`.
     # Prevents a double Drop for the same local on the same lowered path.
     consumed_resource_locals: Dict<i64, bool>
+    # Declaration-owned link names contain no foreign SymbolIds. ABI spelling
+    # is learned from HirFunction attributes, never guessed from an import.
+    callable_link_names: Dict<text, text>
+    # is_entry_module of the lower_module call in progress. Threaded to the
+    # per-function MIR naming fallback instead of relying on its default
+    # argument (see function_lowering.spl).
+    lowering_entry_module: bool
 
 impl MirLowering:
     fn local_symbol_slot(symbol_id: i64) -> i64:
@@ -513,6 +543,21 @@ impl MirLowering:
             slot = slot + 1
         self.local_symbol_index_slots = slots
 
+    fn local_symbol_free_bucket(symbol_id: i64) -> i64:
+        """First empty bucket on symbol_id's probe chain, or -1 when every
+        bucket is occupied. Bounded by capacity so it always terminates."""
+        val capacity = self.local_symbol_index_slots.len()
+        if capacity == 0:
+            return -1
+        var bucket = symbol_id % capacity
+        var probes = 0
+        while probes < capacity:
+            if self.local_symbol_index_slots[bucket] < 0:
+                return bucket
+            bucket = (bucket + 1) % capacity
+            probes = probes + 1
+        -1
+
     me bind_local(symbol_id: i64, local: LocalId):
         if symbol_id < 0 or local.id < 0:
             return
@@ -526,10 +571,13 @@ impl MirLowering:
         if self.local_symbol_index_slots.len() == 0 or
            (self.local_symbol_ids.len() + 1) * 10 >= self.local_symbol_index_slots.len() * 7:
             self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
-        val capacity = self.local_symbol_index_slots.len()
-        var bucket = symbol_id % capacity
-        while self.local_symbol_index_slots[bucket] >= 0:
-            bucket = (bucket + 1) % capacity
+        var bucket = self.local_symbol_free_bucket(symbol_id)
+        if bucket < 0:
+            # No empty bucket: the index has drifted from local_symbol_ids
+            # (the authoritative store). Rebuild from it rather than probe
+            # forever; a rebuilt table always keeps load below 0.7.
+            self.rebuild_local_symbol_index(self.local_symbol_index_slots.len() * 2)
+            bucket = self.local_symbol_free_bucket(symbol_id)
         val new_slot = self.local_symbol_ids.len()
         self.local_symbol_ids.push(symbol_id)
         self.local_symbol_values.push(local)
@@ -708,6 +756,46 @@ struct MirError:
     message: text
     span: Span?
     fatal: bool
+
+# ============================================================================
+# Per-local marker-map removal (lane-portable)
+# ============================================================================
+#
+# `Dict.remove(k)` has DIFFERENT return values on the two lanes that run this
+# compiler: the seed interpreter returns a NEW dict without the key
+# (interpreter_method/collections.rs "remove" | "delete"), while the seed's
+# native codegen lowers `.remove` to `rt_collection_remove` -> `rt_dict_remove`,
+# which mutates in place and returns the REMOVED VALUE (or nil). So the idiom
+# `self.marks = self.marks.remove(id)` is correct interpreted and, natively,
+# replaces the whole marker map with `true`/nil on the first plain assignment
+# in a function. Every later `.contains(id)` then misses: measured on the
+# phase-2 (natively compiled Stage 2) lane, `str(t)` lost its
+# tagged_text_locals mark and was rendered through rt_raw_i64_to_string a
+# second time, printing the tagged string HANDLE (`2083130940001`) instead of
+# `3`; the same clobber blanked runtime_array_locals / option_value_locals /
+# nil_locals / runtime_dict_locals. A bare `self.marks.remove(id)` statement is
+# the mirror-image bug (in place natively, no-op interpreted). Rebuilding the
+# map without the key is the one form both lanes agree on; the contains_key
+# guard keeps the common (unmarked) case O(1). Bug record:
+# doc/08_tracking/bug/dict_remove_return_value_differs_native_vs_interpreter_2026-09-13.md
+
+fn marker_map_without(marks: Dict<i64, bool>, key: i64) -> Dict<i64, bool>:
+    if not marks.contains_key(key):
+        return marks
+    var kept: Dict<i64, bool> = {}
+    for k in marks.keys():
+        if k != key:
+            kept[k] = marks[k]
+    kept
+
+fn text_map_without(marks: Dict<i64, text>, key: i64) -> Dict<i64, text>:
+    if not marks.contains_key(key):
+        return marks
+    var kept: Dict<i64, text> = {}
+    for k in marks.keys():
+        if k != key:
+            kept[k] = marks[k]
+    kept
 
 # ============================================================================
 # Exports

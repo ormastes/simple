@@ -31,6 +31,7 @@ doc/                # Documentation — each phase organized by feature domain
   # Domains: language, compiler, lib, app, os, hardware, platform, runtime, ui, ml, infra
   # Topics: semantic grouping within domain (e.g., type_system/, parser/, networking/)
   # Rule: ≤10 files per directory; max depth 4 (doc/phase/domain/topic)
+  # Config: config/check/doc_layout.sdn (root/file_limit/max_depth/exempt_phase)
 bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 .claude/            # Agents, skills, templates, rules
 ```
@@ -42,6 +43,13 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
   See `doc/07_guide/workspace/file_manifest.md`.
 - **Detailed:** `doc/04_architecture/compiler/misc/file_class_structure.md` (2,649 files, 623K lines)
 - **Glossary:** `doc/glossary.md`
+- **Fan-out + depth guard:** `scripts/check/check-directory-fanout.shs` enforces the
+  ≤10-files and max-depth-4 rules above, baseline-relative (new/grown violations
+  fail; pre-existing ones are grandfathered in `scripts/check/directory_fanout_baseline.txt`
+  and `scripts/check/doc_depth_baseline.txt`). Reads `config/check/doc_layout.sdn`
+  (override with `--config`/`--root`); `--depth`/`--fanout` run one check only;
+  `--plan` prints a proposed (never-applied) file→subdirectory split for an
+  over-limit directory; `--selftest` is fatal and runs before every scan.
 
 ## Auto-Generated Docs
 | What | Where | When |
@@ -52,3 +60,14 @@ bin/                # Binaries (bin/simple → release/<triple>/simple symlink)
 | Test DB | `doc/08_tracking/test/test_db.sdn` | Every test run |
 | TODOs | `doc/TODO.md` | `bin/simple todo-scan` |
 | Todo DB | `doc/08_tracking/todo/todo_db.sdn` | `bin/simple todo-scan` |
+
+**In-development tag (`@tag:in-development`).** Specs/features marked
+in-development are expected to FAIL, are SKIPPED in whole-suite runs, and are
+**COUNTED** in the runner summary — so the count belongs in `test_result.md` and
+`test_db.sdn`, and an in-development feature belongs in `pending_feature.md`, not
+`feature.md`. Semantics and the anti-use rules: `doc/07_guide/infra/testing.md`
+§ Tags and Filtering. **Not yet enforced at `origin/main` @ `3ccf808f6f2`
+(2026-08-23)** — the pure-Simple runner parses only `# @di_test` and
+`# @exec_limit` (`src/app/test_runner_new/test_runner_single.spl:193,209`); the
+skip/count wiring is landing in sibling lanes. Re-verify before asserting these
+files carry the count.

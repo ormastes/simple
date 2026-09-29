@@ -1,0 +1,122 @@
+# Interpreter: a mutating array method on a plain local variable, nested
+# inside a larger EXPRESSION (`acc = acc + arr.pop()`, `f(arr.pop())`,
+# `if arr.pop() % 2 == 0:`), clones the whole backing Vec per call.
+#
+# `arr.pop()` as a bare statement, or as a `val x = arr.pop()` initializer,
+# routes through `interpreter_helpers/patterns.rs`'s identifier fast path,
+# which mutates in place via `Arc::make_mut` on the env slot -- O(1)
+# amortized. The SAME call nested in a larger expression is evaluated by
+# `interpreter/expr/calls.rs`'s `Expr::MethodCall` identifier branch, whose
+# MECALL-OWNED move only covers `Value::Object` receivers; an array receiver
+# falls to `evaluate_method_call_with_self_update`, which evaluates the
+# receiver to a COPY (Arc refcount 2) before the mutator runs, so
+# `handle_array_methods`'s `pop` arm clones the whole Vec on every call --
+# O(n) per call, O(n^2) per loop.
+#
+# See doc/08_tracking/bug/interpreter_identifier_array_mutator_in_expression_clones_2026-09-12.md
+#
+# Read the RATIO (time at 4x n / time at n), not the absolute seconds --
+# linear ~= 4, the quadratic clone measured 11.7-20.6 in the bug doc. The
+# bound below (large*10 < small*70, i.e. ratio < 7) sits well above a linear
+# ratio and well below the measured quadratic ratios, so it discriminates the
+# two on a loaded, shared host.
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn id(x: i64) -> i64:
+    return x
+
+fn sum_n(n: i64) -> i64:
+    return n * (n - 1) / 2
+
+fn make_array(n: i64) -> [i64]:
+    var arr: [i64] = []
+    var i = 0
+    while i < n:
+        arr.push(i)
+        i = i + 1
+    return arr
+
+# Shape 1: `acc = acc + arr.pop()` -- pop nested in a binary expression.
+fn run_pop_in_binary(n: i64) -> i64:
+    var arr = make_array(n)
+    var acc = 0
+    while arr.len() > 0:
+        acc = acc + arr.pop()
+    return acc
+
+# Shape 2: `acc = acc + id(arr.pop())` -- pop nested as a call argument,
+# itself nested in a binary expression (the exact shape measured in the bug
+# doc, ratio 20.6).
+fn run_pop_as_call_arg(n: i64) -> i64:
+    var arr = make_array(n)
+    var acc = 0
+    while arr.len() > 0:
+        acc = acc + id(arr.pop())
+    return acc
+
+# Shape 3: `if arr.pop() % 2 == 0:` -- pop nested in an if-condition.
+fn run_pop_in_if_condition(n: i64) -> i64:
+    var arr = make_array(n)
+    var evens = 0
+    while arr.len() > 0:
+        if arr.pop() % 2 == 0:
+            evens = evens + 1
+    return evens
+
+describe "seed interpreter: identifier array mutator nested in an expression":
+    it "pop_in_binary_expr: doubling^2 n costs less than 7x, not ~12x":
+        val t0 = rt_time_now_unix_micros()
+        val small = run_pop_in_binary(20000)
+        val t1 = rt_time_now_unix_micros()
+        val large = run_pop_in_binary(80000)
+        val t2 = rt_time_now_unix_micros()
+        val small_us = t1 - t0
+        val large_us = t2 - t1
+        print "[perf] pop_in_binary_expr: n=20000 {small_us}us n=80000 {large_us}us"
+        expect(small).to_equal(sum_n(20000))
+        expect(large).to_equal(sum_n(80000))
+        expect(small_us > 0).to_equal(true)
+        expect(large_us * 10 < small_us * 70).to_equal(true)
+
+    it "pop_as_call_arg: doubling^2 n costs less than 7x, not ~20x":
+        val t0 = rt_time_now_unix_micros()
+        val small = run_pop_as_call_arg(20000)
+        val t1 = rt_time_now_unix_micros()
+        val large = run_pop_as_call_arg(80000)
+        val t2 = rt_time_now_unix_micros()
+        val small_us = t1 - t0
+        val large_us = t2 - t1
+        print "[perf] pop_as_call_arg: n=20000 {small_us}us n=80000 {large_us}us"
+        expect(small).to_equal(sum_n(20000))
+        expect(large).to_equal(sum_n(80000))
+        expect(small_us > 0).to_equal(true)
+        expect(large_us * 10 < small_us * 70).to_equal(true)
+
+    it "pop_in_if_condition: doubling^2 n costs less than 7x, not ~17x":
+        val t0 = rt_time_now_unix_micros()
+        val small = run_pop_in_if_condition(20000)
+        val t1 = rt_time_now_unix_micros()
+        val large = run_pop_in_if_condition(80000)
+        val t2 = rt_time_now_unix_micros()
+        val small_us = t1 - t0
+        val large_us = t2 - t1
+        print "[perf] pop_in_if_condition: n=20000 {small_us}us n=80000 {large_us}us"
+        expect(small).to_equal(20000 / 2)
+        expect(large).to_equal(80000 / 2)
+        expect(small_us > 0).to_equal(true)
+        expect(large_us * 10 < small_us * 70).to_equal(true)
+
+    it "aliasing: a second binding keeps its full length after expression-context pops (COW)":
+        # Correctness pin, independent of the perf bound above: a genuinely
+        # aliased array (a second binding holding the same Arc) must still
+        # copy-on-write when the mutator is nested in an expression, exactly
+        # as the statement fast path already guarantees.
+        var arr = make_array(1000)
+        val alias = arr
+        var acc = 0
+        while arr.len() > 0:
+            acc = acc + arr.pop()
+        expect(arr.len()).to_equal(0)
+        expect(alias.len()).to_equal(1000)
+        expect(acc).to_equal(sum_n(1000))

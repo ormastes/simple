@@ -1,4 +1,8 @@
 # Quadratic fragment-accumulator neighbors in networking code
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** OPEN
 **Found:** 2026-08-21
@@ -140,3 +144,4 @@ counters were added and the specs were executed against BOTH shapes.
 The 4 correctness scenarios pass in BOTH shapes, confirming the refactor is
 behavior-preserving and that only the 3 work-counter scenarios discriminate.
 Regression: `io/buffer_spec.spl` PASS.
+

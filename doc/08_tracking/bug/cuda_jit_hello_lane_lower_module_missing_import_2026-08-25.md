@@ -1,4 +1,8 @@
 # cuda_jit hello lane: `lower_module` not found, then seed interpreter method collision (2026-08-25)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** partially fixed (import), remainder blocked on seed interpreter.
 **Spec:** `test/03_system/gpu_lane/cuda_jit_hello_spec.spl` — `Results: 14 total, 13 passed, 1 failed`
@@ -29,3 +33,4 @@ spec (different import set) gets past lowering and fails later with `expected 1 
 Reproduce: `bin/simple test <spec with the 6 imports of cuda_jit_lane_executor + lower_module call>`.
 Unblocks when: a pure-Simple self-hosted `bin/simple` is deployed (the bootstrap redeploy is
 tracked separately), or the seed's cross-module member resolution is keyed by class identity.
+

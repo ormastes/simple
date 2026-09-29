@@ -1,69 +1,426 @@
-# Aspect/dynload lane — plan (authored 2026-08-19)
+# Aspect Dynload, HAL Migration, Runtime Boundary, and x86 Bootstrap Plan
 
-My plan for this lane, written after re-verifying the tree rather than from memory.
+**Date:** 2026-08-19  
+**Status:** active; corrected after Sol review; implementation and bootstrap
+acceptance incomplete; shared Git configuration repaired; bulk cleanup awaits a
+fresh exact manifest  
+**Merge owner:** `/root`  
+**Final reviewers:** Sol/highest-capability reviewer for broad findings, coverage,
+performance, repository cleanup, and done marks  
+**Audited revision:**
+`e3d58a25e733f32d2557936098f849ade1d7df57`
 
-Binary identity at authoring time (stamp before AND after every step below; other
-sessions swap this symlink, so an unstamped verdict is worthless):
-`/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`,
-59645008, 2026-08-18 10:12:23.164167908 +0000.
+The working tree is changing concurrently. Counts below identify whether they
+are historical, committed-tree, or current dirty-tree evidence. Before edits,
+regenerate machine-readable censuses pinned to revision plus dirty-patch hash.
 
-Machine hazard, measured this session: ~18 GB of 128 GB available, swap 0, and
-**33 orphaned `simple` processes holding 92.4 GB**. earlyoom
-(`--prefer simple|rustc|cc1 --avoid claude`) SIGTERMs at 10% free and SIGKILLs at
-5%; 699 SIGTERMs hit `simple` in 6 hours. Separately the kernel OOM killer took
-three claude sessions at 23:30:27 after a memory-guard script set
-`oom_score_adj=1000` on them. **Exit 143/137 is an OOM kill, not a verdict** —
-re-run, never record. One `simple` process at a time, detached with
-`nohup setsid`, never wrapped in `timeout`.
+## 1. Objective
 
-## Position vs origin (re-verified, changed twice during the session)
+Deliver the following as one evidence-driven campaign:
 
-At 23:47 `ca7c33ecf75` was my ANCESTOR (0 behind / 3 ahead), so no rebase was due.
-By 00:xx origin had genuinely moved to **`e347858a954`** and I am now
-**12 behind / 3 ahead**. A rebase IS now required. `git ls-remote` is the
-authority here, not the local ref.
+1. Fix every currently reproducible test failure that is fixable on this host.
+2. Prefer pure-Simple owners over Rust or C implementation paths.
+3. Collapse direct `rt_*` use behind one reviewed owner per ABI/symbol family
+   and public `hal_*`/`io_*` surfaces, subject to layer, capability-family,
+   bare-metal, and bootstrap dependency constraints; remove accidental
+   compatibility-family declarations.
+4. Remove remaining non-reference Rust HAL work and migrate the remaining C HAL
+   implementation to pure Simple without changing observable I/O semantics.
+5. Prove C-versus-Simple I/O parity and obtain real 100% branch coverage for the
+   scoped C and pure-Simple HAL implementations.
+6. Finish startup, component dynload, aspect-pack, facet, interpreter, compiler,
+   and loader work; compare retained performance with Bun, Go, Rust, Python,
+   Java, and C where the lane is semantically comparable.
+7. Produce and deploy a provenance-backed x86_64 Stage 4 bootstrap.
+8. Preserve useful concurrent work, then remove only proven stale/wrong agent
+   processes, worktrees, branches/bookmarks, locks, and unpublished commits.
 
-My 3 commits: `ca7c33ecf75` (base) -> `acd936994ba` (static component table) ->
-`5ffd9e20e59` (SIF v1) -> `013f1b33a10` (this session's loader+aspect work).
+This plan does not count a seed-only check, a stale receipt, a tautological test,
+an empty coverage denominator, or an unavailable-platform skip as a PASS.
 
-## What has ACTUALLY landed
+## 2. Frozen shared contracts
 
-| Piece | State | Evidence |
+- Public hardware and I/O names are `hal_*` and `io_*`.
+- A raw `rt_*` symbol may temporarily remain only in its canonical low-level
+  provider. Compatibility families re-export that owner; they do not redeclare
+  or reimplement the hook.
+- The default pure-Simple owner for hosted runtime facades is
+  `src/lib/nogc_sync_mut`; other runtime families delegate when semantics match.
+- C/Rust reference implementations are test or bootstrap oracles, not the
+  production user-facing owner.
+- Shared parity helpers are `prepare_hal_fixture`, `run_c_hal_case`,
+  `run_simple_hal_case`, `assert_hal_parity`, and
+  `assert_hal_branch_coverage`.
+- Manual steps use literal `step("inventory runtime boundaries")`,
+  `step("compare C and Pure Simple I/O semantics")`,
+  `step("measure HAL branch coverage")`, and
+  `step("verify x86 bootstrap")`.
+- An unfinished oracle fails explicitly with `assert(false)` or `fail(...)`.
+
+## 3. Status snapshot
+
+### 3.1 Tests and ignored work
+
+| Evidence | Current status | Interpretation |
+|---|---:|---|
+| Historical env-gated audit (2026-08-09) | 27 files: 8 PASS, 19 real FAIL, 0 env-only FAIL | Historical fix queue only; not the current failure count. Current-tree audit already shows some rows repaired/stale. |
+| Intentional dropped case | 1 Metal failure-injection case | Record as unavailable/dropped, never PASS. |
+| Startup/ExecIR focused run on current dirty tree | 23 passed, 0 failed, 0 skipped | Covers four focused specs only; not a full-suite result. |
+| Stage-binary runnable guard | 8 failed/crashed invocations out of 12 across 4 binaries | Artifact/runtime failures, separate from spec-file count. |
+| Checked-in `summary.txt` receipts | 10,720 files, zero recorded fail/skip/ignore/pending | Stale Windows-origin receipts; historical only. |
+
+Static raw-line census (not executable-scenario counts; comments/fixtures and
+duplicated legacy/canonical test trees inflate these values): 216 `skip` lines,
+93 `pending(...)`, 8 `ignore_it`, 4 ignore
+annotations, 1 skip annotation, 5 `pass_todo`, 143 intentional no-op pass
+variants, 788 tautology shapes, and 3 confirmed empty executable `it` bodies.
+The relevant compiler subset contains 54 pending lines, 2 ignore annotations,
+1 skip annotation, 9 no-op pass variants, and 144 tautologies. The relevant
+runtime/HAL subset contains 33 pending lines, no explicit ignore/skip marker,
+28 no-op pass variants, 119 tautologies, and 18 validated platform-gated
+vacuous lines. Non-vendor Rust test-like files contain 29 `#[ignore]` markers.
+Before implementation acceptance, generate a deduplicated manifest that reports
+unique executable specs, duplicate mirror rows, failed spec files, failed
+invocations, pending scenarios, ignored scenarios, unavailable rows, and source
+comments/fixtures separately.
+
+Authoritative failure sources:
+
+- `doc/08_tracking/bug/gated_specs_are_tautology_shells_2026-08-09.md`
+- `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
+- `doc/08_tracking/test/expect_vacuity_gate_full_corpus_census.md`
+
+### 3.2 `rt_*` boundary census
+
+The first audit captured the following **unpinned historical dirty-tree lexical
+snapshot**, excluding repository-declared vendor paths and bundled third-party
+runtime headers. It is useful for area proportions only. It is neither the
+audited-revision census nor the mutable-tree completion denominator.
+
+| Area | Lexical `rt_*` tokens |
+|---|---:|
+| `src/compiler` | 5,403 |
+| `src/lib` | 12,448 |
+| `src/os` | 5,382 |
+| `src/runtime` | 9,448 |
+| `src/compiler_rust` | 31,654 |
+| **Total** | **64,335** |
+
+The current dirty-tree Sol review found **4,277 anchored direct pure-Simple
+`extern fn rt_*` declarations**: 797 in `src/compiler` and 3,480 in `src/lib`.
+It also found 32,061 current Rust-tree lexical tokens; 31,654 is the earlier
+historical dirty-tree value above. The 64,335 total is not a callsite count and includes
+comments and checked-in source artifacts.
+
+Highest-repeat candidate declarations are `rt_env_get` (108 files),
+`rt_file_read_text` (103), `rt_file_exists` (72 real declarations; two additional
+comment examples were excluded), `rt_file_write_text` (41),
+`rt_file_delete` (32), `rt_process_run` (29), and
+`rt_time_now_unix_micros` (28). These are the first consolidation wave.
+
+Before the first migration patch, add a checked-in census command and manifest
+pinned to revision plus dirty-patch hash. It must report lexical tokens,
+anchored declarations, unique symbols, semantic callsites, C/Rust definitions,
+and files separately so these categories cannot be mixed again.
+
+### 3.3 Rust, C, and pure-Simple HAL
+
+Audited HAL scope: `src/os/kernel/arch`, `src/os/kernel/arch_adapt`,
+`src/lib/nogc_sync_mut/hal`, and `src/compiler_rust/lib/std/src/bare/hal`.
+
+| Implementation | Files | LOC | Status |
+|---|---:|---:|---|
+| Pure Simple `.spl` | 195 | 23,442 | Current dirty-tree scope, including `riscv_shared/fpga_orchestration.spl`; canonical direction, but several implementations remain partial. |
+| C `.c` | 20 | 14,924 | Migration remains substantial. |
+| C headers `.h` | 16 | 1,665 | Must shrink with the C implementation boundary. |
+| Rust `.rs` HAL implementation | 0 | 0 | No owned Rust HAL implementation remains in this audited scope. |
+
+The remaining C concentration is Cosmos/OpenSSD ARM32 (15 files/9,052 LOC),
+RISC-V64 boot/runtime shims (3 files/4,804 LOC), Cortex-M33 (1 file/1,044
+LOC), and a 24-line RISC-V32 boot shim. Rust files in the I/O parity benchmark
+remain reference oracles, not HAL production implementations.
+
+Known pure-Simple HAL gaps include the hard-coded 64-byte RISC-V64 cacheline,
+module-local rather than cross-layer ZICBOM capability state, sentinel rather
+than real DTB parsing in `hal_smp_init_from_bytes`, and seven known direct arch
+imports outside the intended boundary.
+
+### 3.4 HAL coverage and C/Simple I/O parity
+
+No trustworthy HAL branch-coverage percentage exists today.
+`build/coverage/coverage.sdn` reports 100% with zero files, zero decisions, and
+zero paths and is invalid evidence. One `# @cover` target names a deleted
+`src/lib/nogc_sync_mut/hal/mmio.spl`; markers are targets, not measurement.
+
+Reusable parity assets already exist:
+
+- `test/perf/io_parity/io_parity_simple.spl`
+- `test/perf/io_parity/io_parity_ref.c`
+- `test/perf/io_parity/io_parity_ref.rs`
+- `test/perf/io_parity/run_io_parity_benchmarks.shs`
+
+They cover checksum parity for `read_text`, `mmap_text`, and `append_at`, plus
+startup timing. They do not cover the HAL branch denominator and must be
+extended rather than relabelled.
+
+Coverage acceptance is split into two truthful claim levels:
+
+- **Host-executable branch coverage:** exact admitted source files, nonzero
+  branch denominator, compiler/toolchain and instrumentation recorded, every
+  branch hit, reviewed exclusions, and biting sabotage controls.
+- **Physical-board contract coverage:** one real-device evidence scenario per
+  declared board contract. QEMU, synthetic strings, and CPU-class evidence do
+  not count as board-init execution.
+
+Boot/inline-assembly and hardware-only leaves are isolated from host-executable
+logic before any 100% claim. If production C is deleted, retain the reviewed C
+oracle in a test-only location with hash/provenance, license, build command, and
+explicit non-production status until the stabilization window closes.
+
+### 3.5 Aspect/component dynload
+
+Implemented substrate:
+
+- `load_policy`, startup decision, and segment planning under `src/app/startup`.
+- Checked dynSMF policy, artifact freshness, stub, ABI, and interface-hash gates
+  under `src/os/smf/dynsmf_session.spl`.
+- Config parsing/autoload helpers under `src/app/startup/dynsmf_autoload.spl`.
+- SCI CLI extension route, registry, help, and completion contracts under
+  `src/lib/nogc_sync_mut/composition`.
+- Component descriptor parsing and catalog validation under
+  `src/lib/common/structural/component/descriptor.spl`.
+
+Partial/not wired:
+
+- `src/app/main.spl` still calls `dynsmf_startup_session(...)`, not the config
+  entrypoint.
+- The loader-side `load_policy` consumer remains unfinished.
+- No app-root stage-0 option-router cutover exists.
+- `resolve_component` static/dynamic selection is not implemented.
+
+True aspect/facet dynload remains not started: no implemented `AspectCatalog`,
+`AspectPackDirectory`, `SMF_FLAG_ASPECT_PACK`, `facet interface`, `facet impl`,
+`bind facet`, `FacetRef`, or `try_facet` surface exists in source and tests.
+
+### 3.6 Startup/interpreter/compiler/loader performance
+
+Current dirty startup work adds ExecIR encode-time arena sizing, a reusable
+arena executor, memoized interpreter tier state, and array/slice runtime-local
+tagging. Its four focused specs passed 23/23 in this audit. These files are an
+active overlapping lane and must not be overwritten.
+
+Five startup-campaign items remain: deploy self-hosted default `bin/simple`,
+institutionalize >=5-sample p50/p95/RSS admission, prove full-rebuild static
+folding, finish Phase-C app cutover/migration proof, and add Phase-E growth-band
+remeasurement.
+
+Retained startup evidence is seed-based and noisy: Simple source-run p50 31 ms,
+Bun 31-33 ms, Python 43 ms, and `go run` 245 ms. No accepted native-Simple
+lane exists because native build failed; Java is absent from the retained
+matrix. These numbers do not prove pure-Simple parity.
+
+### 3.7 x86_64 bootstrap
+
+- Deployed `bin/simple` is still the Rust seed (sha256
+  `d3d54fab80199cddb962e07ca1ab655c0cfb8be3594ad4aa615084948116af54`).
+- The best retained pure-Simple artifact is an imported, stale Stage 2 archive
+  (sha256 `adb24ebf9f3b09fe6baa89278660a898205a123253b3de3233a13ce960b34b1b`).
+- No current admitted Stage 3 output is present.
+- No provenance-backed Stage 4 artifact or deploy receipt exists.
+- Current blockers are Rust-authority compile errors, a symlink/logical-path
+  wrapper hazard, concurrent Rust/runtime tree churn, and stale admission paths.
+
+### 3.8 Repository/process state
+
+Repository configuration changed during the audit and temporarily placed
+`core.bare=false` plus a lane path in the shared config. After quiescing Git/JJ
+activity, the Sol-reviewed repair removed shared `core.bare`/`core.worktree`,
+put `core.bare=true` in the bare primary's private `config.worktree`, verified
+the GPU and aspect linked roots, and proved all three indexes unchanged. A
+timestamped config backup remains under `/mnt/data/worktrees/simple-config-repair.*`.
+The earlier registry audit found 443 entries, two missing registrations, and
+three locked initializations; the two missing entries were pruned only after preserving
+their heads as `rescue/agentrestore-35849c9` and
+`rescue/fix-dbl-87d5f016`, and the failed seed checkout was removed only after
+confirming commit `1c6c8d4` remained on `codex/gate5r-dir-sync-b791`.
+The stale orphaned audit PGID 291105 and runaway cleanup audit groups 343494 and
+376108 exited after `TERM`. All broader worktree, branch, commit, and JJ cleanup
+remains paused until a fresh exact manifest converges; the earlier bulk counts
+are planning evidence, not an authorized deletion list.
+
+## 4. Implementation lanes
+
+### Lane A — Test failure inventory and repair
+
+- Freeze one deterministic manifest and exact compiler/mode/host identity.
+- Reconcile all 19 historical rows against current source/receipts, classify
+  repaired/stale/unavailable/current, then reproduce each currently failing row
+  at most once and group it by shared root cause.
+- Claim each category and fix the pure-Simple owner first.
+- Replace tautologies, empty examples, and false platform PASS paths with real
+  assertions or explicit unavailable status.
+- Rerun failed shards only, then one scoped authoritative manifest.
+
+### Lane B — Runtime boundary and alias collapse
+
+- Start with env/file/process/time duplicate ownership.
+- Move each hook to one canonical owner; make compatibility families re-export.
+- Replace public direct `rt_*` imports with typed `io_*`/`hal_*` calls.
+- Track the regenerated pinned-manifest baseline after each wave; a decrease is not
+  acceptance unless ABI, error, ownership, and compiled execution stay green.
+- Continue with compiler backend/loader and GPU/window/audio/CUDA SFFI groups.
+
+### Lane C — HAL C-to-Simple migration
+
+- Freeze observable contracts from C and current Simple implementations.
+- Migrate one architecture/provider at a time: RISC-V32 shim, Cortex-M33,
+  RISC-V64 boot/runtime, then Cosmos/OpenSSD ARM32.
+- Keep assembly startup only where hardware ABI requires it; document why.
+- Delete C owners and headers only after parity and target boot/link evidence.
+- Resolve DTB cacheline/SMP parsing and capability-state gaps in their owners.
+
+### Lane D — Real HAL coverage and I/O parity
+
+- Define the exact C and Simple HAL file denominator, source hashes, branch
+  model, instrumentation/toolchain, QEMU/board matrix, and reviewed exclusions.
+- Extend the existing parity harness with the frozen shared helpers.
+- Cover success, each error, boundary sizes, partial I/O, EOF, timeout,
+  unsupported operation, invalid handles/addresses, and platform dispatch.
+- Add deliberate negative controls proving every oracle and coverage gate bites.
+- Require 100% of host-executable branches for both retained C reference and
+  pure-Simple owner; zero-denominator coverage is a hard failure. Report
+  physical-board contract coverage separately and never blend it into host
+  branch coverage.
+- Record p50/p95/RSS and byte/checksum parity on identical fixtures.
+
+### Lane E — Startup and component dynload cutover
+
+- Wire real startup entrypoints to dynload config without touching the no-op and
+  help fast paths.
+- Finish loader-side load-policy consumption.
+- Implement `resolve_component` static/dynamic selection and real manifest IDs.
+- Cut the app CLI to the SCI extension router/help/completion path.
+- Prove extension add/remove changes config/artifact SHA without recompiling or
+  relinking the core binary.
+
+### Lane F — Aspect pack and typed facet surface
+
+- Add aspect component IDs through existing checked dynSMF admission first.
+- Implement aspect catalog/directory/container flag and loader rejection rules.
+- Implement parser, type, lowering, and runtime support for typed facets only
+  after a real pack can be admitted and loaded.
+- Add cache-key/invalidation coverage for the visible aspect-catalog digest.
+- Prove unload/lifetime behavior, stale-generation rejection, concurrent
+  first-use single-flight publication, retry/error paths, capability denial,
+  ABI/interface/implementation-hash rejection, and post-open digest/TOCTOU
+  protection before open-world activation.
+- Trace every grammar/loader/runtime acceptance case to selected requirements,
+  architecture, detail design, executable SPipe, and generated/manual spec.
+
+### Lane G — Interpreter/compiler/loader optimization
+
+- Preserve and review the current ExecIR arena/tier changes.
+- Profile the entire path before leaf tuning.
+- Optimize algorithm, allocation/copy, layout, lookup/dispatch, then local code.
+- Keep startup, source-run, cached-source, compile, native-run, and loader
+  first-load/hot-load lanes separate.
+- Compare identical semantics against C, Bun, Go, Rust, Python, and Java with at
+  least five samples, p50/p95, max RSS, tool versions, hashes, and checksums.
+- Record any remaining parity blocker under `doc/08_tracking/bug`.
+
+### Lane H — x86_64 bootstrap and deployment
+
+- Work from a physical private worktree and freeze Rust/runtime inputs.
+- Repair the concrete Rust-authority compile errors before a broad bootstrap.
+- Restore or regenerate valid Stage 2/3 admission paths; never relabel the stale
+  imported parent as current-source proof.
+- Build with `SIMPLE_NO_STUB_FALLBACK=1` and isolated cache paths.
+- Require Stage 4 sanity, essential-tool smoke, provenance, post-bootstrap
+  acceptance, and deploy receipt before replacing the seed.
+- Deploy by atomic replacement with retained rollback binary/receipt. Record
+  exact binary identity, compile and run smoke, compiler/lib/MCP/LSP checks,
+  MCP integration smoke, and current Stage 2/3 provenance before promotion.
+
+### Lane I — Sol-reviewed repository cleanup
+
+- Preserve the repaired worktree-config ownership; do not reintroduce shared
+  `core.bare`/`core.worktree`, clean the bare root, or infer authority from one
+  inconsistent command.
+- Inventory process/session lifecycle, worktree path existence, dirty state,
+  unique unpublished commits, reachability, locks, branches, and bookmarks.
+- Maintain an explicit whitelist of the main Codex PID/session and child-agent
+  processes. Require UID, ancestry, CWD, and latest lifecycle evidence before
+  terminating anything; use `TERM` with a grace/poll period before `KILL` and
+  never use broad `pkill`. Preserve active `/root` children
+  and any process currently proven active by lifecycle evidence.
+- Trial cherry-picks only after ancestry plus patch-id/change-id comparison, in
+  an explicit integration worktree. Preserve useful unique commits before
+  removal; do not cherry-pick subject-equivalent or already-landed changes.
+- Remove only clean or fully preserved stale/wrong worktrees and their
+  branches/bookmarks; prune missing metadata and stale locks last.
+- Discover each actual JJ root independently and audit its workspace plus
+  operation log; `jj status` failing in this root proves nothing about sibling
+  JJ workspaces.
+- Do not delete unknown history or use broad cleanup as a shortcut.
+
+## 5. Dependencies and parallel ownership
+
+| Lane | May run in parallel with | Hard dependency |
 |---|---|---|
-| SIF v1 (`80.driver/sif/sif.spl`) | committed, specs green | `5ffd9e20e59`; roundtrip + discrimination specs exit 0 |
-| aspect_pack container/catalog/loader | committed, 39 fns, specs 7/7 + 9/9 | `013f1b33a10` |
-| segment mapper (one mmap per SEGMENT) | committed, WIRED | `module_loader_compat.spl:15` imports it; `:302` `map_segment`, `:312` `bind_symbol` |
-| **smf_mmap_native real native layer** | committed — the real fix | was a Dict fake (`_g_fake_memory`, `native_call_function_0` -> `return 0`); now `rt_mmap_raw`/`rt_mprotect`/`rt_ptr_*` |
-| ABI mismatch gate | genuinely wired | compare at `aspect_pack.spl:870`, error `:872`, asserted by defect spec `:240` |
+| A tests | B, C inventory, E design | Frozen manifest and no repeated green gates |
+| B runtime boundary | E/F docs, G measurements | One owner per symbol group |
+| C HAL migration | E/F/G | D parity contract before deletion |
+| D coverage/parity | E/F | Stable C reference and Simple candidate |
+| E component dynload | B non-overlapping files, C/D | Existing dynSMF admission |
+| F aspects/facets | C/D/G | E component resolver and real pack admission |
+| G performance | C/D/E/F after their correctness gate | Stable executable and identical semantics |
+| H bootstrap | Read-only audits only | Quiescent private tree and preceding correctness gates |
+| I cleanup | Read-only status work | Sol review and preserved useful history |
 
-## What is NOT done — stated plainly
+Every implementation lane uses isolated files and cache directories. `/root` is
+the merge owner. A Sol/highest-capability reviewer must accept broad findings,
+manual quality, exclusions, performance claims, coverage denominator, cleanup
+targets, and completion marks.
 
-**1. Neither SIF nor aspect_pack has a single product caller.** Verified by grep:
-`use .*aspect_pack` across `src/**.spl` returns ZERO importers; the only mention
-is `aop_group_manifest.spl:39` `aspect_pack_artifacts` commented
-"SPEC-FORWARD: no aspect packs yet". SIF likewise has no importer outside its own
-directory. Both are spec-proven libraries that nothing calls. This is the same
-unwired-code defect class CLAUDE.md documents for `interface_digest_of` and
-`smf_manifest_entry_verifies`, and it is the single most important gap in the
-lane — passing specs are not the same as being in the load path.
+## 6. Acceptance gates
 
-**2. Execution of mapped code is unproven.** `segment_symbol_resolution_spec`
-stands at 7/8 with the POSITIVE CONTROL honestly red: this interpreter cannot
-invoke a raw `i64` code address (no working pointer cast — `unsupported cast
-target type: Pointer` — and no `rt_call_*` extern). Arithmetic, bounds, lifecycle
-and the native layer are proven; RUNNING code is not. Filed:
-`doc/08_tracking/bug/loader_interpreter_cannot_call_raw_code_address_2026-08-18.md`.
+- [ ] All host-fixable manifest failures pass; unavailable rows are explicit.
+- [ ] No new `pass_todo`, tautology, empty body, or false environment PASS.
+- [ ] Direct pure-Simple `extern fn rt_*` declarations reach the reviewed target
+      for each wave, with one canonical owner and no duplicate compatibility
+      declaration.
+- [ ] No owned Rust HAL implementation remains outside explicitly retained
+      reference/bootstrap code.
+- [ ] Scoped C HAL implementation is deleted only after pure-Simple replacement
+      and target evidence.
+- [ ] C/Simple I/O observations match on every fixture and error case.
+- [ ] Real HAL coverage reaches 100% of the nonzero host-executable branch
+      denominator for both admitted C and Simple providers, with biting negative
+      controls; separately, every declared physical-board contract has real-board
+      evidence or an explicit unavailable status.
+- [ ] Real startup uses dynload config and component resolution. — NOT verified (2026-09-05): the component-resolution half does not hold. `src/app/startup/component_dynsmf_wiring.spl` is imported by ZERO product files under `src/` (only specs `use` it, and three read it as text) and is named by no catalog/config file under `config/` or `src/app/`, so `component_resolver_catalog_parse_sdn` (:388) is not established as reachable from `src/app/main.spl`, which is what the cited gate runs. Only the config half is on the real path, and through a DIFFERENT module: `src/app/main.spl:9-12,36` uses `app.startup.dynsmf_autoload.product_dynload_startup`, not the cited file.
+- [x] Aspect packs and typed facets have parser/type/loader/runtime coverage. — verified test/01_unit/compiler/frontend/facet_parser_schema_spec.spl:10 `typed facet parser schema` (parser), test/01_unit/compiler/semantics/facet_static_binding_spec.spl:116 `closed-world facet parser, binder, witness, and direct MIR lowering` (type), test/01_unit/compiler/loader/aspect_pack_io_spec.spl:72 `aspect pack I/O policy` (loader), test/01_unit/compiler/loader/joinpoint_patchpoint_execution_spec.spl:61 `join-point call through a slot cell` (runtime)
+- [ ] Cross-language perf receipts use comparable work, >=5 samples, p50/p95,
+      RSS, hashes, versions, fallback state, and checksum/output parity.
+- [ ] A provenance-backed x86_64 Stage 4 passes and is deployed as `bin/simple`.
+- [ ] Stage 4 deployment is atomic and rollback-tested; its binary identity,
+      current Stage 2/3 provenance, compile/run smoke, and essential-tool smoke
+      are retained.
+- [ ] The final candidate passes `<runtime> check src/compiler`, `src/lib`,
+      `src/app/mcp`, and `src/app/simple_lsp_mcp`, plus the MCP stdio integration
+      smoke, with `SIMPLE_NO_STUB_FALLBACK=1` where applicable.
+- [ ] Direct-env working/staged guards, numbered/generated-artifact guards,
+      SPipe mirror/layout checks, `doc/06_spec` executable-spec count zero, stub
+      prevention, requirement traceability, and manual-quality review pass.
+- [ ] Dynload/aspect acceptance includes invalidation, unload/lifetime,
+      concurrency/single-flight, retry/error paths, ABI/interface/impl-hash and
+      post-open digest rejection, plus current requirements/design/spec links.
+- [ ] Sol confirms useful commits preserved and only stale/wrong repository and
+      process state removed.
+- [ ] `$verify` reports `STATUS: PASS`; every acceptance criterion is run at
+      most once after its final change.
 
-**3. Deliberately not implemented** (recorded, not forgotten): PackRef
-`content_hash`/`index_hash`/`signature_policy` (grep: 0 occurrences — no verifier
-or signing authority in-tree, an unchecked hash is decoration);
-`required_core_public_abi_hash` is carried and round-tripped but NEVER compared
-(nothing publishes a core ABI hash, so the gate would be fake); multi-profile
-catalogs §9.6; zstd dictionaries / co-load clusters §12.2 (design says optional);
-AspectPackIndexCache + `pread`/`WILLNEED` policy §14.1/§15 (needs a file layer
-this byte-array module lacks); unload §14.7 (design says not required initially).
-§12.1/§23 remain PARTIAL — the pack is a standalone container, not yet a
-registered SMF section type.
+## 7. Immediate order
 
 **4. Lint is INCONCLUSIVE, not green.** `lint-cached.shs` FAILs on every file
 including an untouched control, with an unattributed
@@ -280,471 +637,94 @@ Bootstrap (nothing here is compiled into a pure-Simple compiler — everything i
 source-level and seed-interpreted); unifying the duplicate loader trees; signing
 key custody; wiring `forbidden_io_checker` into a semantic pass; and the push
 itself, blocked repeatedly by the config corruption above.
-# Aspect Dynload, HAL Migration, Runtime Boundary, and x86 Bootstrap Plan
 
-**Date:** 2026-08-19  
-**Status:** active; corrected after Sol review; implementation and bootstrap
-acceptance incomplete; shared Git configuration repaired; bulk cleanup awaits a
-fresh exact manifest  
-**Merge owner:** `/root`  
-**Final reviewers:** Sol/highest-capability reviewer for broad findings, coverage,
-performance, repository cleanup, and done marks  
-**Audited revision:**
-`e3d58a25e733f32d2557936098f849ade1d7df57`
-
-The working tree is changing concurrently. Counts below identify whether they
-are historical, committed-tree, or current dirty-tree evidence. Before edits,
-regenerate machine-readable censuses pinned to revision plus dirty-patch hash.
-
-## 1. Objective
-
-Deliver the following as one evidence-driven campaign:
-
-1. Fix every currently reproducible test failure that is fixable on this host.
-2. Prefer pure-Simple owners over Rust or C implementation paths.
-3. Collapse direct `rt_*` use behind one reviewed owner per ABI/symbol family
-   and public `hal_*`/`io_*` surfaces, subject to layer, capability-family,
-   bare-metal, and bootstrap dependency constraints; remove accidental
-   compatibility-family declarations.
-4. Remove remaining non-reference Rust HAL work and migrate the remaining C HAL
-   implementation to pure Simple without changing observable I/O semantics.
-5. Prove C-versus-Simple I/O parity and obtain real 100% branch coverage for the
-   scoped C and pure-Simple HAL implementations.
-6. Finish startup, component dynload, aspect-pack, facet, interpreter, compiler,
-   and loader work; compare retained performance with Bun, Go, Rust, Python,
-   Java, and C where the lane is semantically comparable.
-7. Produce and deploy a provenance-backed x86_64 Stage 4 bootstrap.
-8. Preserve useful concurrent work, then remove only proven stale/wrong agent
-   processes, worktrees, branches/bookmarks, locks, and unpublished commits.
-
-This plan does not count a seed-only check, a stale receipt, a tautological test,
-an empty coverage denominator, or an unavailable-platform skip as a PASS.
-
-## 2. Frozen shared contracts
-
-- Public hardware and I/O names are `hal_*` and `io_*`.
-- A raw `rt_*` symbol may temporarily remain only in its canonical low-level
-  provider. Compatibility families re-export that owner; they do not redeclare
-  or reimplement the hook.
-- The default pure-Simple owner for hosted runtime facades is
-  `src/lib/nogc_sync_mut`; other runtime families delegate when semantics match.
-- C/Rust reference implementations are test or bootstrap oracles, not the
-  production user-facing owner.
-- Shared parity helpers are `prepare_hal_fixture`, `run_c_hal_case`,
-  `run_simple_hal_case`, `assert_hal_parity`, and
-  `assert_hal_branch_coverage`.
-- Manual steps use literal `step("inventory runtime boundaries")`,
-  `step("compare C and Pure Simple I/O semantics")`,
-  `step("measure HAL branch coverage")`, and
-  `step("verify x86 bootstrap")`.
-- An unfinished oracle fails explicitly with `assert(false)` or `fail(...)`.
-
-## 3. Status snapshot
-
-### 3.1 Tests and ignored work
-
-| Evidence | Current status | Interpretation |
-|---|---:|---|
-| Historical env-gated audit (2026-08-09) | 27 files: 8 PASS, 19 real FAIL, 0 env-only FAIL | Historical fix queue only; not the current failure count. Current-tree audit already shows some rows repaired/stale. |
-| Intentional dropped case | 1 Metal failure-injection case | Record as unavailable/dropped, never PASS. |
-| Startup/ExecIR focused run on current dirty tree | 23 passed, 0 failed, 0 skipped | Covers four focused specs only; not a full-suite result. |
-| Stage-binary runnable guard | 8 failed/crashed invocations out of 12 across 4 binaries | Artifact/runtime failures, separate from spec-file count. |
-| Checked-in `summary.txt` receipts | 10,720 files, zero recorded fail/skip/ignore/pending | Stale Windows-origin receipts; historical only. |
-
-Static raw-line census (not executable-scenario counts; comments/fixtures and
-duplicated legacy/canonical test trees inflate these values): 216 `skip` lines,
-93 `pending(...)`, 8 `ignore_it`, 4 ignore
-annotations, 1 skip annotation, 5 `pass_todo`, 143 intentional no-op pass
-variants, 788 tautology shapes, and 3 confirmed empty executable `it` bodies.
-The relevant compiler subset contains 54 pending lines, 2 ignore annotations,
-1 skip annotation, 9 no-op pass variants, and 144 tautologies. The relevant
-runtime/HAL subset contains 33 pending lines, no explicit ignore/skip marker,
-28 no-op pass variants, 119 tautologies, and 18 validated platform-gated
-vacuous lines. Non-vendor Rust test-like files contain 29 `#[ignore]` markers.
-Before implementation acceptance, generate a deduplicated manifest that reports
-unique executable specs, duplicate mirror rows, failed spec files, failed
-invocations, pending scenarios, ignored scenarios, unavailable rows, and source
-comments/fixtures separately.
-
-Authoritative failure sources:
-
-- `doc/08_tracking/bug/gated_specs_are_tautology_shells_2026-08-09.md`
-- `doc/08_tracking/bug/stage3_native_build_and_compile_segv_on_hello_world_2026-08-18.md`
-- `doc/08_tracking/test/expect_vacuity_gate_full_corpus_census.md`
-
-### 3.2 `rt_*` boundary census
-
-The first audit captured the following **unpinned historical dirty-tree lexical
-snapshot**, excluding repository-declared vendor paths and bundled third-party
-runtime headers. It is useful for area proportions only. It is neither the
-audited-revision census nor the mutable-tree completion denominator.
-
-| Area | Lexical `rt_*` tokens |
-|---|---:|
-| `src/compiler` | 5,403 |
-| `src/lib` | 12,448 |
-| `src/os` | 5,382 |
-| `src/runtime` | 9,448 |
-| `src/compiler_rust` | 31,654 |
-| **Total** | **64,335** |
-
-The current dirty-tree Sol review found **4,277 anchored direct pure-Simple
-`extern fn rt_*` declarations**: 797 in `src/compiler` and 3,480 in `src/lib`.
-It also found 32,061 current Rust-tree lexical tokens; 31,654 is the earlier
-historical dirty-tree value above. The 64,335 total is not a callsite count and includes
-comments and checked-in source artifacts.
-
-Highest-repeat candidate declarations are `rt_env_get` (108 files),
-`rt_file_read_text` (103), `rt_file_exists` (72 real declarations; two additional
-comment examples were excluded), `rt_file_write_text` (41),
-`rt_file_delete` (32), `rt_process_run` (29), and
-`rt_time_now_unix_micros` (28). These are the first consolidation wave.
-
-Before the first migration patch, add a checked-in census command and manifest
-pinned to revision plus dirty-patch hash. It must report lexical tokens,
-anchored declarations, unique symbols, semantic callsites, C/Rust definitions,
-and files separately so these categories cannot be mixed again.
-
-### 3.3 Rust, C, and pure-Simple HAL
-
-Audited HAL scope: `src/os/kernel/arch`, `src/os/kernel/arch_adapt`,
-`src/lib/nogc_sync_mut/hal`, and `src/compiler_rust/lib/std/src/bare/hal`.
-
-| Implementation | Files | LOC | Status |
-|---|---:|---:|---|
-| Pure Simple `.spl` | 195 | 23,442 | Current dirty-tree scope, including `riscv_shared/fpga_orchestration.spl`; canonical direction, but several implementations remain partial. |
-| C `.c` | 20 | 14,924 | Migration remains substantial. |
-| C headers `.h` | 16 | 1,665 | Must shrink with the C implementation boundary. |
-| Rust `.rs` HAL implementation | 0 | 0 | No owned Rust HAL implementation remains in this audited scope. |
-
-The remaining C concentration is Cosmos/OpenSSD ARM32 (15 files/9,052 LOC),
-RISC-V64 boot/runtime shims (3 files/4,804 LOC), Cortex-M33 (1 file/1,044
-LOC), and a 24-line RISC-V32 boot shim. Rust files in the I/O parity benchmark
-remain reference oracles, not HAL production implementations.
-
-Known pure-Simple HAL gaps include the hard-coded 64-byte RISC-V64 cacheline,
-module-local rather than cross-layer ZICBOM capability state, sentinel rather
-than real DTB parsing in `hal_smp_init_from_bytes`, and seven known direct arch
-imports outside the intended boundary.
-
-### 3.4 HAL coverage and C/Simple I/O parity
-
-No trustworthy HAL branch-coverage percentage exists today.
-`build/coverage/coverage.sdn` reports 100% with zero files, zero decisions, and
-zero paths and is invalid evidence. One `# @cover` target names a deleted
-`src/lib/nogc_sync_mut/hal/mmio.spl`; markers are targets, not measurement.
-
-Reusable parity assets already exist:
-
-- `test/perf/io_parity/io_parity_simple.spl`
-- `test/perf/io_parity/io_parity_ref.c`
-- `test/perf/io_parity/io_parity_ref.rs`
-- `test/perf/io_parity/run_io_parity_benchmarks.shs`
-
-They cover checksum parity for `read_text`, `mmap_text`, and `append_at`, plus
-startup timing. They do not cover the HAL branch denominator and must be
-extended rather than relabelled.
-
-Coverage acceptance is split into two truthful claim levels:
-
-- **Host-executable branch coverage:** exact admitted source files, nonzero
-  branch denominator, compiler/toolchain and instrumentation recorded, every
-  branch hit, reviewed exclusions, and biting sabotage controls.
-- **Physical-board contract coverage:** one real-device evidence scenario per
-  declared board contract. QEMU, synthetic strings, and CPU-class evidence do
-  not count as board-init execution.
-
-Boot/inline-assembly and hardware-only leaves are isolated from host-executable
-logic before any 100% claim. If production C is deleted, retain the reviewed C
-oracle in a test-only location with hash/provenance, license, build command, and
-explicit non-production status until the stabilization window closes.
-
-### 3.5 Aspect/component dynload
-
-Implemented substrate:
-
-- `load_policy`, startup decision, and segment planning under `src/app/startup`.
-- Checked dynSMF policy, artifact freshness, stub, ABI, and interface-hash gates
-  under `src/os/smf/dynsmf_session.spl`.
-- Config parsing/autoload helpers under `src/app/startup/dynsmf_autoload.spl`.
-- SCI CLI extension route, registry, help, and completion contracts under
-  `src/lib/nogc_sync_mut/composition`.
-- Component descriptor parsing and catalog validation under
-  `src/lib/common/structural/component/descriptor.spl`.
-
-### 3.5.1 Static correction (2026-08-26; not acceptance evidence)
-
-The preceding snapshot predates several landed source slices.  The following is
-a **static, source-only correction at audited revision
-`2b35049f8d70d7c5af93adf3de2c6e3be36a419b`**.  It does not assert that an
-app-root path is executed, that a public typed-facet grammar/ABI is selected,
-or that any of the acceptance gates in section 6 pass.
-
-- `resolve_component` static/dynamic selection is implemented in
-  `src/lib/common/structural/component/descriptor.spl`; the production-planner
-  consumer is `src/app/startup/startup_planner.spl`, and
-  `src/app/startup/dynsmf_component_bridge.spl` feeds that planner from the
-  checked dynSMF manifest/config overlay.  The old "not implemented" statement
-  is stale.  App-root stage-0 cutover remains an acceptance item until an
-  executable entrypoint proves it.
-- Aspect-pack SMF producer and reader substrate exists: the compiler writer
-  declares `SectionType.AspectPackDirectory` and
-  `SMF_FLAG_ASPECT_PACK` in
-  `src/compiler/70.backend/linker/smf_writer.spl` and
-  `src/compiler/70.backend/linker/smf_header.spl`; the canonical writer exposes
-  `generate_aspect_pack_smf`; and
-  `src/compiler/99.loader/aspect_pack_section.spl` validates and registers the
-  matching section.  This corrects the older claim that those source symbols
-  did not exist; it does not prove an end-to-end emitted artifact is loaded by
-  every product path.
-- Loader-owned catalog and lifecycle source now exists in
-  `src/compiler/99.loader/module_loader_compat.spl`, including explicit catalog
-  installation, visible-facet acquisition, and unload entrypoints.  Its
-  catalogue digest, generation, and single-flight work remain subject to the
-  existing receipt/final-unpin design and review gates; this correction neither
-  approves nor alters those unsafe proposals.
-- `src/lib/common/facet_registry.spl` supplies an in-memory catalog,
-  binding lookup, optional `try_facet`, and generation witness primitives;
-  `src/lib/common/facet_syntax.spl` supplies text-level declarations for
-  `facet interface`, `facet impl`, `bind facet`, and `require facet`.
-  Corresponding source specs exist under `test/01_unit/lib/`, but are not
-  claimed executed here.
-
-The public typed `FacetRef<T>` acquisition ABI, selected frontend grammar
-contract, end-to-end typed lowering/dispatch, and accepted unload lifetime
-semantics are still **not complete**.  They require the outstanding feature and
-NFR selection and must not be inferred from the internal/static substrate above.
-
-### 3.6 Startup/interpreter/compiler/loader performance
-
-Current dirty startup work adds ExecIR encode-time arena sizing, a reusable
-arena executor, memoized interpreter tier state, and array/slice runtime-local
-tagging. Its four focused specs passed 23/23 in this audit. These files are an
-active overlapping lane and must not be overwritten.
-
-Five startup-campaign items remain: deploy self-hosted default `bin/simple`,
-institutionalize >=5-sample p50/p95/RSS admission, prove full-rebuild static
-folding, finish Phase-C app cutover/migration proof, and add Phase-E growth-band
-remeasurement.
-
-Retained startup evidence is seed-based and noisy: Simple source-run p50 31 ms,
-Bun 31-33 ms, Python 43 ms, and `go run` 245 ms. No accepted native-Simple
-lane exists because native build failed; Java is absent from the retained
-matrix. These numbers do not prove pure-Simple parity.
-
-### 3.7 x86_64 bootstrap
-
-- Deployed `bin/simple` is still the Rust seed (sha256
-  `d3d54fab80199cddb962e07ca1ab655c0cfb8be3594ad4aa615084948116af54`).
-- The best retained pure-Simple artifact is an imported, stale Stage 2 archive
-  (sha256 `adb24ebf9f3b09fe6baa89278660a898205a123253b3de3233a13ce960b34b1b`).
-- No current admitted Stage 3 output is present.
-- No provenance-backed Stage 4 artifact or deploy receipt exists.
-- Current blockers are Rust-authority compile errors, a symlink/logical-path
-  wrapper hazard, concurrent Rust/runtime tree churn, and stale admission paths.
-
-### 3.8 Repository/process state
-
-Repository configuration changed during the audit and temporarily placed
-`core.bare=false` plus a lane path in the shared config. After quiescing Git/JJ
-activity, the Sol-reviewed repair removed shared `core.bare`/`core.worktree`,
-put `core.bare=true` in the bare primary's private `config.worktree`, verified
-the GPU and aspect linked roots, and proved all three indexes unchanged. A
-timestamped config backup remains under `/mnt/data/worktrees/simple-config-repair.*`.
-The earlier registry audit found 443 entries, two missing registrations, and
-three locked initializations; the two missing entries were pruned only after preserving
-their heads as `rescue/agentrestore-35849c9` and
-`rescue/fix-dbl-87d5f016`, and the failed seed checkout was removed only after
-confirming commit `1c6c8d4` remained on `codex/gate5r-dir-sync-b791`.
-The stale orphaned audit PGID 291105 and runaway cleanup audit groups 343494 and
-376108 exited after `TERM`. All broader worktree, branch, commit, and JJ cleanup
-remains paused until a fresh exact manifest converges; the earlier bulk counts
-are planning evidence, not an authorized deletion list.
-
-## 4. Implementation lanes
-
-### Lane A — Test failure inventory and repair
-
-- Freeze one deterministic manifest and exact compiler/mode/host identity.
-- Reconcile all 19 historical rows against current source/receipts, classify
-  repaired/stale/unavailable/current, then reproduce each currently failing row
-  at most once and group it by shared root cause.
-- Claim each category and fix the pure-Simple owner first.
-- Replace tautologies, empty examples, and false platform PASS paths with real
-  assertions or explicit unavailable status.
-- Rerun failed shards only, then one scoped authoritative manifest.
-
-### Lane B — Runtime boundary and alias collapse
-
-- Start with env/file/process/time duplicate ownership.
-- Move each hook to one canonical owner; make compatibility families re-export.
-- Replace public direct `rt_*` imports with typed `io_*`/`hal_*` calls.
-- Track the regenerated pinned-manifest baseline after each wave; a decrease is not
-  acceptance unless ABI, error, ownership, and compiled execution stay green.
-- Continue with compiler backend/loader and GPU/window/audio/CUDA SFFI groups.
-
-### Lane C — HAL C-to-Simple migration
-
-- Freeze observable contracts from C and current Simple implementations.
-- Migrate one architecture/provider at a time: RISC-V32 shim, Cortex-M33,
-  RISC-V64 boot/runtime, then Cosmos/OpenSSD ARM32.
-- Keep assembly startup only where hardware ABI requires it; document why.
-- Delete C owners and headers only after parity and target boot/link evidence.
-- Resolve DTB cacheline/SMP parsing and capability-state gaps in their owners.
-
-### Lane D — Real HAL coverage and I/O parity
-
-- Define the exact C and Simple HAL file denominator, source hashes, branch
-  model, instrumentation/toolchain, QEMU/board matrix, and reviewed exclusions.
-- Extend the existing parity harness with the frozen shared helpers.
-- Cover success, each error, boundary sizes, partial I/O, EOF, timeout,
-  unsupported operation, invalid handles/addresses, and platform dispatch.
-- Add deliberate negative controls proving every oracle and coverage gate bites.
-- Require 100% of host-executable branches for both retained C reference and
-  pure-Simple owner; zero-denominator coverage is a hard failure. Report
-  physical-board contract coverage separately and never blend it into host
-  branch coverage.
-- Record p50/p95/RSS and byte/checksum parity on identical fixtures.
-
-### Lane E — Startup and component dynload cutover
-
-- Wire real startup entrypoints to dynload config without touching the no-op and
-  help fast paths.
-- Finish loader-side load-policy consumption.
-- Implement `resolve_component` static/dynamic selection and real manifest IDs.
-- Cut the app CLI to the SCI extension router/help/completion path.
-- Prove extension add/remove changes config/artifact SHA without recompiling or
-  relinking the core binary.
-
-### Lane F — Aspect pack and typed facet surface
-
-- Add aspect component IDs through existing checked dynSMF admission first.
-- Implement aspect catalog/directory/container flag and loader rejection rules.
-- Implement parser, type, lowering, and runtime support for typed facets only
-  after a real pack can be admitted and loaded.
-- Add cache-key/invalidation coverage for the visible aspect-catalog digest.
-- Prove unload/lifetime behavior, stale-generation rejection, concurrent
-  first-use single-flight publication, retry/error paths, capability denial,
-  ABI/interface/implementation-hash rejection, and post-open digest/TOCTOU
-  protection before open-world activation.
-- Trace every grammar/loader/runtime acceptance case to selected requirements,
-  architecture, detail design, executable SPipe, and generated/manual spec.
-
-### Lane G — Interpreter/compiler/loader optimization
-
-- Preserve and review the current ExecIR arena/tier changes.
-- Profile the entire path before leaf tuning.
-- Optimize algorithm, allocation/copy, layout, lookup/dispatch, then local code.
-- Keep startup, source-run, cached-source, compile, native-run, and loader
-  first-load/hot-load lanes separate.
-- Compare identical semantics against C, Bun, Go, Rust, Python, and Java with at
-  least five samples, p50/p95, max RSS, tool versions, hashes, and checksums.
-- Record any remaining parity blocker under `doc/08_tracking/bug`.
-
-### Lane H — x86_64 bootstrap and deployment
-
-- Work from a physical private worktree and freeze Rust/runtime inputs.
-- Repair the concrete Rust-authority compile errors before a broad bootstrap.
-- Restore or regenerate valid Stage 2/3 admission paths; never relabel the stale
-  imported parent as current-source proof.
-- Build with `SIMPLE_NO_STUB_FALLBACK=1` and isolated cache paths.
-- Require Stage 4 sanity, essential-tool smoke, provenance, post-bootstrap
-  acceptance, and deploy receipt before replacing the seed.
-- Deploy by atomic replacement with retained rollback binary/receipt. Record
-  exact binary identity, compile and run smoke, compiler/lib/MCP/LSP checks,
-  MCP integration smoke, and current Stage 2/3 provenance before promotion.
-
-### Lane I — Sol-reviewed repository cleanup
-
-- Preserve the repaired worktree-config ownership; do not reintroduce shared
-  `core.bare`/`core.worktree`, clean the bare root, or infer authority from one
-  inconsistent command.
-- Inventory process/session lifecycle, worktree path existence, dirty state,
-  unique unpublished commits, reachability, locks, branches, and bookmarks.
-- Maintain an explicit whitelist of the main Codex PID/session and child-agent
-  processes. Require UID, ancestry, CWD, and latest lifecycle evidence before
-  terminating anything; use `TERM` with a grace/poll period before `KILL` and
-  never use broad `pkill`. Preserve active `/root` children
-  and any process currently proven active by lifecycle evidence.
-- Trial cherry-picks only after ancestry plus patch-id/change-id comparison, in
-  an explicit integration worktree. Preserve useful unique commits before
-  removal; do not cherry-pick subject-equivalent or already-landed changes.
-- Remove only clean or fully preserved stale/wrong worktrees and their
-  branches/bookmarks; prune missing metadata and stale locks last.
-- Discover each actual JJ root independently and audit its workspace plus
-  operation log; `jj status` failing in this root proves nothing about sibling
-  JJ workspaces.
-- Do not delete unknown history or use broad cleanup as a shortcut.
-
-## 5. Dependencies and parallel ownership
-
-| Lane | May run in parallel with | Hard dependency |
-|---|---|---|
-| A tests | B, C inventory, E design | Frozen manifest and no repeated green gates |
-| B runtime boundary | E/F docs, G measurements | One owner per symbol group |
-| C HAL migration | E/F/G | D parity contract before deletion |
-| D coverage/parity | E/F | Stable C reference and Simple candidate |
-| E component dynload | B non-overlapping files, C/D | Existing dynSMF admission |
-| F aspects/facets | C/D/G | E component resolver and real pack admission |
-| G performance | C/D/E/F after their correctness gate | Stable executable and identical semantics |
-| H bootstrap | Read-only audits only | Quiescent private tree and preceding correctness gates |
-| I cleanup | Read-only status work | Sol review and preserved useful history |
-
-Every implementation lane uses isolated files and cache directories. `/root` is
-the merge owner. A Sol/highest-capability reviewer must accept broad findings,
-manual quality, exclusions, performance claims, coverage denominator, cleanup
-targets, and completion marks.
-
-## 6. Acceptance gates
-
-- [ ] All host-fixable manifest failures pass; unavailable rows are explicit.
-- [ ] No new `pass_todo`, tautology, empty body, or false environment PASS.
-- [ ] Direct pure-Simple `extern fn rt_*` declarations reach the reviewed target
-      for each wave, with one canonical owner and no duplicate compatibility
-      declaration.
-- [ ] No owned Rust HAL implementation remains outside explicitly retained
-      reference/bootstrap code.
-- [ ] Scoped C HAL implementation is deleted only after pure-Simple replacement
-      and target evidence.
-- [ ] C/Simple I/O observations match on every fixture and error case.
-- [ ] Real HAL coverage reaches 100% of the nonzero host-executable branch
-      denominator for both admitted C and Simple providers, with biting negative
-      controls; separately, every declared physical-board contract has real-board
-      evidence or an explicit unavailable status.
-- [ ] Real startup uses dynload config and component resolution.
-- [ ] Aspect packs and typed facets have parser/type/loader/runtime coverage.
-- [ ] Cross-language perf receipts use comparable work, >=5 samples, p50/p95,
-      RSS, hashes, versions, fallback state, and checksum/output parity.
-- [ ] A provenance-backed x86_64 Stage 4 passes and is deployed as `bin/simple`.
-- [ ] Stage 4 deployment is atomic and rollback-tested; its binary identity,
-      current Stage 2/3 provenance, compile/run smoke, and essential-tool smoke
-      are retained.
-- [ ] The final candidate passes `<runtime> check src/compiler`, `src/lib`,
-      `src/app/mcp`, and `src/app/simple_lsp_mcp`, plus the MCP stdio integration
-      smoke, with `SIMPLE_NO_STUB_FALLBACK=1` where applicable.
-- [ ] Direct-env working/staged guards, numbered/generated-artifact guards,
-      SPipe mirror/layout checks, `doc/06_spec` executable-spec count zero, stub
-      prevention, requirement traceability, and manual-quality review pass.
-- [ ] Dynload/aspect acceptance includes invalidation, unload/lifetime,
-      concurrency/single-flight, retry/error paths, ABI/interface/impl-hash and
-      post-open digest rejection, plus current requirements/design/spec links.
-- [ ] Sol confirms useful commits preserved and only stale/wrong repository and
-      process state removed.
-- [ ] `$verify` reports `STATUS: PASS`; every acceptance criterion is run at
-      most once after its final change.
-
-## 7. Immediate order
-
-1. Keep the repaired Git configuration quiescent; generate a fresh exact
-   worktree/branch/JJ manifest before any further history mutation, then use a
-   registered private integration worktree without destroying current residue.
-2. Preserve the active ExecIR/aspect-dynload changes and any useful unpublished
-   commits.
-3. Freeze the failing-test and HAL/`rt_*` manifests.
-4. Fix stage/Rust-authority blockers and the smallest shared test root causes.
-5. Run runtime-boundary and HAL parity/coverage lanes in parallel with dynload
-   startup/component work.
-6. Implement aspect-pack and typed-facet lanes.
-7. Integrate optimization work, record cross-language evidence, then bootstrap
-   x86_64 Stage 4.
-8. Perform one final Sol review, bounded verify pass, and cleanup.
+## Update 3 — master checklist refresh (2026-08-19T05:59:06Z)
+
+This checklist supersedes earlier broad “DONE” prose where later edits
+invalidated the receipt. It uses the evidence boundaries in
+`doc/09_report/aspect_dynload_hal_runtime_status_2026-08-19.md`. No broad suite
+was run for this refresh.
+
+### Evidence bookkeeping
+
+- [x] Preserve the last exact bounded manifest as 53 rows: 22 pass, two fail,
+  seven historical-only, 22 not-run; 151 executed cases = 147 pass + four fail;
+  ten blocker rows.
+- [x] Mark that aggregate stale after later source changes; do not call it the
+  current-source total.
+- [x] Keep skip and repository-wide ignored totals unavailable. Keep the
+  timestamped raw ignore-annotation inventory separate from executed results.
+- [x] Record the timestamped canonical-root HAL snapshot and broad raw `rt_*`
+  lexical inventory with their exact roots/regexes.
+- [x] Record the narrow direct-env/process working and staged guards as PASS
+  with zero forbidden leaf hooks inside their scope.
+- [x] Close only the targeted runtime alias/SCC batch: 5/5 with zero targeted
+  leaf externs in `runtime_alias_semantics_spec.spl`.
+- [ ] Refresh the bounded manifest once after all owned final edits converge.
+
+### Focused red/unrerun rows
+
+- [ ] Rerun aspect-pack directory after hardening (12/13, then 13/13, then
+  changed again).
+- [ ] Rerun facet static binding after its patch/case expansion (last 2/5).
+- [ ] Rerun W^X lifecycle after the two fixes (last 6/8).
+- [ ] Repair and rerun the admitted-byte dynSMF loader spec (latest exact 1/6
+  after the three-cycle cap; later fix/review in flight; no native execution).
+- [ ] Fix and rerun log compatibility (latest exact 4/7: nil length, filtering
+  mismatch, and missing ring record; later source fixes unadmitted/unrerun).
+- [ ] Rerun CLI after the final source fixes (last pre-fix receipt 7/7).
+- [ ] Produce the full I/O parity benchmark receipt; the mmap link 1/1 is not
+  the benchmark.
+- [ ] Run the Class-A harness v2 full matrix after Stage 4 admission. Its schema
+  selftest passes exactly 18 negative controls, and its current receipt root is
+  `build/perf/startup_class_a_v2/`; current preflight exits 2 because Stage 4
+  is unavailable, so no full matrix receipt or PASS exists.
+
+### Bootstrap and feature cutover
+
+- [ ] Produce current admitted pure-Simple Stage 2.
+- [ ] Produce current admitted pure-Simple Stage 3.
+- [ ] Produce current admitted x86_64 Stage 4 and essential-tools evidence.
+- [ ] Deploy the admitted Stage 4 and retain deployment/rollback identity.
+- [ ] Finish startup config, loader-policy, component-resolver, and CLI
+  help/router production cutovers with post-edit evidence.
+- [ ] Wire `forbidden_io_checker`, windowed pack I/O/index cache, joinpoint
+  slots/advice registry, startup/manual activation, unload/pin, and the
+  operational-seal publication seam into real product paths.
+- [ ] Deliver the typed facet compiler surface or keep its blocker explicit.
+
+### HAL migration and coverage
+
+- [x] Record the truthful file-migration count: zero original C files removed;
+  current work is policy extraction only.
+- [x] Record source-complete slices separately: Cosmos FSBL, Cortex-M access,
+  RV32 boot policy, RV64 PMM, RV64 boot-TCP, Cosmos ECC, Cosmos PCIe/NVMe,
+  Cosmos runtime core, Cosmos SMP/GIC, Cosmos MMU/cache, and Cortex-M
+  scalar/parser/FS.
+- [ ] Merge/admit the source-complete Cosmos policy objects. Runtime core and
+  SMP/GIC production wiring are still open; MMU/cache native Simple/unit/ARM
+  link remains blocked without Stage 4.
+- [x] RV64 endian/checksum/device-ID policy is source-complete as a pure-Simple module with a unit oracle — verified src/os/kernel/arch/riscv64/freestanding_policy.spl:44 `rv64_read_be16`, :69 `rv64_checksum_add`, :92 `rv64_pci_is_virtio_net`; test/01_unit/os/kernel/arch/riscv64_freestanding_policy_spec.spl
+  - divergence: planned the slice wired into the RV64 boot path; shipped the policy module only — no caller outside `freestanding_policy.spl` under src/os/kernel/arch/riscv64/ (`git grep rv64_checksum_add -- src/os/kernel/arch/riscv64` → definition only).
+- [ ] Admit Cortex scalar/parser/FS with Stage 4 and refresh its actual 44/44,
+  ABI-object, and three combined-board-link evidence; source/diagnostic 4/4 is
+  not that admission.
+- [ ] Refresh the Cortex combined image after parser/FS integration.
+- [ ] Convert scoped host/object/C-gcov evidence into only its stated scope;
+  do not claim whole-HAL coverage. Whole-HAL remains unknown.
+- [ ] Run missing QEMU/physical-board/mixed-language gates where applicable.
+
+### Cleanup
+
+- [x] Remove nine individually proven-safe `/tmp` worktrees non-force.
+- [x] Preserve the two restart12 rescue refs before cleanup decisions.
+- [ ] Retain restart12 JJ (unpublished 26-file payload/conflicted `main`), the
+  TTY lane, and `/tmp/jjtest`; no JJ workspace removal is authorized yet.
+- [x] Preserve active processes: the latest cleanup pass found no stale
+  Codex/Claude process and killed none.
+
+## Acceptance
+
+Runnable oracles for the remaining open boxes: `test/03_system/plan_acceptance/aspect_dynload_lane_plan_spec.spl`
+(tagged `@tag:in-development`; one `it` per open box — see
+`doc/03_plan/agent_tasks/plan_remains_acceptance_2026-09-05.md`).

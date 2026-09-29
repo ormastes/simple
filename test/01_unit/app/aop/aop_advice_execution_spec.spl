@@ -1,0 +1,106 @@
+"""
+## Purpose and audience
+
+# AOP advice execution (reproduce)
+
+Reproduce spec for the product bug "AOP advice never executes". `on pc{...} use
+<advice> <kind>` parsed into `Node::AopAdvice` and was then dropped by the
+interpreter's no-op statement arm, so `before`, `after_success` and
+`after_error` advice never ran and every observation flag stayed `false`.
+
+Fails before the fix (all four scenarios report `false`/`0`), passes after.
+
+## Operator workflow
+
+Run `bin/simple test --no-session-daemon test/01_unit/app/aop/aop_advice_execution_spec.spl`
+and confirm the Results line reports 0 failed.
+
+## Compatibility and limitations
+
+Covers the interpreter path only; native/JIT weaving is out of scope.
+
+## Recovery and troubleshooting
+
+If a scenario fails, re-run this single file and read the first failing Verify step.
+"""
+use std.spec.{step}
+# REQ-FEATURE-USAGE-001
+
+# Module-level recorders: closures capture enclosing locals by value and are
+# read-only (.claude/rules/language.md:22), so a write to a captured local
+# is a compile error. Examples reset these at the old declaration site.
+var called_cw = false
+var count_cw = 0
+var executed_cw = false
+var errored_cw = false
+var succeeded_cw = false
+
+describe "AOP advice execution":
+    context "before advice":
+        it "runs before advice at the join point":
+            called_cw = false
+
+            fn advice():
+                called_cw = true
+
+            fn target() -> i64:
+                42
+
+            on pc{ execution(* target(..)) } use advice before priority 10
+
+            expect target() == 42
+            expect called_cw == true
+
+        it "matches a wildcard pointcut across several functions":
+            count_cw = 0
+
+            fn counter():
+                count_cw = count_cw + 1
+
+            fn calc_add() -> i64:
+                1
+
+            fn calc_sub() -> i64:
+                2
+
+            on pc{ execution(* calc*(..)) } use counter before priority 10
+
+            calc_add()
+            calc_sub()
+            expect count_cw == 2
+
+    context "after advice":
+        it "runs after_success when the target succeeds":
+            executed_cw = false
+
+            fn after_advice():
+                executed_cw = true
+
+            fn ok_target() -> i64:
+                7
+
+            on pc{ execution(* ok_target(..)) } use after_advice after_success priority 10
+
+            expect ok_target() == 7
+            expect executed_cw == true
+
+        it "runs after_error and not after_success when the target returns Err":
+            errored_cw = false
+            succeeded_cw = false
+
+            fn on_error():
+                errored_cw = true
+
+            fn on_success():
+                succeeded_cw = true
+
+            fn failing() -> Result<i64, text>:
+                Err("boom")
+
+            on pc{ execution(* failing(..)) } use on_error after_error priority 10
+            on pc{ execution(* failing(..)) } use on_success after_success priority 10
+
+            val r = failing()
+            expect r.err.?
+            expect errored_cw == true
+            expect succeeded_cw == false

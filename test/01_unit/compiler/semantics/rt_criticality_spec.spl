@@ -1,12 +1,15 @@
 use std.test.*
 use compiler.semantics.rt_criticality.*
 use compiler.frontend.rt_criticality_registry.{rt_criticality_parse_args}
-use compiler.semantics.rt_criticality_validation.{rt_direct_callee_dispatches, rt_admit_with_manifest}
+use compiler.semantics.rt_criticality_validation.{rt_direct_callee_dispatches, rt_admit_with_manifest, validate_rt_criticality, validate_rt_criticality_diagnostics}
 use compiler.semantics.rt_criticality_validation.{rt_annotation_bound_diagnostic}
 use compiler.semantics.rt_criticality_validation.{rt_expr_dispatches, rt_expr_allocates, rt_hal_facts_with_reviewed_intrinsic}
-use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirEnumPayload}
-use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.frontend.rt_criticality_registry.{rt_criticality_reset, rt_criticality_declare, rt_criticality_claim_keys, rt_criticality_is_hal}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirEnumPayload, HirFunction, HirBlock}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
 
 fn unit_type() -> HirType:
     HirType(kind: HirTypeKind.Unit, span: Span.default())
@@ -23,6 +26,34 @@ fn fact(name: text, effects: i64, bounded: i64, callees: [text]) -> RtCriticalFa
     RtCriticalFact(name: name, own_effects: effects, bounded_effects: bounded,
         callees: callees, line: 1)
 
+# This HIR fixture reaches the real registry -> validator route.  The
+# `malloc_` name intentionally produces an unbounded allocation fact, making
+# duplicate admission observable as duplicate diagnostics rather than a
+# tautological empty success.
+fn rt_validation_fn(id: i64, name: text, attr: FunctionAttr) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id), name: name, type_params: [], params: [],
+        return_type: unit_type(),
+        body: HirBlock(stmts: [], has: true,
+            value: HirExpr(kind: HirExprKind.UnitLit, has_type_: true,
+                type_: unit_type(), span: Span.default()), span: Span.default()),
+        effects: [], visibility: Visibility.Public,
+        is_async: false, is_static: false, is_public: true, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false, func_attr: attr,
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: Span.default())
+
+fn rt_validation_module(path: text, fn_: HirFunction) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[fn_.symbol] = fn_
+    HirModule(name: "rt_validation_fixture", path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: functions,
+        classes: {}, structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [])
+
 describe "RT declaration criticality staging":
     it "defaults an implicit RT declaration to critical with one stable warning phase":
         val warning = rt_critical_profile_diagnostics("tick", "", "", false)
@@ -35,6 +66,11 @@ describe "RT declaration criticality staging":
     it "requires a reason for an explicitly lower tier":
         expect(rt_critical_profile_diagnostics("tick", "robust", "", false).len()).to_equal(1)
         expect(rt_critical_profile_diagnostics("tick", "robust", "bounded lab shim", false).len()).to_equal(0)
+
+    it "admits verified as stricter than critical without a lower-tier reason":
+        expect(rt_profile_assurance_rank("verified") > rt_profile_assurance_rank("critical")).to_equal(true)
+        expect(rt_critical_profile("verified")).to_equal(true)
+        expect(rt_critical_profile_diagnostics("tick", "verified", "", false).len()).to_equal(0)
 
     it "rejects unknown and misspelled profiles even when a reason is present":
         val diagnostics = rt_critical_profile_diagnostics("tick", "criticall", "typo", false)
@@ -56,7 +92,37 @@ describe "RT declaration criticality staging":
         val parsed = rt_criticality_parse_args("hal")
         expect(parsed[0]).to_equal("critical")
 
+    it "treats verified and unqualified roots as fatal assurance independently of the global profile":
+        expect(rt_profile_assurance_rank("")).to_equal(3)
+        expect(rt_profile_assurance_rank("critical")).to_equal(3)
+        expect(rt_profile_assurance_rank("verified")).to_equal(4)
+        expect(rt_critical_profile("verified")).to_equal(true)
+
 describe "mission-critical transitive admission":
+    it "promotes a lower root to a reachable critical dependency with scalar closure state":
+        val facts = [fact("lower_root", 0, 0, ["critical_helper"]),
+            fact("critical_helper", RT_EFFECT_ALLOC, 0, [])]
+        var ranks: Dict<text, i64> = {}
+        ranks["lower_root"] = rt_profile_assurance_rank("robust")
+        ranks["critical_helper"] = rt_profile_assurance_rank("")
+        val effective = rt_effective_assurance_closure(facts, ranks)
+        expect(effective[0]).to_equal(3)
+        expect(rt_critical_admit("lower_root", facts)[0])
+            .to_contain("RT-E-UNBOUNDED-ALLOCATION")
+
+    it "keeps an explicitly lower allocation in the configured warning migration phase":
+        val path = "synthetic/rt_lower_alloc.spl"
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "robust,reason:\"lab shim\"")
+        var modules: Dict<text, HirModule> = {}
+        modules[path] = rt_validation_module(path,
+            rt_validation_fn(810, "malloc_tick", FunctionAttr.default()))
+        val diagnostics = validate_rt_criticality_diagnostics(modules)
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].severity).to_equal(RtCriticalDiagnosticSeverity.Warning)
+        expect(diagnostics[0].message).to_contain("RT-W-STEADY-ALLOCATION-001")
+
     it "rejects a transitive unbounded allocation":
         val facts = [fact("irq", 0, 0, ["helper"]),
             fact("helper", RT_EFFECT_ALLOC, 0, [])]
@@ -131,6 +197,26 @@ describe "mission-critical transitive admission":
         expect(rt_admit_with_manifest("irq", facts).len()).to_equal(0)
         rt_bound_manifest_clear()
 
+    it "preserves exact reviewed allocation authority through the shared validator scratch":
+        val path = "synthetic/rt_reviewed_alloc.spl"
+        val root_id = rt_stable_fn_id(path, 813)
+        val facts = [RtCriticalFact(name: root_id,
+            own_effects: RT_EFFECT_ALLOC, bounded_effects: 0,
+            callees: [], line: 0,
+            effect_units: rt_observed_effect_units(RT_EFFECT_ALLOC))]
+        val digest = rt_closure_digest(root_id, facts)
+        rt_bound_manifest_replace([RtBoundCapability(subject_id: root_id,
+            closure_digest: digest, effect: RT_EFFECT_ALLOC,
+            max_units: 1, review_id: "SAFETY-ALLOC-813")])
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "critical")
+        var modules: Dict<text, HirModule> = {}
+        modules[path] = rt_validation_module(path,
+            rt_validation_fn(813, "malloc_tick", FunctionAttr.default()))
+        val diagnostics = validate_rt_criticality_diagnostics(modules)
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(0)
+
     it "rejects stale production manifest closure identity":
         val facts = [fact("irq", RT_EFFECT_BLOCKING, 0, [])]
         rt_bound_manifest_replace([RtBoundCapability(subject_id: "irq",
@@ -147,3 +233,33 @@ describe "mission-critical transitive admission":
         val with_intrinsic = rt_hal_facts_with_reviewed_intrinsic("irq", facts)
         expect(with_intrinsic.len()).to_equal(2)
         expect(rt_admit_with_manifest("irq", with_intrinsic).len()).to_equal(0)
+
+    it "keeps a non-HAL critical registry claim out of HAL admission and prevents direct-HAL double admission":
+        val path = "synthetic/rt_non_hal_claim.spl"
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "critical")
+        val key = rt_criticality_claim_keys()[0]
+        expect(rt_criticality_is_hal(key)).to_equal(false)
+        var attr = FunctionAttr.default()
+        attr.is_rt_hal = true
+        var modules: Dict<text, HirModule> = {}
+        modules[path] = rt_validation_module(path, rt_validation_fn(811, "malloc_tick", attr))
+        val diagnostics = validate_rt_criticality(modules)
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("RT-E-UNBOUNDED-ALLOCATION")
+
+    it "admits a HAL registry claim once with its reviewed intrinsic":
+        val path = "synthetic/rt_hal_claim.spl"
+        rt_criticality_reset()
+        rt_criticality_declare(path, "malloc_tick", "hal")
+        val key = rt_criticality_claim_keys()[0]
+        expect(rt_criticality_is_hal(key)).to_equal(true)
+        var attr = FunctionAttr.default()
+        attr.is_rt_hal = true
+        var modules: Dict<text, HirModule> = {}
+        modules[path] = rt_validation_module(path, rt_validation_fn(812, "malloc_tick", attr))
+        val diagnostics = validate_rt_criticality(modules)
+        rt_criticality_reset()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0]).to_contain("RT-E-UNBOUNDED-ALLOCATION")

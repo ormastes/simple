@@ -93,13 +93,8 @@ It supplies the owner file/line and unblock condition for every row below.
    pinned LLVM fork build; host Mach-O/Linux binaries and wrappers are invalid.
 4. **B-IMAGE:** no manifest-bound kernel/deployment image containing the exact
    admitted payload, linker, runtime input, source, and canonical aliases.
-5. **B-DESKTOP-LIVE:** the production wrapper, canonical Stage-4 admission,
-   shared sorted/hashed receipt validator, and 16-case hermetic self-test now
-   exist. Live composition remains blocked because the canonical fullscreen
-   owner launches with `-net none`, terminates QEMU after capture, and
-   `gui_entry_desktop.spl` does not start or cooperatively poll SSHD. No fresh
-   same-run OVMF/GRUB desktop plus SSH transcript exists for version, compile,
-   link, mounted-filesystem execution, exact output, and exit status.
+5. **B-DESKTOP-LIVE:** no fresh OVMF/GRUB serial plus SSH transcript for version,
+   compile, link, mounted-filesystem execution, exact output, and exit status.
 6. **B-SPEC:** the duplicated opt-in Clang/Rust live specs were removed. The
    canonical frozen executable/manual now call the production combined-wrapper
    path and fail closed while it or any receipt is unavailable. Stage-4
@@ -344,7 +339,7 @@ creating another contract.
 | `doc/07_guide/os/simpleos_board_bringup.md` | CURRENT: physical evidence remains B-PHYSICAL; no QEMU substitution |
 | feature/layer experts `simpleos_toolchain_selfhost`, `llvm_toolchain_port`, `os_kernel_exec`, `compiler_driver` | UPDATED with canonical plan, umbrella blocker and current WARN truth |
 | `doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md` plus the Stage 3 frontier record | UPDATED; every B-* row names owner file/line and unblock condition |
-| `.codex/skills/system_test/SKILL.md` | UPDATED with canonical SimpleOS evidence profiles, single-owner layout, and fail-closed production-oracle rules |
+| workflow skills/agents/commands | N/A: this plan does not change SPipe/tool command behavior |
 | generated deployment manual | MANUAL SOURCE COMPLETE/B-SPEC: operator flow and traceability exist; pure-Simple docgen and `sspec-maintain` evidence remain blocked |
 
 ## Implementation sequence

@@ -40,7 +40,7 @@ impl<'a> Parser<'a> {
         self.parse_struct_with_attrs(vec![])
     }
 
-    pub(crate) fn parse_struct_with_attrs(&mut self, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+    pub(crate) fn parse_struct_with_attrs(&mut self, mut attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
@@ -79,6 +79,7 @@ impl<'a> Parser<'a> {
 
         // Check for empty struct (no body)
         // Empty structs are declared as just "struct Name" without a colon and body
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (fields, methods, invariant, doc_comment) = if self.check(&TokenKind::Newline) || self.is_at_end() {
             // Empty struct - no fields, methods, invariant, or doc comment
             (Vec::new(), Vec::new(), None, None)
@@ -86,6 +87,7 @@ impl<'a> Parser<'a> {
             // Parse fields, optional inline methods, optional invariant, and doc comment
             self.parse_indented_fields_and_methods()?
         };
+        self.collection_owner = previous_collection_owner;
 
         if !explicit_mixins.is_empty() {
             return Ok(Node::Class(ClassDef {
@@ -108,6 +110,16 @@ impl<'a> Parser<'a> {
                 mixins: explicit_mixins,
                 is_value_type: true,
             }));
+        }
+
+        if let Some(trait_name) = &implements_trait {
+            attributes.push(Attribute {
+                span: self.make_span(start_span),
+                name: "implements".to_string(),
+                value: None,
+                args: Some(vec![Expr::Identifier(trait_name.clone())]),
+                named_args: None,
+            });
         }
 
         let struct_def = StructDef {
@@ -200,6 +212,7 @@ impl<'a> Parser<'a> {
         let where_clause = self.parse_where_clause()?;
 
         // Check for empty class (no body)
+        let previous_collection_owner = self.collection_owner_push(&name);
         let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
             if self.check(&TokenKind::Newline) || self.is_at_end() {
                 // Empty class - no fields, methods, invariant, etc.
@@ -207,6 +220,7 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_class_body()?
             };
+        self.collection_owner = previous_collection_owner;
 
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
@@ -347,6 +361,22 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
+        let collection_algorithm = if self.check(&TokenKind::At) {
+            let attribute = self.parse_at_as_attribute()?;
+            if attribute.name != "collection_algorithm" {
+                return Err(ParseError::contextual_error(
+                    "field attribute",
+                    "unsupported attribute before field",
+                    attribute.span,
+                ));
+            }
+            let algorithm = self.collection_algorithm_attribute(&[attribute])?;
+            self.skip_newlines();
+            algorithm
+        } else {
+            None
+        };
+        let declaration_start = self.current.span.start;
 
         let visibility = self.parse_optional_visibility()?;
 
@@ -440,7 +470,7 @@ impl<'a> Parser<'a> {
         };
 
         // Bit-width fields may not have default values (ambiguous parse, not useful)
-        let default = if bit_width.is_none() && self.check(&TokenKind::Assign) {
+        let mut default = if bit_width.is_none() && self.check(&TokenKind::Assign) {
             self.advance();
             Some(self.parse_expression()?)
         } else if bit_width.is_some() && self.check(&TokenKind::Assign) {
@@ -454,6 +484,24 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+
+        if let Some(algorithm) = collection_algorithm {
+            let value = default.take().ok_or_else(|| {
+                ParseError::contextual_error(
+                    "collection algorithm",
+                    "@collection_algorithm requires an initialized field",
+                    start_span,
+                )
+            })?;
+            let declaration = Span::new(
+                declaration_start, self.previous.span.end,
+                start_span.line, start_span.column,
+            );
+            let site_id = self.collection_site_id(&name, declaration, true);
+            default = Some(self.collection_attributed_value(
+                value, &algorithm, &site_id, start_span, Some(&ty)
+            )?);
+        }
 
         if self.check(&TokenKind::Newline) {
             self.advance();
@@ -632,7 +680,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || self.check(&TokenKind::At)
+                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me])
@@ -686,10 +734,15 @@ impl<'a> Parser<'a> {
                     f.is_static = is_static;
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
-                    // Skip auto-injection for constructors (methods named "new").
+                    // A constructor `fn new(...)` without self/me is static like any other
+                    // factory. It used to be skipped here, which left it non-static, so
+                    // HIR injected an implicit `self`: the definition took (self, args)
+                    // while `Type.new(args)` passed (args) and every argument arrived one
+                    // register late (FlatPoolReader.new(blob) -> 0xC0000005 on every
+                    // frontend-cache hit in the stage-2 CLI, bootstrap42, 2026-09-25).
                     // Methods whose first param is not `self` or `me` are implicitly static
                     // (factory methods like `fn wrap(v: T) -> Foo<T>` don't need `self`).
-                    if !is_static && f.name != "new" {
+                    if !is_static {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {
@@ -831,7 +884,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || self.check(&TokenKind::At)
+                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me, TokenKind::Static])
@@ -899,9 +952,14 @@ impl<'a> Parser<'a> {
                     f.is_static = is_static;
 
                     // Auto-inject 'self' parameter for instance methods (non-static) if not present.
-                    // Skip auto-injection for constructors (methods named "new").
+                    // A constructor `fn new(...)` without self/me is static like any other
+                    // factory. It used to be skipped here, which left it non-static, so
+                    // HIR injected an implicit `self`: the definition took (self, args)
+                    // while `Type.new(args)` passed (args) and every argument arrived one
+                    // register late (FlatPoolReader.new(blob) -> 0xC0000005 on every
+                    // frontend-cache hit in the stage-2 CLI, bootstrap42, 2026-09-25).
                     // Methods whose first param is not `self` or `me` are implicitly static.
-                    if !is_static && f.name != "new" {
+                    if !is_static {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
                         if has_self_param {

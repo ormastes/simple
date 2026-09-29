@@ -18,6 +18,11 @@
 #include <string.h>
 #include <errno.h>
 
+/* Text results in the native Simple ABI are managed RuntimeValue strings,
+ * not borrowed C-string pointers.  The Rust interpreter facade has a
+ * separate raw pointer helper for its transient completion snapshot. */
+extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
+
 /* ===== Handle Table ===== */
 
 #define RT_MAX_DRIVERS      64
@@ -35,8 +40,38 @@ static rt_driver_slot g_slots[RT_MAX_DRIVERS];
 
 spl_driver* spl_driver_create(int64_t queue_depth) {
 #if defined(__linux__)
-    /* epoll is the proven backend; io_uring path added in M4 */
+#if defined(SIMPLE_ASYNC_DRIVER_NO_EPOLL)
+    /* The Rust facade calls the explicit constructor directly in this seed
+     * build; keep the generic C entry honest for native C consumers. */
+    const char* requested = getenv("SIMPLE_SOSIX_PROVIDER");
+    if (!requested || !*requested || strcmp(requested, "auto") == 0) {
+        return spl_driver_create_uring(queue_depth);
+    }
+    if (strcmp(requested, "io_uring") == 0 ||
+        strcmp(requested, "io-uring") == 0 || strcmp(requested, "uring") == 0) {
+        return spl_driver_create_uring(queue_depth);
+    }
+    return NULL;
+#else
+    const char* requested = getenv("SIMPLE_SOSIX_PROVIDER");
+    if (requested && *requested &&
+        (strcmp(requested, "io_uring") == 0 ||
+         strcmp(requested, "io-uring") == 0 || strcmp(requested, "uring") == 0)) {
+        /* Explicit requests fail closed if kernel policy or build support
+         * prevents queue creation; never hide this behind epoll. */
+        return spl_driver_create_uring(queue_depth);
+    }
+    if (requested && *requested && strcmp(requested, "auto") != 0 &&
+        strcmp(requested, "epoll") != 0 && strcmp(requested, "reference") != 0 &&
+        strcmp(requested, "rust-syscall") != 0) {
+        return NULL;
+    }
+    if (!requested || !*requested || strcmp(requested, "auto") == 0) {
+        spl_driver* uring = spl_driver_create_uring(queue_depth);
+        if (uring) return uring;
+    }
     return spl_driver_create_epoll(queue_depth);
+#endif
 #elif defined(__APPLE__) || defined(__FreeBSD__)
     return spl_driver_create_kqueue(queue_depth);
 #elif defined(_WIN32)
@@ -138,6 +173,11 @@ bool spl_driver_supports_zero_copy(spl_driver* d) {
 
 /* ===== Simple FFI — Flat Handle-Based API ===== */
 
+/* The Rust runtime owns the hosted rt_driver_* facade on the interpreter
+ * path.  Native C consumers can retain this adapter, but the seed build
+ * defines this guard so the two owners cannot export the same ABI symbols. */
+#ifndef SIMPLE_ASYNC_DRIVER_NO_FLAT_API
+
 static rt_driver_slot* slot_get(int64_t handle) {
     if (handle < 0 || handle >= RT_MAX_DRIVERS) return NULL;
     if (!g_slots[handle].driver) return NULL;
@@ -159,6 +199,8 @@ int64_t rt_driver_create(int64_t queue_depth) {
 void rt_driver_destroy(int64_t handle) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return;
+    for (int64_t i = 0; i < s->completion_count; i++)
+        spl_completion_release(&s->completions[i]);
     spl_driver_destroy(s->driver);
     s->driver = NULL;
     s->completion_count = 0;
@@ -170,11 +212,32 @@ int64_t rt_driver_submit_accept(int64_t handle, int64_t listen_fd) {
     return s->driver->vtable->submit_accept(s->driver, listen_fd);
 }
 
+/* Simple text arguments are passed as pointer+length at this ABI boundary;
+ * they are not required to carry a trailing NUL.  The platform vtable still
+ * uses C strings, so copy and validate the bounded input before dispatch. */
+static char* copy_foreign_cstr(const char* value, int64_t length) {
+    if (!value || length <= 0 || (uint64_t)length > SIZE_MAX - 1)
+        return NULL;
+    char* copy = (char*)malloc((size_t)length + 1);
+    if (!copy) return NULL;
+    memcpy(copy, value, (size_t)length);
+    if (memchr(copy, '\0', (size_t)length) != NULL) {
+        free(copy);
+        return NULL;
+    }
+    copy[length] = '\0';
+    return copy;
+}
+
 int64_t rt_driver_submit_connect(int64_t handle, int64_t fd,
-                                  const char* addr, int64_t port) {
+                                  const char* addr, int64_t addr_len, int64_t port) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return -EINVAL;
-    return s->driver->vtable->submit_connect(s->driver, fd, addr, port);
+    char* address = copy_foreign_cstr(addr, addr_len);
+    if (!address) return -EINVAL;
+    int64_t result = s->driver->vtable->submit_connect(s->driver, fd, address, port);
+    free(address);
+    return result;
 }
 
 int64_t rt_driver_submit_recv(int64_t handle, int64_t fd, int64_t buf_size) {
@@ -215,10 +278,14 @@ int64_t rt_driver_submit_write(int64_t handle, int64_t fd,
 }
 
 int64_t rt_driver_submit_open(int64_t handle, const char* path,
-                               int64_t flags, int64_t mode) {
+                               int64_t path_len, int64_t flags, int64_t mode) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return -EINVAL;
-    return s->driver->vtable->submit_open(s->driver, path, flags, mode);
+    char* path_copy = copy_foreign_cstr(path, path_len);
+    if (!path_copy) return -EINVAL;
+    int64_t result = s->driver->vtable->submit_open(s->driver, path_copy, flags, mode);
+    free(path_copy);
+    return result;
 }
 
 int64_t rt_driver_submit_close(int64_t handle, int64_t fd) {
@@ -248,6 +315,11 @@ int64_t rt_driver_flush(int64_t handle) {
 int64_t rt_driver_poll(int64_t handle, int64_t max, int64_t timeout_ms) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return -EINVAL;
+    /* A caller may intentionally ignore a payload. Retire the previous
+     * snapshot before reusing its fixed storage so every owned buffer has a
+     * deterministic release path. */
+    for (int64_t i = 0; i < s->completion_count; i++)
+        spl_completion_release(&s->completions[i]);
     if (max > RT_MAX_COMPLETIONS) max = RT_MAX_COMPLETIONS;
     int64_t n = s->driver->vtable->poll(s->driver, s->completions,
                                          max, timeout_ms);
@@ -273,11 +345,14 @@ int64_t rt_driver_poll_flags(int64_t handle, int64_t index) {
     return s->completions[index].flags;
 }
 
-const char* rt_driver_poll_data(int64_t handle, int64_t index) {
+int64_t rt_driver_poll_data(int64_t handle, int64_t index) {
     rt_driver_slot* s = slot_get(handle);
-    if (!s || index < 0 || index >= s->completion_count) return "";
-    if (!s->completions[index].data) return "";
-    return s->completions[index].data;
+    if (!s || index < 0 || index >= s->completion_count) return rt_string_new(NULL, 0);
+    spl_completion* completion = &s->completions[index];
+    int64_t value = rt_string_new((const uint8_t*)completion->data,
+                                  completion->data_len > 0 ? (uint64_t)completion->data_len : 0);
+    spl_completion_release(completion);
+    return value;
 }
 
 int64_t rt_driver_poll_data_len(int64_t handle, int64_t index) {
@@ -286,13 +361,31 @@ int64_t rt_driver_poll_data_len(int64_t handle, int64_t index) {
     return s->completions[index].data_len;
 }
 
+/* Borrowed views for the interpreter's raw completion ABI.  The completion
+ * remains owned by the slot until the next poll or driver destruction; the
+ * managed rt_driver_poll_data() above is the ownership-transferring API. */
+const uint8_t* rt_driver_poll_data_ptr(int64_t handle, int64_t index) {
+    rt_driver_slot* s = slot_get(handle);
+    if (!s || index < 0 || index >= s->completion_count) return NULL;
+    spl_completion* completion = &s->completions[index];
+    return completion->data_len > 0 ? (const uint8_t*)completion->data : NULL;
+}
+
 bool rt_driver_cancel(int64_t handle, int64_t op_id) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return false;
     return s->driver->vtable->cancel(s->driver, op_id);
 }
 
-const char* rt_driver_backend_name(int64_t handle) {
+int64_t rt_driver_backend_name(int64_t handle) {
+    rt_driver_slot* s = slot_get(handle);
+    if (!s) return rt_string_new((const uint8_t*)"none", 4);
+    const char* name = s->driver->vtable->backend_name(s->driver);
+    return rt_string_new((const uint8_t*)name, (uint64_t)strlen(name));
+}
+
+/* Borrowed static backend name for the interpreter's raw completion ABI. */
+const char* rt_driver_backend_name_ptr(int64_t handle) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return "none";
     return s->driver->vtable->backend_name(s->driver);
@@ -308,4 +401,13 @@ bool rt_driver_supports_zero_copy(int64_t handle) {
     rt_driver_slot* s = slot_get(handle);
     if (!s) return false;
     return s->driver->vtable->supports_zero_copy(s->driver);
+}
+
+#endif /* SIMPLE_ASYNC_DRIVER_NO_FLAT_API */
+
+void spl_completion_release(spl_completion* completion) {
+    if (!completion) return;
+    free(completion->data);
+    completion->data = NULL;
+    completion->data_len = 0;
 }

@@ -1,0 +1,175 @@
+# Mission-critical memory-allocation diagnostic CONFIG (2026-08-23).
+#
+# WHAT THIS CONFIGURES
+# --------------------
+# `35.semantics/noalloc_checker.spl`'s steady-state gate rejects any symbol
+# whose `AllocClass` is not `is_steady_state_safe()` once the startup seal has
+# closed -- and the seal closes automatically when the resolved safety profile
+# is at least `critical`, i.e. in MISSION-CRITICAL MODE. That gate has no
+# configuration at all today: it is all-or-nothing.
+#
+# The underlying safety property -- mission-critical code must not dynamically
+# allocate memory -- is exactly why the check must keep EXISTING. So this
+# module deliberately does NOT provide a global off-switch. What it provides is
+# a SCOPED, EXPLICIT, JUSTIFIED opt-out: a build names the individual symbols
+# (or dot-bounded module prefixes) whose allocation it accepts, and every other
+# symbol stays hard-rejected. A suppressed finding is still PRODUCED and
+# reported, tagged `allowed` with its justification -- it is never deleted.
+#
+# WHY THIS FILE HAS NO `use` LINES AND NO MODULE-LEVEL STATE
+# ----------------------------------------------------------
+# Same discipline as `00.common/assurance/policy_names.spl`: it lives in
+# 00.common so 35.semantics/80.driver/90.tools may all import it without
+# inverting layering, and it keeps no `var`, no module-level dict, and no
+# environment access -- pure functions of their arguments. A caller that wants
+# the env knob reads `SIMPLE_MC_ALLOC_ALLOW` itself and hands the raw string to
+# `parse_alloc_allowances`, so nothing here can contaminate an interpreter
+# session (the failure mode documented in policy_names.spl's header).
+#
+# ENV KNOB (read by the caller, parsed here)
+#   SIMPLE_MC_ALLOC_ALLOW="sym_or_prefix=justification,other=justification"
+# An entry with an empty justification is REJECTED, not silently accepted:
+# an unjustified opt-out from a mission-critical safety property is a defect.
+#
+# DEFAULT: empty allowance set -- byte-identical behaviour to the pre-config
+# gate. The config can only ever narrow the gate at named symbols; it can
+# never widen the accepted `AllocClass` set and has no severity dimension
+# (severity is a separate feature, owned elsewhere).
+
+# One accepted allocation site.
+#
+# Fields:
+#   scope:          exact symbol name, or a module/namespace prefix matched on
+#                   a dot boundary (never a bare substring prefix -- WP-11
+#                   fixed exactly that bug in `is_bounded_pool_family`).
+#   justification:  why allocation is acceptable here. Must be non-empty.
+struct McAllocAllowance:
+    scope: text
+    justification: text
+
+# The configuration value itself. `allowances` empty == the unconfigured
+# mission-critical default: every non-steady-state-safe symbol is rejected.
+struct McAllocDiagnosticConfig:
+    allowances: [McAllocAllowance]
+
+impl McAllocDiagnosticConfig:
+    # The default: no opt-out at all. An unconfigured mission-critical build
+    # behaves exactly as it did before this config existed.
+    static fn default() -> McAllocDiagnosticConfig:
+        McAllocDiagnosticConfig(allowances: [])
+
+    # True when the config grants no opt-out whatsoever.
+    fn is_empty() -> bool:
+        self.allowances.len() == 0
+
+# Exact-or-dot-boundary match, mirroring `noalloc_checker.is_bounded_pool_family`.
+# A bare `starts_with` would silently swallow sibling symbols whose names merely
+# share a textual prefix (`boot_init` vs `boot_init_unsafe`).
+fn mc_alloc_scope_matches(scope: text, symbol: text) -> bool:
+    if scope == "":
+        return false
+    symbol == scope or symbol.starts_with(scope + ".")
+
+# The justification for `symbol`, or "" when no allowance covers it.
+# Returning the justification rather than a bool is deliberate: the caller
+# reports it alongside the suppressed finding, so an opt-out is always visible
+# in the diagnostic output rather than being an invisible hole.
+fn mc_alloc_allowance_for(config: McAllocDiagnosticConfig, symbol: text) -> text:
+    for a in config.allowances:
+        if a.justification != "" and mc_alloc_scope_matches(a.scope, symbol):
+            return a.justification
+    ""
+
+# True when `symbol` has an explicit, justified allowance.
+fn mc_alloc_is_allowed(config: McAllocDiagnosticConfig, symbol: text) -> bool:
+    mc_alloc_allowance_for(config, symbol) != ""
+
+# Parse `SIMPLE_MC_ALLOC_ALLOW`-shaped text into a config.
+# Grammar: `scope=justification` entries separated by `,`. Entries with an
+# empty scope or an empty justification are DROPPED (fail-closed: an
+# unparseable opt-out grants nothing rather than granting everything).
+fn parse_alloc_allowances(raw: text) -> McAllocDiagnosticConfig:
+    var out: [McAllocAllowance] = []
+    if raw == "":
+        return McAllocDiagnosticConfig(allowances: out)
+    for part in raw.split(","):
+        val trimmed = part.trim()
+        if trimmed == "":
+            continue
+        val eq = trimmed.find("=")
+        if eq < 0:
+            continue
+        val scope = trimmed[0:eq].trim()
+        val why = trimmed[eq + 1:trimmed.len()].trim()
+        if scope == "" or why == "":
+            continue
+        out.push(McAllocAllowance(scope: scope, justification: why))
+    McAllocDiagnosticConfig(allowances: out)
+
+# ============================================================================
+# Critical-mode toolchain allowances (2026-08-24)
+# ============================================================================
+#
+# WHY THIS EXISTS
+# ---------------
+# Critical mode closes the startup seal automatically
+# (`noalloc_checker.steady_state_gate_active`), and the steady-state gate then
+# rejects every symbol that is not `is_steady_state_safe()`. The Simple
+# COMPILER, LOADER and INTERPRETER all allocate by construction -- they build
+# ASTs, HIR, symbol tables and module graphs whose size is a function of the
+# input program, which is exactly `AllocClass.Unbounded`. Under the
+# unconfigured gate none of the three can run under critical mode at all, so
+# critical mode could never be applied to a build that hosts its own
+# toolchain.
+#
+# This is the config change that permits it: critical mode now SHIPS with a
+# justified allowance covering the toolchain namespace, instead of requiring
+# every operator to hand-write `SIMPLE_MC_ALLOC_ALLOW` for it.
+#
+# WHAT IT DELIBERATELY DOES NOT DO
+# --------------------------------
+#  - It does NOT change `McAllocDiagnosticConfig.default()`, which stays empty:
+#    the unconfigured gate and `check_steady_state_gate` remain byte-identical,
+#    as `mission_critical_alloc_config_spec.spl` pins.
+#  - It does NOT add a profile, mode, severity dimension or env knob.
+#  - It does NOT widen the accepted `AllocClass` set.
+#  - Above all it grants NOTHING outside the `compiler.` namespace. The
+#    baremetal no-alloc consumer (`src/lib/nogc_async_mut_noalloc`, the tier
+#    whose whole purpose is the no-alloc guarantee) is untouched and stays
+#    hard-rejected -- that guarantee is real and has real dependents, so it is
+#    not widened to make the toolchain green.
+#
+# The three components the allowance names share one module namespace in this
+# tree -- `compiler.*` covers the compiler pipeline (layers 00-90), the loader
+# (`compiler.loader`, `src/compiler/99.loader`) and the interpreter
+# (`compiler.interp` / `compiler.frontend.core.interpreter`) -- so one
+# dot-boundary scope expresses exactly those three and nothing else. Listing
+# the same subtree three times would not narrow it.
+#
+# A symbol admitted here is still REPORTED, tagged `allowed[steady-state]`
+# with this justification, so an audit can enumerate every allocation a
+# critical-mode build tolerates.
+
+val MC_TOOLCHAIN_SCOPE = "compiler"
+
+# The critical-mode toolchain allowance set: allocation is permitted for the
+# self-hosted compiler, loader and interpreter, and for nothing else.
+fn mc_alloc_toolchain_allowances() -> McAllocDiagnosticConfig:
+    McAllocDiagnosticConfig(allowances: [
+        McAllocAllowance(
+            scope: MC_TOOLCHAIN_SCOPE,
+            justification: "self-hosted compiler/loader/interpreter: AST, HIR, symbol-table and module-graph growth is a function of the input program and cannot be bounded at build time; hosting the toolchain under critical mode requires it"
+        )
+    ])
+
+# Merge operator-supplied allowances on top of a base set. Both sides are
+# preserved: an operator entry never removes a base entry, and `mc_alloc_*`
+# already returns the FIRST matching justification, so a base allowance and a
+# narrower operator allowance cannot silently cancel each other.
+fn mc_alloc_merge(base: McAllocDiagnosticConfig, extra: McAllocDiagnosticConfig) -> McAllocDiagnosticConfig:
+    var out: [McAllocAllowance] = []
+    for a in extra.allowances:
+        out.push(a)
+    for a in base.allowances:
+        out.push(a)
+    McAllocDiagnosticConfig(allowances: out)

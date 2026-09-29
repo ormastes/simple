@@ -1,0 +1,203 @@
+"""
+## Purpose and audience
+
+Pins the CLI wiring of `simple ui tui <file.ui.sdn>` for the engineers working
+the slim TUI/GUI kernel-plugin lane. Until 2026-09-06 the shipped command ran a
+stub (`src/app/ui.tui/app.spl:22`) that printed the literal `Simple UI`, blocked
+on one line of input and never parsed the `.ui.sdn` file, so every historical
+"TUI startup" number measured a stub and no opening-speed work on
+`async_app.spl` reached the product. See
+`doc/08_tracking/bug/ui_tui_cli_entry_is_a_stub_2026-09-05.md`.
+
+## Operator workflow
+
+Run this spec and confirm the Results line reports 0 failed. Scenario 1 proves
+the ordinary route now targets the real parser-backed app and that the parsed
+fixture really renders its greeting into a frame. Scenario 2 proves the stub is
+still reachable, but only behind the explicit `SIMPLE_UI_TUI_STUB=1` env used by
+the startup-size audits. Scenario 3 proves the missing-file contract is
+unchanged on both routes.
+
+## Compatibility and limitations
+
+Neither `run_tui` route can be driven to completion here: the stub blocks on
+`input("")` and the real route's watcher thread runs synchronously under the
+seed interpreter (`thread_spawn` is not concurrent on that lane -- see
+`doc/00_llm_process/feature_expert/ui_slim_kernel_plugin/skill.md` Seed-lane
+facts), so `AsyncTuiApp.run()` never returns. Scenario 1 therefore asserts the
+routing seam `tui_entry_target()` plus a real `AsyncTuiApp.new` parse and a
+frame built from the parsed tree with the same three calls `render_frame` makes
+-- `Screen.new` / `compute_layout` / `render_tui_tree` -- at a fixed 80x24
+instead of `get_terminal_size()`, which is not a terminal under the runner.
+Only scenario 3 calls `run_tui` directly: both routes reject a missing path
+before anything blocks.
+
+## Verification guidance and troubleshooting
+
+If scenario 1's `tui_entry_target` assertion fails, the CLI has been re-pointed
+at the stub -- that is the defect this spec exists to prevent. If its frame
+assertion fails while the seam assertion passes, the parser or the TUI renderer
+regressed, not the wiring. If scenario 2 fails, the startup-size audit lost its
+stub. The fixture is written under `build/test/tui_cli_wiring/` and mirrors
+`examples/06_io/ui/minimal.ui.sdn`.
+"""
+# Lifecycle: plan: doc/03_plan/ui/slim_kernel_plugin/plan.md ; design: doc/05_design/ui/slim_kernel_plugin/design.md ; bug: doc/08_tracking/bug/ui_tui_cli_entry_is_a_stub_2026-09-05.md
+# @cover src/app/ui.tui/app.spl
+# @cover src/app/ui/backend_entry_tui.spl
+# @manual_section: TUI CLI wiring
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{mkdir_p, write_file, file_exists, env_get, env_set}
+
+use app.ui.tui.app.{run_tui, tui_entry_target}
+use app.ui.tui.async_app.{AsyncTuiApp}
+use app.ui.tui.screen.{Screen}
+use app.ui.render.tui_widgets.{render_tui_tree}
+use common.ui.layout.{compute_layout}
+
+val FIXTURE_DIR = "build/test/tui_cli_wiring"
+val FIXTURE_PATH = "build/test/tui_cli_wiring/minimal.ui.sdn"
+val GREETING = "Hello from Simple UI!"
+val STUB_ENV = "SIMPLE_UI_TUI_STUB"
+
+fn fixture_source() -> text:
+    """Mirror of examples/06_io/ui/minimal.ui.sdn, written to a scratch dir."""
+    var s = "app:\n"
+    s = s + "    title: \"Minimal\"\n"
+    s = s + "    theme: glass_dark\n"
+    s = s + "\n"
+    s = s + "layout:\n"
+    s = s + "    type: vbox\n"
+    s = s + "    children:\n"
+    s = s + "        main:\n"
+    s = s + "            type: panel\n"
+    s = s + "            id: main\n"
+    s = s + "            title: Hello\n"
+    s = s + "            flex: 1\n"
+    s = s + "            children:\n"
+    s = s + "                greeting:\n"
+    s = s + "                    type: text\n"
+    s = s + "                    id: greeting\n"
+    s = s + "                    content: \"{GREETING}\"\n"
+    s = s + "        status:\n"
+    s = s + "            type: statusbar\n"
+    s = s + "            id: status\n"
+    s = s + "            left: \"NORMAL MODE\"\n"
+    s = s + "            right: \"Minimal\"\n"
+    return s
+
+fn write_fixture() -> bool:
+    """Materialise the .ui.sdn fixture under a scratch dir; true when present."""
+    mkdir_p(FIXTURE_DIR)
+    write_file(FIXTURE_PATH, fixture_source())
+    return file_exists(FIXTURE_PATH)
+
+fn first_frame_text(app: AsyncTuiApp) -> text:
+    """Build one frame the way AsyncTuiApp.render_frame does, at a fixed 80x24."""
+    val width = 80
+    val height = 23
+    var screen = Screen.new(width, height)
+    val state = app.session.current_state()
+    val rects = compute_layout(state.tree.root_node(), 0, 0, width, height)
+    screen = render_tui_tree(screen, state.tree.root_node(), rects, state)
+    return screen.render()
+
+fn parsed_first_frame(file_path: text) -> text:
+    """Parse a .ui.sdn through the real AsyncTuiApp and return its first frame.
+
+    The match lives at top level rather than inside an `it` body: under the seed
+    interpreter a class bound by a `match` arm inside a spec closure loses its
+    static type and field access reports `... on Dict`.
+    """
+    val app_result = AsyncTuiApp.new(file_path)
+    match app_result:
+        Err(e):
+            return "ERROR: {e}"
+        Ok(app):
+            return first_frame_text(app)
+
+# =========================================================================
+# Scenario 1 -- the ordinary route is the real parser-backed app
+# =========================================================================
+
+describe "simple ui tui ordinary route":
+    # @manual scenario evidence
+
+    it "targets the parser-backed async app, not the stub":
+        # @req REQ-UI-SLIM-009
+        step("read the CLI routing seam with SIMPLE_UI_TUI_STUB unset")
+        # @capture(routing): tui_entry_target() with no stub env set
+        val previous = env_get(STUB_ENV)
+        env_set(STUB_ENV, "")
+        val target = tui_entry_target()
+        env_set(STUB_ENV, previous)
+        expect(target).to_equal("async_app")
+
+    it "parses the fixture and renders its greeting into the first frame":
+        # @req REQ-UI-SLIM-009
+        step("write the fixture, construct AsyncTuiApp and build one frame")
+        # @capture(frame): first rendered frame text for the minimal fixture
+        expect(write_fixture()).to_equal(true)
+        val frame = parsed_first_frame(FIXTURE_PATH)
+        expect(frame.contains(GREETING)).to_equal(true)
+
+    it "does not render the stub's literal placeholder for a parsed file":
+        # @req REQ-UI-SLIM-004
+        step("the stub's only output was the literal `Simple UI` banner")
+        # @capture(frame): differential oracle -- stub banner absent from the real frame
+        expect(write_fixture()).to_equal(true)
+        val frame = parsed_first_frame(FIXTURE_PATH)
+        expect(frame.contains(GREETING) and not frame.trim().starts_with("Simple UI")).to_equal(true)
+
+# =========================================================================
+# Scenario 2 -- the stub stays reachable for the startup-size audit
+# =========================================================================
+
+describe "startup-size audit stub":
+    # @manual scenario evidence
+
+    it "SIMPLE_UI_TUI_STUB=1 selects the stub route":
+        # @req REQ-UI-SLIM-004
+        step("set SIMPLE_UI_TUI_STUB=1 and read the routing seam")
+        # @capture(routing): tui_entry_target() with the audit env set
+        val previous = env_get(STUB_ENV)
+        env_set(STUB_ENV, "1")
+        val target = tui_entry_target()
+        env_set(STUB_ENV, previous)
+        expect(target).to_equal("stub")
+
+    it "any other value keeps the real route":
+        # @req REQ-UI-SLIM-004
+        step("a non-1 value must not divert the product command to the stub")
+        val previous = env_get(STUB_ENV)
+        env_set(STUB_ENV, "0")
+        val target = tui_entry_target()
+        env_set(STUB_ENV, previous)
+        expect(target).to_equal("async_app")
+
+# =========================================================================
+# Scenario 3 -- unchanged missing-file contract on both routes
+# =========================================================================
+
+describe "missing .ui.sdn file":
+    # @manual scenario evidence
+
+    it "returns 1 on the ordinary route":
+        # @req REQ-UI-SLIM-009
+        step("call run_tui on a path that does not exist, stub env unset")
+        val previous = env_get(STUB_ENV)
+        env_set(STUB_ENV, "")
+        val code = run_tui("build/test/tui_cli_wiring/definitely_absent.ui.sdn")
+        env_set(STUB_ENV, previous)
+        expect(code).to_equal(1)
+
+    it "returns 1 on the stub route":
+        # @req REQ-UI-SLIM-004
+        step("call run_tui on a missing path with SIMPLE_UI_TUI_STUB=1")
+        val previous = env_get(STUB_ENV)
+        env_set(STUB_ENV, "1")
+        val code = run_tui("build/test/tui_cli_wiring/definitely_absent.ui.sdn")
+        env_set(STUB_ENV, previous)
+        expect(code).to_equal(1)

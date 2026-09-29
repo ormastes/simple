@@ -1,4 +1,9 @@
 # Lint's parser rejects `describe "...", fn():` that the test runner accepts
+## Closed 2026-09-16 — Status FIXED, re-verified 2026-08-17; root cause and fix in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 - **Filed:** 2026-08-07
 - Status: FIXED
@@ -82,3 +87,4 @@ fail-closed as of 2026-08-01 (see `entry_and_fixes.spl` lines 87-89, which emit
 a reported PARSE001 diagnostic and return early). The file still shows "NOT
 LINTED" in the banner and the linter exit code is 3 (distinct from parse-error
 exit code 1), ensuring the parse failure is visible. No change required.
+

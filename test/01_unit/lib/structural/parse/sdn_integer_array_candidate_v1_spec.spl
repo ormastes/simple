@@ -1,0 +1,110 @@
+# @req REQ-008 REQ-009
+# Requirements: doc/02_requirements/feature/environment_optimized_dynamic_libraries.md
+# Real SDN lexer -> transactional VM -> SdnValue. Legacy remains the oracle/default.
+# Malformed divergence is deliberate evidence AGAINST admission, not parity success.
+use std.spec.{describe, it, expect, fail, step}
+use std.common.sdn.parser.{parse as legacy_parse}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.structural_integer_array_candidate_v1.{sdn_integer_array_parse_candidate_v1}
+use std.common.structural.parse.program_v1.{ParseProgramLimitsV1}
+
+fn setup_sdn_limits_v1() -> ParseProgramLimitsV1:
+    ParseProgramLimitsV1(max_program_words: 128, max_source_bytes: 1024,
+        max_tokens: 128, max_nodes: 128, max_children: 128, max_diagnostics: 8,
+        max_values: 8, max_calls: 4, max_choices: 4, max_steps: 2048)
+
+fn check_exact_sdn_array_v1(value: SdnValue, expected: [i64]):
+    match value:
+        case SdnValue.Array(items):
+            expect(items.len()).to_equal(expected.len())
+            var i = 0
+            while i < items.len():
+                match items[i]:
+                    case SdnValue.Int(number): expect(number).to_equal(expected[i])
+                    case _: fail("expected an integer SDN element")
+                i = i + 1
+        case _: fail("expected an SDN array")
+
+fn step_differential_sdn_v1(source: text, expected: [i64]):
+    step("run legacy independently and compare exact SDN variants, order, and integers")
+    val legacy = legacy_parse(source)
+    if legacy.is_err(): fail("selected valid legacy fixture was rejected")
+    val candidate = sdn_integer_array_parse_candidate_v1(source, setup_sdn_limits_v1())
+    if candidate.is_err(): fail("selected valid candidate fixture was rejected")
+    val accepted = candidate.unwrap()
+    check_exact_sdn_array_v1(legacy.unwrap(), expected)
+    check_exact_sdn_array_v1(accepted.value, expected)
+    expect(accepted.grammar_steps).to_be_greater_than(0)
+    expect(accepted.syntax.roots.len()).to_equal(1)
+
+fn step_legacy_divergence_v1(source: text, legacy_expected: [i64]):
+    # Static oracle derivation (not runtime evidence): parser.spl:479-489
+    # slices [1,len-1) without checking ']'; its splitter at438-475 omits
+    # empty comma pieces. Thus [12 -> [1], [1,] -> [1], [1,,2] -> [1,2].
+    step("record permissive legacy acceptance and strict candidate rejection without claiming parity")
+    val legacy = legacy_parse(source)
+    if legacy.is_err(): fail("legacy divergence fixture changed; review admission evidence")
+    check_exact_sdn_array_v1(legacy.unwrap(), legacy_expected)
+    val candidate = sdn_integer_array_parse_candidate_v1(source, setup_sdn_limits_v1())
+    expect(candidate.is_err()).to_equal(true)
+    expect(candidate.unwrap_err()).to_equal("no_match")
+
+describe "SDN single-line integer-array grammar candidate":
+    it "matches legacy values on empty and singleton arrays":
+        step_differential_sdn_v1("[]", [])
+        step_differential_sdn_v1(" \t[0]\t ", [0])
+
+    it "matches legacy element order, signs, leading zeroes, and negative zero":
+        step_differential_sdn_v1("[ 12, -7, 001, -0 ]", [12, -7, 1, 0])
+        step_differential_sdn_v1("[12,12,-12]", [12, 12, -12])
+
+    it "derives multibyte token spans from actual lexer output at the exact source cursor":
+        val candidate = sdn_integer_array_parse_candidate_v1("[ 12, -7]", setup_sdn_limits_v1()).unwrap()
+        expect(candidate.tokens.kind).to_equal([2u16, 1u16, 4u16, 1u16, 3u16])
+        expect(candidate.tokens.start).to_equal([0u32, 2u32, 4u32, 6u32, 8u32])
+        expect(candidate.tokens.count).to_equal([1u32, 2u32, 1u32, 2u32, 1u32])
+        expect(candidate.syntax.nodes.len()).to_equal(5)
+        expect(candidate.syntax.children).to_equal([0, 1, 2, 3])
+        expect(candidate.syntax.roots).to_equal([4])
+        expect(candidate.syntax.nodes[1].kind).to_equal(101)
+        expect(candidate.syntax.nodes[1].start).to_equal(2)
+        expect(candidate.syntax.nodes[1].count).to_equal(2)
+        expect(candidate.syntax.nodes[3].kind).to_equal(101)
+        expect(candidate.syntax.nodes[3].start).to_equal(6)
+        expect(candidate.syntax.nodes[3].count).to_equal(2)
+        check_exact_sdn_array_v1(candidate.value, [12, -7])
+
+    it "records missing closing delimiter divergence rather than claiming malformed parity":
+        # Legacy slices off the last character even without a closing bracket.
+        step_legacy_divergence_v1("[12", [1])
+
+    it "records trailing and duplicate separator divergences":
+        step_legacy_divergence_v1("[1,]", [1])
+        step_legacy_divergence_v1("[1,,2]", [1, 2])
+
+    it "rejects noninteger words, multiline input, and non-ASCII before ambiguous span recovery":
+        expect(sdn_integer_array_parse_candidate_v1("[one]", setup_sdn_limits_v1()).unwrap_err()).to_equal("unsupported_integer_spelling")
+        expect(sdn_integer_array_parse_candidate_v1("[1\n2]", setup_sdn_limits_v1()).unwrap_err()).to_equal("unsupported_multiline")
+        expect(sdn_integer_array_parse_candidate_v1("[é]", setup_sdn_limits_v1()).unwrap_err()).to_equal("unsupported_non_ascii")
+        expect(sdn_integer_array_parse_candidate_v1("[#1]", setup_sdn_limits_v1()).unwrap_err()).to_equal("unsupported_integer_spelling")
+
+    it "accepts full i64 endpoints and rejects numeric overflow without wrapped values":
+        val endpoints = sdn_integer_array_parse_candidate_v1(
+            "[-9223372036854775808,9223372036854775807]", setup_sdn_limits_v1()).unwrap()
+        check_exact_sdn_array_v1(endpoints.value, [-9223372036854775807 - 1, 9223372036854775807])
+        expect(sdn_integer_array_parse_candidate_v1("[9223372036854775808]", setup_sdn_limits_v1()).unwrap_err()).to_equal("integer_overflow")
+        expect(sdn_integer_array_parse_candidate_v1("[-9223372036854775809]", setup_sdn_limits_v1()).unwrap_err()).to_equal("integer_overflow")
+
+    it "propagates source, token, action output, and grammar fuel limits":
+        var limits = setup_sdn_limits_v1()
+        limits.max_source_bytes = 2
+        expect(sdn_integer_array_parse_candidate_v1("[1]", limits).unwrap_err()).to_equal("source_capacity")
+        limits = setup_sdn_limits_v1()
+        limits.max_tokens = 2
+        expect(sdn_integer_array_parse_candidate_v1("[1]", limits).unwrap_err()).to_equal("token_capacity")
+        limits = setup_sdn_limits_v1()
+        limits.max_nodes = 2
+        expect(sdn_integer_array_parse_candidate_v1("[1]", limits).unwrap_err()).to_equal("output_capacity")
+        limits = setup_sdn_limits_v1()
+        limits.max_steps = 1
+        expect(sdn_integer_array_parse_candidate_v1("[1]", limits).unwrap_err()).to_equal("fuel_exhausted")

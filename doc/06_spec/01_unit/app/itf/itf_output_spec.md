@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -12,30 +12,6 @@
 # Itf Output Specification
 
 ## Scenarios
-
-### pager process ownership
-
-#### routes inherited stdio through the process facade without spawning a pager in this spec
-
-The executable scenario reads `src/app/devhub/output.spl`; it does not launch
-an interactive pager. It requires the direct
-`app.io.process_ops.{process_run_inherit}` facade import and call, and rejects
-the raw `rt_process_run_inherit` symbol entirely.
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val source = file_read("src/app/devhub/output.spl")
-expect(source).to_contain("use app.io.process_ops.{process_run_inherit}")
-expect(source).to_contain("process_run_inherit(pager_bin, pager_args + [tmp_path])")
-expect(source.contains("rt_process_run_inherit")).to_be(false)
-```
-
-</details>
 
 ### format_size
 
@@ -253,14 +229,13 @@ expect(_visible_len(padded_plain)).to_equal(6)
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Source | `test/01_unit/app/devhub/itf_output_spec.spl` |
-| Updated | 2026-08-25 |
+| Source | `test/01_unit/app/itf/itf_output_spec.spl` |
+| Updated | 2026-07-19 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
 Tests covering:
-- pager process ownership without launching a subprocess
 - format_size
 - _table_col_widths (dynamic-width table sizing)
 - _visible_len / _pad_visible (ANSI-aware table alignment)
@@ -269,8 +244,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1,0 +1,100 @@
+#!/bin/sh
+# Emit every owned Simple SFFI declaration lacking an explicit unsafe(ffi) tag.
+# This is a source-only prioritization ledger, never provider/admission proof.
+#
+# Verdict is the LAST line on stdout (.claude/rules/vcs.md):
+#   PASS  — <n> assertion(s) checked ...        exit 0
+#   FAIL  — <what failed, expected vs actual>   exit 1
+#   ERROR — nothing was checked (<reason>)      exit 2
+#
+# The ledger itself goes to $1 (or stdout when no path is given); the verdict is
+# always printed last on stdout so a caller cannot mistake a vacuous run for a
+# pass.
+set -u
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-/dev/stdout}
+work=$(mktemp -d) || { echo 'ERROR — nothing was checked (mktemp failed)'; exit 2; }
+trap 'rm -rf "$work"' EXIT INT TERM
+
+checked=0
+
+# This package was retired as unreachable in a89db70d01c.  A later broad tree
+# restore accidentally resurrected it, adding 178 unregistered @extern
+# declarations and 17 net source-signature variants.  Keep the absence
+# explicit: aggregate inventory ceilings can otherwise hide the resurrection
+# after unrelated SFFI debt is removed.
+retired_interpreter_extern="$root/src/app/interpreter/extern"
+checked=$((checked + 1))
+if [ -e "$retired_interpreter_extern" ]; then
+    echo "FAIL — $checked assertion(s) checked, retired interpreter extern package was restored: $retired_interpreter_extern"
+    exit 1
+fi
+
+# The contract inventory is this audit's only input AND is not a separate row in
+# check-sffi-v2-authority.shs, so its ratchet verdict must be surfaced here
+# rather than swallowed.
+inventory_log="$work/inventory.log"
+SFFI_SOURCE_ONLY=1 sh "$root/scripts/audit/sffi-contract-inventory.shs" \
+    "$work/contracts.tsv" "$work/symbols.tsv" >"$inventory_log" 2>&1
+inventory_rc=$?
+checked=$((checked + 1))
+if [ "$inventory_rc" -ne 0 ]; then
+    inventory_verdict=$(grep -E 'SFFI contract inventory: (FAIL|ERROR)' "$inventory_log" | tail -n 1)
+    [ -n "$inventory_verdict" ] || inventory_verdict="exit $inventory_rc with no verdict line"
+    echo "FAIL — $checked assertion(s) checked, dependency scripts/audit/sffi-contract-inventory.shs failed (rc=$inventory_rc): $inventory_verdict"
+    exit 1
+fi
+
+if [ ! -s "$work/contracts.tsv" ]; then
+    echo 'ERROR — nothing was checked (contract inventory produced no rows)'
+    exit 2
+fi
+
+# This conservative textual estimate prioritizes high-fanout raw boundaries.
+# It excludes comments and declarations, but is not a resolved call graph or
+# any kind of ABI/provider/admission proof.
+find "$root/src" "$root/test" -type f -name '*.spl' ! -path '*/vendor/*' -print0 |
+xargs -0 -r -n 200 perl -ne '
+    s/#.*$//;
+    next if /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+/;
+    while (/\b((?:rt_|spl_)[A-Za-z0-9_]+)\s*\(/g) { print "$1\n" }
+' | LC_ALL=C sort | uniq -c | awk 'BEGIN { OFS="\t" } { print $2, $1 }' \
+    >"$work/raw-call-estimates.tsv"
+
+expected_header='symbol	backing	provider_language	provider_id	source_signature_sha256	file	line	unsafe_tag	contract	cryptographic_admission	evidence	state	scoped_callsite_estimate	backing_first_declaring_file'
+actual_header=$(head -n 1 "$work/contracts.tsv")
+checked=$((checked + 1))
+if [ "$actual_header" != "$(printf '%b' "$expected_header")" ]; then
+    echo 'FAIL — 2 assertion(s) checked, unsupported contract-inventory schema: contracts.tsv header does not match the expected 14-column layout'
+    exit 1
+fi
+
+{
+    printf 'file	line	symbol	source_raw_call_estimate	source_signature_sha256	unsafe_tag	contract	provider_id	state\n'
+    awk -F '\t' 'BEGIN { OFS="\t" }
+        NR == FNR { calls[$1]=$2; next }
+        FNR > 1 && $8 != "tagged" {
+            print $6, $7, $1, (calls[$1] + 0), $5, $8, $9, $4, $12
+        }
+    ' "$work/raw-call-estimates.tsv" "$work/contracts.tsv" |
+        LC_ALL=C sort -t "$(printf '\t')" -k4,4nr -k1,1 -k2,2n -k3,3
+} >"$work/backlog.tsv"
+
+if [ "$out" = /dev/stdout ]; then
+    cat "$work/backlog.tsv"
+else
+    if [ -e "$out" ] && [ ! -f "$out" ]; then
+        echo 'ERROR — nothing was checked (output must be a regular file path)'
+        exit 2
+    fi
+    cp "$work/backlog.tsv" "$out" || {
+        echo "ERROR — nothing was checked (could not write ledger to $out)"
+        exit 2
+    }
+fi
+
+checked=$((checked + 1))
+count=$(awk 'END { if (NR > 0) print NR - 1; else print 0 }' "$work/backlog.tsv")
+echo "PASS — $checked assertion(s) checked, SFFI unsafe backlog ledger emitted: rows=$count source_only=true admission=absent inventory_rc=0"
+exit 0

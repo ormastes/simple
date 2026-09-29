@@ -1,7 +1,7 @@
 #!/bin/sh
 
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
-COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-60}
+COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 
@@ -11,6 +11,7 @@ candidate_frontend_timeout_bin() {
     elif command -v gtimeout >/dev/null 2>&1; then
         command -v gtimeout
     else
+        echo 'candidate_frontend_timeout_bin: timeout or gtimeout is required on PATH' >&2
         return 1
     fi
 }
@@ -22,6 +23,281 @@ candidate_frontend_timeout_bin() {
 # candidate that emits more than this from a 2-line fixture is non-functional
 # regardless of its exit status.
 CANDIDATE_FRONTEND_MAX_LOG_BYTES=${CANDIDATE_FRONTEND_MAX_LOG_BYTES:-4194304}
+
+candidate_frontend_executable_path() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*) printf '%s.exe\n' "$1" ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+
+candidate_frontend_hash_file() (
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        candidate_hash_output=$(sha256sum -- "$1") || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        candidate_hash_output=$(shasum -a 256 -- "$1") || return 1
+    else
+        return 126
+    fi
+    candidate_hash_digest=${candidate_hash_output%% *}
+    [ "${#candidate_hash_digest}" -eq 64 ] || return 126
+    case "$candidate_hash_digest" in *[!0-9a-f]*) return 126 ;; esac
+    printf '%s\n' "$candidate_hash_digest"
+)
+candidate_frontend_descriptor_root() {
+    case "$(uname -s)" in
+      Darwin) printf '/dev/fd\n' ;;
+      *) printf '/proc/%s/fd\n' "$1" ;;
+    esac
+}
+candidate_frontend_perl_executable() {
+    case "$(uname -s)" in
+      Darwin) printf '/usr/bin/perl\n' ;;
+      *) command -v perl ;;
+    esac
+}
+candidate_frontend_procfd() {
+    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || {
+        [ "$(uname -s)" = Darwin ] &&
+        expr "$1" : '/dev/fd/[1-9][0-9]*$' >/dev/null
+    }
+}
+candidate_frontend_pinned_cwd() {
+    [ "${CANDIDATE_FRONTEND_PINNED_CWD:-0}" = 1 ] &&
+    [ "$(uname -s)" = Darwin ] || return 1
+    /usr/bin/perl -e '
+        open(my $dir, "<&6") or exit 1;
+        my @held = stat($dir); my @cwd = stat(".");
+        exit !(@held && @cwd && -d $dir && $held[0] == $cwd[0] && $held[1] == $cwd[1]);
+    '
+}
+candidate_frontend_procfd_leaf() {
+    expr "$1" : '/proc/[1-9][0-9]*/fd/[1-9][0-9]*/[A-Za-z0-9_.-][A-Za-z0-9_.-]*$' >/dev/null || {
+        case "$1" in ./[A-Za-z0-9_.-]*) ;; *) return 1 ;; esac
+        candidate_leaf=${1#./}
+        case "$candidate_leaf" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+        candidate_frontend_pinned_cwd
+    }
+}
+
+# Darwin fdescfs supports reading an inherited file descriptor, but neither
+# directory-fd suffixes nor executing an executable through /dev/fd. Enter the
+# held output directory with fchdir before starting the smoke shell; its log
+# and receipt leaves then stay attached to that directory even if renamed.
+# The interpreter is macOS system Perl, and its held identity is checked before
+# use. The admission script itself is read through the inherited descriptor.
+candidate_frontend_pinned_smoke() (
+    pinned_candidate=$1 pinned_driver_log=$2
+    if [ "$(uname -s)" != Darwin ]; then
+        candidate_frontend_smoke "$pinned_candidate" >>"$pinned_driver_log" 2>&1
+        exit $?
+    fi
+    for pinned_path in "$pinned_driver_log" "$CANDIDATE_FRONTEND_LOG_PATH" "$CANDIDATE_FRONTEND_STATUS_PATH"; do
+        case "$pinned_path" in /dev/fd/6/*) ;; *) exit 126 ;; esac
+        pinned_leaf=${pinned_path#/dev/fd/6/}
+        case "$pinned_leaf" in ''|.|..|*[!A-Za-z0-9_.-]*) exit 126 ;; esac
+    done
+    CANDIDATE_FRONTEND_LOG_PATH=./${CANDIDATE_FRONTEND_LOG_PATH##*/}
+    CANDIDATE_FRONTEND_STATUS_PATH=./${CANDIDATE_FRONTEND_STATUS_PATH##*/}
+    CANDIDATE_FRONTEND_PINNED_CWD=1
+    CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-pinned
+    CANDIDATE_FRONTEND_CAPTURE_PARENT=/dev/fd/6
+    export CANDIDATE_FRONTEND_LOG_PATH CANDIDATE_FRONTEND_STATUS_PATH
+    export CANDIDATE_FRONTEND_PINNED_CWD CANDIDATE_FRONTEND_LOG_DISPLAY_PATH
+    export CANDIDATE_FRONTEND_CAPTURE_KIND CANDIDATE_FRONTEND_CAPTURE_PARENT
+    export CANDIDATE_FRONTEND_ROOT CANDIDATE_FRONTEND_BACKEND CANDIDATE_FRONTEND_BOOTSTRAP
+    export CANDIDATE_FRONTEND_MAX_LOG_BYTES COMPILER_BUILD_TIMEOUT_SECONDS
+    export COMPILER_EXEC_TIMEOUT_SECONDS COMPILER_CHECK_KILL_GRACE_SECONDS
+    exec 9<"$CANDIDATE_FRONTEND_ROOT/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs" || exit 126
+    /usr/bin/perl -MFcntl=O_WRONLY,O_APPEND,O_CREAT,O_NOFOLLOW,O_NONBLOCK -e '
+        open(my $interpreter, "<&8") or die "frontend-launch-error: interpreter descriptor: $!\n";
+        my @held = stat($interpreter); my @system = stat("/usr/bin/perl");
+        @held && @system && $held[0] == $system[0] && $held[1] == $system[1]
+            or die "frontend-launch-error: interpreter is not system Perl\n";
+        open(my $dir, "<&6") or die "frontend-launch-error: output descriptor: $!\n";
+        -d $dir && chdir($dir) or die "frontend-launch-error: output fchdir: $!\n";
+        my ($leaf, $candidate) = @ARGV;
+        sysopen(my $log, $leaf, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600)
+            or die "frontend-launch-error: driver log: $!\n";
+        -f $log or die "frontend-launch-error: driver log is not regular\n";
+        open(STDOUT, ">&", $log) && open(STDERR, ">&", $log)
+            or die "frontend-launch-error: log redirect: $!\n";
+        exec "/bin/sh", "-c", q{. /dev/fd/9; candidate_frontend_smoke "$1"}, "sh", $candidate;
+        die "frontend-launch-error: smoke exec: $!\n";
+    ' "${pinned_driver_log##*/}" "$pinned_candidate"
+)
+
+candidate_frontend_run_collector() {
+    if [ "$(uname -s)" = Darwin ]; then
+        # fdescfs duplicates the held script's open description, including its
+        # offset. Rewind it before every probe instead of admitting an empty
+        # second script execution after the first has consumed the descriptor.
+        /usr/bin/perl -e '
+            my $script = shift @ARGV;
+            $script =~ m{\A/dev/fd/([1-9][0-9]*)\z} or exit 126;
+            open(my $held, "<&$1") or die "frontend-launch-error: open collector descriptor: $!\n";
+            seek($held, 0, 0) or die "frontend-launch-error: rewind collector descriptor: $!\n";
+            do $script;
+            die "frontend-launch-error: collector did not exit: $@ $!\n";
+        ' "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    else
+        "$BOOTSTRAP_STAGE3_PERL_DESCRIPTOR" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    fi
+}
+
+# One host capture authority for both fresh bootstrap and admitted resume.
+# Windows native children require a Job Object; MSYS process groups alone do
+# not contain grandchildren created through Win32 CreateProcess.
+candidate_frontend_capture_setup() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+      MSYS*|MINGW*|CYGWIN*)
+        CANDIDATE_FRONTEND_CAPTURE_KIND=windows-job
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_PYTHON=$(command -v python3 || command -v python) || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR=$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log-windows.py
+        [ -f "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" ] &&
+            [ ! -L "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" ] || return 126
+        BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR") || return 126
+        ;;
+      Darwin)
+        CANDIDATE_FRONTEND_CAPTURE_KIND=darwin-pinned
+        frontend_descriptor_root=$(candidate_frontend_descriptor_root 0) || return 126
+        exec 6<"$1" \
+            7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" \
+            8<"$(candidate_frontend_perl_executable)" || return 126
+        BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=$frontend_descriptor_root/8
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$frontend_descriptor_root/7
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$frontend_descriptor_root/6
+        export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+        ;;
+      Linux)
+        CANDIDATE_FRONTEND_CAPTURE_KIND=procfd
+        frontend_owner_pid=$(perl -e 'print getppid') || return 126
+        exec 6<"$1" 7<"$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl" \
+            8<"$(command -v perl)" || return 126
+        BOOTSTRAP_STAGE3_PERL_DESCRIPTOR=/proc/$frontend_owner_pid/fd/8
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=/proc/$frontend_owner_pid/fd/7
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=/proc/$frontend_owner_pid/fd/6
+        export BOOTSTRAP_STAGE3_PERL_DESCRIPTOR BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR
+        ;;
+      FreeBSD)
+        # FreeBSD has no /proc/<pid>/fd by default and no guaranteed fdescfs
+        # mount, so descriptor-path pinning is unavailable. Pin by plain
+        # absolute paths instead, with the collector script sha256-pinned
+        # like the windows-job kind.
+        CANDIDATE_FRONTEND_CAPTURE_KIND=plain-pin
+        CANDIDATE_FRONTEND_CAPTURE_PARENT=$(CDPATH= cd -- "$1" && pwd -P) || return 126
+        BOOTSTRAP_STAGE3_PLAIN_PERL=$(command -v perl) || return 126
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR=$CANDIDATE_FRONTEND_ROOT/scripts/bootstrap/run-process-group-bounded-log.pl
+        [ -f "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" ] &&
+            [ ! -L "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" ] || return 126
+        BOOTSTRAP_STAGE3_BOUNDED_LOG_SHA=$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR") || return 126
+        ;;
+      *) return 126 ;;
+    esac
+}
+
+candidate_frontend_capture_leaf() {
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ] ||
+        [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = plain-pin ]; then
+        [ "${1%/*}" = "$CANDIDATE_FRONTEND_CAPTURE_PARENT" ] || return 1
+        case "${1##*/}" in ''|.|..|*[!A-Za-z0-9_.-]*) return 1 ;; esac
+    else
+        candidate_frontend_procfd_leaf "$1"
+    fi
+}
+
+candidate_frontend_collect() {
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        "$BOOTSTRAP_STAGE3_WINDOWS_PYTHON" "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR" \
+            --helper-sha256="$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" "$@"
+    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-pinned ]; then
+        candidate_frontend_run_collector "$@"
+    elif [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = plain-pin ]; then
+        [ "$(candidate_frontend_hash_file "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR")" = \
+            "$BOOTSTRAP_STAGE3_BOUNDED_LOG_SHA" ] || return 126
+        "$BOOTSTRAP_STAGE3_PLAIN_PERL" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    else
+        candidate_frontend_procfd "${BOOTSTRAP_STAGE3_PERL_DESCRIPTOR:-}" || return 126
+        candidate_frontend_procfd "${BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR:-}" || return 126
+        "$BOOTSTRAP_STAGE3_PERL_DESCRIPTOR" "$BOOTSTRAP_STAGE3_BOUNDED_LOG_DESCRIPTOR" "$@"
+    fi
+}
+
+candidate_frontend_bounded_build() {
+    bounded_probe=$1; shift
+    bounded_parent=${build_log%/*}
+    bounded_base=${build_log##*/}
+    [ "$bounded_parent/$bounded_base" = "$build_log" ] || return 126
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = darwin-pinned ]; then
+        [ "$bounded_parent" = . ] || return 126
+        candidate_frontend_pinned_cwd || return 126
+        bounded_output_parent=/dev/fd/6
+        # Output publication stays in the held directory, while source paths
+        # retain the repository working directory expected by native-build.
+        set -- /bin/sh -c 'cd "$1" || exit 126; shift; exec "$@"' sh "$CANDIDATE_FRONTEND_ROOT" "$@"
+    else
+        candidate_frontend_capture_leaf "$build_log" || return 126
+        bounded_output_parent=$bounded_parent
+    fi
+    case "$bounded_probe" in
+      p2_add) bounded_leaf=$bounded_base ;;
+      stage2_mir_retention) bounded_leaf=$bounded_base.stage2-mir-retention ;;
+      stage2_module_path_naming) bounded_leaf=$bounded_base.stage2-module-path-naming ;;
+      hello_world_positional) bounded_leaf=$bounded_base.hello-world-positional ;;
+      hello_world_positional_debugger) bounded_leaf=$bounded_base.hello-world-positional.debugger.log ;;
+      *) return 126 ;;
+    esac
+    bounded_timeout=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
+    bounded_grace=$COMPILER_CHECK_KILL_GRACE_SECONDS
+    if [ "$bounded_probe" = hello_world_positional_debugger ]; then
+        bounded_timeout=90
+        bounded_grace=5
+    fi
+    bounded_log=$bounded_parent/$bounded_leaf
+    bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
+    # native-build is synchronous: once its root exits, any remaining Job
+    # members are helpers, not work needed to produce the probe executable.
+    # Preserve the default wait-job policy on non-Windows collectors.
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        set -- --root-exit-policy=terminate-job -- "$@"
+    else
+        set -- -- "$@"
+    fi
+    if candidate_frontend_collect \
+        --output-parent="$bounded_output_parent" --log-leaf="$bounded_leaf" \
+        --receipt-leaf="$bounded_leaf.bounded.env" \
+        --max-bytes="$CANDIDATE_FRONTEND_MAX_LOG_BYTES" \
+        --timeout-seconds="$bounded_timeout" \
+        --term-grace-seconds="$bounded_grace" "$@"; then
+        bounded_rc=0
+    else
+        bounded_rc=$?
+    fi
+    [ -f "$bounded_log" ] && [ -f "$bounded_receipt" ] || return 126
+    [ "$(sed -n 's/^schema=//p' "$bounded_receipt")" = simple-bounded-process-log-v1 ] || return 126
+    bounded_reason=$(sed -n 's/^reason=//p' "$bounded_receipt")
+    bounded_raw=$(sed -n 's/^raw_status=//p' "$bounded_receipt")
+    [ "$bounded_raw" = "$bounded_rc" ] || return 126
+    [ "$(sed -n 's/^log_sha256=//p' "$bounded_receipt")" = \
+        "$(candidate_frontend_hash_file "$bounded_log")" ] || return 126
+    if [ "${CANDIDATE_FRONTEND_CAPTURE_KIND:-procfd}" = windows-job ]; then
+        [ "$(sed -n 's/^process_group=//p' "$bounded_receipt")" = windows-job ] || return 126
+        [ "$(sed -n 's/^root_exit_policy=//p' "$bounded_receipt")" = terminate-job ] || return 126
+        [ "$(sed -n 's/^helper_sha256=//p' "$bounded_receipt")" = \
+            "$BOOTSTRAP_STAGE3_WINDOWS_COLLECTOR_SHA" ] || return 126
+    fi
+    case "$bounded_reason:$bounded_rc" in
+      child-exit:*) ;;
+      child-native-exception:125|child-native-exception:132|child-native-exception:136|child-native-exception:139) ;;
+      child-signal:1[2-9][89]|child-signal:1[3-9][0-9]|child-signal:2[0-5][0-9]) ;;
+      timeout:124|overflow:125|setup-failure:126|exec-failure:127|supervisor-signal:1[2-9][89]|supervisor-signal:1[3-9][0-9]|supervisor-signal:2[0-5][0-9]) ;;
+      *) return 126 ;;
+    esac
+    bounded_last_reason=$bounded_reason
+    return "$bounded_rc"
+}
 
 # candidate_frontend_smoke <candidate>
 #
@@ -37,137 +313,264 @@ candidate_frontend_smoke() (
     candidate=$1
     candidate_backend=${CANDIDATE_FRONTEND_BACKEND:-cranelift}
     candidate_bootstrap=${CANDIDATE_FRONTEND_BOOTSTRAP:-0}
+    # SIMPLE_EXECUTION_MODE must be UNSET, not set-to-empty, for the probes
+    # below to reach the driver's JIT default: `VAR= cmd` sets VAR to "" in
+    # the child's environment, and exec_core.rs reads that with
+    # std::env::var() as Ok("") -> parse_str_checked("") fails -> exit 2. Only
+    # an absent var falls through to Err(_) -> ExecutionMode::Jit. Scoped to
+    # this subshell so it can't leak SIMPLE_EXECUTION_MODE state to the caller.
+    unset SIMPLE_EXECUTION_MODE
+    # Each admission probe runs in a fresh isolated HOME/cache. The compiler's
+    # persistent package-index contract therefore has no admitted SCV yet;
+    # authorize that first, explicit initialization instead of accidentally
+    # depending on the developer's pre-existing user index.
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+    export SIMPLE_PACKAGE_INDEX_COLD_INIT
     timeout_bin=$(candidate_frontend_timeout_bin || true)
     [ -n "$timeout_bin" ] || exit 1
     probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-host-gpu-admission.XXXXXX") || exit 1
     trap 'rm -rf "$probe_dir"' 0
     trap 'exit 1' HUP INT TERM
-    probe_output=$probe_dir/p2_add
+    # These source-fixture builds have fresh private caches, not an admitted
+    # persistent SCV/package-index generation. Select the driver's explicit
+    # cold-initialization contract only inside this smoke subshell; normal
+    # candidate invocations must still reject missing package-index authority.
+    SIMPLE_PACKAGE_INDEX_COLD_INIT=1
+    export SIMPLE_PACKAGE_INDEX_COLD_INIT
+    build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
+    build_log_display=${CANDIDATE_FRONTEND_LOG_DISPLAY_PATH:-$build_log}
+    status_path=${CANDIDATE_FRONTEND_STATUS_PATH:-}
+    p2_add_log=$build_log
+    stage2_mir_retention_log=$build_log.stage2-mir-retention
+    stage2_module_path_naming_log=$build_log.stage2-module-path-naming
+    hello_world_positional_log=$build_log.hello-world-positional
+    p2_add_receipt=$p2_add_log.bounded.env
+    stage2_mir_retention_receipt=$stage2_mir_retention_log.bounded.env
+    stage2_module_path_naming_receipt=$stage2_module_path_naming_log.bounded.env
+    hello_world_positional_receipt=$hello_world_positional_log.bounded.env
+    p2_add_raw_status=not-run stage2_mir_retention_raw_status=not-run
+    stage2_module_path_naming_raw_status=not-run hello_world_positional_raw_status=not-run
+    candidate_frontend_finish() {
+        result=$1
+        probe=$2
+        raw_status=$3
+        [ -n "$status_path" ] || return 0
+        candidate_frontend_capture_leaf "$status_path" || return 126
+        status_tmp="${status_path}.tmp.$$"
+        {
+            echo schema=simple-candidate-frontend-status-v2
+            echo result="$result"
+            echo probe="$probe"
+            echo raw_status="$raw_status"
+            echo bootstrap_mode="$candidate_bootstrap"
+            echo backend="$candidate_backend"
+            echo log_path="$build_log_display"
+            for status_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+                eval "status_raw=\${${status_probe}_raw_status}"
+                eval "status_log=\${${status_probe}_log}"
+                eval "status_receipt=\${${status_probe}_receipt}"
+                case "$status_probe" in
+                  p2_add) status_log_display=$build_log_display ;;
+                  stage2_mir_retention) status_log_display=$build_log_display.stage2-mir-retention ;;
+                  stage2_module_path_naming) status_log_display=$build_log_display.stage2-module-path-naming ;;
+                  hello_world_positional) status_log_display=$build_log_display.hello-world-positional ;;
+                esac
+                if [ "$status_raw" = not-run ]; then
+                    status_log=-
+                    status_receipt=-
+                    status_log_display=-
+                fi
+                if [ "$status_log" != - ] && { [ ! -f "$status_log" ] || [ ! -f "$status_receipt" ]; }; then
+                    status_log=-
+                    status_receipt=-
+                    status_log_display=-
+                fi
+                echo "${status_probe}_raw_status=$status_raw"
+                echo "${status_probe}_log_path=$status_log_display"
+                echo "${status_probe}_log_sha256=$([ "$status_log" = - ] && echo - || candidate_frontend_hash_file "$status_log")"
+                echo "${status_probe}_collector_receipt_path=$([ "$status_log_display" = - ] && echo - || echo "$status_log_display.bounded.env")"
+                echo "${status_probe}_collector_receipt_sha256=$([ "$status_receipt" = - ] && echo - || candidate_frontend_hash_file "$status_receipt")"
+            done
+        } >"$status_tmp" || return 1
+        ln "$status_tmp" "$status_path" || { rm -f "$status_tmp"; return 126; }
+        rm -f "$status_tmp"
+    }
+    candidate_frontend_fail() {
+        failed_probe=$1
+        failed_status=$2
+        case "$failed_probe" in
+          p2_add-*|p2-add-*) failed_log=$p2_add_log ;;
+          stage2-mir-retention-*) failed_log=$stage2_mir_retention_log ;;
+          stage2-module-path-naming-*) failed_log=$stage2_module_path_naming_log ;;
+          hello-world-positional-*) failed_log=$hello_world_positional_log ;;
+          *) failed_log=$build_log ;;
+        esac
+        echo "candidate_frontend_smoke: ${failed_probe} failed (raw rc=${failed_status})" >&2
+        if [ -f "$failed_log" ]; then
+            head -c 65536 "$failed_log" >&2
+        fi
+        candidate_frontend_finish fail "$failed_probe" "$failed_status" || :
+        exit "$failed_status"
+    }
+    if ! candidate_frontend_capture_leaf "$build_log"; then
+        candidate_frontend_finish fail setup-failure 126 || :
+        exit 126
+    fi
+    probe_output=$(candidate_frontend_executable_path "$probe_dir/p2_add")
+    probe_build_status=0
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
     SIMPLE_FRONTEND_DELEGATE="$candidate" \
     SIMPLE_FRONTEND_DELEGATED=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_EXECUTION_MODE= \
     SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
     SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
-        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        candidate_frontend_bounded_build p2_add "$candidate" native-build \
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
         --entry scripts/check/cert/redeploy_gate/fixtures/p2_add.spl \
         --cache-dir "$probe_dir/cache" \
         --mode one-binary \
-        --output "$probe_output" >"$probe_dir/build.log" 2>&1 || {
-            head -c 65536 "$probe_dir/build.log" >&2
-            exit 1
-        }
+        --output "$probe_output" || probe_build_status=$?
+    p2_add_raw_status=$probe_build_status
+    p2_add_reason=$(sed -n 's/^reason=//p' "$p2_add_receipt" 2>/dev/null || echo infrastructure-failure)
+    [ "$probe_build_status" -eq 0 ] || {
+        # tail, not head: a real build failure's log is typically dominated
+        # by hundreds of KB of compiler warnings from unrelated files BEFORE
+        # the actual failing command's output; the failure text is always the
+        # last thing printed, so keep the END of the log (measured 2026-08-31:
+        # a genuine link failure was invisible behind 65536 bytes of clang-cl
+        # deprecation warnings under a head-bounded excerpt).
+        tail -c 65536 "$p2_add_log" >&2
+        candidate_frontend_fail p2_add-build "$probe_build_status"
+    }
     # Runaway-diagnostic gate: even a build that reports success must not have
     # spewed an unbounded diagnostic stream at a two-line fixture.
-    build_log_bytes=$(wc -c <"$probe_dir/build.log" 2>/dev/null || echo 0)
+    build_log_bytes=$(wc -c <"$p2_add_log" 2>/dev/null || echo 0)
     if [ "$build_log_bytes" -gt "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" ]; then
         echo "candidate_frontend_smoke: candidate emitted ${build_log_bytes} bytes of output for a two-line fixture (cap ${CANDIDATE_FRONTEND_MAX_LOG_BYTES}); treating as a runaway error loop" >&2
-        head -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+        candidate_frontend_fail p2_add-log-cap 1
     fi
     # Dead-lexer signature: kind 0 / empty token text is never a real token.
-    if grep -q "Unknown(0) ''" "$probe_dir/build.log" 2>/dev/null ||
-        grep -q '\[lexer_fatal\]' "$probe_dir/build.log" 2>/dev/null; then
+    if grep -q "Unknown(0) ''" "$p2_add_log" 2>/dev/null ||
+        grep -q '\[lexer_fatal\]' "$p2_add_log" 2>/dev/null; then
         echo "candidate_frontend_smoke: candidate reported a dead lexer while compiling the fixture" >&2
-        head -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+        candidate_frontend_fail p2_add-dead-lexer 1
     fi
+    probe_run_status=0
     probe_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || exit 1
-    [ "$probe_stdout" = 5 ]
+        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$probe_output" 2>/dev/null) || probe_run_status=$?
+    [ "$probe_run_status" -eq 0 ] || candidate_frontend_fail p2_add-run "$probe_run_status"
+    [ "$probe_stdout" = 5 ] || candidate_frontend_fail p2_add-output 1
 
     # Exact Stage-2 MIR-retention guard. An admitted self-compiled compiler was
     # observed emitting two method-call instructions, then losing them when
     # end_function called finalize_block with an already-empty pending list.
     # p2_add alone did not distinguish that failure, so keep this fixture and
     # cache independent and require its native result before admission.
-    retention_output=$probe_dir/stage2_mir_retention
+    retention_output=$(candidate_frontend_executable_path \
+        "$probe_dir/stage2_mir_retention")
+    retention_build_status=0
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
     SIMPLE_FRONTEND_DELEGATE="$candidate" \
     SIMPLE_FRONTEND_DELEGATED=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_EXECUTION_MODE= \
     SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
     SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
-        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        candidate_frontend_bounded_build stage2_mir_retention "$candidate" native-build \
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
         --entry scripts/check/cert/redeploy_gate/fixtures/stage2_mir_retention.spl \
         --cache-dir "$probe_dir/cache-stage2-mir-retention" \
         --mode one-binary \
-        --output "$retention_output" >>"$probe_dir/build.log" 2>&1 || {
-            head -c 65536 "$probe_dir/build.log" >&2
-            exit 1
-        }
-    build_log_bytes=$(wc -c <"$probe_dir/build.log" 2>/dev/null || echo 0)
+        --output "$retention_output" || retention_build_status=$?
+    stage2_mir_retention_raw_status=$retention_build_status
+    stage2_mir_retention_reason=$(sed -n 's/^reason=//p' "$stage2_mir_retention_receipt" 2>/dev/null || echo infrastructure-failure)
+    [ "$retention_build_status" -eq 0 ] || {
+        # tail, not head: a real build failure's log is typically dominated
+        # by hundreds of KB of compiler warnings from unrelated files BEFORE
+        # the actual failing command's output; the failure text is always the
+        # last thing printed, so keep the END of the log (measured 2026-08-31:
+        # a genuine link failure was invisible behind 65536 bytes of clang-cl
+        # deprecation warnings under a head-bounded excerpt).
+        tail -c 65536 "$stage2_mir_retention_log" >&2
+        candidate_frontend_fail stage2-mir-retention-build "$retention_build_status"
+    }
+    build_log_bytes=$(wc -c <"$stage2_mir_retention_log" 2>/dev/null || echo 0)
     [ "$build_log_bytes" -le "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" ] || {
         echo "candidate_frontend_smoke: candidate exceeded the combined admission log cap" >&2
-        head -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+        candidate_frontend_fail stage2-mir-retention-log-cap 1
     }
+    retention_run_status=0
     retention_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$retention_output" 2>/dev/null) || exit 1
-    [ "$retention_stdout" = 3 ] || exit 1
+        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$retention_output" 2>/dev/null) || retention_run_status=$?
+    [ "$retention_run_status" -eq 0 ] ||
+        candidate_frontend_fail stage2-mir-retention-run "$retention_run_status"
+    [ "$retention_stdout" = 3 ] || candidate_frontend_fail stage2-mir-retention-output 1
 
     # Stage-3 module-identity guard. Stage 2 previously admitted even though
     # its native lowering turned both of these source paths into the empty
     # module name. Compile and execute the canonical helper through the exact
     # candidate that will build Stage 3; interpreter-only tests cannot prove
     # this boundary.
-    naming_output=$probe_dir/stage2_module_path_naming
+    naming_output=$(candidate_frontend_executable_path \
+        "$probe_dir/stage2_module_path_naming")
+    naming_build_status=0
     SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
     SIMPLE_FRONTEND_DELEGATE="$candidate" \
     SIMPLE_FRONTEND_DELEGATED=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_EXECUTION_MODE= \
     SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
     SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
-        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        candidate_frontend_bounded_build stage2_module_path_naming "$candidate" native-build \
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
         --entry scripts/check/cert/redeploy_gate/fixtures/stage2_module_path_naming.spl \
         --cache-dir "$probe_dir/cache-stage2-module-path-naming" \
         --mode one-binary \
-        --output "$naming_output" >>"$probe_dir/build.log" 2>&1 || {
-            head -c 65536 "$probe_dir/build.log" >&2
-            exit 1
-        }
-    build_log_bytes=$(wc -c <"$probe_dir/build.log" 2>/dev/null || echo 0)
+        --output "$naming_output" || naming_build_status=$?
+    stage2_module_path_naming_raw_status=$naming_build_status
+    stage2_module_path_naming_reason=$(sed -n 's/^reason=//p' "$stage2_module_path_naming_receipt" 2>/dev/null || echo infrastructure-failure)
+    [ "$naming_build_status" -eq 0 ] || {
+        # tail, not head: a real build failure's log is typically dominated
+        # by hundreds of KB of compiler warnings from unrelated files BEFORE
+        # the actual failing command's output; the failure text is always the
+        # last thing printed, so keep the END of the log (measured 2026-08-31:
+        # a genuine link failure was invisible behind 65536 bytes of clang-cl
+        # deprecation warnings under a head-bounded excerpt).
+        tail -c 65536 "$stage2_module_path_naming_log" >&2
+        candidate_frontend_fail stage2-module-path-naming-build "$naming_build_status"
+    }
+    build_log_bytes=$(wc -c <"$stage2_module_path_naming_log" 2>/dev/null || echo 0)
     [ "$build_log_bytes" -le "$CANDIDATE_FRONTEND_MAX_LOG_BYTES" ] || {
         echo "candidate_frontend_smoke: candidate exceeded the combined admission log cap during module naming" >&2
-        head -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+        candidate_frontend_fail stage2-module-path-naming-log-cap 1
     }
-    if grep -q "Unknown(0) ''" "$probe_dir/build.log" 2>/dev/null ||
-        grep -q '\[lexer_fatal\]' "$probe_dir/build.log" 2>/dev/null; then
+    if grep -q "Unknown(0) ''" "$stage2_module_path_naming_log" 2>/dev/null ||
+        grep -q '\[lexer_fatal\]' "$stage2_module_path_naming_log" 2>/dev/null; then
         echo "candidate_frontend_smoke: candidate reported a dead lexer during module naming" >&2
-        tail -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+        candidate_frontend_fail stage2-module-path-naming-dead-lexer 1
     fi
+    naming_run_status=0
     naming_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$naming_output" 2>/dev/null) || exit 1
+        "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$naming_output" 2>/dev/null) || naming_run_status=$?
+    [ "$naming_run_status" -eq 0 ] ||
+        candidate_frontend_fail stage2-module-path-naming-run "$naming_run_status"
     naming_expected=$(printf 'app.cli.bootstrap_main\ncompiler.driver.driver\napp.cli.main')
     [ "$naming_stdout" = "$naming_expected" ] || {
         echo "candidate_frontend_smoke: Stage-2 module naming mismatch: '$naming_stdout'" >&2
-        exit 1
+        candidate_frontend_fail stage2-module-path-naming-output 1
     }
 
     # Positional-entry no-crash probe (2026-08-25). Both probes above name the
@@ -179,57 +582,84 @@ candidate_frontend_smoke() (
     # is how a compiler unable to compile hello world was ADMITTED. See
     # doc/08_tracking/bug/stage2_admitted_while_hello_world_native_build_segv_2026-08-25.md
     #
-    # This is a NO-CRASH check, not a must-succeed check, and must stay that
-    # way: a healthy compiler may legitimately reject a positional entry with a
-    # clean non-zero diagnostic, and demanding success here would false-reject
-    # it. Only death-by-signal and a hang are failures. `--entry-closure` is
-    # mandatory -- without it the candidate scans the default source roots and
-    # runs unbounded on a two-line fixture.
-    positional_output=$probe_dir/hello_world_positional
-    SIMPLE_BINARY="$candidate" \
+    # Admission is strict: all four collectors must report child-exit/raw 0 so
+    # the status-v2 receipt can be verified without an accepted-failure state.
+    positional_output=$(candidate_frontend_executable_path \
+        "$probe_dir/hello_world_positional")
+    positional_status=0
+    if SIMPLE_BINARY="$candidate" \
     SIMPLE_BIN="$candidate" \
     SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
     SIMPLE_FRONTEND_DELEGATE="$candidate" \
     SIMPLE_FRONTEND_DELEGATED=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_EXECUTION_MODE= \
     SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
     SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
-        "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
-        "${COMPILER_BUILD_TIMEOUT_SECONDS}s" "$candidate" native-build \
+        candidate_frontend_bounded_build hello_world_positional "$candidate" native-build \
         --backend "$candidate_backend" \
         --runtime-bundle core-c-bootstrap \
         --entry-closure \
         --cache-dir "$probe_dir/cache-hello-world-positional" \
         --mode one-binary \
         scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
-        --output "$positional_output" >>"$probe_dir/build.log" 2>&1
-    # Status read DIRECTLY into a variable on the line after the command --
-    # never through a pipe, whose $? is the last element's status.
-    positional_status=$?
-    if [ "$positional_status" -eq 124 ]; then
-        echo "candidate_frontend_smoke: candidate HUNG (timeout) native-building a two-line hello world with a positional entry" >&2
-        exit 1
+        --output "$positional_output"; then
+        positional_status=0
+    else
+        positional_status=$?
     fi
-    if [ "$positional_status" -ge 128 ]; then
-        echo "candidate_frontend_smoke: candidate CRASHED (signal $((positional_status - 128)), rc=$positional_status) native-building a two-line hello world with a positional entry" >&2
-        tail -c 4096 "$probe_dir/build.log" >&2
-        exit 1
+    hello_world_positional_raw_status=$positional_status
+    hello_world_positional_reason=$(sed -n 's/^reason=//p' "$hello_world_positional_receipt" 2>/dev/null || echo infrastructure-failure)
+    # A native SIGSEGV here has previously left only the last flushed HIR
+    # progress marker. Replay this exact source/argv/bootstrap/backend shape
+    # under LLDB while the sanity scrub's HOME, TMPDIR, and environment are
+    # still active. The replay is diagnostic only; it cannot turn a failed
+    # admission into a pass. Keep a separate bounded log in the held output
+    # directory so the smoke's temporary cache may still be removed.
+    if [ "$positional_status" -eq 139 ] && [ "$(uname -s)" = Darwin ] &&
+       command -v lldb >/dev/null 2>&1; then
+        positional_debug_log=$hello_world_positional_log.debugger.log
+        SIMPLE_BINARY="$candidate" \
+        SIMPLE_BIN="$candidate" \
+        SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+        SIMPLE_FRONTEND_DELEGATE="$candidate" \
+        SIMPLE_FRONTEND_DELEGATED=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+        SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
+        SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+            candidate_frontend_bounded_build hello_world_positional_debugger \
+                lldb -b -o run -k 'thread backtrace all' \
+                -k 'register read' -- "$candidate" native-build \
+                --backend "$candidate_backend" \
+                --runtime-bundle core-c-bootstrap \
+                --entry-closure \
+                --cache-dir "$probe_dir/cache-hello-world-positional-debug" \
+                --mode one-binary \
+                scripts/check/cert/redeploy_gate/fixtures/hello_world.spl \
+                --output "$probe_dir/hello_world_positional_debug" || :
+        if [ -f "$positional_debug_log" ] && [ ! -L "$positional_debug_log" ]; then
+            echo "candidate_frontend_smoke: SIGSEGV replay log: ${build_log_display}.hello-world-positional.debugger.log" >&2
+            tail -c 32768 "$positional_debug_log" >&2 || :
+        fi
     fi
-    # A clean non-zero exit is deliberately accepted here; see above. When the
-    # build DID succeed, the artifact must actually run and print the fixture's
-    # output -- an exit-0 build proves nothing about the binary it produced.
-    if [ "$positional_status" -eq 0 ] && [ -x "$positional_output" ]; then
+    [ "$positional_status" -eq 0 ] ||
+        candidate_frontend_fail hello-world-positional-build "$positional_status"
+    if [ "$positional_status" -eq 0 ] && [ ! -x "$positional_output" ]; then
+        echo "candidate_frontend_smoke: hello world positional build exited 0 without an executable output" >&2
+        candidate_frontend_fail hello-world-positional-output-missing 1
+    fi
+    if [ "$positional_status" -eq 0 ]; then
         positional_stdout=$("$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
             "${COMPILER_EXEC_TIMEOUT_SECONDS}s" "$positional_output" 2>/dev/null)
         positional_run_status=$?
         if [ "$positional_run_status" -ne 0 ] || [ "$positional_stdout" != hello ]; then
             echo "candidate_frontend_smoke: hello world built from a positional entry did not run correctly (rc=$positional_run_status, stdout='$positional_stdout')" >&2
-            exit 1
+            [ "$positional_run_status" -ne 0 ] || positional_run_status=1
+            candidate_frontend_fail hello-world-positional-run "$positional_run_status"
         fi
     fi
-    :
+    candidate_frontend_finish pass complete 0
 )
 
 candidate_frontend_delegate_fidelity() (
@@ -266,7 +696,6 @@ EOF
     SIMPLE_FRONTEND_DELEGATE="$delegate" \
     SIMPLE_FRONTEND_DELEGATED=0 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_EXECUTION_MODE= \
     SIMPLE_BOOTSTRAP=0 \
     SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
         "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
@@ -274,6 +703,10 @@ EOF
         >"$probe_dir/stdout" 2>"$probe_dir/stderr"
     probe_status=$?
     set -e
+    if [ "$positional_status" -ne 0 ] &&
+        [ "$hello_world_positional_reason" != child-exit ]; then
+        candidate_frontend_fail hello-world-positional-infrastructure 126
+    fi
     [ "$probe_status" -eq 17 ] || exit 1
     grep -Fq 'stage4-delegate-stdout' "$probe_dir/stdout" || exit 1
     grep -Fq 'stage4-delegate-stderr' "$probe_dir/stderr"
@@ -285,6 +718,10 @@ simple_binary_is_valid() (
     case "$candidate" in
         */target/debug/*|*/debug/simple|*/debug/simple.exe) return 1 ;;
     esac
+    # See candidate_frontend_smoke's comment: setting SIMPLE_EXECUTION_MODE to
+    # empty is not the same as unset and would exit 2, not fall through to
+    # the JIT default. Scoped to this subshell.
+    unset SIMPLE_EXECUTION_MODE
     timeout_bin=$(candidate_frontend_timeout_bin || true)
     [ -n "$timeout_bin" ] || return 1
     version=$(SIMPLE_BINARY="$candidate" \
@@ -293,7 +730,6 @@ simple_binary_is_valid() (
         SIMPLE_FRONTEND_DELEGATE="$candidate" \
         SIMPLE_FRONTEND_DELEGATED=1 \
         SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_EXECUTION_MODE= \
         SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
         SIMPLE_BOOTSTRAP=0 \
         SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
@@ -309,7 +745,6 @@ simple_binary_is_valid() (
         SIMPLE_FRONTEND_DELEGATE="$candidate" \
         SIMPLE_FRONTEND_DELEGATED=1 \
         SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_EXECUTION_MODE= \
         SIMPLE_BOOTSTRAP=0 \
         SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
         "$timeout_bin" -k "${COMPILER_CHECK_KILL_GRACE_SECONDS}s" \
@@ -325,7 +760,6 @@ simple_binary_is_valid() (
         SIMPLE_FRONTEND_DELEGATE="$candidate" \
         SIMPLE_FRONTEND_DELEGATED=1 \
         SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_EXECUTION_MODE= \
         SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
         SIMPLE_BOOTSTRAP=0 \
         SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \

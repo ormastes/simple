@@ -1,4 +1,9 @@
 # A fabricated BLAKE2s KAT would have condemned a correct implementation
+## Closed 2026-09-16 — Status FIXED; wrong KAT vector corrected in both spec copies
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED (vector corrected in both spec copies; filed for the pattern)
 **Found:** 2026-08-04
@@ -72,3 +77,4 @@ a named tool in a comment, with no command recorded that anyone could re-run.
 A KAT whose provenance cannot be re-executed is not a known-answer test.
 Vectors should either come from the standard's own appendix or carry the exact
 command that regenerates them.
+

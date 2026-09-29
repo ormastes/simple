@@ -1,0 +1,67 @@
+# @cover src/os/sosix/fs/client_adapter_v1.spl 80%
+"""# SOSIX FS v1 Client Adapter Specification
+
+The compatibility client encodes only generation-bearing registered
+references. Raw legacy pointers fail closed until buffer registration exists.
+"""
+
+use std.spec
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.ipc_codec_v1.{SOSIX_FS_IPC_REQUEST_SIZE_V1, sosix_fs_ipc_decode_request_v1}
+use os.sosix.fs.client_adapter_v1.{
+    SOSIX_FS_CLIENT_REGISTRATION_REQUIRED,
+    sosix_fs_client_plan_registered_v1,
+    sosix_fs_client_reject_legacy_raw_v1
+}
+
+fn _operation() -> SosixOperationId:
+    SosixOperationId(slot: 7, generation: 3)
+
+describe "SOSIX filesystem v1 client planning":
+    it "encodes a registered read with typed correlation":
+        val plan = sosix_fs_client_plan_registered_v1(
+            _operation(), SOSIX_FS_READ_AT,
+            SosixCapabilityRef(slot: 11, generation: 2),
+            SosixBufferRef(slot: 13, generation: 4),
+            20, 5, 64, 900, 17, 41
+        )
+        expect(plan.accepted).to_be(true)
+        expect(plan.reason).to_equal("ready")
+        expect(plan.bytes.len() as u64).to_equal(SOSIX_FS_IPC_REQUEST_SIZE_V1)
+
+        val decoded = sosix_fs_ipc_decode_request_v1(plan.bytes, SOSIX_FS_READ_AT)
+        expect(decoded.accepted).to_be(true)
+        expect(decoded.request.operation_slot).to_equal(7)
+        expect(decoded.request.operation_generation).to_equal(3)
+        expect(decoded.request.request_token).to_equal(41)
+        expect(decoded.request.buffer.generation).to_equal(4)
+
+    it "rejects missing correlation endpoints before encoding":
+        val plan = sosix_fs_client_plan_registered_v1(
+            _operation(), SOSIX_FS_WRITE_AT,
+            SosixCapabilityRef(slot: 11, generation: 2),
+            SosixBufferRef(slot: 13, generation: 4),
+            0, 0, 8, 0, 0, 1
+        )
+        expect(plan.accepted).to_be(false)
+        expect(plan.reason).to_equal("invalid-reply-endpoint")
+        expect(plan.bytes.len()).to_equal(0)
+
+    it "rejects unregistered raw compatibility buffers without fabricating refs":
+        val plan = sosix_fs_client_reject_legacy_raw_v1(
+            _operation(), SOSIX_FS_READ_AT, 0x1000
+        )
+        expect(plan.accepted).to_be(false)
+        expect(plan.reason).to_equal("registered-buffer-required")
+        expect(plan.status).to_equal(SOSIX_FS_CLIENT_REGISTRATION_REQUIRED)
+        expect(plan.bytes.len()).to_equal(0)
+
+    it "distinguishes a null raw pointer from missing registration":
+        val plan = sosix_fs_client_reject_legacy_raw_v1(
+            _operation(), SOSIX_FS_WRITE_AT, 0
+        )
+        expect(plan.accepted).to_be(false)
+        expect(plan.reason).to_equal("invalid-raw-buffer")
+        expect(plan.status).to_equal(-14)

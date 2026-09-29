@@ -1,71 +1,7 @@
 # Bug: mutating method call two struct-field hops from `self` silently loses the write (self-hosted binary)
 
-> ## RESOLVED 2026-08-17 (interpreter) — and the framing below is WRONG. Read this first.
->
-> **The interpreter half of this bug is FIXED.** Classified by CONTENT, not by
-> SHA (SHA ancestry is unsound in this repo — constant rebasing rewrites them):
->
-> - `src/compiler_rust/compiler/src/interpreter/place.rs` now exists as a general
->   place model; its header names the
->   `"deeply nested field access requires intermediate variables"` error it replaced.
-> - `src/compiler_rust/compiler/src/interpreter/expr/calls.rs:23` documents
->   repairing exactly the method-receiver path this bug describes — the one that
->   was "silently evaluated as a value copy".
-> - `src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975`
->   `merge_shared_collection_fields` propagates Array/Dict/ByteArray fields from
->   callee back to caller.
->
-> Executed evidence, deployed seed (`bin/simple`, mtime 2026-08-16 22:59), rc=0:
->
-> ```
-> SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
->   test/01_unit/compiler/codegen/probe_struct_receiver_mutation_persist_jit.spl
-> PASS depth0_bump_twice = 2
-> PASS depth0_set_to = 7
-> PASS depth1_bump_twice = 2
-> PASS depth2_bump_twice = 2
-> PASS depth2_direct_assign = 5
-> RECEIVER_MUTATION PROBE: ALL PASS
-> ```
->
-> Depth 2 persists (was `0`), and the depth-2 direct assignment that this doc
-> records as a **hard error** now simply works. Both symptoms are gone.
->
-> **Three claims in the body below are now measurably false — do not cite them:**
->
-> 1. *"Depth is the only axis that matters."* It is not an axis at all. On the
->    JIT, depth **0** fails identically to depth 3; on the interpreter every depth
->    now passes. The real axis is **value-type (`struct`) receivers** — `class`
->    receivers are correct on both engines.
-> 2. *"JIT is correct at every depth."* False, and this is the dangerous one. The
->    2026-07-27 sweep treated the JIT as the healthy control and retracted correct
->    findings against it. The JIT is the engine that is broken now.
-> 3. *"Spec `it` blocks always evaluate on the interpreter, so the whole suite
->    runs on the defective engine."* The mechanism is real, but the polarity has
->    inverted: the suite now runs on the **correct** engine and is therefore
->    **blind** to the live defect. A spec asserting the right value passes while
->    `bin/simple run` returns the wrong one.
->
-> **What is left is filed separately and is worse than what this doc describes:**
-> `doc/08_tracking/bug/jit_method_receiver_mutation_never_written_back_2026-08-17.md`
-> — on the JIT a `struct` receiver loses the write at depth 0; on the interpreter
-> an explicit `mut` struct **parameter** loses the write. The two engines fail in
-> **disjoint** places, so neither is a safe control for the other.
->
-> The `src/compiler/10.frontend/core/interpreter/eval_access.spl` citation could
-> **not** be exercised: there is no usable self-hosted binary in this tree
-> (`bootstrap/stage3/simple run` → `error: unknown command 'run'`), so the
-> pure-Simple counterpart of this defect remains UNVERIFIED in either direction.
->
-> Regression coverage added: `probe_struct_receiver_mutation_persist_jit.spl`,
-> `struct_receiver_mutation_persist_spec.spl`,
-> `probe_receiver_mutation_writeback_class_jit.spl`,
-> `receiver_mutation_writeback_class_spec.spl` (all under
-> `test/01_unit/compiler/codegen/`).
-
 - **Date:** 2026-07-27
-- **Status:** RESOLVED (interpreter, 2026-08-17); residual JIT defect tracked in
-  `jit_method_receiver_mutation_never_written_back_2026-08-17.md`
+- **Status:** open
 - **Severity:** high (silent state loss; systemic for ECS-style services)
 - **Found by:** SimpleOS harden lane P4 (TTY), reproduced in isolation
 
@@ -458,10 +394,38 @@ unobservable. Replaced with absolute `id == 0`, `generation == 1`,
 | pm_service | 8 | 3 (unrelated class) |
 | pipefs / procfs / rs / sched | 1 / 1 / 0 / 1 | 0 / 0 / 0 / 0 |
 
-## Triage evidence 2026-08-17 (read-only lane; classified by CURRENT SOURCE content, not SHA ancestry)
+## Re-reproduction attempt 2026-09-06 — NOT REPRODUCIBLE on the current seed
 
-ALREADY-FIXED (interpreter/JIT). Content: `merge_shared_collection_fields` exists at src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:975 and is called from the write-back path (:1140), propagating Array/Dict/ByteArray fields callee->caller while keeping scalars/nested structs value-typed. Repro (THREE hops, `self.world.output.bufs.insert("k",5)` inside a `me`), verbatim on the deployed seed:
+Host: `bin/release/aarch64-unknown-linux-gnu/simple`, 50093192 bytes,
+mtime 2026-09-06 09:59 (aarch64 Linux), `SIMPLE_EXECUTION_MODE=interpret`.
+
+Minimal fixture with the record's exact shape — a mutating method call two
+struct-field hops from `self` (`build/wi/r_twohop.spl`):
+
+```simple
+class Buf:
+    var items: [i64] = []
+
+class World:
+    var output_bufs: Buf = Buf(items: [])
+
+class Sys:
+    var world: World = World(output_bufs: Buf(items: []))
+    fn push_two_hop(v: i64) -> void: self.world.output_bufs.items.push(v)
+    fn count() -> i64: self.world.output_bufs.items.len()
 ```
-len=1
+
+Two pushes, then read back:
+
 ```
-identical under jit and SIMPLE_EXECUTION_MODE=interpreter. The mutation persists; the extract-mutate-writeback workaround is no longer required.
+two-hop count=2 (expected 2)
+```
+
+The mutation survives both hops. The record's own "Sites fixed" section and its
+note that two- and three-hop were "verified FIXED under INTERP" line up with
+this; the header still says OPEN.
+
+Scope: the **Rust seed's** interpreter lane only. The pure-Simple interpreter
+(`src/compiler/10.frontend/core/interpreter/eval_access.spl`, the file the work
+package attributed this row to) was NOT exercised by this run, and that
+attribution is a heuristic path mapping rather than a claim this record makes.

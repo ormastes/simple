@@ -1,4 +1,8 @@
 # Phase-2 sweep triage — remaining real failures (2026-08-21)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Triage of the parallel `test/01_unit` + `test/02_integration` sweep. Scope
 excludes `compiler/mir/**`, `compiler/mir_opt/**` and the
@@ -78,17 +82,3 @@ Filed separately: `doc/08_tracking/bug/map_for_each_missing_on_dict_2026-08-21.m
 `Results:` / `SPEC FILE VERDICT` line. Re-runs were capped at 8 concurrent
 `bin/simple` processes.
 
-## Follow-up 2026-08-21 (test-infrastructure lane)
-
-Re-read against the tree; classifications above hold. Section 1
-(`normalize_type_segments`), section 2 (`rt_cpu_is_x86_64` unbacked extern),
-section 4 (intentional TDD RED) and the section-5 behavioural defects are all
-product-side and stay RED per `.claude/rules/testing.md` — none is a stale
-expectation or an env artefact, so none is fixable in the spec lane.
-
-The "load-induced flakes" table is corroborated and must not be treated as
-regressions.
-
-`digest_spec.spl` in section 5 is **superseded**: it is fixed and green
-(`14 total, 14 passed`) — see the RESOLVED section of
-`red_spec_triage_2026-08-21.md`.

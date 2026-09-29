@@ -1,4 +1,8 @@
 # `bin/simple test` cannot see module-global mutation performed inside a called function
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Status: OPEN, not root-caused (found incidentally, out of scope to fix here)
 
@@ -94,3 +98,4 @@ conflate, but the mechanisms and fixes are unrelated.
 - `doc/08_tracking/bug/compile_lane_false_fails_globals_in_mainless_modules_2026-07-29.md`
   (similar-sounding, different mechanism -- see note above)
 - `.claude/rules/testing.md` "run and test are DIFFERENT ENGINES"
+

@@ -1,0 +1,123 @@
+#!/bin/sh
+# Focused contract for the admitted-compiler hosted TLS supplement link plan.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+WRAPPER="$ROOT_DIR/scripts/check/build-simple-web-server-native.shs"
+SUPPLEMENT_DIR=${SIMPLE_WEB_TLS_SUPPLEMENT_DIR:-"$ROOT_DIR/build/native_probe/host-gpu-runtime-capsule-current"}
+PROVIDER=${SIMPLE_WEB_TLS_PROVIDER_OBJECT:-"$SUPPLEMENT_DIR/runtime_tls_hosted.o"}
+MANIFEST=${SIMPLE_WEB_TLS_SUPPLEMENT_MANIFEST:-"$SUPPLEMENT_DIR/capsule.manifest"}
+RUNTIME_PATH=${SIMPLE_WEB_RUNTIME_PATH:-"$ROOT_DIR/build/simpleos_gpu_host/x86_64-vulkan-cuda-runtime-target/bootstrap"}
+RUNTIME_ARCHIVE=${SIMPLE_WEB_RUNTIME_ARCHIVE:-"$RUNTIME_PATH/libsimple_runtime.a"}
+TLS_SOURCE=${SIMPLE_WEB_TLS_PROVIDER_SOURCE:-"$ROOT_DIR/src/runtime/runtime_tls_hosted.c"}
+
+runtime_source_tree_sha256() {
+    (
+        cd "$ROOT_DIR"
+        git ls-files --cached --others --exclude-standard -- \
+            src/compiler_rust/runtime src/compiler_rust/common/src/runtime_symbols.rs src/runtime \
+            | LC_ALL=C sort \
+            | while IFS= read -r source; do
+                case "$source" in
+                    src/runtime/vendor/*|src/runtime/.simple/*|*/target/*) continue ;;
+                    src/runtime/*.o|src/runtime/*.a|src/runtime/*.so) continue ;;
+                    src/runtime/miniaudio.h|src/runtime/stb_image.h|src/runtime/stb_truetype.h) continue ;;
+                esac
+                [ -f "$source" ] && sha256sum "$source"
+            done
+    ) | sha256sum | awk '{print $1}'
+}
+
+[ -f "$PROVIDER" ] || { echo "FAIL: missing TLS supplement object: $PROVIDER" >&2; exit 1; }
+[ -f "$MANIFEST" ] || { echo "FAIL: missing TLS supplement manifest: $MANIFEST" >&2; exit 1; }
+[ -f "$RUNTIME_ARCHIVE" ] || { echo "FAIL: missing host-GPU runtime archive: $RUNTIME_ARCHIVE" >&2; exit 1; }
+[ -f "$TLS_SOURCE" ] || { echo "FAIL: missing hosted TLS source: $TLS_SOURCE" >&2; exit 1; }
+grep -Fxq 'schema=simple-host-gpu-runtime-capsule-v1' "$MANIFEST"
+grep -Fxq 'status=pass' "$MANIFEST"
+grep -Fxq 'gpu_symbol_owner=libsimple_runtime.a' "$MANIFEST" || {
+    echo "FAIL: host-GPU capsule does not declare its GPU symbol ownership" >&2
+    exit 1
+}
+grep -Fq 'gpu_archive_symbols=' "$MANIFEST" || {
+    echo "FAIL: host-GPU capsule omits its GPU symbol receipt" >&2
+    exit 1
+}
+provider_sha=$(sha256sum "$PROVIDER" | awk '{print $1}')
+grep -Fxq "tls_provider_object_sha256=$provider_sha" "$MANIFEST"
+archive_sha=$(sha256sum "$RUNTIME_ARCHIVE" | awk '{print $1}')
+grep -Fxq "archive_sha256=$archive_sha" "$MANIFEST"
+runtime_sources_sha=$(runtime_source_tree_sha256)
+grep -Fxq "runtime_source_tree_sha256=$runtime_sources_sha" "$MANIFEST" || {
+    echo "FAIL: host-GPU runtime capsule is stale or lacks its exact source-tree fingerprint" >&2
+    exit 1
+}
+source_sha=$(sha256sum "$TLS_SOURCE" | awk '{print $1}')
+grep -Fxq "tls_provider_source_sha256=$source_sha" "$MANIFEST"
+host_cc=${CC:-cc}
+crypto_link=$($host_cc -print-file-name=libcrypto.so)
+[ "$crypto_link" != libcrypto.so ] && [ -f "$crypto_link" ] || {
+    echo "FAIL: host C driver cannot resolve libcrypto.so" >&2
+    exit 1
+}
+crypto_provider=$(realpath "$crypto_link")
+crypto_sha=$(sha256sum "$crypto_provider" | awk '{print $1}')
+grep -Fxq "crypto_provider_sha256=$crypto_sha" "$MANIFEST"
+for symbol in \
+    rt_cuda_available rt_cuda_device_count rt_cuda_init rt_cuda_launch_kernel \
+    rt_vulkan_provider_is_available rt_vulkan_provider_device_count \
+    rt_vulkan_init rt_vulkan_compile_spirv_raw rt_vulkan_create_compute_pipeline
+do
+    nm -g --defined-only "$RUNTIME_ARCHIVE" 2>/dev/null \
+        | awk -v expected="$symbol" 'NF >= 1 && $NF == expected { found = 1 } END { exit(found ? 0 : 1) }' || {
+        echo "FAIL: host-GPU runtime archive is missing $symbol" >&2
+        exit 1
+    }
+done
+
+# Retained failed evidence must agree with the diagnosis: the generated core-C
+# plan omitted the provider while the canonical supplement owns every missing
+# TLS hook.  The retained directory is optional on clean checkouts.
+RETAINED="$ROOT_DIR/build/native_probe/web-dfd3-hostgpu-tls-rebuilt-20260812/native-objects-l33jAI"
+if [ -d "$RETAINED" ]; then
+    [ ! -e "$RETAINED/runtime_tls_hosted.o" ] || {
+        echo "FAIL: retained failure unexpectedly already contains runtime_tls_hosted.o" >&2
+        exit 1
+    }
+fi
+
+for symbol in rt_byte_char rt_rsa_decrypt rt_wire_to_hex rt_hex_to_wire rt_random_i64; do
+    nm -g --defined-only "$PROVIDER" | awk '{print $NF}' | grep -Fxq "$symbol" || {
+        echo "FAIL: TLS supplement is missing $symbol" >&2
+        exit 1
+    }
+done
+
+grep -Fq 'SIMPLE_LINK_OBJECTS="$WEB_LINK_OBJECTS"' "$WRAPPER"
+grep -Fq 'SIMPLE_LINK_LIBRARIES="$WEB_LINK_LIBRARIES"' "$WRAPPER"
+grep -Fq 'WEB_LINK_LIBRARIES=crypto' "$WRAPPER"
+grep -Fq 'tls_provider_object_sha256=$TLS_PROVIDER_SHA256' "$WRAPPER"
+grep -Fq 'archive_sha256=$RUNTIME_ARCHIVE_SHA256' "$WRAPPER"
+grep -Fq 'runtime_source_tree_sha256=$RUNTIME_SOURCE_TREE_SHA256' "$WRAPPER"
+grep -Fq 'tls_provider_source_sha256=$TLS_PROVIDER_SOURCE_SHA256' "$WRAPPER"
+grep -Fq 'crypto_provider_sha256=$CRYPTO_PROVIDER_SHA256' "$WRAPPER"
+
+# Prove the exact object is sufficient as a direct link-plan input without
+# invoking the expensive Simple web closure.
+probe_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-web-tls-link-plan.XXXXXX")
+trap 'rm -rf "$probe_dir"' EXIT HUP INT TERM
+cat >"$probe_dir/probe.c" <<'EOF'
+#include <stdint.h>
+extern int64_t rt_byte_char(int64_t);
+extern const char *rt_wire_to_hex(const char *);
+extern const char *rt_hex_to_wire(const char *);
+extern int64_t rt_random_i64(void);
+int main(void) {
+    (void)rt_wire_to_hex("");
+    (void)rt_hex_to_wire("");
+    (void)rt_random_i64();
+    return rt_byte_char(65) == 65 ? 0 : 1;
+}
+EOF
+$host_cc "$probe_dir/probe.c" "$PROVIDER" -lcrypto -o "$probe_dir/probe"
+
+echo "PASS: admitted host-gpu web link plan attaches the manifest-bound TLS supplement"

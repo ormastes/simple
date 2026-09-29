@@ -20,7 +20,7 @@ Purpose: Prove that the LLM Caret infrastructure tools (mail_list / mail_read /
 | Category | Application |
 | Status | Active |
 | Source | `test/01_unit/app/llm_caret/infra_tools_spec.spl` |
-| Updated | 2026-08-25 |
+| Updated | 2026-08-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Purpose and audience
@@ -37,6 +37,11 @@ Audience: llm_caret maintainers and anyone extending the tool surface.
 
 #### advertises every infra tool with a name, description and object input_schema
 
+**Manual warnings:**
+- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
+
+
+- advertises every infra tool with a name, description and object input_schema
 - Collect the full schema list run_tool can dispatch
    - Expected: all.len() equals `14`
 - Every infra tool has a well-formed entry
@@ -51,10 +56,12 @@ Audience: llm_caret maintainers and anyone extending the tool surface.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("advertises every infra tool with a name, description and object input_schema")
 step("Collect the full schema list run_tool can dispatch")
 val all = tool_schemas()
 expect(all.len()).to_equal(14)
@@ -77,6 +84,7 @@ for name in INFRA_TOOLS:
 
 #### marks required arguments per tool
 
+- marks required arguments per tool
 - mail_send requires to/subject/body; storage_put requires key/content
 - read-only listings have no required arguments
 
@@ -84,10 +92,12 @@ for name in INFRA_TOOLS:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("marks required arguments per tool")
 step("mail_send requires to/subject/body; storage_put requires key/content")
 expect(_schema_named("mail_send")).to_contain("\"required\": [\"to\", \"subject\", \"body\"]")
 expect(_schema_named("storage_put")).to_contain("\"required\": [\"key\", \"content\"]")
@@ -102,6 +112,7 @@ expect(_schema_named("storage_ls")).to_contain("\"required\": []")
 
 #### mutating tools say so in their description
 
+- mutating tools say so in their description
 - module-level lists agree with the aggregate
    - Expected: mail_tool_schemas().len() equals `3`
    - Expected: storage_tool_schemas().len() equals `3`
@@ -110,10 +121,12 @@ expect(_schema_named("storage_ls")).to_contain("\"required\": []")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mutating tools say so in their description")
 expect(_json_get_str(_schema_named("mail_send"), "description")).to_contain("MUTATING")
 expect(_json_get_str(_schema_named("storage_put"), "description")).to_contain("MUTATING")
 expect(_json_get_str(_schema_named("wiki_write"), "description")).to_contain("MUTATING")
@@ -128,6 +141,10 @@ expect(storage_tool_schemas().len()).to_equal(3)
 
 #### classifies mail_list/mail_read/storage_ls/storage_get as read-only
 
+- classifies mail_list/mail_read/storage_ls/storage_get as read-only
+   - Expected: is_read_only_tool(name) is true
+   - Expected: is_mutating_tool(name) is false
+   - Expected: is_known_tool(name) is true
 - read-only tools are auto-allowed even under the default policy
    - Expected: permission_decision(default_policy(WS), name) equals `allow`
 
@@ -135,10 +152,12 @@ expect(storage_tool_schemas().len()).to_equal(3)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies mail_list/mail_read/storage_ls/storage_get as read-only")
 for name in READ_ONLY:
     expect(is_read_only_tool(name)).to_equal(true)
     expect(is_mutating_tool(name)).to_equal(false)
@@ -151,6 +170,9 @@ for name in READ_ONLY:
 
 #### classifies mail_send/storage_put as mutating, same gate as bash/write_file
 
+- classifies mail_send/storage_put as mutating, same gate as bash/write_file
+   - Expected: is_mutating_tool(name) is true
+   - Expected: is_read_only_tool(name) is false
 - default policy resolves to ask, not allow
    - Expected: permission_decision(default_policy(WS), name) equals `ask`
 - explicit grant and allow-all resolve to allow
@@ -161,10 +183,12 @@ for name in READ_ONLY:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("classifies mail_send/storage_put as mutating, same gate as bash/write_file")
 for name in MUTATING + ["bash", "write_file"]:
     expect(is_mutating_tool(name)).to_equal(true)
     expect(is_read_only_tool(name)).to_equal(false)
@@ -179,6 +203,7 @@ for name in MUTATING + ["bash", "write_file"]:
 
 #### denies mail_send and storage_put by default before touching config
 
+- denies mail_send and storage_put by default before touching config
 - mail_send with a complete, valid input is still denied
    - Expected: r1.is_error is true
    - Expected: r1.tool_use_id equals `m1`
@@ -191,10 +216,12 @@ for name in MUTATING + ["bash", "write_file"]:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("denies mail_send and storage_put by default before touching config")
 reset_config()
 _configure_mail_unreachable()
 _configure_storage_unreachable()
@@ -225,6 +252,9 @@ reset_config()
 
 #### mail tools return the honest not-configured error
 
+- mail tools return the honest not-configured error
+   - Expected: r.is_error is true
+   - Expected: r.content equals `mail not configured: set [mail] in llm_caret.sdn`
 - mail_send past the gate reports the same honest error
    - Expected: rs.is_error is true
    - Expected: rs.content equals `mail not configured: set [mail] in llm_caret.sdn`
@@ -233,10 +263,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mail tools return the honest not-configured error")
 reset_config()
 for name in ["mail_list", "mail_read"]:
     var input = "{}"
@@ -256,13 +288,23 @@ expect(rs.content).to_equal("mail not configured: set [mail] in llm_caret.sdn")
 
 #### storage tools return the honest not-configured error
 
+- storage tools return the honest not-configured error
+   - Expected: r1.is_error is true
+   - Expected: r1.content equals `storage not configured: set [storage] in llm_caret.sdn`
+   - Expected: r2.content equals `storage not configured: set [storage] in llm_caret.sdn`
+   - Expected: r3.is_error is true
+   - Expected: r3.content equals `storage not configured: set [storage] in llm_caret.sdn`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 11 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("storage tools return the honest not-configured error")
 reset_config()
 val r1 = run_tool(default_policy(WS), new_tool_call("u", "storage_ls", "{}"))
 expect(r1.is_error).to_equal(true)
@@ -278,6 +320,8 @@ expect(r3.content).to_equal("storage not configured: set [storage] in llm_caret.
 
 #### names the missing secret env var, never a value, and never connects
 
+- names the missing secret env var, never a value, and never connects
+   - Expected: r.is_error is true
 - storage keys resolve the same way
    - Expected: s.is_error is true
 
@@ -285,10 +329,12 @@ expect(r3.content).to_equal("storage not configured: set [storage] in llm_caret.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("names the missing secret env var, never a value, and never connects")
 reset_config()
 _configure_mail_unreachable()
 val r = run_tool(default_policy(WS), new_tool_call("u", "mail_list", "{}"))
@@ -307,13 +353,19 @@ reset_config()
 
 #### refuses the ftp backend honestly instead of aborting on the unbacked extern
 
+- refuses the ftp backend honestly instead of aborting on the unbacked extern
+   - Expected: r.is_error is true
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("refuses the ftp backend honestly instead of aborting on the unbacked extern")
 reset_config()
 parse_config_text("storage:\n    backend: ftp\n    endpoint: 127.0.0.1:2121\n    bucket: b\n    access_key_env: A\n    secret_key_env: B\n")
 val r = run_tool(default_policy(WS), new_tool_call("u", "storage_ls", "{}"))
@@ -330,6 +382,12 @@ reset_config()
 
 #### mail_send rejects a missing or malformed 'to' and an empty subject
 
+- mail_send rejects a missing or malformed 'to' and an empty subject
+   - Expected: ok1 is false
+   - Expected: e1 equals `mail_send: missing required 'to'`
+   - Expected: ok2 is false
+   - Expected: ok3 is false
+   - Expected: e3 equals `mail_send: missing required 'subject'`
 - through run_tool the same error is surfaced as a tool error
    - Expected: r.is_error is true
    - Expected: r.content equals `mail_send: missing required 'to'`
@@ -338,10 +396,12 @@ reset_config()
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mail_send rejects a missing or malformed 'to' and an empty subject")
 reset_config()
 val (ok1, e1) = mail_send("", "s", "b")
 expect(ok1).to_equal(false)
@@ -362,13 +422,19 @@ expect(r.content).to_equal("mail_send: missing required 'to'")
 
 #### mail_send refuses STARTTLS port 587 with an honest facade-gap error
 
+- mail_send refuses STARTTLS port 587 with an honest facade-gap error
+   - Expected: ok is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mail_send refuses STARTTLS port 587 with an honest facade-gap error")
 reset_config()
 parse_config_text("mail:\n    smtp_host: smtp.invalid\n    smtp_port: 587\n    user: u\n    secret_env: X\n")
 val (ok, err) = mail_send("a@example.test", "s", "b")
@@ -382,13 +448,20 @@ reset_config()
 
 #### mail_build_message emits RFC 5322 headers and exactly ONE DATA terminator (live-server defect 2026-08-25)
 
+- mail_build_message emits RFC 5322 headers and exactly ONE DATA terminator (live-server defect 2026-08-25)
+   - Expected: msg equals `From: caret@localhost\r\nTo: to@example.test\r\nSubject: hello\r\nContent-Typ... (full value in folded executable source)`
+   - Expected: msg.split("\r\n.\r\n").len() equals `2`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mail_build_message emits RFC 5322 headers and exactly ONE DATA terminator (live-server defect 2026-08-25)")
 # Before the fix mail_send used smtp.send.message_build_simple, whose
 # mime_type_text_plain() call hit a bodyless forward declaration and
 # aborted the whole tool with "missing return in non-unit function"
@@ -403,13 +476,21 @@ expect(msg.split("\r\n.\r\n").len()).to_equal(2)
 
 #### mail_read rejects a missing or non-numeric uid
 
+- mail_read rejects a missing or non-numeric uid
+   - Expected: ok1 is false
+   - Expected: e1 equals `mail_read: missing required 'uid'`
+   - Expected: ok2 is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("mail_read rejects a missing or non-numeric uid")
 reset_config()
 val (ok1, e1) = mail_read("")
 expect(ok1).to_equal(false)
@@ -423,13 +504,24 @@ expect(e2).to_contain("decimal IMAP UID")
 
 #### storage_get and storage_put reject an empty, absolute or traversing key
 
+- storage_get and storage_put reject an empty, absolute or traversing key
+   - Expected: g1 is false
+   - Expected: ge1 equals `storage_get: missing required 'key'`
+   - Expected: g2 is false
+   - Expected: p1 is false
+   - Expected: pe1 equals `storage_put: missing required 'key'`
+   - Expected: p2 is false
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("storage_get and storage_put reject an empty, absolute or traversing key")
 reset_config()
 val (g1, ge1) = storage_get("", "", 0)
 expect(g1).to_equal(false)
@@ -449,6 +541,9 @@ expect(pe2).to_contain("'..'")
 
 #### storage_get enforces the byte cap and storage_put the upload cap
 
+- storage_get enforces the byte cap and storage_put the upload cap
+   - Expected: cap equals `262144`
+   - Expected: ok is false
 - a cap within range is accepted and the next failure is config, not the cap
    - Expected: ok2 is false
    - Expected: err2 equals `storage not configured: set [storage] in llm_caret.sdn`
@@ -460,10 +555,12 @@ expect(pe2).to_contain("'..'")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("storage_get enforces the byte cap and storage_put the upload cap")
 reset_config()
 val cap = storage_get_max_bytes()
 expect(cap).to_equal(262144)
@@ -491,13 +588,20 @@ expect(pe).to_contain("over the tool cap")
 
 #### unknown tool names still fail closed
 
+- unknown tool names still fail closed
+   - Expected: r.is_error is true
+   - Expected: r.content equals `unknown tool: mail_delete`
+
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 3 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+# @req REQ-SSPEC-APP
+step("unknown tool names still fail closed")
 val r = run_tool(allow_all_policy(WS), new_tool_call("x", "mail_delete", "{}"))
 expect(r.is_error).to_equal(true)
 expect(r.content).to_equal("unknown tool: mail_delete")
@@ -517,3 +621,60 @@ expect(r.content).to_equal("unknown tool: mail_delete")
 
 
 </details>
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual:
+
+- `REQ-SSPEC-UNIT`
+- `REQ-APP-LLM-CARET-INFRA-001`
+- `REQ-SSPEC-APP`
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Canonical SPipe generation for source `c8b17b13b1d9ce0b901adfedbb28d6b185bc452ca25fc697c453f3f9513fc9c3`; maintenance tool `1`, rules `ssdoc-rules/1`.
+
+Source SHA-256: `c8b17b13b1d9ce0b901adfedbb28d6b185bc452ca25fc697c453f3f9513fc9c3`.
+<!-- sspec-maintain:provenance:end -->
+
+<!-- sspec-maintain:scorecard:start -->
+## SSpec documentization scorecard
+
+Source SHA-256: `c8b17b13b1d9ce0b901adfedbb28d6b185bc452ca25fc697c453f3f9513fc9c3`  
+Analyzer: `1`; rules: `ssdoc-rules/1`  
+Raw score: **80/100**; effective score: **49/100**; blockers: **1**.
+
+SSpec documentization score: 49/100
+source: test/01_unit/app/llm_caret/infra_tools_spec.spl
+mirror: doc/06_spec/01_unit/app/llm_caret/infra_tools_spec.md (current)
+findings: 7 blockers: 1
+  narrative=100 structure=100 oracle=70
+  traceability=60 evidence=70 coverage=100 maintainability=70
+  cache=not-used suppressed=0
+  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
+  raw=80; blocker cap makes effective=49
+doc/06_spec/01_unit/app/llm_caret/infra_tools_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
+  why: Operators need recovery and evidence interpretation guidance.
+  improve: Author verification and recovery facts in SSpec and regenerate.
+doc/06_spec/01_unit/app/llm_caret/infra_tools_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
+  why: A test dump is not a complete professional specification manual.
+  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
+test/01_unit/app/llm_caret/infra_tools_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 5 unexplained numeric expected value(s)
+  why: Reviewers need to know why a magic expected value is authoritative.
+  improve: Name the authoritative expected value or add a '# oracle:' explanation.
+test/01_unit/app/llm_caret/infra_tools_spec.spl:1:1: blocker SSDOC-TRC-003 [traceability] (-40): 2 declared requirement(s) have no scenario binding
+  why: A requirement list without scenario evidence is inventory, not traceability.
+  improve: Bind the stable requirement ID inside its executable scenario or explicit blocked case.
+test/01_unit/app/llm_caret/infra_tools_spec.spl:68:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'advertises every infra tool with a name, description and object input_schema' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/infra_tools_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'marks required arguments per tool' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+test/01_unit/app/llm_caret/infra_tools_spec.spl:100:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'mutating tools say so in their description' has no retained capture or evidence
+  why: Professional manuals need retained observable evidence.
+  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,34 @@
+# Launch hardening + single-fallback policy (P5, design §4.1, plan hazard:
+# "exactly one fallback after proving logical-root parity"). This module owns
+# the decision of whether a fallback to a second provider is permitted; it
+# never performs the fallback itself (that is the adapter's job, composed
+# over whichever `SearchProvider` the policy approves).
+
+pub struct LaunchPolicyV1:
+    max_restarts: i64
+    fallback_used: bool
+
+impl LaunchPolicyV1:
+    static fn fresh(max_restarts: i64) -> LaunchPolicyV1:
+        LaunchPolicyV1(max_restarts: max_restarts, fallback_used: false)
+
+# A fallback is allowed only when:
+#  1. no fallback has been used yet on this policy instance (exactly one,
+#     ever -- not "one per failure"), and
+#  2. the candidate's logical root matches the failed provider's last known
+#     logical root (parity must be PROVEN, not assumed).
+# Returns the policy's next state on success; the caller must persist it and
+# never re-derive `fallback_used: false` from a fresh instance.
+pub fn approve_fallback(policy: LaunchPolicyV1, failed_logical_root: text, candidate_logical_root: text) -> Result<LaunchPolicyV1, text>:
+    if policy.fallback_used:
+        return Err("fallback_already_used")
+    if failed_logical_root != candidate_logical_root:
+        return Err("logical_root_parity_not_proven")
+    Ok(LaunchPolicyV1(max_restarts: policy.max_restarts, fallback_used: true))
+
+# Restart budget for the launch (transport-level respawn attempts before the
+# adapter gives up and moves to `Unavailable`). Independent of the fallback
+# budget above -- a provider may restart in place several times before the
+# single cross-provider fallback is ever considered.
+pub fn allow_restart(policy: LaunchPolicyV1, attempts_so_far: i64) -> bool:
+    attempts_so_far < policy.max_restarts

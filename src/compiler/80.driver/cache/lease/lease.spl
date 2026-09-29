@@ -7,25 +7,44 @@
 # `gc.lease.reclaim_rule`: "only after proving the owning process/session is
 # dead, or after a conservative timeout PLUS a generation check." This
 # implementation checks liveness via rt_process_exists (kill -0 semantics);
-# a dead process's lease reclaims immediately. A live process whose lease is
-# merely stale (no heartbeat) is reclaimed only past LEASE_STALE_TIMEOUT_SECS
-# AND a heartbeat-generation check (the recorded generation must not have
-# advanced since the reclaim check started reading it).
-# ponytail: LEASE_STALE_TIMEOUT_SECS is a conservative ceiling, not measured
-# against a real build's longest single action; revisit if a legitimate lease
-# is ever reclaimed while its process is still alive but slow.
-
-extern fn rt_file_write_text(path: text, content: text) -> bool
-extern fn rt_file_exists(path: text) -> bool
-extern fn rt_file_delete(path: text) -> bool
-extern fn rt_dir_create_all(path: text) -> bool
-extern fn rt_dir_list(path: text) -> [text]
-extern fn rt_getpid() -> i64
-extern fn rt_time_now_unix_micros() -> i64
-extern fn rt_process_exists(pid: i64) -> bool
+# a dead process's lease reclaims immediately. A live process remains a root:
+# this lease format has no bound heartbeat-generation read that could prove a
+# stale process has stopped publishing its retained generation.
 
 use std.crypto.sha256.{sha256_text}
-use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+use std.io_runtime.{dir_create_all, dir_list, file_delete, file_exists, getpid, process_is_running, time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable, file_write_exact}
+
+@always_inline
+fn lease_file_write_raw(path: text, content: text) -> bool:
+    file_write_exact(path, content)
+@always_inline
+fn lease_file_exists_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        file_exists(path)
+@always_inline
+fn lease_file_delete_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        file_delete(path)
+@always_inline
+fn lease_dir_create_all_raw(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        dir_create_all(path)
+@always_inline
+fn lease_dir_list_raw(path: text) -> [text]:
+    unsafe(capabilities: [ffi]):
+        dir_list(path)
+@always_inline
+fn lease_process_id_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        getpid()
+@always_inline
+fn lease_time_now_unix_micros_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        time_now_unix_micros()
+@always_inline
+fn lease_process_exists_raw(pid: i64) -> bool:
+    process_is_running(pid)
 
 val LEASE_HEADER: text = "simple-cache-lease-v1"
 val LEASE_STALE_TIMEOUT_SECS: i64 = 21600   # 6h conservative ceiling
@@ -84,9 +103,9 @@ fn lease_parse(content: text) -> CacheLease?:
 # Acquire a new lease for the current process. lease_id is derived from
 # pid + timestamp so two acquires from the same process never collide.
 fn lease_acquire(root: text, referenced_manifests: [text], referenced_artifacts: [text]) -> CacheLease?:
-    rt_dir_create_all(lease_dir(root))
-    val pid = rt_getpid()
-    val now = rt_time_now_unix_micros()
+    lease_dir_create_all_raw(lease_dir(root))
+    val pid = lease_process_id_raw()
+    val now = lease_time_now_unix_micros_raw()
     val lease_id = sha256_text("{pid}-{now}")
     val lease = CacheLease(
         lease_id: lease_id,
@@ -96,21 +115,24 @@ fn lease_acquire(root: text, referenced_manifests: [text], referenced_artifacts:
         referenced_manifests: referenced_manifests,
         referenced_artifacts: referenced_artifacts,
     )
-    if rt_file_write_text(lease_path(root, lease_id), lease_serialize(lease)):
+    if lease_file_write_raw(lease_path(root, lease_id), lease_serialize(lease)):
         return lease
     nil
 
 fn lease_release(root: text, lease_id: text) -> bool:
     val path = lease_path(root, lease_id)
-    if not rt_file_exists(path):
+    if not lease_file_exists_raw(path):
         return true
-    rt_file_delete(path)
+    lease_file_delete_raw(path)
 
 fn lease_heartbeat(root: text, lease_id: text) -> bool:
     val path = lease_path(root, lease_id)
-    if not rt_file_exists(path):
+    if not lease_file_exists_raw(path):
         return false
-    val content = file_read_nullable(path) ?? ""
+    val maybe_content = file_read_nullable(path)
+    if maybe_content == nil:
+        panic("E-SFFI-CACHE-LEASE-READ: unreadable existing lease: {path}")
+    val content = maybe_content.unwrap()
     match lease_parse(content):
         case Some(lease):
             val bumped = CacheLease(
@@ -121,34 +143,45 @@ fn lease_heartbeat(root: text, lease_id: text) -> bool:
                 referenced_manifests: lease.referenced_manifests,
                 referenced_artifacts: lease.referenced_artifacts,
             )
-            return rt_file_write_text(path, lease_serialize(bumped))
+            return lease_file_write_raw(path, lease_serialize(bumped))
         case nil:
             return false
 
 fn lease_read(root: text, lease_id: text) -> CacheLease?:
     val path = lease_path(root, lease_id)
-    if not rt_file_exists(path):
+    if not lease_file_exists_raw(path):
         return nil
-    lease_parse(file_read_nullable(path) ?? "")
+    val maybe_content = file_read_nullable(path)
+    if maybe_content == nil:
+        panic("E-SFFI-CACHE-LEASE-READ: unreadable existing lease: {path}")
+    lease_parse(maybe_content.unwrap())
 
 # A lease is reclaimable (safe to delete without violating gc_reachability_safe)
-# only if the owning process is provably dead, or the heartbeat generation has
-# not advanced past a conservative staleness timeout.
-fn lease_is_reclaimable(lease: CacheLease, now_unix_micros: i64) -> bool:
-    if not rt_process_exists(lease.process_id):
+# only if the owning process is provably dead. A timestamp cannot prove a live
+# process has stopped using its cached roots.
+fn lease_is_reclaimable(lease: CacheLease, _now_unix_micros: i64) -> bool:
+    # The current process is authoritative for its own live lease. Avoid a
+    # provider round-trip here; bootstrap/interpreter providers have returned
+    # false for their own PID and incorrectly erased fresh GC roots.
+    if lease.process_id == getpid():
+        return false
+    if not lease_process_exists_raw(lease.process_id):
         return true
-    val age_secs = (now_unix_micros - lease.created_at) / 1000000
-    age_secs >= LEASE_STALE_TIMEOUT_SECS
+    false
 
 # All non-reclaimable leases in root, i.e. the GC roots this module contributes.
 fn lease_list_active(root: text) -> [CacheLease]:
     val dir = lease_dir(root)
-    if not rt_file_exists(dir):
+    if not lease_file_exists_raw(dir):
         return []
     var out: [CacheLease] = []
-    val now = rt_time_now_unix_micros()
-    for name in rt_dir_list(dir):
-        val content = file_read_nullable("{dir}/{name}") ?? ""
+    val now = lease_time_now_unix_micros_raw()
+    for name in lease_dir_list_raw(dir):
+        val path = "{dir}/{name}"
+        val maybe_content = file_read_nullable(path)
+        if maybe_content == nil:
+            panic("E-SFFI-CACHE-LEASE-READ: unreadable existing lease: {path}")
+        val content = maybe_content.unwrap()
         match lease_parse(content):
             case Some(lease):
                 if not lease_is_reclaimable(lease, now):
@@ -160,17 +193,21 @@ fn lease_list_active(root: text) -> [CacheLease]:
 # Reclaim (delete) every stale/dead-owner lease file. Returns count reclaimed.
 fn lease_reclaim_stale(root: text) -> i64:
     val dir = lease_dir(root)
-    if not rt_file_exists(dir):
+    if not lease_file_exists_raw(dir):
         return 0
     var count = 0
-    val now = rt_time_now_unix_micros()
-    for name in rt_dir_list(dir):
+    val now = lease_time_now_unix_micros_raw()
+    for name in lease_dir_list_raw(dir):
         val path = "{dir}/{name}"
-        val content = file_read_nullable(path) ?? ""
+        val maybe_content = file_read_nullable(path)
+        if maybe_content == nil:
+            # An unreadable lease must remain a GC root; never reclaim it.
+            continue
+        val content = maybe_content.unwrap()
         match lease_parse(content):
             case Some(lease):
                 if lease_is_reclaimable(lease, now):
-                    rt_file_delete(path)
+                    lease_file_delete_raw(path)
                     count = count + 1
             case nil:
                 pass_do_nothing

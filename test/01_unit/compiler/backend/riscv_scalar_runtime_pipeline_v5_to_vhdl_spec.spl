@@ -1,0 +1,55 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_pipeline_v5.{
+    strict_riscv_scalar_runtime_pipeline_v5_direct}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v5_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v5,
+    scalar_runtime_pipeline_v5_driver_closure_diagnostic,
+    scalar_runtime_pipeline_v5_aggregate_child_entity_diagnostic,
+    scalar_runtime_pipeline_v5_route_receipt}
+
+describe "strict direct runtime scalar pipeline v5 VHDL emission":
+    it "rebuilds the exact closed mixed graph with injective wiring and child receipts":
+        val rebuilt = strict_riscv_scalar_runtime_pipeline_v5_direct(
+            "runtime_pipeline_v5_rv64", CoreConfig.rv64(), LsuConfig.rv64_product_default())
+        expect(rebuilt.is_ok()).to_equal(true)
+        if rebuilt.is_ok():
+            val pipeline = rebuilt.ok().unwrap()
+            expect(scalar_runtime_pipeline_v5_driver_closure_diagnostic(pipeline)).to_equal("")
+            val result = compile_strict_riscv_scalar_runtime_pipeline_v5(
+                "runtime_pipeline_v5_rv64", CoreConfig.rv64(), LsuConfig.rv64_product_default())
+            expect(result.is_success()).to_equal(true)
+            if result.is_success():
+                expect(result.route).to_equal("hwir-gen2-scalar-runtime-pipeline-v5-direct")
+                expect(result.hwir_graph_sha256).to_equal(pipeline.structural_sha256())
+                expect(result.vhdl).to_contain("-- simple-hwir v5-route-receipt=" +
+                    scalar_runtime_pipeline_v5_route_receipt(pipeline))
+                expect(result.vhdl).to_contain("-- simple-hwir child-router=" +
+                    pipeline.router.structural_sha256())
+                expect(result.vhdl).to_contain("-- simple-hwir child-pending=" +
+                    pipeline.pending.structural_sha256())
+                expect(result.vhdl).to_contain("-- simple-hwir child-lsu=" +
+                    pipeline.lsu.structural_sha256())
+                expect(result.vhdl).to_contain("-- simple-hwir child-fence=" +
+                    pipeline.fence.structural_sha256())
+                expect(result.vhdl).to_contain("-- simple-hwir child-global-fault-gate=" +
+                    pipeline.global_fault_gate.structural_sha256())
+                expect(result.vhdl).to_contain("control: entity work." + pipeline.control.entity_name)
+                expect(result.vhdl).to_contain("wire_o8_uop_skid_p9_uop_ready <= source_o6_router_p9_uop_ready")
+                expect(result.vhdl).to_contain("completion_rd_value : out std_logic_vector(63 downto 0)")
+
+    it "retains its dedicated route on canonical constructor rejection":
+        val result = compile_strict_riscv_scalar_runtime_pipeline_v5(
+            "", CoreConfig.rv32(), LsuConfig.rv32_product_default())
+        expect(result.is_success()).to_equal(false)
+        expect(result.route).to_equal("hwir-gen2-scalar-runtime-pipeline-v5-direct")
+        expect(result.vhdl).to_equal("")
+        expect(result.diagnostic).to_contain("HWIR-E-RISCV-RUNTIME-PIPELINE-V5-ID")
+
+    it "rejects case-insensitive aggregate child entity collisions with different graphs":
+        expect(scalar_runtime_pipeline_v5_aggregate_child_entity_diagnostic(
+            ["provider_rtl", "PROVIDER_RTL"], ["graph-a", "graph-b"])).to_equal(
+            "HWIR-E-RISCV-RUNTIME-PIPELINE-V5-VHDL-ENTITY-COLLISION: one case-insensitive child entity name requires one exact graph")
+        expect(scalar_runtime_pipeline_v5_aggregate_child_entity_diagnostic(
+            ["provider_rtl", "PROVIDER_RTL"], ["graph-a", "graph-a"])).to_equal("")

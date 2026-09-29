@@ -1,4 +1,9 @@
 # HTTP Basic auth comments claim an `rt_black_box` barrier the code never calls
+## Closed 2026-09-16 — FIXED 2026-08-09; black_box wrap; all 11 Basic-auth examples pass
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED — 2026-08-09, verified via
 `src/lib/nogc_sync_mut/http/auth/http_auth_spec.spl` (all 11 Basic-auth
@@ -97,3 +102,4 @@ No new spec was added to pin the barrier call site itself (e.g. asserting
 the barrier is *reachable and correct*, which is the property that matters;
 a literal call-site regression test was judged not worth a dedicated spec
 file for a one-line wrap. If this regresses again, re-open and add one.
+

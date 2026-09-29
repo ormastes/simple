@@ -1,0 +1,191 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+
+# Seed tree-walk interpreter: DICT MUTATOR METHODS on a bare-identifier
+# receiver must cost O(1) amortized per call, not O(len).
+#
+# Mechanism pinned (not just a wall-clock number). `d[k] = v` (indexed store)
+# has always been linear because `interpreter/node_exec.rs` mutates the
+# binding's `Arc<HashMap>` through `Arc::make_mut`. The METHOD forms did not:
+# the identifier-Dict branch of
+# `interpreter_helpers/patterns.rs::handle_method_call_with_self_update_inner`
+# re-entered `evaluate_expr` on the whole method call, which dispatched into
+# the purely functional `interpreter_method/collections.rs::handle_dict_methods`
+# -- and every mutator arm there begins `let mut new_map = map.clone()`, a
+# whole-HashMap copy, on EVERY call. Building or draining a dict through
+# `insert`/`remove`/`merge` was therefore O(N^2) while the bracket form was
+# O(N).
+#
+# Measured 2026-09-12 on the deployed seed (aarch64, 2026-09-06 build),
+# interpreter lane, standalone probe at n=20000 vs 80000:
+#   d.remove("k{i}") in a loop   11.50s -> >90s (timeout)   QUADRATIC
+#   d["k{i}"] = i    in a loop    0.03s ->   0.13s          linear (control)
+#
+# Read the RATIO (n=5000 vs n=20000, a 4x step), not the seconds: this host is
+# shared and absolute times move several-fold between runs of identical code.
+# Linear is ~4, quadratic ~16; the bound below discriminates at 7.
+#
+# See doc/08_tracking/bug/interpreter_dict_mutator_methods_clone_map_2026-09-12.md
+
+use std.spec.step
+
+extern fn rt_time_now_unix_micros() -> i64
+
+fn fill(n: i64) -> {text: i64}:
+    var d: {text: i64} = {}
+    var i = 0
+    while i < n:
+        d["k{i}"] = i
+        i = i + 1
+    d
+
+# --- timed kernels: fill is NOT timed (it is the linear control), only the
+# --- mutator-method loop is.
+
+fn time_remove(n: i64) -> i64:
+    var d = fill(n)
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < n:
+        d.remove("k{i}")
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn time_insert(n: i64) -> i64:
+    var d: {text: i64} = {}
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < n:
+        d.insert("k{i}", i)
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn time_set(n: i64) -> i64:
+    var d: {text: i64} = {}
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < n:
+        d.set("k{i}", i)
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn time_merge(n: i64) -> i64:
+    var d: {text: i64} = {}
+    val t0 = rt_time_now_unix_micros()
+    var i = 0
+    while i < n:
+        d.merge({"k{i}": i})
+        i = i + 1
+    rt_time_now_unix_micros() - t0
+
+fn remove_all(n: i64) -> i64:
+    var d = fill(n)
+    var i = 0
+    while i < n:
+        d.remove("k{i}")
+        i = i + 1
+    d.len()
+
+class Reg:
+    d: {text: i64}
+    fn drop_key(mut self, k: text):
+        self.d.remove(k)
+
+fn field_remove_len(n: i64) -> i64:
+    var r = Reg(d: fill(n))
+    var i = 0
+    while i < n:
+        r.drop_key("k{i}")
+        i = i + 1
+    r.d.len()
+
+describe "seed interpreter: dict mutator methods scale linearly":
+    # @manual scenario evidence
+    it "d.remove(k) in a loop is linear in the dict size":
+        # @req REQ-SSPEC-PERF
+        step("d.remove(k) in a loop is linear in the dict size")
+        val small = time_remove(5000)
+        val large = time_remove(20000)
+        print "[perf] dict_remove: n=5000 {small}us n=20000 {large}us"
+        expect(small > 0).to_equal(true)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "d.insert(k, v) in a loop is linear in the dict size":
+        # @req REQ-SSPEC-PERF
+        step("d.insert(k, v) in a loop is linear in the dict size")
+        val small = time_insert(5000)
+        val large = time_insert(20000)
+        print "[perf] dict_insert: n=5000 {small}us n=20000 {large}us"
+        expect(small > 0).to_equal(true)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "d.set(k, v) in a loop is linear in the dict size":
+        # @req REQ-SSPEC-PERF
+        step("d.set(k, v) in a loop is linear in the dict size")
+        val small = time_set(5000)
+        val large = time_set(20000)
+        print "[perf] dict_set: n=5000 {small}us n=20000 {large}us"
+        expect(small > 0).to_equal(true)
+        expect(large * 10 < small * 70).to_equal(true)
+
+    it "d.merge(other) in a loop is linear in the dict size":
+        # @req REQ-SSPEC-PERF
+        step("d.merge(other) in a loop is linear in the dict size")
+        val small = time_merge(5000)
+        val large = time_merge(20000)
+        print "[perf] dict_merge: n=5000 {small}us n=20000 {large}us"
+        expect(small > 0).to_equal(true)
+        expect(large * 10 < small * 70).to_equal(true)
+
+describe "seed interpreter: dict mutator methods keep their semantics":
+    # @manual scenario evidence
+    it "removing every key empties the dict":
+        # @req REQ-SSPEC-PERF
+        step("removing every key empties the dict")
+        expect(remove_all(2000)).to_equal(0)
+
+    it "a genuine alias taken before the removals keeps every key":
+        # @req REQ-SSPEC-PERF
+        step("a genuine alias taken before the removals keeps every key")
+        # Value semantics: `alias` holds the same Arc, so the first in-place
+        # mutation must copy-on-write and leave `alias` untouched. This is the
+        # invariant an ownership-gated `Arc::make_mut` fast path must not break.
+        var d = fill(500)
+        val alias = d
+        var i = 0
+        while i < 500:
+            d.remove("k{i}")
+            i = i + 1
+        expect(d.len()).to_equal(0)
+        expect(alias.len()).to_equal(500)
+
+    it "the mutator methods return the updated dict, not the element":
+        # @req REQ-SSPEC-PERF
+        step("the mutator methods return the updated dict, not the element")
+        # Contract as shipped: unlike `array.remove(i)` (which returns the
+        # REMOVED ELEMENT since the 2026-07-20 fix), every dict mutator arm in
+        # `handle_dict_methods` yields the DICT. Pinned so a perf rewrite cannot
+        # quietly change it.
+        var d: {text: i64} = {}
+        d["a"] = 1
+        d["b"] = 2
+        val r = d.remove("a")
+        expect(r.len()).to_equal(1)
+        expect(r.has("b")).to_equal(true)
+        var e: {text: i64} = {}
+        e["x"] = 1
+        val ri = e.insert("y", 9)
+        expect(ri.len()).to_equal(2)
+
+    it "the field form self.d.remove(k) still empties the dict":
+        # @req REQ-SSPEC-PERF
+        step("the field form self.d.remove(k) still empties the dict")
+        # CORRECTNESS pin only, deliberately NOT a timing bound. The field
+        # receiver (`self.d.remove(k)`) routes through the general PLACE branch
+        # of patterns.rs into `evaluate_method_call_with_self_update`, which
+        # evaluates the receiver to a value and so still reaches the functional
+        # `handle_dict_methods` clone. That shape is fixed by the place-kernel
+        # lane (nested-place mutation), not by the identifier fast path this
+        # spec guards; adding a ratio bound here would pin work this lane does
+        # not own. Measured 2026-09-12 on the deployed seed: 14.16s at n=20000.
+        expect(field_remove_len(1000)).to_equal(0)

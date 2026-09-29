@@ -1,0 +1,56 @@
+@gc
+
+# differential_oracle — the plan's §4 verification gate: compare a cell's result
+# against a REAL CUDA execution, never against itself.
+#
+# Honesty contract (NFR-3): `bit_exact` may only be true when a CUDA device was
+# actually present AND a device-side result was actually produced and compared.
+# With no CUDA device on this host the verdict is `bit_exact=false` with reason
+# `cuda-oracle-unavailable` — an absent oracle is absence of evidence, never a pass.
+
+use gc_async_mut.gpu_ops.{gpu_device_count}
+use std.gc_async_mut.compute.compute_run.{cpu_reduce_i64}
+
+# Verdict of one differential comparison against the CUDA oracle.
+class DifferentialVerdict:
+    cell: text
+    bit_exact: bool      # true ONLY when a device result was produced and matched
+    compared: bool       # true when both sides were actually computed
+    cpu_value: i64
+    device_value: i64
+    device_count: i64
+    reason: text
+
+    static fn unavailable(cell: text, cpu_value: i64, device_count: i64, reason: text) -> DifferentialVerdict:
+        DifferentialVerdict(cell: cell, bit_exact: false, compared: false,
+                            cpu_value: cpu_value, device_value: 0,
+                            device_count: device_count, reason: reason)
+
+# CUDA-side execution of `cell` over `data`.
+# TODO(cell-grid W1): no CUDA reduce/scan/sort kernel artifact is built yet, so
+# there is no device side to compare against. Returns Err so the caller reports
+# `compared=false` rather than fabricating a matching device value.
+fn cuda_oracle_i64(cell: text, data: [i64]) -> Result<i64, text>:
+    Err("cuda-{cell}-kernel-artifact-absent")
+
+# Differentially compare the pure-Simple result for `cell` against the CUDA oracle.
+fn differential_compare_against_cuda(cell: text, data: [i64]) -> DifferentialVerdict:
+    # Only the `reduce` cell has a pure-Simple reference to compare with; naming
+    # any other cell here would label a reduce result as that cell's value.
+    if cell != "reduce":
+        return DifferentialVerdict.unavailable(cell, 0, gpu_device_count(), "cell-not-implemented")
+    val cpu_value = cpu_reduce_i64(data, 0)
+    val devices = gpu_device_count()
+    if devices <= 0:
+        return DifferentialVerdict.unavailable(cell, cpu_value, devices, "cuda-oracle-unavailable")
+    val attempt = cuda_oracle_i64(cell, data)
+    match attempt:
+        case Ok(device_value):
+            return DifferentialVerdict(cell: cell, bit_exact: device_value == cpu_value,
+                                       compared: true, cpu_value: cpu_value,
+                                       device_value: device_value, device_count: devices,
+                                       reason: "compared")
+        case Err(e):
+            return DifferentialVerdict.unavailable(cell, cpu_value, devices, e)
+
+export DifferentialVerdict, cuda_oracle_i64, differential_compare_against_cuda

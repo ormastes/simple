@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# A second native-build into a populated cache scope must still publish its object
+
+`compile_ir_to_object_path` finishes by moving the privately staged object onto
+its canonical destination with `rt_file_publish_noreplace`, which answers `1`
+on success, `0` when the destination ALREADY EXISTS, and `-1` otherwise. The
+`0` arm was reported as the hard failure `AOT object destination already
+exists`.
+
+The destination is `"{output_base}.{module}.o"` — keyed by cache scope and
+module name only. So the second native-build of the same module into the same
+scope finds its own previous output sitting there, and fails, even though the
+object it just produced is the authoritative one.
+
+MEASURED 2026-09-13 (lane BOOT-6) against the Stage-2 candidate
+`build/bootstrap-boot5c/stage2/aarch64-unknown-linux-gnu/simple.rejected`,
+sha256 `67786227817bf45f...`, two positional `native-build`s of
+`scripts/check/cert/redeploy_gate/fixtures/hello_world.spl` sharing one `HOME`:
+
+    order A: SIMPLE_BOOTSTRAP=0 then =1  ->  raw_status 0, then 1
+    order B: SIMPLE_BOOTSTRAP=1 then =0  ->  raw_status 0, then 1
+
+The failure follows the ORDER, not `SIMPLE_BOOTSTRAP`; whichever pass runs
+second fails. That is the whole of the Stage-2 sanity blocker recorded in
+`doc/08_tracking/bug/stage2_sanity_bootstrap1_backend_object_path_status_1_2026-09-13.md`,
+whose two candidate causes are both refuted below.
+
+`strace -y` on the failing run, same binary:
+
+    write(.../simple-aot-diagnostic-njhtYD/message.tmp...,
+          "AOT object destination already exists", 37) = 37
+    read (.../simple-aot-diagnostic-njhtYD/message, "AOT object destination already e", 32) = 32
+    read (.../simple-aot-diagnostic-njhtYD/message, "xists", 32) = 5
+    read (.../simple-aot-diagnostic-njhtYD/message, "", 27) = 0
+
+So the backend's `status` of 1 is CORRECT (candidate 2 refuted), the diagnostic
+write DID land and its bytes WERE read back in full (candidate 1 refuted). The driver
+reported `diagnostic file empty` because its `case Ok(message):` payload read
+loses the text — a separate Stage-2 codegen defect, filed separately, that
+masked this one.
+
+The fix clears a stale destination before publishing. The publish itself stays
+no-clobber, so a genuinely racing publisher still loses rather than being
+silently overwritten.
+"""
+
+use std.io_runtime.{file_read}
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+describe "LLVM object-path publication over a stale destination":
+    it "clears a destination left by an earlier build before publishing":
+        # @req REQ-SSPEC-COMPILER
+        step("the publish site must not treat its own previous output as fatal")
+        val source = file_read(
+            "src/compiler/70.backend/backend/llvm_backend_tools.spl")
+        # Fail closed on a vacuous read: an empty or truncated file must FAIL.
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain(
+            "if file_exists(obj_path):\n        file_delete(obj_path)")
+        expect(source).to_contain(
+            "val publish_status = rt_file_publish_noreplace(staged_obj_path, obj_path)")
+
+    it "keeps the publish itself no-clobber and keeps both failure arms":
+        # @req REQ-SSPEC-COMPILER
+        step("clearing a stale destination must not become an unconditional overwrite")
+        # `rt_file_publish_noreplace` is the only publish primitive here and it
+        # answers 0 for an existing destination. Both arms must survive, so the
+        # gate cannot be "passed" by deleting the failure reporting.
+        val source = file_read(
+            "src/compiler/70.backend/backend/llvm_backend_tools.spl")
+        expect(source.len() > 20000).to_equal(true)
+        expect(source).to_contain("\"AOT object destination already exists\", 1)")
+        expect(source).to_contain("\"AOT object publication failed\", 1)")
+
+    it "never again calls a readable diagnostic empty":
+        # @req REQ-SSPEC-COMPILER
+        step("the driver must consult the runtime size before saying `empty`")
+        # `diagnostic file empty` was FALSE here: 37 bytes were written and 37
+        # were read back. The note is derived from a `case Ok(message):`
+        # payload that this Stage-2 binary loses, so the driver must ask the
+        # runtime how many bytes are on disk before naming the failure mode,
+        # and must deliver the text it can still read.
+        val driver = file_read(
+            "src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(driver.len() > 100000).to_equal(true)
+        expect(driver).to_contain("val diagnostic_size = file_size_raw(diagnostic_path)")
+        expect(driver).to_contain("diagnostic_note = \"diagnostic file empty\"")

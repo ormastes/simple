@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: fixed in .spl (2026-05-29) — root cause was the `parse_pipe()` function (line ~127) else-branch not applying `transform_placeholder_lambda` to the pipe RHS; a second identical pipe loop in the binary-expression context (line ~470) already had the fix applied. Fix: changed `expr_call(right,
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # Short Grammar Placeholder Rejected In Parenthesized Pipe Callback
 
 Date: 2026-05-27

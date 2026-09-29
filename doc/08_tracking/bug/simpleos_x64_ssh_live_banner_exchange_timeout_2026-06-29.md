@@ -1,4 +1,8 @@
 # SimpleOS x64 SSH Live Banner Exchange Timeout
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - status: open
 - date: 2026-06-29
@@ -42,6 +46,3 @@ The SSH exec bridge has a focused Simple launch proof path for
 `simple.smf --version` and `simple --check`, but live OpenSSH does not reach it
 while banner exchange fails.
 
-## Triage note (2026-07-17)
-
-Likely fixed by commits `d5770319715` (2026-07-???) and `7dc03ab537e` (2026-07-???) addressing banner-exchange timeout in SimpleOS x64 SSH. Pending runtime verification: re-run the QEMU gate (`test/03_system/os/ssh_live_login_in_qemu_spec.spl`) to confirm authenticated session reaches `SESSION OK shell ...` output.

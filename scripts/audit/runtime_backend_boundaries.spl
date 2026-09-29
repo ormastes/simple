@@ -1,10 +1,8 @@
 # Audit runtime-family backend ownership and SimpleOS POSIX boundaries.
 
-extern fn rt_cli_get_args() -> [text]
-extern fn rt_file_read_text(path: text) -> text
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
-extern fn rt_exit(code: i32) -> void
 
+use std.io.{exit_i32, file_read_text, process_run}
+use std.sffi.system.{args_get}
 struct RuntimeBoundaryConfig:
     root: text
 
@@ -85,7 +83,7 @@ fn list_spl_under(root: text, roots: [text]) -> [text]:
     for rel_root in roots:
         val scan_root = join_path(root, rel_root)
         val command = "if [ -e " + shell_quote(scan_root) + " ]; then find " + shell_quote(scan_root) + " -type f -name '*.spl' | sort; fi"
-        val result = rt_process_run("/bin/sh", ["-c", command])
+        val result = process_run("/bin/sh", ["-c", command])
         if result.2 != 0:
             continue
         for raw in result.0.split("\n"):
@@ -95,7 +93,7 @@ fn list_spl_under(root: text, roots: [text]) -> [text]:
     paths
 
 fn code_lines(path: text) -> [text]:
-    val source = rt_file_read_text(path) ?? ""
+    val source = file_read_text(path) ?? ""
     var lines: [text] = []
     var line_no = 0
     for line in source.split("\n"):
@@ -175,7 +173,7 @@ fn async_runtime_owner_wildcards(root: text, scan_root: text) -> [text]:
             if module_path == "":
                 continue
             val sync_path = join_path(root, "src/lib/nogc_sync_mut/" + module_path + ".spl")
-            val sync_text = rt_file_read_text(sync_path) ?? ""
+            val sync_text = file_read_text(sync_path) ?? ""
             if has_backend_hook(sync_text):
                 hits = hits.push(rel_path(path, root) + ":" + split_lineno(entry).to_string() + ": " + stripped + " -> " + rel_path(sync_path, root))
     hits
@@ -232,7 +230,7 @@ fn print_json_report(runtime_hooks: [text], gc_wildcards: [text], nogc_wildcards
     print("  \"simpleos_lower_layer_posix_libc_import_samples\": " + json_array(simpleos_imports, 20))
     print("}")
 
-val config = parse_args(normalize_args(rt_cli_get_args()))
+val config = parse_args(normalize_args(args_get()))
 val runtime_hooks = direct_runtime_hooks(config.root)
 val gc_wildcards = async_runtime_owner_wildcards(config.root, "src/lib/gc_async_mut")
 val nogc_wildcards = async_runtime_owner_wildcards(config.root, "src/lib/nogc_async_mut")
@@ -241,5 +239,5 @@ val portable_imports = portable_lib_imports(config.root)
 print_json_report(runtime_hooks, gc_wildcards, nogc_wildcards, simpleos_imports, portable_imports)
 
 if runtime_hooks.len() == 0 and gc_wildcards.len() == 0 and nogc_wildcards.len() == 0 and simpleos_imports.len() == 0 and portable_imports.len() == 0:
-    rt_exit(0)
-rt_exit(1)
+    exit_i32(0)
+exit_i32(1)

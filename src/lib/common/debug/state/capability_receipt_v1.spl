@@ -1,0 +1,133 @@
+# State capability receipt v1 -- pure-data contract.
+#
+# `StateCapabilityReceiptV1` and its `CapabilityStatus` / `ResourceDisposition`
+# vocabulary, frozen verbatim from
+# `doc/01_research/infra/dump_replay/simple_dump_replay_fw_spipe_devhub_design_plan_2026-09-05.md`
+# section 5 (field list ~L250-277, `CapabilityStatus` ~L282-287, resource
+# dispositions ~L314-315). Pure data: no I/O, no nogc imports, consistent with
+# `contracts_v1.spl` in this directory.
+#
+# Wave 0 rule: a capsule must never imply capabilities merely because it
+# contains memory bytes. Every fresh receipt starts fully `Unverified` (see
+# `state_capability_receipt_unverified_v1`), and the validator rejects any
+# `Supported` status that is not backed by a runnable acceptance receipt (see
+# `state_capability_receipt_validate_v1`).
+
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub enum CapabilityStatus:
+    Supported
+    Partial(text, text)
+    Blocked(text, text)
+    Unavailable(text)
+    Prohibited(text)
+    Unverified(text)
+
+pub enum ResourceDisposition:
+    Restored
+    Replayed
+    Recreated
+    Proxied
+    Frozen
+    ResetAtBoundary
+    ModeledByScenario
+    OmittedAnalysisOnly
+    Unsupported
+    Prohibited
+
+pub struct StateCapabilityReceiptV1:
+    receipt_version: text
+    artifact_id: text
+    raw_artifact_digests: [text]
+    normalized_capsule_digest: text
+    target_id: text
+    target_revision: text
+    build_identity: text
+    engine_id: text
+    engine_version: text
+    machine_config_digest: text
+    state_granularity: text
+    capture_boundary: text
+    capture_perturbation: text
+    components_present: [text]
+    components_missing: [text]
+    resource_dispositions: [ResourceDisposition]
+    analyze: CapabilityStatus
+    resume_forward: CapabilityStatus
+    exact_replay: CapabilityStatus
+    reverse_execution: CapabilityStatus
+    counterfactual_fork: CapabilityStatus
+    profile_correlation: CapabilityStatus
+    proof_receipts: [text]
+    taints: [text]
+    safety_class: text
+    redaction_receipt: text
+
+pub val STATE_CAPABILITY_RECEIPT_VERSION_V1: text = "state-capability-receipt/v1"
+
+# Wave 0 default: every capability is `Unverified` and every list is empty
+# until a real producer supplies evidence. Never construct a receipt with any
+# other default status.
+pub fn state_capability_receipt_unverified_v1(artifact_id: text, claim_source: text) -> StateCapabilityReceiptV1:
+    StateCapabilityReceiptV1(
+        receipt_version: STATE_CAPABILITY_RECEIPT_VERSION_V1,
+        artifact_id: artifact_id,
+        raw_artifact_digests: [],
+        normalized_capsule_digest: "",
+        target_id: "",
+        target_revision: "",
+        build_identity: "",
+        engine_id: "",
+        engine_version: "",
+        machine_config_digest: "",
+        state_granularity: "",
+        capture_boundary: "",
+        capture_perturbation: "",
+        components_present: [],
+        components_missing: [],
+        resource_dispositions: [],
+        analyze: CapabilityStatus.Unverified(claim_source),
+        resume_forward: CapabilityStatus.Unverified(claim_source),
+        exact_replay: CapabilityStatus.Unverified(claim_source),
+        reverse_execution: CapabilityStatus.Unverified(claim_source),
+        counterfactual_fork: CapabilityStatus.Unverified(claim_source),
+        profile_correlation: CapabilityStatus.Unverified(claim_source),
+        proof_receipts: [],
+        taints: [],
+        safety_class: "",
+        redaction_receipt: "",
+    )
+
+fn _is_sha256_digest_v1(value: text) -> bool:
+    if not value.starts_with("sha256:"):
+        return false
+    sha256_lower_hex_valid(value.substring(7, value.len()))
+
+fn _is_supported_v1(status: CapabilityStatus) -> bool:
+    match status:
+        case CapabilityStatus.Supported: true
+        case _: false
+
+# Pure validation: rejects a malformed receipt version, an empty artifact id,
+# any non-empty digest field that is not `sha256:<64 lowercase hex>`, and any
+# of the six capability statuses claiming `Supported` while `proof_receipts`
+# is empty -- no `Supported` without a runnable acceptance receipt.
+pub fn state_capability_receipt_validate_v1(r: StateCapabilityReceiptV1) -> Result<(), text>:
+    if r.receipt_version != STATE_CAPABILITY_RECEIPT_VERSION_V1:
+        return Err("state capability receipt: wrong receipt_version")
+    if r.artifact_id == "":
+        return Err("state capability receipt: empty artifact_id")
+    if r.normalized_capsule_digest != "" and not _is_sha256_digest_v1(r.normalized_capsule_digest):
+        return Err("state capability receipt: malformed normalized_capsule_digest")
+    for digest in r.raw_artifact_digests:
+        if not _is_sha256_digest_v1(digest):
+            return Err("state capability receipt: malformed raw artifact digest")
+    val any_supported = _is_supported_v1(r.analyze) or
+        _is_supported_v1(r.resume_forward) or
+        _is_supported_v1(r.exact_replay) or
+        _is_supported_v1(r.reverse_execution) or
+        _is_supported_v1(r.counterfactual_fork) or
+        _is_supported_v1(r.profile_correlation)
+    if any_supported and r.proof_receipts.len() == 0:
+        return Err("state capability receipt: Supported status with no proof_receipts")
+    Ok(())

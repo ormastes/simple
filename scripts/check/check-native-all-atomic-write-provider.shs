@@ -1,0 +1,132 @@
+#!/bin/sh
+set -eu
+
+# The hosted native bundle is one link lane. runtime_native.c and the weak
+# SimpleOS stubs are alternate core/embedded lanes and must not be added to
+# these link inputs: simple-runtime, bundled by simple-native-all, owns this ABI.
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+rust_root="$repo_root/src/compiler_rust"
+target_dir=${CARGO_TARGET_DIR:-"$rust_root/target"}
+archive="$target_dir/debug/libsimple_native_all.a"
+
+cargo build --quiet --manifest-path "$rust_root/Cargo.toml" -p simple-native-all
+
+test -f "$archive" || {
+    echo "FAIL: native-all archive missing: $archive" >&2
+    exit 1
+}
+
+# Count archive members, not a deduplicated symbol list. This catches a second
+# strong provider even when both definitions have the same unmangled name.
+provider_count=$(
+    nm -g --defined-only "$archive" 2>/dev/null |
+        awk 'NF >= 2 { name=$NF; sub(/^_/, "", name); type=$(NF-1); if (name == "rt_file_atomic_write" && type ~ /^[TDBR]$/) count++ } END { print count+0 }'
+)
+test "$provider_count" -eq 1 || {
+    echo "FAIL: expected exactly one strong rt_file_atomic_write in hosted link inputs, found $provider_count" >&2
+    exit 1
+}
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-all-atomic.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+
+cat >"$tmp_dir/consumer.c" <<'EOF'
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef uint64_t RuntimeValue;
+extern RuntimeValue rt_string_new(const uint8_t *, uint64_t);
+extern int64_t rt_string_free(RuntimeValue);
+extern int64_t rt_file_atomic_write(RuntimeValue, RuntimeValue);
+
+static int finish(int code, RuntimeValue path, RuntimeValue text) {
+    int64_t path_freed = rt_string_free(path);
+    int64_t text_freed = rt_string_free(text);
+    if (code != 0) return code;
+    if (path_freed != 1) return 15;
+    if (text_freed != 1) return 16;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char content[] = "runtime-owned atomic write";
+    char actual[sizeof content] = {0};
+    if (argc != 2) return 10;
+    RuntimeValue path = rt_string_new((const uint8_t *)argv[1], strlen(argv[1]));
+    RuntimeValue text = rt_string_new((const uint8_t *)content, sizeof(content) - 1);
+    if (rt_file_atomic_write(path, text) != 1) return finish(11, path, text);
+    FILE *file = fopen(argv[1], "rb");
+    if (!file) return finish(12, path, text);
+    size_t read = fread(actual, 1, sizeof(actual), file);
+    if (fclose(file) != 0) return finish(13, path, text);
+    int result = read == sizeof(content) - 1 &&
+                         memcmp(actual, content, sizeof(content) - 1) == 0
+                     ? 0
+                     : 14;
+    return finish(result, path, text);
+}
+EOF
+
+# Intentionally link only the hosted bundle. Adding runtime_native.c or the
+# weak embedded stub here would violate the bundle policy and mask ownership.
+# Match the production bundle's duplicate-definition policy for its separately
+# baselined legacy providers; the strict atomic-write count above remains the
+# ownership gate and cannot be relaxed by this linker option.
+case $(uname -s) in
+    Darwin) duplicate_policy="-Wl,-multiply_defined,suppress" ;;
+    *) duplicate_policy="-Wl,-z,muldefs" ;;
+esac
+cc_path=$(command -v cc)
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+link_stdout="$tmp_dir/link.stdout"
+link_stderr="$tmp_dir/link.stderr"
+link_rc=0
+cc "$tmp_dir/consumer.c" "$archive" -o "$tmp_dir/consumer" \
+    "$duplicate_policy" -ldl -lpthread -lm -lrt -lutil \
+    >"$link_stdout" 2>"$link_stderr" || link_rc=$?
+
+run_stdout="$tmp_dir/run.stdout"
+run_stderr="$tmp_dir/run.stderr"
+run_rc=not-run
+if [ "$link_rc" -eq 0 ]; then
+    run_rc=0
+    "$tmp_dir/consumer" "$tmp_dir/state.txt" \
+        >"$run_stdout" 2>"$run_stderr" || run_rc=$?
+else
+    : >"$run_stdout"
+    : >"$run_stderr"
+fi
+
+echo "CHECK_COMMAND=sh scripts/check/check-native-all-atomic-write-provider.shs"
+echo "CC_PATH=$cc_path"
+echo "CC_SHA256=$(hash_file "$cc_path")"
+echo "ARCHIVE=$archive"
+echo "ARCHIVE_SHA256=$(hash_file "$archive")"
+echo "STRONG_PROVIDER_COUNT=$provider_count"
+echo "LINK_RC=$link_rc"
+echo "LINK_STDOUT_BEGIN"
+cat "$link_stdout"
+echo "LINK_STDOUT_END"
+echo "LINK_STDERR_BEGIN"
+cat "$link_stderr"
+echo "LINK_STDERR_END"
+echo "RUN_RC=$run_rc"
+echo "RUN_STDOUT_BEGIN"
+cat "$run_stdout"
+echo "RUN_STDOUT_END"
+echo "RUN_STDERR_BEGIN"
+cat "$run_stderr"
+echo "RUN_STDERR_END"
+
+test "$link_rc" -eq 0
+test "$run_rc" -eq 0
+
+echo "PASS: native-all has one runtime-owned atomic-write provider and an external ABI consumer links and runs"

@@ -14,6 +14,11 @@
 
 extern int errno;
 
+/* Keep decimal exponent handling bounded.  The implementation uses repeated
+ * powers of ten rather than a host libm helper, so accepting an unbounded
+ * lexical exponent would turn parsing into an attacker-controlled CPU loop. */
+#define SIMPLEOS_STRTOD_EXPONENT_LIMIT 400
+
 /* ====================================================================
  * 1. Integer parsing — strtol family
  * ==================================================================== */
@@ -254,8 +259,11 @@ double strtod(const char *nptr, char **endptr) {
     /* Integer part */
     double result = 0.0;
     int any = 0;
+    int significand_nonzero = 0;
     while (*s >= '0' && *s <= '9') {
-        result = result * 10.0 + (*s - '0');
+        int digit = *s - '0';
+        result = result * 10.0 + digit;
+        if (digit != 0) significand_nonzero = 1;
         any = 1;
         s++;
     }
@@ -265,7 +273,9 @@ double strtod(const char *nptr, char **endptr) {
         s++;
         double frac = 0.1;
         while (*s >= '0' && *s <= '9') {
-            result += (*s - '0') * frac;
+            int digit = *s - '0';
+            result += digit * frac;
+            if (digit != 0) significand_nonzero = 1;
             frac *= 0.1;
             any = 1;
             s++;
@@ -287,8 +297,14 @@ double strtod(const char *nptr, char **endptr) {
 
         int exp = 0;
         int eany = 0;
+        int exp_out_of_range = 0;
         while (*s >= '0' && *s <= '9') {
-            exp = exp * 10 + (*s - '0');
+            int digit = *s - '0';
+            if (exp > (SIMPLEOS_STRTOD_EXPONENT_LIMIT - digit) / 10) {
+                exp_out_of_range = 1;
+            } else {
+                exp = exp * 10 + digit;
+            }
             eany = 1;
             s++;
         }
@@ -296,6 +312,14 @@ double strtod(const char *nptr, char **endptr) {
         if (!eany) {
             /* No digits after 'e' — rewind */
             s = e_start;
+        } else if (exp_out_of_range) {
+            /* Consume the complete exponent for endptr correctness, but do
+             * not attempt a scale loop whose work is proportional to input. */
+            if (endptr) *endptr = (char *)s;
+            if (!significand_nonzero) return neg ? -0.0 : 0.0;
+            errno = ERANGE;
+            return eneg ? (neg ? -0.0 : 0.0)
+                        : (neg ? -__builtin_huge_val() : __builtin_huge_val());
         } else {
             /* Apply exponent via repeated multiply/divide */
             double scale = 1.0;

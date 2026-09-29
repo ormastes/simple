@@ -2,8 +2,7 @@
 
 - **Date:** 2026-07-27
 - **Lane:** vhdl_gen RTL generation probes (`test/01_unit/lib/hardware/vhdl_gen/probe_bus_infra_gen.spl`)
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 02).
+- **Status:** open — non-blocking (graceful interpreter fallback, results correct)
 
 ## Observation
 

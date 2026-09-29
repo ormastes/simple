@@ -165,6 +165,7 @@ fn find_max_numbered(expr: &Expr) -> usize {
         }
         Expr::Cast { expr, .. } => find_max_numbered(expr),
         Expr::Spread(inner) => find_max_numbered(inner),
+        Expr::StructSpread(inner) => find_max_numbered(inner),
         Expr::Lambda { .. } => 0,
         // Match: scan the scrutinee (subject) only. Arms are a scoping boundary
         // because `case _:` uses `_` as a wildcard pattern, not a placeholder.
@@ -273,6 +274,7 @@ fn replace_numbered_placeholders(expr: Expr) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_numbered_placeholders(*inner))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_numbered_placeholders(*inner))),
         Expr::Lambda { .. } => expr,
         // Match: replace placeholders in the scrutinee (subject) only.
         // Arms are a scoping boundary; their bodies and patterns are left
@@ -353,6 +355,7 @@ fn count_placeholders(expr: &Expr) -> usize {
         }
         Expr::Cast { expr, .. } => count_placeholders(expr),
         Expr::Spread(inner) => count_placeholders(inner),
+        Expr::StructSpread(inner) => count_placeholders(inner),
         // Lambda bodies should not be traversed (they have their own scope)
         Expr::Lambda { .. } => 0,
         // Match: count placeholders in the scrutinee only; arms are a scoping boundary.
@@ -482,6 +485,7 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_placeholders(*inner, counter))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_placeholders(*inner, counter))),
         // Don't descend into lambdas (they have their own scope)
         Expr::Lambda { .. } => expr,
         // Match: replace placeholders in the scrutinee only.
@@ -624,6 +628,7 @@ fn replace_bare_placeholder_fixed(expr: Expr, slot: usize) -> Expr {
             target_type,
         },
         Expr::Spread(inner) => Expr::Spread(Box::new(replace_bare_placeholder_fixed(*inner, slot))),
+        Expr::StructSpread(inner) => Expr::StructSpread(Box::new(replace_bare_placeholder_fixed(*inner, slot))),
         Expr::Lambda { .. } => expr,
         Expr::Match { subject, arms } => Expr::Match {
             subject: Box::new(replace_bare_placeholder_fixed(*subject, slot)),

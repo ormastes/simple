@@ -1,0 +1,40 @@
+"""Fail-closed lifetime contract for the retained CUDA Web layout arena."""
+
+# @tag: unit, cuda, web, layout, lifetime
+
+use std.spec.*
+use std.io_runtime.file_read
+
+describe "CUDA Web layout cache lifetime contract":
+
+    it "drops context-owned storage before initialization recovery":
+        step("Read the retained CUDA layout port")
+        val source = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/cuda_execution_port.spl")
+
+        step("Require arena release before context shutdown")
+        # @req: REQ-GPU-DYN-007
+        expect(source).to_contain(
+            "self.storage.release(session)\n            session.shutdown()\n            return _web_cuda_layout_result")
+
+    it "invalidates warm storage after transfer or execution failure":
+        step("Read the retained failure branch")
+        val source = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/cuda_execution_port.spl")
+
+        step("Require failed warm work to destroy both arena and session")
+        # @req: REQ-GPU-DYN-011
+        expect(source).to_contain(
+            "not uploaded or not submitted or not synchronized or not readback")
+        expect(source).to_contain(
+            "self.storage.release(session)\n            session.shutdown()\n        elif not self.retain_session")
+
+    it "keeps successful warm storage allocated":
+        step("Inspect the cold-only cleanup branch")
+        val source = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/cuda_execution_port.spl")
+
+        step("Require successful retained calls to bypass cleanup")
+        # @req: NFR-GPU-DYN-009
+        expect(source).to_contain(
+            "elif not self.retain_session:\n            self.storage.release(session)")

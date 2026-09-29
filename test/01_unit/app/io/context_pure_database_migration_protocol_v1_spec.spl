@@ -1,0 +1,154 @@
+# @tag: unit, app, io, database, ownership
+
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{read_file_text}
+use app.io.context_pure_database_migration_protocol_v1.{
+    ContextMigrationSourceIdentityV1,
+    ContextMigrationLeaseV1,
+    ContextMigrationStageObservationV1,
+    ContextMigrationDestinationObservationV1,
+    context_migration_source_identity_digest_v1,
+    context_migration_recovery_decision_v1
+}
+
+fn source_identity(nonce: text, generation: i64) -> ContextMigrationSourceIdentityV1:
+    ContextMigrationSourceIdentityV1(
+        source_key: "context.sqlite.db", object_nonce: nonce,
+        object_generation: generation,
+        byte_length: 128, bytes_digest: sha256_text("source-bytes"),
+        rows_digest: sha256_text("ordered-rows"),
+        source_format: "sqlite-facade")
+
+fn lease_for(source: ContextMigrationSourceIdentityV1,
+             owner: text, stage_content: text) -> ContextMigrationLeaseV1:
+    ContextMigrationLeaseV1(
+        lease_id: "lease-{owner}", owner_nonce: owner,
+        destination_key: "context.pure.db",
+        source_identity_digest: context_migration_source_identity_digest_v1(source),
+        stage_bytes_digest: sha256_text(stage_content),
+        stage_byte_length: stage_content.len())
+
+fn stage_for(lease: ContextMigrationLeaseV1,
+             source: ContextMigrationSourceIdentityV1) -> ContextMigrationStageObservationV1:
+    ContextMigrationStageObservationV1(
+        exists: true, owner_nonce: lease.owner_nonce,
+        bytes_digest: lease.stage_bytes_digest,
+        byte_length: lease.stage_byte_length,
+        rows_digest: source.rows_digest, image_format: "simple-pure-db-v3")
+
+fn no_destination() -> ContextMigrationDestinationObservationV1:
+    ContextMigrationDestinationObservationV1(
+        exists: false, bytes_digest: "", byte_length: 0)
+
+describe "context PureDatabase migration publication protocol":
+    it "rejects A-B-A source replacement even when bytes return to A":
+        val pinned = source_identity("object-A", 7)
+        val replaced_then_restored = source_identity("object-C", 9)
+        val lease = lease_for(pinned, "owner-a", "stage-a")
+        val decision = context_migration_recovery_decision_v1(
+            lease, pinned, replaced_then_restored, stage_for(lease, pinned),
+            no_destination())
+        expect(replaced_then_restored.bytes_digest).to_equal(pinned.bytes_digest)
+        expect(decision.status).to_equal("source_identity_changed")
+        expect(decision.may_publish_noreplace).to_equal(false)
+
+    it "does not let a competing publisher replace the winner":
+        val pinned = source_identity("object-A", 7)
+        val winner = lease_for(pinned, "owner-a", "stage-a")
+        val competitor = lease_for(pinned, "owner-b", "stage-b")
+        val destination = ContextMigrationDestinationObservationV1(
+            exists: true, bytes_digest: winner.stage_bytes_digest,
+            byte_length: winner.stage_byte_length)
+        val decision = context_migration_recovery_decision_v1(
+            competitor, pinned, pinned, stage_for(competitor, pinned), destination)
+        expect(decision.status).to_equal("destination_conflict")
+        expect(decision.may_publish_noreplace).to_equal(false)
+        expect(decision.destination_committed).to_equal(false)
+
+    it "refuses an invalid pinned identity before it can recover a destination":
+        val invalid = ContextMigrationSourceIdentityV1(
+            source_key: "context.sqlite.db", object_nonce: "", object_generation: 0,
+            byte_length: 128, bytes_digest: "", rows_digest: "",
+            source_format: "sqlite-facade")
+        val forged = ContextMigrationLeaseV1(
+            lease_id: "lease-forged", owner_nonce: "owner-forged",
+            destination_key: "context.pure.db", source_identity_digest: "",
+            stage_bytes_digest: sha256_text("stage-forged"), stage_byte_length: 12)
+        val destination = ContextMigrationDestinationObservationV1(
+            exists: true, bytes_digest: forged.stage_bytes_digest,
+            byte_length: forged.stage_byte_length)
+        val decision = context_migration_recovery_decision_v1(
+            forged, invalid, invalid,
+            ContextMigrationStageObservationV1(
+                exists: false, owner_nonce: "", bytes_digest: "", byte_length: 0,
+                rows_digest: "", image_format: ""),
+            destination)
+        expect(decision.status).to_equal("lease_invalid")
+        expect(decision.destination_committed).to_equal(false)
+        expect(decision.may_publish_noreplace).to_equal(false)
+
+    it "recovers a committed destination after the publish acknowledgment is lost":
+        val pinned = source_identity("object-A", 7)
+        val lease = lease_for(pinned, "owner-a", "stage-a")
+        val destination = ContextMigrationDestinationObservationV1(
+            exists: true, bytes_digest: lease.stage_bytes_digest,
+            byte_length: lease.stage_byte_length)
+        val decision = context_migration_recovery_decision_v1(
+            lease, pinned, pinned,
+            ContextMigrationStageObservationV1(
+                exists: false, owner_nonce: "", bytes_digest: "",
+                byte_length: 0, rows_digest: "", image_format: ""),
+            destination)
+        expect(decision.status).to_equal("committed_recovered")
+        expect(decision.destination_committed).to_equal(true)
+        expect(decision.may_publish_noreplace).to_equal(false)
+
+    it "permits only the exact lease owner stage to retry no-replace publication":
+        val pinned = source_identity("object-A", 7)
+        val lease = lease_for(pinned, "owner-a", "stage-a")
+        val retry = context_migration_recovery_decision_v1(
+            lease, pinned, pinned, stage_for(lease, pinned), no_destination())
+        expect(retry.status).to_equal("retry_publish_noreplace")
+        expect(retry.may_publish_noreplace).to_equal(true)
+
+        val foreign_stage = ContextMigrationStageObservationV1(
+            exists: true, owner_nonce: "owner-b",
+            bytes_digest: lease.stage_bytes_digest,
+            byte_length: lease.stage_byte_length,
+            rows_digest: pinned.rows_digest, image_format: "simple-pure-db-v3")
+        val refused = context_migration_recovery_decision_v1(
+            lease, pinned, pinned, foreign_stage, no_destination())
+        expect(refused.status).to_equal("stage_invalid")
+        expect(refused.may_publish_noreplace).to_equal(false)
+
+        val wrong_rows = ContextMigrationStageObservationV1(
+            exists: true, owner_nonce: lease.owner_nonce,
+            bytes_digest: lease.stage_bytes_digest,
+            byte_length: lease.stage_byte_length,
+            rows_digest: sha256_text("different-ordered-rows"),
+            image_format: "simple-pure-db-v3")
+        val wrong_rows_refused = context_migration_recovery_decision_v1(
+            lease, pinned, pinned, wrong_rows, no_destination())
+        expect(wrong_rows_refused.status).to_equal("stage_invalid")
+        expect(wrong_rows_refused.may_publish_noreplace).to_equal(false)
+
+        val wrong_format = ContextMigrationStageObservationV1(
+            exists: true, owner_nonce: lease.owner_nonce,
+            bytes_digest: lease.stage_bytes_digest,
+            byte_length: lease.stage_byte_length, rows_digest: pinned.rows_digest,
+            image_format: "sqlite-facade")
+        val wrong_format_refused = context_migration_recovery_decision_v1(
+            lease, pinned, pinned, wrong_format, no_destination())
+        expect(wrong_format_refused.status).to_equal("stage_invalid")
+        expect(wrong_format_refused.may_publish_noreplace).to_equal(false)
+
+    it "does not add the protocol model to live context routes":
+        val protocol_name = "context_pure_database_migration_protocol_v1"
+        expect(read_file_text("src/app/io/context_ops.spl").index_of(
+            protocol_name)).to_equal(-1)
+        expect(read_file_text(
+            "src/app/io/context_pure_database_importer.spl").index_of(
+            protocol_name)).to_equal(-1)
+        expect(read_file_text("src/app/io/__init__.spl").index_of(
+            protocol_name)).to_equal(-1)

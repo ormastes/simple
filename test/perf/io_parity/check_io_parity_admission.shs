@@ -1,0 +1,590 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
+publication_mode=published
+if [[ "${1:-}" == "--prepublish" ]]; then
+    publication_mode=prepublish
+    shift
+fi
+RECEIPT="${1:-${IO_PARITY_RECEIPT:-$ROOT/build/perf/io_parity/io_parity_receipt.txt}}"
+selftest_mode="${IO_PARITY_ADMISSION_SELFTEST:-0}"
+selftest_stage4_verifier="${IO_PARITY_SELFTEST_STAGE4_VERIFIER:-}"
+
+unavailable() {
+    echo "STATUS: UNAVAILABLE I/O parity admission: $*" >&2
+    exit 125
+}
+
+blocked() {
+    echo "STATUS: BLOCKED I/O parity admission: $*" >&2
+    exit 1
+}
+
+[[ "$selftest_mode" == 0 || "$selftest_mode" == 1 ]] ||
+    blocked "IO_PARITY_ADMISSION_SELFTEST must be 0 or 1"
+if [[ -n "$selftest_stage4_verifier" && "$selftest_mode" != 1 ]]; then
+    blocked "test-only Stage 4 verifier injection is forbidden in production mode"
+fi
+if [[ "$selftest_mode" == 1 && -z "$selftest_stage4_verifier" ]]; then
+    blocked "selftest mode requires an explicit Stage 4 verifier"
+fi
+
+receipt_parent="$(cd "$(dirname "$RECEIPT")" 2>/dev/null && pwd -P)" ||
+    unavailable "receipt directory is absent: $(dirname "$RECEIPT")"
+RECEIPT="$receipt_parent/$(basename "$RECEIPT")"
+if [[ "$publication_mode" == published ]]; then
+    publication_seal="$receipt_parent/io_parity_receipt.publish"
+    if [[ -e "$publication_seal" && ! -f "$RECEIPT" ]]; then
+        blocked "publication marker exists without its canonical receipt"
+    fi
+    if [[ -f "$RECEIPT" && ! -e "$publication_seal" ]]; then
+        blocked "canonical receipt is not committed by a publication marker"
+    fi
+fi
+[[ -f "$RECEIPT" ]] || unavailable "receipt is absent: $RECEIPT"
+[[ ! -L "$RECEIPT" ]] || blocked "receipt must not be a symlink"
+RECEIPT="$(readlink -f -- "$RECEIPT")" || blocked "cannot canonicalize receipt"
+receipt_dir="$(dirname "$RECEIPT")"
+receipt_name="$(basename "$RECEIPT")"
+if [[ "$publication_mode" == published ]]; then
+    [[ "$receipt_name" == io_parity_receipt.txt ]] || blocked "published receipt name is not canonical"
+else
+    [[ "$receipt_name" =~ ^[.]io_parity_receipt[.]tmp[.][0-9]+$ ]] ||
+        blocked "prepublication receipt is not a same-directory harness temporary"
+fi
+if [[ "$publication_mode" == published ]]; then
+    [[ -f "$publication_seal" && ! -L "$publication_seal" && "$(readlink -f -- "$publication_seal")" == "$publication_seal" ]] ||
+        blocked "canonical publication marker is absent or non-canonical"
+    awk -F= 'NF < 2 || $1 == "" || ++seen[$1] > 1 { exit 1 }' "$publication_seal" ||
+        blocked "publication marker is malformed"
+    seal_value() {
+        local key="$1"
+        awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$publication_seal"
+    }
+    [[ "$(seal_value schema)" == simple.io-parity-publication/v1 ]] || blocked "publication marker schema mismatch"
+    [[ "$(seal_value method)" == same-directory-temp-rename-v1 ]] || blocked "publication marker method mismatch"
+    [[ "$(seal_value receipt.path)" == "$RECEIPT" ]] || blocked "publication marker receipt path mismatch"
+    [[ "$(seal_value receipt.sha256)" == "$(sha256sum "$RECEIPT" | awk '{print $1}')" ]] ||
+        blocked "publication marker receipt hash mismatch"
+fi
+awk -F= 'NF < 2 || $1 == "" || ++seen[$1] > 1 { exit 1 }' "$RECEIPT" ||
+    blocked "receipt has a malformed or duplicate key"
+
+value_for() {
+    local key="$1"
+    local value
+    value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$RECEIPT")"
+    [[ -n "$value" ]] || blocked "receipt key $key is absent or empty"
+    printf '%s' "$value"
+}
+
+require_exact() {
+    local key="$1"
+    local expected="$2"
+    local actual
+    actual="$(value_for "$key")"
+    [[ "$actual" == "$expected" ]] || blocked "receipt key $key expected=$expected actual=$actual"
+}
+
+require_positive_uint() {
+    local key="$1"
+    local value
+    value="$(value_for "$key")"
+    [[ "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]] || blocked "receipt key $key must be a positive integer"
+    printf '%s' "$value"
+}
+
+require_sha256() {
+    local key="$1"
+    local value
+    value="$(value_for "$key")"
+    [[ "$value" =~ ^[0-9a-f]{64}$ ]] || blocked "receipt key $key is not a SHA-256"
+}
+
+require_positive_decimal() {
+    local key="$1"
+    local value
+    value="$(value_for "$key")"
+    [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] || blocked "receipt key $key is not a decimal"
+    awk -v value="$value" 'BEGIN { exit !(value + 0 > 0) }' || blocked "receipt key $key must be positive"
+    printf '%s' "$value"
+}
+
+require_bound_file() {
+    local prefix="$1"
+    local path expected actual canonical
+    path="$(value_for "$prefix.path")"
+    require_sha256 "$prefix.sha256"
+    expected="$(value_for "$prefix.sha256")"
+    [[ -f "$path" && ! -L "$path" ]] || blocked "$prefix path is absent, non-file, or symlinked: $path"
+    canonical="$(readlink -f -- "$path")" || blocked "cannot canonicalize $prefix path"
+    [[ "$canonical" == "$path" ]] || blocked "$prefix path is not canonical: $path"
+    actual="$(sha256sum "$path" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || blocked "$prefix hash mismatch"
+}
+
+require_bound_file_at() {
+    local prefix="$1"
+    local expected="$2"
+    local expected_canonical
+    expected_canonical="$(readlink -f -- "$expected")" || blocked "cannot canonicalize expected $prefix path"
+    [[ "$(value_for "$prefix.path")" == "$expected_canonical" ]] ||
+        blocked "$prefix path is not independently anchored"
+    require_bound_file "$prefix"
+}
+
+canonical_executable() {
+    local requested="$1"
+    local resolved
+    resolved="$(command -v -- "$requested" 2>/dev/null)" || blocked "required executable is absent: $requested"
+    resolved="$(readlink -f -- "$resolved")" || blocked "cannot canonicalize executable: $requested"
+    [[ -f "$resolved" && -x "$resolved" && ! -L "$resolved" ]] || blocked "executable is not canonical: $resolved"
+    printf '%s' "$resolved"
+}
+
+manifest_value() {
+    local key="$1"
+    local path="$2"
+    local value
+    value="$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$path")"
+    [[ -n "$value" ]] || blocked "manifest key $key is absent: $path"
+    printf '%s' "$value"
+}
+
+first_line() {
+    "$@" 2>&1 | sed -n '1p' | tr '\t\r\n' '   '
+}
+
+require_exact schema simple.io-parity/v3
+require_exact verdict PASS
+require_exact receipt.write same-directory-temp-rename-v1
+require_exact timing.model interleaved-process-monotonic-internal-v2
+require_exact timing.clock monotonic
+require_exact timing.unit micros
+require_exact throughput.unit mib_per_second
+require_exact timing.samples_per_class 7
+require_exact timing.interleave sample-cache-case-rotating-engine-v1
+require_exact rss.unit kib
+require_exact cache.classes cold,warm
+require_exact cache.cold.precondition posix-fadvise-dontneed-requested-before-each-measurement
+require_exact cache.warm.precondition direct-byte-touch-prime-before-each-measurement
+require_exact cache.target.mmap_direct fixture
+require_exact cache.target.append_at precreated-output-artifact
+require_exact post_timing.append_verify common-cache-control-read-size-checksum-then-sha256-rss-read-v1
+require_exact error.contract invalid_iterations-and-unknown_case-exit-2-v1
+require_exact error.invalid_iterations checked
+require_exact error.unknown_case checked
+require_exact checksum.selftest PASS
+require_exact checksum.selftest.cases 144
+require_exact checksum.selftest.scalar_calls 1073741824
+require_exact checksum.selftest.packed_calls 134217728
+require_exact checksum.selftest.ratio 8
+require_exact ratio.model reference_p50_micros/simple_p50_micros
+require_exact budget.mmap_direct.simple_vs_c.minimum 0.50
+require_exact budget.mmap_direct.simple_vs_rust.minimum 0.50
+require_exact budget.append_at.simple_vs_c.minimum 0.50
+require_exact budget.append_at.simple_vs_rust.minimum 0.50
+require_exact budget.max_rss_kib 524288
+require_exact compiler.simple.admission admitted-stage4-pure-simple
+require_exact compiler.simple.provenance_schema simple-bootstrap-stage4-provenance-v1
+require_exact compiler.simple.stub_fallback forbidden
+require_exact compiler.simple.build native-build-entry-closure-cranelift-core-c-bootstrap-v1
+require_exact compiler.simple.cache_scope build-perf-io-parity-simple-native-cache
+require_exact engine.c.identity c-native
+require_exact engine.rust.identity rust-native
+require_exact engine.simple.identity simple-native
+require_exact case.read_text.mode excluded
+require_exact case.read_text.exclusion non-equivalent-runtime-cache-semantics-no-performance-claim
+require_exact case.mmap_direct.mode strict
+require_exact case.mmap_direct.semantic open-map-shared-readonly-close-fd-touch-every-byte-unmap-per-iteration
+require_exact case.append_at.mode strict
+require_exact case.append_at.semantic precreated-sized-target-open-explicit-offset-4096-byte-write-all-close-per-iteration
+
+if grep -Eq '^case[.]read_text[.].*(samples|p50_micros|p95_micros|max_rss_kib|p50_ratio|performance_admission)=' "$RECEIPT"; then
+    blocked "read_text performance claims are forbidden while runtime cache semantics differ"
+fi
+
+for key in host.hostname host.kernel host.arch host.uname host.cpu_model host.load_start host.load_end \
+    compiler.c.version compiler.rust.version compiler.simple.version compiler.simple.source_revision \
+    tool.time.version; do
+    value_for "$key" >/dev/null
+done
+require_positive_uint host.cpu_logical >/dev/null
+require_positive_uint host.mem_total_kib >/dev/null
+
+expected_cc="$(canonical_executable gcc)"
+expected_rustup="$(canonical_executable rustup)"
+expected_rustc="$(canonical_executable "$("$expected_rustup" which rustc)")"
+expected_simple="$(canonical_executable "$(value_for compiler.simple.path)")"
+expected_time="$(canonical_executable /usr/bin/time)"
+expected_ldd="$(canonical_executable ldd)"
+expected_provenance="${expected_simple}.provenance.env"
+
+. "$ROOT/scripts/check/lib/require-self-hosted.shs"
+check_untestable() {
+    blocked "$*"
+}
+require_self_hosted "$expected_simple" "I/O parity Stage 4 compiler"
+[[ "$SELF_HOSTED_REAL" == "$expected_simple" ]] || blocked "Simple compiler identity changed during verification"
+
+if [[ "$selftest_mode" == 1 ]]; then
+    selftest_stage4_verifier="$(readlink -f -- "$selftest_stage4_verifier")" ||
+        blocked "cannot canonicalize selftest Stage 4 verifier"
+    [[ -f "$selftest_stage4_verifier" && -x "$selftest_stage4_verifier" && ! -L "$selftest_stage4_verifier" ]] ||
+        blocked "selftest Stage 4 verifier must be a canonical executable file"
+    "$selftest_stage4_verifier" "$expected_provenance" "$expected_simple" "$ROOT" ||
+        blocked "selftest Stage 4 verifier rejected compiler provenance"
+else
+    BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+    STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+    export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+    . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+    . "$STAGE4_PROVENANCE_HELPER_PATH"
+    expected_provenance="$(bootstrap_stage3_canonical_file "$expected_provenance")" ||
+        blocked "adjacent Stage 4 compiler provenance is missing, symlinked, or non-canonical"
+    stage4_verify_candidate_provenance "$expected_provenance" "$expected_simple" "$ROOT" ||
+        blocked "Stage 4 compiler provenance does not verify against the current source tree"
+fi
+
+require_bound_file_at compiler.c "$expected_cc"
+require_bound_file_at compiler.rust "$expected_rustc"
+require_bound_file_at compiler.simple "$expected_simple"
+require_bound_file_at compiler.simple.provenance "$expected_provenance"
+require_bound_file_at tool.time "$expected_time"
+require_bound_file_at tool.ldd "$expected_ldd"
+require_exact compiler.c.version "$(first_line "$expected_cc" --version)"
+require_exact compiler.rust.version "$(first_line "$expected_rustc" --version)"
+expected_simple_version="$("$expected_simple" --version 2>&1)" || blocked "Simple compiler version probe failed"
+expected_simple_version="$(printf '%s' "$expected_simple_version" | tr '\t\r\n' '   ')"
+require_exact compiler.simple.version "$expected_simple_version"
+require_exact compiler.simple.provenance_schema "$(manifest_value schema "$expected_provenance")"
+require_exact compiler.simple.source_revision "$(manifest_value source_revision "$expected_provenance")"
+
+require_bound_file_at fixture "$receipt_dir/fixture.txt"
+require_bound_file_at raw.rows "$receipt_dir/io_parity_raw_rows.tsv"
+require_bound_file_at output.manifest "$receipt_dir/io_parity_outputs.tsv"
+require_bound_file_at compiler.simple.compile_log "$receipt_dir/simple_compile.log"
+require_bound_file_at compiler.simple.checksum_selftest_compile_log "$receipt_dir/mapped_checksum_selftest_compile.log"
+require_bound_file_at tool.cache_control "$receipt_dir/io_parity_cache_control"
+require_bound_file_at harness.runner "$ROOT/test/perf/io_parity/run_io_parity_benchmarks.shs"
+require_bound_file_at harness.admission "$ROOT/test/perf/io_parity/check_io_parity_admission.shs"
+require_bound_file_at source.c "$ROOT/test/perf/io_parity/io_parity_ref.c"
+require_bound_file_at source.rust "$ROOT/test/perf/io_parity/io_parity_ref.rs"
+require_bound_file_at source.simple "$ROOT/test/perf/io_parity/io_parity_simple.spl"
+require_bound_file_at source.mapped_checksum "$ROOT/test/perf/io_parity/mapped_checksum.spl"
+require_bound_file_at source.mapped_checksum_selftest "$ROOT/test/perf/io_parity/mapped_checksum_selftest.spl"
+require_bound_file_at source.ptr_raw "$ROOT/src/lib/nogc_sync_mut/ptr/raw.spl"
+require_bound_file_at source.cache_control "$ROOT/test/perf/io_parity/io_parity_cache_control.c"
+require_bound_file_at source.simple_runtime_manifest "$receipt_dir/simple_runtime_sources.tsv"
+for lang in c rust simple; do
+    require_bound_file_at "engine.$lang" "$receipt_dir/io_parity_$lang"
+    require_bound_file_at "engine.$lang.runtime_manifest" "$receipt_dir/io_parity_$lang.runtime.tsv"
+done
+require_bound_file_at engine.simple.checksum_selftest "$receipt_dir/mapped_checksum_selftest"
+require_bound_file_at checksum.selftest.output "$receipt_dir/mapped_checksum_selftest.out"
+
+# Engine identity is established by reproducing each build from checker-owned
+# compiler/source/flag anchors. Receipt-selected paths and pairwise-different
+# hashes are evidence only; they cannot authenticate a coordinated substitute.
+verification_work="$(mktemp -d "${TMPDIR:-/tmp}/io-parity-admission.XXXXXX")" ||
+    blocked "cannot create isolated engine verification directory"
+trap 'rm -rf "$verification_work"' EXIT INT TERM
+if ! "$expected_cc" -O3 -march=native -std=c11 \
+    "$ROOT/test/perf/io_parity/io_parity_ref.c" -o "$verification_work/io_parity_c" \
+    >"$verification_work/c-build.log" 2>&1; then
+    blocked "checker-owned C engine rebuild failed"
+fi
+if ! "$expected_cc" -O3 -march=native -std=c11 \
+    "$ROOT/test/perf/io_parity/io_parity_cache_control.c" -o "$verification_work/io_parity_cache_control" \
+    >"$verification_work/cache-control-build.log" 2>&1; then
+    blocked "checker-owned cache-control rebuild failed"
+fi
+if ! "$expected_rustc" -C opt-level=3 -C target-cpu=native \
+    "$ROOT/test/perf/io_parity/io_parity_ref.rs" -o "$verification_work/io_parity_rust" \
+    >"$verification_work/rust-build.log" 2>&1; then
+    blocked "checker-owned Rust engine rebuild failed"
+fi
+if ! env SIMPLE_NO_STUB_FALLBACK=1 "$expected_simple" native-build \
+    --source "$ROOT/src/lib" --source "$ROOT/test/perf/io_parity" \
+    --entry-closure --entry "$ROOT/test/perf/io_parity/io_parity_simple.spl" \
+    --runtime-bundle core-c-bootstrap --backend cranelift --cpu native \
+    --opt-level=aggressive --cache-dir "$verification_work/simple-native-cache" \
+    --output "$verification_work/io_parity_simple" \
+    >"$verification_work/simple-build.log" 2>&1; then
+    blocked "checker-owned Simple engine rebuild failed"
+fi
+if grep -Eiq 'runtime archive is STALE|Generating [0-9]+ stub functions|unresolved symbol preview|fabricated stub|stub fallback' \
+    "$verification_work/simple-build.log"; then
+    blocked "checker-owned Simple engine rebuild contains stub fallback evidence"
+fi
+if ! env SIMPLE_NO_STUB_FALLBACK=1 "$expected_simple" native-build \
+    --source "$ROOT/src/lib" --source "$ROOT/test/perf/io_parity" \
+    --entry-closure --entry "$ROOT/test/perf/io_parity/mapped_checksum_selftest.spl" \
+    --runtime-bundle core-c-bootstrap --backend cranelift --cpu native \
+    --opt-level=aggressive --cache-dir "$verification_work/simple-native-cache" \
+    --output "$verification_work/mapped_checksum_selftest" \
+    >"$verification_work/mapped-checksum-selftest-build.log" 2>&1; then
+    blocked "checker-owned mapped checksum self-test rebuild failed"
+fi
+if grep -Eiq 'runtime archive is STALE|Generating [0-9]+ stub functions|unresolved symbol preview|fabricated stub|stub fallback' \
+    "$verification_work/mapped-checksum-selftest-build.log"; then
+    blocked "checker-owned mapped checksum self-test rebuild contains stub fallback evidence"
+fi
+for lang in c rust simple; do
+    rebuilt_hash="$(sha256sum "$verification_work/io_parity_$lang" | awk '{print $1}')"
+    [[ "$rebuilt_hash" == "$(value_for "engine.$lang.sha256")" ]] ||
+        blocked "$lang engine is not the checker-reproduced source/compiler product"
+done
+[[ "$(sha256sum "$verification_work/io_parity_cache_control" | awk '{print $1}')" == \
+    "$(value_for tool.cache_control.sha256)" ]] ||
+    blocked "cache-control tool is not the checker-reproduced source/compiler product"
+[[ "$(sha256sum "$verification_work/mapped_checksum_selftest" | awk '{print $1}')" == \
+    "$(value_for engine.simple.checksum_selftest.sha256)" ]] ||
+    blocked "mapped checksum self-test is not the checker-reproduced source/compiler product"
+checksum_selftest_output="$verification_work/mapped_checksum_selftest.out"
+if ! env SIMPLE_NO_STUB_FALLBACK=1 "$verification_work/mapped_checksum_selftest" \
+    >"$checksum_selftest_output" 2>&1; then
+    blocked "checker-owned mapped checksum self-test failed"
+fi
+checksum_selftest_expected='[iobench-selftest] cases=144 scalar_calls=1073741824 packed_calls=134217728 ratio=8'
+[[ "$(cat "$checksum_selftest_output")" == "$checksum_selftest_expected" ]] ||
+    blocked "checker-owned mapped checksum self-test output mismatch"
+[[ "$(sha256sum "$checksum_selftest_output" | awk '{print $1}')" == \
+    "$(value_for checksum.selftest.output.sha256)" ]] ||
+    blocked "mapped checksum self-test retained output mismatch"
+
+verify_error_contract() {
+    local lang="$1"
+    local binary="$2"
+    local reason="$3"
+    local iterations="$4"
+    local case_name="$5"
+    local output="$verification_work/error-$lang-$reason.out"
+    local status
+    if env SIMPLE_NO_STUB_FALLBACK=1 IO_PARITY_ITERS="$iterations" IO_PARITY_CASE="$case_name" \
+        "$binary" >"$output" 2>&1; then
+        blocked "checker-owned negative error contract exited zero lang=$lang reason=$reason"
+    else
+        status=$?
+    fi
+    [[ "$status" -eq 2 ]] || blocked "checker-owned negative error status mismatch lang=$lang reason=$reason status=$status"
+    [[ "$(cat "$output")" == "[iobench-error] lang=$lang reason=$reason" ]] ||
+        blocked "checker-owned negative error marker mismatch lang=$lang reason=$reason"
+}
+
+for lang in c rust simple; do
+    verify_error_contract "$lang" "$verification_work/io_parity_$lang" invalid_iterations 0 mmap_direct
+    verify_error_contract "$lang" "$verification_work/io_parity_$lang" unknown_case 1 invalid
+done
+
+if grep -Eiq 'runtime archive is STALE|Generating [0-9]+ stub functions|unresolved symbol preview|fabricated stub|stub fallback' \
+    "$receipt_dir/simple_compile.log"; then
+    blocked "Simple compile log contains stub fallback evidence"
+fi
+
+c_engine_hash="$(value_for engine.c.sha256)"
+rust_engine_hash="$(value_for engine.rust.sha256)"
+simple_engine_hash="$(value_for engine.simple.sha256)"
+[[ "$c_engine_hash" != "$rust_engine_hash" && "$c_engine_hash" != "$simple_engine_hash" && \
+   "$rust_engine_hash" != "$simple_engine_hash" ]] || blocked "engine identities collapse to one artifact"
+
+validate_runtime_manifest() {
+    local lang="$1"
+    local manifest="$receipt_dir/io_parity_$lang.runtime.tsv"
+    local engine="$receipt_dir/io_parity_$lang"
+    local expected_first="engine_path=$engine engine_sha256=$(value_for "engine.$lang.sha256")"
+    [[ "$(sed -n '1p' "$manifest")" == "$expected_first" ]] || blocked "runtime manifest engine anchor mismatch: $lang"
+    awk 'NR > 1 && !($0 == "runtime_linkage=static-in-engine" || $0 ~ /^runtime_path=\/[^ ]+ runtime_sha256=[0-9a-f]{64}$/) { exit 1 }' \
+        "$manifest" || blocked "runtime manifest is malformed: $lang"
+    while IFS=' ' read -r path_field hash_field; do
+        [[ "$path_field" == runtime_path=* ]] || continue
+        local path="${path_field#runtime_path=}"
+        local expected_hash="${hash_field#runtime_sha256=}"
+        [[ -f "$path" && ! -L "$path" && "$(readlink -f -- "$path")" == "$path" ]] ||
+            blocked "runtime dependency is not canonical: $path"
+        [[ "$(sha256sum "$path" | awk '{print $1}')" == "$expected_hash" ]] ||
+            blocked "runtime dependency hash mismatch: $path"
+    done <"$manifest"
+}
+
+for lang in c rust simple; do
+    validate_runtime_manifest "$lang"
+done
+
+runtime_source_manifest="$receipt_dir/simple_runtime_sources.tsv"
+runtime_source_count=0
+while IFS=' ' read -r path_field hash_field; do
+    [[ "$path_field" == source_path=* && "$hash_field" == source_sha256=* ]] ||
+        blocked "runtime source manifest is malformed"
+    source_path="${path_field#source_path=}"
+    source_hash="${hash_field#source_sha256=}"
+    [[ "$source_path" == "$ROOT/src/runtime/"* && -f "$source_path" && ! -L "$source_path" && \
+        "$(readlink -f -- "$source_path")" == "$source_path" ]] || blocked "runtime source is not repo-anchored: $source_path"
+    [[ "$(sha256sum "$source_path" | awk '{print $1}')" == "$source_hash" ]] || blocked "runtime source hash mismatch: $source_path"
+    runtime_source_count=$((runtime_source_count + 1))
+done <"$runtime_source_manifest"
+[[ "$runtime_source_count" -gt 0 ]] || blocked "runtime source manifest is empty"
+
+fixture_bytes="$(require_positive_uint fixture.bytes)"
+raw_rows="$(value_for raw.rows.path)"
+raw_count="$(require_positive_uint raw.rows.count)"
+[[ "$raw_count" -eq 84 ]] || blocked "raw row count must be exactly 84 for 7x2x2x3 samples"
+
+awk -F '\t' -v fixture_bytes="$fixture_bytes" '
+BEGIN {
+    engine[0] = "c"; engine[1] = "rust"; engine[2] = "simple"
+    class[0] = "cold"; class[1] = "warm"
+    case_name[0] = "mmap_direct"; case_name[1] = "append_at"
+    header = "sequence\tsample\tcache_class\tlang\tcase\tbytes\titers\tmicros\tchecksum\tmax_rss_kib"
+}
+NR == 1 {
+    if ($0 != header) exit 10
+    next
+}
+{
+    row = NR - 2
+    group = int(row / 3)
+    position = row % 3
+    sample = int(group / 4)
+    within = group % 4
+    class_index = int(within / 2)
+    case_index = within % 2
+    rotation = (sample + class_index + case_index) % 3
+    expected_engine = engine[(rotation + position) % 3]
+    if ($1 != row || $2 != sample || $3 != class[class_index] ||
+        $4 != expected_engine || $5 != case_name[case_index]) exit 11
+    for (column = 6; column <= 10; column++) {
+        if ($column !~ /^[0-9]+$/ || $column + 0 <= 0) exit 12
+    }
+    expected_bytes = ($5 == "append_at") ? 4096 * $7 : fixture_bytes * $7
+    if ($6 != expected_bytes) exit 13
+    parity_key = $2 SUBSEP $3 SUBSEP $5
+    if (!(parity_key in bytes)) {
+        bytes[parity_key] = $6; iters[parity_key] = $7; checksum[parity_key] = $9
+    } else if (bytes[parity_key] != $6 || iters[parity_key] != $7 || checksum[parity_key] != $9) {
+        exit 14
+    }
+    combination = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5
+    if (++seen[combination] != 1) exit 15
+    rows += 1
+}
+END {
+    if (rows != 84) exit 16
+}
+' "$raw_rows" || blocked "raw rows violate order, interleave, positivity, byte-touch, or parity semantics"
+
+output_manifest="$(value_for output.manifest.path)"
+output_count="$(require_positive_uint output.manifest.count)"
+[[ "$output_count" -eq 42 ]] || blocked "output artifact count must be exactly 42 for append rows"
+awk -F '\t' -v raw="$raw_rows" -v output_dir="$receipt_dir/outputs" '
+BEGIN {
+    header = "sequence\tsample\tcache_class\tlang\tcase\tpath\tbytes\tchecksum\tsha256"
+    while ((getline line < raw) > 0) {
+        if (++raw_line == 1) continue
+        split(line, field, "\t")
+        if (field[5] == "append_at") {
+            raw_bytes[field[1]] = field[6]
+            raw_checksum[field[1]] = field[9]
+            raw_sample[field[1]] = field[2]
+            raw_class[field[1]] = field[3]
+            raw_lang[field[1]] = field[4]
+        }
+    }
+    close(raw)
+}
+NR == 1 { if ($0 != header) exit 20; next }
+{
+    if ($1 !~ /^[0-9]+$/ || !($1 in raw_bytes)) exit 21
+    expected_path = output_dir "/sequence_" $1 "_sample_" $2 "_" $3 "_" $4 "_append_at.bin"
+    if ($2 != raw_sample[$1] || $3 != raw_class[$1] || $4 != raw_lang[$1] ||
+        $5 != "append_at" || $6 != expected_path || $7 != raw_bytes[$1] || $8 != raw_checksum[$1] ||
+        $9 !~ /^[0-9a-f]{64}$/ || ++seen[$1] != 1) exit 22
+    parity_key = $2 SUBSEP $3
+    if (!(parity_key in parity_hash)) parity_hash[parity_key] = $9
+    else if (parity_hash[parity_key] != $9) exit 23
+    rows += 1
+}
+END { if (rows != 42) exit 24 }
+' "$output_manifest" || blocked "output manifest violates raw-row binding or byte-identical parity"
+
+while IFS=$'\t' read -r sequence sample cache_class lang case_name output_path bytes checksum output_sha; do
+    [[ "$sequence" == sequence ]] && continue
+    [[ -f "$output_path" && ! -L "$output_path" && "$(readlink -f -- "$output_path")" == "$output_path" ]] ||
+        blocked "output artifact is absent or non-canonical: $output_path"
+    [[ "$(wc -c <"$output_path" | tr -d '[:space:]')" == "$bytes" ]] || blocked "output artifact byte count mismatch: $output_path"
+    [[ "$(sha256sum "$output_path" | awk '{print $1}')" == "$output_sha" ]] || blocked "output artifact hash mismatch: $output_path"
+    actual_checksum="$(od -An -tu1 -v "$output_path" | awk '{ for (i = 1; i <= NF; i++) sum += $i } END { print sum + 0 }')"
+    [[ "$actual_checksum" == "$checksum" ]] || blocked "output artifact checksum mismatch: $output_path"
+done <"$output_manifest"
+actual_output_files="$(find "$receipt_dir/outputs" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
+[[ "$actual_output_files" -eq 42 ]] || blocked "retained output directory must contain exactly 42 artifacts"
+
+percentile_for() {
+    local case_name="$1"
+    local cache_class="$2"
+    local lang="$3"
+    local column="$4"
+    local percentile="$5"
+    awk -F '\t' -v c="$case_name" -v k="$cache_class" -v l="$lang" -v col="$column" \
+        'NR > 1 && $3 == k && $4 == l && $5 == c { print $col }' "$raw_rows" | \
+        LC_ALL=C sort -n | awk -v p="$percentile" '
+            { values[NR] = $1 }
+            END {
+                if (NR != 7) exit 1
+                rank = int(NR * p)
+                if (rank < NR * p) rank += 1
+                print values[rank]
+            }'
+}
+
+max_for() {
+    local case_name="$1"
+    local cache_class="$2"
+    local lang="$3"
+    local column="$4"
+    awk -F '\t' -v c="$case_name" -v k="$cache_class" -v l="$lang" -v col="$column" '
+        NR > 1 && $3 == k && $4 == l && $5 == c { if ($col > max) max = $col; count += 1 }
+        END { if (count != 7) exit 1; print max }
+    ' "$raw_rows"
+}
+
+throughput_mib_per_second() {
+    local bytes="$1"
+    local micros="$2"
+    awk -v bytes="$bytes" -v micros="$micros" \
+        'BEGIN { if (bytes <= 0 || micros <= 0) exit 1; printf "%.6f", bytes * 1000000 / (1024 * 1024 * micros) }'
+}
+
+for case_name in mmap_direct append_at; do
+    for cache_class in cold warm; do
+        for lang in c rust simple; do
+            require_exact "case.$case_name.$cache_class.$lang.samples" 7
+            require_exact "case.$case_name.$cache_class.$lang.p50_micros" "$(percentile_for "$case_name" "$cache_class" "$lang" 8 0.50)"
+            require_exact "case.$case_name.$cache_class.$lang.p95_micros" "$(percentile_for "$case_name" "$cache_class" "$lang" 8 0.95)"
+            p50_micros="$(percentile_for "$case_name" "$cache_class" "$lang" 8 0.50)"
+            sample_bytes="$(percentile_for "$case_name" "$cache_class" "$lang" 6 0.50)"
+            require_exact "case.$case_name.$cache_class.$lang.p50_mib_per_second" \
+                "$(throughput_mib_per_second "$sample_bytes" "$p50_micros")"
+            max_rss="$(max_for "$case_name" "$cache_class" "$lang" 10)"
+            require_exact "case.$case_name.$cache_class.$lang.max_rss_kib" "$max_rss"
+            [[ "$max_rss" -le 524288 ]] || blocked "RSS budget miss case=$case_name class=$cache_class lang=$lang"
+        done
+        simple_p50="$(percentile_for "$case_name" "$cache_class" simple 8 0.50)"
+        for reference in c rust; do
+            reference_p50="$(percentile_for "$case_name" "$cache_class" "$reference" 8 0.50)"
+            expected_ratio="$(awk -v reference="$reference_p50" -v simple="$simple_p50" 'BEGIN { printf "%.6f", reference / simple }')"
+            require_exact "case.$case_name.$cache_class.simple_vs_$reference.p50_ratio" "$expected_ratio"
+            minimum="$(value_for "budget.$case_name.simple_vs_$reference.minimum")"
+            awk -v ratio="$expected_ratio" -v minimum="$minimum" 'BEGIN { exit !(ratio + 0 >= minimum + 0) }' ||
+                blocked "performance budget miss case=$case_name class=$cache_class reference=$reference"
+        done
+        require_exact "case.$case_name.$cache_class.performance_admission" PASS
+    done
+done
+
+if [[ "$selftest_mode" == 1 ]]; then
+    echo "STATUS: SELFTEST VERIFIED I/O parity admission receipt=$RECEIPT" >&2
+    exit 77
+fi
+echo "STATUS: PASS I/O parity admission receipt=$RECEIPT"

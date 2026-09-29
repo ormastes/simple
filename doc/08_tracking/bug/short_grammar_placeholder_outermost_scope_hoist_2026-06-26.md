@@ -1,5 +1,10 @@
 # Bug: `_1` placeholder lambda hoists to the outermost expression in nested calls
 
+## Re-verified OPEN 2026-09-13 — still reproduces on the Windows Rust seed
+- **measured** (Windows Rust seed v1.0.0-rc.1, `bin/simple run`): `wrap(find_gt(arr, twice(_1) == 4))` printed `<closure@0x...>` instead of a value — the placeholder lambda swallowed the whole `wrap(...)` expression, exactly the hoisting this entry describes.
+- **measured**: both call sites (matching and non-matching predicate) printed closures, so the failure is unconditional, not value-dependent.
+- **inferred**: left OPEN — the desugaring lives in the compiler front end (`src/compiler/**` / `src/compiler_rust/**`), both off-limits this session because a bootstrap is running concurrently.
+
 - **ID:** short_grammar_placeholder_outermost_scope_hoist_2026-06-26
 - **Found:** 2026-06-26
 - **Severity:** P2 — silently wrong results; any `_N` placeholder used inside an inner call argument captures the whole surrounding expression

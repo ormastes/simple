@@ -1,0 +1,170 @@
+#version 450
+// Device glass material kernel — the exact integer twin of
+// engine2d_draw_ir_glass_material_pixels() in
+// src/lib/gc_async_mut/gpu/engine2d/draw_ir_glass_material.spl.
+//
+// binding 0 = framebuffer uint[], index = y * fb_w + x (READ ONLY here)
+// binding 1 = output uint[], rw * rh, index = py * rw + px
+// push constants (60 bytes): fb_w, fb_h, rx, ry, rw, rh, corner_radius,
+//                            blur_radius, saturation_milli,
+//                            surface_alpha_milli, surface_color,
+//                            gradient_from, gradient_to,
+//                            gradient_enabled, gradient_layered
+// dispatch: 2D, ceil(rw/16) x ceil(rh/16) workgroups of 16x16
+//
+// Every arithmetic step is integer and mirrors the CPU reference operation for
+// operation, including the DOUBLE truncation of the separable box blur (each
+// row is averaged and packed to 8 bits first, then the row averages are
+// averaged): a single 2D mean would differ by one ulp and break pixel parity.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) buffer Framebuffer { uint data[]; } fb;
+layout(set = 0, binding = 1) buffer GlassOut { uint data[]; } dst;
+
+layout(push_constant) uniform PushConstants {
+    int fb_w;
+    int fb_h;
+    int rx;
+    int ry;
+    int rw;
+    int rh;
+    int corner_radius;
+    int blur_radius;
+    int saturation_milli;
+    int surface_alpha_milli;
+    uint surface_color;
+    uint gradient_from;
+    uint gradient_to;
+    int gradient_enabled;
+    int gradient_layered;
+} pc;
+
+int clampi(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+int chan_r(uint p) { return int((p >> 16u) & 255u); }
+int chan_g(uint p) { return int((p >> 8u) & 255u); }
+int chan_b(uint p) { return int(p & 255u); }
+int chan_a(uint p) { return int((p >> 24u) & 255u); }
+
+// Twin of color.spl rgba(): clamps every component, ARGB layout.
+uint pack_rgba(int r, int g, int b, int a) {
+    return (uint(clampi(a, 0, 255)) << 24u)
+         | (uint(clampi(r, 0, 255)) << 16u)
+         | (uint(clampi(g, 0, 255)) << 8u)
+         | uint(clampi(b, 0, 255));
+}
+
+// Twin of color.spl blend(): src-over on straight alpha, composited in
+// premultiplied space and unpremultiplied by the resulting out_a.
+uint blend_over(uint s, uint d) {
+    int sa = chan_a(s);
+    if (sa == 255) return s;
+    if (sa == 0) return d;
+    int da = chan_a(d);
+    int inv_a = 255 - sa;
+    int dst_weight = (da * inv_a) / 255;
+    int out_a = sa + dst_weight;
+    int out_r = (chan_r(s) * sa + chan_r(d) * dst_weight) / out_a;
+    int out_g = (chan_g(s) * sa + chan_g(d) * dst_weight) / out_a;
+    int out_b = (chan_b(s) * sa + chan_b(d) * dst_weight) / out_a;
+    return pack_rgba(out_r, out_g, out_b, out_a);
+}
+
+// Twin of _glass_inside_rounded_rect().
+bool inside_rounded(int px, int py) {
+    int r = pc.corner_radius;
+    if (r <= 0) return true;
+    if (px >= r && px < pc.rw - r) return true;
+    if (py >= r && py < pc.rh - r) return true;
+    int cx = (px < r) ? r : (pc.rw - r - 1);
+    int cy = (py < r) ? r : (pc.rh - r - 1);
+    int dx = px - cx;
+    int dy = py - cy;
+    return dx * dx + dy * dy <= r * r;
+}
+
+// Twin of _glass_lerp_channel().
+int lerp_channel(int from_value, int to_value, int row, int den) {
+    if (den <= 0) return from_value;
+    return (from_value * (den - row) + to_value * row) / den;
+}
+
+void main() {
+    int px = int(gl_GlobalInvocationID.x);
+    int py = int(gl_GlobalInvocationID.y);
+    if (px >= pc.rw || py >= pc.rh) return;
+
+    int ox = pc.rx + px;
+    int oy = pc.ry + py;
+    uint original = fb.data[uint(oy * pc.fb_w + ox)];
+    uint result = original;
+
+    if (inside_rounded(px, py)) {
+        int r = pc.blur_radius;
+        int vr = 0; int vg = 0; int vb = 0; int va = 0; int vs = 0;
+        for (int off = -r; off <= r; ++off) {
+            int fy = pc.ry + py + off;
+            if (fy < 0 || fy >= pc.fb_h) continue;
+            int hr = 0; int hg = 0; int hb = 0; int ha = 0; int hs = 0;
+            for (int dxo = -r; dxo <= r; ++dxo) {
+                int fx = pc.rx + px + dxo;
+                if (fx < 0 || fx >= pc.fb_w) continue;
+                uint p = fb.data[uint(fy * pc.fb_w + fx)];
+                hr += chan_r(p); hg += chan_g(p);
+                hb += chan_b(p); ha += chan_a(p);
+                hs += 1;
+            }
+            // The host packs this row average into a u32 before the vertical
+            // pass reads it back, so the truncation happens here too.
+            uint row_avg = 0u;
+            if (hs > 0) row_avg = pack_rgba(hr / hs, hg / hs, hb / hs, ha / hs);
+            vr += chan_r(row_avg); vg += chan_g(row_avg);
+            vb += chan_b(row_avg); va += chan_a(row_avg);
+            vs += 1;
+        }
+        uint blurred = 0u;
+        if (vs > 0) blurred = pack_rgba(vr / vs, vg / vs, vb / vs, va / vs);
+
+        uint saturated = blurred;
+        int sat = clampi(pc.saturation_milli, 0, 3000);
+        if (sat != 1000) {
+            int sr = chan_r(blurred);
+            int sg = chan_g(blurred);
+            int sb = chan_b(blurred);
+            int lum = (sr * 54 + sg * 183 + sb * 19 + 128) / 256;
+            saturated = pack_rgba(
+                clampi(lum + (sr - lum) * sat / 1000, 0, 255),
+                clampi(lum + (sg - lum) * sat / 1000, 0, 255),
+                clampi(lum + (sb - lum) * sat / 1000, 0, 255),
+                chan_a(blurred));
+        }
+
+        int surface_alpha = clampi(
+            255 * clampi(pc.surface_alpha_milli, 0, 1000) / 1000, 0, 255);
+        uint tint = pack_rgba(chan_r(pc.surface_color), chan_g(pc.surface_color),
+                              chan_b(pc.surface_color), surface_alpha);
+        uint surface = blend_over(tint, saturated);
+
+        if (pc.gradient_enabled != 0) {
+            int den = pc.rh - 1;
+            int grad_alpha = (pc.gradient_layered != 0)
+                ? lerp_channel(chan_a(pc.gradient_from), chan_a(pc.gradient_to), py, den)
+                : surface_alpha;
+            uint grad_tint = pack_rgba(
+                lerp_channel(chan_r(pc.gradient_from), chan_r(pc.gradient_to), py, den),
+                lerp_channel(chan_g(pc.gradient_from), chan_g(pc.gradient_to), py, den),
+                lerp_channel(chan_b(pc.gradient_from), chan_b(pc.gradient_to), py, den),
+                grad_alpha);
+            uint grad_dst = (pc.gradient_layered != 0) ? surface : saturated;
+            result = blend_over(grad_tint, grad_dst);
+        } else {
+            result = surface;
+        }
+    }
+
+    dst.data[uint(py * pc.rw + px)] = result;
+}

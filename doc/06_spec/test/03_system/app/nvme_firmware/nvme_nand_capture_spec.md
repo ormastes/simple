@@ -54,25 +54,15 @@ NVMe NAND data-change capture — emulated NAND write/read + FTL block migration
 
 NVMe NAND data-change capture — emulated NAND write/read + FTL block migration.
 
-The pure-Simple NVMe firmware emulator tracks NAND state as ONFI-style page
-words (four `u32` words per page, matching the ONFI NAND addressing the real
-controller uses). Two properties must hold for a host to trust the device:
+The pure-Simple NVMe firmware emulator captures NAND-level data changes: a host
+write drives the emulated ONFI NAND words from zeros to data and the read path
+returns exactly those bytes, while the FTL migrates a logical block across
+physical NAND blocks (preserving the data and erasing the victim).
 
-- **Write/read fidelity.** A host write drives a page's ONFI words from the
-  erased all-zero state to the written pattern, and a read of that LBA must
-  return exactly those words back — proving the data change is captured
-  end-to-end at the NAND level, not just acknowledged.
-- **FTL block migration.** The Flash Translation Layer relocates a logical
-  block (LBA) across two physical-block phases — the **source phase** (the
-  block it lived in before migration) and the **destination phase** (the
-  block it lives in after) — while preserving the stored data and erasing the
-  vacated victim block.
-
-The capture demos live under `examples/` and cannot be bare-imported from
-`test/` (cross-example import is unsupported), so this scenario drives them
-through the real CLI (`bin/simple run`) as subprocesses and asserts the
-operator-visible NAND-level evidence — exactly what the generated manual
-shows. Run:
+The capture demos live under examples/ and cannot be bare-imported from test/
+(cross-example import is unsupported), so this scenario drives them through the
+real CLI (`bin/simple run`) as subprocesses and asserts the operator-visible
+NAND-level evidence — exactly what the generated manual shows. Run:
 `bin/simple test test/03_system/app/nvme_firmware/nvme_nand_capture_spec.spl`.
 
 ## Scenarios
@@ -89,7 +79,6 @@ shows. Run:
 - Reading the LBA back returns exactly the written NAND words
 - The demo confirms the NAND data change was captured
 - The end-to-end capture scenario reports overall PASS
--  expect no fail marker
 
 
 <details>
@@ -100,7 +89,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Run the NAND data-change capture demo through the CLI")
-val (out, err, code) = run_nand_write_read_demo()
+val (out, err, code) = _run("examples/09_embedded/simpleos_nvme_fw/emu/nvme_nand_capture_main.spl")
 expect(code).to_equal(0)
 
 step("Before the write, the target NAND page words are all zero")
@@ -119,7 +108,6 @@ expect(out).to_contain("NAND DATA CHANGE CAPTURED")
 
 step("The end-to-end capture scenario reports overall PASS")
 expect(out).to_contain("NVME NAND CAPTURE PASS")
-_expect_no_fail_marker(out, "NAND data-change capture demo")
 ```
 
 </details>
@@ -131,11 +119,10 @@ _expect_no_fail_marker(out, "NAND data-change capture demo")
 - Run the NAND FTL block-migration capture demo through the CLI
    - Expected: code equals `0`
 - Before migration, the LBA lives in its original physical NAND block (source phase)
-   - Expected: capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"]) is true
+- capture bit table
 - After migration, the LBA has moved to a different physical NAND block (destination phase)
 - The demo confirms the FTL block migration was captured
 - The end-to-end migration scenario reports overall PASS
--  expect no fail marker
 
 
 <details>
@@ -146,15 +133,14 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Run the NAND FTL block-migration capture demo through the CLI")
-val (out, err, code) = run_ftl_migration_demo()
+val (out, err, code) = _run("examples/09_embedded/simpleos_nvme_fw/fw/nand_migration_capture_main.spl")
 expect(code).to_equal(0)
 
-step("Before migration, the LBA lives in its original physical NAND block (source phase)")
+step("Before migration, the LBA lives in its original physical NAND block")
 expect(out).to_contain("MIGRATE-BEFORE lba=100 block=0 nand=171")
-expect(capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])).to_equal(true)
-expect(capture_text("ftl_lba100_before_migration")).to_contain("bytes: 0xab")
+capture_bit_table("ftl_lba100_before_migration", [171], "bits8", ["nand_block"])
 
-step("After migration, the LBA has moved to a different physical NAND block (destination phase)")
+step("After migration, the LBA has moved to a different physical NAND block")
 expect(out).to_contain("MIGRATE-AFTER lba=100 block=")
 
 step("The demo confirms the FTL block migration was captured")
@@ -162,7 +148,6 @@ expect(out).to_contain("NAND FTL BLOCK MIGRATION CAPTURED")
 
 step("The end-to-end migration scenario reports overall PASS")
 expect(out).to_contain("NAND MIGRATION CAPTURE PASS")
-_expect_no_fail_marker(out, "NAND migration capture demo")
 ```
 
 </details>

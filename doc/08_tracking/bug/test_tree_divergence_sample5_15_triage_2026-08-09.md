@@ -1,4 +1,8 @@
 # Test-tree divergence: sample 5 (15 pairs) + Part A old pending items (2026-08-09)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Fifth sampling pass against `scripts/check/test_tree_divergence_baseline.txt`,
 continuing the reconciliation of `test/01_unit` (canonical) vs `test/unit`
@@ -109,3 +113,4 @@ assertion.
 
 Not committed/pushed — left for the user to review and land via git plumbing,
 per instructions.
+

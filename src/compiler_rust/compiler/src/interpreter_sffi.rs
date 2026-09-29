@@ -586,72 +586,25 @@ thread_local! {
     static UNBACKED_EXTERN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Opt-in strict mode: treat a call to an unbacked extern as fatal instead of
-/// substituting nil.
+/// Refuse a call to an extern that no implementation backs.
 ///
-/// Default OFF. The nil substitution below is a known silent-wrong-value
-/// source (an unbacked extern is indistinguishable from one that legitimately
-/// returned 0/nil), but thousands of declared externs are unbacked today, so
-/// promoting this to fatal by default would break callers that currently read
-/// the nil as "feature unavailable". This flag exists so a lane can measure the
-/// real blast radius before that promotion is considered.
-fn strict_extern_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_EXTERN").as_deref() == Ok("1"))
-}
-
-/// Suppress the default warn-only diagnostic without changing any value.
-fn extern_warn_silenced() -> bool {
-    static QUIET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *QUIET.get_or_init(|| std::env::var("SIMPLE_QUIET_EXTERN_WARN").as_deref() == Ok("1"))
-}
-
-/// Report a call to an extern that no implementation backs, once per distinct
-/// name per process.
-///
-/// Warn-only by default: the call still returns nil exactly as before, so this
-/// changes no program's value or exit status. It only makes the substitution
-/// *visible*, which is the whole defect — a fabricated nil currently reads as a
-/// legitimate 0. Under `SIMPLE_STRICT_EXTERN=1` the same condition aborts.
-fn report_unbacked_extern(name: &str, argc: usize) {
-    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
-    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-    let first_time = match seen.lock() {
-        Ok(mut set) => set.insert(name.to_string()),
-        Err(_) => true,
-    };
-
-    if strict_extern_enabled() {
-        // Deliberately NOT `abort()`: aborting raises SIGABRT, so the shell
-        // reports "dumped core" (exit 134), writes a core file, and trips
-        // crash-detection tooling -- none of which is true here. This is a
-        // clean, fully-diagnosed refusal, so it must look like one: flush the
-        // diagnostic ourselves (process::exit does not run destructors and
-        // will not flush a buffered writer) and exit 1, matching the plain
-        // interpreter lane's `error: semantic: unknown extern function: ...`
-        // exit status.
-        use std::io::Write;
-        let mut err = std::io::stderr().lock();
-        let _ = writeln!(
-            err,
-            "error: extern `{name}` (argc={argc}) is declared in Simple but backed by no \
-             implementation; SIMPLE_STRICT_EXTERN=1 refuses to substitute nil for it."
-        );
-        let _ = err.flush();
-        drop(err);
-        let _ = std::io::stdout().flush();
-        std::process::exit(1);
-    }
-
-    if first_time && !extern_warn_silenced() {
-        eprintln!(
-            "warning: extern `{name}` (argc={argc}) is declared but backed by no \
-             implementation -- the call returned nil, which is indistinguishable from a \
-             real 0/false/empty result. Implement it, fix the spelling, or delete the \
-             declaration. Set SIMPLE_STRICT_EXTERN=1 to make this fatal, or \
-             SIMPLE_QUIET_EXTERN_WARN=1 to silence this warning."
-        );
-    }
+/// Returning a fabricated nil here made the JIT lane exit zero with a wrong
+/// value. An extern declaration is a promise that an implementation exists;
+/// optional capabilities must expose that absence through a real, implemented
+/// provider instead of relying on an unresolved symbol. Exit cleanly rather
+/// than aborting so crash tooling does not misclassify this diagnosed error.
+fn report_unbacked_extern(name: &str, argc: usize) -> ! {
+    use std::io::Write;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "error: extern `{name}` (argc={argc}) is declared in Simple but backed by no \
+         implementation; refusing to substitute nil for an unresolved extern."
+    );
+    let _ = err.flush();
+    drop(err);
+    let _ = std::io::stdout().flush();
+    std::process::exit(1);
 }
 
 /// Internal handler for rt_interp_call.
@@ -838,16 +791,15 @@ unsafe extern "C" fn interp_call_handler(
             //
             // Shape 2 is the MAJORITY of this tree's externs (measured
             // 2026-08-18: 3,206 of 3,952 distinct declared symbols are
-            // `rt_`/`spl_`-prefixed), so until this branch existed both the
-            // default warning AND `SIMPLE_STRICT_EXTERN=1` were silently INERT
-            // for ~81% of the declaration surface. Measured before the fix:
+            // `rt_`/`spl_`-prefixed), so both shapes must reach the same fatal
+            // refusal rather than silently substituting nil. Measured before
+            // the fix:
             //
             //   extern fn rt_lane_absent_probe_xyz(x: i64) -> i64
-            //   $ SIMPLE_STRICT_EXTERN=1 bin/simple run probe.spl
+            //   $ bin/simple run probe.spl
             //   got 0        # rc=0, no warning, no refusal
             //
-            // versus the un-prefixed sibling in the same shape, which exited 1
-            // with the refusal diagnostic. Detecting shape 2 by its exact
+            // Detecting shape 2 by its exact
             // message is deliberate: `CompileError` carries no dedicated
             // "unbacked extern" variant, and E1002/UNDEFINED_FUNCTION is also
             // raised for ordinary undefined calls, so the code alone would
@@ -978,6 +930,30 @@ mod tests {
             interp_error_diag_enabled(),
             std::env::var_os("SIMPLE_BOOTSTRAP_DIAG").is_some()
         );
+    }
+
+    #[test]
+    fn unbacked_extern_exits_nonzero_instead_of_returning_a_fabricated_value() {
+        let reporter: fn(&str, usize) -> ! = report_unbacked_extern;
+        const CHILD_ENV: &str = "SIMPLE_TEST_UNBACKED_EXTERN_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            reporter("rt_missing_regression_probe", 2);
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "interpreter_sffi::tests::unbacked_extern_exits_nonzero_instead_of_returning_a_fabricated_value",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("run unbacked-extern child");
+
+        assert_eq!(output.status.code(), Some(1), "child output: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("rt_missing_regression_probe"), "stderr: {stderr}");
+        assert!(stderr.contains("refusing to substitute nil"), "stderr: {stderr}");
     }
 
     #[test]

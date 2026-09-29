@@ -1,4 +1,8 @@
 # Native OS window resize ignored; compositor keeps stale fixed-size buffer
+## Obsolete 2026-09-16 — referenced path(s) gone, e.g. src/os/hosted/hosted_entry.spl:108-151
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass. Kept for history;
+the subject is removed, superseded, or duplicated elsewhere in the ledger.
 
 ## Status
 Open.
@@ -20,3 +24,4 @@ Drag-resize the SimpleOS Shared Hosted WM window at OS level → compositor keep
 
 ## Next Step
 Handle EVENT_WINDOW_RESIZED; allocate new buffer and notify compositor of size change.
+

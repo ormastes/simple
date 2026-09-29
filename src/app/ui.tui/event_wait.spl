@@ -1,0 +1,67 @@
+# Async TUI event wait
+#
+# The run loop used to drain `try_recv()` and then `thread_sleep(16)` — a
+# ~60 fps periodic wake that fired even when nothing happened. This module owns
+# the replacement: one BLOCKING wait on the event channel followed by a
+# non-blocking drain, so the consumer wakes once per delivered event batch and
+# never on a timer.
+#
+# No deadline is needed here. The file watcher is a separate producer thread
+# that already self-paces on its own 500 ms content check and pushes
+# `UIEvent.FileChanged`; the consumer therefore only has to wait for the
+# channel. `Channel` exposes no `recv_timeout` facade
+# (`src/lib/nogc_sync_mut/concurrent/channel.spl` — its header states "No
+# timeout receive"), and this module deliberately does not add one.
+#
+# Wake accounting: `Channel.recv()` is implemented over `recv_timeout(30s)`
+# (`src/compiler_rust/runtime/src/value/channels.rs:124`), so a genuinely idle
+# consumer still wakes about once every 30 s. That wake is COUNTED by the
+# counter below and reported, never claimed to be zero (NFR-UI-SLIM-005).
+#
+# The counter is module state read and reset through the two free functions
+# below, the same shape as `screen_row_copy_count` in `app.ui.tui.screen`. It
+# never affects delivery.
+
+use std.nogc_async_mut.concurrent.channel.{Channel}
+use common.ui.widget.{UIEvent}
+
+var _event_wait_wake_count = 0
+
+fn event_wait_wake_count() -> i32:
+    """Number of waits that returned since the last reset."""
+    return _event_wait_wake_count
+
+fn event_wait_wake_reset() -> i32:
+    """Reset the wake counter and return the value it had."""
+    val prev = _event_wait_wake_count
+    _event_wait_wake_count = 0
+    return prev
+
+fn collect_event_batch(channel: Channel) -> [UIEvent]:
+    """Block until one event is admitted, then drain everything already queued.
+
+    Returns the events in FIFO order. An empty result means the wait returned
+    without an event: either the channel was closed (`close()` drops the
+    sender, which wakes a blocked receiver at once) or the runtime's 30 s
+    receive cap elapsed while the channel was still open. Callers distinguish
+    the two with `channel.is_closed()`.
+
+    Counts exactly one wake per call.
+    """
+    _event_wait_wake_count = _event_wait_wake_count + 1
+    var batch: [UIEvent] = []
+
+    val first = channel.recv()
+    if first == nil:
+        return batch
+
+    val first_event: UIEvent = first
+    batch = batch.push(first_event)
+
+    var pending = channel.try_recv()
+    while pending != nil:
+        val next_event: UIEvent = pending
+        batch = batch.push(next_event)
+        pending = channel.try_recv()
+
+    return batch

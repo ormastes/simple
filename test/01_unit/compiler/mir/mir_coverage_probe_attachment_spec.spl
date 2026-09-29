@@ -1,0 +1,159 @@
+use std.spec
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_coverage.{MirCoverageModeV1, MirCoverageSiteKindV1,
+    MirCoverageSourceV1, MirCoverageSiteKeyV1, MirCoverageConditionSiteV1,
+    MirCoverageCatalogV1, mir_coverage_finalize_v1}
+use compiler.mir.mir_coverage_probe_plan.{MirCoverageBooleanOperandV1,
+    MirCoverageProvisionalDecisionProbeV1, MirCoverageProvisionalConditionProbeV1,
+    MirCoverageProbePlanV1, mir_coverage_resolve_probe_plan_v1}
+use compiler.mir.mir_coverage_probe_attachment.{mir_coverage_attach_probe_plan_v1,
+    mir_coverage_probe_attachment_publication_guard_v1}
+use compiler.mir.mir_instructions.{BlockId, LocalId, LocalKind, MirBlock,
+    MirConstValue, MirFunction, MirInst, MirInstKind, MirLocal, MirModule,
+    MirOperand, MirOperandKind, MirSignature, MirTerminator, MirType}
+
+fn attachment_site(kind: MirCoverageSiteKindV1, start: i64) -> MirCoverageSiteKeyV1:
+    MirCoverageSiteKeyV1(
+        "src/attachment.spl", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "attachment", start, start + 2, 7, start, kind, 0,
+        "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+
+fn attachment_catalog() -> Result<MirCoverageCatalogV1, text>:
+    val decision = attachment_site(MirCoverageSiteKindV1.IfDecision, 1)
+    val condition = attachment_site(MirCoverageSiteKindV1.AndCondition, 2)
+    mir_coverage_finalize_v1(MirCoverageModeV1.DecisionsAndConditions,
+        [MirCoverageSourceV1("src/attachment.spl",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "abc")], [decision], [MirCoverageConditionSiteV1(decision, condition)])
+
+fn attachment_plan(catalog: MirCoverageCatalogV1) -> Result<MirCoverageProbePlanV1, text>:
+    val decision = catalog.decisions[0].site
+    val condition = catalog.conditions[0].site
+    mir_coverage_resolve_probe_plan_v1(catalog,
+        [MirCoverageProvisionalDecisionProbeV1(decision,
+            MirCoverageBooleanOperandV1.Local(0))],
+        [MirCoverageProvisionalConditionProbeV1(decision, condition,
+            MirCoverageBooleanOperandV1.Literal(true))])
+
+fn attachment_span() -> Span:
+    Span(start: 1, end: 2, line: 7, col: 1, file: "attachment.spl", length: 1)
+
+fn attachment_module(catalog: MirCoverageCatalogV1, plan: MirCoverageProbePlanV1, duplicate: bool = false,
+    wrong_path: bool = false, wrong_local_type: bool = false,
+    wrong_function_name: bool = false, duplicate_function_name: bool = false) -> MirModule:
+    val decision = plan.decisions[0]
+    val condition = plan.conditions[0]
+    val path = if wrong_path: "src/wrong.spl" else: catalog.decisions[0].site.authored_path
+    val decision_probe = MirInst(kind: MirInstKind.DecisionProbe(
+        decision.runtime_id, decision.semantic_id,
+        MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0))), path,
+        catalog.decisions[0].site.line, catalog.decisions[0].site.column), span: nil)
+    val condition_probe = MirInst(kind: MirInstKind.ConditionProbe(
+        condition.runtime_id, condition.semantic_id, condition.decision_runtime_id,
+        condition.decision_semantic_id,
+        MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(true), MirType.bool())),
+        catalog.conditions[0].site.authored_path, catalog.conditions[0].site.line,
+        catalog.conditions[0].site.column), span: nil)
+    var instructions = [decision_probe, condition_probe]
+    if duplicate: instructions.push(decision_probe)
+    val function = MirFunction(symbol: SymbolId(id: 701),
+        name: if wrong_function_name: "other_attachment" else: "attachment",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [MirLocal(LocalId(id: 0), "decision",
+            if wrong_local_type: MirType.i64() else: MirType.bool(), LocalKind.Var, false)],
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+            instructions: instructions, terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: attachment_span(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false)
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function.symbol] = function
+    if duplicate_function_name:
+        val replay = MirFunction(symbol: SymbolId(id: 702), name: "attachment",
+            signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+            locals: [], blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+                instructions: [], terminator: MirTerminator.Ret(nil))],
+            entry_block: BlockId(id: 0), span: attachment_span(), generic_params: [],
+            is_generic_template: false, specialization_of: nil, type_bindings: {},
+            layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+            has_driver_manifest_attr: false, driver_manifest_attr: nil,
+            has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+            has_fast_math: false)
+        functions[replay.symbol] = replay
+    MirModule(name: "attachment", functions: functions, statics: {}, constants: {}, types: {})
+
+describe "MIR coverage V1 concrete probe attachment":
+    it "attaches one canonical catalog and plan to exactly matching typed MIR probes":
+        match attachment_catalog():
+            case Err(message): expect(message).to_equal("")
+            case Ok(catalog):
+                match attachment_plan(catalog):
+                    case Err(message): expect(message).to_equal("")
+                    case Ok(plan):
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan)):
+                            case Err(message): expect(message).to_equal("")
+                            case Ok(attachment):
+                                expect(attachment.decision_count).to_equal(1)
+                                expect(attachment.condition_count).to_equal(1)
+                                expect(attachment.admitted).to_equal(false)
+                                expect(mir_coverage_probe_attachment_publication_guard_v1(
+                                    attachment).is_err()).to_equal(true)
+
+    it "rejects duplicate and source-mismatched concrete probes":
+        match attachment_catalog():
+            case Err(message): expect(message).to_equal("")
+            case Ok(catalog):
+                match attachment_plan(catalog):
+                    case Err(message): expect(message).to_equal("")
+                    case Ok(plan):
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan, duplicate: true)):
+                            case Err(message): expect(message).to_contain("MIRCOV-ATTACH-E-DUPLICATE")
+                            case Ok(_): expect("attached").to_equal("rejected")
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan, wrong_path: true)):
+                            case Err(message): expect(message).to_contain("MIRCOV-ATTACH-E-CONCRETE-DECISION")
+                            case Ok(_): expect("attached").to_equal("rejected")
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan, wrong_local_type: true)):
+                            case Err(message): expect(message).to_contain("MIRCOV-ATTACH-E-CONCRETE-DECISION")
+                            case Ok(_): expect("attached").to_equal("rejected")
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan, wrong_function_name: true)):
+                            case Err(message): expect(message).to_contain("MIRCOV-ATTACH-E-CONCRETE-DECISION")
+                            case Ok(_): expect("attached").to_equal("rejected")
+
+    it "rejects duplicate function names before name-based ownership matching":
+        match attachment_catalog():
+            case Err(message): expect(message).to_equal("")
+            case Ok(catalog):
+                match attachment_plan(catalog):
+                    case Err(message): expect(message).to_equal("")
+                    case Ok(plan):
+                        match mir_coverage_attach_probe_plan_v1(catalog, plan,
+                                attachment_module(catalog, plan, duplicate_function_name: true)):
+                            case Err(message): expect(message).to_equal(
+                                "MIRCOV-ATTACH-E-FUNCTION-NAME-DUPLICATE: MIR module contains duplicate function names")
+                            case Ok(_): expect("attached").to_equal("rejected")
+
+    it "rejects a catalog whose declared snapshot no longer matches its contents":
+        match attachment_catalog():
+            case Err(message): expect(message).to_equal("")
+            case Ok(catalog):
+                match attachment_plan(catalog):
+                    case Err(message): expect(message).to_equal("")
+                    case Ok(plan):
+                        val stale = MirCoverageCatalogV1(catalog.mode,
+                            catalog.sources, catalog.decisions, catalog.conditions,
+                            catalog.zero_count_sdn, catalog.zero_count_sdn_sha256,
+                            "", catalog.publishable)
+                        match mir_coverage_attach_probe_plan_v1(stale, plan,
+                                attachment_module(catalog, plan)):
+                            case Err(message): expect(message).to_contain("MIRCOV-ATTACH-E-CATALOG-SNAPSHOT")
+                            case Ok(_): expect("attached").to_equal("rejected")

@@ -79,3 +79,8 @@ FAILS on any divergence (:16), and the header records the discrimination proof
 in both directions (:19-21). This is an intentional known-red differential
 harness, not a silent-wrong-result bug, and closing it red would remove real
 coverage. Left exactly as is.
+
+## Triage 2026-09-13
+Reconfirmed: this is a deliberately-landed KNOWN-RED differential harness
+documenting real engine divergences, not a single fixable defect in
+itself. Left as-is, no code change attempted.

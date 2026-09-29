@@ -22,6 +22,22 @@
 #include <io.h>
 #include <process.h>
 #include <windows.h>
+#include "platform/windows_raw_mapping.h"
+#if defined(_MSC_VER)
+/* rt_legacy_stop_group's SIGNATURE takes pid_t while its body is
+ * `#if !defined(_WIN32)`, so the type leaks into the Windows build. MinGW
+ * declares pid_t and compiled fine; MSVC does not, and the core-C archive
+ * failed with `unknown type name 'pid_t'`, which stopped the whole Stage 2
+ * runtime supplement from building.
+ *
+ * The MSVC CRT spells it _pid_t and only exposes the POSIX alias when
+ * _CRT_DECLARE_NONSTDC_NAMES is on, so alias it explicitly. Gated on
+ * _MSC_VER, never _WIN32 -- widening would shadow MinGW's own declaration. */
+#if !defined(_PID_T_) && !defined(pid_t)
+typedef int pid_t;
+#define _PID_T_
+#endif
+#endif
 #else
 #include <dirent.h>
 #include <signal.h>
@@ -52,8 +68,7 @@ int64_t rt_thread_available_parallelism(void) {
 int64_t rt_munmap_raw(int64_t addr, int64_t length) {
     if (!addr || length <= 0) return -1;
 #if defined(_WIN32)
-    (void)length;
-    return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
+    return spl_windows_munmap_raw(addr, length);
 #else
     return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
 #endif
@@ -111,6 +126,19 @@ int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
 int64_t spl_thread_cpu_count(void) {
     return rt_thread_available_parallelism();
 }
+
+#if defined(__simpleos__)
+/* The hosted pthread pool is not part of the SimpleOS user runtime. */
+void rt_thread_sleep(int64_t millis) {
+    if (millis <= 0) return;
+    struct timespec delay = { millis / 1000, (millis % 1000) * 1000000 };
+    (void)nanosleep(&delay, NULL);
+}
+
+static bool simpleos_debug_mode_enabled;
+void rt_set_debug_mode(bool enabled) { simpleos_debug_mode_enabled = enabled; }
+bool rt_is_debug_mode_enabled(void) { return simpleos_debug_mode_enabled; }
+#endif
 
 static SplValue spl_value_nil(void) {
     SplValue v;
@@ -282,7 +310,7 @@ char* spl_str_replace(const char* s, const char* old_s, const char* new_s) {
 }
 
 uint64_t spl_str_hash(const char* s) {
-    uint64_t hash = 1469598103934665603ULL;
+    uint64_t hash = 14695981039346656037ULL;
     if (!s) return hash;
     while (*s) {
         hash ^= (unsigned char)*s++;
@@ -507,6 +535,13 @@ int64_t rt_crc32_text(const char* text, int64_t text_len) {
     return (int64_t)(crc ^ 0xFFFFFFFFU);
 }
 
+#if defined(_WIN32)
+/* rt_widen_long_path_rc is now the shared helper in platform/runtime_win_long_path.h
+ * (macro alias for rt_win_long_path_widen); used by rt_file_create_excl
+ * below. This file used to carry its own byte-identical copy. */
+#include "platform/runtime_win_long_path.h"
+#endif
+
 int rt_file_create_excl(const char* path, int64_t path_len,
                         const char* content, int64_t content_len) {
     if (!path || path_len <= 0 || (uint64_t)path_len >= SIZE_MAX ||
@@ -516,7 +551,29 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     if (!path_copy) return 0;
     memcpy(path_copy, path, (size_t)path_len);
     path_copy[path_len] = '\0';
-    FILE* f = fopen(path_copy, "wx");
+    /* "b": text mode on Windows turned every LF into CRLF, so a content-
+     * addressed file (SCV inventory generations) no longer hashed to its own
+     * name and every cold init failed inventory-generation-invalid
+     * (2026-09-25). No-op on POSIX. */
+#if defined(_WIN32)
+    /* Long paths: the package-module index under an isolated HOME
+     * (verification/home/.cache/simple/v1/projects/<64hex>/...) exceeds
+     * MAX_PATH, the narrow fopen failed, and every admission failed
+     * package-index:publish-failed (2026-09-25). Widen like the other
+     * Windows file entry points; fall back to fopen when widening fails. */
+    FILE* f = NULL;
+    {
+        wchar_t* wide = rt_widen_long_path_rc(path_copy);
+        if (wide) {
+            f = _wfopen(wide, L"wbx");
+            free(wide);
+        } else {
+            f = fopen(path_copy, "wbx");
+        }
+    }
+#else
+    FILE* f = fopen(path_copy, "wbx");
+#endif
     if (!f) {
         free(path_copy);
         return 0;

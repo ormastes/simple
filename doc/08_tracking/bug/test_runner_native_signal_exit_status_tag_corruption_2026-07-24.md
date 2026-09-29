@@ -1,4 +1,8 @@
 # Test-runner native signal exit status tag corruption — 2026-07-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 **Status:** CURRENT SOURCE FIXED / FRESH STAGE-4 QUALIFICATION PENDING
 
@@ -45,3 +49,4 @@ POSIX child by signal and requires both status `-1` and formatted text `"-1"`.
 Run it once in interpreter mode and once with a fresh admitted Stage-4 native
 binary. Only if the fresh artifact still produces the sentinel should emitted
 LLVM for tuple field 2 and signed shifts be inspected.
+

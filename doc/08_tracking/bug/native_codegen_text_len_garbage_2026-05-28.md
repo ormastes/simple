@@ -1,3 +1,17 @@
+## Closed 2026-09-13 — prior in-body resolution, carried forward (NOT re-verified this pass)
+
+Reviewed in the 2026-05-and-earlier bug/todo tracking sweep. This entry already
+recorded its own resolution before this pass; the header exists so the closure is
+visible at the top rather than buried in the body. First status line found:
+
+> Status: FIXED (2026-05-29)
+
+This is a closure marker, not a new claim: the repro was **not** re-run in this
+sweep. The original evidence in the body stands on its own. Re-open with a fresh
+dated repro if the symptom returns — do not treat this header as verification.
+
+---
+
 # BUG: text.len() returns garbage value in native LLVM codegen
 
 Status: FIXED (2026-05-29)
@@ -37,7 +51,7 @@ The same bug existed in the Cranelift `inline_runtime_len_value` in
 `src/compiler_rust/compiler/src/codegen/instr/helpers.rs`.
 
 The same logic bug exists in the pure-Simple LLVM backend
-(`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`) but that path is not currently used
+(`src/compiler/50.mir/mir_lowering_expr_part3.spl`) but that path is not currently used
 by `native-build` (dispatches to Rust seed by default).
 
 ## Reproduction

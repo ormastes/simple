@@ -1,0 +1,176 @@
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.*
+use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+
+class Rules:
+    group_parts: [[[text]]]
+    group_specificities: [[i32]]
+    decls: [text]
+    important_decls: [text]
+
+# Named transport for the three parallel rule-scan arrays. Returning these as
+# an anonymous [[text]] loses the inner RuntimeArray identity in native code.
+enum CssWrapperKind:
+    Media
+    Supports
+    Layer
+    Unsupported
+
+class CssRuleScan:
+    selectors: [text]
+    declarations: [text]
+    wrapper_starts: [i32]
+    wrapper_counts: [i32]
+    wrapper_kinds: [CssWrapperKind]
+    wrapper_preludes: [text]
+
+val CSS_SCAN_CANDIDATE_CAP: i32 = 6000
+val CSS_VAR_SUBSTITUTION_BUDGET: i32 = 1024
+val CSS_SELECTOR_GROUP_CAP: i32 = 16
+val CSS_SELECTOR_PART_CAP: i32 = 256
+
+enum CssVarResolution:
+    Resolved(value: text)
+    Invalid
+    Cycle
+    DepthExceeded
+    BudgetExceeded
+
+class CssVarResolutionState:
+    remaining: i32
+    active_names: [text]
+    prop_names: [text]
+    prop_values: [text]
+    prop_count: i32
+    memo_names: [text]
+    memo_values: [text]
+    memo_count: i32
+
+    static fn new(props: text) -> CssVarResolutionState:
+        var names: [text] = [""; 200]
+        var values: [text] = [""; 200]
+        var prop_count = 0
+        var pos: i64 = 0
+        var guard = 0
+        # First-iteration discriminator for the `prop_count=0` stage-3 defect.
+        # `guard=45` with `prop_count=0` proves `colon > 0` never fired, but NOT
+        # which primitive broke: `substring` (raw_len=0), `trim` (raw_len>0 but
+        # line_len=0), or `index_of` itself (line_len>0 but io<0 while the
+        # native `find_from` on the SAME text returns a real index). Capturing
+        # both searches on the same receiver is what separates the third case
+        # from the first two -- an `index_of` that disagrees with `find_from`
+        # on identical input is a compiler/runtime defect and nothing else.
+        var probe_raw_len: i64 = -1
+        var probe_line_len: i64 = -1
+        var probe_colon_io: i64 = -1
+        var probe_colon_ff: i64 = -1
+        while pos < props.len() and guard < names.len():  # cpu-lane-loop-ok: walks the collected :root custom-property lines (one per newline), bounded by the 200-entry prop_names table; runs once per style invalidation inside extract_css, not per paint frame
+            guard = guard + 1
+            val nl = find_from(props, "\n", pos)
+            val line_end = if nl < 0: props.len() else: nl
+            val line_raw = props.substring(pos, line_end)
+            val line = line_raw.trim()
+            # `index_of` is NOT usable here: in the baremetal/native lane it
+            # returns 0 for a receiver whose colon is at index 11, while the
+            # native `find_from` on the SAME text returns 11. Proven 2026-08-09
+            # in the SimpleOS WM lane:
+            #   raw_len=15 line_len=15 colon_index_of=0 colon_find_from=11
+            # A returned 0 fails the `colon > 0` guard below exactly like a
+            # "not found", which is why all 45 property lines were dropped.
+            # Do NOT "simplify" this back to `line.index_of(":")`.
+            val colon = find_from(line, ":", 0)
+            if guard == 1:
+                probe_raw_len = line_raw.len()
+                probe_line_len = line.len()
+                probe_colon_io = line.index_of(":")
+                probe_colon_ff = colon
+            if colon > 0:
+                names[prop_count] = line.substring(0, colon).trim()
+                values[prop_count] = line.substring(
+                    colon + 1, line.len()
+                ).trim()
+                prop_count = prop_count + 1
+            pos = if nl < 0: props.len() else: nl + 1
+        # STAGE 3 of the `props=0` chain, and the only stage that had never been
+        # instrumented. `prop_count` is set solely inside `if colon > 0` above,
+        # and the walk is bounded by `guard < names.len()` -- the `200` literal
+        # table cap. A non-empty `props` that yields `prop_count=0` is therefore
+        # either "the loop never ran" (`guard=0`), "the loop ran but no line had
+        # a colon" (`guard>0`), or "the table cap truncated it"
+        # (`guard>=names_cap`), and those three have different causes. Silent
+        # whenever the re-parse recovers at least one property.
+        #
+        # PROVEN 2026-08-09 in the SimpleOS WM lane: stage 1 and stage 2 were
+        # both silent and this fired with
+        #   props_len=1365 names_cap=200 guard=45 prop_count=0
+        # i.e. the collected sheet arrives intact (1365 chars, the host's exact
+        # value), the loop walks all 45 property lines, and `colon > 0` still
+        # never fires. The `raw_len`/`line_len`/`colon_index_of`/`colon_find_from`
+        # fields exist to name which primitive is responsible.
+        if props.len() > 0 and (prop_count == 0 or guard >= names.len()):
+            print "[web-style-producer] css-props-stage3 props_len={props.len()} names_cap={names.len()} guard={guard} prop_count={prop_count} raw_len={probe_raw_len} line_len={probe_line_len} colon_index_of={probe_colon_io} colon_find_from={probe_colon_ff}"
+        CssVarResolutionState(
+            remaining: CSS_VAR_SUBSTITUTION_BUDGET,
+            active_names: [""; 33],
+            prop_names: names,
+            prop_values: values,
+            prop_count: prop_count,
+            memo_names: [""; 200],
+            memo_values: [""; 200],
+            memo_count: 0
+        )
+
+class ParsedAttr:
+    name: text
+    op: i32
+    want: text
+    want_lower: text
+    ci: bool
+
+# kind: 0 = ordinary compound part, 1 = empty part, 2 = `>` child combinator.
+class ParsedSel:
+    kind: i32
+    dead: bool
+    check_tag: bool
+    want_tag: text
+    check_id: bool
+    want_id: text
+    want_classes: [text]
+    attr_tests: [ParsedAttr]
+    pseudo_codes: [i32]
+    # Non-empty only for `:root[expr]`; a functional argument on `root`
+    # (`:root(x)`) is ignored by the text path and is ignored here too.
+    pseudo_root_attrs: [text]
+    # Pre-split options for :not/:is/:where/:has. EMPTY has two meanings, by
+    # pseudo: for :not/:is/:where the part is already `dead`, so it never
+    # reaches evaluation; for :has it means "the split failed", which
+    # `simple_match` passes through and `_pseudo_ctx_matches` rejects.
+    pseudo_opts: [[text]]
+    pseudo_nth_kind: [i32]       # 0 odd, 1 even, 2 an+b, 3 plain literal
+    pseudo_nth_a: [i32]
+    pseudo_nth_b: [i32]
+
+class RuleBuckets:
+    id_keys: [text]
+    id_rules: [[i32]]
+    class_keys: [text]
+    class_rules: [[i32]]
+    tag_keys: [text]
+    tag_rules: [[i32]]
+    fallback_rules: [i32]
+    # O(1) key->index lookups for style_rule_candidates. build_rule_buckets already
+    # builds these dicts while bucketing rules; without carrying them forward,
+    # style_rule_candidates fell back to text_key_index's O(distinct-keys) linear
+    # scan per node lookup, reproducing the same quadratic shape build_rule_buckets
+    # itself was fixed for (WEB-2) -- O(nodes x distinct-keys) overall.
+    id_key_dict: Dict<text, i32>
+    class_key_dict: Dict<text, i32>
+    tag_key_dict: Dict<text, i32>
+    # Selector parts of every rule, pre-parsed ONCE here instead of re-parsed
+    # from selector TEXT on every candidate x node pair. Indexed exactly like
+    # rules.group_parts: [rule][comma-group][part]. See "Pre-parsed selector
+    # parts (round 9)" below.
+    parsed_groups: [[[ParsedSel]]]

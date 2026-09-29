@@ -1,0 +1,73 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-APP-LSP-MCP-VISIBILITY-REQUESTER
+# design: doc/05_design/app/mcp/mdsoc_visibility_requester_design.md ; guide: doc/07_guide/app/mcp/mcp_visibility.md
+"""
+simple-lsp-mcp requester scoping over the real `handle_tool_call` path:
+- `lsp_visibility` / `lsp_symbols` / `lsp_hover` accept `requester` (path[:line]),
+- omitted: the last location a POSITION tool (lsp_hover, ...) was called with
+  in this server session (file-only tools never update it),
+- nothing yet: `source: none` with an explicit note — never the file itself.
+
+Run: `bin/simple test test/01_unit/app/simple_lsp_mcp/lsp_visibility_requester_spec.spl`
+"""
+
+use std.spec
+use std.spec.step
+use app.simple_lsp_mcp.tools.{handle_tool_call}
+use app.simple_lsp_mcp.session_state.{lsp_reset_location, lsp_last_location, lsp_record_location, lsp_resolve_requester}
+
+val PARSE_ERROR = "src/compiler/85.mdsoc/feature/parsing/app/parse_error.spl"
+val PARSING_PORTS = "src/compiler/85.mdsoc/feature/parsing/app/ports.spl"
+val DRIVER = "src/compiler/80.driver/driver.spl"
+
+fn call(id: text, name: text, args: text) -> text:
+    handle_tool_call(id, "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args + "}}")
+
+describe "lsp_visibility requester resolution":
+    it "reports source none with a note when no position tool ran yet":
+        step("fresh session, file only")
+        lsp_reset_location()
+        val r = call("1", "lsp_visibility", "{\"file\":\"" + PARSE_ERROR + "\"}")
+        expect(r).to_contain("none given and no file was read/opened in this session")
+        expect(r).to_contain("ParseError")
+
+    it "honours an explicit requester with line":
+        step("requester=driver.spl:100 into a feature capsule")
+        lsp_reset_location()
+        val r = call("2", "lsp_visibility", "{\"file\":\"" + PARSE_ERROR + "\",\"requester\":\"" + DRIVER + ":100\"}")
+        expect(r).to_contain("explicit")
+        expect(r).to_contain(":100,")
+        expect(r).to_contain("named in an export line")
+
+    it "defaults to the last position-tool location, resolved before it is recorded":
+        step("lsp_hover at parsing/app/parse_error.spl:5 records file:5")
+        lsp_reset_location()
+        val hover = call("3", "lsp_hover", "{\"file\":\"" + PARSE_ERROR + "\",\"line\":4,\"character\":8}")
+        expect(hover).to_contain("ParseError")
+        expect(lsp_last_location()).to_equal(PARSE_ERROR + ":5")
+        val r = call("4", "lsp_visibility", "{\"file\":\"" + PARSING_PORTS + "\"}")
+        expect(r).to_contain("last_read")
+        expect(r).to_contain(PARSE_ERROR)
+        expect(r).to_contain(":5,")
+
+    it "never lets a file-only query become its own requester":
+        step("lsp_symbols does not update the session location")
+        lsp_reset_location()
+        val syms = call("5", "lsp_symbols", "{\"file\":\"" + PARSE_ERROR + "\"}")
+        expect(syms).to_contain("featureVisibility")
+        expect(lsp_last_location()).to_equal("")
+
+    it "resolves explicit over last location over none":
+        step("lsp_resolve_requester precedence")
+        lsp_reset_location()
+        val (none_req, none_src) = lsp_resolve_requester("")
+        expect(none_req).to_equal("")
+        expect(none_src).to_equal("none")
+        lsp_record_location(DRIVER, 99)
+        val (last_req, last_src) = lsp_resolve_requester("")
+        expect(last_req).to_equal(DRIVER + ":100")
+        expect(last_src).to_equal("last_read")
+        val (exp_req, exp_src) = lsp_resolve_requester("x.spl")
+        expect(exp_req).to_equal("x.spl")
+        expect(exp_src).to_equal("explicit")
+        lsp_reset_location()

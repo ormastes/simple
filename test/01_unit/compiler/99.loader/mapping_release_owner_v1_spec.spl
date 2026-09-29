@@ -1,0 +1,155 @@
+# @cover src/compiler/99.loader/mapping_release_owner_v1.spl 0%
+"""
+## Purpose and audience
+
+Purpose: pin the physical executable-mapping release gate that sits BELOW the
+logical facet refcount owned by `std.common.aspect_pack`.  Audience: loader and
+aspect-dynload engineers.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/99.loader/mapping_release_owner_v1_spec.spl`.
+2. Every scenario must pass; a failure is a regression in release gating.
+
+## Compatibility and limitations
+
+Pure value transitions only.  This spec never maps or unmaps real memory: the
+owner never calls `munmap` itself, it only decides whether the separate mapper
+gate is permitted to, and records the outcome the mapper reports back.  See
+`src/compiler/99.loader/module_loader_compat.spl:585-590` for the gap this
+closes and `doc/03_plan/agent_tasks/simple_infra_optimization_parallel_plan_2026-09-08.md`
+section "L6 aspect dynload quiescence capped handoff" for the prohibition that
+logical retirement is not permission to unmap.
+"""
+
+use std.spec.step
+use compiler.loader.object_mapper.{SharedExecRecord}
+use compiler.loader.mapping_release_owner_v1.*
+
+
+fn fixture_record() -> SharedExecRecord:
+    SharedExecRecord(owner_id: "aspect-pack-a", symbol: "advice_around_v1",
+        address: 4096, size: 256, generation: 7)
+
+
+describe "Physical executable-mapping release gate":
+    it "refuses physical release while a pin is outstanding":
+        step("Verify: release refused under pin")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_MAPPED_V1)
+
+        val pinned = mapping_release_pin_v1(owner, 7)
+        expect(pinned.is_ok()).to_equal(true)
+        expect(pinned.unwrap()).to_equal(1)
+
+        val quiesced = mapping_release_begin_quiesce_v1(owner, 7)
+        expect(quiesced.is_ok()).to_equal(true)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_QUIESCING_V1)
+
+        val decision = mapping_release_request_v1(owner, 7)
+        expect(decision.is_err()).to_equal(true)
+        expect(decision.unwrap_err()).to_equal(MappingReleaseRefusalV1.pins_outstanding)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_QUIESCING_V1)
+
+    it "does not treat logical retirement as permission to unmap":
+        step("Verify: quiescing with zero pins is still not released")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_pins_v1(owner)).to_equal(0)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_QUIESCING_V1)
+        expect(mapping_release_is_released_v1(owner)).to_equal(false)
+
+    it "refuses a new pin once the mapping is quiescing":
+        step("Verify: publication and new pins are excluded after quiesce")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        val late = mapping_release_pin_v1(owner, 7)
+        expect(late.is_err()).to_equal(true)
+        expect(late.unwrap_err()).to_equal(MappingReleaseRefusalV1.not_mapped)
+
+    it "permits release after the final pin drops":
+        step("Verify: retry after pin drop succeeds")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        expect(mapping_release_pin_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_request_v1(owner, 7).is_err()).to_equal(true)
+
+        val dropped = mapping_release_unpin_v1(owner, 7)
+        expect(dropped.is_ok()).to_equal(true)
+        expect(dropped.unwrap()).to_equal(0)
+
+        val permit = mapping_release_request_v1(owner, 7)
+        expect(permit.is_ok()).to_equal(true)
+        expect(permit.unwrap().address).to_equal(4096)
+        expect(permit.unwrap().size).to_equal(256)
+        expect(permit.unwrap().generation).to_equal(7)
+
+        val settled = mapping_release_record_outcome_v1(owner, 7, true)
+        expect(settled.is_ok()).to_equal(true)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_RELEASED_V1)
+        expect(mapping_release_is_released_v1(owner)).to_equal(true)
+
+    it "retains the mapping identity when the reported unmap fails":
+        step("Verify: failed unmap retains identity and counts the attempt")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_request_v1(owner, 7).is_ok()).to_equal(true)
+
+        val failed = mapping_release_record_outcome_v1(owner, 7, false)
+        expect(failed.is_ok()).to_equal(true)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_QUIESCING_V1)
+        expect(mapping_release_is_released_v1(owner)).to_equal(false)
+        expect(mapping_release_failed_unmaps_v1(owner)).to_equal(1)
+
+        val retained = mapping_release_identity_v1(owner)
+        expect(retained.owner_id).to_equal("aspect-pack-a")
+        expect(retained.symbol).to_equal("advice_around_v1")
+        expect(retained.address).to_equal(4096)
+        expect(retained.size).to_equal(256)
+        expect(retained.generation).to_equal(7)
+
+        step("Verify: a retained mapping is retry-safe")
+        val retry = mapping_release_request_v1(owner, 7)
+        expect(retry.is_ok()).to_equal(true)
+        expect(mapping_release_record_outcome_v1(owner, 7, true).is_ok()).to_equal(true)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_RELEASED_V1)
+        expect(mapping_release_failed_unmaps_v1(owner)).to_equal(1)
+        expect(mapping_release_release_attempts_v1(owner)).to_equal(2)
+
+    it "rejects every transition that names a stale generation":
+        step("Verify: generation mismatch rejected")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        val stale_pin = mapping_release_pin_v1(owner, 6)
+        expect(stale_pin.is_err()).to_equal(true)
+        expect(stale_pin.unwrap_err()).to_equal(MappingReleaseRefusalV1.generation_mismatch)
+
+        val stale_quiesce = mapping_release_begin_quiesce_v1(owner, 8)
+        expect(stale_quiesce.is_err()).to_equal(true)
+        expect(stale_quiesce.unwrap_err()).to_equal(MappingReleaseRefusalV1.generation_mismatch)
+        expect(mapping_release_state_v1(owner)).to_equal(MAPPING_RELEASE_MAPPED_V1)
+
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        val stale_request = mapping_release_request_v1(owner, 6)
+        expect(stale_request.is_err()).to_equal(true)
+        expect(stale_request.unwrap_err()).to_equal(MappingReleaseRefusalV1.generation_mismatch)
+
+        expect(mapping_release_request_v1(owner, 7).is_ok()).to_equal(true)
+        val stale_outcome = mapping_release_record_outcome_v1(owner, 99, true)
+        expect(stale_outcome.is_err()).to_equal(true)
+        expect(stale_outcome.unwrap_err()).to_equal(MappingReleaseRefusalV1.generation_mismatch)
+        expect(mapping_release_is_released_v1(owner)).to_equal(false)
+
+    it "refuses release without a preceding quiesce and after release":
+        step("Verify: mapped -> released shortcut and double release are refused")
+        val owner = mapping_release_owner_new_v1(fixture_record())
+        val early = mapping_release_request_v1(owner, 7)
+        expect(early.is_err()).to_equal(true)
+        expect(early.unwrap_err()).to_equal(MappingReleaseRefusalV1.not_quiescing)
+
+        expect(mapping_release_begin_quiesce_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_request_v1(owner, 7).is_ok()).to_equal(true)
+        expect(mapping_release_record_outcome_v1(owner, 7, true).is_ok()).to_equal(true)
+
+        val again = mapping_release_request_v1(owner, 7)
+        expect(again.is_err()).to_equal(true)
+        expect(again.unwrap_err()).to_equal(MappingReleaseRefusalV1.already_released)

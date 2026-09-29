@@ -8,7 +8,15 @@ Executables, wrappers, and MCP server launchers.
 |---|---|
 | `bb` | Bug tool |
 | `bug` | Bug report tool |
+| `caret` | LLM Caret launcher |
+| `cs` | Caret suite (multi-agent session view) |
+| `cs.cmd` | Windows caret-suite wrapper |
+| `devhub` | DevHub CLI launcher |
+| `gh` | `gh` shim — routes to the configured git backend (github passthrough, otherwise DevHub) |
+| `itf` | DevHub CLI compat wrapper (pre-rename name) |
 | `jira` | Jira CLI |
+| `k3` | Claude Code on Kimi K3 (Kimi Code login or Moonshot key) |
+| `kimi-code-token` | Prints a refreshed Kimi Code OAuth token (`k3`'s apiKeyHelper) |
 | `mail` | Email CLI |
 | `release` | Release directory |
 | `simple` | Main compiler binary |
@@ -24,5 +32,4 @@ Executables, wrappers, and MCP server launchers.
 | `t32_lsp_mcp_server.cmd` | T32 LSP MCP wrapper |
 | `t32_mcp_server.cmd` | T32 MCP wrapper |
 | `codex_chrome_devtools_mcp.cmd` | Codex Chrome DevTools MCP |
-| `codex_stitch_mcp.cmd` | Codex Stitch MCP |
 | `FILE.md` | This manifest |

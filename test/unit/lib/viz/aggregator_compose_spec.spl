@@ -1,4 +1,27 @@
-# aggregator_compose_spec.spl — tests for Wave 2 (6b) cross-surface composition helpers
+"""
+## Purpose and audience
+Pins the Wave 2 (6b) cross-surface composition helpers: transform
+composition, clip intersection, effect composition, and the per-surface
+effective-value lookups over the transform/clip/effect property trees.
+Written for maintainers of the viz aggregator and for reviewers of surface
+flattening changes who need the algebra pinned against regressions.
+## Operator workflow
+./src/compiler_rust/target/bootstrap/simple run test/unit/lib/viz/aggregator_compose_spec.spl
+## Compatibility and limitations
+Runs on the seeded interpreter with the std.skia/std.cc/std.viz entities
+only; no real frame is submitted to a compositor and no GPU work is
+scheduled. Matrix comparisons use a 1e-6 epsilon rather than exact
+equality because the helpers multiply through f32 storage.
+## Verification guidance and troubleshooting
+A failure names the composed value that drifted; the oracle comment on each
+expect line states the geometric or alpha-algebra reason the expected value
+is authoritative. Rerun the single scenario and compare the failing matrix
+entry or rect edge against the epsilon helper in this file.
+"""
+# Lifecycle: doc/01_research/local/metal_2d_frame_cost_perf.md ;
+# doc/03_plan/ui/unified_surface_draw_ir_and_html_css_conformance.md ;
+# doc/04_architecture/viz_canonical_frame_builder.md ;
+# doc/05_design/module_surface_export_provenance.md
 
 use std.skia.entity.matrix.{Matrix3x3}
 use std.skia.entity.geometry.{SkRect}
@@ -34,7 +57,7 @@ fn _mat_eq(a: Matrix3x3, b: Matrix3x3) -> bool:
     val d01 = a.m01 - b.m01
     val d02 = a.m02 - b.m02
     val d10 = a.m10 - b.m10
-    val d11 = a.m11 - b.m11
+    val d01v = a.m11 - b.m11
     val d12 = a.m12 - b.m12
     val d20 = a.m20 - b.m20
     val d21 = a.m21 - b.m21
@@ -43,7 +66,7 @@ fn _mat_eq(a: Matrix3x3, b: Matrix3x3) -> bool:
     val abs01 = if d01 < 0.0: 0.0 - d01 else: d01
     val abs02 = if d02 < 0.0: 0.0 - d02 else: d02
     val abs10 = if d10 < 0.0: 0.0 - d10 else: d10
-    val abs11 = if d11 < 0.0: 0.0 - d11 else: d11
+    val abs11 = if d01v < 0.0: 0.0 - d01v else: d01v
     val abs12 = if d12 < 0.0: 0.0 - d12 else: d12
     val abs20 = if d20 < 0.0: 0.0 - d20 else: d20
     val abs21 = if d21 < 0.0: 0.0 - d21 else: d21
@@ -90,55 +113,74 @@ fn _local_translate(tx: f32, ty: f32) -> [f32]:
 # Test suite
 # ---------------------------------------------------------------------------
 
+# @manual_section: aggregator-compose
 describe "aggregator_compose":
 
     # 1. compose_transforms: identity * identity = identity
     it "compose_transforms identity with identity yields identity":
+        # @req REQ-VIZ-AGGREGATE-001
+        # @capture(bit_table): composed matrix entries vs the identity matrix
+        step("Compose two shipped identity transforms and compare against the identity matrix")
         val result = compose_transforms(_identity(), _identity())
         val eq = _mat_eq(result, _identity())
-        eq.to_equal(true)
+        expect(eq).to_equal(true)  # oracle: composing the identity with itself is the identity by definition of the neutral element
 
     # 2. compose_transforms: translate(5,0) then translate(0,3) => translate(5,3)
     it "compose_transforms translate(5,0) then translate(0,3) yields translate(5,3)":
+        # @req REQ-VIZ-AGGREGATE-002
+        # @capture(bit_table): composed translation entries vs expected translate(5,3)
+        step("Compose a (5,0) translation with a (0,3) translation and compare against translate(5,3)")
         val t1 = _translate(5.0, 0.0)
         val t2 = _translate(0.0, 3.0)
         val result = compose_transforms(t1, t2)
         val expected = _translate(5.0, 3.0)
         val eq = _mat_eq(result, expected)
-        eq.to_equal(true)
+        expect(eq).to_equal(true)  # oracle: translations compose by adding offsets, so x stays 5 and y accumulates to 3
 
     # 3. intersect_clips: fully overlapping rects => smaller rect
     it "intersect_clips fully overlapping returns the smaller rect":
+        # @req REQ-VIZ-AGGREGATE-003
+        # @capture(bit_table): intersection rect edges vs the child clip edges
+        step("Intersect a 100x100 parent clip with a fully contained 40x40 child clip")
         val parent_clip = SkRect(left: 0.0, top: 0.0, right: 100.0, bottom: 100.0)
         val child_clip  = SkRect(left: 10.0, top: 10.0, right: 50.0, bottom: 50.0)
         val result = intersect_clips(parent_clip, child_clip)
-        result.left.to_equal(10.0)
-        result.top.to_equal(10.0)
-        result.right.to_equal(50.0)
-        result.bottom.to_equal(50.0)
+        expect(result.left).to_equal(10.0)   # oracle: the child edge is the binding constraint on the left
+        expect(result.top).to_equal(10.0)    # oracle: the child edge is the binding constraint on the top
+        expect(result.right).to_equal(50.0)  # oracle: the child edge is the binding constraint on the right
+        expect(result.bottom).to_equal(50.0)  # oracle: the child edge is the binding constraint on the bottom
 
     # 4. intersect_clips: disjoint rects => empty (0,0,0,0)
     it "intersect_clips disjoint rects returns empty rect":
+        # @req REQ-VIZ-AGGREGATE-004
+        # @capture(bit_table): disjoint-intersection rect edges vs the empty rect
+        step("Intersect two clips that share no area and require the empty rect")
         val parent_clip = SkRect(left: 0.0, top: 0.0, right: 10.0, bottom: 10.0)
         val child_clip  = SkRect(left: 20.0, top: 20.0, right: 30.0, bottom: 30.0)
         val result = intersect_clips(parent_clip, child_clip)
-        result.left.to_equal(0.0)
-        result.top.to_equal(0.0)
-        result.right.to_equal(0.0)
-        result.bottom.to_equal(0.0)
+        expect(result.left).to_equal(0.0)    # oracle: a disjoint intersection collapses to the canonical empty rect
+        expect(result.top).to_equal(0.0)     # oracle: a disjoint intersection collapses to the canonical empty rect
+        expect(result.right).to_equal(0.0)   # oracle: a disjoint intersection collapses to the canonical empty rect
+        expect(result.bottom).to_equal(0.0)  # oracle: a disjoint intersection collapses to the canonical empty rect
 
     # 5. intersect_clips: partially overlapping => correct overlap
     it "intersect_clips partially overlapping rects returns correct overlap":
+        # @req REQ-VIZ-AGGREGATE-005
+        # @capture(bit_table): partial-overlap rect edges vs the clipped corner region
+        step("Intersect a 50x50 parent with a child offset to (30,30) and require the 20x20 overlap")
         val parent_clip = SkRect(left: 0.0, top: 0.0, right: 50.0, bottom: 50.0)
         val child_clip  = SkRect(left: 30.0, top: 30.0, right: 80.0, bottom: 80.0)
         val result = intersect_clips(parent_clip, child_clip)
-        result.left.to_equal(30.0)
-        result.top.to_equal(30.0)
-        result.right.to_equal(50.0)
-        result.bottom.to_equal(50.0)
+        expect(result.left).to_equal(30.0)   # oracle: the child starts inside the parent, so its left edge binds
+        expect(result.top).to_equal(30.0)    # oracle: the child starts inside the parent, so its top edge binds
+        expect(result.right).to_equal(50.0)  # oracle: the parent ends inside the child, so its right edge binds
+        expect(result.bottom).to_equal(50.0)  # oracle: the parent ends inside the child, so its bottom edge binds
 
     # 6. compose_effects: opacity multiplies 0.5 * 0.5 = 0.25
     it "compose_effects multiplies opacity values":
+        # @req REQ-VIZ-AGGREGATE-006
+        # @capture(bit_table): composed opacity vs the 0.5*0.5 product
+        step("Compose two 0.5-opacity effects and require the 0.25 product")
         val parent_effect = EffectNode(
             id: 0, parent_id: -1,
             opacity: 0.5, blend_mode: BLEND_MODE_SRC_OVER,
@@ -153,10 +195,13 @@ describe "aggregator_compose":
         val diff = result.opacity - 0.25
         val abs_diff = if diff < 0.0: 0.0 - diff else: diff
         val close = abs_diff < 1e-6
-        close.to_equal(true)
+        expect(close).to_equal(true)  # oracle: nested src-over effects multiply alpha, 0.5 * 0.5 = 0.25
 
     # 7. compose_effects: child blend_mode Multiply (2) + parent SrcOver => result is Multiply
     it "compose_effects child non-SrcOver blend_mode overrides parent SrcOver":
+        # @req REQ-VIZ-AGGREGATE-007
+        # @capture(bit_table): composed blend mode vs the child Multiply mode
+        step("Compose a SrcOver parent with a Multiply child and require the child mode to win")
         val blend_multiply: i32 = 2
         val parent_effect = EffectNode(
             id: 0, parent_id: -1,
@@ -169,10 +214,13 @@ describe "aggregator_compose":
             has_render_surface: false, clip_id: 0, transform_id: 0
         )
         val result = compose_effects(parent_effect, child_effect)
-        result.blend_mode.to_equal(blend_multiply)
+        expect(result.blend_mode).to_equal(blend_multiply)  # oracle: a non-SrcOver child mode is the stronger, more specific effect
 
     # 8. compose_effects: both SrcOver => result blend_mode is SrcOver (parent's)
     it "compose_effects both SrcOver yields SrcOver blend mode":
+        # @req REQ-VIZ-AGGREGATE-008
+        # @capture(bit_table): composed blend mode vs SrcOver
+        step("Compose two SrcOver effects and require SrcOver to survive")
         val parent_effect = EffectNode(
             id: 0, parent_id: -1,
             opacity: 1.0, blend_mode: BLEND_MODE_SRC_OVER,
@@ -184,19 +232,25 @@ describe "aggregator_compose":
             has_render_surface: false, clip_id: 0, transform_id: 0
         )
         val result = compose_effects(parent_effect, child_effect)
-        result.blend_mode.to_equal(BLEND_MODE_SRC_OVER)
+        expect(result.blend_mode).to_equal(BLEND_MODE_SRC_OVER)  # oracle: composing src-over with src-over is still src-over
 
     # 9. effective_transform_for_surface: root node (parent_id -1, identity local) => identity
     it "effective_transform_for_surface for root node returns identity":
+        # @req REQ-VIZ-AGGREGATE-009
+        # @capture(bit_table): root-surface effective matrix vs the identity matrix
+        step("Look up the effective transform of a surface bound to an empty transform-tree root")
         var tree = TransformTree.new()
         # root node already at id=0 with empty local (falls back to identity)
         val sid = _surface(0)
         val result = effective_transform_for_surface(sid, tree)
         val eq = _mat_eq(result, _identity())
-        eq.to_equal(true)
+        expect(eq).to_equal(true)  # oracle: a root with no local transform contributes the identity
 
     # 10. effective_clip_for_surface: 2-level nested clip => intersection
     it "effective_clip_for_surface for 2-level nested clip returns intersection":
+        # @req REQ-VIZ-AGGREGATE-010
+        # @capture(bit_table): nested-clip lookup rect emptiness vs the zero-size root intersection
+        step("Nest two clip nodes under a zero-size root and require the empty intersection")
         var tree = ClipTree.new()
         # root node (id=0) has clip_w=0/clip_h=0 (no clip at root by default)
         # Add a parent clip node at id=1
@@ -218,10 +272,13 @@ describe "aggregator_compose":
         # child clip: (20,20,60,60) intersected with (0,0,0,0) -> (0,0,0,0)
         # So result is empty rect (disjoint with zero-size root)
         val is_empty = result.left >= result.right or result.top >= result.bottom
-        is_empty.to_equal(true)
+        expect(is_empty).to_equal(true)  # oracle: intersecting with the zero-size root clip empties every descendant clip
 
     # 11. effective_clip_for_surface: single node with no parent (root itself) returns its rect
     it "effective_clip_for_surface for a clip node with parent_id -1 returns own rect":
+        # @req REQ-VIZ-AGGREGATE-011
+        # @capture(bit_table): root-node clip lookup rect edges vs the default root rect
+        step("Look up the effective clip of a surface bound to the default root node")
         # Build a fresh ClipTree where we treat node 0's clip as real
         var tree = ClipTree.new()
         # Add a standalone clip node with parent_id=-1 so it is treated as root
@@ -236,11 +293,14 @@ describe "aggregator_compose":
         # So effective_clip_for_surface for surface with sink_id=0 returns SkRect(0,0,0,0).
         val sid = _surface(0)
         val result = effective_clip_for_surface(sid, tree)
-        result.left.to_equal(0.0)
-        result.top.to_equal(0.0)
+        expect(result.left).to_equal(0.0)  # oracle: the default root node carries the canonical empty rect origin
+        expect(result.top).to_equal(0.0)   # oracle: the default root node carries the canonical empty rect origin
 
     # 12. effective_effect_for_surface: 2-level effect composition multiplies opacity
     it "effective_effect_for_surface for 2-level tree multiplies opacity":
+        # @req REQ-VIZ-AGGREGATE-012
+        # @capture(bit_table): 2-level effective opacity vs the 1.0*0.5 product
+        step("Look up the effective effect of a surface under an opaque root and a 0.5-opacity child")
         var tree = EffectTree.new()
         # root node (id=0) opacity=1.0, blend_mode=0 (already inserted by EffectTree.new())
         val child_node = EffectNode(
@@ -255,4 +315,4 @@ describe "aggregator_compose":
         val diff = result.opacity - 0.5
         val abs_diff = if diff < 0.0: 0.0 - diff else: diff
         val close = abs_diff < 1e-6
-        close.to_equal(true)
+        expect(close).to_equal(true)  # oracle: the opaque root multiplies to 1.0 * 0.5 = 0.5

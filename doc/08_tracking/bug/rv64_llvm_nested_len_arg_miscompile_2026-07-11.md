@@ -1,4 +1,9 @@
 # BUG: RV64 LLVM native — `text.len()` evaluates to nil (-1); hoisting into a local does NOT fix it
+## Closed 2026-09-16 — Status: FIXED in seed codegen; gate 5/5 PASS evidence in body
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
+bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
+fresh dated repro if the symptom returns.
 
 **Status:** FIXED in seed codegen 2026-07-11 (fix built + gate 5/5; commit pending)
 
@@ -107,3 +112,4 @@ the compiler defect remains open.
 - `doc/08_tracking/bug/native_string_method_returns_neg1_core_c_bootstrap_2026-05-29.md` (older -1-returning string-method class, bootstrap C path)
 - `doc/08_tracking/bug/interp_method_call_result_as_arg_corruption_nested_2026-06-30.md` (interp-tier cousin)
 - `doc/08_tracking/bug/native_build_noncritical_skip_stale_cache_masking_2026-07-11.md` (why this stayed hidden behind stale cache objects)
+

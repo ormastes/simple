@@ -1,4 +1,8 @@
 # Stage4 atomic-database HIR names
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 ## Reproduction
 
@@ -16,3 +20,4 @@ which Stage4 treated as an unresolved identifier.
 
 `db_atomic_hir_contract_spec.spl` checks concrete owners, removal of the broad
 facade import, native-safe propagation, and sync/async mirror parity.
+

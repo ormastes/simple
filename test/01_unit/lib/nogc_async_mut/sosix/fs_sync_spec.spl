@@ -1,0 +1,118 @@
+"""A synchronous SOSIX read waits exactly once per completion through the notification adapter and never spins."""
+
+use std.spec.*
+use std.common.contracts.sosix.operation_v1.{SosixOperationId}
+use std.common.contracts.sosix.capability_ref_v1.{SosixCapabilityRef, SosixBufferRef}
+use std.common.contracts.sosix.wait_v1.{
+    SOSIX_NATIVE_WAIT_SIGNALED, SOSIX_NATIVE_WAIT_TIMED_OUT, SOSIX_NATIVE_WAIT_CANCELED,
+    SOSIX_SYNC_WAIT_COMPLETED, SOSIX_SYNC_WAIT_TIMED_OUT, SOSIX_SYNC_WAIT_CANCELED, SOSIX_SYNC_WAIT_ERROR
+}
+use std.common.contracts.sosix.error_v1.{SOSIX_ERROR_QUEUE_FULL, SOSIX_ERROR_NATIVE, SOSIX_ERROR_TIMED_OUT, SOSIX_ERROR_CANCELED}
+use std.nogc_async_mut.sosix.fs.{SosixHostedFs}
+use std.nogc_async_mut.sosix.sync.{SosixSyncWaitDriver, sosix_sync_fs_read_at, SOSIX_SYNC_WAIT_BUDGET}
+
+fn setup_sosix_software_ring(capacity: i64) -> SosixHostedFs:
+    match SosixHostedFs.create(92u64, 7u64, capacity):
+        case Ok(fs): fs
+        case Err(_):
+            fail("unresolved sosix oracle: hosted fs could not be created")
+            SosixHostedFs.create(92u64, 7u64, capacity).unwrap()
+
+fn file_cap() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 3, generation: 1)
+
+fn buffer_ref() -> SosixBufferRef:
+    SosixBufferRef(slot: 5, generation: 1)
+
+# Software device: each native wait services the oldest submission with a scripted result.
+class ScriptedDevice:
+    status: i32
+    transferred: u64
+
+impl SosixSyncWaitDriver for ScriptedDevice:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        fs.service_one(self.status, self.transferred)
+        SOSIX_NATIVE_WAIT_SIGNALED
+
+# A device that never completes anything: every wait times out natively.
+class SilentDevice:
+    calls: u64
+
+impl SosixSyncWaitDriver for SilentDevice:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        SOSIX_NATIVE_WAIT_TIMED_OUT
+
+# A device whose native wait is interrupted by cancellation.
+class CancelingDevice:
+    calls: u64
+
+impl SosixSyncWaitDriver for CancelingDevice:
+    fn wait_once(fs: SosixHostedFs, operation: SosixOperationId, deadline_ns: u64, attempt: u64) -> u8:
+        SOSIX_NATIVE_WAIT_CANCELED
+
+describe "SOSIX synchronous positioned read":
+    it "waits exactly once for a completion and returns the typed result":
+        # @req REQ-SOSIX-FS-SYNC
+        step("Wait synchronously without spinning")
+        val fs = setup_sosix_software_ring(2)
+        val device = ScriptedDevice(status: 0, transferred: 24u64)
+        val result = sosix_sync_fs_read_at(fs, device, file_cap(), buffer_ref(), 0u64, 0u64, 24u64, 0u64)
+        expect(result.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(result.waits).to_equal(1u64)
+        expect(result.completion.transferred).to_equal(24u64)
+        step("The ring saw one reserve, one commit, one completion")
+        expect(fs.telemetry().reservations).to_equal(1u64)
+        expect(fs.telemetry().commits).to_equal(1u64)
+        expect(fs.telemetry().completions).to_equal(1u64)
+
+    it "returns a native failure as a typed error after one wait":
+        step("Service the read with a native error")
+        val fs = setup_sosix_software_ring(1)
+        val device = ScriptedDevice(status: -5, transferred: 0u64)
+        val result = sosix_sync_fs_read_at(fs, device, file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(result.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(result.waits).to_equal(1u64)
+        expect(result.error.kind).to_equal(SOSIX_ERROR_NATIVE)
+        expect(result.error.native_code).to_equal(-5)
+
+    it "reports a native wait timeout without a second wait or a spin":
+        step("The device never signals; the native wait times out once")
+        val fs = setup_sosix_software_ring(1)
+        val result = sosix_sync_fs_read_at(fs, SilentDevice(calls: 0u64), file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(result.outcome).to_equal(SOSIX_SYNC_WAIT_TIMED_OUT)
+        expect(result.waits).to_equal(1u64)
+        expect(result.error.kind).to_equal(SOSIX_ERROR_TIMED_OUT)
+        step("The operation is still owned by the ring, not leaked or spun on")
+        expect(fs.occupancy()).to_equal(1u64)
+        expect(SOSIX_SYNC_WAIT_BUDGET).to_be_greater_than(1u64)
+
+    it "rejects a full queue before any wait":
+        step("Reject a stale generation and a full queue")
+        val fs = setup_sosix_software_ring(1)
+        val first = fs.read_at(file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(first.accepted).to_be(true)
+        val result = sosix_sync_fs_read_at(fs, ScriptedDevice(status: 0, transferred: 8u64), file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(result.outcome).to_equal(SOSIX_SYNC_WAIT_ERROR)
+        expect(result.waits).to_equal(0u64)
+        expect(result.error.kind).to_equal(SOSIX_ERROR_QUEUE_FULL)
+
+    it "reports a canceled native wait as canceled, not as a timeout":
+        step("The native wait is interrupted by cancellation")
+        val fs = setup_sosix_software_ring(1)
+        val result = sosix_sync_fs_read_at(fs, CancelingDevice(calls: 0u64), file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(result.outcome).to_equal(SOSIX_SYNC_WAIT_CANCELED)
+        expect(result.waits).to_equal(1u64)
+        expect(result.error.kind).to_equal(SOSIX_ERROR_CANCELED)
+
+    it "returns the ring slot when the synchronous call returns, so a capacity-1 ring serves call after call":
+        step("Two consecutive synchronous reads on a capacity-1 ring")
+        val fs = setup_sosix_software_ring(1)
+        val device = ScriptedDevice(status: 0, transferred: 8u64)
+        val first = sosix_sync_fs_read_at(fs, device, file_cap(), buffer_ref(), 0u64, 0u64, 8u64, 0u64)
+        expect(first.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(fs.occupancy()).to_equal(0u64)
+        val second = sosix_sync_fs_read_at(fs, device, file_cap(), buffer_ref(), 8u64, 0u64, 8u64, 0u64)
+        step("The second call is admitted and completes: the first call released its lease on return")
+        expect(second.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(second.completion.transferred).to_equal(8u64)
+        expect(fs.telemetry().completions).to_equal(2u64)

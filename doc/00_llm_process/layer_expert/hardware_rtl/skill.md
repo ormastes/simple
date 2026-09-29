@@ -1,5 +1,13 @@
 # hardware_rtl Layer Expert
 
+## RISC-V Gen2 CSR boundary
+
+`compiler.mir.hwir.riscv_scalar_csr_projection` is a stateless typed access
+projection, not a CSR bank. `riscv_scalar_csr_owner` captures its intent and
+gates the external commit with accepted completion through the sole retirement
+path. A denied projection asserts neither read nor write effect. Keep Zicsr
+unadvertised until the combined generated-VHDL cycle gate qualifies this owner.
+
 ## Role
 
 Own layer-specific process knowledge for RTL **generation** in pure Simple —

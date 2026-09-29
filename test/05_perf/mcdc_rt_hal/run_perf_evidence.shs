@@ -69,7 +69,6 @@ trap 'on_signal TERM' TERM
 trap 'on_signal HUP' HUP
 
 blocked() { FINAL_STATUS="BLOCKED"; FINAL_DETAIL="$*"; echo "BLOCKED: $*" >&2; exit 2; }
-command -v /usr/bin/time >/dev/null 2>&1 || blocked "GNU /usr/bin/time is required"
 command -v size >/dev/null 2>&1 || blocked "binutils size is required"
 command -v heaptrack >/dev/null 2>&1 || blocked "heaptrack is required for allocation evidence"
 command -v heaptrack_print >/dev/null 2>&1 || blocked "heaptrack_print is required"
@@ -79,15 +78,17 @@ case "$RUNS" in ''|*[!0-9]*) blocked "MCDC_RT_HAL_RUNS must be an odd integer >=
 
 compile_lane() {
     lane="$1" mode="$2" owner_bytes="$3" output="$4"
+    shift 4
     "$SIMPLE_BIN" compile "$FIXTURE" --native --release \
         --mcdc-mode="$mode" --mcdc-owner-bytes="$owner_bytes" \
-        --mcdc-global-bytes=67108864 -o "$output" \
+        --mcdc-global-bytes=67108864 "$@" -o "$output" \
         >"$OUT/raw/build-$lane.out" 2>"$OUT/raw/build-$lane.err" || blocked "compile failed for $lane"
 }
 
 compile_lane off static-off 1048576 "$OUT/bin/mcdc-off"
 compile_lane static-on static-on 1048576 "$OUT/bin/mcdc-static-on"
-compile_lane dynamic dynamic-aspect 1048576 "$OUT/bin/mcdc-dynamic"
+compile_lane dynamic-dormant dynamic-aspect 1048576 "$OUT/bin/mcdc-dynamic-dormant" --mcdc-dynamic-dormant
+compile_lane dynamic-enabled dynamic-aspect 1048576 "$OUT/bin/mcdc-dynamic"
 compile_lane static-saturation static-on 8192 "$OUT/bin/mcdc-static-saturation"
 "$SIMPLE_BIN" compile "$RT_FIXTURE" --native --release --mcdc-mode=static-off \
     -o "$OUT/bin/rt-hal" >"$OUT/raw/build-rt-hal.out" \
@@ -122,23 +123,25 @@ echo 'lane,elapsed_ns_p50,whole_tree_peak_kib,parent_pure_allocation_calls,paren
 
 measure_lane() {
     lane="$1" binary="$2" argument_name="$3" argument_value="$4"
+    [ -n "$cgroup_parent" ] || blocked "$cgroup_reason"
     lane_argument="--$argument_name=$argument_value"
     elapsed_file="$OUT/raw/$lane.elapsed"
     : >"$elapsed_file"
     "$binary" "$lane_argument" >"$OUT/raw/$lane.warm.out" 2>"$OUT/raw/$lane.warm.err" || blocked "$lane warm run failed"
-    max_rss=0
+    max_peak=0
     sample=1
     checksum=""
     while [ "$sample" -le "$RUNS" ]; do
         output="$OUT/raw/$lane.$sample.out"
-        rss="$OUT/raw/$lane.$sample.rss"
-        /usr/bin/time -f '%M' -o "$rss" "$binary" "$lane_argument" >"$output" 2>"$OUT/raw/$lane.$sample.err" || blocked "$lane sample $sample failed"
+        TREE_PEAK_BYTES=""
+        tree_sample "$lane-$sample" "$binary" "$lane_argument" >"$output" 2>"$OUT/raw/$lane.$sample.err" || blocked "$lane sample $sample failed"
+        case "$TREE_PEAK_BYTES" in ''|*[!0-9]*) blocked "$lane $cgroup_reason" ;; esac
+        peak_kib=$((TREE_PEAK_BYTES / 1024)); [ "$peak_kib" -gt "$max_peak" ] && max_peak="$peak_kib"
         value="$(field "$output" elapsed_ns)"; [ -n "$value" ] || blocked "$lane emitted no elapsed_ns"
         printf '%s\n' "$value" >>"$elapsed_file"
         current_checksum="$(field "$output" checksum)"; [ -n "$current_checksum" ] || blocked "$lane emitted no checksum"
         if [ -n "$checksum" ] && [ "$checksum" != "$current_checksum" ]; then blocked "$lane checksum changed"; fi
         checksum="$current_checksum"
-        rss_value="$(cat "$rss")"; [ "$rss_value" -gt "$max_rss" ] && max_rss="$rss_value"
         sample=$((sample + 1))
     done
 
@@ -161,7 +164,7 @@ measure_lane() {
     recorded="$(field "$final" recorded)"; dropped="$(field "$final" dropped)"
     overwritten="$(field "$final" overwritten)"; saturated="$(field "$final" saturated)"
     lane_status="$(field "$final" status)"; [ -n "$lane_status" ] || lane_status="ok"
-    row_status="PENDING"
+    row_status="PASS"
     if [ "$lane" = dynamic-dormant ]; then
         dynamic_load_ok="$(field "$final" dynamic_load_ok)"
         dynamic_published="$(field "$final" dynamic_published)"
@@ -176,16 +179,10 @@ measure_lane() {
     fi
     case "$lane" in rt-hal-*) [ "$lane_status" = "ok" ] || blocked "$lane unavailable: $lane_status" ;; esac
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$lane" "$(median "$elapsed_file")" "$max_rss" "$full_alloc" "$hot_alloc" \
+        "$lane" "$(median "$elapsed_file")" "$max_peak" "$full_alloc" "$hot_alloc" \
         "$(stat -c %s "$binary")" "$(text_bytes "$binary")" "$checksum" \
         "$recorded" "$dropped" "$overwritten" "$saturated" "$row_status" >>"$CSV"
 }
-
-measure_lane off "$OUT/bin/mcdc-off" lane off
-measure_lane static-on "$OUT/bin/mcdc-static-on" lane static-on
-measure_lane dynamic-dormant "$OUT/bin/mcdc-dynamic" lane dynamic-dormant
-measure_lane dynamic-enabled "$OUT/bin/mcdc-dynamic" lane dynamic-enabled
-measure_lane static-saturation "$OUT/bin/mcdc-static-saturation" lane static-on
 
 # Build both fixed providers exactly once. Tool identities are passed to the
 # typed executor and are never printed into benchmark output.
@@ -264,6 +261,15 @@ tree_sample() {
     fi
     return "$tree_rc"
 }
+
+# Every numeric memory column is a fresh cgroup-v2 process-tree peak. This is
+# intentionally shared by MC/DC, analyzer, and RT/HAL rows so the RSS gates
+# never compare parent-only values against descendant-inclusive values.
+measure_lane off "$OUT/bin/mcdc-off" lane off
+measure_lane static-on "$OUT/bin/mcdc-static-on" lane static-on
+measure_lane dynamic-dormant "$OUT/bin/mcdc-dynamic-dormant" lane dynamic-dormant
+measure_lane dynamic-enabled "$OUT/bin/mcdc-dynamic" lane dynamic-enabled
+measure_lane static-saturation "$OUT/bin/mcdc-static-saturation" lane static-on
 
 append_rt_blocked() {
     artifact_bytes="$(stat -c %s "$OUT/bin/rt-hal" 2>/dev/null || true)"
@@ -350,6 +356,16 @@ NR==1 {next}
 {time[$1]=$2; rss[$1]=$3; alloc[$1]=$5; text[$1]=$7; sum[$1]=$8; sat[$1]=$12; status[$1]=$13}
 END {
   fail=0
+  required["off"]=1; required["static-on"]=1
+  required["dynamic-dormant"]=1; required["dynamic-enabled"]=1
+  required["static-saturation"]=1
+  required["analyzer-base"]=1; required["analyzer-double-e"]=1
+  required["analyzer-double-c"]=1
+  for (lane in required) {
+    if (status[lane] != "PASS") {
+      print "FAIL: required evidence row did not pass: " lane > "/dev/stderr"; fail=1
+    }
+  }
   if (sum["off"] != sum["static-on"] || sum["off"] != sum["dynamic-dormant"] || sum["off"] != sum["dynamic-enabled"]) {print "FAIL: checksum parity" > "/dev/stderr"; fail=1}
   if (status["static-on"] == "FAIL") {print "FAIL: static-on recorded no MC/DC evidence" > "/dev/stderr"; fail=1}
   if (status["dynamic-dormant"] == "FAIL") {print "FAIL: dynamic dormant aspect was active or recorded evidence" > "/dev/stderr"; fail=1}

@@ -300,6 +300,9 @@ impl<'a> Parser<'a> {
             TokenKind::Mod => self.parse_keyword_as_pattern("mod"),
             TokenKind::By => self.parse_keyword_as_pattern("by"),
             TokenKind::Union => self.parse_keyword_as_pattern("union"),
+            // Soft keywords in pattern position (e.g. `for case in ...`).
+            TokenKind::Case => self.parse_keyword_as_pattern("case"),
+            TokenKind::Invariant => self.parse_keyword_as_pattern("invariant"),
             TokenKind::Match => self.parse_keyword_as_pattern("match"),
             TokenKind::Or => self.parse_keyword_as_pattern("or"),
             TokenKind::And => self.parse_keyword_as_pattern("and"),

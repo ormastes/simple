@@ -1,4 +1,8 @@
 # Module-level glyph raster cache: `[text]` array-element read is corrupt under native/JIT — lookup never hits its own store
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 - **Date:** 2026-08-06
 - **Lane:** hosted `bin/simple run` (Cranelift JIT), font rendering
@@ -230,3 +234,4 @@ replacing the linear `[text]` key-array scan with parallel primitive arrays
 text-array-free key encoding is feasible for this cache's key shape
 (identity+generation+font_size+codepoint+render_config — mostly not
 representable as small integers without a lookup step of its own).
+

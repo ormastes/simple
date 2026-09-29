@@ -1,4 +1,8 @@
 # Test-tree divergence — sample 8 (15 pairs, `NR%65==30`)
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 Eighth sampling pass over `scripts/check/test_tree_divergence_baseline.txt`
 (956 lines), continuing the reconciliation series (samples 1-7 covered
@@ -75,3 +79,4 @@ None of these three are caused by the tree-divergence itself — same failures
 reproduce identically on both canonical and shadow copies before and after
 sync, confirming they are pre-existing implementation bugs, not test-tree
 drift.
+

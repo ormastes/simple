@@ -1,0 +1,192 @@
+"""Memory-only executable contract for the ContextStoreV1 adapter.
+
+This lane intentionally covers only the frozen in-memory behavior steps.
+Expected rows and error variants are independently declared by the contract.
+"""
+
+# @tag: unit, app, io, database, pure-simple, contract
+
+use std.spec.{describe, it, expect, step}
+use app.io.context_store_v1.{ContextPackV1, ContextStoreV1, ContextStoreErrorV1}
+
+fn context_store_expected_rows_v1() -> [ContextPackV1]:
+    [
+        ContextPackV1(id: 1, source: "src/a.spl", target: "alpha",
+            status: "ready", lines: 2, token_estimate: 4,
+            content: "quote=' % _ |\\\t\r\n雪"),
+        ContextPackV1(id: 2, source: "src/b.spl", target: "beta",
+            status: "ready", lines: 1, token_estimate: 1,
+            content: "second")
+    ]
+
+fn context_store_expect_rows_v1(actual: [ContextPackV1], expected: [ContextPackV1]):
+    expect(actual.len()).to_equal(expected.len())
+    var i: i64 = 0
+    while i < expected.len():
+        expect(actual[i].id).to_equal(expected[i].id)
+        expect(actual[i].source).to_equal(expected[i].source)
+        expect(actual[i].target).to_equal(expected[i].target)
+        expect(actual[i].status).to_equal(expected[i].status)
+        expect(actual[i].lines).to_equal(expected[i].lines)
+        expect(actual[i].token_estimate).to_equal(expected[i].token_estimate)
+        expect(actual[i].content).to_equal(expected[i].content)
+        i = i + 1
+
+fn context_store_expect_error_v1(actual, expected: ContextStoreErrorV1):
+    expect(actual.is_err()).to_equal(true)
+    expect(actual.unwrap_err()).to_equal(expected)
+
+describe "ContextStoreV1 frozen memory contract":
+    # M-001
+    it "should round trip context rows through the pure store":
+        step("Round trip context rows through the pure store")
+        val store = ContextStoreV1.memory().unwrap()
+        val expected = context_store_expected_rows_v1()
+        expect(store.replace_all(expected).is_ok()).to_equal(true)
+        expect(store.put(ContextPackV1(id: 0, source: "src/c.spl",
+            target: "gamma", status: "ready", lines: 1,
+            token_estimate: 1, content: "third")).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(store.get_exact("src/a.spl").unwrap(), [expected[0]])
+        context_store_expect_rows_v1(store.query_literal("beta").unwrap(), [expected[1]])
+        expect(store.get_exact("missing.spl").unwrap().len()).to_equal(0)
+        val allocated = ContextStoreV1.memory().unwrap()
+        val zero_rows = [
+            ContextPackV1(id: 0, source: "zero/a", target: "zero-a", status: "ready",
+                lines: 1, token_estimate: 1, content: "zero-a"),
+            ContextPackV1(id: 0, source: "zero/b", target: "zero-b", status: "ready",
+                lines: 1, token_estimate: 1, content: "zero-b")]
+        expect(allocated.replace_all(zero_rows).is_ok()).to_equal(true)
+        val zero_a = allocated.get_exact("zero/a").unwrap()
+        val zero_b = allocated.get_exact("zero/b").unwrap()
+        expect(zero_a.len()).to_equal(1)
+        expect(zero_b.len()).to_equal(1)
+        expect(zero_a[0].id).to_be_greater_than(0)
+        expect(zero_b[0].id).to_be_greater_than(zero_a[0].id)
+        expect(store.put(ContextPackV1(id: 0, source: "src/a.spl",
+            target: "alpha-updated", status: "ready", lines: 2,
+            token_estimate: 4, content: expected[0].content)).is_ok()).to_equal(true)
+        val replaced = store.get_exact("src/a.spl").unwrap()
+        expect(replaced.len()).to_equal(1)
+        expect(replaced[0].target).to_equal("alpha-updated")
+        val maxed = ContextStoreV1.memory().unwrap()
+        expect(maxed.replace_all([ContextPackV1(id: 9223372036854775807,
+            source: "max", target: "max", status: "ready", lines: 1,
+            token_estimate: 1, content: "max")]).is_ok()).to_equal(true)
+        context_store_expect_error_v1(maxed.put(ContextPackV1(id: 0,
+            source: "overflow", target: "overflow", status: "ready", lines: 1,
+            token_estimate: 1, content: "overflow")), ContextStoreErrorV1.InvalidIdentity)
+
+    # M-004
+    it "should preserve literal context search and rendering":
+        step("Preserve literal context search and rendering")
+        val store = ContextStoreV1.memory().unwrap()
+        val expected = context_store_expected_rows_v1()
+        expect(store.replace_all(expected).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(
+            store.query_literal("% _ |\\\t\r\n雪").unwrap(), [expected[0]])
+        context_store_expect_rows_v1(store.query_literal("quote='").unwrap(), [expected[0]])
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), expected)
+        context_store_expect_rows_v1(store.query_literal("alpha").unwrap(), [expected[0]])
+        context_store_expect_rows_v1(store.query_literal("\\").unwrap(), [expected[0]])
+
+    # M-005
+    it "should retain the old image after an invalid replacement":
+        step("Retain old rows after invalid replacement")
+        val store = ContextStoreV1.memory().unwrap()
+        val old_rows = context_store_expected_rows_v1()
+        expect(store.replace_all(old_rows).is_ok()).to_equal(true)
+        val invalid = [ContextPackV1(id: -1, source: "bad", target: "bad",
+            status: "ready", lines: 1, token_estimate: 1, content: "bad")]
+        context_store_expect_error_v1(store.replace_all(invalid), ContextStoreErrorV1.InvalidIdentity)
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), old_rows)
+        val invalid_count = [ContextPackV1(id: 0, source: "bad-count", target: "bad",
+            status: "ready", lines: -1, token_estimate: 1, content: "bad")]
+        context_store_expect_error_v1(store.replace_all(invalid_count), ContextStoreErrorV1.InvalidIdentity)
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), old_rows)
+        val invalid_tokens = [ContextPackV1(id: 0, source: "bad-token", target: "bad",
+            status: "ready", lines: 1, token_estimate: -1, content: "bad")]
+        context_store_expect_error_v1(store.replace_all(invalid_tokens), ContextStoreErrorV1.InvalidIdentity)
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), old_rows)
+
+    # M-006
+    it "should keep duplicate-ID replacement atomic":
+        step("Keep duplicate-ID replacement atomic")
+        val store = ContextStoreV1.memory().unwrap()
+        val old_rows = context_store_expected_rows_v1()
+        expect(store.replace_all(old_rows).is_ok()).to_equal(true)
+        val duplicate = [
+            ContextPackV1(id: 9, source: "x", target: "x", status: "ready",
+                lines: 1, token_estimate: 1, content: "x"),
+            ContextPackV1(id: 9, source: "y", target: "y", status: "ready",
+                lines: 1, token_estimate: 1, content: "y")]
+        context_store_expect_error_v1(store.replace_all(duplicate), ContextStoreErrorV1.DuplicateIdentity)
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), old_rows)
+        val displacement = [ContextPackV1(id: 1, source: "other", target: "other",
+            status: "ready", lines: 1, token_estimate: 1, content: "other")]
+        context_store_expect_error_v1(store.replace_all(displacement), ContextStoreErrorV1.DuplicateIdentity)
+        context_store_expect_rows_v1(store.query_literal("src/").unwrap(), old_rows)
+        context_store_expect_error_v1(store.put(ContextPackV1(id: 1, source: "other-put",
+            target: "other", status: "ready", lines: 1, token_estimate: 1,
+            content: "other")), ContextStoreErrorV1.DuplicateIdentity)
+
+    # M-002 and M-003
+    it "should preserve unsorted IDs duplicate sources and zero-ID allocation":
+        step("Preserve unsorted IDs duplicate sources and zero-ID allocation")
+        val empty_store = ContextStoreV1.memory().unwrap()
+        expect(empty_store.replace_all([]).is_ok()).to_equal(true)
+        expect(empty_store.query_literal("row/").unwrap().len()).to_equal(0)
+        val singleton_store = ContextStoreV1.memory().unwrap()
+        val singleton = [ContextPackV1(id: 7, source: "singleton", target: "one",
+            status: "ready", lines: 1, token_estimate: 1, content: "one")]
+        expect(singleton_store.replace_all(singleton).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(singleton_store.query_literal("singleton").unwrap(), singleton)
+        val odd_store = ContextStoreV1.memory().unwrap()
+        val odd_rows = [
+            ContextPackV1(id: 5, source: "odd/5", target: "t5", status: "ready", lines: 5, token_estimate: 50, content: "row-5"),
+            ContextPackV1(id: 1, source: "odd/1", target: "t1", status: "ready", lines: 1, token_estimate: 10, content: "row-1"),
+            ContextPackV1(id: 9, source: "odd/9", target: "t9", status: "ready", lines: 9, token_estimate: 90, content: "row-9"),
+            ContextPackV1(id: 3, source: "odd/3", target: "t3", status: "ready", lines: 3, token_estimate: 30, content: "row-3"),
+            ContextPackV1(id: 7, source: "odd/7", target: "t7", status: "ready", lines: 7, token_estimate: 70, content: "row-7")]
+        expect(odd_store.replace_all(odd_rows).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(odd_store.query_literal("odd/").unwrap(), [
+            odd_rows[1], odd_rows[3], odd_rows[0], odd_rows[4], odd_rows[2]])
+        val duplicate_source_store = ContextStoreV1.memory().unwrap()
+        val unsorted = [
+            ContextPackV1(id: 8, source: "same", target: "late", status: "ready",
+                lines: 1, token_estimate: 1, content: "late"),
+            ContextPackV1(id: 2, source: "same", target: "early", status: "ready",
+                lines: 1, token_estimate: 1, content: "early")]
+        expect(duplicate_source_store.replace_all(unsorted).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(duplicate_source_store.get_exact("same").unwrap(), [unsorted[1], unsorted[0]])
+        val reverse_store = ContextStoreV1.memory().unwrap()
+        val reverse_rows = [
+            ContextPackV1(id: 16, source: "reverse", target: "r16", status: "ready", lines: 1, token_estimate: 1, content: "r16"),
+            ContextPackV1(id: 14, source: "reverse", target: "r14", status: "ready", lines: 1, token_estimate: 1, content: "r14"),
+            ContextPackV1(id: 12, source: "reverse", target: "r12", status: "ready", lines: 1, token_estimate: 1, content: "r12"),
+            ContextPackV1(id: 10, source: "reverse", target: "r10", status: "ready", lines: 1, token_estimate: 1, content: "r10"),
+            ContextPackV1(id: 8, source: "reverse", target: "r8", status: "ready", lines: 1, token_estimate: 1, content: "r8"),
+            ContextPackV1(id: 6, source: "reverse", target: "r6", status: "ready", lines: 1, token_estimate: 1, content: "r6"),
+            ContextPackV1(id: 4, source: "reverse", target: "r4", status: "ready", lines: 1, token_estimate: 1, content: "r4"),
+            ContextPackV1(id: 2, source: "reverse", target: "r2", status: "ready", lines: 1, token_estimate: 1, content: "r2")]
+        expect(reverse_store.replace_all(reverse_rows).is_ok()).to_equal(true)
+        context_store_expect_rows_v1(reverse_store.get_exact("reverse").unwrap(), [
+            reverse_rows[7], reverse_rows[6], reverse_rows[5], reverse_rows[4],
+            reverse_rows[3], reverse_rows[2], reverse_rows[1], reverse_rows[0]])
+        expect(reverse_store.put(ContextPackV1(id: 0, source: "new", target: "new",
+            status: "ready", lines: 1, token_estimate: 1, content: "new")).is_ok()).to_equal(true)
+        val new_row = reverse_store.get_exact("new").unwrap()
+        expect(new_row.len()).to_equal(1)
+        expect(new_row[0].id).to_equal(17)
+
+    # M-008
+    it "should close the in-memory context store":
+        step("Close the in-memory context store")
+        val store = ContextStoreV1.memory().unwrap()
+        expect(store.close().is_ok()).to_equal(true)
+        expect(store.close().is_ok()).to_equal(true)
+        context_store_expect_error_v1(store.get_exact("after-close"), ContextStoreErrorV1.Closed)
+        context_store_expect_error_v1(store.query_literal("after-close"), ContextStoreErrorV1.Closed)
+        context_store_expect_error_v1(store.put(ContextPackV1(id: 0, source: "after-close",
+            target: "after-close", status: "ready", lines: 1, token_estimate: 1,
+            content: "after-close")), ContextStoreErrorV1.Closed)
+        context_store_expect_error_v1(store.replace_all([]), ContextStoreErrorV1.Closed)

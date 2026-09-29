@@ -1,5 +1,12 @@
 # Stage3 numeric interpolation corrupts AST hardening slot (2026-08-13)
 
+## Triage 2026-09-13
+OPEN, out of scope for this lane: the doc's own status says the Pure-Simple
+MIR/LLVM root-cause fix is already implemented; what remains is native
+rebuild + runtime confirmation on a working self-hosted Build10 binary, which
+this worktree does not have. Left OPEN pending that redeploy.
+
+
 Status: Pure-Simple MIR/LLVM root-cause fix implemented; native rebuild and
 runtime confirmation remain required because the frozen Build10 executables
 crash before focused compile/test execution.

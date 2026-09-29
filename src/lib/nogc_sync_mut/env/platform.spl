@@ -5,6 +5,7 @@
 use std.env.types.{rt_env_home, rt_hostname, rt_env_cwd, rt_process_run}
 use std.env.variables.{env_get}
 use std.path.{join2}
+use std.cache_path_policy_v1.{user_local_location_v1, cache_location_v1}
 
 # No-shell existence probe, same as the established `is_char_device`
 # precedent (io_runtime.spl) — used below to skip the `uname -s` shell-out
@@ -12,6 +13,10 @@ use std.path.{join2}
 # where `rt_process_run` is a TRAP_STUB. See
 # doc/08_tracking/bug/simpleos_baremetal_backend_resolve_empty_override_rt_process_run_trap_2026-08-11.md
 use std.io_runtime.{file_exists}
+
+# In-process host-OS primitive (allowlisted provider wrapper, no `rt_` token at
+# this call site so it does not move the check-no-direct-rt ratchet).
+use std.sffi.platform.{platform_name_raw}
 
 @always_inline
 fn _platform_process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
@@ -45,32 +50,18 @@ fn detect_os() -> text:
     Example:
         detect_os()  # "linux"
     """
-    # Check OS environment variable for Windows.
-    # NIL-GUARD (2026-08-02): env_get returns nil for an unset var, and in a
-    # large module unit (e.g. anything importing browser_engine) the
-    # interpreter evaluates `os_env != nil` as true for that nil, so the old
-    # `!= "" and != nil` guard still let `.lower()` run on nil — "method
-    # `lower` not found on type `nil`" during engine2d backend auto-resolve
-    # (probe_metal -> is_macos -> detect_os). Use the same `== nil` ternary
-    # pattern as the OSTYPE branch below, which evaluates correctly in both
-    # engines. See doc/08_tracking/bug/jit_method_lower_not_found_on_nil_backend_autoresolve_2026-08-02.md
-    val os_env_raw = env_get("OS")
-    val os_env = if os_env_raw == nil: "" else: os_env_raw.lower()
-    if os_env.contains("windows"):
-        return "windows"
-
-    val ostype_raw = env_get("OSTYPE")
-    val ostype = if ostype_raw == nil: "" else: ostype_raw.lower()
-    if ostype.contains("linux"):
-        return "linux"
-    if ostype.contains("darwin") or ostype.contains("mac"):
-        return "macos"
-    if ostype.contains("freebsd"):
-        return "freebsd"
-    if ostype.contains("openbsd"):
-        return "openbsd"
-    if ostype.contains("netbsd"):
-        return "netbsd"
+    # The runtime is authoritative; mutable OS/OSTYPE values are not host facts.
+    # BSD providers report "unix", so retain the guarded uname fallback below.
+    val rt_os = platform_name_raw()
+    if rt_os != nil:
+        if rt_os == "windows":
+            return "windows"
+        if rt_os == "macos":
+            return "macos"
+        if rt_os == "linux":
+            return "linux"
+        if rt_os == "freebsd" or rt_os == "illumos" or rt_os == "solaris":
+            return rt_os
 
     # BAREMETAL GUARD (2026-08-11): `rt_process_run` is a TRAP_STUB on
     # baremetal targets (halts the kernel), while `rt_file_exists` is a real
@@ -289,6 +280,19 @@ fn get_cache_dir() -> text:
         val home = get_home_dir()
         return join2(home, ".cache")
 
+fn get_user_local_dir() -> text:
+    user_local_location_v1(
+        detect_os(), env_get("LOCALAPPDATA") ?? "",
+        env_get("XDG_CACHE_HOME") ?? "", get_home_dir()
+    )
+
+fn get_cache_location(app: text) -> text:
+    cache_location_v1(
+        app, detect_os(), env_get("SIMPLE_CACHE") ?? "",
+        env_get("LOCALAPPDATA") ?? "", env_get("XDG_CACHE_HOME") ?? "",
+        get_home_dir(), get_current_dir()
+    )
+
 fn get_data_dir() -> text:
     """Get user data directory.
 
@@ -371,6 +375,9 @@ fn get_temp_dir() -> text:
     # Default fallbacks
     val os = detect_os()
     if os == "windows":
+        val local_app_data = env_get("LOCALAPPDATA")
+        if local_app_data != "" and local_app_data != nil:
+            return local_app_data + "/Temp"
         "C:/Windows/Temp"
     else:
         "/tmp"

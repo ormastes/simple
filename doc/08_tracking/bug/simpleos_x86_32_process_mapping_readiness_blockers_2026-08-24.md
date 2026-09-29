@@ -1,4 +1,8 @@
 # SimpleOS x86-32 process mapping readiness blockers — 2026-08-24
+## Open 2026-09-16 — needs owner triage
+
+Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
+evidence found in the body. This is bookkeeping, not verification.
 
 The authenticated ELF32/i386 metadata path is present, but filesystem-launched
 x86-32 execution must remain blocked before loader authority consumption.
@@ -79,3 +83,4 @@ x86-32 execution must remain blocked before loader authority consumption.
 Until those owners join the scheduler transaction,
 `executable_target_dispatch_v1` must retain
 `process_image_builder_ready = false` for canonical architecture `x86`.
+
