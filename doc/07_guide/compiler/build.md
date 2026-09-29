@@ -6,6 +6,12 @@ This guide covers the Simple build system, project configuration, build commands
 
 ## Overview
 
+Automatic Windows hosted C compiler discovery compiles a probe that includes
+`<stdlib.h>` before accepting a candidate. A headerless object is insufficient:
+`clang-cl` can emit one without the C SDK that runtime compilation needs. A
+rejected candidate permits discovery to try the next configured candidate;
+the probe does not replace target, linker-library or bootstrap admission checks.
+
 The Simple language build system is fully self-hosted, written in Simple and configured with SDN (Simple Data Notation).
 
 > **Default toolchain = pure-Simple, not the Rust seed.** All tooling
