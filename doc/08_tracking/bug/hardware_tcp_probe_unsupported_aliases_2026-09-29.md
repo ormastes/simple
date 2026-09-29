@@ -76,3 +76,34 @@ the supported network runtime provider. No Rust-only reimplementation or
 placeholder pass is accepted as evidence. The earlier admitted TRACE32 mini
 compile reached its 180-second startup guard without a verdict; that result
 is not repeated or claimed as evidence for this repair.
+
+## Release provider compatibility blockers (2026-09-29)
+
+Static review of release head `903a6e36d833fb49a9fd59c0719edc46ee0614cc`
+found that exporting the scalar TCP method is insufficient qualification:
+
+- `src/runtime/runtime_native.c:11496` parses only IPv4 into `sockaddr_in`.
+  Its connect-timeout owner returns `-1` for parse failure at line 11586,
+  whereas this helper enters hostname resolution only for `-101`. Thus
+  `localhost` and IPv6 literals cannot work with this C provider.
+- The Windows branch at line 11896 returns `-1` unconditionally for
+  `rt_io_tcp_connect_timeout`; it does not implement the readiness operation.
+- `browser_dns_lookup` forwards to `rt_dns_lookup`. The inspected owned C
+  runtime `.c` files contain no definition of this symbol; the Rust runtime
+  provides it in `src/compiler_rust/runtime/src/value/net_tcp.rs:468`.
+  A qualifying native link must prove the actual DNS owner instead of assuming
+  the Rust provider is present in a self-hosted runtime capsule.
+- Historical socket-status repair `78e803b12aa` is already an ancestor of this
+  release head and does not supply these missing capabilities.
+
+Required repair belongs in the shared network provider contract: consistent
+invalid-address status, real IPv4/IPv6 timed connect and descriptor cleanup,
+bounded DNS on the selected runtime, and a real Windows implementation where
+Windows readiness is claimed. Do not teach this app to treat all `-1` errors
+as hostname parse failures or weaken its IPv6/hostname assertions.
+
+The real loopback, hostname, invalid-host, IPv6, repeated-close, and deadline
+specs remain pending on a verified self-hosted runtime. No dynamic PASS or
+release readiness is claimed. This evidence-only followup changes the source
+commit identity; the original preparation receipt covers only its recorded
+original result, not this followup.
