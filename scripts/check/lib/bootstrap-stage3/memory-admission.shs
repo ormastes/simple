@@ -377,6 +377,51 @@ bootstrap_stage3_memory_sample() {
     esac
 }
 
+# Capture the Windows executable helper from the commit owning the actual
+# sourced facade. A current hash of arbitrary working bytes is not authority.
+bootstrap_stage3_memory_capture_windows_provider() {
+    [ "$#" -eq 1 ] || return 1
+    bootstrap_stage3_memory_windows_capture=$1
+    bootstrap_stage3_memory_windows_facade_dir=$(
+        CDPATH= cd -- "$(dirname -- "$BOOTSTRAP_STAGE3_FACADE_PATH")" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_memory_windows_facade_dir" = \
+        "${bootstrap_stage3_facade_dir:-}" ] &&
+        [ "$BOOTSTRAP_STAGE3_FACADE_PATH" = \
+        "$bootstrap_stage3_memory_windows_facade_dir/bootstrap-stage3-provenance.shs" ] || return 1
+    bootstrap_stage3_memory_windows_root=$(
+        CDPATH= cd -- "$bootstrap_stage3_memory_windows_facade_dir/../../.." && pwd -P
+    ) || return 1
+    bootstrap_stage3_memory_windows_git_root=$(git -C \
+        "$bootstrap_stage3_memory_windows_root" rev-parse --show-toplevel) || return 1
+    bootstrap_stage3_memory_windows_git_root=$(
+        CDPATH= cd -- "$bootstrap_stage3_memory_windows_git_root" && pwd -P
+    ) || return 1
+    [ "$bootstrap_stage3_memory_windows_root" = \
+        "$bootstrap_stage3_memory_windows_git_root" ] || return 1
+    bootstrap_stage3_memory_windows_commit=$(git -C \
+        "$bootstrap_stage3_memory_windows_root" rev-parse --verify 'HEAD^{commit}') || return 1
+    bootstrap_stage3_memory_windows_rel=scripts/check/lib/bootstrap-stage3/windows-process-inventory.ps1
+    bootstrap_stage3_memory_windows_blob=$(git -C \
+        "$bootstrap_stage3_memory_windows_root" rev-parse --verify \
+        "$bootstrap_stage3_memory_windows_commit:$bootstrap_stage3_memory_windows_rel") || return 1
+    git -C "$bootstrap_stage3_memory_windows_root" cat-file blob \
+        "$bootstrap_stage3_memory_windows_blob" >"$bootstrap_stage3_memory_windows_capture" || return 1
+    bootstrap_stage3_memory_validate_windows_provider
+}
+
+bootstrap_stage3_memory_validate_windows_provider() {
+    [ "$(git -C "$bootstrap_stage3_memory_windows_root" rev-parse --verify \
+        'HEAD^{commit}')" = "$bootstrap_stage3_memory_windows_commit" ] &&
+        [ "$(git -C "$bootstrap_stage3_memory_windows_root" hash-object \
+        --path="$bootstrap_stage3_memory_windows_rel" \
+        "$bootstrap_stage3_memory_windows_root/$bootstrap_stage3_memory_windows_rel")" = \
+        "$bootstrap_stage3_memory_windows_blob" ] &&
+        [ "$(git -C "$bootstrap_stage3_memory_windows_root" hash-object \
+        "$bootstrap_stage3_memory_windows_capture")" = \
+        "$bootstrap_stage3_memory_windows_blob" ]
+}
+
 bootstrap_stage3_memory_append_processes() {
     bootstrap_stage3_memory_process_output=$1
     bootstrap_stage3_memory_process_fixture=\
@@ -391,6 +436,41 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
             "$bootstrap_stage3_memory_process_tmp" || {
             rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
         bootstrap_stage3_memory_process_source=fixture
+    elif case "$(uname -s 2>/dev/null || echo unknown)" in
+        MINGW*|MSYS*|CYGWIN*) true ;; *) false ;; esac; then
+        # MSYS ps does not implement the BSD -ax/-o inventory contract. Query
+        # native Windows once; never classify an empty/partial result as idle.
+        bootstrap_stage3_memory_windows_provider=$(mktemp --suffix=.ps1 \
+            "${TMPDIR:-/tmp}/stage3-process-provider.XXXXXX") || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+        bootstrap_stage3_memory_capture_windows_provider \
+            "$bootstrap_stage3_memory_windows_provider" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_windows_provider"; return 1; }
+        bootstrap_stage3_memory_windows_output=$(cygpath -w \
+            "$bootstrap_stage3_memory_process_tmp") || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_windows_provider"; return 1; }
+        bootstrap_stage3_memory_windows_provider_native=$(cygpath -w \
+            "$bootstrap_stage3_memory_windows_provider") || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_windows_provider"; return 1; }
+        powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+            -File "$bootstrap_stage3_memory_windows_provider_native" \
+            -OutputPath "$bootstrap_stage3_memory_windows_output" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_windows_provider"; return 1; }
+        bootstrap_stage3_memory_validate_windows_provider || {
+            rm -f "$bootstrap_stage3_memory_process_tmp" \
+                "$bootstrap_stage3_memory_windows_provider"; return 1; }
+        rm -f "$bootstrap_stage3_memory_windows_provider"
+        bootstrap_stage3_memory_process_source=windows-cim
+        {
+            printf 'process_scan_source_root=%s\n' "$bootstrap_stage3_memory_windows_root"
+            printf 'process_scan_git_head=%s\n' "$bootstrap_stage3_memory_windows_commit"
+            printf 'process_scan_provider_blob=%s\n' "$bootstrap_stage3_memory_windows_blob"
+        } >>"$bootstrap_stage3_memory_process_output" || {
+            rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
     elif command -v ps >/dev/null 2>&1; then
         # -ax and one -o per column: FreeBSD ps -e means 'show environment',
         # and it reads 'pid=,ppid=,...' as a single pid column + header row.
