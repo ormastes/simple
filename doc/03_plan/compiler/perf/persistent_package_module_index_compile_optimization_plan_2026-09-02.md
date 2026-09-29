@@ -403,6 +403,26 @@ no-stub native test passes; real archive output attachment, production V3
 publication, full CLI execution, and paired time/RSS proof remain open. See
 `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
 
+Native object handoff follow-up (2026-09-29): the cold driver context now
+retains each module's object path after the existing capsule receipt gate,
+including validated cache hits. It resets that map with the typed HIR receipts
+at the next capture. The focused no-stub Stage-2 native probe passes; see
+`doc/09_report/compiler/target6_cold_native_object_handoff_2026-09-29.md`.
+This supplies real codegen output paths to the cold persistence bridge, but
+does not itself publish a V3 graph or prove a full warm compile.
+
+Native object persistence follow-up (2026-09-29): a bounded no-follow bridge
+now persists the actual cold object bytes into the existing binary CAS after
+checking their capsule receipt. The production native driver calls it after
+accepting cold capsules and records objectless export facades explicitly. A
+694-unit no-stub driver-linked probe passes, including accepted-identity and
+tamper rejection. A full frozen-SCV build remains unproved; physical aliases
+and generated outputs still need typed output bindings. The binary CAS
+remains non-authoritative for warm hits until complete action identities,
+archive publication, and readback are wired. No joint time/RSS improvement
+is claimed; see
+`doc/09_report/compiler/target6_cold_native_object_persistence_2026-09-29.md`.
+
 Archive semantic follow-up (2026-09-29): before publishing `CURRENT`, the
 cold publisher now checks the exact symbol/action payload grammar used by the
 warm decoder, including action target-symbol resolution. A hash-valid but
@@ -416,5 +436,19 @@ the typed WM tray fix, then failed at the Stage4 `host-gpu` link on 173
 distinct symbols. This still blocks full-CLI Target 6 qualification; the
 focused V3 probes are narrower evidence. See
 `doc/09_report/compiler/target56_stage4_cli_link_boundary_2026-09-28.md`.
+The 2026-09-29 standalone Stage4 self-hosting attempt removed reintroduced
+stale `app.package.registry` and `app.ffi_gen.specs` duplicate source paths;
+the canonical package CLI spec passed 3/3. The older Stage4 flat loader then
+collapsed two distinct GC-family regex facades to `tooling.regex_nfa` before
+compilation. This is a source-root naming blocker, not a current-source
+compiler or Target 6 performance pass. See
+`doc/08_tracking/bug/stage4_module_collisions_and_stale_imports_2026-07-24.md`.
+An entry walk with that older Stage4 binary bypassed the GC-family collision
+but rejected 124 current-source declarations during parse; forcing the
+closure flag before the walk loaded only the entry and left imports unresolved.
+Neither route produced a current-source compiler. The 12 remaining canonical
+`ffi_gen.specs` files that imported `NL` from the wrong module now use
+`std.text.{NL}`. The full production cutover still needs the current-source
+self-hosted build and qualification gates above.
 The marker bridge's focused native evidence and limits are in
 `doc/09_report/compiler/target6_index_compat_marker_publication_2026-09-28.md`.
