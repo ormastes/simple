@@ -85,6 +85,13 @@ linker, a cross compiler, SMF inputs, or a compiler-driver fallback. The
 capture is opt-in because it copies every link input and can be large. The
 archive records the Simple link; a matched C size claim also needs a C build
 using the same startup and required runtime/link inputs.
+For the Linux one-source hello gate, run
+`scripts/check/check-runtime-binary-size-matched-link.py` with the archive,
+its receipt, both unstripped and stripped outputs, the one-function C source,
+and the exact Clang, LLD, and strip tools. It replays the Simple link byte for
+byte, replaces only the program object for C, and checks the 15 KiB and 1.05x
+limits. The full BS7 cohort still requires its separate admission, provider,
+NoGC, startup, and RSS evidence.
 
 For the bootstrap-only Rust tool, an existing directory in
 `SIMPLE_RUNTIME_PATH` supplies native link archives and leaves interpreter

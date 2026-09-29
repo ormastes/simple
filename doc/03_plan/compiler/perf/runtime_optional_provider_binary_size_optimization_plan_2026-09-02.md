@@ -197,6 +197,17 @@ development or 100 release samples per lane, and rejects Rust seed or
 pre-Stage4 evidence. The focused mutation suite passes. No heavy cohort has
 been run, so native development and release qualification remain pending.
 
+Exact hello-link follow-up (2026-09-29): a fresh selected-K1 pure-Simple
+Stage4 compiler built a one-source hello and captured LLD's opened inputs.
+Replaying that archive changed only the program object for the C comparator;
+both outputs run. After the same strip tool, Simple is 13,544 bytes and C is
+13,608 bytes (ratio 0.995297), so this matched Linux size comparison passes.
+The fail-closed replay checker and two rejection probes are recorded in
+`doc/09_report/compiler/target5_exact_hello_link_c_gate_2026-09-29.md`.
+The generic BS7 checker still trusts the `matched-startup-v1` label; wire
+this replay proof into BS7 admission and complete NoGC/provider traces plus
+30/100-sample cohorts before marking the phase or Target 5 complete.
+
 ## Phase 6 — Feature and Architecture Qualification
 
 - Exercise every provider family on every supported architecture.

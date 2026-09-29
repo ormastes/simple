@@ -1,5 +1,10 @@
 # Target 5 Stage4 hello C attribution (Linux ARM64, 2026-09-29)
 
+Superseded for the exact Linux size comparison by
+`doc/09_report/compiler/target5_exact_hello_link_c_gate_2026-09-29.md`,
+which captures and replays the actual hello link. The figures below remain a
+record of the earlier unmatched diagnostic.
+
 Status: diagnostic only. This comparison does not satisfy the BS7 matched C
 size gate, because the exact runtime archive and link manifest used by the
 saved Simple hello were not retained with that output. The saved Simple binary
