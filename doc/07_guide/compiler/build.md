@@ -92,6 +92,13 @@ and the exact Clang, LLD, and strip tools. It replays the Simple link byte for
 byte, replaces only the program object for C, and checks the 15 KiB and 1.05x
 limits. The full BS7 cohort still requires its separate admission, provider,
 NoGC, startup, and RSS evidence.
+On Linux, the BS7 producer and checker require the unstripped Simple and C
+outputs, captured archive and receipt, C source, and the Clang, LLD, and strip
+tools through their `--matched-*` options. They bind all input hashes in the
+cohort receipt and rerun the exact replay; `matched-startup-v1` by itself is
+not size evidence. Pass `--python-binary` as the baseline executable; the
+receipt binds its hash and the checker requires each Simple/Python sample row
+to name the matching lane's binary hash.
 
 For the bootstrap-only Rust tool, an existing directory in
 `SIMPLE_RUNTIME_PATH` supplies native link archives and leaves interpreter

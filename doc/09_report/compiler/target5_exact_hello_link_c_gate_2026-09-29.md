@@ -46,18 +46,27 @@ replays both links, verifies the captured archive/output/linker hashes,
 checks the two strip outputs and runtime output, and enforces both size
 limits. It also requires both program objects to define only `__simple_main`
 and import only `rt_println_str`, preventing a second `main` from replacing
-the archived startup wrapper. It passed on these artifacts before this final
-symbol-contract hardening; the symbol sets were inspected with `nm`.
+the archived startup wrapper. The final checker passed on the actual
+captured archive after the symbol-contract hardening.
 A changed C stripped file was rejected
 as `c-strip-replay-mismatch`; a changed archive receipt was rejected as
 `archive-digest-mismatch`. A C object that also defined `main` was rejected
-as `hello-object-symbol-contract-invalid`. The final checker passed Python
-syntax validation after the symbol-contract change.
+as `hello-object-symbol-contract-invalid`.
 
+The BS7 producer/checker now require this replay on Linux and bind the
+unstripped outputs, C source, archive, capture receipt, and tool hashes in
+the cohort receipt. A real-LLD fixture passes the producer and checker and
+rejects collector/provider, Stage4, sample-count, binary, label, archive,
+receipt, and sample-binary-hash mutations. The cohort also binds the supplied
+Python executable hash; every sample row must match its lane's executable.
 This result qualifies the exact **size comparison only**. The existing
 30-pair Simple/Python startup and RSS diagnostic used the same stripped
 Simple SHA-256, but it did not capture the required NoGC inventory or
-provider trace and is not a BS7 admission. The generic BS7 producer/checker
-still accepts a `matched-startup-v1` label without running this replay checker;
-that handoff, fresh production cohorts, 100-sample release qualification,
-and full optional-provider feature closure remain required.
+provider trace and is not a BS7 admission. Fresh production cohorts,
+100-sample release qualification, and full optional-provider feature closure
+remain required.
+
+The executable SPipe wrapper was attempted with this Stage4 compiler, but its
+older flat AST bridge rejected declaration nodes within a 40-file source closure
+before either scenario ran. The shell mutation fixture passed; the SPipe
+wrapper remains unverified.

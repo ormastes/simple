@@ -8,18 +8,31 @@ field() { [ "$(grep -c "^$2=" "$1" 2>/dev/null || true)" -eq 1 ] || return 1; se
 eq_field() { value=$(field "$1" "$2") || fail "missing-$2"; [ "$value" = "$3" ] || fail "invalid-$2"; }
 uint() { value=$(field "$1" "$2") || fail "missing-$2"; case "$value" in ''|*[!0-9]*) fail "invalid-$2";; esac; printf '%s' "$value"; }
 
-RECEIPT= SAMPLES= SIMPLE= C_BINARY= STAGE4= NOGC= PROVIDERS=
+RECEIPT= SAMPLES= SIMPLE= C_BINARY= PYTHON= STAGE4= NOGC= PROVIDERS=
+MATCH_SIMPLE= MATCH_C= MATCH_SOURCE= MATCH_ARCHIVE= MATCH_RECEIPT=
+MATCH_CLANG= MATCH_LLD= MATCH_STRIP=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --receipt) RECEIPT=$2; shift 2;; --samples) SAMPLES=$2; shift 2;;
         --simple-binary) SIMPLE=$2; shift 2;; --c-binary) C_BINARY=$2; shift 2;;
+        --python-binary) PYTHON=$2; shift 2;;
         --stage4-receipt) STAGE4=$2; shift 2;; --nogc-inventory) NOGC=$2; shift 2;;
-        --provider-trace) PROVIDERS=$2; shift 2;; *) fail "unknown-argument-$1";;
+        --provider-trace) PROVIDERS=$2; shift 2;;
+        --matched-simple-unstripped) MATCH_SIMPLE=$2; shift 2;;
+        --matched-c-unstripped) MATCH_C=$2; shift 2;;
+        --matched-c-source) MATCH_SOURCE=$2; shift 2;;
+        --matched-archive) MATCH_ARCHIVE=$2; shift 2;;
+        --matched-archive-receipt) MATCH_RECEIPT=$2; shift 2;;
+        --matched-clang) MATCH_CLANG=$2; shift 2;;
+        --matched-lld) MATCH_LLD=$2; shift 2;;
+        --matched-strip) MATCH_STRIP=$2; shift 2;;
+        *) fail "unknown-argument-$1";;
     esac
 done
 for file in "$RECEIPT" "$SAMPLES" "$SIMPLE" "$C_BINARY" "$STAGE4" "$NOGC" "$PROVIDERS"; do
     [ -f "$file" ] && [ ! -L "$file" ] || fail missing-or-symlinked-input
 done
+[ -f "$PYTHON" ] || fail missing-python-binary
 
 eq_field "$RECEIPT" schema simple.runtime-binary-size-startup-cohort/v1
 mode=$(field "$RECEIPT" cohort_mode) || fail missing-cohort-mode
@@ -30,6 +43,7 @@ case "$(field "$STAGE4" compiler_kind || true)" in *seed*|*rust*) fail stage4-is
 eq_field "$RECEIPT" stage4_receipt_sha256 "$(hash_file "$STAGE4")"
 eq_field "$RECEIPT" simple_binary_sha256 "$(hash_file "$SIMPLE")"
 eq_field "$RECEIPT" c_binary_sha256 "$(hash_file "$C_BINARY")"
+eq_field "$RECEIPT" python_binary_sha256 "$(hash_file "$PYTHON")"
 eq_field "$RECEIPT" samples_sha256 "$(hash_file "$SAMPLES")"
 eq_field "$RECEIPT" nogc_inventory_sha256 "$(hash_file "$NOGC")"
 eq_field "$RECEIPT" provider_trace_sha256 "$(hash_file "$PROVIDERS")"
@@ -39,9 +53,32 @@ eq_field "$RECEIPT" simple_binary_bytes "$simple_bytes"
 eq_field "$RECEIPT" c_binary_bytes "$c_bytes"
 [ "$simple_bytes" -lt 2097152 ] || fail nogc-binary-not-below-2mib
 os=$(field "$RECEIPT" host_os) || fail missing-host-os
+[ "$os" = "$(uname -s)" ] || fail host-os-mismatch
+eq_field "$RECEIPT" host_arch "$(uname -m)"
 allowance=$(uint "$RECEIPT" format_allowance_bytes)
 if [ "$os" = Linux ]; then
     eq_field "$RECEIPT" c_reference_kind matched-startup-v1
+    for file in "$MATCH_SIMPLE" "$MATCH_C" "$MATCH_SOURCE" "$MATCH_ARCHIVE" "$MATCH_RECEIPT"; do
+        [ -f "$file" ] && [ ! -L "$file" ] || fail matched-link-input-missing-or-symlinked
+    done
+    for tool in "$MATCH_CLANG" "$MATCH_LLD" "$MATCH_STRIP"; do
+        [ -f "$tool" ] && [ -x "$tool" ] || fail matched-link-tool-missing
+    done
+    eq_field "$RECEIPT" matched_simple_unstripped_sha256 "$(hash_file "$MATCH_SIMPLE")"
+    eq_field "$RECEIPT" matched_c_unstripped_sha256 "$(hash_file "$MATCH_C")"
+    eq_field "$RECEIPT" matched_c_source_sha256 "$(hash_file "$MATCH_SOURCE")"
+    eq_field "$RECEIPT" matched_archive_sha256 "$(hash_file "$MATCH_ARCHIVE")"
+    eq_field "$RECEIPT" matched_archive_receipt_sha256 "$(hash_file "$MATCH_RECEIPT")"
+    eq_field "$RECEIPT" matched_clang_sha256 "$(hash_file "$MATCH_CLANG")"
+    eq_field "$RECEIPT" matched_lld_sha256 "$(hash_file "$MATCH_LLD")"
+    eq_field "$RECEIPT" matched_strip_sha256 "$(hash_file "$MATCH_STRIP")"
+    python3 "$(dirname -- "$0")/check-runtime-binary-size-matched-link.py" \
+        --archive "$MATCH_ARCHIVE" --receipt "$MATCH_RECEIPT" \
+        --simple-binary "$MATCH_SIMPLE" --simple-stripped "$SIMPLE" \
+        --c-source "$MATCH_SOURCE" --c-binary "$MATCH_C" \
+        --c-stripped "$C_BINARY" --clang "$MATCH_CLANG" \
+        --lld "$MATCH_LLD" --strip "$MATCH_STRIP" >/dev/null ||
+        fail matched-link-replay-rejected
     [ "$allowance" -eq 0 ] || fail linux-format-allowance
     [ "$simple_bytes" -le 15360 ] || fail linux-release-small-over-15kib
     [ $((simple_bytes * 100)) -le $((c_bytes * 105)) ] || fail linux-c-ratio-over-105-percent
@@ -57,13 +94,14 @@ fi
 sample_count=$(uint "$RECEIPT" sample_count)
 [ "$sample_count" -ge "$minimum" ] || fail insufficient-samples
 work=$(mktemp -d "${TMPDIR:-/tmp}/bs7-check.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
-awk -F'|' -v n="$sample_count" '
+awk -F'|' -v n="$sample_count" -v simple_hash="$(hash_file "$SIMPLE")" -v python_hash="$(hash_file "$PYTHON")" '
 BEGIN { lane[1]="simple"; lane[2]="python" }
 NF != 7 || $1 != "sample" { exit 10 }
 {
   found=0; for (i=1;i<=2;i++) if ($2==lane[i]) found=i
   if (!found || $3 !~ /^[0-9]+$/ || $3 != ++count[$2] || $3 > n) exit 11
   if ($4 !~ /^[1-9][0-9]*$/ || $5 !~ /^[1-9][0-9]*$/ || $6 != 0 || $7 !~ /^[0-9a-f]{64}$/) exit 12
+  if (($2=="simple" && $7!=simple_hash) || ($2=="python" && $7!=python_hash)) exit 14
   print $4 > (out "." $2 ".time"); print $5 > (out "." $2 ".rss")
 }
 END { if (NR != 2*n || count["simple"] != n || count["python"] != n) exit 13 }
