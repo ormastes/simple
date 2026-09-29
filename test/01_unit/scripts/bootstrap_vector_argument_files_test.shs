@@ -1,0 +1,44 @@
+#!/bin/sh
+# New POSIX fixture-constructor criterion; does not rerun the ordered gate.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-vector-argument-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_new_path_validate "$parent" || exit 64
+work=$(mktemp -d "$parent/argument-files.XXXXXX")
+case "$work" in "$parent"/argument-files.*) ;; *) exit 1 ;; esac
+cleanup() {
+  status=$?
+  if [ "$status" -eq 0 ]; then rm -rf -- "$work"
+  else printf 'Retained failed argument fixture: %s\n' "$work" >&2; fi
+  return "$status"
+}
+trap cleanup EXIT
+fail() { echo "FAIL POSIX vector arguments: $*" >&2; exit 1; }
+# Extract the exact constructors used by the vector fixture.
+awk '/^fixture_sha_from_files\(\) \{/{on=1} on{print} on && /^\}$/{exit}' \
+  "$repo/test/01_unit/scripts/bootstrap_stage2_hir_vector_test.shs" > "$work/sha-constructor.shs"
+awk '/^fixture_write_from_files\(\) \{/{on=1} on{print} on && /^\}$/{exit}' \
+  "$repo/test/01_unit/scripts/bootstrap_stage2_hir_vector_test.shs" > "$work/transcript-constructor.shs"
+[ -s "$work/sha-constructor.shs" ] && [ -s "$work/transcript-constructor.shs" ] || fail 'actual constructors missing'
+. "$work/sha-constructor.shs"
+. "$work/transcript-constructor.shs"
+stage2_home_absolute="$work/home" stage2_tmp_absolute="$work/tmp"
+mkdir "$stage2_home_absolute" "$stage2_tmp_absolute"
+printf '%s\n' 'SPACE=two words' 'DOLLAR=literal$HOME' 'SLASH=literal\path' 'GLOB=*?[a-z]' 'EMPTY=' > "$work/env.args"
+printf '%s\n' 'native-build' '' '--output' 'two words/$literal\path*?' > "$work/command.args"
+expected=$(bootstrap_stage3_args_sha256 'SPACE=two words' 'DOLLAR=literal$HOME' 'SLASH=literal\path' 'GLOB=*?[a-z]' 'EMPTY=' \
+  native-build '' --output 'two words/$literal\path*?')
+actual=$(fixture_sha_from_files "$work/env.args" "$work/command.args")
+[ "$actual" = "$expected" ] || fail 'POSIX construction changed an argument byte or empty argument'
+fixture_write_from_files "$work/constructed.transcript" "$work/env.args" "$work/command.args" \
+  "$repo" "$stage2_home_absolute" "$stage2_tmp_absolute" "$PATH"
+bootstrap_stage3_write_command_transcript "$work/direct.transcript" "$repo" "$stage2_home_absolute" "$stage2_tmp_absolute" "$PATH" \
+  'SPACE=two words' 'DOLLAR=literal$HOME' 'SLASH=literal\path' 'GLOB=*?[a-z]' 'EMPTY=' -- \
+  native-build '' --output 'two words/$literal\path*?'
+cmp -s "$work/constructed.transcript" "$work/direct.transcript" || fail 'POSIX construction changed canonical transcript bytes'
+echo 'PASS POSIX vector arguments: spaces, literal dollar/backslash/glob and empty argument retain exact hash and transcript bytes; ordered-gate criterion not rerun'

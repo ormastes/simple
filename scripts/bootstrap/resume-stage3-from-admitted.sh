@@ -10,6 +10,8 @@ bootstrap_stage3_error() {
 }
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$root/scripts/check/lib/portable-hardlink-lock.pl"
+. "$root/scripts/bootstrap/bootstrap-cache-lineage.shs"
 source_output=${1:?usage: resume-stage3-from-admitted.sh OUTPUT_DIR}
 
 # VERDICT-on-exit contract: every run of this script must end with exactly one
@@ -460,6 +462,16 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+# Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
+# controls; newer transcripts must carry the complete pair in the same order.
+bootstrap_stage2_hir_env=
+if stage2_hir_cache=$(stage2_env_value SIMPLE_HIR_CACHE); then
+  stage2_hir_cache_dir=$(stage2_env_value SIMPLE_HIR_CACHE_DIR) || \
+    bootstrap_stage3_error 'recorded Stage 2 HIR controls are incomplete'
+  bootstrap_stage2_hir_env=1
+elif grep -q '^explicit-env:[0-9][0-9]*:SIMPLE_HIR_CACHE' "$stage2_transcript"; then
+  bootstrap_stage3_error 'recorded Stage 2 HIR controls are incomplete or malformed'
+fi
 bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 # Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
@@ -503,6 +515,8 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
   "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
   "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_hir_env:+"SIMPLE_HIR_CACHE=$stage2_hir_cache"} \
+  ${bootstrap_stage2_hir_env:+"SIMPLE_HIR_CACHE_DIR=$stage2_hir_cache_dir"} \
   ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
   ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
   ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
@@ -599,6 +613,7 @@ for old in "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$st
   if [ -e "$old" ]; then cp -p "$old" "$archive/$(basename "$old").before-resume"; fi
 done
 rm -f "$candidate" "$stage3_transcript" "$stage3_log" "$stage3_status" "$stage3_sanity" "$manifest"
+# Matching retries retain objects; explicit cleanup is guarded by lineage ownership.
 bootstrap_cache_new_path_validate "$stage3_cache" || bootstrap_stage3_error 'noncanonical stage3 cache selection'
 mkdir -p "$home" "$tmp" "$(dirname "$stage3_log")"
 
@@ -816,7 +831,8 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_STAGE3_STREAMING_SURFACES=1" \
   "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE=$stage3_requested_route" \
   "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE=$stage3_fallback_route" \
-  "SIMPLE_FRONTEND_CACHE=0" \
+  "SIMPLE_FRONTEND_CACHE=1" "SIMPLE_FRONTEND_CACHE_DIR=$stage3_cache/frontend" \
+  "SIMPLE_HIR_CACHE=1" "SIMPLE_HIR_CACHE_DIR=$stage3_cache/hir" \
   "MALLOC_ARENA_MAX=2" "MALLOC_TRIM_THRESHOLD_=0" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_PACKAGE_INDEX_COLD_INIT=1" \
@@ -962,6 +978,7 @@ while [ "$stage3_guard_watch" = linux-proc-memavailable ] && kill -0 "$stage3_gu
 done
 wait "$stage3_guard_pid"
 status=$?
+bootstrap_cache_report_log "$stage3_log"
 if [ "$stage3_containment_backend" = cgroupfs ]; then
   bootstrap_stage3_memory_terminate_unit "$stage3_guard_unit" \
     "$memory_admission" || status=125

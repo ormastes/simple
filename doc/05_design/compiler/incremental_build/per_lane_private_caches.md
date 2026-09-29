@@ -1,5 +1,15 @@
 # Per-Lane Private Build Caches
 
+## 2026-09-29 policy update
+
+The canonical wrappers preserve compatible caches by default. Cache expiry,
+compiler rebuild and one-binary mode do not collect old producer scopes.
+Explicit phase invalidation and clean rebuild use immutable phase/producer/entry
+bindings plus an exclusive writer; metadata mismatch refuses reuse while
+preserving completed objects. Manual clean is limited to one owned idle cache
+lineage. See [bootstrap cache policy](../../../07_guide/tooling/bootstrap_cache_policy.md)
+for flags, failed-attempt evidence, source-fix invalidation and orphan lock repair.
+
 Status: implemented (2026-08-17). Scope: native-build object caches in both
 engines (Rust seed `native_project`, pure-Simple `80.driver`) and the bootstrap
 stage scripts.
