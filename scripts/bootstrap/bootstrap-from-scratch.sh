@@ -2902,10 +2902,9 @@ run_rust_authority_cargo() {
         CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
-        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-        SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" TMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
@@ -2923,10 +2922,9 @@ run_rust_authority_cargo() {
         CFLAGS_x86_64_pc_windows_gnu="${mingw_cflags}" \
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="${mingw_rustflags}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
-        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-        SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
         TEMP="${windows_temp}" TMP="${windows_temp}" \
-        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "LLVM_SYS_231_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \
