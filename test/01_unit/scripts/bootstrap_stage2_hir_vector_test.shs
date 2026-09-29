@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Actual pre-exec vector and receipt replay only; no compiler execution.
-set -euo pipefail
+set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
@@ -12,7 +12,7 @@ bootstrap_cache_new_path_validate "$parent" || exit 64
 work=$(mktemp -d "$parent/stage2-vector.XXXXXX")
 case "$work" in "$parent"/stage2-vector.*) ;; *) exit 1 ;; esac
 cleanup() {
-  local status=$?
+  status=$?
   if [ "$status" -eq 0 ]; then rm -rf -- "$work"
   else printf 'Retained failed vector fixture: %s\n' "$work" >&2; fi
   return "$status"
@@ -34,16 +34,37 @@ awk '/^stage2_args=\$\(bootstrap_stage3_args_sha256/{on=1} on{print} on && /"\$@
 
 # Only the execution boundary is replaced: the actual builder must reach it
 # after its ordered-name equality guard. Preserve the actual argument vector.
+# The owner forbids embedded newlines. Each legal argument is therefore a
+# complete line, including empty arguments, spaces, dollar signs and slashes.
+# Quoted positional construction preserves bytes without arrays or eval.
+fixture_sha_from_files() {
+  fixture_env_file=$1 fixture_argv_file=$2
+  set --
+  while IFS= read -r fixture_arg; do set -- "$@" "$fixture_arg"; done < "$fixture_env_file"
+  while IFS= read -r fixture_arg; do set -- "$@" "$fixture_arg"; done < "$fixture_argv_file"
+  bootstrap_stage3_args_sha256 "$@"
+}
+fixture_write_from_files() {
+  fixture_out=$1 fixture_env_file=$2 fixture_argv_file=$3
+  fixture_cwd=$4 fixture_home=$5 fixture_tmp=$6 fixture_path=$7
+  set --
+  while IFS= read -r fixture_arg; do set -- "$@" "$fixture_arg"; done < "$fixture_env_file"
+  set -- "$@" --
+  while IFS= read -r fixture_arg; do set -- "$@" "$fixture_arg"; done < "$fixture_argv_file"
+  bootstrap_stage3_write_command_transcript "$fixture_out" "$fixture_cwd" "$fixture_home" "$fixture_tmp" "$fixture_path" "$@"
+}
 bootstrap_stage3_run_transcribed() {
-  local transcript=$1 cwd=$2 home=$4 tmp=$5 path=$6
+  capture_transcript=$1 capture_cwd=$2 capture_home=$4 capture_tmp=$5 capture_path=$6
   shift 6
-  captured_env=()
-  while [ "$1" != -- ]; do captured_env+=("$1"); shift; done
+  captured_env_file="$work/$PLATFORM.env-args"
+  captured_argv_file="$work/$PLATFORM.command-args"
+  : > "$captured_env_file"
+  while [ "$1" != -- ]; do printf '%s\n' "$1" >> "$captured_env_file"; shift; done
   shift 2 # -- and producer program path
-  captured_argv=("$@")
-  capture_sha=$(bootstrap_stage3_args_sha256 "${captured_env[@]}" "${captured_argv[@]}")
-  bootstrap_stage3_write_command_transcript "$transcript" "$cwd" "$home" "$tmp" "$path" \
-    "${captured_env[@]}" -- "${captured_argv[@]}"
+  printf '%s\n' "$@" > "$captured_argv_file"
+  capture_sha=$(fixture_sha_from_files "$captured_env_file" "$captured_argv_file")
+  fixture_write_from_files "$capture_transcript" "$captured_env_file" "$captured_argv_file" \
+    "$capture_cwd" "$capture_home" "$capture_tmp" "$capture_path"
 }
 repo_root=$repo
 stage_build_path=$PATH stage_build_rust_log=error
@@ -80,19 +101,21 @@ for PLATFORM in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-
   bootstrap_stage2_windows_cc=
   [ -z "$bootstrap_stage2_windows_env" ] || bootstrap_stage2_windows_cc="CC=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" CC)"
   stage2_env_value() { bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"; }
-  set -- "${captured_argv[@]}"
+  set --
+  while IFS= read -r replay_arg; do set -- "$@" "$replay_arg"; done < "$captured_argv_file"
   . "$work/hir-replay.shs"
   . "$work/args-replay.shs"
   [ "$stage2_args" = "$capture_sha" ] || fail "$PLATFORM new transcript replay changed recorded vector hash"
   # Legacy receipts retain the exact historical vector and omit both fields.
-  legacy_env=()
-  for assignment in "${captured_env[@]}"; do
-    case "$assignment" in SIMPLE_HIR_CACHE=*|SIMPLE_HIR_CACHE_DIR=*) ;; *) legacy_env+=("$assignment") ;; esac
-  done
-  legacy_sha=$(bootstrap_stage3_args_sha256 "${legacy_env[@]}" "${captured_argv[@]}")
+  legacy_env_file="$work/$PLATFORM.legacy-env-args"
+  : > "$legacy_env_file"
+  while IFS= read -r assignment; do
+    case "$assignment" in SIMPLE_HIR_CACHE=*|SIMPLE_HIR_CACHE_DIR=*) ;; *) printf '%s\n' "$assignment" >> "$legacy_env_file" ;; esac
+  done < "$captured_env_file"
+  legacy_sha=$(fixture_sha_from_files "$legacy_env_file" "$captured_argv_file")
   stage2_transcript="$work/$PLATFORM.legacy.transcript"
-  bootstrap_stage3_write_command_transcript "$stage2_transcript" "$repo" "$stage2_home_absolute" "$stage2_tmp_absolute" "$PATH" \
-    "${legacy_env[@]}" -- "${captured_argv[@]}"
+  fixture_write_from_files "$stage2_transcript" "$legacy_env_file" "$captured_argv_file" \
+    "$capture_cwd" "$capture_home" "$capture_tmp" "$capture_path"
   . "$work/hir-replay.shs"
   . "$work/args-replay.shs"
   [ "$stage2_args" = "$legacy_sha" ] || fail "$PLATFORM legacy vector was rewritten"
