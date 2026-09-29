@@ -544,6 +544,29 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // A structurally typed Dict has no nominal method owner. Emitting
+        // `Dict.contains_key` lets name-based codegen recovery discard that
+        // qualifier and bind an unrelated user method. Keep membership on the
+        // same runtime ABI as indexing, including its tagged key representation.
+        if matches!(method, "has" | "has_key" | "contains" | "contains_key")
+            && args.len() == 1
+            && self.receiver_is_dict(receiver, receiver_local_ty)
+        {
+            let receiver_reg = self.lower_expr(receiver)?;
+            let raw_key_reg = self.lower_expr(&args[0])?;
+            let key_reg = self.box_arg_for_any_param(raw_key_reg, &args[0])?;
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_contains"),
+                    args: vec![receiver_reg, key_reg],
+                });
+                dest
+            });
+        }
+
         // `d.get_or(k, default)` on a Dict<K, V>: return the value if `k` is
         // present, else `default` — mirroring the interpreter's
         // `interpreter_method/collections.rs` "get_or" arm EXACTLY: presence
