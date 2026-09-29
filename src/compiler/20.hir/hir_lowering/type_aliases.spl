@@ -1,0 +1,76 @@
+# Type aliases retain parser templates until their arguments are known. Their
+# expansion produces the underlying HIR shape, never a nominal alias symbol.
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.*
+use compiler.frontend.parser_types.{ParserTypeParam}
+use compiler.frontend.parser_types_expr.{Type}
+use compiler.common.diagnostics.span.{Span}
+
+impl HirLowering:
+    fn type_alias_position(symbol_id: SymbolId) -> i64:
+        if symbol_id.id < 0 or symbol_id.id >= self.type_alias_positions.len():
+            return -1
+        self.type_alias_positions[symbol_id.id]
+
+    me register_type_alias_template(symbol_id: SymbolId, target: Type, parameters: [ParserTypeParam], owner: text):
+        if self.type_alias_position(symbol_id) >= 0:
+            return
+        if symbol_id.id < 0 or symbol_id.id >= self.symbols.next_symbol_id:
+            self.error("invalid type alias symbol", target.span)
+            return
+        while self.type_alias_positions.len() <= symbol_id.id:
+            self.type_alias_positions = self.type_alias_positions.push(-1)
+        self.type_alias_positions[symbol_id.id] = self.type_alias_symbol_ids.len()
+        self.type_alias_symbol_ids = self.type_alias_symbol_ids.push(symbol_id.id)
+        self.type_alias_targets = self.type_alias_targets.push(target)
+        self.type_alias_parameters = self.type_alias_parameters.push(parameters)
+        self.type_alias_owners = self.type_alias_owners.push(owner)
+        self.type_alias_scopes = self.type_alias_scopes.push(self.symbols.current_scope)
+
+    me lower_named_symbol_kind(symbol_id: SymbolId, arguments: [HirType], span: Span) -> HirTypeKind:
+        val position = self.type_alias_position(symbol_id)
+        if position < 0:
+            return HirTypeKind.Named(symbol_id, arguments)
+        for active_id in self.type_alias_active_ids:
+            if active_id == symbol_id.id:
+                self.error("cyclic type alias `{self.symbols.symbols[symbol_id.id].name}`", span)
+                return HirTypeKind.Error
+        val parameters = self.type_alias_parameters[position]
+        if arguments.len() > parameters.len():
+            self.error("type alias expects {parameters.len()} type arguments, got {arguments.len()}", span)
+            return HirTypeKind.Error
+        var required_index = arguments.len()
+        while required_index < parameters.len():
+            if not parameters[required_index].has_default:
+                self.error("type alias expects {parameters.len()} type arguments, got {arguments.len()}", span)
+                return HirTypeKind.Error
+            required_index = required_index + 1
+
+        # Each expansion owns its frame. A nested alias cannot accidentally
+        # capture a formal from the caller; defaults can use earlier formals.
+        val saved_names = self.type_alias_argument_names
+        val saved_types = self.type_alias_argument_types
+        val saved_owner = self.type_alias_current_owner
+        val saved_scope = self.symbols.current_scope
+        val saved_active = self.type_alias_active_ids
+        self.type_alias_argument_names = []
+        self.type_alias_argument_types = []
+        self.type_alias_current_owner = self.type_alias_owners[position]
+        self.symbols.current_scope = self.type_alias_scopes[position]
+        var active_frame: [i64] = []
+        for active_id in saved_active:
+            active_frame = active_frame.push(active_id)
+        self.type_alias_active_ids = active_frame.push(symbol_id.id)
+        var index = 0
+        while index < parameters.len():
+            val argument = if index < arguments.len(): arguments[index] else: self.lower_type(parameters[index].default)
+            self.type_alias_argument_names = self.type_alias_argument_names.push(parameters[index].name)
+            self.type_alias_argument_types = self.type_alias_argument_types.push(argument)
+            index = index + 1
+        val expanded = self.lower_type(self.type_alias_targets[position])
+        self.type_alias_argument_names = saved_names
+        self.type_alias_argument_types = saved_types
+        self.type_alias_current_owner = saved_owner
+        self.symbols.current_scope = saved_scope
+        self.type_alias_active_ids = saved_active
+        expanded.kind
