@@ -54,3 +54,19 @@ Required remaining evidence:
 The existing store's unwrapped local key and unauthenticated CBC are explicitly
 accepted interim limitations, with a concrete hardening TODO. They are not
 described as equivalent to an OS credential vault.
+
+## CI shell dialect repair
+
+The base repository gate parses `.shs` with POSIX `sh -n`; it rejected touched
+mail libraries that already used Bash arrays/redirections. Their implementations
+now have `.bash` suffixes, with POSIX-parseable compatibility loaders retaining
+the public `.shs` paths. The host CI explicitly checks Bash syntax and executes
+the real client. The repository gate is unchanged.
+
+Windows CI executed 30 policy checks successfully, then found a native jq path
+conversion failure for a literal filename containing shell-looking characters.
+Config reads now use stdin redirection, avoiding MSYS argument path heuristics
+without evaluating the filename. The targeted config and placeholder groups
+passed locally after this change; the Windows rerun is the platform oracle.
+This and the shell-dialect loader change comprise the third bounded repair
+cycle. Any remaining failure is reported rather than entering another loop.
