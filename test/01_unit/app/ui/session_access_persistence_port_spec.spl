@@ -1,57 +1,123 @@
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-APP
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# Real UISession callback-field regressions; run in interpreted and native modes.
+# Native dotted-call lowering defect and pending execution evidence:
+# doc/08_tracking/bug/native_ui_persistence_function_field_calls_2026-09-29.md
 
-# Purpose and audience: executable specification evidence for the owning engineering team.
-# @req REQ-SSPEC-APP
-# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-
-use std.spec.step
-
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step, fail}
 use common.ui.builder.{button, build_tree}
 use common.ui.widget.{UIEvent}
 use common.ui.access.{UiAccessEvent, UiAccessNode, UiAccessSnapshot}
 use nogc_sync_mut.ui.session.{UISession, UiAccessPersistence}
 
+var snapshot_count: i64 = 0
+var event_count: i64 = 0
+var list_count: i64 = 0
+var query_count: i64 = 0
 
-class AccessPersistenceProbe:
-    snapshot_count: i64
-    event_count: i64
+fn reset_probe():
+    snapshot_count = 0
+    event_count = 0
+    list_count = 0
+    query_count = 0
 
-impl UiAccessPersistence for AccessPersistenceProbe:
-    me persist_snapshot(snapshot: UiAccessSnapshot) -> Result<(), text>:
-        self.snapshot_count = self.snapshot_count + 1
-        Ok(())
+fn probe_counts() -> [i64]:
+    [snapshot_count, event_count, list_count, query_count]
 
-    me insert_event(event: UiAccessEvent) -> Result<(), text>:
-        self.event_count = self.event_count + 1
-        Ok(())
+fn persist_probe_snapshot(snapshot: UiAccessSnapshot) -> Result<(), text>:
+    snapshot_count = snapshot_count + 1
+    Ok(())
 
-    fn list_events(surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
-        Ok([])
+fn insert_probe_event(event: UiAccessEvent) -> Result<(), text>:
+    event_count = event_count + 1
+    Ok(())
 
-    fn query_nodes(surface_id: text, kind: text, query: text, limit: i64) -> Result<[UiAccessNode], text>:
-        Ok([])
+fn list_probe_events(prefix: text, surface_id: text, count: i64) -> Result<[UiAccessEvent], text>:
+    list_count = list_count + 1
+    if count < 0:
+        return Err("{prefix}:invalid-count:{surface_id}:{count}")
+    Ok([UiAccessEvent(surface_id: surface_id, widget_id: "save", canonical_id: "{surface_id}/save",
+        event_kind: "action", payload: prefix, sequence: count)])
 
-describe "UISession access persistence port":
-    # @manual scenario evidence
-    it "seeds and updates an attached storage-independent persistence port":
-        # @req REQ-SSPEC-APP
-        step("seeds and updates an attached storage-independent persistence port")
-        var probe = AccessPersistenceProbe(snapshot_count: 0, event_count: 0)
+fn query_probe_nodes(prefix: text, surface_id: text, kind: text, query: text, limit: i64) -> Result<[UiAccessNode], text>:
+    query_count = query_count + 1
+    if limit < 0:
+        return Err("{prefix}:invalid-limit:{surface_id}:{kind}:{query}:{limit}")
+    Ok([UiAccessNode(canonical_id: "{surface_id}/save", surface_id: surface_id,
+        widget_id: "save", kind: kind, visible: true, focused: false, enabled: true,
+        selected: false, text_value: "{prefix}:{query}:{limit}", props: [], child_ids: [], action_names: ["save"])])
+
+fn probe_port(prefix: text) -> UiAccessPersistence:
+    UiAccessPersistence(
+        insert_event_fn: insert_probe_event,
+        persist_snapshot_fn: persist_probe_snapshot,
+        list_events_fn: \surface_id, count: list_probe_events(prefix, surface_id, count),
+        query_nodes_fn: \surface_id, kind, query, limit: query_probe_nodes(prefix, surface_id, kind, query, limit)
+    )
+
+describe "UISession access persistence callback fields":
+    it "seeds and updates the attached callback port":
+        step("Attach the production callback class, then dispatch a real action")
+        reset_probe()
         var session = UISession.new(build_tree(button("save", "Save", "save")))
-        session.attach_access_persistence(probe)
-        expect(probe.snapshot_count).to_equal(1)
-
+        session.attach_access_persistence(probe_port("seed"))
+        expect(probe_counts()).to_equal([1, 0, 0, 0])
         session.dispatch(UIEvent.Action(name: "save"))
-        expect(probe.event_count).to_equal(1)
-        expect(probe.snapshot_count).to_equal(2)
-        expect(session.access_persisted_events("main", 10)?.len()).to_equal(0)
-        expect(session.access_search_nodes("main", "button", "save", 10)?.len()).to_equal(0)
+        expect(probe_counts()).to_equal([2, 1, 0, 0])
 
-    it "keeps persistence optional for the core session":
-        # @req REQ-SSPEC-APP
-        step("keeps persistence optional for the core session")
+    it "forwards list arguments and returns the callback event payload":
+        step("Invoke a captured list callback through access_persisted_events")
+        reset_probe()
+        var session = UISession.new(build_tree(button("save", "Save", "save")))
+        session.attach_access_persistence(probe_port("history-owner"))
+        val result = session.access_persisted_events("history-surface", 7)
+        match result:
+            Ok(events):
+                expect(events.len()).to_equal(1)
+                expect(events[0].surface_id).to_equal("history-surface")
+                expect(events[0].sequence).to_equal(7)
+                expect(events[0].payload).to_equal("history-owner")
+            Err(error): fail("unexpected history error: {error}")
+        expect(probe_counts()).to_equal([1, 0, 1, 0])
+
+    it "forwards all search arguments and returns the callback node payload":
+        step("Invoke a captured query callback through access_search_nodes")
+        reset_probe()
+        var session = UISession.new(build_tree(button("save", "Save", "save")))
+        session.attach_access_persistence(probe_port("search-owner"))
+        val result = session.access_search_nodes("search-surface", "button", "Save", 3)
+        match result:
+            Ok(nodes):
+                expect(nodes.len()).to_equal(1)
+                expect(nodes[0].surface_id).to_equal("search-surface")
+                expect(nodes[0].kind).to_equal("button")
+                expect(nodes[0].text_value).to_equal("search-owner:Save:3")
+            Err(error): fail("unexpected search error: {error}")
+        expect(probe_counts()).to_equal([1, 0, 0, 1])
+
+    it "preserves the exact errors from both callbacks":
+        step("Return distinct argument-bearing errors from history and search")
+        reset_probe()
+        var session = UISession.new(build_tree(button("save", "Save", "save")))
+        session.attach_access_persistence(probe_port("error-owner"))
+        val events = session.access_persisted_events("errors", -2)
+        match events:
+            Err(error): expect(error).to_equal("error-owner:invalid-count:errors:-2")
+            Ok(_): fail("history callback error was lost")
+        val nodes = session.access_search_nodes("errors", "button", "save", -4)
+        match nodes:
+            Err(error): expect(error).to_equal("error-owner:invalid-limit:errors:button:save:-4")
+            Ok(_): fail("search callback error was lost")
+        expect(probe_counts()).to_equal([1, 0, 1, 1])
+
+    it "rejects both reads when no persistence port is attached":
+        step("Exercise the production nil guards without attaching callbacks")
+        reset_probe()
         val session = UISession.new(build_tree(button("save", "Save", "save")))
-        expect(session.access_persisted_events("main", 10).err().unwrap()).to_equal("no access store attached")
+        val events = session.access_persisted_events("main", 10)
+        match events:
+            Err(error): expect(error).to_equal("no access store attached")
+            Ok(_): fail("history accepted a missing persistence port")
+        val nodes = session.access_search_nodes("main", "button", "save", 10)
+        match nodes:
+            Err(error): expect(error).to_equal("no access store attached")
+            Ok(_): fail("search accepted a missing persistence port")
+        expect(probe_counts()).to_equal([0, 0, 0, 0])
