@@ -11,6 +11,7 @@ use super::config::runtime_bundle_requests_core_c_bootstrap;
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
+    build_bootstrap_tools_sqlite_runtime, stage_sqlite_runtime_dll,
     build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
@@ -1401,8 +1402,26 @@ int main(int argc, char** argv) {
         let main_o = self.compile_main_stub(temp_dir)?;
         let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
         let extra_link_objects = configured_extra_link_objects()?;
-        let selected_runtime = self.selected_runtime_library(temp_dir)?;
+        let bootstrap_tools_authority = if self.resolve_runtime_lane() == super::NativeRuntimeLane::BootstrapTools {
+            Some(self.bootstrap_tools_authority()?)
+        } else {
+            None
+        };
+        let selected_runtime = if let Some(authority) = bootstrap_tools_authority.as_ref() {
+            Some((authority.native_all.clone(), true))
+        } else {
+            self.selected_runtime_library(temp_dir)?
+        };
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        // SQLite's provider borrows the selected runtime owner's bounded string
+        // ABI. It does not bring in the incompatible core-C value/array owner.
+        let bootstrap_tools_sqlite = if bootstrap_tools_authority.is_some()
+            && Self::entry_objects_require_sqlite(object_paths)?
+        {
+            Some(build_bootstrap_tools_sqlite_runtime(&temp_dir.join("bootstrap_tools_sqlite"))?)
+        } else {
+            None
+        };
         let bootstrap_mutex_runtime = if super::config::is_bootstrap_main_entry(&self.entry_file)
             && selected_runtime
                 .as_ref()
@@ -1430,7 +1449,9 @@ int main(int argc, char** argv) {
         } else {
             None
         };
-        let host_gpu_hosted_runtime = if host_gpu_lane {
+        let host_gpu_hosted_runtime = if let Some(authority) = bootstrap_tools_authority.as_ref() {
+            Some(authority.hosted_runtime.clone())
+        } else if host_gpu_lane {
             let runtime_path = self
                 .config
                 .runtime_path
@@ -1879,6 +1900,11 @@ int main(int argc, char** argv) {
         }
 
         if !exact_stage4 {
+            if let Some(sqlite) = bootstrap_tools_sqlite.as_ref() {
+                // Before the owner archive: newly introduced rt_string_* roots
+                // must participate in ordinary static archive extraction.
+                cmd.arg(external_tool_path(&sqlite.object));
+            }
             if let Some((runtime_lib, is_native_all)) = selected_runtime.as_ref() {
                 if super::config::is_shared_runtime_library(runtime_lib) {
                     // Dynamic runtime lane. The `-lunwind` entry resolves nothing
@@ -2155,10 +2181,11 @@ int main(int argc, char** argv) {
                 // The rlib's std/core/alloc and allocator-shim references must
                 // resolve from the matching std (never from stubs) on Windows,
                 // where its `win32` module is compiled in.
-                #[cfg(target_os = "windows")]
-                cmd.arg(external_tool_path(
-                    super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?,
-                ));
+                if cfg!(target_os = "windows") || bootstrap_tools_authority.is_some() {
+                    cmd.arg(external_tool_path(
+                        super::tools::build_rust_std_shim_for_rlib(hosted_runtime, temp_dir)?,
+                    ));
+                }
             }
             if let Some(core_runtime) = host_gpu_core_runtime.as_ref() {
                 cmd.arg(external_tool_path(core_runtime));
@@ -2179,6 +2206,13 @@ int main(int argc, char** argv) {
                 simple_common::platform::link_config::PlatformLinkConfig::for_target(&cross_target)
             }
         };
+        if let Some(sqlite) = bootstrap_tools_sqlite.as_ref() {
+            if let Some(library) = sqlite.library.as_ref() {
+                cmd.arg(external_tool_path(library));
+            } else if !link_config.libraries.contains(&"sqlite3") {
+                cmd.arg(if is_msvc { "sqlite3.lib" } else { "-lsqlite3" });
+            }
+        }
         for path in &link_config.library_search_paths {
             cmd.arg(format!("-L{}", path));
         }
@@ -2386,7 +2420,7 @@ int main(int argc, char** argv) {
         // reported names (Rust std internals are never stubbed), print the
         // count and write the list beside the binary.
         #[cfg(target_os = "windows")]
-        if !output_result.status.success() && is_msvc && strict_no_stub_fallback {
+        if !output_result.status.success() && is_msvc && !strict_no_stub_fallback {
             let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
             let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
             if !undefined.is_empty() {
@@ -2425,6 +2459,9 @@ int main(int argc, char** argv) {
         }
 
         if output_result.status.success() {
+            if let Some(dll) = bootstrap_tools_sqlite.as_ref().and_then(|sqlite| sqlite.runtime_dll.as_ref()) {
+                stage_sqlite_runtime_dll(dll, &self.output)?;
+            }
             // Dynamic lane: place the runtime beside the binary so the
             // `$ORIGIN` RUNPATH resolves without LD_LIBRARY_PATH. A compiler
             // that only runs with the right env var set is a trap the bootstrap

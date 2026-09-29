@@ -135,6 +135,7 @@ fn register_static_runtime_symbols_with_abi() {
 }
 pub mod parallel;
 pub mod packed_byte_adapters;
+pub mod sdl_native_bridge;
 pub mod sandbox;
 pub mod security_runtime;
 /// UTF-8 slice-boundary audit (counting mode). See the module docs: this is
