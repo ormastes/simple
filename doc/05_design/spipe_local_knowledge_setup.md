@@ -94,18 +94,18 @@ returns deterministic segments, provenance and coverage plus runtime eligibility
 `explain_resolution` records selected, skipped, missing, and denied decisions.
 These are proposed shared contracts until their implementation is admitted.
 
-## September 9 workspace integration refinement
+## September 29 workspace integration refinement
 
-New global installation selects `~/spipe` as common and `~/.spipe` as the
+New global installation selects `{home}/.spipe` as common and `{home}/spipe` as the
 private workspace, with `common` linking to that checkout. The original
 interactive `.spipe/.spipe` path remains a compatibility mode. The latest user
-refinement routes Simple `.spipe/common` to `~/spipe`; existing `.spipe/spipe` remains a
+refinement routes Simple `.spipe/common` to `{home}/.spipe`; existing `.spipe/spipe` remains a
 migration fallback, with its recorded pin preserved until reviewed cutover.
 
 The shared locator order is explicit `SPIPE_HOME`, project `.spipe/common`,
-`~/spipe`, `~/.spipe/common`, direct current SPipe package, then verified
-legacy `.spipe/spipe`, `.spipe/spipe_project`, direct `.spipe` gitlink, or
-`~/.spipe` package. Validate selected package identity and declared project
+legacy project `.spipe/spipe`, `.spipe/spipe_project`, and direct `.spipe`,
+then `{home}/.spipe`, `{home}/spipe/common`, legacy `{home}/spipe`, legacy `{home}/.spipe/common`,
+and the current package. Validate selected package identity and declared project
 revision requirements before accepting a root. Invalid explicit roots and pin
 mismatches fail; optional candidates may be absent. Resolve workspace
 separately from common. Changing the route does not authorize removing the
@@ -147,3 +147,7 @@ local operations and next recoverable step; it does not claim completion.
 Provider launchers, DFS execution, telemetry, learned grouping, and KV reuse are
 later waves. The setup guide may describe those contracts as planned; it must
 not expose an unimplemented command as working or assert a provider cache hit.
+
+The September 29 deployment uses `SPIPE_HOME` for core and `SPIPE_WORKSPACE`
+for private/local knowledge. Simple setup links project `.spipe/common` through
+`{home}/spipe/common`, rejects conflicting existing routes, and preserves legacy pins.
