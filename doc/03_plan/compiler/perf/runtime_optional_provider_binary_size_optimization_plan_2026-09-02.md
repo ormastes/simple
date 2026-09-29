@@ -22,6 +22,11 @@ an output/archive/linker hash receipt. Its focused no-stub native probe passes;
 the saved hello must be rebuilt with this capture, and BS7 still needs a
 checked C-comparator input binding before the 1.05 gate can pass. See
 `doc/09_report/compiler/target5_native_link_reproduction_capture_2026-09-29.md`.
+The first fresh Stage4 compiler attempt compiled 866 source units but hit an
+outdated SQLite contract in the available pure-Simple Stage2 tool; a refreshed
+bootstrap-only tool then hit the shared runtime-path/interpreter-provider
+conflict before codegen. The exact blocker and acceptance are in
+`doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
 
 ## Phase 0 — Baselines and Attribution
 
