@@ -412,6 +412,15 @@ This supplies real codegen output paths to the future archive producer, but
 does not yet persist those outputs, publish a V3 graph, or prove a full warm
 compile.
 
+Native object persistence follow-up (2026-09-29): a bounded no-follow bridge
+now persists the actual cold object bytes into the existing binary CAS after
+checking their capsule receipt. A focused no-stub native probe passes and
+retains only compact digest/format identities after each object. The driver
+does not call the bridge yet, and the binary CAS remains non-authoritative
+for warm hits until complete action identities, archive publication, and
+readback are wired. No joint time/RSS improvement is claimed; see
+`doc/09_report/compiler/target6_cold_native_object_persistence_2026-09-29.md`.
+
 Archive semantic follow-up (2026-09-29): before publishing `CURRENT`, the
 cold publisher now checks the exact symbol/action payload grammar used by the
 warm decoder, including action target-symbol resolution. A hash-valid but

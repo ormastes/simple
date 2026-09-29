@@ -1,0 +1,68 @@
+"""Native proof that cold HIR object persistence binds real bytes and receipts."""
+
+use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
+    cold_hir_native_objects_persist_v1
+}
+use compiler.driver.cache.binary_object_cas.{binary_object_cas_read}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    ColdHirSemanticSeedV1, ColdHirTypedReceiptV1
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.io_runtime.{file_write, getpid, time_now_unix_micros}
+
+fn main() -> i64:
+    val root = "build/tmp/cold_hir_native_object_persistence/" +
+        "{getpid()}-{time_now_unix_micros()}"
+    if not dir_create_all(root):
+        print "FAIL create root"
+        return 1
+    val path = root + "/module-a.o"
+    val bytes: [u8] = [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8,
+        0x02_u8, 0x01_u8, 0x01_u8, 0x31_u8]
+    val digest = sha256_u8_hex(bytes)
+    if not file_write_bytes(path, bytes) or
+            not file_write(path + ".capsule-receipt",
+                "native-capsule-result-v1\nidentity-a\n{path}\n8\n{digest}\n"):
+        print "FAIL create object and capsule receipt"
+        return 2
+    val receipts = [ColdHirTypedReceiptV1(
+        ColdHirSemanticSeedV1("module.a", "module/a.spl", "source",
+            "inventory", "abi", []), "typed-abi")]
+    var paths: Dict<text, text> = {"module.a": path}
+    val persisted = cold_hir_native_objects_persist_v1(root, receipts, paths)
+    if persisted.is_err():
+        print "FAIL persist: {persisted.unwrap_err()}"
+        return 3
+    val outputs = persisted.unwrap()
+    if outputs.len() != 1 or outputs[0].module_identity != "module.a" or
+            outputs[0].object_digest != digest or
+            outputs[0].object_byte_count != 8 or
+            outputs[0].object_format != "elf" or
+            outputs[0].capsule_identity != "identity-a":
+        print "FAIL persisted identity"
+        return 4
+    val readback = binary_object_cas_read(root, digest, 64)
+    if readback == nil:
+        print "FAIL persisted readback missing"
+        return 5
+    val persisted_bytes = readback.unwrap()
+    if persisted_bytes.len() != bytes.len() or
+            sha256_u8_hex(persisted_bytes) != digest:
+        print "FAIL persisted readback digest"
+        return 5
+    if not file_write(path + ".capsule-receipt",
+            "native-capsule-result-v1\nidentity-a\n{path}\n8\n" +
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"):
+        print "FAIL tamper receipt"
+        return 6
+    if cold_hir_native_objects_persist_v1(root, receipts, paths).is_ok():
+        print "FAIL tampered receipt admitted"
+        return 7
+    paths["module.b"] = path
+    if cold_hir_native_objects_persist_v1(root, receipts, paths).is_ok():
+        print "FAIL extra object path admitted"
+        return 8
+    print "PASS cold_hir_native_object_persistence_probe"
+    0
