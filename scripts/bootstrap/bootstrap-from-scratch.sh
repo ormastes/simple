@@ -31,7 +31,7 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
     --backend|--output|--bootstrap-receipt|--produce-stage3-receipt|\
     --strategy|--resume-stage3-from-admitted|--resume-stage4-from-admitted|\
     --mode|--diagnostic-root|--diagnostic-child-compiler|--target|--jobs|\
-    --progress-interval|--invalidate-cache)
+    --progress-interval|--invalidate-cache|--refresh-stage2-source-cache)
       bootstrap_value_missing=1
       if [ "${bootstrap_argc}" -gt 0 ]; then
         case "$1" in -*) ;; *) bootstrap_value_missing=0 ;; esac
@@ -264,8 +264,9 @@ Options:
                      (stage2, stage3, stage4, stage4b-ui-backend, stage5N).
   --fresh-cache      Compatibility alias for --clean-rebuild
   --refresh-stage2-source-cache=DIR
-                     Explicit source-only refresh for the reviewed release Rust
-                     dependency-key owner; preserves objects for engine validation.
+                     Explicit source-only refresh from retained predecessor
+                     source/runtime/tool snapshots; verified Rust producer only.
+                     Retain objects for real dependency-key validation.
   --incremental-unlimited
                      Reuse incremental caches, including one-binary Stage 4,
                      and use every detected host CPU; retain Stage 4
@@ -506,6 +507,13 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 # -- argv-parse end
+if [ -n "${refresh_stage2_source_cache}" ]; then
+  [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
+    [ "${fresh_cache}" -eq 0 ] && [ -z "${invalidate_cache_scope}" ] &&
+    [ "${execution_profile}" != clean-release ] || {
+    echo 'error: source refresh is a separate Rust Stage2-only operation; clean/invalidate/resume unsupported' >&2; exit 64;
+  }
+fi
 
 if [ "${stop_after_stage2}" -eq 1 ]; then
   [ "${stop_after_stage3}" -eq 0 ] &&
@@ -1650,14 +1658,14 @@ bootstrap_cache_context_hash() {
 bootstrap_prepare_phase_cache() {
   bootstrap_cache_action "$2"
   if [ "$2" = stage2 ] && [ -n "${refresh_stage2_source_cache}" ]; then
-    [ "${bootstrap_selected_action}" = reuse ] &&
+    [ "${bootstrap_selected_action}" = reuse ] && [ -z "${bootstrap_stage2_parent_override}" ] &&
       [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] || {
       echo 'error: source refresh requires Rust full-bootstrap Stage2-only, without clean/invalidate' >&2; exit 64;
     }
     # This reviewed owner folds full module source with unconditional global
     # structural dependencies. Unknown implementations fail closed.
     [ "$(hash_file "${repo_root}/src/compiler_rust/compiler/src/pipeline/native_project/mod.rs")" = \
-      51febe82933b423cdcb113e1b36e9d2bdfe73b2f166076af718629c7dc2bc2db ] &&
+      67ffbc45c28f92d2e7112840c07f3c2b63095ceaf1c51b0b627d1523682d40f0 ] &&
       [ "$(hash_file "$4")" = "$(hash_file "${seed_bin}")" ] || {
       echo 'error: source refresh rejected: unsupported Rust dependency-key owner/producer' >&2; exit 64;
     }
