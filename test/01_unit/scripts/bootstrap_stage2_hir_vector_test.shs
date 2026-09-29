@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Actual pre-exec vector and receipt replay only; no compiler execution.
+set -euo pipefail
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo/scripts/check/lib/bootstrap-stage3-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-vector-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_new_path_validate "$parent" || exit 64
+work=$(mktemp -d "$parent/stage2-vector.XXXXXX")
+case "$work" in "$parent"/stage2-vector.*) ;; *) exit 1 ;; esac
+cleanup() {
+  local status=$?
+  if [ "$status" -eq 0 ]; then rm -rf -- "$work"
+  else printf 'Retained failed vector fixture: %s\n' "$work" >&2; fi
+  return "$status"
+}
+trap cleanup EXIT
+fail() { echo "FAIL Stage 2 HIR vector: $*" >&2; exit 1; }
+bootstrap_stage3_error() { echo "$1" >&2; exit 64; }
+absolute_path() { printf '%s\n' "$1"; }
+# Extract the actual builder and replay expressions, rather than maintaining a
+# test copy of the environment list or bypassing its strict pre-exec guard.
+awk '/^  bootstrap_run_stage2_native\(\) \{/{on=1} on{print} on && /^  \}$/{exit}' \
+  "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" > "$work/builder.shs"
+awk '/^bootstrap_stage2_hir_env=/{on=1} on && /^bootstrap_stage2_darwin_env=/{exit} on{print}' \
+  "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" > "$work/hir-replay.shs"
+awk '/^stage2_args=\$\(bootstrap_stage3_args_sha256/{on=1} on{print} on && /"\$@"\) \|\| exit 1$/{exit}' \
+  "$repo/scripts/bootstrap/resume-stage3-from-admitted.sh" > "$work/args-replay.shs"
+[ -s "$work/builder.shs" ] && [ -s "$work/hir-replay.shs" ] && [ -s "$work/args-replay.shs" ] || fail 'source expressions missing'
+. "$work/builder.shs"
+
+# Only the execution boundary is replaced: the actual builder must reach it
+# after its ordered-name equality guard. Preserve the actual argument vector.
+bootstrap_stage3_run_transcribed() {
+  local transcript=$1 cwd=$2 home=$4 tmp=$5 path=$6
+  shift 6
+  captured_env=()
+  while [ "$1" != -- ]; do captured_env+=("$1"); shift; done
+  shift 2 # -- and producer program path
+  captured_argv=("$@")
+  capture_sha=$(bootstrap_stage3_args_sha256 "${captured_env[@]}" "${captured_argv[@]}")
+  bootstrap_stage3_write_command_transcript "$transcript" "$cwd" "$home" "$tmp" "$path" \
+    "${captured_env[@]}" -- "${captured_argv[@]}"
+}
+repo_root=$repo
+stage_build_path=$PATH stage_build_rust_log=error
+bootstrap_link_library_path= bootstrap_link_compat_sha256=absent
+simple_abi_policy=v1 SIMPLE_PLUGIN_MANIFEST_POLICY=runtime
+SIMPLE_KERNEL_K1_POLICY=legacy SIMPLE_COVERAGE_CUTOVER_STATE=legacy
+k1_composition_sha256_before=absent build_progress_events="$work/progress"
+stage2_cache_absolute="$work/cache-stage2" stage3_cache_absolute="$work/cache-stage3"
+stage2_compatibility_manifest_absolute="$work/compatibility"
+stage2_seed_absolute="$work/no-compiler" stage2_home_absolute="$work/home" stage2_tmp_absolute="$work/tmp"
+stage2_native_log="$work/no-build.log" stage2_refusal_log="$work/refusal.log"
+stage_runtime_absolute="$work/runtime" stage2_bin="$work/no-output"
+backend=cranelift jobs=1 bootstrap_mode=dynload NATIVE_LOW_MEMORY=0
+k1_composition_source_args= native_verbose_arg= stage2_timeout_args=
+CC=fixture-cc CXX=fixture-cxx AR=fixture-ar LD=fixture-ld LLVM_CONFIG=fixture-llvm SIMPLE_LLVM_REQUIRED_VERSION=fixture
+mkdir -p "$stage2_home_absolute" "$stage2_tmp_absolute"
+for PLATFORM in x86_64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
+  bootstrap_stage2_darwin_env= bootstrap_stage2_windows_env= bootstrap_stage2_msvc_env=
+  bootstrap_windows_abi_env= bootstrap_windows_cc_env= bootstrap_windows_include_env= bootstrap_windows_lib_env= bootstrap_windows_libpath_env=
+  case "$PLATFORM" in
+    *apple-darwin*) bootstrap_stage2_darwin_env=1 ;;
+    *windows-msvc*)
+      bootstrap_stage2_windows_env=1 bootstrap_stage2_msvc_env=1
+      bootstrap_windows_abi_env='SIMPLE_WINDOWS_ABI=win64-msvc SIMPLE_LINKER_FLAVOR=msvc'
+      bootstrap_windows_cc_env=CC=fixture-cl
+      bootstrap_windows_include_env=INCLUDE=fixture-include bootstrap_windows_lib_env=LIB=fixture-lib bootstrap_windows_libpath_env=LIBPATH=fixture-libpath
+      ;;
+  esac
+  stage2_command_transcript="$work/$PLATFORM.transcript"
+  bootstrap_run_stage2_native || fail "actual $PLATFORM pre-exec equality guard refused"
+  [ -n "${capture_sha:-}" ] || fail 'builder did not reach capture boundary'
+  stage2_transcript=$stage2_command_transcript
+  stage2_progress=$build_progress_events stage2_library_path=$bootstrap_link_library_path stage2_link_compat=$bootstrap_link_compat_sha256
+  bootstrap_stage2_windows_cc=
+  [ -z "$bootstrap_stage2_windows_env" ] || bootstrap_stage2_windows_cc="CC=$(bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" CC)"
+  stage2_env_value() { bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"; }
+  set -- "${captured_argv[@]}"
+  . "$work/hir-replay.shs"
+  . "$work/args-replay.shs"
+  [ "$stage2_args" = "$capture_sha" ] || fail "$PLATFORM new transcript replay changed recorded vector hash"
+  # Legacy receipts retain the exact historical vector and omit both fields.
+  legacy_env=()
+  for assignment in "${captured_env[@]}"; do
+    case "$assignment" in SIMPLE_HIR_CACHE=*|SIMPLE_HIR_CACHE_DIR=*) ;; *) legacy_env+=("$assignment") ;; esac
+  done
+  legacy_sha=$(bootstrap_stage3_args_sha256 "${legacy_env[@]}" "${captured_argv[@]}")
+  stage2_transcript="$work/$PLATFORM.legacy.transcript"
+  bootstrap_stage3_write_command_transcript "$stage2_transcript" "$repo" "$stage2_home_absolute" "$stage2_tmp_absolute" "$PATH" \
+    "${legacy_env[@]}" -- "${captured_argv[@]}"
+  . "$work/hir-replay.shs"
+  . "$work/args-replay.shs"
+  [ "$stage2_args" = "$legacy_sha" ] || fail "$PLATFORM legacy vector was rewritten"
+done
+# Malformed optional pairs are refused before any receipt admission replay.
+stage2_transcript="$work/half.transcript"
+printf 'explicit-env:18:SIMPLE_HIR_CACHE=1\n' > "$stage2_transcript"
+if ( . "$work/hir-replay.shs" ) > "$work/half.log" 2>&1; then fail 'half HIR pair accepted'; fi
+hir_dir_assignment="SIMPLE_HIR_CACHE_DIR=$work/hir"
+stage2_transcript="$work/duplicate-enable.transcript"
+printf 'explicit-env:18:SIMPLE_HIR_CACHE=1\nexplicit-env:18:SIMPLE_HIR_CACHE=1\nexplicit-env:%s:%s\n' \
+  "${#hir_dir_assignment}" "$hir_dir_assignment" > "$stage2_transcript"
+if ( . "$work/hir-replay.shs" ) > "$work/duplicate-enable.log" 2>&1; then fail 'complete pair with duplicate enable accepted'; fi
+stage2_transcript="$work/duplicate-dir.transcript"
+printf 'explicit-env:18:SIMPLE_HIR_CACHE=1\nexplicit-env:%s:%s\nexplicit-env:%s:%s\n' \
+  "${#hir_dir_assignment}" "$hir_dir_assignment" "${#hir_dir_assignment}" "$hir_dir_assignment" > "$stage2_transcript"
+if ( . "$work/hir-replay.shs" ) > "$work/duplicate-dir.log" 2>&1; then fail 'complete pair with duplicate directory accepted'; fi
+echo 'PASS Stage 2 HIR vector: actual Linux/Darwin/MSVC pre-exec guard, exact current/legacy replay hashes, malformed pair refusal; no compiler execution'

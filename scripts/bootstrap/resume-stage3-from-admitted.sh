@@ -485,6 +485,16 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+# Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
+# controls; newer transcripts must carry the complete pair in the same order.
+bootstrap_stage2_hir_env=
+if stage2_hir_cache=$(stage2_env_value SIMPLE_HIR_CACHE); then
+  stage2_hir_cache_dir=$(stage2_env_value SIMPLE_HIR_CACHE_DIR) || \
+    bootstrap_stage3_error 'recorded Stage 2 HIR controls are incomplete'
+  bootstrap_stage2_hir_env=1
+elif grep -q '^explicit-env:[0-9][0-9]*:SIMPLE_HIR_CACHE' "$stage2_transcript"; then
+  bootstrap_stage3_error 'recorded Stage 2 HIR controls are incomplete or malformed'
+fi
 bootstrap_stage2_darwin_env=
 case "$platform" in *apple-darwin*) bootstrap_stage2_darwin_env=1 ;; esac
 # Windows twin of the Darwin block: bootstrap-from-scratch.sh hashes
@@ -528,6 +538,8 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$stage2_progress" \
   "SIMPLE_FRONTEND_CACHE=$(stage2_env_value SIMPLE_FRONTEND_CACHE)" \
   "SIMPLE_FRONTEND_CACHE_DIR=$(stage2_env_value SIMPLE_FRONTEND_CACHE_DIR)" \
+  ${bootstrap_stage2_hir_env:+"SIMPLE_HIR_CACHE=$stage2_hir_cache"} \
+  ${bootstrap_stage2_hir_env:+"SIMPLE_HIR_CACHE_DIR=$stage2_hir_cache_dir"} \
   ${bootstrap_stage2_darwin_env:+"CC=$(stage2_env_value CC)"} \
   ${bootstrap_stage2_darwin_env:+"CXX=$(stage2_env_value CXX)"} \
   ${bootstrap_stage2_darwin_env:+"AR=$(stage2_env_value AR)"} \
