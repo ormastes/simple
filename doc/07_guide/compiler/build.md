@@ -556,3 +556,19 @@ After full Stage 4, the exact candidate runs
 `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` with its
 absolute candidate and adjacent provenance paths. The checker is read-only and
 confirms retained smoke before/after; never repeat an unchanged green smoke run.
+
+## Seven-plan implementation diagnostics
+
+The [parallel pure-Simple TDD report](../../03_plan/evidence/seven_plans/parallel_pure_simple_tdd_2026-09-29.md)
+records bounded source changes and the exact remaining admission gates. Its
+Phase 1 interpreter results are development diagnostics, not proof that the
+deployed compiler supports all seven plans. In particular, a candidate SCV
+identity map does not settle durable batches, and an explanation of a container
+constructor does not prove typed MIR lowering.
+
+Package-index compatibility publication clears prior producer/root/variant
+markers when rejecting a graph. Provider admission reserves its metadata writer
+before publishing a terminal state; consumers must observe the acquire-based
+state API before reading the receipt. Link spill validation rejects overflowing
+output extents. These changes still require admitted native/SPipe verification;
+the report records the Windows CRT and WSL Stage 4 blockers.

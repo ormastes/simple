@@ -3,6 +3,13 @@
 Date: 2026-09-29
 Status: execution plan; implementation completion is not certified.
 
+Parallel pure-Simple TDD update (2026-09-29): five bounded implementation
+changes and their diagnostic results are recorded in
+[the progress report](evidence/seven_plans/parallel_pure_simple_tdd_2026-09-29.md).
+This does not change the host certification cells below to VERIFIED or DONE.
+The report separates existing implementation, new regression fixes, and the
+remaining requirements; no unsupported completion percentages are assigned.
+
 Execution update (2026-09-29): the user selected Windows first, then macOS,
 and requested branch publication and PRs. This ordering supersedes the initial
 Windows/Linux ordering below for this execution lane; it does not remove any

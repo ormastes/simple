@@ -1,12 +1,74 @@
-use app.spipe.testing.*
+use std.spec.*
+use std.nogc_sync_mut.atomic.{MemoryOrdering}
 use std.io.{read_file}
 use std.common.crypto.sha256.{sha256_text}
 use compiler.loader.provider_admission.*
+use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
+use compiler.driver.cache.pinned_archive_capability.{ArchiveFileIdentityV1, PinnedArchiveCapability}
+use compiler.driver.smf.package_image_v1.{PackageImageV1}
+
+# State-machine fixtures intentionally do not claim validated archive authority.
+fn terminal_state_fixture() -> ProviderAdmissionV1:
+    val digest = sha256_text("state-only-fixture")
+    val descriptor = ProviderDescriptorV1("primary", "package", digest, [], ProviderModeV1.pure_simple, "", true)
+    val image = PackageImageV1(1, "package", digest, digest, digest, "producer", digest, digest, [], [])
+    val archive = PackageArchiveReceiptV1("package", digest, digest, digest, "producer", digest, digest, [], [], digest)
+    val capability = PinnedArchiveCapability(-1, ArchiveFileIdentityV1(0, 0, 0, digest), digest, digest, [], false)
+    provider_admission_new_v1(descriptor, ProviderAdmissionAuthorityV1(image, archive, capability, digest, []))
+
+fn terminal_state_receipt(identity: text) -> ProviderAdmissionReceiptV1:
+    val digest = sha256_text("state-only-fixture")
+    ProviderAdmissionReceiptV1(identity, "package", digest, digest, digest, [], ProviderModeV1.pure_simple, ProviderEffectPolicyV1(identity, true), true, false)
 
 val STATE_PATH = "src/compiler/99.loader/provider_admission/state.spl"
 val ADMISSION_PATH = "src/compiler/99.loader/provider_admission/admission.spl"
 
 describe "metadata-only provider admission":
+    # @req REQ-002 REQ-012
+    it "should keep reserved finalization unpublished and reject competing writers":
+        step("Reserve finalization while the provider remains admitting")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(admission.atomic_state.compare_exchange(1, 3, MemoryOrdering.AcqRel, MemoryOrdering.Acquire)).to_be(true)
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.admitting)
+        step("Refuse both competing terminal writers without publishing metadata")
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("competitor"))).to_be(false)
+        expect(provider_admission_reject_v1(admission, ProviderAdmissionErrorV1.abi_mismatch)).to_be(false)
+        expect(admission.receipt).to_be_nil()
+        expect(admission.failure).to_be_nil()
+
+    # @req REQ-002 REQ-012
+    it "should preserve the first receipt after refusing duplicate publication":
+        step("Claim admission and publish the primary receipt")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("primary"))).to_be(true)
+        step("Refuse replacement and retain the admitted identity")
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("replacement"))).to_be(false)
+        expect(admission.receipt.unwrap().provider_identity).to_equal("primary")
+
+    # @req REQ-002 REQ-012
+    it "should preserve rejection without attaching a later receipt":
+        step("Reject the claimed admission with its typed failure")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(provider_admission_reject_v1(admission, ProviderAdmissionErrorV1.abi_mismatch)).to_be(true)
+        step("Refuse publication after rejection")
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("primary"))).to_be(false)
+        expect(admission.receipt).to_be_nil()
+        expect(admission.failure.unwrap().error).to_equal(ProviderAdmissionErrorV1.abi_mismatch)
+
+    # @req REQ-002 REQ-012
+    it "should preserve admission without attaching a later failure":
+        step("Publish the claimed admission")
+        val admission = terminal_state_fixture()
+        expect(provider_admission_try_claim_v1(admission)).to_be(true)
+        expect(provider_admission_publish_v1(admission, terminal_state_receipt("primary"))).to_be(true)
+        step("Refuse rejection after publication")
+        expect(provider_admission_reject_v1(admission, ProviderAdmissionErrorV1.abi_mismatch)).to_be(false)
+        expect(admission.failure).to_be_nil()
+        expect(provider_admission_state_v1(admission)).to_equal(ProviderAdmissionStateV1.admitted)
+
     it "admits one effect owner and keeps the shadow metadata-only":
         val descriptor = ProviderDescriptorV1(
             "pure.provider", "pkg.provider", sha256_text("abi"),
