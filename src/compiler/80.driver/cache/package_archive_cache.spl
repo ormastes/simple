@@ -1,6 +1,7 @@
 # Pinned package archive admission and atomic SCC publication.
 
 use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
+use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
 use compiler.driver.cache.cas_batch_transaction.{
     cas_batch_abort_v1, cas_batch_begin_v1, cas_batch_current_v1,
     cas_batch_lookup_receipt_digest_v1, cas_batch_publish_v1,
@@ -64,18 +65,29 @@ fn package_archive_aggregate_entry_v1(
     metadata_digests = metadata_digests.sorted()
     action_digests = action_digests.sorted()
     dependency_modules = dependency_modules.sorted()
+    val module_names = cache_text_join_v1(module_identities, ",")
+    val metadata = cache_text_join_v1(metadata_digests, "|")
+    val actions = cache_text_join_v1(action_digests, "|")
+    if module_names == nil or metadata == nil or actions == nil:
+        return nil
+    val module_name_text = module_names.unwrap()
+    val metadata_text = metadata.unwrap()
+    val action_text = actions.unwrap()
     Some(PackageModuleIndexEntryV1(
-        package_identity, module_identities.join(","), "", "",
-        sha256_text(metadata_digests.join("|")), "", "", "", "",
-        sha256_text(action_digests.join("|")), "", scc_identity,
+        package_identity, module_name_text, "", "",
+        sha256_text(metadata_text), "", "", "", "",
+        sha256_text(action_text), "", scc_identity,
         dependency_modules, []))
 
 fn package_archive_digest_valid_v1(value: text) -> bool:
     if value.len() != 64:
         return false
-    for ch in value:
-        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
             return false
+        index = index + 1
     true
 
 fn package_archive_token_valid_v1(value: text) -> bool:
@@ -96,6 +108,27 @@ fn package_archive_field_v1(line: text, prefix: text) -> text?:
         return nil
     Some(line.substring(prefix.len()))
 
+struct PackageArchiveDecimalU64V1:
+    valid: bool
+    value: u64
+
+fn package_archive_decimal_u64_v1(value: text) -> PackageArchiveDecimalU64V1:
+    if value == "" or (value.len() > 1 and value.starts_with("0")):
+        return PackageArchiveDecimalU64V1(false, 0u64)
+    var number = 0u64
+    var index = 0
+    while index < value.len():
+        val code = value.byte_at(index) as i64
+        if code < 48 or code > 57:
+            return PackageArchiveDecimalU64V1(false, 0u64)
+        val digit = (code - 48).to_u64()
+        if number > 1844674407370955161u64 or
+                (number == 1844674407370955161u64 and digit > 5u64):
+            return PackageArchiveDecimalU64V1(false, 0u64)
+        number = number * 10u64 + digit
+        index = index + 1
+    PackageArchiveDecimalU64V1(true, number)
+
 fn package_archive_manifest_v1(
     entry: PackageModuleIndexEntryV1, authority: PackageArchiveAuthorityV1,
     dependency_interface_digests: [text], interface_digest: text,
@@ -110,13 +143,18 @@ fn package_archive_manifest_v1(
             not package_archive_digest_valid_v1(interface_digest) or
             not package_archive_digest_valid_v1(action_digest)):
         return ""
-    [PACKAGE_ARCHIVE_MANIFEST_V1,
+    val dependency_list = dependencies.unwrap()
+    val dependency_text = cache_text_join_v1(dependency_list, ",")
+    if dependency_text == nil:
+        return ""
+    val dependency_text_value = dependency_text.unwrap()
+    cache_text_join_v1([PACKAGE_ARCHIVE_MANIFEST_V1,
         "package={entry.package_identity}",
         "variant={authority.variant_digest}",
         "producer={authority.producer_digest}",
-        "dependencies={dependencies!.len()};{dependencies!.join(",")}",
+        "dependencies={dependency_list.len()};{dependency_text_value}",
         "interface={interface_digest}",
-        "action={action_digest}"].join("\n")
+        "action={action_digest}"], "\n") ?? ""
 
 fn package_archive_build_receipt_v1(
     entry: PackageModuleIndexEntryV1, authority: PackageArchiveAuthorityV1,
@@ -176,8 +214,12 @@ fn package_archive_receipt_decode_v1(content: text) -> PackageArchiveReceiptV1?:
         if parts.len() != 5:
             return nil
         val name_length = parts[0].to_i64() ?? -1
-        val offset = parts[2].to_u64() ?? 0
-        val extent = parts[3].to_u64() ?? 0
+        val offset_parsed = package_archive_decimal_u64_v1(parts[2])
+        val extent_parsed = package_archive_decimal_u64_v1(parts[3])
+        if not offset_parsed.valid or not extent_parsed.valid:
+            return nil
+        val offset = offset_parsed.value
+        val extent = extent_parsed.value
         if name_length != parts[1].len() or extent == 0:
             return nil
         members = members.push(PackageArchiveMemberReceiptV1(
@@ -203,27 +245,37 @@ fn package_archive_load_v1(
         root, entry.package_identity, entry.action_digest)
     if receipt_digest == nil:
         return PackageArchiveLoadV1(false, "archive-missing", true, "", nil)
-    val receipt_content = cas_get(root, receipt_digest!)
+    val receipt_digest_value = receipt_digest.unwrap()
+    val receipt_content = cas_get(root, receipt_digest_value)
     if receipt_content == nil:
         return PackageArchiveLoadV1(
             false, "archive-receipt-missing", false, "", nil)
-    val receipt = package_archive_receipt_decode_v1(receipt_content!)
-    if receipt == nil or receipt!.receipt_digest != receipt_digest!:
+    val receipt_content_value = receipt_content.unwrap()
+    val receipt = package_archive_receipt_decode_v1(receipt_content_value)
+    if receipt == nil:
+        return PackageArchiveLoadV1(
+            false, "archive-receipt-invalid", false, "", nil)
+    val receipt_value = receipt.unwrap()
+    if receipt_value.receipt_digest != receipt_digest_value:
         return PackageArchiveLoadV1(
             false, "archive-receipt-invalid", false, "", nil)
     val dependencies = package_archive_sorted_dependencies_v1(
         dependency_interface_digests)
-    if (dependencies == nil or receipt!.package_key != entry.package_identity or
-            receipt!.action_key != entry.action_digest or
-            receipt!.normalized_metadata_digest != entry.smf_metadata_digest or
-            receipt!.producer_digest != authority.producer_digest or
-            receipt!.producer_identity != authority.root_generation or
-            receipt!.variant_digest != authority.variant_digest or
-            receipt!.dependency_interface_digests != dependencies!):
+    if dependencies == nil:
+        return PackageArchiveLoadV1(
+            false, "archive-provenance-mismatch", false, "", nil)
+    val dependency_values = dependencies.unwrap()
+    if (receipt_value.package_key != entry.package_identity or
+            receipt_value.action_key != entry.action_digest or
+            receipt_value.normalized_metadata_digest != entry.smf_metadata_digest or
+            receipt_value.producer_digest != authority.producer_digest or
+            receipt_value.producer_identity != authority.root_generation or
+            receipt_value.variant_digest != authority.variant_digest or
+            receipt_value.dependency_interface_digests != dependency_values):
         return PackageArchiveLoadV1(
             false, "archive-provenance-mismatch", false, "", nil)
     PackageArchiveLoadV1(
-        true, "ok", false, cas_blob_path(root, receipt!.archive_digest), receipt)
+        true, "ok", false, cas_blob_path(root, receipt_value.archive_digest), receipt)
 
 fn package_archive_publish_scc_v1(
     root: text, scc_identity: text, authority: PackageArchiveAuthorityV1,
@@ -259,28 +311,35 @@ fn package_archive_publish_scc_v1(
         if aggregate == nil:
             _ = cas_batch_abort_v1(transaction)
             return false
+        val aggregate_entry = aggregate.unwrap()
         val dependencies = package_archive_sorted_dependencies_v1(
             dependencies_all)
-        val interface_content = interfaces.join("\n")
-        val action_content = actions.join("\n")
-        val interface_digest = sha256_text(interface_content)
+        val interface_content = cache_text_join_v1(interfaces, "\n")
+        val action_content = cache_text_join_v1(actions, "\n")
+        if interface_content == nil or action_content == nil:
+            _ = cas_batch_abort_v1(transaction)
+            return false
+        val interface_text = interface_content.unwrap()
+        val action_text = action_content.unwrap()
+        val interface_digest = sha256_text(interface_text)
         val manifest = package_archive_manifest_v1(
-            aggregate!, authority, dependencies_all,
-            interface_digest, sha256_text(action_content))
+            aggregate_entry, authority, dependencies_all,
+            interface_digest, sha256_text(action_text))
         if dependencies == nil or manifest == "":
             _ = cas_batch_abort_v1(transaction)
             return false
+        val dependency_digests = dependencies.unwrap()
         val (archive_content, receipt) = package_archive_build_receipt_v1(
-            aggregate!, authority, dependencies!, manifest,
-            interface_content, action_content)
+            aggregate_entry, authority, dependency_digests, manifest,
+            interface_text, action_text)
         if (cas_put(root, archive_content) != receipt.archive_digest or
                 cas_put(root, package_archive_receipt_canonical_fields_v1(receipt)) !=
                     receipt.receipt_digest):
             _ = cas_batch_abort_v1(transaction)
             return false
         if cas_batch_stage_object_v1(
-                &mut transaction, package_identity,
-                PackageActionKeyV1(aggregate!.action_digest), receipt).is_err():
+                transaction, package_identity,
+                PackageActionKeyV1(aggregate_entry.action_digest), receipt).is_err():
             _ = cas_batch_abort_v1(transaction)
             return false
     cas_batch_publish_v1(transaction).is_ok()

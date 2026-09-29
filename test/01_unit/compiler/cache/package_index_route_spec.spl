@@ -2,7 +2,7 @@ use compiler.driver.cache.package_index_route.{
     package_index_route_current_v1, package_index_route_ordered_modules_v1}
 use compiler.driver.cache.package_module_index.{
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
-    package_module_index_decode_v1,
+    package_module_index_decode_v1, package_module_index_entry_action_digest_v1,
     package_module_index_publish_v1
 }
 use std.spec.{describe, it, expect}
@@ -20,20 +20,54 @@ fn route_entry(package_identity: text, module_identity: text) -> PackageModuleIn
         "scc::{module_identity}", [], [])
 
 describe "production package-index routing":
+    it "refuses full and different-entry requests against a scoped graph":
+        val old_cache = env_get("SIMPLE_CACHE") ?? ""
+        val cache_root = "build/test-artifacts/package-index-scope-{rt_getpid()}"
+        dir_remove(cache_root, true)
+        env_set("SIMPLE_CACHE", cache_root)
+        var graph = PackageModuleIndexGenerationV1(
+            3, sha256_text("producer"), "root", "revision", "commit", "tree",
+            sha256_text("inventory"), [route_entry("pkg-a", "a")],
+            sha256_text("variant"), "src/a.spl")
+        var entry = graph.entries[0]
+        entry.action_digest = package_module_index_entry_action_digest_v1(
+            graph, entry)
+        graph.entries = [entry]
+        expect(package_module_index_publish_v1(cache_root, graph)).to_be(true)
+        val full = package_index_route_current_v1(
+            "", "/tmp/package-index-scope-snapshot", "revision", "tree",
+            graph.inventory_digest, graph.producer_digest,
+            graph.root_generation, graph.variant_digest, [], false)
+        expect(full.valid).to_be(false)
+        expect(full.reason).to_equal("index-scope-mismatch")
+        val other = package_index_route_current_v1(
+            "src/b.spl", "/tmp/package-index-scope-snapshot", "revision", "tree",
+            graph.inventory_digest, graph.producer_digest,
+            graph.root_generation, graph.variant_digest, [], false)
+        expect(other.valid).to_be(false)
+        expect(other.reason).to_equal("index-scope-mismatch")
+        env_set("SIMPLE_CACHE", old_cache)
+        dir_remove(cache_root, true)
+
     it "keeps unchanged selected modules after a dirty-package schedule":
         val entries = [
             route_entry("pkg-a", "a"), route_entry("pkg-b", "b"),
-            route_entry("pkg-c", "c"), route_entry("pkg-outside", "z")]
+            route_entry("pkg-b", "c"), route_entry("pkg-outside", "z")]
         var selected: Dict<text, bool> = {}
         selected["a"] = true
         selected["b"] = true
         selected["c"] = true
+        var heads: Dict<text, i64> = {}
+        heads["pkg-a"] = 0
+        heads["pkg-b"] = 1
+        heads["pkg-outside"] = 3
         val ordered = package_index_route_ordered_modules_v1(
-            entries, ["a", "b", "c"], selected, ["pkg-b"])
+            entries, ["a", "b", "c"], selected, ["pkg-b"],
+            heads, [-1, 2, -1, -1])
         expect(ordered.len()).to_equal(3)
         expect(ordered[0]).to_equal("b")
-        expect(ordered[1]).to_equal("a")
-        expect(ordered[2]).to_equal("c")
+        expect(ordered[1]).to_equal("c")
+        expect(ordered[2]).to_equal("a")
 
     it "rejects a graph requested with a different variant digest":
         val old_cache = env_get("SIMPLE_CACHE") ?? ""

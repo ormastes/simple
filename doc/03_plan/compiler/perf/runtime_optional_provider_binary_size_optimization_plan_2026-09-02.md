@@ -94,6 +94,40 @@ not establish the 15 KiB hello gate, a matched startup/RSS improvement, a
 production install manifest, or the full CLI feature closure. See
 `doc/09_report/compiler/target5_sqlite_demand_provider_probe_2026-09-28.md`.
 
+Current Linux Stage4 follow-up (2026-09-28): the linker now offers the
+SQLite first-demand bridge as a separately scanned candidate when building
+the full CLI. A native exact-symbol contract passes 3/3 and an actual C-object
+archive/owner-selection integration spec passes 1/1. The full CLI retry did
+not reach link selection because the diagnostic pure-Simple compiler hit
+flat-AST parse errors after source closure; no full CLI size/startup/RSS or
+SQLite-link improvement is claimed. See
+`doc/09_report/compiler/target5_stage4_sqlite_demand_candidate_2026-09-28.md`.
+The final bounded native-arena retry reached the same empty declaration-tag
+parse failure at lower RSS; the targeted parser blocker is recorded in
+`doc/08_tracking/bug/target5_native_full_closure_empty_decl_tag_2026-09-28.md`.
+
+Current-source Linux ARM64 diagnostic (2026-09-29): the pure-Simple bootstrap
+coordinator built a one-module release-small hello at 21,016 stripped bytes
+with the default linker and 14,560 bytes with explicit `SIMPLE_LINKER=lld`.
+The latter meets the 15,360-byte absolute gate directionally; 30 paired
+Simple/Python startup and RSS samples favor Simple. An admitted Stage4 receipt,
+same-current-source matched-startup C comparator, retained link map,
+provider/NoGC traces, and full CLI demand-load proof are still missing. See
+`doc/09_report/compiler/target5_current_source_hello_lld_diagnostic_2026-09-29.md`.
+
+Stage4 live-closure follow-up (2026-09-29): on the saved 866-object compiler
+entry, lld's partial-link projection retains `main` and reduces undefined
+`rt_*` names from BFD's 728 to 293, excluding the 12 optional network and
+native-execution references that lacked Stage4 owners. The current-source
+bootstrap tool then reached the exact Stage4 gate with lld and found no
+direct Rust-runtime roots after assigning live imports to compiler and C
+owners. An empty Rust capsule is now supported with a focused passing test;
+the final link then exposed the sole non-`rt_`/`spl_` provider-owned live
+import, `text_dot_from_char_code`. The core-C archive defines it, but the
+live-request filter omits it before capsule projection. Exact owner retention,
+the Stage4 executable, and hello runtime/cohort proof remain pending. See
+`doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.

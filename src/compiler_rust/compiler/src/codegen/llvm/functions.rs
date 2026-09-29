@@ -856,7 +856,8 @@ impl LlvmBackend {
                         let Some(&alloca) = local_allocas.get(local_index) else {
                             continue;
                         };
-                        let offset = 8 + (capture_index as u64 * 8);
+                        // Match the reserved kind word in compile_closure_create.
+                        let offset = 16 + (capture_index as u64 * 8);
                         let offset_val = self.context_ref().i32_type().const_int(offset, false);
                         let field_ptr = unsafe {
                             builder
@@ -3885,7 +3886,6 @@ impl LlvmBackend {
                         .or_else(|| module.get_function(global_name));
 
                     if let Some(func) = func {
-                        let adapter = self.named_callable_adapter(module, func)?;
                         let alloc_fn_type = i64_type.fn_type(&[i64_type.into()], false);
                         let alloc_fn = module
                             .get_function("rt_alloc")
@@ -3906,9 +3906,9 @@ impl LlvmBackend {
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
                         let fn_addr = builder
-                            .build_ptr_to_int(adapter.as_global_value().as_pointer_value(), i64_type, "fn_addr")
+                            .build_ptr_to_int(func.as_global_value().as_pointer_value(), i64_type, "fn_addr")
                             .map_err(|e| crate::error::factory::llvm_build_failed("ptr_to_int", &e))?;
-                        let closure_marker = i64_type.const_zero();
+                        let direct_marker = i64_type.const_int(0x5344_4952_4543_5446, false);
                         let slot_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
                         let fn_slot = builder
                             .build_pointer_cast(closure_ptr, slot_ptr_type, "fn_slot")
@@ -3929,7 +3929,7 @@ impl LlvmBackend {
                             .build_pointer_cast(marker_ptr, slot_ptr_type, "marker_slot")
                             .map_err(|e| crate::error::factory::llvm_cast_failed("cast marker slot", &e))?;
                         builder
-                            .build_store(marker_slot, closure_marker)
+                            .build_store(marker_slot, direct_marker)
                             .map_err(|e| crate::error::factory::llvm_build_failed("store marker", &e))?;
                         vreg_map.insert(*dest, closure_i64);
                     } else {

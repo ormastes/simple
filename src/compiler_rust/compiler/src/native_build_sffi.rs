@@ -68,6 +68,11 @@ pub fn is_valid_runtime_bundle(value: &str) -> bool {
             | "host_gpu"
             | "gpu"
             | "bootstrap-tools"
+            | "dynamic-runtime"
+            | "dynamic_runtime"
+            | "dynamic"
+            | "shared-runtime"
+            | "shared_runtime"
     )
 }
 
@@ -213,7 +218,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                 println!("  --opt-level=<level> Optimization level: none, basic, standard, aggressive");
                 println!("  --list-optimizations Print implemented optimization groups and levels");
                 println!(
-                    "  --runtime-bundle <mode> Runtime lane: auto (default), simple-core, core-c-bootstrap, host-gpu, or admitted bootstrap-tools"
+                    "  --runtime-bundle <mode> Runtime lane to link: auto (default), simple-core, core-c-bootstrap, host-gpu, admitted bootstrap-tools, or dynamic-runtime (Stage4 compiler only)"
                 );
                 println!("  --runtime-path <dir> Directory containing libsimple_runtime.a");
                 println!("  --entry-closure     Compile only modules reachable from --entry");
@@ -340,7 +345,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
                     runtime_bundle = args_vec[i + 1].clone();
                     i += 2;
                 } else {
-                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools)");
+                    eprintln!("error: --runtime-bundle requires a value (auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools, dynamic-runtime)");
                     return 1;
                 }
             }
@@ -521,7 +526,7 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             return 1;
         }
         eprintln!(
-            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools, runtime",
+            "error: invalid --runtime-bundle value '{}'. Expected one of: auto, simple-core, core-c-bootstrap, host-gpu, bootstrap-tools, dynamic-runtime, runtime",
             runtime_bundle
         );
         return 1;
@@ -732,5 +737,25 @@ pub extern "C" fn rt_native_build(args: RuntimeValue) -> i64 {
             eprintln!("Build failed: {}", e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod runtime_bundle_tests {
+    use super::{is_allowed_runtime_bundle, is_valid_runtime_bundle};
+
+    #[test]
+    fn ffi_parser_passes_stage4_dynamic_runtime_to_entry_admission() {
+        for name in [
+            "dynamic-runtime",
+            "dynamic_runtime",
+            "dynamic",
+            "shared-runtime",
+            "shared_runtime",
+        ] {
+            assert!(is_valid_runtime_bundle(name), "{name}");
+            assert!(is_allowed_runtime_bundle(name, false), "{name}");
+        }
+        assert!(!is_allowed_runtime_bundle("rust-hosted", false));
     }
 }

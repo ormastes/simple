@@ -1,0 +1,55 @@
+# Native regression for package archive receipt option and numeric decoding.
+use compiler.driver.cache.package_archive_cache.{package_archive_receipt_decode_v1}
+use compiler.driver.cache.package_archive_types.{
+    PackageArchiveMemberReceiptV1, PackageArchiveReceiptV1,
+    package_archive_receipt_canonical_fields_v1,
+    package_archive_receipt_digest_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn main() -> i64:
+    val first = PackageArchiveMemberReceiptV1(
+        "actions.smf", 0u64, 92u64, sha256_text("actions"))
+    val second = PackageArchiveMemberReceiptV1(
+        "interface.smf", 92u64, 50u64, sha256_text("interface"))
+    val provisional = PackageArchiveReceiptV1(
+        "pkg.alpha", sha256_text("action-key"), sha256_text("archive"),
+        sha256_text("metadata"), "root", sha256_text("producer"),
+        sha256_text("variant"), [], [first, second], "")
+    val digest = package_archive_receipt_digest_v1(provisional)
+    val encoded = package_archive_receipt_canonical_fields_v1(provisional)
+    if encoded == "" or encoded.contains("Option::") or
+            not encoded.contains("dependencies=\n") or
+            not encoded.contains("member=11:actions.smf:0:92:"):
+        print "receipt-encode-invalid"
+        return 1
+    val decoded = package_archive_receipt_decode_v1(encoded)
+    if decoded == nil:
+        print "receipt-decode-missing"
+        return 1
+    val value = decoded.unwrap()
+    if value.receipt_digest != digest or value.members.len() != 2 or
+            value.members[0].offset != 0u64 or
+            value.members[0].extent != 92u64 or
+            value.members[1].offset != 92u64 or
+            value.members[1].extent != 50u64:
+        print "receipt-roundtrip-invalid"
+        return 1
+    if package_archive_receipt_decode_v1(
+            encoded.replace(":0:92:", ":bad:92:")) != nil:
+        print "receipt-invalid-number-accepted"
+        return 1
+    if package_archive_receipt_decode_v1(
+            encoded.replace(":0:92:", ":0:bad:")) != nil:
+        print "receipt-invalid-extent-accepted"
+        return 1
+    if package_archive_receipt_decode_v1(
+            encoded.replace(":0:92:", ":18446744073709551616:92:")) != nil:
+        print "receipt-overflow-offset-accepted"
+        return 1
+    if package_archive_receipt_decode_v1(
+            encoded.replace(":0:92:", ":00:92:")) != nil:
+        print "receipt-noncanonical-offset-accepted"
+        return 1
+    print "receipt-native-roundtrip-pass"
+    0

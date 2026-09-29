@@ -485,7 +485,12 @@ impl LlvmBackend {
         let alloc_fn = module
             .get_function("rt_alloc")
             .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
-        let allocation_size = closure_size.max(16);
+        // LLVM native callable header: entry pointer, reserved kind word.
+        // MIR capture offsets start at 8; shift them past the kind word so
+        // arbitrary captured data can never masquerade as a direct function.
+        let allocation_size = closure_size.checked_add(8)
+            .ok_or_else(|| CompileError::semantic("LLVM closure allocation size overflow"))?
+            .max(16);
         let size_val = i64_type.const_int(allocation_size as u64, false);
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "closure_alloc")
@@ -525,7 +530,7 @@ impl LlvmBackend {
             .build_store(fn_slot, func_ptr_cast)
             .map_err(|e| crate::error::factory::llvm_build_failed("store", &e))?;
 
-        if closure_size < 16 {
+        {
             let offset_val = self.context_ref().i32_type().const_int(8, false);
             let marker_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "closure_marker_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
@@ -543,7 +548,7 @@ impl LlvmBackend {
 
         for ((offset, field_type), value) in capture_offsets.iter().zip(capture_types.iter()).zip(captures.iter()) {
             let capture_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context_ref().i32_type().const_int(*offset as u64, false);
+            let offset_val = self.context_ref().i32_type().const_int(*offset as u64 + 8, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;

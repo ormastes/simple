@@ -61,6 +61,16 @@ Cache indexes point to content; they do not supply package graph facts.
 
 ## Storage layout
 
+V2 generations retain the original all-`.spl` inventory coverage contract.
+V3 generations encode `scope-entry=<relative source identity>` after the
+configuration variant. The index digest and each action digest bind this
+field. Decode validates that the root exists, every entry is reachable from
+it, and every import/reverse edge is closed. The cold builder checks source
+content against the full frozen inventory even when it receives only reached
+drafts. A warm full-build request or a different entry refuses V3 before
+archive admission and requires explicit cold initialization. V1 binding and
+V2 full-graph encoding remain canonical and readable.
+
 Each generation uses immutable content-addressed records and a single atomic
 `CURRENT` pointer. TLDR headers and SMF sections are separate objects so closure
 planning reads bounded headers while semantic consumers fetch demanded sections.

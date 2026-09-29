@@ -2978,6 +2978,7 @@ impl LlvmBackend {
         builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
         use crate::hir::TypeId;
+        use inkwell::types::BasicType;
 
         let i8_type = self.context_ref().i8_type();
         let i8_ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
@@ -3057,16 +3058,60 @@ impl LlvmBackend {
                     }
                 };
 
-                let call_site = builder
-                    .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("indirect call", &e))?;
+                // GlobalLoad and global function initializers store a direct
+                // function record. Unlike ClosureCreate, that entry takes no
+                // hidden environment argument. Inspect the existing record
+                // marker before selecting the call signature.
+                let marker_ptr = unsafe {
+                    builder.build_gep(
+                        i8_type, base_ptr,
+                        &[self.context_ref().i32_type().const_int(8, false)],
+                        "call_marker_ptr",
+                    )
+                }.map_err(|e| crate::error::factory::llvm_build_failed("gep marker", &e))?;
+                let marker = builder.build_load(i64_type, marker_ptr, "call_marker")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load marker", &e))?
+                    .into_int_value();
+                let is_direct = builder.build_int_compare(
+                    IntPredicate::EQ, marker,
+                    i64_type.const_int(0x5344_4952_4543_5446, false), "is_direct_function",
+                ).map_err(|e| crate::error::factory::llvm_build_failed("compare marker", &e))?;
+                let parent = builder.get_insert_block().and_then(|block| block.get_parent())
+                    .ok_or_else(|| CompileError::semantic("indirect call has no enclosing function"))?;
+                let direct_block = self.context_ref().append_basic_block(parent, "call_direct");
+                let closure_block = self.context_ref().append_basic_block(parent, "call_closure");
+                let merge_block = self.context_ref().append_basic_block(parent, "call_result");
+                builder.build_conditional_branch(is_direct, direct_block, closure_block)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("branch callable kind", &e))?;
 
+                builder.position_at_end(direct_block);
+                let direct_type = match fn_type.get_return_type() {
+                    Some(result) => result.fn_type(&llvm_param_types[1..], false),
+                    None => self.context_ref().void_type().fn_type(&llvm_param_types[1..], false),
+                };
+                let direct_call = builder.build_indirect_call(direct_type, fn_ptr, &arg_vals[1..], "direct_call")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("direct function call", &e))?;
+                builder.build_unconditional_branch(merge_block)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("merge direct call", &e))?;
+
+                builder.position_at_end(closure_block);
+                let closure_call = builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "closure_call")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("closure call", &e))?;
+                builder.build_unconditional_branch(merge_block)
+                    .map_err(|e| crate::error::factory::llvm_build_failed("merge closure call", &e))?;
+
+                builder.position_at_end(merge_block);
                 if let Some(d) = dest {
-                    if let Some(ret_val) = call_site.try_as_basic_value().basic() {
-                        vreg_map.insert(d, ret_val);
+                    if let (Some(direct_result), Some(closure_result)) = (
+                        direct_call.try_as_basic_value().basic(),
+                        closure_call.try_as_basic_value().basic(),
+                    ) {
+                        let result = builder.build_phi(direct_result.get_type(), "call_value")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("call result phi", &e))?;
+                        result.add_incoming(&[(&direct_result, direct_block), (&closure_result, closure_block)]);
+                        vreg_map.insert(d, result.as_basic_value());
                     } else {
-                        let default_val = self.runtime_int_type().const_int(0, false);
-                        vreg_map.insert(d, default_val.into());
+                        vreg_map.insert(d, self.runtime_int_type().const_zero().into());
                     }
                 }
             }

@@ -50,18 +50,8 @@ fn detect_os() -> text:
     Example:
         detect_os()  # "linux"
     """
-    # IN-PROCESS SHORT-CIRCUIT (2026-09-02): `rt_platform_name()` answers this
-    # question without any environment dependency and without a shell-out, so
-    # it is consulted FIRST -- that is what makes detection correct under
-    # `env -i` (a bootstrap's environment), where `OS`/`OSTYPE` are absent and
-    # the old path fell through to a `/bin/sh` probe that does not exist on
-    # Windows and therefore returned "unknown".
-    #
-    # The seed primitive collapses BSD to "unix", so that value falls through
-    # to the guarded `uname -s` probe below. nil is guarded because an
-    # unbacked extern silently returns nil in this repo (see
-    # doc/08_tracking/bug/unregistered_extern_silent_nil_2026-08-01.md), which
-    # is exactly what would happen on a baremetal target.
+    # The runtime is authoritative; mutable OS/OSTYPE values are not host facts.
+    # BSD providers report "unix", so retain the guarded uname fallback below.
     val rt_os = platform_name_raw()
     if rt_os != nil:
         if rt_os == "windows":
@@ -72,35 +62,6 @@ fn detect_os() -> text:
             return "linux"
         if rt_os == "freebsd" or rt_os == "illumos" or rt_os == "solaris":
             return rt_os
-
-    # Only an absent runtime provider may use environment hints. An OS or
-    # OSTYPE value inherited by a Unix process must not override "unix".
-    # NIL-GUARD (2026-08-02): env_get returns nil for an unset var, and in a
-    # large module unit (e.g. anything importing browser_engine) the
-    # interpreter evaluates `os_env != nil` as true for that nil, so the old
-    # `!= "" and != nil` guard still let `.lower()` run on nil — "method
-    # `lower` not found on type `nil`" during engine2d backend auto-resolve
-    # (probe_metal -> is_macos -> detect_os). Use the same `== nil` ternary
-    # pattern as the OSTYPE branch below, which evaluates correctly in both
-    # engines. See doc/08_tracking/bug/jit_method_lower_not_found_on_nil_backend_autoresolve_2026-08-02.md
-    if rt_os == nil or rt_os == "" or rt_os == "unknown":
-        val os_env_raw = env_get("OS")
-        val os_env = if os_env_raw == nil: "" else: os_env_raw.lower()
-        if os_env.contains("windows"):
-            return "windows"
-
-        val ostype_raw = env_get("OSTYPE")
-        val ostype = if ostype_raw == nil: "" else: ostype_raw.lower()
-        if ostype.contains("linux"):
-            return "linux"
-        if ostype.contains("darwin") or ostype.contains("mac"):
-            return "macos"
-        if ostype.contains("freebsd"):
-            return "freebsd"
-        if ostype.contains("openbsd"):
-            return "openbsd"
-        if ostype.contains("netbsd"):
-            return "netbsd"
 
     # BAREMETAL GUARD (2026-08-11): `rt_process_run` is a TRAP_STUB on
     # baremetal targets (halts the kernel), while `rt_file_exists` is a real
