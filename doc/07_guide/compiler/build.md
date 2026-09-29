@@ -76,6 +76,39 @@ diagnostic scratch. Use `--print-intermediates` (or
 `SIMPLE_PRINT_BUILD_INTERMEDIATES=1`) to retain and print each exact path.
 The legacy `SIMPLE_KEEP_LLVM_IR=1` remains supported for LLVM IR only.
 
+For an exact Linux LLD native-link input capture, set `SIMPLE_LINKER=lld` and
+`SIMPLE_NATIVE_LINK_REPRODUCE_PATH` to a new absolute `.tar` path for one
+native output. LLD writes the input bytes and response file into the archive;
+the linker writes `<archive>.receipt` with SHA-256 hashes of the archive,
+output, and linker. A requested capture fails if the route uses another
+linker, a cross compiler, SMF inputs, or a compiler-driver fallback. The
+capture is opt-in because it copies every link input and can be large. The
+archive records the Simple link; a matched C size claim also needs a C build
+using the same startup and required runtime/link inputs.
+For the Linux one-source hello gate, run
+`scripts/check/check-runtime-binary-size-matched-link.py` with the archive,
+its receipt, both unstripped and stripped outputs, the one-function C source,
+expected stdout bytes, and the exact Clang, LLD, and strip tools. It replays
+the Simple link byte for
+byte, replaces only the program object for C, and checks the 15 KiB and 1.05x
+limits. The full BS7 cohort still requires its separate admission, provider,
+NoGC, startup, and RSS evidence.
+On Linux, the BS7 producer and checker require the unstripped Simple and C
+outputs, captured archive and receipt, C source, and the Clang, LLD, and strip
+tools through their `--matched-*` options. The C entry calls `puts` and both
+outputs must match `--matched-expected-stdout`. They bind all input hashes in the
+cohort receipt and rerun the exact replay; `matched-startup-v1` by itself is
+not size evidence. Pass the NoGC hello as `--simple-binary`, the startup
+executable as `--interpreter-binary`, and Python as `--python-binary`. The
+receipt binds all three hashes; each startup sample row must name its
+interpreter or Python executable hash.
+
+For the bootstrap-only Rust tool, an existing directory in
+`SIMPLE_RUNTIME_PATH` supplies native link archives and leaves interpreter
+symbols on the static provider by default. An explicit runtime library file
+path still selects dynamic loading. `SIMPLE_RUNTIME_LOAD` can select a
+different interpreter mode when the path is a directory.
+
 ### Quality Commands
 
 ```bash

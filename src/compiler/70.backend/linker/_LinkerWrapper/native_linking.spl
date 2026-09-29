@@ -4,6 +4,9 @@ use compiler.backend.linker.linker_wrapper.*
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
 use compiler.backend.linker._LinkerWrapper.shared_linking.{_link_native_mingw}
+use compiler.backend.linker._LinkerWrapper.native_link_reproduce_v1.{
+    native_link_reproduce_reason_v1, native_link_reproduce_finish_v1
+}
 # Linker Wrapper - Unified Linking API
 #
 # This module provides a single entry point for all linking operations,
@@ -249,10 +252,13 @@ pub fn link_error_detail(site: text, payload: text) -> text:
 
 fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) -> Result:
     val trace = linker_trace_enabled()
+    val reproduce_path = env_get("SIMPLE_NATIVE_LINK_REPRODUCE_PATH") ?? ""
     if trace:
         print "[LINKER] link_to_native: {object_files.len()} files, output={output}"
     if object_files.len() == 0:
         return Err("No object files to link")
+    if reproduce_path != "" and is_simpleos_target():
+        return Err("native-link-reproduce-requires-linux-lld")
 
     # SimpleOS is a cross-target decision, independent of the host OS. Route
     # it before Windows/Unix host dispatch so the same BootLayoutPlan engine
@@ -264,6 +270,8 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
         return link_simpleos_internal(object_files, output, simpleos_target, config)
 
     val os = native_effective_link_os(host_os(), config.target_triple, config.linker_abi)
+    if reproduce_path != "" and os != "linux":
+        return Err("native-link-reproduce-requires-linux-lld")
     if trace:
         print "[LINKER] os={os}"
     if not hosted_native_link_os_supported(os):
@@ -285,6 +293,8 @@ fn link_to_native(object_files: [text], output: text, config: NativeLinkConfig) 
 
     # If inputs are SMF/LSM, build a self-contained binary instead of raw native link.
     val smf_inputs = filter_smf_inputs(object_files)
+    if reproduce_path != "" and smf_inputs.len() > 0:
+        return Err("native-link-reproduce-requires-object-inputs")
     if trace:
         print "[LINKER] smf_inputs={smf_inputs.len()}"
     if smf_inputs.len() > 0:
@@ -310,6 +320,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     val os = host_os()
     val arch = host_arch()
     val trace = linker_trace_enabled()
+    val reproduce_path = env_get("SIMPLE_NATIVE_LINK_REPRODUCE_PATH") ?? ""
+    if reproduce_path != "" and os != "linux":
+        return Err("native-link-reproduce-requires-linux-lld")
     if trace:
         print "[LINKER] link_native_unix: os={os}, arch={arch}"
 
@@ -323,6 +336,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # error, never a silent fallback to the external toolchain those arms
     # would otherwise select.
     if requested_linker_override().trim().lower() == "internal":
+        if reproduce_path != "":
+            return Err("native-link-reproduce-requires-linux-lld")
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
             return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
@@ -334,6 +349,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
         return internal_link_native(os, arch, config, object_files, output)
 
     if hosted_cross_cc_required(target, os, arch):
+        if reproduce_path != "":
+            return Err("native-link-reproduce-requires-linux-lld")
         return link_native_cc(object_files, output, config)
 
     # Size builds use LLD on Linux: it prunes dynamic symbols from discarded
@@ -348,6 +365,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] find_linker returned, is_err={linker_result.is_err()}"
     if linker_result.is_err():
+        if reproduce_path != "":
+            return Err("native-link-reproduce-requires-linux-lld")
         # An explicit SIMPLE_LINKER request that cannot be resolved is a user
         # error, not "no linker found" — falling back to cc would silently
         # link with whatever the compiler driver defaults to (on a host where
@@ -380,6 +399,10 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if trace:
         print "[LINKER] got linker_path={linker_path}"
     val linker_type = linker_type_for_path(linker_path)
+    val reproduce_reason = native_link_reproduce_reason_v1(
+        reproduce_path, output, os, linker_type.to_string())
+    if reproduce_reason != "":
+        return Err(reproduce_reason)
     if trace:
         print "[LINKER] got linker_type"
 
@@ -394,6 +417,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # and must route to the compiler driver instead of failing the link profile.
     val crt_required = native_link_uses_crt_objects(os)
     if not crt.found or not crt_required:
+        if reproduce_path != "":
+            return Err("native-link-reproduce-requires-direct-crt")
         if not config.allow_cc_fallback and crt_required:
             return Err("Direct native linker CRT discovery is required by the strict link profile")
         debug("linker", "CRT files not found, falling back to cc")
@@ -410,6 +435,8 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Output file
     args.push("-o")
     args.push(output)
+    if reproduce_path != "":
+        args.push("--reproduce={reproduce_path}")
 
     # Emulation mode
     if os == "linux":
@@ -525,6 +552,9 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     # Execute linker
     val exec_result = execute_linker(execution_linker_path, args)
     if exec_result.is_err():
+        if reproduce_path != "":
+            val _ = file_delete(output)
+            return Err("Native link with reproduction failed: " + exec_result.unwrap_err())
         if not config.allow_cc_fallback:
             return Err("Strict direct native link failed: " + exec_result.unwrap_err())
         # Fallback to cc on failure
@@ -535,6 +565,12 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     if config.verbose:
         val size = linker_file_size(output)
         print "[linker-wrapper] Native binary: {output} ({size} bytes)"
+
+    val reproduce_finish_reason = native_link_reproduce_finish_v1(
+        reproduce_path, output, execution_linker_path)
+    if reproduce_finish_reason != "":
+        val _ = file_delete(output)
+        return Err(reproduce_finish_reason)
 
     val darwin_tool_error = link_status_text(
         "darwin-link-tool-identity-direct",

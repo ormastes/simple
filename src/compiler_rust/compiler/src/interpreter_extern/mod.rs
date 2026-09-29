@@ -2262,6 +2262,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // (backs `text.last_index_of`), so it is registered in the same change.
     insert_simple!("rt_string_rfind", sffi_string::rt_string_rfind_fn);
     insert_simple!("rt_string_len", sffi_string::rt_string_len_fn);
+    insert_simple!("rt_string_substr_from", sffi_string::rt_string_substr_from_fn);
     insert_simple!("rt_string_new", sffi_string::rt_string_new_fn);
     // host_wm_showcase_unknown_extern_rt_string_to_int_2026-07-28: the JIT/native
     // lanes resolve these two through codegen/runtime_sffi.rs, but the interpreter
