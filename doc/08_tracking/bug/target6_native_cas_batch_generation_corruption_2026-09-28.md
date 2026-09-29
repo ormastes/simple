@@ -63,6 +63,13 @@ These are build-path boundaries, not evidence that CAS serialization passed or
 failed. The next CAS test needs a qualified narrow entry-closure builder and
 must still prove persisted generation readback, load, pin, and decode.
 
+The publication guard now validates the joined generation against every
+expected row before creating the generation file. Its subsequent exact
+readback still checks the persisted bytes before moving `CURRENT`. This keeps
+the normal path to one row split and rejects a three-byte serializer result
+without writing an orphan generation. The root native serialization failure
+and a passing native round trip remain unproven.
+
 ## Candidate repair evidence
 
 A one-unit no-stub Stage2 native reproducer returned zero bytes for
