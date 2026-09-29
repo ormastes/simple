@@ -56,3 +56,20 @@ the producer still requires the Stage 2 admission receipt beneath default
 build/bootstrap although that fixture uses build/bootstrap-custom. Three
 repair/verification cycles are exhausted; negative fixtures after this failure
 remain unexecuted. Full admission regression PASS is not claimed.
+
+## Follow-up: isolated Rust authority Windows temp environment
+
+Job 109210263954 at head 21c841e8a20 passed initial Cargo seed compilation,
+then failed its isolated Rust authority build on 2026-09-29 at 01:37Z. The
+uploaded rust-seed-build.log records MSVC D8037: cannot create temporary il
+file. Its env-i invocation has TEMP=/tmp, no TMP, and empty SystemRoot.
+
+The Windows authority workspace now converts its own freshly created temp
+directory with cygpath -m and passes it as both TEMP and TMP. SystemRoot
+accepts Windows/MSYS casing variants, requires a nonempty value, and is
+converted to native path syntax. No global host temp directory is modified.
+This is a new compiler process-environment failure; exhausted planner receipt
+fixture cycles were not rerun. Native Windows qualification still requires CI.
+
+This job also records host CPUs: 4, requested jobs: 10, self-host jobs: 10.
+Ten workers are configured but ten hardware cores were not allocated.

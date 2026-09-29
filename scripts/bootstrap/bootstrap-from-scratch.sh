@@ -1554,7 +1554,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   windows_include="${INCLUDE:-}"
   windows_lib="${LIB:-}"
   windows_libpath="${LIBPATH:-}"
-  windows_system_root="${SystemRoot:-}"
+  windows_system_root="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}"
   windows_temp="${TEMP:-${rust_authority_tmp}}"
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
@@ -1602,6 +1602,17 @@ prepare_rust_authority_workspace() {
     CDPATH= cd -- "${repo_root}/src/compiler_rust/vendor" && pwd -P
   )
   if [ "${os}" = "windows" ]; then
+    # env -i strips TMP, while MSYS may expose TEMP as /tmp. Native MSVC
+    # needs a Windows path; keep its temporary files in this authority scope.
+    windows_temp=$(cygpath -m "$(absolute_path "${rust_authority_tmp}")") || {
+      echo "error: could not convert Rust authority temporary path for Windows" >&2
+      exit 1
+    }
+    [ -n "${windows_system_root}" ] || {
+      echo "error: Windows SystemRoot is missing from the build environment" >&2
+      exit 1
+    }
+    windows_system_root=$(cygpath -m "${windows_system_root}") || exit 1
     vendored_sources_absolute=$(cygpath -m "${vendored_sources_absolute}") || {
       echo "error: could not convert vendored Cargo source path for Windows" >&2
       exit 1
@@ -1653,7 +1664,7 @@ run_rust_authority_cargo() {
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-        TEMP="${windows_temp}" \
+        TEMP="${windows_temp}" TMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
@@ -1671,7 +1682,7 @@ run_rust_authority_cargo() {
         AR_x86_64_pc_windows_gnu="${mingw_ar}" \
         INCLUDE="${windows_include}" LIB="${windows_lib}" \
         LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-        TEMP="${windows_temp}" \
+        TEMP="${windows_temp}" TMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
@@ -1690,7 +1701,7 @@ run_rust_authority_cargo() {
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-      TEMP="${windows_temp}" \
+      TEMP="${windows_temp}" TMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
     run_logged "${rust_authority_log}" env -i \
@@ -1704,7 +1715,7 @@ run_rust_authority_cargo() {
       AR_x86_64_pc_windows_gnu="${mingw_ar}" \
       INCLUDE="${windows_include}" LIB="${windows_lib}" \
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
-      TEMP="${windows_temp}" \
+      TEMP="${windows_temp}" TMP="${windows_temp}" \
       "${cargo_abs}" "$@"
   fi
 }
