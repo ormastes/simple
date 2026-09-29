@@ -55,3 +55,9 @@ closure reached 821 files but the runtime directory was interpreted as a
 dynamic provider path and the static fallback rejected an untyped `str` SFFI
 call. No Stage4 compiler or captured hello was produced. See
 `doc/08_tracking/bug/target5_stage4_bootstrap_runtime_path_dual_use_2026-09-29.md`.
+
+Bootstrap-provider follow-up: an existing runtime archive directory no longer
+becomes a dynamic-library path in the bootstrap provider. The untyped SFFI
+refusal remains fail-closed and now identifies its function and argument
+index. Focused Rust tests pass (3 native-loader, 21 dynamic-SFFI). No fresh
+Stage4 compiler or hello capture has been produced from these edits.

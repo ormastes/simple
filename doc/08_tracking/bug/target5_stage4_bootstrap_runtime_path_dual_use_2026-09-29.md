@@ -1,6 +1,6 @@
 # Stage4 bootstrap runtime path conflates link directory and interpreter provider
 
-Status: OPEN (Linux ARM64, 2026-09-29). Blocks a fresh Stage4 hello built from
+Status: PARTIAL FIX (Linux ARM64, 2026-09-29). Blocks a fresh Stage4 hello built from
 the Target 5 link-capture branch; the saved historical hello is not a substitute.
 
 The pure-Simple Stage2 bootstrap tool at
@@ -46,3 +46,12 @@ Evidence logs are retained under
 `codex/target5-size-attribution-20260929` worktree. They are build artifacts,
 not committed release evidence. Three Stage4 build attempts were made this
 session; no fourth retry was run.
+
+The native-loader bootstrap provider now treats an existing
+`SIMPLE_RUNTIME_PATH` directory as a link-archive location, leaving
+`SIMPLE_RUNTIME_LOAD` or the static default to choose interpreter symbols.
+An explicit library file path still selects `DynamicPath`. Three focused
+native-loader tests pass. The generic dynamic SFFI refusal is unchanged and
+now names the function and argument index; 21 focused compiler tests pass.
+The refreshed bootstrap tool has not been rebuilt or rerun with these edits,
+so Stage4 admission and the exact foreign call remain unresolved.
