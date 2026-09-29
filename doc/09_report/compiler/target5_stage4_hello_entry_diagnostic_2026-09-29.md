@@ -39,11 +39,20 @@ linked a 21,448-byte ARM64 hello, SHA-256
 the hello executable ran and printed `Hello World` with exit 0.
 
 The compiler itself returned exit 1 after linking because native no-op
-receipt publication saw zero source paths and refused to encode a receipt.
-That fail-closed refusal is correct for the observed empty inventory. The
-cause of the lost owner vector is still open in
+receipt publication saw zero usable source paths and refused to encode a
+receipt. That fail-closed refusal is correct for the observed empty path. The
+owner-copy bug is tracked in
 `doc/08_tracking/bug/stage4_positional_aot_noop_receipt_source_paths_2026-09-29.md`.
 No matched C hello size, startup, RSS, or release qualification is claimed.
+
+The next bounded trace narrowed this failure: the loaded hello path is 51
+characters, while `driver_source_owner_text_copy(loaded_source.path)` returns
+an empty string immediately. The owner vector still has one slot at
+publication, but its empty path is rejected by receipt validation. The
+non-streaming context assignment did not cause this loss. The helper's
+`rt_bytes_to_text(value.bytes())` copy needs a native-proven replacement;
+the diagnostic prints were removed and no additional build retry was made
+after the third focused cycle.
 
 Status: exact Stage4 compiler links and emits a runnable hello, but the hello
 build exits 1 after linking. Production size/startup/RSS qualification is open.
