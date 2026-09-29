@@ -18,8 +18,13 @@ try {
     $null = & $launcher --help 2>&1
     $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 127) { throw 'Invalid MAIL_BASH must fail with 127' }
+    # The rejected launch is expected; do not leak its native exit code to
+    # callers such as GitHub Actions' PowerShell wrapper.
+    $global:LASTEXITCODE = 0
     Write-Output 'PASS: Windows launcher help, spaced config path, missing Bash'
 } finally {
     $env:MAIL_BASH = $originalBash
-    Remove-Item -LiteralPath $config -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $config) {
+        Remove-Item -LiteralPath $config -Force
+    }
 }
