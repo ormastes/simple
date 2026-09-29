@@ -25,6 +25,18 @@ fn test_cranelift_jit_typed_dict_membership_present_and_missing_scalar_keys() {
     assert_eq!(em.execute("boolean_keys", &[]).expect("boolean membership"), 1);
 }
 
+#[test]
+fn test_cranelift_jit_typed_dict_float_literal_key_compatibility() {
+    let mir = source_to_mir(
+        "fn float_index() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    return map[1.0]\n\nfn float_get() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    return map.get(1.0)\n\nfn float_membership() -> i64:\n    val map: Dict<f64, i64> = {1.0: 7}\n    if map.has(1.0) and map.has_key(1.0) and map.contains(1.0) and map.contains_key(1.0) and not map.has(2.0) and not map.has_key(2.0) and not map.contains(2.0) and not map.contains_key(2.0):\n        return 1\n    return 0\n",
+    );
+    let mut em = LocalExecutionManager::cranelift().expect("initialize float key JIT");
+    em.compile_module(&mir).expect("compile float literal key paths");
+    assert_eq!(em.execute("float_index", &[]).expect("float literal index"), 7);
+    assert_eq!(em.execute("float_get", &[]).expect("float literal get"), 7);
+    assert_eq!(em.execute("float_membership", &[]).expect("float literal membership"), 1);
+}
+
 // =============================================================================
 // Cranelift JIT Tests
 // =============================================================================

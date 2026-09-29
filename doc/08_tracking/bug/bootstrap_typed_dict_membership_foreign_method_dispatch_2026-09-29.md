@@ -28,24 +28,33 @@ can discard the qualifier and bind a same-named nominal method.
 
 Typed Dict `has`, `has_key`, `contains`, and `contains_key` now lower directly
 to the existing `rt_contains` ABI. Receiver and key are evaluated once, and the
-existing RuntimeValue argument boxer preserves integer, unsigned, float, and
-boolean key tags. Alias spellings and specific nominal classes are not used
-to choose the intrinsic. Nominal receiver methods retain their existing path.
+existing RuntimeValue argument boxer preserves integer, unsigned, and Boolean
+key tags. Float keys retain the pre-existing raw-bit ABI used by literal
+writes, indexing and mutation; boxing only membership would lose those keys.
+Alias spellings and specific nominal classes are not used to choose the
+intrinsic. Nominal receiver methods retain their existing path.
 
 The JIT regression also exposed the literal write path leaving boolean keys
 unboxed. Owned-process debugger evidence showed an integer key written and
 queried as `0x8`, while `true` was written as `0x1` and queried as the correct
-tagged boolean `0xb`. Literal keys now use the same general RuntimeValue boxer
-as membership reads. The original integer and boolean result assertions are
-retained.
+tagged boolean `0xb`. Boolean literal keys now use the same RuntimeValue boxer
+as membership reads. All other literal key types retain their original write
+boxing. The original integer and Boolean result assertions are retained.
 
 Boolean and float literal **values** still use the pre-existing integer-only
 write boxer. Their value representation remains a separate unresolved gap;
 this membership-key change does not claim to fix value boxing.
 
-Other existing key ABI gaps remain: typed Dict `.set`/`.insert` box integer
-keys only, and Dict indexing boxes integer/boolean keys but not float keys.
-This change therefore does not claim a general scalar-key Dict roundtrip.
+Other existing key ABI gaps remain: typed Dict `.set`/`.insert` leave Boolean
+keys raw, and the legacy float key ABI is raw bits rather than boxed floats.
+This change does not claim a general scalar-key Dict ABI migration.
+
+An initial general literal-key boxing change introduced a float indexing/get
+regression because those readers preserved raw bits. That change is narrowed
+to Boolean literal keys, and membership likewise preserves raw float bits.
+Focused float literal index/get/membership regressions and F32/F64 MIR
+assertions are prepared; execution requires explicit authorization beyond the
+three verification cycles already consumed.
 
 ## Regression evidence
 

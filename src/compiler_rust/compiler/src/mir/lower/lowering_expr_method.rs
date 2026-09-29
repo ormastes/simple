@@ -547,14 +547,22 @@ impl<'a> MirLowerer<'a> {
         // A structurally typed Dict has no nominal method owner. Emitting
         // `Dict.contains_key` lets name-based codegen recovery discard that
         // qualifier and bind an unrelated user method. Keep membership on the
-        // same runtime ABI as indexing, including its tagged key representation.
+        // same key ABI as indexing: tagged integers/booleans, raw float bits.
         if matches!(method, "has" | "has_key" | "contains" | "contains_key")
             && args.len() == 1
             && self.receiver_is_dict(receiver, receiver_local_ty)
         {
             let receiver_reg = self.lower_expr(receiver)?;
             let raw_key_reg = self.lower_expr(&args[0])?;
-            let key_reg = self.box_arg_for_any_param(raw_key_reg, &args[0])?;
+            // Literal writes, indexing and typed mutation currently preserve
+            // raw float keys. Boxing only this read would make those keys miss.
+            let float_key = matches!(args[0].ty, TypeId::F32 | TypeId::F64)
+                || (args[0].ty == TypeId::ANY && matches!(args[0].kind, HirExprKind::Float(_)));
+            let key_reg = if float_key {
+                raw_key_reg
+            } else {
+                self.box_arg_for_any_param(raw_key_reg, &args[0])?
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();

@@ -85,7 +85,7 @@ fn typed_dict_alias_field_membership_keeps_runtime_owner() {
 
 #[test]
 fn typed_dict_membership_boxes_scalar_keys_once() {
-    for (key_type, expected) in [("i64", "int"), ("f64", "float"), ("bool", "bool")] {
+    for (key_type, expected) in [("i64", "int"), ("f32", "raw"), ("f64", "raw"), ("bool", "bool")] {
         let source =
             format!("fn probe(map: Dict<{key_type}, i64>, key: {key_type}) -> bool:\n    map.contains_key(key)\n");
         let mir = compile_to_mir(&source).expect("typed scalar Dict membership must lower");
@@ -94,9 +94,15 @@ fn typed_dict_membership_boxes_scalar_keys_once() {
         let mut contains = 0;
         for inst in probe.blocks.iter().flat_map(|b| &b.instructions) {
             match inst {
-                MirInst::BoxInt { .. } if expected == "int" => boxes += 1,
-                MirInst::BoxFloat { .. } if expected == "float" => boxes += 1,
-                MirInst::Call { target, .. } if expected == "bool" && target.name() == "rt_value_bool" => boxes += 1,
+                MirInst::BoxInt { .. } => {
+                    assert_eq!(expected, "int", "{key_type}: unexpected integer key conversion");
+                    boxes += 1;
+                }
+                MirInst::BoxFloat { .. } => panic!("{key_type}: preserve baseline raw float key ABI"),
+                MirInst::Call { target, .. } if target.name() == "rt_value_bool" => {
+                    assert_eq!(expected, "bool", "{key_type}: unexpected Boolean key conversion");
+                    boxes += 1;
+                }
                 MirInst::Call { target, args, .. } if target.name() == "rt_contains" => {
                     assert_eq!(args.len(), 2);
                     contains += 1;
@@ -104,7 +110,7 @@ fn typed_dict_membership_boxes_scalar_keys_once() {
                 _ => (),
             }
         }
-        assert_eq!(boxes, 1, "{key_type}: box key once using its runtime tag");
+        assert_eq!(boxes, usize::from(expected != "raw"), "{key_type}: preserve scalar key ABI");
         assert_eq!(contains, 1, "{key_type}: test membership once");
     }
 }
