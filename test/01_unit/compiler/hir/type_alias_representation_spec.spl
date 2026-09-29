@@ -1,0 +1,265 @@
+# Alias lowering must preserve the target's representation before MIR dispatch.
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.parser_types.{ParserModule, ParserTypeParam, ParserTypeAlias}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_symbol_table_methods.*
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.type_aliases.*
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn alias_parser_name(name: text) -> Type:
+    Type(kind: TypeKind.Named(name, []), span: Span.empty())
+
+fn alias_local_lowering(source: text) -> HirLowering:
+    val module = parse_and_build_module(source, "alias_owner.spl")
+    val lowering = HirLowering.with_filename("alias_owner.spl")
+    lowering.use_explicit_semantic_policy()
+    lowering.declare_module_symbols(module)
+    lowering
+
+fn alias_formal(name: text, default_name: text) -> ParserTypeParam:
+    ParserTypeParam(name: name, bounds: [], has_default: default_name != "", default: alias_parser_name(default_name), span: Span.empty())
+
+fn alias_test_template(lowering: HirLowering, name: text, target: Type, parameters: [ParserTypeParam]) -> SymbolId:
+    val id = lowering.symbols.define(name, SymbolKind.TypeAlias, nil, Span.empty(), Visibility.Public, false, Some(lowering.module_filename))
+    lowering.register_type_alias_template(id, target, parameters, lowering.module_filename)
+    id
+
+fn alias_is_text(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Str: true
+        case _: false
+
+fn alias_is_bool(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Bool: true
+        case _: false
+
+fn alias_dict_text_i64(kind: HirTypeKind) -> bool:
+    match kind:
+        case HirTypeKind.Dict(key, value):
+            if not alias_is_text(key.kind): return false
+            match value.kind:
+                case HirTypeKind.Int(bits, signed): bits == 64 and signed
+                case _: false
+        case _: false
+
+describe("HIR alias representation", fn():
+    it("expands a forward alias chain into a typed dictionary", fn():
+        val lowering = alias_local_lowering("type AChain = ZMap\ntype ZMap = Dict<text, i64>\n")
+        expect(alias_dict_text_i64(lowering.lower_named_kind("AChain", [], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("expands primitive text and bool aliases", fn():
+        val lowering = alias_local_lowering("type Label = text\ntype Flag = bool\n")
+        expect(alias_is_text(lowering.lower_named_kind("Label", [], Span.empty()))).to_equal(true)
+        expect(alias_is_bool(lowering.lower_named_kind("Flag", [], Span.empty()))).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("substitutes actual generic arguments inside composite targets", fn():
+        val lowering = HirLowering.with_filename("generic_owner.spl")
+        val formal_type = alias_parser_name("T")
+        val array_type = Type(kind: TypeKind.Array(formal_type, nil), span: Span.empty())
+        val target = Type(kind: TypeKind.Named("Dict", [formal_type, array_type]), span: Span.empty())
+        alias_test_template(lowering, "Registry", target, [alias_formal("T", "")])
+        val argument = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+        val kind = lowering.lower_named_kind("Registry", [argument], Span.empty())
+        var correct = false
+        match kind:
+            case HirTypeKind.Dict(key, value):
+                match value.kind:
+                    case HirTypeKind.Array(inner, _):
+                        correct = alias_is_bool(key.kind) and alias_is_bool(inner.kind)
+                    case _: ()
+            case _: ()
+        expect(correct).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("resolves defaults from earlier formals and rejects missing required arguments", fn():
+        val lowering = HirLowering.with_filename("generic_owner.spl")
+        val target = Type(kind: TypeKind.Named("Dict", [alias_parser_name("K"), alias_parser_name("V")]), span: Span.empty())
+        alias_test_template(lowering, "DefaultMap", target, [alias_formal("K", ""), alias_formal("V", "K")])
+        val kind = lowering.lower_named_kind("DefaultMap", [HirType(kind: HirTypeKind.Str, span: Span.empty())], Span.empty())
+        var correct = false
+        match kind:
+            case HirTypeKind.Dict(key, value): correct = alias_is_text(key.kind) and alias_is_text(value.kind)
+            case _: ()
+        expect(correct).to_equal(true)
+        val saved_scope = lowering.symbols.current_scope.id
+        lowering.lower_named_kind("DefaultMap", [], Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("expects 2 type arguments, got 0")
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+        expect(lowering.type_alias_current_owner).to_equal("")
+        expect(lowering.symbols.current_scope.id).to_equal(saved_scope)
+    )
+
+    it("diagnoses cycles and restores the expansion frame", fn():
+        val lowering = alias_local_lowering("type First = Second\ntype Second = First\ntype Label = text\n")
+        lowering.lower_named_kind("First", [], Span.empty())
+        expect(lowering.errors.len()).to_equal(1)
+        expect(lowering.diagnostic_messages[0]).to_contain("cyclic type alias")
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+        expect(lowering.type_alias_current_owner).to_equal("")
+        expect(alias_is_text(lowering.lower_named_kind("Label", [], Span.empty()))).to_equal(true)
+    )
+
+    it("keeps an alias's declaration scope when a caller shadows its target", fn():
+        val lowering = alias_local_lowering("class Target:\n    value: i64\ntype Alias = Target\n")
+        val target = lowering.symbols.lookup_or_invalid("Target")
+        lowering.symbols.push_scope(ScopeKind.Function)
+        val shadow = lowering.symbols.define("Target", SymbolKind.Struct, nil, Span.empty(), Visibility.Private, false, Some("consumer"))
+        var resolved_id = -1
+        match lowering.lower_named_kind("Alias", [], Span.empty()):
+            case HirTypeKind.Named(id, _): resolved_id = id.id
+            case _: ()
+        expect(shadow.id == target.id).to_equal(false)
+        expect(resolved_id).to_equal(target.id)
+        expect(lowering.symbols.lookup_or_invalid("Target").id).to_equal(shadow.id)
+        lowering.symbols.pop_scope()
+    )
+
+    it("projects imported compound aliases through their defining owner", fn():
+        val owner_source = "pub class Cell:\n    value: i64\npub type Cells = Dict<text, Cell>\npub type Labels = Dict<text, text>\n"
+        var modules: {text: ParserModule} = {}
+        modules["pkg.owner"] = parse_and_build_module(owner_source, "pkg/owner.spl")
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
+        val lowering = hirlowering_for_module("consumer.spl", registry)
+        val shadow = lowering.symbols.define("Cell", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+        lowering.register_imported_symbol(0, "pkg.owner", "Cells", "Cells", Span.empty(), false)
+        lowering.register_imported_symbol(0, "pkg.owner", "Labels", "Labels", Span.empty(), false)
+        val owner_cell = lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Cell")
+        var resolved_cell = -1
+        match lowering.lower_named_kind("Cells", [], Span.empty()):
+            case HirTypeKind.Dict(_, value):
+                match value.kind:
+                    case HirTypeKind.Named(id, _): resolved_cell = id.id
+                    case _: ()
+            case _: ()
+        expect(owner_cell >= 0).to_equal(true)
+        expect(owner_cell == shadow.id).to_equal(false)
+        expect(resolved_cell).to_equal(owner_cell)
+        val projected = lowering.imported_surface_type(alias_parser_name("Labels"), "pkg.owner")
+        var labels_correct = false
+        match projected.kind:
+            case HirTypeKind.Dict(key, value): labels_correct = alias_is_text(key.kind) and alias_is_text(value.kind)
+            case _: ()
+        expect(labels_correct).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+        lowering.begin_module("next.spl")
+        expect(lowering.type_alias_symbol_ids.len()).to_equal(0)
+        expect(lowering.type_alias_positions.len()).to_equal(0)
+        expect(lowering.type_alias_targets.len()).to_equal(0)
+        expect(lowering.type_alias_parameters.len()).to_equal(0)
+        expect(lowering.type_alias_owners.len()).to_equal(0)
+        expect(lowering.type_alias_scopes.len()).to_equal(0)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+        expect(lowering.type_alias_argument_names.len()).to_equal(0)
+        expect(lowering.type_alias_argument_types.len()).to_equal(0)
+        expect(lowering.type_alias_current_owner).to_equal("")
+        alias_test_template(lowering, "Labels", alias_parser_name("bool"), [])
+        expect(alias_is_bool(lowering.lower_named_kind("Labels", [], Span.empty()))).to_equal(true)
+    )
+
+    it("preserves imported generic arguments and resolves defaults in the owner", fn():
+        val owner_source = "pub class Cell:\n    value: i64\npub type Items = Dict<text, text>\n"
+        val owner_module = parse_and_build_module(owner_source, "pkg/owner.spl")
+        # Construct the parser's generic alias template explicitly: this
+        # scenario tests HIR substitution, without claiming parser coverage.
+        owner_module.type_aliases["Items"] = ParserTypeAlias(
+            name: "Items", type_params: [alias_formal("T", "Cell")],
+            type_: Type(kind: TypeKind.Named("Dict", [alias_parser_name("text"), alias_parser_name("T")]), span: Span.empty()),
+            visibility: Visibility.Public, is_public: true, span: Span.empty())
+        var modules: {text: ParserModule} = {}
+        modules["pkg.owner"] = owner_module
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
+        val lowering = hirlowering_for_module("consumer.spl", registry)
+        val shadow = lowering.symbols.define("Cell", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+        lowering.register_imported_symbol(0, "pkg.owner", "Items", "Items", Span.empty(), false)
+        val owner_cell = lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Cell")
+        var default_cell = -1
+        match lowering.lower_named_kind("Items", [], Span.empty()):
+            case HirTypeKind.Dict(_, value):
+                match value.kind:
+                    case HirTypeKind.Named(id, _): default_cell = id.id
+                    case _: ()
+            case _: ()
+        expect(owner_cell >= 0).to_equal(true)
+        expect(owner_cell == shadow.id).to_equal(false)
+        expect(default_cell).to_equal(owner_cell)
+        val explicit_type = Type(kind: TypeKind.Named("Items", [alias_parser_name("bool")]), span: Span.empty())
+        val projected = lowering.imported_surface_type_projected(explicit_type, "Items", "", "pkg.owner")
+        var explicit_correct = false
+        match projected.kind:
+            case HirTypeKind.Dict(key, value): explicit_correct = alias_is_text(key.kind) and alias_is_bool(value.kind)
+            case _: ()
+        expect(explicit_correct).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+
+    it("rejects an unknown owner target rather than borrowing the consumer's name", fn():
+        val owner_source = "pub type Missing = Dict<text, Secret>\n"
+        var modules: {text: ParserModule} = {}
+        modules["pkg.owner"] = parse_and_build_module(owner_source, "pkg/owner.spl")
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
+        val lowering = hirlowering_for_module("consumer.spl", registry)
+        lowering.symbols.define("Secret", SymbolKind.Class, nil, Span.empty(), Visibility.Public, false, Some("consumer"))
+        lowering.register_imported_symbol(0, "pkg.owner", "Missing", "Missing", Span.empty(), false)
+        lowering.lower_named_kind("Missing", [], Span.empty())
+        expect(lowering.diagnostic_messages.len() > 0).to_equal(true)
+        expect(lowering.diagnostic_messages.join("\n")).to_contain("unresolved type: Secret")
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Secret")).to_equal(-1)
+        expect(lowering.type_alias_active_ids.len()).to_equal(0)
+    )
+
+    it("preserves explicit generic alias arguments in imported array fields and returns", fn():
+        val owner_source = "pub type Box = [text]\npub class Holder:\n    items: [Box<i64>]\npub fn boxes() -> [Box<i64>]:\n    []\n"
+        val owner_module = parse_and_build_module(owner_source, "pkg/owner.spl")
+        owner_module.type_aliases["Box"] = ParserTypeAlias(
+            name: "Box", type_params: [alias_formal("T", "text")],
+            type_: Type(kind: TypeKind.Array(alias_parser_name("T"), nil), span: Span.empty()),
+            visibility: Visibility.Public, is_public: true, span: Span.empty())
+        var modules: {text: ParserModule} = {}
+        modules["pkg.owner"] = owner_module
+        val registry = module_surfaces_from_modules(modules, [SourceFile(path: "pkg/owner.spl", content: owner_source, module_name: "pkg.owner")]).unwrap()
+        val lowering = hirlowering_for_module("consumer.spl", registry)
+        lowering.register_imported_symbol(0, "pkg.owner", "Box", "Box", Span.empty(), false)
+        val field_type = owner_module.classes["Holder"].fields[0].type_
+        val return_type = owner_module.functions["boxes"].return_type
+        val projected_field = lowering.imported_surface_type_projected(field_type, "", "Box", "pkg.owner")
+        val projected_return = lowering.imported_surface_type(return_type, "pkg.owner")
+        var projections: [HirType] = [projected_field, projected_return]
+        for projected in projections:
+            var explicit_i64 = false
+            match projected.kind:
+                case HirTypeKind.Array(box_type, _):
+                    match box_type.kind:
+                        case HirTypeKind.Array(element, _):
+                            match element.kind:
+                                case HirTypeKind.Int(bits, signed): explicit_i64 = bits == 64 and signed
+                                case _: ()
+                        case _: ()
+                case _: ()
+            expect(explicit_i64).to_equal(true)
+        var default_text = false
+        match lowering.lower_named_kind("Box", [], Span.empty()):
+            case HirTypeKind.Array(element, _): default_text = alias_is_text(element.kind)
+            case _: ()
+        expect(default_text).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+    )
+)

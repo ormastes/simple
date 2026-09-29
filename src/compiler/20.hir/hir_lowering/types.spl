@@ -107,6 +107,21 @@ class HirLowering:
     module_surfaces: ModuleSurfacesByName   # Compact declaration-only import resolver state
     current_method_self_type: HirType?
     current_method_self_symbol_id: i64
+    # Alias templates belong to this module's SymbolTable, including imported
+    # aliases. Resolve lazily so forward references and generic arguments keep
+    # their representation; an alias name is not a nominal runtime type.
+    type_alias_symbol_ids: [i64]
+    # Compact SymbolId-indexed positions: nominal type uses must not scan the
+    # alias registry on this hot lowering path. Missing IDs store -1.
+    type_alias_positions: [i64]
+    type_alias_targets: [Type]
+    type_alias_parameters: [[ParserTypeParam]]
+    type_alias_owners: [text]
+    type_alias_scopes: [ScopeId]
+    type_alias_active_ids: [i64]
+    type_alias_argument_names: [text]
+    type_alias_argument_types: [HirType]
+    type_alias_current_owner: text
     lowered_impl_functions: HirImplFunctions
     lowered_traits: HirTraitsByName   # Traits lowered in this module (by name), for injecting defaults into impls
     lowered_trait_count_value: i64    # Scalar mirror; diagnostic probes must not materialize Dict.keys().
@@ -617,6 +632,16 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         module_surfaces: empty_module_surfaces,
         current_method_self_type: nil,
         current_method_self_symbol_id: -1,
+        type_alias_symbol_ids: [],
+        type_alias_positions: [],
+        type_alias_targets: [],
+        type_alias_parameters: [],
+        type_alias_owners: [],
+        type_alias_scopes: [],
+        type_alias_active_ids: [],
+        type_alias_argument_names: [],
+        type_alias_argument_types: [],
+        type_alias_current_owner: "",
         lowered_impl_functions: empty_impl_functions,
         lowered_traits: empty_traits,
         lowered_trait_count_value: 0,
@@ -1072,6 +1097,16 @@ impl HirLowering:
         HirType(kind: kind, span: lt.span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
+        # Only the current alias's formal parameters substitute into its body.
+        # Arguments are lowered in the caller before entering this frame.
+        var alias_argument_index = 0
+        while alias_argument_index < self.type_alias_argument_names.len():
+            if self.type_alias_argument_names[alias_argument_index] == name:
+                if hir_args.len() != 0:
+                    self.error("type alias parameter `{name}` cannot take type arguments", span)
+                    return HirTypeKind.Error
+                return self.type_alias_argument_types[alias_argument_index].kind
+            alias_argument_index = alias_argument_index + 1
         # (helper `_seed_parity_is_ascii_upper` is defined at module scope below)
         # bug: native_result_unwrap silent-wrong tail -- `T?` optional
         # annotations arrive from the flat-AST bridge as Named("Option", [T])
@@ -1227,13 +1262,21 @@ impl HirLowering:
                     self.error("Dict type expects 2 type arguments", span)
                     HirTypeKind.Error
             case _:
-                if not self.symbols.lookup(name).?:
-                    val _registered_global = self.try_register_bootstrap_global_symbol(name, span)
-                val symbol_id = self.symbols.lookup_or_invalid(name)
+                var symbol_id = SymbolId(id: -1)
+                if self.type_alias_current_owner != "" and self.type_alias_current_owner != self.module_filename:
+                    # Imported alias bodies use the declaring module's scope,
+                    # never a same-named type in the consumer.
+                    val raw_alias_target = self.symbols.lookup_qualified_type_raw(self.type_alias_current_owner, name)
+                    if raw_alias_target >= 0:
+                        symbol_id = SymbolId(id: raw_alias_target)
+                else:
+                    if not self.symbols.lookup(name).?:
+                        val _registered_global = self.try_register_bootstrap_global_symbol(name, span)
+                    symbol_id = self.symbols.lookup_or_invalid(name)
                 if symbol_id.is_valid():
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)
-                    HirTypeKind.Named(symbol_id, hir_args)
+                    self.lower_named_symbol_kind(symbol_id, hir_args, span)
                 # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
                 # the symbol lookup, exactly where the seed puts them
                 # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare
