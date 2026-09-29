@@ -1,0 +1,105 @@
+# Shared finite provenance of generated package facades.
+
+fn generated_facade_export_name_valid(name: text) -> bool:
+    if name == "":
+        return false
+    var idx = 0
+    while idx < name.len():
+        val code = name.char_code_at(idx)
+        val letter = (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or code == 95
+        val digit = code >= 48 and code <= 57
+        if not letter and not (idx > 0 and digit):
+            return false
+        idx = idx + 1
+    true
+
+fn generated_facade_doc_quote_count(line: text, initially_in_doc: bool) -> i64:
+    # Comments begin only outside literals. A '#' inside a short string must
+    # not hide a later triple-quoted opening on the same physical line.
+    var in_doc = initially_in_doc
+    var short_quote: i64 = 0
+    var count: i64 = 0
+    var idx = 0
+    while idx < line.len():
+        val code = line.char_code_at(idx)
+        if code == 92 and (in_doc or short_quote != 0):
+            idx = idx + 2
+            continue
+        if not in_doc and short_quote == 0 and code == 35:
+            break
+        if short_quote == 0 and idx + 3 <= line.len() and line[idx:idx + 3] == "\"\"\"":
+            count = count + 1
+            in_doc = not in_doc
+            idx = idx + 3
+            continue
+        if not in_doc and (code == 34 or code == 39):
+            if short_quote == 0:
+                short_quote = code
+            elif short_quote == code:
+                short_quote = 0
+        idx = idx + 1
+    count
+
+pub fn generated_facade_export_pairs(content: text) -> [text]:
+    """Return aligned owner-file/export-items pairs for real generated exports.
+
+    A generator marker applies to the next top-level bare export only. Imports,
+    explicit export routes, unrelated declarations and docstrings end the pair.
+    The caller still resolves and validates the owner; this is not admission.
+    """
+    if not content.contains("# Re-exported from "):
+        return []
+    var pairs: [text] = []
+    var owner_file = ""
+    var in_doc = false
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if not in_doc and line.starts_with("#"):
+            if raw_line.starts_with("# Re-exported from ") and line.contains(".spl"):
+                val owner_parts = line.substring(19).split(".spl")
+                owner_file = owner_parts[0]
+            elif raw_line.starts_with(" ") or raw_line.starts_with("\t"):
+                owner_file = ""
+            continue
+        val quote_count = generated_facade_doc_quote_count(line, in_doc)
+        val was_in_doc = in_doc
+        if quote_count % 2 == 1:
+            in_doc = not in_doc
+        if was_in_doc or quote_count > 0:
+            owner_file = ""
+            continue
+        if raw_line.starts_with(" ") or raw_line.starts_with("\t"):
+            if line != "":
+                owner_file = ""
+            continue
+        if owner_file != "" and line.starts_with("export "):
+            # Explicit import-origin routes retain their existing precedence.
+            # They are not the bare exports described by generator comments.
+            if line.starts_with("export use ") or line.contains(" from "):
+                owner_file = ""
+                continue
+            var items = line.substring(7)
+            if items.contains("#"):
+                items = items.split("#")[0].trim()
+            var has_named_item = false
+            var valid_items = true
+            for raw_item in items.split(","):
+                val item = raw_item.trim()
+                if item == "":
+                    valid_items = false
+                elif not item.ends_with(".*"):
+                    val names = item.split(":")
+                    if names.len() > 2:
+                        valid_items = false
+                    for raw_name in names:
+                        val name = raw_name.trim()
+                        if not generated_facade_export_name_valid(name):
+                            valid_items = false
+                    has_named_item = true
+            if valid_items and has_named_item:
+                pairs = pairs.push(owner_file)
+                pairs = pairs.push(items)
+            owner_file = ""
+        elif line != "" and not line.starts_with("#"):
+            owner_file = ""
+    pairs

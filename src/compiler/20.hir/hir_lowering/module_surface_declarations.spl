@@ -1,6 +1,7 @@
 # Parser declarations retained in module surfaces.
 
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.generated_facade_provenance.{generated_facade_export_pairs}
 use compiler.frontend.parser_types.*
 # Class B (stage-1 run13): this module reaches parser_types_expr through a
 # TWO-HOP GLOB -- `use compiler.frontend.parser_types.*` here, and
@@ -145,36 +146,29 @@ fn module_surface_export_origin_hints(
     # produce a hint without the exact generator marker.
     if not source.content.contains("# Re-exported from "):
         return Ok(true)
-    var owner_file = ""
     var facade_name = module_surface_canonical_module_name(source.module_name)
     if facade_name.ends_with(".__init__"):
         facade_name = facade_name[0:facade_name.len() - 9]
-    for raw_line in source.content.split("\n"):
-        val line = raw_line.trim()
-        if line.starts_with("# Re-exported from ") and line.contains(".spl"):
-            val owner_parts = line.substring(19).split(".spl")
-            owner_file = owner_parts[0]
-            continue
-        if owner_file != "" and line.starts_with("export "):
-            val owner_module = facade_name + "." + owner_file.replace("/", ".")
-            for raw_item in line.substring(7).split(","):
-                val item = raw_item.trim()
-                if item != "" and not item.ends_with(".*"):
-                    var source_name = item
-                    var local_name = item
-                    if item.contains(":"):
-                        val parts = item.split(":")
-                        source_name = parts[0].trim()
-                        if parts.len() > 1:
-                            local_name = parts[1].trim()
-                    val put_result = module_surface_export_origin_index_put(
-                        origins, local_name, owner_module, source_name,
-                        "generated-comment")
-                    if put_result.is_err():
-                        return Err(put_result.unwrap_err())
-            owner_file = ""
-        elif line != "" and not line.starts_with("#"):
-            owner_file = ""
+    val provenance_pairs: [text] = generated_facade_export_pairs(source.content)
+    var pair_idx = 0
+    while pair_idx < provenance_pairs.len():
+        val owner_module = facade_name + "." + provenance_pairs[pair_idx].replace("/", ".")
+        for raw_item in provenance_pairs[pair_idx + 1].split(","):
+            val item = raw_item.trim()
+            if item != "" and not item.ends_with(".*"):
+                var source_name = item
+                var local_name = item
+                if item.contains(":"):
+                    val parts = item.split(":")
+                    source_name = parts[0].trim()
+                    if parts.len() > 1:
+                        local_name = parts[1].trim()
+                val put_result = module_surface_export_origin_index_put(
+                    origins, local_name, owner_module, source_name,
+                    "generated-comment")
+                if put_result.is_err():
+                    return Err(put_result.unwrap_err())
+        pair_idx = pair_idx + 2
     Ok(true)
 
 pub class ModuleSurfaceParserOwner:
