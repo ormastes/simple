@@ -39,6 +39,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_collection_capture_impl.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sdl2.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_sdl2_rust_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
@@ -294,6 +296,7 @@ fn compile_c_runtime_sources() {
         "runtime_memtrack.c",
         // Shared capture state uses this runtime owner's text and builder ABI.
         "runtime_collection_capture.c",
+        "runtime_sdl2_rust_provider.c",
         "runtime_simd_dispatch.c",
         // rt_opengl_* / rt_oneapi_* (interpreter_extern_registration_lanes.md,
         // lane R2): both families were entirely absent from this list, so the
@@ -501,6 +504,7 @@ fn compile_c_runtime_sources() {
             build.file(src_path);
         }
     }
+    build.define("SIMPLE_RUNTIME_RUST_SDL_PROVIDER", None);
     build.compile("runtime_sffi_c");
 
     // hosted_cocoa.c is Objective-C behind a .c extension. Keep its symbols

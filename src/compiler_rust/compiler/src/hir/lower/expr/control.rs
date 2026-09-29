@@ -2137,18 +2137,19 @@ impl Lowerer {
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
 
-        // Coalescing a declared [T]? yields [T], not a nullable pointer to it.
-        // Keeping the wrapper here erases the element type at a following
-        // for-in: iterable inference accepts Array, but intentionally does not
-        // accept optional pointers. Narrow only arrays; scalar optional slots
-        // have tagged/raw representation rules above, and other shared
-        // references must not acquire unwrap semantics from this correction.
+        // Restore the concrete owner for arrays and for structs with a
+        // same-owner, nonnullable fallback. Retaining the optional wrapper
+        // loses array element inference and struct callable-field dispatch.
+        // Struct nil/optional fallbacks retain their wrapper. Scalar slots
+        // keep the tagged/raw rules above; other references are unchanged.
         let result_ty = match self.module.types.get(result_ty) {
             Some(HirType::Pointer {
                 kind: PointerKind::Shared,
                 inner,
                 ..
-            }) if matches!(self.module.types.get(*inner), Some(HirType::Array { .. })) => *inner,
+            }) if matches!(self.module.types.get(*inner), Some(HirType::Array { .. }))
+                || (default_hir.ty == *inner
+                    && matches!(self.module.types.get(*inner), Some(HirType::Struct { .. }))) => *inner,
             _ => result_ty,
         };
 

@@ -18,6 +18,8 @@ pub(crate) enum NativeRuntimeLane {
     SimpleCore,
     CoreCBootstrap,
     HostGpu,
+    /// Canonical bootstrap verification tools, bound to an admitted compiler capsule.
+    BootstrapTools,
     /// Link the Stage4 compiler entry against the SHARED runtime
     /// (`libsimple_runtime.so` / `.dylib`) instead of a static archive.
     ///
@@ -41,6 +43,7 @@ impl NativeRuntimeLane {
             Self::SimpleCore => "simple-core",
             Self::CoreCBootstrap => "core-c-bootstrap",
             Self::HostGpu => "host-gpu",
+            Self::BootstrapTools => "bootstrap-tools",
             Self::DynamicRuntime => "dynamic-runtime",
         }
     }
@@ -59,6 +62,105 @@ pub(super) fn runtime_bundle_requests_core_c_bootstrap(value: &str) -> bool {
 
 fn runtime_bundle_requests_host_gpu(value: &str) -> bool {
     matches!(value, "host-gpu" | "host_gpu" | "gpu")
+}
+
+fn runtime_bundle_requests_bootstrap_tools(value: &str) -> bool {
+    value == "bootstrap-tools"
+}
+
+fn is_bootstrap_tool_entry(project_root: &Path, entry: Option<&Path>) -> bool {
+    let Some(entry) = entry else { return false };
+    let entry = super::safe_canonicalize(entry);
+    [
+        "src/app/cli/_CliMain/main_and_help.spl",
+        "src/app/test_runner_new/main.spl",
+        "src/app/mcp/main.spl",
+        "src/app/simple_lsp_mcp/main.spl",
+    ]
+    .iter()
+    .any(|relative| entry == super::safe_canonicalize(&project_root.join(relative)))
+}
+
+pub(super) struct BootstrapToolsAuthority {
+    pub native_all: PathBuf,
+    pub hosted_runtime: PathBuf,
+}
+
+fn read_bootstrap_tools_receipt(path: &Path) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("bootstrap-tools cannot read {}: {error}", path.display()))?;
+    let mut fields = std::collections::BTreeMap::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let (key, value) = line.split_once('=')
+            .ok_or_else(|| format!("bootstrap-tools malformed receipt {}", path.display()))?;
+        if fields.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(format!("bootstrap-tools duplicate receipt field `{key}`"));
+        }
+    }
+    Ok(fields)
+}
+
+fn bootstrap_tools_file_sha256(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("bootstrap-tools cannot open {}: {error}", path.display()))?;
+    let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0u8; 65536];
+    loop {
+        let count = file.read(&mut buffer)
+            .map_err(|error| format!("bootstrap-tools cannot hash {}: {error}", path.display()))?;
+        if count == 0 { break; }
+        digest.update(&buffer[..count]);
+    }
+    Ok(digest.finish().as_ref().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn validate_bootstrap_tools_hash(
+    receipt: &std::collections::BTreeMap<String, String>, key: &str, path: &Path,
+) -> Result<(), String> {
+    let wanted = receipt.get(key).ok_or_else(|| format!("bootstrap-tools missing `{key}`"))?;
+    if wanted.len() != 64 || !wanted.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || bootstrap_tools_file_sha256(path)? != *wanted
+    {
+        return Err(format!("bootstrap-tools `{key}` mismatch for {}", path.display()));
+    }
+    Ok(())
+}
+
+fn admitted_bootstrap_tools_authority(
+    runtime_path: &Path, compiler: &Path, native_all_name: &str,
+) -> Result<BootstrapToolsAuthority, String> {
+    let capsule = read_bootstrap_tools_receipt(&runtime_path.join("phase2-runtime-capsule.env"))?;
+    if capsule.get("schema").map(String::as_str) != Some("simple-phase2-runtime-capsule-v2")
+        || capsule.get("status").map(String::as_str) != Some("frozen")
+    {
+        return Err("bootstrap-tools requires a frozen phase2 runtime capsule v2".to_string());
+    }
+    validate_bootstrap_tools_hash(&capsule, "compiler_sha256", compiler)?;
+    let native_all = runtime_path.join(native_all_name);
+    validate_bootstrap_tools_hash(&capsule, "native_all_sha256", &native_all)?;
+    let receipt_path = runtime_path.join("hosted-runtime.env");
+    validate_bootstrap_tools_hash(&capsule, "hosted_authority_receipt_sha256", &receipt_path)?;
+    let hosted = read_bootstrap_tools_receipt(&receipt_path)?;
+    if hosted.get("schema").map(String::as_str) != Some("simple-bootstrap-hosted-runtime-authority-v1")
+        || hosted.get("status").map(String::as_str) != Some("frozen")
+    {
+        return Err("bootstrap-tools requires a frozen hosted runtime authority v1".to_string());
+    }
+    let relative = hosted.get("relative_path").ok_or("bootstrap-tools missing hosted relative_path")?;
+    let relative = Path::new(relative);
+    if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || relative.extension().and_then(|ext| ext.to_str()) != Some("rlib")
+    {
+        return Err("bootstrap-tools hosted authority must name a relative rlib inside the capsule".to_string());
+    }
+    let hosted_runtime = runtime_path.join(relative);
+    let root = std::fs::canonicalize(runtime_path).map_err(|error| error.to_string())?;
+    if !std::fs::canonicalize(&hosted_runtime).map_err(|error| error.to_string())?.starts_with(&root) {
+        return Err("bootstrap-tools hosted authority escapes its capsule".to_string());
+    }
+    validate_bootstrap_tools_hash(&hosted, "sha256", &hosted_runtime)?;
+    Ok(BootstrapToolsAuthority { native_all, hosted_runtime })
 }
 
 pub(super) fn runtime_bundle_requests_dynamic_runtime(value: &str) -> bool {
@@ -337,6 +439,7 @@ impl NativeProjectBuilder {
             value if runtime_bundle_requests_simple_core(value) => return NativeRuntimeLane::SimpleCore,
             value if runtime_bundle_requests_core_c_bootstrap(value) => return NativeRuntimeLane::CoreCBootstrap,
             value if runtime_bundle_requests_host_gpu(value) => return NativeRuntimeLane::HostGpu,
+            value if runtime_bundle_requests_bootstrap_tools(value) => return NativeRuntimeLane::BootstrapTools,
             value if runtime_bundle_requests_dynamic_runtime(value) => return NativeRuntimeLane::DynamicRuntime,
             _ => {}
         }
@@ -400,7 +503,9 @@ impl NativeProjectBuilder {
         selected_runtime: Option<&(PathBuf, bool)>,
     ) -> Result<(), String> {
         if let Some((runtime_lib, true)) = selected_runtime {
-            if is_bootstrap_main_entry(&self.entry_file) || self.resolve_runtime_lane() == NativeRuntimeLane::HostGpu {
+            if is_bootstrap_main_entry(&self.entry_file)
+                || matches!(self.resolve_runtime_lane(), NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools)
+            {
                 return Ok(());
             }
             let entry = self
@@ -416,6 +521,17 @@ impl NativeProjectBuilder {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn bootstrap_tools_authority(&self) -> Result<BootstrapToolsAuthority, String> {
+        if !is_bootstrap_tool_entry(&self.project_root, self.entry_file.as_deref()) {
+            return Err("bootstrap-tools is restricted to canonical bootstrap verification tool entries".to_string());
+        }
+        let runtime_path = self.config.runtime_path.as_deref()
+            .ok_or("bootstrap-tools requires an explicit admitted runtime capsule path")?;
+        let compiler = std::env::current_exe().map_err(|error| error.to_string())?;
+        let (native_all_name, _) = runtime_archive_names(super::effective_target().linker_flavor());
+        admitted_bootstrap_tools_authority(runtime_path, &compiler, native_all_name)
     }
 
     pub(crate) fn selected_runtime_library(&self, temp_dir: &Path) -> Result<Option<(PathBuf, bool)>, String> {
@@ -463,6 +579,9 @@ impl NativeProjectBuilder {
             );
         }
         let lane = self.resolve_runtime_lane();
+        if lane == NativeRuntimeLane::BootstrapTools {
+            return self.bootstrap_tools_authority().map(|authority| Some((authority.native_all, true)));
+        }
         if self.is_authorized_stage4_compiler_entry() {
             // The rejection below is the SAME intent 6c97e5709ad landed: a
             // Stage4 compiler entry that asks for a lane it will not get must
@@ -580,7 +699,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
-                NativeRuntimeLane::HostGpu => {}
+                NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools => {}
                 // Unreachable: the dynamic lane returns above.
                 NativeRuntimeLane::DynamicRuntime => {}
             }
@@ -631,7 +750,7 @@ impl NativeProjectBuilder {
                         }
                     }
                 }
-                NativeRuntimeLane::HostGpu => {}
+                NativeRuntimeLane::HostGpu | NativeRuntimeLane::BootstrapTools => {}
                 // Unreachable: the dynamic lane returns above.
                 NativeRuntimeLane::DynamicRuntime => {}
             }
@@ -686,5 +805,97 @@ mod tests {
             runtime_archive_names(LinkerFlavor::Msvc),
             ("simple_native_all.lib", "simple_runtime.lib")
         );
+    }
+
+    fn bootstrap_tools_fixture() -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let compiler = root.path().join("compiler");
+        std::fs::write(&compiler, b"admitted compiler bytes").unwrap();
+        std::fs::write(root.path().join("libsimple_native_all.a"), b"native owner archive bytes").unwrap();
+        std::fs::create_dir(root.path().join("deps")).unwrap();
+        std::fs::write(root.path().join("deps/libspl_hosted_runtime-owner.rlib"), b"hosted owner bytes").unwrap();
+        bootstrap_tools_fixture_receipts(root.path(), &compiler, "deps/libspl_hosted_runtime-owner.rlib");
+        (root, compiler)
+    }
+
+    fn bootstrap_tools_fixture_receipts(root: &Path, compiler: &Path, hosted_relative: &str) {
+        let hash = |path: &Path| bootstrap_tools_file_sha256(path).unwrap();
+        let hosted = format!(
+            "schema=simple-bootstrap-hosted-runtime-authority-v1\nstatus=frozen\nrelative_path={hosted_relative}\nsha256={}\n",
+            hash(&root.join(hosted_relative)),
+        );
+        std::fs::write(root.join("hosted-runtime.env"), hosted).unwrap();
+        let capsule = format!(
+            "schema=simple-phase2-runtime-capsule-v2\nstatus=frozen\ncompiler_sha256={}\nnative_all_sha256={}\nhosted_authority_receipt_sha256={}\n",
+            hash(compiler), hash(&root.join("libsimple_native_all.a")), hash(&root.join("hosted-runtime.env")),
+        );
+        std::fs::write(root.join("phase2-runtime-capsule.env"), capsule).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_tools_lane_has_explicit_name_and_exact_entry_allowlist() {
+        assert!(runtime_bundle_requests_bootstrap_tools("bootstrap-tools"));
+        // The native-build command parser must forward this exact lane name to
+        // the authority gate; accepted internal config alone is insufficient.
+        assert!(crate::native_build_sffi::is_valid_runtime_bundle("bootstrap-tools"));
+        for name in ["hosted", "all", "host-gpu", "bootstrap_tools", "auto"] {
+            assert!(!runtime_bundle_requests_bootstrap_tools(name));
+        }
+        for name in ["hosted", "all", "rust-hosted", "bootstrap_tools"] {
+            assert!(!crate::native_build_sffi::is_valid_runtime_bundle(name));
+        }
+        let root = tempfile::tempdir().unwrap();
+        for entry in ["src/app/cli/_CliMain/main_and_help.spl", "src/app/test_runner_new/main.spl",
+            "src/app/mcp/main.spl", "src/app/simple_lsp_mcp/main.spl"] {
+            assert!(is_bootstrap_tool_entry(root.path(), Some(&root.path().join(entry))));
+        }
+        for entry in ["src/app/cli/main.spl", "src/app/unrelated/main.spl", "src/compiler/80.driver/main.spl",
+            "other/src/app/mcp/main.spl"] {
+            assert!(!is_bootstrap_tool_entry(root.path(), Some(&root.path().join(entry))));
+        }
+        assert!(!is_bootstrap_tool_entry(root.path(), None));
+    }
+
+    #[test]
+    fn bootstrap_tools_authority_selects_receipt_owned_archives() {
+        let (root, compiler) = bootstrap_tools_fixture();
+        // A different rlib cannot win through discovery order or modification time.
+        std::fs::write(root.path().join("deps/libspl_hosted_runtime-newer.rlib"), b"unadmitted").unwrap();
+        let authority = admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").unwrap();
+        assert_eq!(authority.native_all, root.path().join("libsimple_native_all.a"));
+        assert_eq!(authority.hosted_runtime, root.path().join("deps/libspl_hosted_runtime-owner.rlib"));
+    }
+
+    #[test]
+    fn bootstrap_tools_authority_rejects_changed_bound_inputs() {
+        for relative in ["compiler", "libsimple_native_all.a", "hosted-runtime.env", "deps/libspl_hosted_runtime-owner.rlib"] {
+            let (root, compiler) = bootstrap_tools_fixture();
+            std::fs::write(root.path().join(relative), b"changed").unwrap();
+            assert!(admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").is_err(), "{relative}");
+        }
+    }
+
+    #[test]
+    fn bootstrap_tools_authority_rejects_missing_or_nonfrozen_capsule() {
+        let (root, compiler) = bootstrap_tools_fixture();
+        let path = root.path().join("phase2-runtime-capsule.env");
+        let valid = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, valid.replace("status=frozen", "status=unadmitted")).unwrap();
+        assert!(admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").is_err());
+        std::fs::remove_file(path).unwrap();
+        assert!(admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").is_err());
+    }
+
+    #[test]
+    fn bootstrap_tools_authority_rejects_escaped_hosted_path_and_duplicate_fields() {
+        let (root, compiler) = bootstrap_tools_fixture();
+        // Even hash-bound traversal is not an in-capsule authority.
+        bootstrap_tools_fixture_receipts(root.path(), &compiler, "deps/../deps/libspl_hosted_runtime-owner.rlib");
+        assert!(admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").is_err());
+        let path = root.path().join("phase2-runtime-capsule.env");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("status=frozen\n");
+        std::fs::write(path, text).unwrap();
+        assert!(admitted_bootstrap_tools_authority(root.path(), &compiler, "libsimple_native_all.a").is_err());
     }
 }
