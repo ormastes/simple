@@ -403,6 +403,15 @@ no-stub native test passes; real archive output attachment, production V3
 publication, full CLI execution, and paired time/RSS proof remain open. See
 `doc/09_report/compiler/target6_driver_cold_hir_receipt_capture_2026-09-29.md`.
 
+Native object handoff follow-up (2026-09-29): the cold driver context now
+retains each module's object path after the existing capsule receipt gate,
+including validated cache hits. It resets that map with the typed HIR receipts
+at the next capture. The focused no-stub Stage-2 native probe passes; see
+`doc/09_report/compiler/target6_cold_native_object_handoff_2026-09-29.md`.
+This supplies real codegen output paths to the future archive producer, but
+does not yet persist those outputs, publish a V3 graph, or prove a full warm
+compile.
+
 Archive semantic follow-up (2026-09-29): before publishing `CURRENT`, the
 cold publisher now checks the exact symbol/action payload grammar used by the
 warm decoder, including action target-symbol resolution. A hash-valid but
