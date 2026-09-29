@@ -103,6 +103,31 @@ workspace directory.
 This is focused compiler/bootstrap evidence. Full bootstrap and the previously
 pending Trace32/hardware/MCP qualification remain separate requirements.
 
+## Windows scalar-pool regression, 2026-09-29
+
+The expanded native fixture passed on the landed compiler at
+`2956aef4b4b9008d4c8450f4eecb8d97efb15dc1`: exactly 1 passed, 0 failed,
+0 ignored, native Cargo exit 0. The selected test was
+`imported_private_functions_struct_slot_values_and_extern_abi_execute`, using
+the LLVM backend, bootstrap profile, MSVC target, strict no-stub/delegate flags
+and four build jobs. Total build/test time was 460.1 seconds; test execution
+was 7.70 seconds. All 24 recorded input hashes remained unchanged.
+
+Real C pool workers accepted a named callback (41 to 42), joined and released
+its task, and rejected ordinary, marker-valued and empty closures with -3.
+The fixture also checks subsequent captured calls, pool close/destroy,
+global callbacks, named/empty/captured VOID calls, and captured bool/text
+callbacks. Existing landed callback and floating-point controls remain.
+
+- Main fixture SHA256: `5AEFF4EE8288979B1000399491406005D76F50310D32DE2EA9415CCC4FFE1C25`.
+- Ports fixture SHA256: `F7A445C3D39BB662823F00F0589F2A513AEF4C430B1D9D3724F07B659FD4E802`.
+- Executed probe SHA256: `29CD22B6D39E4CA96E72995BC0116449AFF8003BE839705C127EA8065D1D8E79`.
+- Frozen evidence: `build/mini_builds/callback-windows-cycle2-20260929/`;
+  probe: `tmp/.tmp2YRS5a/probe.exe` within that directory.
+
+Linux execution of this expanded fixture remains pending. This result makes
+no claim of bootstrap Phase 4 qualification.
+
 
 ## PR #2046 integration review
 
@@ -124,3 +149,12 @@ The integrated global-callback native fixture passed with LLVM 23.1.2 ARM64:
 1 passed, 0 failed, 1 filtered out. Log: `/tmp/pr2046-global-callback-test.log`.
 This additionally exercises the function-global initializer's direct record,
 without replacing the scalar pool ABI with the alternative adapter.
+
+## PR #2049 Linux conflict-resolution evidence
+
+The merged fixture retains the landed global callback check and adds the
+scalar pool, VOID, and captured bool/text controls. On Linux ARM64 with
+LLVM 23.1.2, the expanded native test passed: 1 passed, 0 failed, 1 filtered
+out. Cargo used `CARGO_BUILD_JOBS=10`; the focused fixture itself retains its
+serial native compilation configuration. Log: `/tmp/pr2049-expanded-native-test.log`.
+This result does not qualify a full Linux or FreeBSD bootstrap.

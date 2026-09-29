@@ -101,6 +101,8 @@ impl Drop for BootstrapEnvironment {
 
 #[test]
 fn imported_private_functions_struct_slot_values_and_extern_abi_execute() {
+    // Exercise emitted named pool entries and capture rejection through real
+    // C workers, plus global, VOID and captured bool/text callback controls.
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let source = repo.join("test/fixtures/native/symbol_owner_binding");
     let temporary = tempfile::tempdir().unwrap();
