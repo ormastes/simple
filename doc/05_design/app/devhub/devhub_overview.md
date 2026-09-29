@@ -91,16 +91,15 @@ configured underneath.
 
 ## 4. Config layout
 
-**Current state, verified in `config.spl` 2026-07-20:** config is **split
-across two files**, both still under `~/.config/itf/` (kept as the on-disk
-path for backward compat per §6, even though the source folder is now
-`src/app/devhub/`):
-- `~/.config/itf/config.sdn` (`config_path()`) — non-secret settings.
-- `~/.config/itf/auth.sdn` (`auth_path()`) — tokens/credentials.
+**Current state:** general config and auth are split across two files under
+`~/.config/devhub/`; email accounts use a third file in the same directory.
+Legacy `~/.config/itf/` files remain a read fallback until a DevHub file is
+written:
+- `~/.config/devhub/config.sdn` (`config_path()`) — non-secret settings.
+- `~/.config/devhub/auth.sdn` (`auth_path()`) — tokens/credentials.
 
-`config_dir()` resolves to `{userprofile}/.config/itf` on Windows and
-`{home}/.config/itf` elsewhere — single-endpoint per backend, same as
-before. Fields on `ItfConfig` (`config.spl`): `confluence_url`,
+`config_dir()` resolves to `{userprofile}/.config/devhub` on Windows and
+`{home}/.config/devhub` elsewhere. Fields on `ItfConfig` (`config.spl`): `confluence_url`,
 `confluence_user`, `confluence_default_space`, `jira_url`,
 `jira_acli_path`, `jira_email`, `default_output`, `color_mode`,
 `editor_override`, `pager_override`, `token_cmds` — **plus three fields
@@ -122,7 +121,7 @@ from `config.sdn`.
 `token_envs` (a `[token_env]` section mapping a provider to the **NAME** of an
 environment variable). Resolution moved into one module,
 `src/app/devhub/backend_resolve.spl`, which serves the full chain
-`--backend > DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] > ~/.config/itf/config.sdn > git remote origin > error`.
+`--backend > DEVHUB_GIT_BACKEND > .spipe/config.sdn [devhub] > ~/.config/devhub/config.sdn > git remote origin > error`.
 
 Two structural additions this pass:
 - **A repo-scoped config rung.** `.spipe/config.sdn` gained a `devhub:` section
@@ -145,7 +144,7 @@ research (`facade_email.md` §6) proposes a *dedicated*
 `~/.config/devhub/email.sdn` multi-account schema (`accounts: {name: {provider,
 email, ...}}`) distinct from `auth.sdn`'s single-section-per-backend shape.
 Treat this as a **per-facade proposal for a richer multi-account config**, not
-a contradiction of the "config lives in `~/.config/itf/auth.sdn` today"
+a contradiction of the "config lives in `~/.config/devhub/auth.sdn` today"
 baseline — `email.sdn` is new, additive, and unimplemented; it does not
 replace `auth.sdn`'s existing sections for the other facades. The `storage`
 facade has an analogous open question (single- vs multi-alias config, see
@@ -196,7 +195,7 @@ source this pass:
   match-arm logic needed at the binary-name level.
 - `bin/itf` **stays as a permanent compat wrapper**, unchanged in behavior
   from a user's perspective — same binary, same dispatch table.
-- Config path: `~/.config/itf/config.sdn` + `~/.config/itf/auth.sdn` are
+- Config path: `~/.config/devhub/config.sdn` + `~/.config/devhub/auth.sdn` are
   kept as the on-disk paths for backward compatibility (see §4) — the
   config struct is still named `ItfConfig` and no `~/.config/devhub/` path
   exists yet. This matches the recommendation this section previously

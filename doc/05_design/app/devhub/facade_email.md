@@ -13,7 +13,7 @@ gam` all absent, no network calls made).
 | Capability | mail-cli (IMAP/SMTP, `tools/mail-cli/`) | Outlook adapter (Graph, `src/app/itf/`) |
 |---|---|---|
 | Auth model | Basic (password / app-password / `password_cmd`), per-provider preset incl. `outlook` IMAP/SMTP | **App-only OAuth2 client-credentials** (`oauth2_client_credentials_token`), single **shared mailbox** via `/users/{upn}/...` — NOT a per-user delegated login. No device-code/auth-code flow exists anywhere in `std.*.oauth2`. |
-| Multi-account | Yes, `~/.config/mail-cli/config.json`, `--account NAME` | One mailbox per `~/.config/itf/auth.sdn` `[outlook]` section |
+| Multi-account | Yes, shared `~/.config/devhub/email.sdn`, `--account NAME` | One mailbox per `~/.config/devhub/auth.sdn` `[outlook]` section |
 | list/inbox | `cmd_inbox` (ALL/UNSEEN, threads, table/json) | `outlook messages <FOLDER_ID>` (`$filter`, `$top`) |
 | read | `cmd_read` (marks `\Seen`) | `outlook get <MSG_ID>` (`$expand=attachments`) |
 | search | `cmd_search --from/--subject/--since/--before` → IMAP `SEARCH` | **None.** Only `--filter` (raw Graph `$filter` string) on `messages`; `$search` explicitly unsupported (adapter comment: Graph rejects `$filter`+`$search` together, so this adapter prefers `$filter` and ignores `$search`) |
@@ -115,7 +115,7 @@ secret_env_var, mailbox_upn, cache_path)` → `oauth2_get_token` →
 `std.nogc_sync_mut.oauth2` has no authorization-code or device-code function
 at all). Requires Azure AD app registration + application permissions
 `Mail.Read`/`Mail.ReadWrite` + an Exchange Online `ApplicationAccessPolicy`
-scoping the app to one mailbox. Config in `~/.config/itf/auth.sdn` `[outlook]`
+scoping the app to one mailbox. Config in `~/.config/devhub/auth.sdn` `[outlook]`
 section (`tenant_id`, `client_id`, `client_secret_env` default
 `GRAPH_CLIENT_SECRET`, `shared_mailbox`); secret is an env var, never inline.
 Ops wired at CLI layer: `folders`, `messages <FOLDER_ID> [--filter EXPR --top
@@ -354,16 +354,16 @@ property list is confirmed live.
 ## 7. Provider config schema — `~/.config/devhub/email.sdn`
 
 **Note on config layout:** this is a new, dedicated multi-account config file
-for the `email` facade, separate from `~/.config/itf/auth.sdn` (which today
+for the `email` facade, separate from `~/.config/devhub/auth.sdn` (which today
 holds single-section-per-backend config for Confluence/Jira/MinIO/Outlook).
 See `devhub_overview.md` §4 for how this reconciles with the repo-wide config
 baseline — treat `email.sdn` as additive, not a replacement for `auth.sdn`'s
 existing `[outlook]` section, until the two are formally reconciled.
 
 SDN (this repo's stated config format, not JSON/YAML), one `[account]`-style
-block per configured identity, mirroring mail-cli's `config.json` schema plus
+block per configured identity, shared with mail-cli's account configuration plus
 a `provider` switch and, for Outlook, the same `[outlook]` fields
-`cmd_outlook.spl` already reads from `~/.config/itf/auth.sdn`:
+`cmd_outlook.spl` already reads from `~/.config/devhub/auth.sdn`:
 
 ```
 default_account: "work-gmail"

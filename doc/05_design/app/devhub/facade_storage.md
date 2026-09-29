@@ -90,7 +90,7 @@ prefix, no true recursion — one level via ListObjectsV2), `minio_get_object`,
 `minio_create_bucket`, `minio_delete_bucket`, `minio_presign_get`,
 `minio_presign_put`, `minio_health_live`. **Config is single-endpoint**:
 `_parse_minio_section` reads exactly one `[minio]` section from
-`~/.config/itf/auth.sdn` (url, region, access_key, secret_key,
+`~/.config/devhub/auth.sdn` (url, region, access_key, secret_key,
 tls_skip_verify) — no multi-alias concept today.
 
 **`adapter_minio_mc.spl`** (405 lines) — a second, separate adapter that
@@ -162,7 +162,7 @@ only entry-point wiring differs, confirm which before coding.
 
 mc's alias store (`~/.mc/config.json`, multiple named endpoints) has no
 equivalent in `adapter_minio.spl`: `load_minio_config` parses exactly one
-`[minio]` section from `~/.config/itf/auth.sdn`. To honor mc-shaped
+`[minio]` section from `~/.config/devhub/auth.sdn`. To honor mc-shaped
 `alias/bucket/key` addressing for real (multiple named endpoints, not just
 one implicit default), `auth.sdn` needs either:
 - multiple bracketed sections, e.g. `[minio.prod]` / `[minio.staging]`, with

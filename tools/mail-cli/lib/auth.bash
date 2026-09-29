@@ -29,7 +29,7 @@ cmd_auth() {
       echo "  --account NAME       Account name (default: 'default')"
       echo "  --provider PRESET    gmail, outlook, yahoo, protonmail, fastmail, other"
       echo "  --password-cmd CMD   Run CMD to obtain the password at use-time instead"
-      echo "                       of storing it in config.json (e.g. a password"
+      echo "                       of storing it in email.sdn (e.g. a password"
       echo "                       manager: 'pass show mail/gmail'). Skips the"
       echo "                       interactive password prompt."
       echo "  username defaults to the email address when left blank"
@@ -61,6 +61,12 @@ cmd_auth_login() {
   case "$protocol" in imap|pop3) ;; *) echo "error: protocol must be imap or pop3" >&3; return 2 ;; esac
   if [ "$protocol" = pop3 ]; then provider=other; fi
   mail_config_init
+  local existing_account
+  existing_account=$(mail_config_get_account "$account_name")
+  if [ -n "$existing_account" ] && [ "$(jq -r '.provider // empty' <<< "$existing_account")" = outlook ] && ! _mail_config_json; then
+    echo "error: '$account_name' is an Outlook Graph account; choose a different mail account name" >&3
+    return 2
+  fi
 
   # Select provider
   if [ -z "$provider" ]; then
@@ -182,8 +188,10 @@ cmd_auth_login() {
   # Save account. When --password-cmd is set, store the command instead of
   # the plaintext password (config.shs resolves it at use-time).
   local account_json
+  local stored_provider="$provider"
+  [ "$stored_provider" = outlook ] && stored_provider=outlook_imap
   account_json=$(jq -n \
-    --arg provider "$provider" \
+    --arg provider "$stored_provider" \
     --arg protocol "$protocol" \
     --arg email "$email" \
     --arg username "$username" \
@@ -247,6 +255,10 @@ cmd_auth_logout() {
   if [ -z "$acc" ]; then
     echo "${C_RED}error:${C_RESET} account '${account_name}' not found" >&2; return 1
   fi
+  if [ "$(jq -r '.provider // empty' <<< "$acc")" = outlook ] && ! _mail_config_json; then
+    echo "error: '$account_name' is an Outlook Graph account; manage it through DevHub" >&3
+    return 2
+  fi
 
   local email
   email=$(echo "$acc" | jq -r '.email')
@@ -267,6 +279,12 @@ cmd_auth_status() {
   [ -n "$accounts" ] || { echo "No accounts configured." >&3; return 1; }
   while IFS= read -r name; do
     local MAIL_ACCOUNT="$name"
+    local account_json
+    account_json=$(mail_config_get_account "$name")
+    if [ "$(jq -r '.provider // empty' <<< "$account_json")" = outlook ] && ! _mail_config_json; then
+      echo "$name (Outlook Graph; use DevHub)"
+      continue
+    fi
     echo "$name"
     if mail_resolve_account && _mail_check_login; then
       echo "  Connection OK (${MAIL_ACCT_PROTOCOL})"

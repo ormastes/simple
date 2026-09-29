@@ -21,7 +21,7 @@ If origin is not Bitbucket, abort and route to `gh_setup` instead.
 
 For a self-hosted server, the Cloud steps below do not apply. Instead:
 1. In Bitbucket, go to **Profile → Manage account → HTTP access tokens** and create a token with repository write.
-2. Configure `~/.config/itf/config.sdn`:
+2. Configure `~/.config/devhub/config.sdn`:
    ```
    bitbucket:
        url: https://host:222          # custom port / context path ok
@@ -59,7 +59,7 @@ reviewers, the bot must be added as an explicit reviewer when opening the PR.
 
 ### Step 2 — Save the Token
 
-Edit `~/.config/itf/auth.sdn` and add:
+Edit `~/.config/devhub/auth.sdn` and add:
 
 ```
 bitbucket:
@@ -69,8 +69,8 @@ bitbucket:
 File mode must be `0600`. Verify:
 
 ```bash
-chmod 600 ~/.config/itf/auth.sdn
-ls -la ~/.config/itf/auth.sdn
+chmod 600 ~/.config/devhub/auth.sdn
+ls -la ~/.config/devhub/auth.sdn
 ```
 
 ### Step 3 — Set Workspace and Repo Defaults
@@ -97,7 +97,7 @@ Expected: PR title, state, source/dest branch printed. If you see
 
 ## Verification Checklist
 
-- [ ] `~/.config/itf/auth.sdn` has a `bitbucket:` section with `token:`
+- [ ] `~/.config/devhub/auth.sdn` has a `bitbucket:` section with `token:`
 - [ ] File mode is `0600`
 - [ ] `BB_WORKSPACE` and `BB_REPO` set (or `--workspace`/`--repo` planned per invocation)
 - [ ] `bin/simple itf bb pr view <ID>` succeeds on a known PR

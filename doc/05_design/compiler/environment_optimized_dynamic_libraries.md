@@ -459,7 +459,7 @@ through hard caps before ranking the retained set.
 The native-build parent is the sole ambient source owner. It snapshots CLI and
 environment inputs once, reads project `simple.sdn`, and reads the explicitly
 new feature-specific user source `~/.config/simple/config.sdn`. The latter is
-not an alias for `~/.config/itf/config.sdn` and is not reconstructed from a
+not an alias for `~/.config/devhub/config.sdn` and is not reconstructed from a
 merged `CompilerConfig`. Both files use bounded regular no-follow reads.
 
 The parent resolves the collected layers, serializes the complete typed

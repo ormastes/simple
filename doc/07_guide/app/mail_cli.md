@@ -49,32 +49,32 @@ login error: doing so makes existing encrypted credentials unreadable.
 
 ## Dev-hub
 
-New dev-hub accounts use **one shared JSON file** at
-`{home}/.config/devhub/email.json`. Run `devhub email auth login --protocol pop3
+New dev-hub accounts use **one shared SDN file** at
+`{home}/.config/devhub/email.sdn`. Run `devhub email auth login --protocol pop3
 --account work` to configure it. Dev-hub parses account metadata from that file
 and passes `--config-file` with the same path to mail-cli. Password resolution
 and updates happen in mail-cli; dev-hub does not duplicate saved passwords.
 
-Use `mail inbox --config-file "{home}/.config/devhub/email.json" --account work` for
+Use `mail inbox --config-file "{home}/.config/devhub/email.sdn" --account work` for
 direct access to that same account. Both clients also accept `--config-dir DIR`
-to select `DIR/config.json`, or `--config-file FILE` for any JSON filename.
-For example, `devhub email inbox --config-file /private/team-mail.json` reads
+to select `DIR/email.sdn`, or `--config-file FILE` for an explicit SDN file.
+Explicit legacy JSON files remain readable. For example,
+`devhub email inbox --config-file /private/team-mail.sdn` reads
 that file and forwards its exact location. Conflicting file/directory flags
 are rejected. Mail-cli alone supports matching MAIL_CONFIG_FILE/DIR environment
 defaults. Custom file parents are created when configuration is initialized.
 
-The shared schema has `default_account` and `accounts` objects; account fields
+The shared schema has `default_account` and `accounts` blocks; account fields
 include `protocol`, `email`, `username`, `pop3_server`, `pop3_port`,
 `smtp_server`, `smtp_port`, `tls`, and `password` (encrypted) or `password_cmd`.
 IMAP accounts use `imap_server`/`imap_port`. A Graph account specifies
 `protocol: graph` and its Graph identity fields; its authentication remains
 separate. Do not forward Graph accounts to direct mail-cli operations.
 
-Existing `email.sdn` remains readable when the default JSON file is absent;
-that legacy route retains the separate mail-cli configuration. SDN is not the
-shared mail-cli format. To migrate, configure an account through the new login
-command, or explicitly move/copy an existing mail-cli JSON config to the shared
-location. No automatic copy of existing private configuration occurs.
+When `email.sdn` is absent, DevHub can still read its former `email.json`.
+mail-cli imports that file, or its older `~/.config/mail-cli/config.json`,
+into `email.sdn` on first configuration initialization. The source JSON file
+is left untouched for review.
 
 `devhub email auth password --account work --password-file /private/password.txt`
 updates the shared file after validation. Credential flags also work on other
@@ -88,6 +88,6 @@ Account setup (`auth login`) inherits the terminal so all prompts are visible;
 it is explicitly interactive and is not subject to that capture timeout.
 
 Path arguments accept a leading literal `{home}`. Quote it even in launch
-examples, such as `devhub email inbox --config-file "{home}/.config/devhub/email.json"`.
+examples, such as `devhub email inbox --config-file "{home}/.config/devhub/email.sdn"`.
 The application expands it from the host home-directory environment; neither
 Bash nor PowerShell needs to interpret the placeholder.

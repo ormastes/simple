@@ -58,7 +58,7 @@ base_url = https://graph.microsoft.com/v1.0
 ```
 
 Token cache (auto-managed, mode 0600):
-- `~/.config/itf/outlook_token_cache.sdn` — Graph access token (1h TTL, re-request before expiry)
+- `~/.config/devhub/outlook_token_cache.sdn` — Graph access token (1h TTL, re-request before expiry)
 
 ## Adapter pattern (mirror existing ITF)
 
@@ -123,7 +123,7 @@ Per-cycle procedure (per `--level`):
 
 Pipeline (one cycle, idempotent on re-run):
 
-1. **Watermark load** — read `~/.config/itf/spipe_daily.sdn` for `last_run`.
+1. **Watermark load** — read `~/.config/devhub/spipe_daily.sdn` for `last_run`.
 2. **Pull bug mail** — `outlook.list_messages(folder=Inbox, $filter=receivedDateTime ge last_run)` (or Gmail/IMAP backend if configured).
 3. **Per message**:
    - Extract Jira key from subject/body via regex `[A-Z][A-Z0-9]+-\d+`.

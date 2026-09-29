@@ -15,7 +15,7 @@ date forms are supported. Perl is optional for quoted-printable decoding.
 
 ```bash
 export MAIL_CREDENTIAL_BIN="{home}/.local/bin/simple-mail-credentials"
-bash tools/mail-cli/bin/mail auth status --config-file "{home}/.config/devhub/email.json"
+bash tools/mail-cli/bin/mail auth status --config-file "{home}/.config/devhub/email.sdn"
 ```
 
 Use a private configuration directory. `TMPDIR` selects temporary-file storage.
@@ -33,7 +33,7 @@ on PATH, where that name can select WSL and a different filesystem/configuration
 ```powershell
 $env:MAIL_BASH = 'C:\Program Files\Git\bin\bash.exe'
 $env:MAIL_CREDENTIAL_BIN = '{home}/bin/simple-mail-credentials.exe'
-& .\tools\mail-cli\bin\mail.cmd auth status --config-file '{home}/.config/devhub/email.json'
+& .\tools\mail-cli\bin\mail.cmd auth status --config-file '{home}/.config/devhub/email.sdn'
 ```
 
 Use forward slashes in paths passed to Bash, including configuration and helper
@@ -52,8 +52,8 @@ repo-relative launcher) and supply the placeholder as an argument.
 
 ## dev-hub invocation
 
-dev-hub passes its selected JSON configuration with `--config-file`. Both tools
-also accept `--config-dir DIR` for `DIR/config.json`. For direct process
+dev-hub passes its selected SDN configuration with `--config-file`. Both tools
+also accept `--config-dir DIR` for `DIR/email.sdn`. For direct process
 execution on Windows, configure `DEVHUB_MAIL_BIN` to the Git Bash executable and
 `DEVHUB_MAIL_SCRIPT` to the absolute, forward-slash path of `bin/mail`; the
 script becomes the first argument. Ensure Git's Unix utilities are on the
