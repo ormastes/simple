@@ -40,6 +40,30 @@ fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
 }
 
 #[test]
+fn typed_dict_len_keeps_runtime_owner_and_single_receiver() {
+    let source = include_str!("../../../../../../../test/fixtures/native/typed_dict_len/main.spl");
+    let mir = compile_to_mir(source).expect("typed Dict length fixture must lower");
+    for name in ["dict_len_sequence", "dict_len_field", "dict_len_alias_field", "dict_len_alias_local", "dict_len_parameter", "dict_len_receiver_once"] {
+        let function = mir.functions.iter().find(|f| f.name == name).unwrap();
+        assert!(has_call(function, "rt_dict_len"), "{name}: use the runtime Dict owner");
+        assert!(!has_call(function, "rt_len"), "{name}: avoid generic length layout");
+        assert!(function.blocks.iter().flat_map(|b| &b.instructions).all(|inst| {
+            !matches!(inst, MirInst::MethodCallStatic { func_name, .. } if func_name.ends_with(".len") || func_name.ends_with(".length"))
+        }), "{name}: length must not enter nominal recovery");
+    }
+    let receiver = mir.functions.iter().find(|f| f.name == "dict_len_receiver_once").unwrap();
+    let make_calls = receiver.blocks.iter().flat_map(|b| &b.instructions).filter(|inst| {
+        matches!(inst, MirInst::Call { target, .. } if target.name() == "dict_len_make")
+    }).count();
+    assert_eq!(make_calls, 1, "evaluate the allocating receiver once");
+    for (name, target) in [("dict_len_nominal", "NominalCounter.len"), ("dict_len_nominal_length", "NominalCounter.length")] {
+        let function = mir.functions.iter().find(|f| f.name == name).unwrap();
+        assert!(!has_call(function, "rt_dict_len"), "{name}: preserve nominal owner");
+        assert!(has_exact_declared_call(function, target));
+    }
+}
+
+#[test]
 fn typed_dict_alias_field_membership_keeps_runtime_owner() {
     for method in ["has", "has_key", "contains", "contains_key"] {
         let source = format!(
