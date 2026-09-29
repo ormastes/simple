@@ -49,8 +49,10 @@ The planner producer and bound verifier derive planner.exe from an admitted
 .exe parent, sharing one helper. Exact path pinning and argv digests still
 use the same derived path; alternate executable names are not admitted.
 
-Existing admission producer regression gate fails before fixtures: it points
-its producer variable at bootstrap-from-scratch.sh and expects the planner
-entry-closure invocation there, although that invocation belongs to
-produce-bootstrap-planner-admission-v2.shs. This preexisting gate mismatch
-means full admission regression coverage is not claimed by this repair.
+The admission regression harness had a stale producer path and obsolete
+positional subcommand; both are corrected. Its canonical positive admission
+now passes producer and verifier. The configured-output fixture then fails:
+the producer still requires the Stage 2 admission receipt beneath default
+build/bootstrap although that fixture uses build/bootstrap-custom. Three
+repair/verification cycles are exhausted; negative fixtures after this failure
+remain unexecuted. Full admission regression PASS is not claimed.
