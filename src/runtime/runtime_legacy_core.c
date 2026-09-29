@@ -126,6 +126,11 @@ SplValue spl_int(int64_t n) {
     return v;
 }
 
+/* runtime.h accessors are unchecked: preserve the stored floating payload. */
+double spl_as_float(SplValue v) {
+    return v.as_float;
+}
+
 SplValue spl_str(const char* s) {
     SplValue v = spl_value_nil();
     v.tag = SPL_STRING;
@@ -329,6 +334,11 @@ void spl_array_push_i64(SplArray* a, int64_t n) {
 SplValue spl_array_get(SplArray* a, int64_t idx) {
     if (!a || idx < 0 || idx >= a->len) return spl_value_nil();
     return a->items[idx];
+}
+
+/* Share the existing array lookup's null/bounds behavior and full i64 value. */
+int64_t spl_array_get_i64(SplArray* a, int64_t idx) {
+    return spl_array_get(a, idx).as_int;
 }
 
 int64_t spl_array_len(SplArray* a) {
