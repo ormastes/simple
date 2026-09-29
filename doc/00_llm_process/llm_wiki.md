@@ -961,6 +961,45 @@ convergence and DDC remain explicit release/trust targets. Canonical guide:
 
 ## Protected GitHub PR handoff
 
+### Creating LLM owns landing (user instruction, 2026-09-29)
+
+The LLM that creates a PR must self-review it, fix the problems it finds, run
+required checks, and land its own PR unless an unresolved conflict prevents
+it. Do not hand a self-authored PR back to the user merely because author
+GitHub approval is unavailable. Missing admission or failed checks are work
+for the creating LLM to diagnose and resolve, not grounds to request that a
+human perform the merge. Keep ownership across turns and report any actual
+unresolved conflict with its concrete evidence. Completion means the merge
+is confirmed, not that a branch or PR was merely created.
+
+Use the supported admission route and normal protected merge. This ownership
+rule does not make fabricated review evidence or a protection bypass valid.
+
+
+### Admission route mismatch observed 2026-09-29
+
+The user can authorize self-review and landing, and SPipe exposes admission
+APIs. The current obstacle is a mismatch between those APIs' required trust
+contract and the deployed Simple workflow—not missing user authorization.
+The installed `spipe:dev` skill and live `spipe_self_review_guide` require a
+configured broker with authenticated v2 policy and exact review receipts;
+they explicitly prohibit the legacy `self_attestation`-only route. The repo
+configuration still reports the signed broker unconfigured/unimplemented.
+
+The older handoff instructions below recommend that legacy route and editing
+PR bodies to trigger a check. **They are conflicting historical guidance, not
+an authorized workaround for the current skill.** Do not fabricate receipts or
+change a PR solely to obtain skipped admission. First run the canonical guide,
+inspect current configuration, and resolve the skill/workflow/wiki/broker
+mismatch through the authorized process while retaining landing ownership. A completed code review is not itself admission;
+missing bootstrap evidence remains a separate blocker.
+
+See the [dated evidence, agent mistakes, and recovery procedure](../08_tracking/bug/spipe_admission_skill_workflow_mismatch_2026-09-29.md).
+The Caret wiki service was unavailable, so this update uses the repository's
+canonical wiki. No common/private scope or protection setting was changed.
+
+### Historical procedure (2026-09-27; see conflict notice above)
+
 **A pending PR is not waiting for review — diagnose before waiting (2026-09-27).**
 `spipe-vcs-v3-main` sets `required_approving_review_count: 0`, and every PR
 here is self-authored, so no provider approval will ever arrive and none is
