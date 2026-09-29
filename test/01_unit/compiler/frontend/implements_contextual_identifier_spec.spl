@@ -1,0 +1,165 @@
+# @cover src/compiler/10.frontend/core/tokens.spl
+# @cover src/compiler/10.frontend/core/lexer_struct.spl
+use std.spec
+use compiler.core.tokens.{TOK_IDENT, TOK_MINUS, TOK_KW_IMPLEMENTS, TOK_KW_IMPL, TOK_KW_VAL, TOK_NEWLINE, keyword_lookup, tok_kind_name, tok_is_additive, token_requires_rhs}
+use compiler.frontend.core.lexer.{lex_init_with_path, lex_next}
+use compiler.frontend.core.lexer_types.{TokenKind, token_kind_from_code, token_kind_code}
+use compiler.core.parser.{parser_get_errors, parse_module_silent_checked}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, StmtKind, UnaryOp, BinOp}
+
+fn implements_token_kinds(source: text, count: i64) -> [i64]:
+    lex_init_with_path(source, "implements_tokens.spl")
+    var kinds: [i64] = []
+    var index = 0
+    while index < count:
+        kinds.push(lex_next())
+        index = index + 1
+    kinds
+
+fn implements_expression(source: text) -> Expr:
+    val module = parse_and_build_module_scoped("fn probe(implements: [text]) -> i64:\n    " + source + "\n", "implements_expression.spl", false)
+    expect(parser_get_errors().len()).to_equal(0)
+    val function = module.functions["probe"]
+    match function.body.stmts[0].kind:
+        case StmtKind.Expr(expression): return expression
+        case _: panic("expected implements expression statement")
+
+fn is_implements_identifier(expression: Expr) -> bool:
+    match expression.kind:
+        case ExprKind.Ident(name): name == "implements"
+        case _: false
+
+describe "implements contextual identifier and stable minus token":
+    it "retains operator IDs and ordinary identifier name and classification":
+        expect(TOK_MINUS).to_equal(61)
+        expect(TOK_KW_IMPLEMENTS).to_equal(TOK_IDENT)
+        expect(keyword_lookup("implements")).to_equal(TOK_IDENT)
+        expect(tok_kind_name(TOK_IDENT)).to_equal("Ident")
+        expect(tok_kind_name(TOK_KW_IMPLEMENTS)).to_equal("Ident")
+        expect(tok_kind_name(TOK_MINUS)).to_equal("-")
+        expect(tok_is_additive(TOK_KW_IMPLEMENTS)).to_equal(false)
+        expect(token_requires_rhs(TOK_KW_IMPLEMENTS)).to_equal(false)
+        expect(tok_is_additive(TOK_MINUS)).to_equal(true)
+        expect(token_requires_rhs(TOK_MINUS)).to_equal(true)
+        expect(token_kind_code(token_kind_from_code(TOK_IDENT))).to_equal(6)
+        expect(token_kind_code(token_kind_from_code(TOK_MINUS))).to_equal(61)
+
+    it "tokenizes member and index references as identifiers":
+        val kinds = implements_token_kinds("implements.len(), implements[0]", 10)
+        expect(kinds[0]).to_equal(TOK_IDENT)
+        expect(kinds[1]).to_equal(164)
+        expect(kinds[2]).to_equal(TOK_IDENT)
+        expect(kinds[5]).to_equal(160)
+        expect(kinds[6]).to_equal(TOK_IDENT)
+        expect(kinds[7]).to_equal(144)
+        expect(kinds[8]).to_equal(1)
+        expect(kinds[9]).to_equal(145)
+
+    it "preserves the mock contextual word and rejects minus as that identifier token":
+        # Rust mock grammar consumes Identifier text implements; pure mock
+        # declaration support is outside this lexer/parser-collision fix.
+        val mock_tokens = implements_token_kinds("mock MockUser implements UserTrait:", 5)
+        expect(mock_tokens[2]).to_equal(TOK_IDENT)
+        expect(mock_tokens[4]).to_equal(161)
+        val malformed = implements_token_kinds("mock MockUser - UserTrait:", 5)
+        expect(malformed[2]).to_equal(TOK_MINUS)
+        expect(malformed[2] == TOK_KW_IMPLEMENTS).to_equal(false)
+
+    it "keeps existing hard keywords reserved":
+        expect(keyword_lookup("impl")).to_equal(TOK_KW_IMPL)
+        expect(keyword_lookup("val")).to_equal(TOK_KW_VAL)
+        expect(keyword_lookup("implements_more")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("Implements")).to_equal(TOK_IDENT)
+
+    it "parses a parameter reference as Ident rather than numeric negation":
+        expect(is_implements_identifier(implements_expression("implements"))).to_equal(true)
+
+    it "preserves the identifier receiver of a member call":
+        val expression = implements_expression("implements.len()")
+        var correct = false
+        match expression.kind:
+            case ExprKind.MethodCall(receiver, name, arguments):
+                correct = is_implements_identifier(receiver) and name == "len" and arguments.len() == 0
+            case ExprKind.Call(callee, arguments):
+                match callee.kind:
+                    case ExprKind.Field(receiver, name):
+                        correct = is_implements_identifier(receiver) and name == "len" and arguments.len() == 0
+                    case _: ()
+            case _: ()
+        expect(correct).to_equal(true)
+
+    it "retains index, positional argument and named argument references":
+        var correct_index = false
+        match implements_expression("implements[0]").kind:
+            case ExprKind.Index(receiver, index):
+                match index.kind:
+                    case ExprKind.IntLit(value): correct_index = is_implements_identifier(receiver) and value == 0
+                    case _: ()
+            case _: ()
+        expect(correct_index).to_equal(true)
+        var correct_call = false
+        match implements_expression("consume(implements)").kind:
+            case ExprKind.Call(callee, arguments):
+                correct_call = arguments.len() == 1 and is_implements_identifier(arguments[0].value)
+            case _: ()
+        expect(correct_call).to_equal(true)
+        var correct_named = false
+        match implements_expression("SimpleProviderRecordV1(interface_groups: implements)").kind:
+            case ExprKind.Call(callee, arguments):
+                correct_named = arguments.len() == 1 and arguments[0].has_name and arguments[0].name == "interface_groups" and is_implements_identifier(arguments[0].value)
+            case _: ()
+        expect(correct_named).to_equal(true)
+
+    it "retains a local binding and its subsequent expression":
+        val module = parse_and_build_module_scoped("fn local() -> i64:\n    val implements = 7\n    implements\n", "implements_local.spl", false)
+        expect(parser_get_errors().len()).to_equal(0)
+        val function = module.functions["local"]
+        expect(function.body.stmts.len()).to_equal(2)
+        var correct_binding = false
+        match function.body.stmts[0].kind:
+            case StmtKind.Val(name, annotation, value):
+                match value.kind:
+                    case ExprKind.IntLit(number): correct_binding = name == "implements" and number == 7
+                    case _: ()
+            case _: ()
+        expect(correct_binding).to_equal(true)
+        var correct_reference = false
+        match function.body.stmts[1].kind:
+            case StmtKind.Expr(expression): correct_reference = is_implements_identifier(expression)
+            case _: ()
+        expect(correct_reference).to_equal(true)
+
+    it "preserves unary minus on both implements and numeric operands":
+        var identifier_negation = false
+        match implements_expression("-implements").kind:
+            case ExprKind.Unary(operator, value): identifier_negation = operator == UnaryOp.Neg and is_implements_identifier(value)
+            case _: ()
+        expect(identifier_negation).to_equal(true)
+        var numeric_negation = false
+        match implements_expression("-1").kind:
+            case ExprKind.Unary(operator, value):
+                match value.kind:
+                    case ExprKind.IntLit(number): numeric_negation = operator == UnaryOp.Neg and number == 1
+                    case _: ()
+            case _: ()
+        expect(numeric_negation).to_equal(true)
+
+    it "preserves binary subtraction with an implements left operand":
+        var subtraction = false
+        match implements_expression("implements - 1").kind:
+            case ExprKind.Binary(operator, left, right):
+                match right.kind:
+                    case ExprKind.IntLit(number): subtraction = operator == BinOp.Sub and is_implements_identifier(left) and number == 1
+                    case _: ()
+            case _: ()
+        expect(subtraction).to_equal(true)
+
+    it "emits a statement newline after a bare implements identifier":
+        val kinds = implements_token_kinds("implements\n", 2)
+        expect(kinds[0]).to_equal(TOK_IDENT)
+        expect(kinds[1]).to_equal(TOK_NEWLINE)
+
+    it "continues rejecting malformed member and missing unary operands":
+        expect(parse_module_silent_checked("fn broken() -> i64:\n    implements.\n", "implements_bad_member.spl")).to_equal(true)
+        expect(parse_module_silent_checked("fn broken() -> i64:\n    -\n", "implements_missing_operand.spl")).to_equal(true)
