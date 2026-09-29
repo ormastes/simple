@@ -16,7 +16,7 @@ for these additions remain planned; this manual does not claim they pass yet.
 
 The user initializer creates an outer user-owned `.spipe` Git repository and
 an inner `.spipe` common gitlink in the existing compatibility mode.
-The September 9 target uses canonical `~/spipe`, a private `~/.spipe` workspace
+The September 29 deployment uses canonical `~/.spipe`, a private `~/spipe` workspace
 with a common link, and Simple's `.spipe/common` route to that checkout. Company,
 department, project, user, host, and account-specific mount paths have separate
 owners. This target remains planned until integrated execution evidence exists.
@@ -31,7 +31,7 @@ and does not duplicate scope registrations.
 The project bootstrap initializes the common revision already recorded by the
 clone and registers the exact checkout in machine-local configuration. It also
 recognizes the legacy `.spipe/spipe` layout without moving dirty state.
-The latest locator target prefers project `.spipe/common` and `~/spipe`; legacy
+The latest locator target prefers project `.spipe/common` and `~/.spipe`; legacy
 project submodules remain migration fallbacks. Existing revision requirements
 must match the selected checkout or yield an explicit incompatibility result.
 
@@ -55,3 +55,13 @@ The separately supplied Node package's reported 25 fixture tests are research
 input, not evidence for the executable path above. CLI/MCP schema-2 integration,
 native-platform behavior, shared locator parity, and migration recovery remain
 acceptance work recorded in the companion system-test plan.
+
+## September 29 home routing evidence
+
+Run `sh test/03_system/app/spipe/feature/spipe_home_routes_contract_test.shs`.
+The isolated shell fixture passed on Linux: default home routes resolve through
+`~/spipe/common`, repeated setup preserves routes, conflicting private content
+remains unchanged, explicit roots with spaces work, and identical roots fail.
+The fixture uses a minimal core delegate to isolate the Simple wrapper contract;
+it does not establish SPipe core installation or scope registration correctness.
+The PowerShell counterpart requires native Windows verification.

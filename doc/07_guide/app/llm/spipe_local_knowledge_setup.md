@@ -4,25 +4,30 @@ SPipe keeps reusable common knowledge separate from company, organization,
 project, user, and host knowledge. The project records the common revision;
 machine-specific checkout paths remain in a private local registry.
 
-## Existing first-user setup compatibility
+## Canonical home deployment
 
-From a SPipe checkout on Unix:
+The September 29 layout places reusable core at `~/.spipe` and private/local
+knowledge at `~/spipe`. `~/spipe/common` links to `~/.spipe`; project
+`.spipe/common` links through that private workspace route. Set `SPIPE_HOME`
+to override core and `SPIPE_WORKSPACE` to override the private workspace.
+Keep these roots distinct, including when either is a symlink.
 
-```sh
-sh scripts/setup-local-knowledge.sh --mode user
+```text
+~/.spipe/                 reusable SPipe core checkout
+~/spipe/                  private/local workspace
+├── common -> ~/.spipe
+├── companies/            authorized company and organization knowledge
+├── projects/             independent project registrations
+├── users/                personal knowledge and private mount paths
+└── runtime/              local cache, retained state, and active runs
 ```
 
-The default creates a user-owned repository at `~/.spipe`, mounts common SPipe
-as `~/.spipe/.spipe`, creates `organization/` and `projects/`, and ignores
-`local/`. It does not create a remote or upload content. PowerShell users run
-`scripts/setup-local-knowledge.ps1 -Mode user`.
-
-The September 9 target layout uses common at `~/spipe`, a private workspace at
-`~/.spipe`, and `~/.spipe/common -> ~/spipe`. Simple's common route should point
-through `.spipe/common` to the canonical checkout after reviewed integration. The earlier nested
-installation remains a migration fallback. The supplied Node install/workspace
-scripts are reference-package proposals; their integration is not established
-by this guide. Continue using the available host bootstrap until that cutover.
+From the core checkout, run `sh scripts/setup-local-knowledge.sh --mode user`
+(or `scripts/setup-local-knowledge.ps1 -Mode user`). Setup creates no remote
+and uploads no private content. Use the core installer for a new installation.
+Existing reversed-layout directories must be inventoried and migrated explicitly;
+setup must preserve existing data and reject a conflicting `common` link.
+Legacy project submodules remain compatibility routes with their pins intact.
 
 ## After cloning a project
 
@@ -41,8 +46,8 @@ with `.spipe/spipe` are supported without moving or overwriting their state.
 The reusable SPipe process surfaces are linked into this repository with:
 
 ```sh
-sh .spipe/spipe/scripts/setup-spipe-links.sh --dry-run
-sh .spipe/spipe/scripts/setup-spipe-links.sh
+sh .spipe/common/scripts/setup-spipe-links.sh --dry-run
+sh .spipe/common/scripts/setup-spipe-links.sh
 ```
 
 The Unix setup script follows the configured `host_process_doc` root, matching
@@ -94,7 +99,7 @@ indexes or summaries. Rebalancing produces a proposal by default. Publishing
 organization/project material into common requires owner approval and a
 sanitized independent artifact.
 
-The canonical reusable instructions live in the SPipe common submodule under
+The canonical reusable instructions live in the SPipe common checkout under
 `doc/00_llm_process/knowledge/` and the `knowledge-ownership` skill.
 
 ## Workspace and research integration target
@@ -107,7 +112,7 @@ knowledge to `hosts/machines/<host>/`, and private account paths to
 setup; runtime probes provide actual capability evidence.
 
 The canonical resolver selects explicit `SPIPE_HOME`, project `.spipe/common`,
-`~/spipe`, `~/.spipe/common`, direct current SPipe package, then verified
+`~/.spipe`, `~/spipe/common`, direct current SPipe package, then verified
 legacy mounts. This latest order supersedes the supplied package's
 project-local-first preference. Existing pins still require validation; route
 migration never silently upgrades or removes a recorded submodule.

@@ -36,7 +36,7 @@ Primary manual step text:
 | Test | Requirements | Observable assertion |
 |---|---|---|
 | Legacy first-user install | REQ-001, REQ-002 | Explicit compatibility mode retains outer `.spipe` and inner pinned `.spipe` gitlink with existing routes. |
-| Preferred global install | REQ-001, REQ-002 | Approved common checkout is `~/spipe`; private workspace common link and Simple `.spipe/common` resolve to it. |
+| Preferred global install | REQ-001, REQ-002 | Approved common checkout is `~/.spipe`; private workspace common link and Simple `.spipe/common` resolve to it. |
 | Project clone | REQ-002, REQ-004 | Recorded common gitlink is initialized at its existing commit; local registration resolves the exact project. |
 | Repeat install | REQ-007 | Existing owned file bytes and common commit remain identical; no duplicate registration. |
 | Personal project | REQ-003, REQ-008 | Common plus project setup succeeds with no organization and no LLM executable. |
