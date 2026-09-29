@@ -370,7 +370,14 @@ _mail_config_query() {
     /^accounts:[[:space:]]*$/ { in_accounts=1; current=""; next }
     /^default_account:[[:space:]]*/ {
       if (mode=="default") { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
+      if (mode=="top" && key=="default_account") { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
       next
+    }
+    /^[a-zA-Z_][a-zA-Z0-9_-]*:[[:space:]]*/ {
+      if (mode=="top") {
+        field=$0; sub(/:.*/, "", field)
+        if (field==key) { s=$0; sub(/^[^:]*:[[:space:]]*/, "", s); print unquote(s) }
+      }
     }
     in_accounts && /^[^ #[:space:]][^:]*:/ { in_accounts=0; current="" }
     in_accounts && /^  [^ #[:space:]][^:]*:[[:space:]]*$/ {
@@ -414,6 +421,31 @@ mail_config_get_default() {
     return
   fi
   _mail_config_query default
+}
+
+mail_config_get_value() {
+  local key="$1"
+  [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || return 2
+  if _mail_config_json; then
+    jq -r --arg k "$key" '.[$k] // empty' < "$MAIL_CONFIG_FILE" 2>/dev/null
+    return
+  fi
+  _mail_config_query top "" "$key"
+}
+
+mail_config_set_value() {
+  local key="$1" value="$2" tmp
+  [[ "$key" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]] || return 2
+  mail_config_init
+  tmp=$(mktemp "${MAIL_CONFIG_FILE}.tmp.XXXXXX")
+  if _mail_config_json; then
+    jq --arg k "$key" --arg v "$value" '.[$k] = $v' < "$MAIL_CONFIG_FILE" > "$tmp" || return 1
+  else
+    printf '%s: %s\n' "$key" "$(jq -n --arg v "$value" '$v')" > "$tmp"
+    awk -v wanted="$key" '$0 !~ ("^" wanted ":[[:space:]]*")' "$MAIL_CONFIG_FILE" >> "$tmp"
+  fi
+  mv "$tmp" "$MAIL_CONFIG_FILE"
+  chmod 600 "$MAIL_CONFIG_FILE"
 }
 
 mail_config_set_default() {
