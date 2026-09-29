@@ -1,0 +1,59 @@
+use std.spec
+use compiler.hir.hir_lowering.types.{hirlowering_new}
+use compiler.hir.hir_lowering.context_helpers.*
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+describe "HIR frozen-registry memo ownership":
+    it "retains shared index rows across reclaimed module scopes":
+        var lowering = hirlowering_new()
+        expect(rt_transient_array_scope_begin()).to_be(true)
+        lowering.begin_module("first.spl")
+        lowering.field_package_dep_memo["pkg Item"] = 7
+        lowering.surface_package_name_memo["pkg.owner"] = "pkg"
+        lowering.surface_decl_owners["Item"] = [7, 9]
+        lowering.package_sibling_names["pkg"] = ["pkg.owner"]
+        lowering.package_sibling_canons["pkg"] = ["pkg.owner"]
+        lowering.surface_index_by_name["pkg.owner"] = 7
+        lowering.explicit_dep_target_memo["7 Item"] = 9
+        lowering.explicit_dep_item_memo["7 Item"] = "RenamedItem"
+        lowering.impl_index_built["1 7"] = true
+        lowering.impl_index_positions["1 7 Item"] = [2, 5]
+        lowering.name_index_built["1 7"] = true
+        lowering.name_index_positions["1 7 C Item"] = 3
+        lowering.reexport_root_memo_index["7 Item"] = 9
+        lowering.reexport_root_memo_item["7 Item"] = "RenamedItem"
+        expect(rt_transient_array_scope_pause()).to_be(true)
+        expect(lowering.promote_registry_memos_transient_owner()).to_be(true)
+        expect(rt_transient_array_scope_end()).to_be(true)
+
+        expect(rt_transient_array_scope_begin()).to_be(true)
+        lowering.begin_module("second.spl")
+        # Populate another row after promotion. A permanent dictionary root
+        # still needs traversal to retain new transient keys and values.
+        lowering.impl_index_positions["1 9 Other"] = [11, 13]
+        expect(rt_transient_array_scope_pause()).to_be(true)
+        expect(lowering.promote_registry_memos_transient_owner()).to_be(true)
+        expect(rt_transient_array_scope_end()).to_be(true)
+
+        expect(lowering.field_package_dep_memo["pkg Item"]).to_equal(7)
+        expect(lowering.surface_package_name_memo["pkg.owner"]).to_equal("pkg")
+        expect(lowering.surface_decl_owners["Item"]).to_equal([7, 9])
+        expect(lowering.package_sibling_names["pkg"]).to_equal(["pkg.owner"])
+        expect(lowering.package_sibling_canons["pkg"]).to_equal(["pkg.owner"])
+        expect(lowering.surface_index_by_name["pkg.owner"]).to_equal(7)
+        expect(lowering.explicit_dep_target_memo["7 Item"]).to_equal(9)
+        expect(lowering.explicit_dep_item_memo["7 Item"]).to_equal("RenamedItem")
+        expect(lowering.impl_index_built["1 7"]).to_be(true)
+        expect(lowering.impl_index_positions["1 7 Item"]).to_equal([2, 5])
+        expect(lowering.impl_index_positions["1 9 Other"]).to_equal([11, 13])
+        expect(lowering.name_index_built["1 7"]).to_be(true)
+        expect(lowering.name_index_positions["1 7 C Item"]).to_equal(3)
+        expect(lowering.reexport_root_memo_index["7 Item"]).to_equal(9)
+        expect(lowering.reexport_root_memo_item["7 Item"]).to_equal("RenamedItem")
+
+    it "rejects promotion outside a paused transient scope":
+        var lowering = hirlowering_new()
+        expect(lowering.promote_registry_memos_transient_owner()).to_be(false)
