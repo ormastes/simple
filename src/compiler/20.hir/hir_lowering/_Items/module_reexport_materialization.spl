@@ -1,6 +1,7 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering.hir_phase_profile.{hir_ambig_dep_trace, hir_ambig_dep_trace_enabled, hir_phase_profile_now, hir_phase_profile_add, hir_phase_profile_count_qtype, hir_phase_profile_count_explicit_scan, HIR_PROF_RIS_SIGTYPE, HIR_PROF_RIS_CALLABLE_DEPS, HIR_PROF_RIS_DECLARED_DEP, HIR_PROF_RIS_EXPLICIT_DEP, HIR_PROF_RIS_PAYLOAD, HIR_PROF_RIS_METHODS}
 use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReexportWalkState}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -17,7 +18,7 @@ use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_export_origin_index_lookup, ModuleSurfaceExportOriginLookup}
 use compiler.hir.hir_lowering.module_surface_export_index.{module_surface_syntactically_exports}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.expressions.*
@@ -64,7 +65,7 @@ impl HirLowering:
         var depth = 0
         while depth < 8:
             val current = self.module_surfaces.surfaces[current_index]
-            val origin = module_surface_export_origin_index_lookup(
+            val origin: ModuleSurfaceExportOriginLookup = module_surface_export_origin_index_lookup(
                 current.export_origin_index, current_item)
             if not origin.found: break
             val owner_index = hir_export_origin_surface_index(
@@ -94,7 +95,7 @@ impl HirLowering:
         if not module_surface_syntactically_exports(target, item_name):
             return HirReexportSource(found: false, module_index: -1,
                 module_name: "", item_name: "")
-        val hop = self.find_reexport_source(terminal.physical_index, current_item)
+        val hop: HirReexportSource = self.find_reexport_source(terminal.physical_index, current_item)
         if hop.found: return hop
         HirReexportSource(found: false, module_index: -1,
             module_name: "", item_name: "")
@@ -124,7 +125,7 @@ impl HirLowering:
         self.report_reexport_chase_stats()
         val facade_mod = self.module_surfaces.surfaces[facade_index]
         val origin_index: ModuleSurfaceExportOriginIndex = facade_mod.export_origin_index
-        val origin_lookup = module_surface_export_origin_index_lookup(origin_index, wanted)
+        val origin_lookup: ModuleSurfaceExportOriginLookup = module_surface_export_origin_index_lookup(origin_index, wanted)
         if origin_lookup.found:
             val origin_index_value = hir_export_origin_surface_index(
                 self.module_surfaces, origin_lookup.owner_module)
@@ -197,7 +198,7 @@ impl HirLowering:
                             module_index: next_index,
                             module_name: next_mod.preferred_registry_name,
                             item_name: source_item)
-                    val deeper = self.find_reexport_source_walk(
+                    val deeper: HirReexportSource = self.find_reexport_source_walk(
                         next_index, source_item, depth + 1, state)
                     if deeper.found:
                         return deeper
@@ -217,7 +218,7 @@ impl HirLowering:
                             module_index: sibling_index,
                             module_name: sibling.preferred_registry_name,
                             item_name: wanted)
-                    val deeper = self.find_reexport_source_walk(
+                    val deeper: HirReexportSource = self.find_reexport_source_walk(
                         sibling_index, wanted, depth + 1, state)
                     if deeper.found:
                         return deeper
@@ -236,7 +237,7 @@ impl HirLowering:
                             module_index: route_target_index,
                             module_name: route_target.preferred_registry_name,
                             item_name: exp_source)
-                    val routed = self.find_reexport_source_walk(
+                    val routed: HirReexportSource = self.find_reexport_source_walk(
                         route_target_index, exp_source, depth + 1, state)
                     if routed.found:
                         return routed
@@ -247,7 +248,7 @@ impl HirLowering:
                         module_name: facade_mod.preferred_registry_name,
                         item_name: exp_source)
                 if exp_source != wanted:
-                    val alias_source = self.find_reexport_source_walk(
+                    val alias_source: HirReexportSource = self.find_reexport_source_walk(
                         facade_index, exp_source, depth + 1, state)
                     if alias_source.found:
                         return alias_source
@@ -309,7 +310,7 @@ impl HirLowering:
                                     # under the same uniqueness rule. Without
                                     # this the shape was only rescued by the
                                     # SIMPLE_BOOTSTRAP=1 unique-owner fallback.
-                                    val via_sibling = self.find_reexport_source_walk(
+                                    val via_sibling: HirReexportSource = self.find_reexport_source_walk(
                                         sibling_index, wanted, depth + 1, state)
                                     if via_sibling.found and
                                        sibling_match_index != via_sibling.module_index:
@@ -337,18 +338,19 @@ impl HirLowering:
                 item_name: dependency,
                 item_kind: kind,
                 module_key: imported_mod_name)
-        val hop = self.find_reexport_source(
+        val hop: HirReexportSource = self.find_reexport_source(
             imported_mod.physical_index, dependency)
+        val source_item = hop.item_name
         if hop.found:
             val source_index = hop.module_index
             if source_index >= 0:
                 val terminal = self.module_surfaces.surfaces[source_index]
-                val kind = hir_module_item_terminal_kind(terminal, hop.item_name)
+                val kind = hir_module_item_terminal_kind(terminal, source_item)
                 if kind != "":
                     return HirMaterializedPayloadOrigin(
                         found: true,
                         module_name: hir_pkg_canonical_module_name(terminal.module_name),
-                        item_name: hop.item_name,
+                        item_name: source_item,
                         item_kind: kind,
                         module_key: terminal.preferred_registry_name)
         # Step 3: an explicit named `use other.mod.{Dep}` written by the enum's
@@ -399,16 +401,17 @@ impl HirLowering:
                                 item_name: item_name,
                                 item_kind: kind,
                                 module_key: target.preferred_registry_name)
-                    val hop = self.find_reexport_source(
+                    val hop: HirReexportSource = self.find_reexport_source(
                         target.physical_index, item_name)
+                    val hop_item = hop.item_name
                     if hop.found and hop.module_index >= 0:
                         val terminal = self.module_surfaces.surfaces[hop.module_index]
-                        val hop_kind = hir_module_item_terminal_kind(terminal, hop.item_name)
+                        val hop_kind = hir_module_item_terminal_kind(terminal, hop_item)
                         if hop_kind != "":
                             return HirMaterializedPayloadOrigin(
                                 found: true,
                                 module_name: hir_pkg_canonical_module_name(terminal.module_name),
-                                item_name: hop.item_name,
+                                item_name: hop_item,
                                 item_kind: hop_kind,
                                 module_key: terminal.preferred_registry_name)
                 item_index = item_index + 1
@@ -840,7 +843,7 @@ impl HirLowering:
                     else: item_name
                     if local_name == dependency and target_index >= 0 and
                        target_index < self.module_surfaces.surfaces.len():
-                        val candidate = self.canonical_callable_dependency_candidate(
+                        val candidate: HirReexportSource = self.canonical_callable_dependency_candidate(
                             target_index, item_name)
                         val candidate_target = candidate.module_index
                         val candidate_item = candidate.item_name
@@ -865,7 +868,7 @@ impl HirLowering:
                 # when every matching glob route reaches one terminal.
                 if item_start == item_end and target_index >= 0 and
                    target_index < self.module_surfaces.surfaces.len():
-                    val candidate = self.canonical_callable_dependency_candidate(
+                    val candidate: HirReexportSource = self.canonical_callable_dependency_candidate(
                         target_index, dependency)
                     val candidate_target = candidate.module_index
                     val candidate_item = candidate.item_name

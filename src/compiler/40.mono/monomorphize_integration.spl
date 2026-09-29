@@ -18,6 +18,7 @@ use compiler.hir.hir_types.*
 # with a synthesized span (span_file empty, line 0) and hard-errors.
 use compiler.hir.hir_types.{HirModule}
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_definitions.{HirFunction}
 use compiler.monomorphize.engine.*
 use compiler.monomorphize.types.ConcreteType
 use compiler.monomorphize.type_subst.*
@@ -195,8 +196,10 @@ impl MonomorphizationPass:
             val module: HirModule = modules[name]
             self.current_module = name
             var funcs: Dict<SymbolId, HirFunction> = {}
-            for sym_id in sorted_symbol_keys(module.functions):
-                val func: HirFunction = module.functions[sym_id]
+            val function_values: [HirFunction] = module.functions.values()
+            for function_index in sorted_function_indices(function_values):
+                val func: HirFunction = function_values[function_index]
+                val sym_id: SymbolId = func.symbol
                 if is_generic_function(func) or func.is_generic_template:
                     funcs[sym_id] = func
                     continue
@@ -1384,27 +1387,36 @@ impl MonomorphizationPass:
 # Helper Functions
 # ============================================================================
 
-fn sorted_symbol_keys(functions: Dict<SymbolId, HirFunction>) -> [SymbolId]:
-    """Function keys in ascending symbol-id order (deterministic root order)."""
-    var keys: [SymbolId] = []
-    for k in functions.keys():
-        val kt: SymbolId = k
-        keys = keys.push(kt)
-    # insertion sort: module function counts are small and this keeps the
-    # comparison on a typed field rather than an ANY-erased key
+fn sorted_function_indices(functions: [HirFunction]) -> [i64]:
+    """Value-array indices in ascending symbol-id order (deterministic roots).
+
+    Native erased dictionaries compare aggregate SymbolId keys by identity.
+    Sorting copied keys and looking them up loses the function payload. Keep
+    the values directly; sort only scalar indices so swaps never copy bodies.
+    """
+    var indices: [i64] = []
+    var symbol_ids: [i64] = []
+    var function_index = 0
+    while function_index < functions.len():
+        val function: HirFunction = functions[function_index]
+        val symbol: SymbolId = function.symbol
+        indices.push(function_index)
+        symbol_ids.push(symbol.id)
+        function_index = function_index + 1
+    # Preserve the existing stable insertion sort and ascending numeric order.
     var i = 1
-    while i < keys.len():
-        val cur: SymbolId = keys[i]
+    while i < indices.len():
+        val cur: i64 = indices[i]
         var j = i - 1
         while j >= 0:
-            val prev: SymbolId = keys[j]
-            if prev.id <= cur.id:
+            val prev: i64 = indices[j]
+            if symbol_ids[prev] <= symbol_ids[cur]:
                 break
-            keys[j + 1] = prev
+            indices[j + 1] = prev
             j = j - 1
-        keys[j + 1] = cur
+        indices[j + 1] = cur
         i = i + 1
-    keys
+    indices
 
 fn is_generic_function(func: HirFunction) -> bool:
     """Check if a function has type parameters.

@@ -12,6 +12,7 @@ root=$(CDPATH= cd -- "$entry_dir/../.." && pwd -P) || exit 70
 contract="$entry_dir/bootstrap-scheduler-contract.shs"
 graph_contract="$entry_dir/bootstrap-graph.sdn"
 . "$contract"
+. "$entry_dir/bootstrap-host-capacity.shs"
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 BOOTSTRAP_STAGE3_VERSION_ROOT=$root
 export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_VERSION_ROOT
@@ -206,69 +207,14 @@ else
 fi
 memory_total=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB:-}
 if [ -z "$memory_total" ]; then
-    # Per-OS total-physical-memory probe. /proc/meminfo alone (the old
-    # behaviour) is Linux- and MSYS-only; a host with neither -- notably
-    # bare FreeBSD, and stock macOS -- fell through to a fabricated 2048 MiB
-    # below with no signal that the number was made up. sysctl covers
-    # FreeBSD/Darwin; PowerShell covers a Windows host where /proc/meminfo
-    # (MSYS's emulation) is unavailable, e.g. a non-MSYS POSIX layer.
-    case "$(uname -s 2>/dev/null || :)" in
-        Darwin)
-            _bs_mem_bytes=$(sysctl -n hw.memsize 2>/dev/null || :)
-            case "$_bs_mem_bytes" in ''|*[!0-9]*) _bs_mem_bytes="" ;; esac
-            [ -z "$_bs_mem_bytes" ] || memory_total=$((_bs_mem_bytes / 1048576))
-            unset _bs_mem_bytes
-            ;;
-        FreeBSD)
-            _bs_mem_bytes=$(sysctl -n hw.physmem 2>/dev/null || :)
-            case "$_bs_mem_bytes" in ''|*[!0-9]*) _bs_mem_bytes="" ;; esac
-            [ -z "$_bs_mem_bytes" ] || memory_total=$((_bs_mem_bytes / 1048576))
-            unset _bs_mem_bytes
-            ;;
-        MINGW*|MSYS*|CYGWIN*)
-            if [ -r /proc/meminfo ]; then
-                memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
-            fi
-            case "$memory_total" in ''|*[!0-9]*) memory_total="" ;; esac
-            if [ -z "$memory_total" ] && command -v powershell.exe >/dev/null 2>&1; then
-                if command -v timeout >/dev/null 2>&1; then
-                    _bs_mem_kib=$(timeout 30 powershell.exe -NoProfile -NonInteractive -Command \
-                        "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize" \
-                        </dev/null 2>/dev/null | tr -d '\r\n ') || :
-                else
-                    _bs_mem_kib=$(powershell.exe -NoProfile -NonInteractive -Command \
-                        "(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize" \
-                        </dev/null 2>/dev/null | tr -d '\r\n ') || :
-                fi
-                case "$_bs_mem_kib" in ''|*[!0-9]*) _bs_mem_kib="" ;; esac
-                [ -z "$_bs_mem_kib" ] || memory_total=$((_bs_mem_kib / 1024))
-                unset _bs_mem_kib
-            fi
-            ;;
-        *)
-            if [ -r /proc/meminfo ]; then
-                memory_total=$(awk '/^MemTotal:/ {print int($2 / 1024); exit}' /proc/meminfo)
-            fi
-            ;;
-    esac
+    memory_total=$(bootstrap_host_memory_mib) || memory_total=
 fi
-case "$memory_total" in ''|*[!0-9]*|0) memory_total="" ;; esac
-# memory_total_known gates memory_enforcement below: when the probe found
-# nothing real, the compiler engine must NOT be capped against a fabricated
-# number (a 2048 MiB stand-in below any seed or cargo build broke mold and
-# every other build on hosts without /proc, notably bare FreeBSD). The
-# fabricated value is kept only so the arithmetic below (which every code
-# path still reads) has a positive integer to work with; it never reaches
-# `ulimit -v` because memory_enforcement stays "none" in that case.
 memory_total_known=1
-if [ -z "$memory_total" ]; then
-    memory_total_known=0
-    memory_total=2048
-fi
-# Reservation used only for the engine-side critical_memory accounting
-# below; the qualifier itself intentionally runs WITHOUT a ulimit -v cap
-# (see run_qualifier) because mold's output-buffer reservation fails under
-# any finite RLIMIT_AS, and a virtual cap never bounded resident memory.
+case "$memory_total" in
+    ''|*[!0-9]*|0) memory_total_known=0; memory_total=2048 ;;
+esac
+# Unknown capacity serializes; the placeholder never becomes a memory limit.
+# An independently supplied CRITICAL_MEMORY_MIB ceiling remains authoritative.
 qualification_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB:-2048}
 # `ulimit -v` limits address reservations, not resident memory. Mold reserves
 # more than 16 GiB of virtual space while linking even a tiny Stage-2 probe;
@@ -276,6 +222,8 @@ qualification_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB:-2048}
 qualification_virtual_memory=${SIMPLE_BOOTSTRAP_QUALIFICATION_VIRTUAL_MEMORY_MIB:-24576}
 memory_safety=${SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_SAFETY_MIB:-1024}
 critical_memory=${SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB:-}
+critical_memory_explicit=0
+[ -z "$critical_memory" ] || critical_memory_explicit=1
 case "$qualification_memory:$memory_safety" in
     *[!0-9:]*|0:*|*:0) echo 'bootstrap-scheduler-error: invalid memory reservation' >&2; exit 2 ;;
 esac
@@ -288,11 +236,13 @@ if [ -z "$critical_memory" ]; then
 fi
 case "$critical_memory" in ''|*[!0-9]*|0) echo 'bootstrap-scheduler-error: invalid compiler memory limit' >&2; exit 2 ;; esac
 memory_enforcement=none
-if [ "$memory_total_known" -eq 1 ] && (ulimit -v 1048576) 2>/dev/null; then
+if { [ "$memory_total_known" -eq 1 ] || [ "$critical_memory_explicit" -eq 1 ]; } &&
+   (ulimit -v 1048576) 2>/dev/null; then
     memory_enforcement=ulimit-v
 fi
 schedule_mode=speculative
-if [ "$qualification_cpu" -eq 0 ] || [ "$memory_enforcement" = none ] ||
+if [ "$memory_total_known" -eq 0 ] || [ "$qualification_cpu" -eq 0 ] ||
+   [ "$memory_enforcement" = none ] ||
    [ "$memory_total" -lt $((qualification_memory + critical_memory + memory_safety)) ]; then
     schedule_mode=serialized-resource-guard
     qualification_cpu=$cpu_total
