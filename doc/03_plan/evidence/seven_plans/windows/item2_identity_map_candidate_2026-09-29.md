@@ -66,7 +66,7 @@ scope. No native compiler or linker was invoked by this interpreter check.
 
 This is authorized Phase-1 diagnostic evidence, not self-hosted SPipe admission
 or Windows/Linux completion. Native execution, required compiler/lib/MCP/LSP
-checks, docgen/sspec-maintain, coverage, and performance qualification remain
+checks, admitted docgen/sspec-maintain, coverage, and performance qualification remain
 open. Five broad system checkers in the existing distributed-database system
 spec remain fail-fast; none was replaced by a placeholder success.
 
@@ -76,3 +76,13 @@ authority fencing, signed receipt rollback detection, transport CAS/read-back,
 CI/provider ingestion, retention, and two-clone recovery. This candidate helper
 does not satisfy those requirements. Guides and shared process skills are
 unchanged because no user-facing command or workflow was added.
+
+## Diagnostic manual generation (2026-09-30)
+
+The previously recorded Phase 1 runner generated the mirrored manual from
+the final seven-case executable spec using `spipe-docgen` with `--no-index`.
+It exited 0 and reported one complete document and zero stubs. The generated
+steps and concrete identity/high-water assertions were inspected. This replaces
+the earlier short hand-authored companion, but does not claim admitted SPipe
+execution or maintenance scores. No unchanged passing test was rerun.
+Log: `build/native_probe/item2-identity-map/docgen.log`.
