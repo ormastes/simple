@@ -1007,6 +1007,21 @@ fn _driver_receipt_first_difference_v1(expected: text, actual: text) -> text:
 pub fn driver_native_capsule_result_valid_v1(capsule: FrozenNativeModuleCapsuleV1) -> bool:
     driver_native_capsule_result_reason_v1(capsule) == ""
 
+# The caller has already admitted the capsule receipt and object bytes. This
+# keeps a compact post-codegen path binding for the cold graph publisher; warm
+# builds and compiles without a frozen HIR inventory pay no extra allocation.
+pub fn driver_cold_hir_record_verified_object_v1(
+    ctx: CompileContext, module_name: text, object_path: text
+) -> text:
+    if ctx.cold_hir_typed_receipts.len() == 0:
+        return ""
+    if module_name == "" or object_path == "":
+        return "cold-hir-object-identity-invalid"
+    if ctx.cold_hir_native_object_paths.has(module_name):
+        return "cold-hir-object-duplicate:{module_name}"
+    ctx.cold_hir_native_object_paths[module_name] = object_path
+    ""
+
 # The owner-only cache checkpoint is the ONE failure path in this file that never
 # printed anything: `_compile_selected_module` routes its failures through
 # `_aot_compile_failure` (which prints at the raising site), but a capsule that
@@ -1861,6 +1876,10 @@ impl CompilerDriver:
                                 and scoped_outputs[0] == cached_capsule.object_path
                                 and driver_native_capsule_result_valid_v1(cached_capsule)
                     if capsule_matches:
+                        val handoff_reason = driver_cold_hir_record_verified_object_v1(
+                            ctx, name, scoped_outputs[0])
+                        if handoff_reason != "":
+                            return CompileResult.CodegenError(handoff_reason)
                         print "[NATIVE] cache hit: {name}"
                         cache_hit_count = cache_hit_count + 1
                         # A verified cache hit IS an OK outcome: the objects were
@@ -2076,6 +2095,10 @@ impl CompilerDriver:
                 else:
                     capsule.reason
                 if capsule.ok and capsule_reason == "":
+                    val handoff_reason = driver_cold_hir_record_verified_object_v1(
+                        ctx, name, obj_path)
+                    if handoff_reason != "":
+                        return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
                     if ctx.demand_scc_publication != nil:
