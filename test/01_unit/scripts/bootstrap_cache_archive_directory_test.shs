@@ -1,0 +1,180 @@
+#!/bin/sh
+# Exercises the production archive helpers with real attempt/provenance paths.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-archive-tests}
+mkdir -p "$parent"
+parent=$(CDPATH= cd -- "$parent" && pwd -P)
+bootstrap_cache_storage_path "$parent" || { echo 'test requires a canonical absolute fixture root' >&2; exit 64; }
+[ "$(id -u)" -ne 0 ] || { echo 'test requires an unprivileged Linux user' >&2; exit 64; }
+work=$(mktemp -d "$parent/archive.XXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
+fail() { echo "FAIL bootstrap cache archive: $*" >&2; exit 1; }
+fixture_cleanup() {
+  status=$?
+  printf 'Retained archive fixture: %s\n' "$work" >&2
+  return "$status"
+}
+trap fixture_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+root="$work/provenance"
+prior="$root/runtime"
+attempt="$root/attempts/attempt-archive-test"
+mkdir -p "$root" "$root/attempts" "$attempt" "$prior/deps"
+printf 'ordinary attempt log\n' > "$root/compiler.log"
+printf 'sealed runtime payload\n' > "$prior/runtime.bin"
+printf 'dependency payload\n' > "$prior/deps/dependency.bin"
+chmod 0400 "$prior/runtime.bin" "$prior/deps/dependency.bin"
+chmod 0500 "$prior/deps" "$prior"
+
+runtime_inode=$(stat -c %i "$prior")
+file_inode=$(stat -c %i "$prior/runtime.bin")
+runtime_mode=$(stat -c %a "$prior")
+file_mode=$(stat -c %a "$prior/runtime.bin")
+file_uid=$(stat -c %u "$prior/runtime.bin")
+runtime_bytes=$(cat "$prior/runtime.bin")
+retained="$root/runtime.prior-attempt-archive-test"
+
+# Ordinary artifacts use the wrapper file path and remain in the attempt.
+bootstrap_cache_archive_prior "$root/compiler.log" "$attempt" || fail 'ordinary file archive failed'
+[ ! -e "$root/compiler.log" ] || fail 'ordinary file remained at prior location'
+[ "$(cat "$attempt/compiler.log")" = 'ordinary attempt log' ] || fail 'ordinary file bytes changed'
+
+# Directory archives use same-parent rename and preserve the sealed authority.
+bootstrap_cache_archive_prior "$prior" "$attempt" || fail 'sealed directory archive failed'
+[ ! -e "$prior" ] || fail 'prior path still exists after archive'
+[ "$(stat -c %i "$retained")" = "$runtime_inode" ] || fail 'directory inode changed'
+[ "$(stat -c %i "$retained/runtime.bin")" = "$file_inode" ] || fail 'child inode changed'
+[ "$(stat -c %a "$retained")" = "$runtime_mode" ] || fail 'directory mode changed'
+[ "$(stat -c %a "$retained/runtime.bin")" = "$file_mode" ] || fail 'child mode changed'
+[ "$(stat -c %u "$retained/runtime.bin")" = "$file_uid" ] || fail 'child owner changed'
+[ "$(cat "$retained/runtime.bin")" = "$runtime_bytes" ] || fail 'child bytes changed'
+[ "$(cat "$retained/deps/dependency.bin")" = 'dependency payload' ] || fail 'nested child bytes changed'
+printf 'runtime\truntime.prior-attempt-archive-test\n' > "$work/expected-map"
+cmp -s "$work/expected-map" "$attempt/attempt-directories.tsv" || fail 'authoritative mapping mismatch'
+
+mkdir -p "$root/runtime-extra/deps"
+printf 'second sealed runtime\n' > "$root/runtime-extra/runtime.bin"
+printf 'second dependency\n' > "$root/runtime-extra/deps/dep.bin"
+chmod 0400 "$root/runtime-extra/runtime.bin" "$root/runtime-extra/deps/dep.bin"
+chmod 0500 "$root/runtime-extra/deps" "$root/runtime-extra"
+extra_inode=$(stat -c %i "$root/runtime-extra")
+extra_file_inode=$(stat -c %i "$root/runtime-extra/runtime.bin")
+bootstrap_cache_archive_prior "$root/runtime-extra" "$attempt" || fail 'second sealed directory archive failed'
+[ "$(stat -c %i "$root/runtime-extra.prior-attempt-archive-test")" = "$extra_inode" ] || fail 'second directory inode changed'
+[ "$(stat -c %i "$root/runtime-extra.prior-attempt-archive-test/runtime.bin")" = "$extra_file_inode" ] || fail 'second child inode changed'
+[ "$(stat -c %a "$root/runtime-extra.prior-attempt-archive-test")" = 500 ] || fail 'second directory mode changed'
+[ "$(cat "$root/runtime-extra.prior-attempt-archive-test/runtime.bin")" = 'second sealed runtime' ] || fail 'second child bytes changed'
+grep -Fq "runtime-extra$(printf '\t')runtime-extra.prior-attempt-archive-test" "$attempt/attempt-directories.tsv" || fail 'mapping append omitted second directory'
+
+# Both collision and symlink inputs must fail without moving source evidence.
+mkdir "$root/collision"
+mkdir "$root/collision.prior-attempt-collision"
+mkdir "$root/attempts/attempt-collision"
+printf 'collision source\n' > "$root/collision/item"
+printf 'occupied destination\n' > "$root/attempts/attempt-collision/item"
+if bootstrap_cache_archive_prior "$root/collision/item" "$root/attempts/attempt-collision" >"$work/collision.log" 2>&1; then
+  fail 'ordinary destination collision was accepted'
+fi
+[ -f "$root/collision/item" ] || fail 'collision refusal moved source'
+[ -d "$root/collision.prior-attempt-collision" ] || fail 'collision refusal changed target'
+
+mkdir "$root/directory-collision"
+printf 'sealed collision\n' > "$root/directory-collision/file"
+chmod 0400 "$root/directory-collision/file"
+chmod 0500 "$root/directory-collision"
+mkdir "$root/directory-collision.prior-attempt-collision-dir"
+mkdir "$root/attempts/attempt-collision-dir"
+if bootstrap_cache_archive_prior "$root/directory-collision" "$root/attempts/attempt-collision-dir" >"$work/directory-collision.log" 2>&1; then
+  fail 'directory destination collision was accepted'
+fi
+[ -d "$root/directory-collision" ] || fail 'directory collision moved source'
+
+mkdir "$root/symlink-source"
+printf 'symlink payload\n' > "$root/symlink-source/item"
+ln -s "$root/symlink-source/item" "$root/symlink-file"
+mkdir "$root/attempts/attempt-symlink"
+if bootstrap_cache_archive_prior "$root/symlink-file" "$root/attempts/attempt-symlink" >"$work/symlink-file.log" 2>&1; then
+  fail 'symlink file source was accepted'
+fi
+[ -L "$root/symlink-file" ] || fail 'symlink refusal changed source'
+ln -s "$root/symlink-source" "$root/symlink-dir"
+if bootstrap_cache_archive_directory "$root/symlink-dir" "$root/attempts/attempt-symlink" >"$work/symlink-dir.log" 2>&1; then
+  fail 'symlink directory source was accepted'
+fi
+[ -L "$root/symlink-dir" ] || fail 'directory symlink refusal changed source'
+
+# Malformed mappings, missing targets, writable mapped trees, and finalized
+# attempts are rejected before the candidate prior directory is moved.
+for refusal in malformed missing finalized; do
+  mkdir "$root/$refusal"
+  printf '%s\n' "$refusal payload" > "$root/$refusal/file"
+  chmod 0400 "$root/$refusal/file"
+  chmod 0500 "$root/$refusal"
+  mkdir "$root/attempts/attempt-$refusal"
+done
+printf 'not-a-tab-separated-map\n' > "$root/attempts/attempt-malformed/attempt-directories.tsv"
+printf 'old\told.prior-attempt-missing\n' > "$root/attempts/attempt-missing/attempt-directories.tsv"
+mkdir "$root/attempts/attempt-writable"
+mkdir "$root/writable.prior-attempt-writable"
+printf 'writable mapped payload\n' > "$root/writable.prior-attempt-writable/file"
+printf 'writable\twritable.prior-attempt-writable\n' > "$root/attempts/attempt-writable/attempt-directories.tsv"
+printf 'finalized\n' > "$root/attempts/attempt-finalized/attempt-files.sha256"
+for refusal in malformed missing; do
+  if bootstrap_cache_archive_prior "$root/$refusal" "$root/attempts/attempt-$refusal" >"$work/$refusal.log" 2>&1; then
+    fail "$refusal mapping/tree refusal was accepted"
+  fi
+  [ -d "$root/$refusal" ] || fail "$refusal refusal moved source"
+done
+if bootstrap_cache_freeze_attempt "$root/attempts/attempt-writable" >"$work/writable.log" 2>&1; then
+  fail 'nonsealed mapped tree passed attempt freeze'
+fi
+[ ! -e "$root/attempts/attempt-writable/attempt-files.sha256" ] || fail 'writable mapped tree published a receipt'
+mkdir "$root/writable-source"
+printf 'must remain mutable\n' > "$root/writable-source/file"
+mkdir "$root/attempts/attempt-writable-source"
+if bootstrap_cache_archive_prior "$root/writable-source" "$root/attempts/attempt-writable-source" >"$work/writable-source.log" 2>&1; then
+  fail 'writable source directory was archived'
+fi
+[ -d "$root/writable-source" ] || fail 'writable source refusal moved directory'
+[ ! -e "$root/attempts/attempt-writable-source/attempt-directories.tsv" ] || fail 'writable source refusal published mapping'
+mkdir "$root/symlink-child-source"
+printf 'real child\n' > "$root/symlink-child-source/real"
+ln -s real "$root/symlink-child-source/alias"
+chmod 0400 "$root/symlink-child-source/real"
+chmod 0500 "$root/symlink-child-source"
+mkdir "$root/attempts/attempt-symlink-child"
+if bootstrap_cache_archive_prior "$root/symlink-child-source" "$root/attempts/attempt-symlink-child" >"$work/symlink-child.log" 2>&1; then
+  fail 'source directory with child symlink was archived'
+fi
+[ -d "$root/symlink-child-source" ] && [ -L "$root/symlink-child-source/alias" ] || fail 'child symlink refusal changed source'
+[ ! -e "$root/attempts/attempt-symlink-child/attempt-directories.tsv" ] || fail 'child symlink refusal published mapping'
+if bootstrap_cache_archive_prior "$root/finalized" "$root/attempts/attempt-finalized" >"$work/finalized.log" 2>&1; then
+  fail 'finalized attempt was accepted'
+fi
+[ -d "$root/finalized" ] || fail 'finalized attempt refusal moved source'
+
+# Freeze the real attempt and verify both direct and mapped evidence digests.
+bootstrap_cache_freeze_attempt "$attempt" || fail 'attempt freeze rejected valid archive'
+(
+  cd "$attempt"
+  sha256sum -c attempt-files.sha256
+) > "$work/manifest-check.log" || fail 'frozen archive manifest did not validate'
+grep -q 'compiler.log: OK' "$work/manifest-check.log" || fail 'ordinary artifact missing from manifest'
+grep -q '../../runtime.prior-attempt-archive-test/runtime.bin: OK' "$work/manifest-check.log" || fail 'mapped runtime missing from manifest'
+grep -q '../../runtime-extra.prior-attempt-archive-test/runtime.bin: OK' "$work/manifest-check.log" || fail 'second mapped runtime missing from manifest'
+grep -q 'attempt-directories.tsv: OK' "$work/manifest-check.log" || fail 'mapping missing from manifest'
+
+# A changed archived runtime must invalidate the frozen attempt receipt.
+chmod u+w "$retained/runtime.bin"
+printf 'tampered runtime\n' > "$retained/runtime.bin"
+if (cd "$attempt" && sha256sum -c attempt-files.sha256 > "$work/tamper-check.log" 2>&1); then
+  fail 'tampered mapped runtime passed receipt verification'
+fi
+grep -q 'FAILED' "$work/tamper-check.log" || fail 'tamper failure lacked digest evidence'
+
+echo 'PASS bootstrap cache archive: ordinary file, sealed same-parent directory, map binding, collision and symlink refusals, freeze and tamper detection'
