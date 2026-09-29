@@ -1,5 +1,12 @@
 # Target 5 native link input capture (Linux LLD, 2026-09-29)
 
+Continuation: a fresh selected-K1 Stage4 compiler now used this opt-in path
+to capture a one-source hello. Its archive replays byte for byte, and a C
+program object linked with every other captured input passes the 15 KiB and
+1.05x matched-C size limits. See
+`doc/09_report/compiler/target5_exact_hello_link_c_gate_2026-09-29.md`.
+The original probe evidence and limits below describe the earlier state.
+
 Status: opt-in production linker capture works in a focused no-stub native
 probe. This is an input-evidence mechanism, not a matched C size or Target 5
 qualification pass.
