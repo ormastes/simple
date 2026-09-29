@@ -6,6 +6,7 @@ set -u
 
 . "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
+. "$(dirname -- "$0")/bootstrap-cache-policy.shs"
 . "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 bootstrap_windows_preserve_cl_mode
 
@@ -1884,18 +1885,20 @@ else
       run_phase_c_tool_build lsp_build src/app/simple_lsp_mcp/main.spl "$server_outputs/simple_lsp_mcp_server" "$tool_build_cache/lsp" "$build_threads"
       lsp_build_ready=$matrix_task_passed
     else
+    service_mcp_cache=$(bootstrap_phase_service_cache "$cache/tool_builds" "$phase" "$snapshot_sha" "$tool_input_identity" mcp) || die "cannot isolate MCP cache"
+    service_lsp_cache=$(bootstrap_phase_service_cache "$cache/tool_builds" "$phase" "$snapshot_sha" "$tool_input_identity" lsp) || die "cannot isolate LSP cache"
     run_matrix_task mcp_build --verification-expect-executable="$mcp_server" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
-      --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --entry src/app/mcp/main.spl --threads "$build_threads" --cache-dir "$service_mcp_cache" \
       --output "$mcp_server"
     mcp_build_ready=$matrix_task_passed
     run_matrix_task lsp_build --verification-expect-executable="$server_outputs/simple_lsp_mcp_server" \
       "$compiler_snapshot" native-build \
       --timeout "$native_internal_timeout" --runtime-bundle "$tool_runtime_bundle" --runtime-path "$runtime_path" \
       --source src/compiler --source src/app --source src/lib --entry-closure \
-      --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$tool_build_cache" \
+      --entry src/app/simple_lsp_mcp/main.spl --threads "$build_threads" --cache-dir "$service_lsp_cache" \
       --output "$server_outputs/simple_lsp_mcp_server"
     lsp_build_ready=$matrix_task_passed
     fi
@@ -2090,16 +2093,20 @@ else
 fi
 
 if [ "$phase" = stage1 ]; then
+  # The admitted seed stamp binds source/tool/target inputs in addition to the
+  # executable hash. Never reuse the other entry's mutable native-build cache.
+  service_mcp_cache=$(bootstrap_phase_service_cache "$cache/tool_builds" "$phase" "$snapshot_sha" "$p1a_stamp_sha" mcp) || die "cannot isolate Phase1 MCP cache"
+  service_lsp_cache=$(bootstrap_phase_service_cache "$cache/tool_builds" "$phase" "$snapshot_sha" "$p1a_stamp_sha" lsp) || die "cannot isolate Phase1 LSP cache"
   run_matrix_task mcp_build --verification-expect-executable="$outputs/simple_mcp_server" \
     "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
+    --entry src/app/mcp/main.spl --threads 1 --cache-dir "$service_mcp_cache" \
     --output "$outputs/simple_mcp_server"
   mcp_build_ready=$matrix_task_passed
   run_matrix_task lsp_build --verification-expect-executable="$outputs/simple_lsp_mcp_server" \
     "$compiler_snapshot" native-build \
     --source src/compiler --source src/app --source src/lib --entry-closure \
-    --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$cache/tool_builds" \
+    --entry src/app/simple_lsp_mcp/main.spl --threads 1 --cache-dir "$service_lsp_cache" \
     --output "$outputs/simple_lsp_mcp_server"
   lsp_build_ready=$matrix_task_passed
 else

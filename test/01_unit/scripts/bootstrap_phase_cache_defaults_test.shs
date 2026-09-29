@@ -1,0 +1,55 @@
+#!/bin/sh
+# Configuration contracts only: no compiler, bootstrap admission, or build.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/bootstrap/bootstrap-cache-policy.shs"
+test_tmp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$test_tmp_parent/phase-cache-defaults.XXXXXX")
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+case "$tmp" in "$test_tmp_parent"/phase-cache-defaults.*) ;; *) exit 1 ;; esac
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "bootstrap_phase_cache_defaults_test: $*" >&2; exit 1; }
+producer_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+producer_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+inputs_a=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+inputs_b=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+base="$tmp/cache with spaces/tool_builds"
+
+first=$(bootstrap_phase_service_cache "$base" stage1 "$producer_a" "$inputs_a" mcp)
+retry=$(bootstrap_phase_service_cache "$base/" stage1 "$producer_a" "$inputs_a" mcp)
+[ "$first" = "$retry" ] || fail 'same lineage retry changed path'
+[ "$first" = "$base/stage1/$producer_a/$inputs_a/mcp" ] || fail 'identity keys missing'
+changed_phase=$(bootstrap_phase_service_cache "$base" stage4 "$producer_a" "$inputs_a" mcp)
+changed_producer=$(bootstrap_phase_service_cache "$base" stage1 "$producer_b" "$inputs_a" mcp)
+changed_inputs=$(bootstrap_phase_service_cache "$base" stage1 "$producer_a" "$inputs_b" mcp)
+changed_entry=$(bootstrap_phase_service_cache "$base" stage1 "$producer_a" "$inputs_a" lsp)
+printf '%s\n' "$first" "$changed_phase" "$changed_producer" "$changed_inputs" "$changed_entry" >"$tmp/paths"
+[ "$(sort -u "$tmp/paths" | wc -l | tr -d ' ')" = 5 ] || fail 'phase/producer/target-context/entry collision'
+
+# Real writes prove two service entries cannot overwrite each other's cache
+# payload; revisiting the exact lineage retains its payload.
+mkdir -p "$first" "$changed_entry"
+printf 'mcp-owned\n' >"$first/object-marker"
+printf 'lsp-owned\n' >"$changed_entry/object-marker"
+[ "$(cat "$retry/object-marker")" = mcp-owned ] || fail 'retry lost cache'
+[ "$(cat "$changed_entry/object-marker")" = lsp-owned ] || fail 'entry cache alias'
+
+for phase in stage1 stage2 stage3 stage4; do
+  bootstrap_phase_service_cache "$base" "$phase" "$producer_a" "$inputs_a" mcp
+done >"$tmp/phases"
+[ "$(sort -u "$tmp/phases" | wc -l | tr -d ' ')" = 4 ] || fail 'phase separation'
+
+if bootstrap_phase_service_cache "$base" stage1 bad "$inputs_a" mcp >/dev/null; then fail 'short producer accepted'; fi
+if bootstrap_phase_service_cache "$base" stage1 "$producer_a" BAD mcp >/dev/null; then fail 'bad input identity accepted'; fi
+if bootstrap_phase_service_cache "$base" stage5 "$producer_a" "$inputs_a" mcp >/dev/null; then fail 'unknown phase accepted'; fi
+if bootstrap_phase_service_cache "$base" stage1 "$producer_a" "$inputs_a" ../mcp >/dev/null; then fail 'entry traversal accepted'; fi
+if bootstrap_phase_service_cache relative stage1 "$producer_a" "$inputs_a" mcp >/dev/null; then fail 'relative cache root accepted'; fi
+if bootstrap_phase_service_cache "$base" stage1 "$producer_a" "$inputs_a" >/dev/null; then fail 'missing entry accepted'; fi
+
+# Connect the executed helper contract to the four production argv sites.
+verification="$root/scripts/bootstrap/bootstrap-phase-verification.shs"
+[ "$(grep -Fc -- '--cache-dir "$service_mcp_cache"' "$verification")" = 2 ] || fail 'MCP cache wiring'
+[ "$(grep -Fc -- '--cache-dir "$service_lsp_cache"' "$verification")" = 2 ] || fail 'LSP cache wiring'
+grep -Fq '"$snapshot_sha" "$p1a_stamp_sha" mcp)' "$verification" || fail 'Stage1 lacks admitted input context'
+grep -Fq '"$snapshot_sha" "$tool_input_identity" mcp)' "$verification" || fail 'Stage4 lacks existing input context'
+echo 'PASS bootstrap phase service cache configuration: distinct keys, retained retry payload, six refusals, four argv sites'
