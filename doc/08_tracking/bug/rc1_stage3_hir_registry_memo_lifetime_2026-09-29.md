@@ -151,3 +151,18 @@ Evidence under build/native_probe/config-layout/:
 No additional full rebuild is used to relabel the remaining failures as a
 pass. Required compiler/lib/MCP checks, core/native smokes and the new SSpec
 remain pending; landing and release are blocked.
+
+## Scoped follow-up proposal after cycle 2
+
+The block-tail fixture's `PostMonoVerifier.walk_stmt` crash has a concrete
+producer mismatch: `HirStmtKind.Let.type_` is a plain nullable `HirType`, while
+the four `Val`/`Var` lowering paths in `statements.spl` passed an explicit
+`Some(HirType)` wrapper. Main corrected this representation in a broader
+macOS bootstrap change (`35b22b6aedf`); that whole commit is not an exact
+release backport. This isolated proposal sends the plain lowered type to
+`Let` and retains the prior optional value at the symbol-table boundary.
+The existing typed block-tail fixture exercises the affected path, but no
+qualified exact-head executable is available here to run it. No additional
+full Stage 3 cycle or positive result is claimed. The 208 collected Stage 3
+errors remain separately unresolved; the retained summary does not support
+attributing all of them to this Let representation defect.
