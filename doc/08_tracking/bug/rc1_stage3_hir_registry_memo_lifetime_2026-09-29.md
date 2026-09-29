@@ -166,3 +166,171 @@ qualified exact-head executable is available here to run it. No additional
 full Stage 3 cycle or positive result is claimed. The 208 collected Stage 3
 errors remain separately unresolved; the retained summary does not support
 attributing all of them to this Let representation defect.
+
+## Cycle 3 preparation: optional Let annotations
+
+Make the Let annotation explicitly HirType? and use bare lifted values from
+the four val/var producers. Preserve absence through substitution, type
+inference, effect/union inspection, MIR and post-mono verification. Backport
+main's existing HirTypeKind walker transport repair and nil-name guards;
+all unknown variants still fail with bounded E-MONO-031 receipts.
+
+Regressions cover absent/present annotations, rejecting a leftover type
+parameter, visiting an erroneous initializer under an absent annotation,
+and preserving absence while substituting the initializer. The native
+fixture now also checks an explicitly typed mutable binding.
+
+Schema regeneration is pending. The configured release-path executable
+identified itself as a Rust bootstrap seed and failed parsing the schema
+generator dependency execution_metrics.spl (unexpected Indent). It was not
+used again as normal tooling. The visitor generator strips optional node
+suffixes, and the codec already encodes nullable nodes with presence tags;
+their existing Let traversal/codec bodies therefore require no manual
+change. The schema registry and fold digest still require a successful
+generator run with qualified pure-Simple tooling before landing.
+
+Further error review found that the loader manifest refers to a legacy
+Effect enum whose full variant set is not declared by the current source.
+The two currently declared Effect types are not compatible substitutes.
+Main's lexer fix d55e104683c also changes Token.kind to a faithful wire-code
+enum; its import edits cannot safely be copied alone. Neither blocker is
+hidden with dummy types or removed validation.
+
+## Cycle 3 verification result
+
+Stage 2 admission passed on the optional-annotation candidate, including
+bootstrap sanity and receiver/runtime capability. Native ps monitoring
+observed 3,811,472 KiB peak process-tree RSS (3.64 GiB). Ten compiler workers
+were confirmed by a process sample. Neither the 8 GiB memory ceiling nor
+the 1 GiB free-disk reserve stopped the build.
+
+The full checked-in block-tail fixture remains FAIL. It completes HIR 1/1,
+then fails closed in value-struct layout validation with
+`internal error: value struct layout owner module index is invalid`.
+Exit 1, 0.76 seconds, 171,098,112 bytes maximum RSS. This happens before
+post-mono verification and does not by itself prove the earlier crash fixed.
+The relevant lookup is `owner_module_indices[walk.node_key]` in
+`src/compiler/35.semantics/value_struct_layout.spl`; no layout guard was removed.
+
+A separate scalar probe isolates tuple/inferred bindings and an explicitly
+typed mutable binding. Exact source bytes are retained as
+`test/fixtures/compiler/rc1_hir_let_annotation_scalar.spl`:
+
+- Previous admitted Stage 2 producer: native compilation exits 139 immediately
+  after the mono summary, using the identical scalar source.
+- New admitted Stage 2 producer: native compilation exits 0; its emitted
+  executable prints `optional let scalar probe PASS` and exits 0.
+- Negative control changes the mutable-binding expectation from 42 to 43.
+  It compiles, then exits 2 without printing PASS. The runtime checks are live.
+
+The compiler explicitly reports the bootstrap-flat pipeline: normal MIR
+lowering, borrow checking and flat MIR passes are skipped. These results
+prove a narrow native bootstrap regression repair; they do not qualify the
+full compiler, test runner or normal language pipeline. The SSpec cases
+remain unexecuted. Producer and fixture hashes are recorded in
+`build/native_probe/config-layout/optional-let-comparison.sha256`.
+
+Building the actual schema-generator entry with the new pure-Simple compiler
+was attempted in its own cache. It failed HIR on facade imports (including
+dir_create_all and env/runtime helpers) and generic Future/Poll declarations.
+No generator executable or regenerated schema is claimed. This confirms that
+regeneration is currently blocked by remaining compiler failures, rather than
+just a missing invocation.
+
+Other-session review: draft #2051 binds parallel CLI/test-runner producers
+after Stage 3 admission; its positive execution remains pending and it does
+not change this bootstrap resume's one-worker requirement. Draft #2061 fixes
+SHB reader/UI callback callers with execution pending. Neither is bootstrap
+completion evidence. Upstream 43ead88be55 couples generic-template HIR handling
+with MIR exclusion and a regression; deleting the current declaration fatal
+alone would be incomplete.
+
+**Overall STATUS: FAIL.** The three scoped rebuild cycles are exhausted.
+Further rebuilds require an explicit decision under the repository's
+AGENTS.md termination guard. No fourth full build or redundant full Stage 3
+sweep was started. Pending: layout-owner repair, full-closure resolution,
+generic-template backport, schema regeneration, SSpec/compiler/lib/MCP and
+core/native gates, bootstrap completion, and reviewed PR landing.
+
+Additional evidence: optional-let-stage2.log, optional-let-stage2-resources.tsv,
+optional-let-stage2-sample.txt, optional-let-fixture-build.log,
+optional-let-scalar-build.log, optional-let-scalar-run.log,
+optional-let-scalar-old-producer.log, optional-let-scalar-negative-run.log,
+and optional-let-schema-build.log under build/native_probe/config-layout/.
+
+## Authorized continuation: reconciled Phase 3 / Phase 4 candidate
+
+The user explicitly authorized continuing, local parallel work, fix PRs and
+landing on 2026-09-29. This continuation is bounded to three further rebuild
+cycles. Independent review/repair lanes ran concurrently; dependent compiler
+generations and large builds remain serialized for memory safety.
+
+The optional candidate remains preserved at `05b0d596d64`. Review found that
+making `Let.type_` optional changes generated codec presence tags, so the
+earlier assumption that codec bodies remain unchanged was incorrect. The RC1
+reconciliation instead adopts PR #2059's plain nullable Let payload with a
+separate boxed symbol-table annotation. It retains kind-only postmono walking,
+guards absent Let annotations locally, and always verifies the initializer.
+This restores the existing schema contract; optional schema regeneration is
+no longer part of this reconciled candidate.
+
+Grouped repairs under verification:
+
+- Correct struct dictionary keys to `SymbolId` in value-layout validation;
+  keep the owner-index guard and record the unexplained pre-HIR memory fault.
+- Snapshot facade re-export item identity before nested native projections;
+  retain a functional cache-hit/alias registration regression.
+- Backport the complete core lexer wire-code conversion and all paired
+  consumers, preserving RC1 UTF-8 spans.
+- Backport generic declaration templating together with MIR non-emission;
+  reachable unsupported generic use remains an error.
+- Restore the manifest capability `Effect`/`AutoLeanMode` model and validate
+  restricted capability combinations.
+- Qualify the MIR folded-global helper with its receiver.
+- Supply canonical planner admission to native CI; execution remains pending.
+
+Cycle 1 uses ten workers, `SIMPLE_NO_STUB_FALLBACK=1`, an 8 GiB process-tree
+RSS limit and 1 GiB free-disk reserve. Source diff and resource samples are
+retained as `reconciled-cycle1-*` under `build/native_probe/config-layout/`.
+Stage 4 readiness work may proceed concurrently, but actual Stage 4 needs an
+admitted Stage 3 producer. No Stage 4 or landing success is claimed here.
+
+Acceptance remains: native scalar and complete block-tail fixtures; positive
+and negative value-layout fixtures; full Stage 3 and Stage 4 admission; real
+SSpec and compiler/lib/MCP checks using a qualified full CLI; core and MCP
+native smoke; required PR gates and reviewed landing. **STATUS: pending.**
+
+### Continuation cycle 1 result
+
+Stage 2 passed admission in approximately 21 minutes with ten workers. Sampled
+peak process-tree RSS was 3,054,848 KiB (2.91 GiB); no resource guard fired.
+Immutable producer: `phase1_1790649469_phase2_1790650801/simple`.
+
+The reconciled scalar fixture compiled and ran successfully. Its changed-answer
+control compiled and exited 2 with no PASS output. This validates the plain
+nullable Let repair on the bootstrap-flat path only; normal MIR/borrow passes
+remain excluded by that path's explicit warning.
+
+The full struct/block-tail fixture still failed the owner-index guard
+(0.68 seconds, 171,212,800 bytes maximum RSS). LLDB then proved that native
+dictionary lookup finds the original SymbolId key but returns NIL for an equal
+copied key. Cycle 2 therefore iterates typed struct values directly; the
+general aggregate-key equality defect remains recorded separately.
+
+The 87-source import probe improved to 11 poisoned modules and 17 errors
+(27.05 seconds, 323,469,312 bytes maximum RSS), with generic declaration errors
+removed but facade errors remaining. Disassembly showed inferred re-export
+carriers reading incorrect field offsets. Cycle 2 gives those carriers explicit
+nominal types and defining-module imports. No full Stage 3 sweep was repeated
+while these smaller deterministic failures remained.
+
+Removed the stale lexer enum/integer comparison discovered by review. Kept
+postmono's robust/critical invariant unchanged and corrected comments that
+overstated generic support. Added host-memory discovery and explicit-limit
+contracts, and preserved Stage 4's admitted single-job continuation contract.
+The shell contracts passed against the identical proposed files before their
+application; no full bootstrap success is inferred from those checks.
+
+Working direct-env and numbered-artifact guards passed; `doc/06_spec` executable
+spec count was zero. Rebuilt layout/import proofs and full runtime/Stage 3/4
+gates remain required. **STATUS: FAIL; cycle 2 repairs awaiting verification.**

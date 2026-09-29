@@ -1,5 +1,6 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering._Items.module_lowering.{HirReexportSource, HirReexportWalkState}
 # HIR Lowering - Item Lowering
 #
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
@@ -457,17 +458,23 @@ impl HirLowering:
             # import silently registered NOTHING and every use site died
             # later with "unresolved name: rt_env_get" (native-build
             # entry-closure path; parity case dynload_tagged_text).
-            val hop = self.find_reexport_source(
+            val hop: HirReexportSource = self.find_reexport_source(
                 imported_mod.physical_index, imported_name)
+            # Project the returned carrier before evaluating another surface
+            # projection or entering a recursive native call. The staged ABI
+            # can otherwise reuse its text projection slot for the registry
+            # name: dir_create_all arrived as nogc_sync_mut.io_runtime.
+            val source_found = hop.found
+            val source_index = hop.module_index
+            val source_item = hop.item_name
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
-            if hop.found:
-                val source_index = hop.module_index
+                eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={source_found} mname={imported_mod.module_name} fns={imported_mod.callable_names.len()}")
+            if source_found:
                 if source_index >= 0:
+                    val source_registry_name = self.module_surfaces.surfaces[source_index].preferred_registry_name
                     self.register_imported_symbol(
-                        source_index,
-                        self.module_surfaces.surfaces[source_index].preferred_registry_name,
-                        hop.item_name, local_name, import_span, materialize_enum)
+                        source_index, source_registry_name,
+                        source_item, local_name, import_span, materialize_enum)
                     # Field/callable projection remains expressed in the
                     # facade owner's qualified scope. The terminal register
                     # above binds `terminal.module.Item`; publish the same type
@@ -477,7 +484,7 @@ impl HirLowering:
                     # HirImpl/HirStaticAssert family).
                     val terminal_module = self.module_surfaces.surfaces[source_index].module_name
                     val terminal_type = self.symbols.lookup_qualified_type_raw(
-                        terminal_module, hop.item_name)
+                        terminal_module, source_item)
                     if terminal_type >= 0:
                         self.symbols.bind_qualified_type(
                             imported_mod.module_name, imported_name,
@@ -697,8 +704,8 @@ impl HirLowering:
             self.reexport_chase_memo_hits = self.reexport_chase_memo_hits + 1
             val terminal_index: i64 = self.reexport_root_memo_index[memo_key]
             if (rt_env_get("SIMPLE_REXMEMO_VERIFY") ?? "") == "1":
-                val verify_state = HirReexportWalkState.fresh()
-                val verify = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
+                val verify_state: HirReexportWalkState = HirReexportWalkState.fresh()
+                val verify: HirReexportSource = self.find_reexport_source_walk(facade_index, wanted, 0, verify_state)
                 val verify_index = if verify.found: verify.module_index else: -1
                 if verify_index != terminal_index:
                     eprint("[rexmemo-mismatch] facade={facade_index} wanted={wanted} memo={terminal_index} walk={verify_index} complete={verify_state.complete} valid={verify_state.valid}")
@@ -716,8 +723,8 @@ impl HirLowering:
         # Keep recursion state on a fresh explicit carrier. HirLowering fields
         # are shared by nested root queries and native cross-module frame sync
         # can restore an older visit snapshot after a nested call returns.
-        val state = HirReexportWalkState.fresh()
-        val result = self.find_reexport_source_walk(
+        val state: HirReexportWalkState = HirReexportWalkState.fresh()
+        val result: HirReexportSource = self.find_reexport_source_walk(
             facade_index, wanted, 0, state)
         self.reexport_walk_complete = state.complete
         self.reexport_walk_valid = state.valid
@@ -776,7 +783,7 @@ impl HirLowering:
                     if hir_module_declares_item(target, name):
                         owner_index = target.physical_index
                     else:
-                        val hop = self.find_reexport_source(target.physical_index, name)
+                        val hop: HirReexportSource = self.find_reexport_source(target.physical_index, name)
                         if hop.found:
                             owner_index = hop.module_index
                             owner_item = hop.item_name

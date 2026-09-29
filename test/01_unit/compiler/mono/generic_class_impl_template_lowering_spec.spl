@@ -1,0 +1,126 @@
+"""
+# Generic class / generic impl lower as NON-EMITTABLE templates (#158 Phase C)
+
+Before this fix, `class Future<T>:` and `impl Poll<T>:` were HARD ERRORS at
+their DECLARATION site in HIR lowering, regardless of whether anything ever
+instantiated them. That blocked the stage1 bootstrap closure on three sites
+that have ZERO instantiations anywhere in the closure:
+
+    src/lib/nogc_async_mut/async/future.spl  class Future<T>      (class tier)
+    src/lib/nogc_async_mut/async/future.spl  Future<T>'s methods  (impl tier)
+    src/lib/nogc_async_mut/async/poll.spl    impl Poll<T>         (impl tier)
+
+Per the hardening plan 9.3 step 12 ("Remove or mark generic templates
+non-emittable"), declaring a template is not the defect -- EMITTING one is.
+The declaration now lowers and is flagged `is_generic_template`; MIR skips
+every flagged function; a reachable instantiation still fails loudly in
+40.mono (E-MONO-030/032) and in strict MIR (HWIR-E-GENERIC).
+
+Pre-fix these examples produced HIR errors; the type-param and template-flag
+assertions below all failed.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.common.driver_core_types.SourceFile
+use compiler.frontend.parser_types.{Module}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.hirlowering_for_module
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirFunction}
+
+# The stage1 blockers, reduced. `Poll2` mirrors src/lib/.../async/poll.spl
+# (generic enum + generic inherent impl); `Fut` mirrors the generic class in
+# async/future.spl (type-parameterised class with inline methods).
+val SRC = "enum Poll2<T>:\n" +
+    "    Ready(T)\n" +
+    "    Pending\n" +
+    "\n" +
+    "impl Poll2<T>:\n" +
+    "    fn is_pending(self) -> bool:\n" +
+    "        return false\n" +
+    "\n" +
+    "class Fut<T>:\n" +
+    "    tag: i64\n" +
+    "\n" +
+    "    fn tag_of(self) -> i64:\n" +
+    "        return self.tag\n" +
+    "\n" +
+    "fn main() -> i64:\n" +
+    "    return 0\n"
+
+struct Lowered:
+    module: HirModule
+    errors: [text]
+
+fn lower_one(name: text, src: text) -> Lowered:
+    val log = Logger(level: 0)
+    val parsed_mod = parse_full_frontend(src, name + ".spl", name, log)
+    var parsed: Dict<text, Module> = {}
+    parsed[name] = parsed_mod
+    val surfaces_result = module_surfaces_from_modules(parsed, [
+        SourceFile(path: name + ".spl", content: src, module_name: name)])
+    if surfaces_result.is_err():
+        return Lowered(module: nil, errors: ["surface build failed: " + surfaces_result.unwrap_err()])
+    var hl = hirlowering_for_module(name, surfaces_result.unwrap())
+    val m = hl.lower_module(parsed_mod)
+    var errors: [text] = []
+    for e in hl.errors:
+        errors.push(e.message)
+    Lowered(module: m, errors: errors)
+
+fn gate_error_count(errs: [text]) -> i64:
+    var n = 0
+    for e in errs:
+        if e.contains("monomorphization is not implemented"):
+            n = n + 1
+    n
+
+fn template_function_count(m: HirModule) -> i64:
+    var n = 0
+    for sym in m.functions.keys():
+        val f: HirFunction = m.functions[sym]
+        if f.is_generic_template:
+            n = n + 1
+    n
+
+describe "generic class and generic impl lower as non-emittable templates":
+    it "raises no declaration-site monomorphization gate error":
+        step("Lower a module declaring impl Poll2<T> and class Fut<T>")
+        val out = lower_one("phase_c_tpl", SRC)
+        step("Confirm the #158 declaration gates no longer fire")
+        expect(gate_error_count(out.errors)).to_equal(0)
+
+    it "lowers the module without errors at all":
+        step("Lower the same module")
+        val out = lower_one("phase_c_tpl2", SRC)
+        step("Confirm the uninstantiated templates are not an error")
+        expect(out.errors.len()).to_equal(0)
+
+    it "records the generic class as a template":
+        step("Lower and inspect HirClass.is_generic_template")
+        val out = lower_one("phase_c_tpl3", SRC)
+        var flagged = false
+        for cn in out.module.classes.keys():
+            val c = out.module.classes[cn]
+            if c.name == "Fut":
+                flagged = c.is_generic_template
+        expect(flagged).to_equal(true)
+
+    it "flags at least one method as a non-emittable template":
+        step("Lower and count is_generic_template functions")
+        val out = lower_one("phase_c_tpl4", SRC)
+        step("Both the impl method and the class method are templates")
+        expect(template_function_count(out.module) > 0).to_equal(true)
+
+    it "keeps the non-generic entry function emittable":
+        step("main() must NOT be flagged as a template")
+        val out = lower_one("phase_c_tpl5", SRC)
+        var main_is_template = true
+        for sym in out.module.functions.keys():
+            val f: HirFunction = out.module.functions[sym]
+            if f.name == "main":
+                main_is_template = f.is_generic_template
+        expect(main_is_template).to_equal(false)

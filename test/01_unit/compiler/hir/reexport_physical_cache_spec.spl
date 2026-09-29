@@ -199,6 +199,31 @@ fn depth_registry() -> ModuleSurfacesByName:
     freeze_registry(surfaces, names, ordered_names, ordered_indices)
 
 describe "physical re-export cache":
+    it "registers the terminal item without replacing it with the module name":
+        step("Verify: recursive facade registration preserves item and alias")
+        val registry = declared_registry(true)
+        var lowering = hirlowering_for_module("consumer", registry)
+        lowering.register_imported_symbol(
+            0, "declared.facade", "Real", "Local", Span.empty(), false)
+        expect(lowering.reexport_root_memo_item["0 Real"]).to_equal("Real")
+        val symbol_id = lowering.symbols.lookup_or_invalid("Local")
+        expect(symbol_id.is_valid()).to_equal(true)
+        val symbol = lowering.symbols.symbols[symbol_id.id]
+        expect(symbol.name).to_equal("declared.leaf.Real")
+        expect(lowering.symbols.lookup_or_invalid("declared.leaf").is_valid()).to_equal(false)
+        # Repeat through the root memo into a distinct importer alias.
+        lowering.register_imported_symbol(
+            0, "declared.facade", "Real", "Second", Span.empty(), false)
+        val second_id = lowering.symbols.lookup_or_invalid("Second")
+        expect(second_id.is_valid()).to_equal(true)
+        expect(lowering.symbols.symbols[second_id.id].name).to_equal("declared.leaf.Real")
+        val cached: HirReexportSource = lowering.find_reexport_source(0, "Real")
+        expect(cached.found).to_equal(true)
+        expect(cached.module_name).to_equal("declared.leaf")
+        expect(cached.item_name).to_equal("Real")
+        val absent: HirReexportSource = lowering.find_reexport_source(0, "Missing")
+        expect(absent.found).to_equal(false)
+
     it "freezes named imports into aligned scalar routes":
         var facade = ModuleSurface.empty("named.facade")
         var leaf = ModuleSurface.empty("named.leaf")

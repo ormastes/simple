@@ -1,0 +1,61 @@
+#!/bin/sh
+# Exercise real authority assignments and Cargo env construction without Cargo.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+engine="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+resume="$root/scripts/bootstrap/resume-stage3-from-admitted.sh"
+work=$(mktemp -d "${TMPDIR:-/tmp}/windows-authority-check.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+awk '/^  windows_system_root=/{print;exit}' "$engine" >"$work/system-root.sh"
+for key in SystemRoot SYSTEMROOT WINDIR windir; do
+    actual=$(env -i PATH="$PATH" "$key=C:/Windows" sh -c '. "$1"; printf "%s" "$windows_system_root"' sh "$work/system-root.sh")
+    [ "$actual" = C:/Windows ]
+done
+awk '/windows_temp=\$\(cygpath/{copy=1} copy{print} /windows_system_root=\$\(cygpath/{exit}' "$engine" >"$work/normalize.sh"
+absolute_path() { printf '%s\n' "$1"; }
+cygpath() {
+    case "$2" in /c/*) printf 'C:/%s\n' "${2#/c/}";; *) printf '%s\n' "$2";; esac
+}
+rust_authority_tmp='/c/build authority/tmp'
+windows_system_root=/c/Windows
+. "$work/normalize.sh"
+[ "$windows_temp" = 'C:/build authority/tmp' ]
+[ "$windows_system_root" = C:/Windows ]
+if (windows_system_root=; . "$work/normalize.sh") >"$work/missing-root.log" 2>&1; then
+    echo 'FAIL: missing SystemRoot accepted' >&2; exit 1
+fi
+# Extract complete actual function; stub only resource setup and Cargo execution.
+awk '/^run_rust_authority_cargo\(\)/{copy=1} copy{print} copy && /^}/{exit}' "$engine" >"$work/cargo-function.sh"
+. "$work/cargo-function.sh"
+prepare_rust_authority_workspace() { . "$work/normalize.sh"; }
+run_logged() { shift; "$@"; }
+cat >"$work/cargo" <<'EOF'
+#!/bin/sh
+[ "$TEMP" = 'C:/build authority/tmp' ] && [ "$TMP" = "$TEMP" ] && [ "$SystemRoot" = C:/Windows ] || exit 1
+printf '%s\n' 'native-cargo-environment-pass'
+EOF
+chmod +x "$work/cargo"
+cargo_abs="$work/cargo"
+progress_log= os=windows PLATFORM=x86_64-pc-windows-msvc
+rust_authority_home="$work" rust_authority_cargo_home="$work" rust_authority_target="$work"
+rustc_abs=rustc cc_abs=cc mingw_linker=cc mingw_cc=cc mingw_ar=ar
+windows_include= windows_lib= windows_libpath=
+rust_llvm_major=18 rust_llvm_prefix= rust_llvm_homebrew_prefix= rust_llvm_library_path= rust_llvm_sdkroot=
+for rust_llvm_status in enabled disabled; do
+    for lto in off on; do
+        actual=$(run_rust_authority_cargo fixture "$lto" build)
+        [ "$actual" = native-cargo-environment-pass ]
+    done
+done
+# Native suffixes must be derived from each actual target tuple.
+awk '/^exe_suffix=/{copy=1} copy && /^manifest=/{exit} copy{print}' "$resume" >"$work/resume-paths.sh"
+output="$work/output"
+for platform in x86_64-pc-windows-msvc x86_64-pc-windows-gnu aarch64-apple-darwin; do
+    . "$work/resume-paths.sh"
+    case "$platform" in
+        *-msvc) [ "$native_all" = "$runtime/simple_native_all.lib" ]; [ "$candidate" = "$stage3/simple.exe" ];;
+        *-gnu) [ "$native_all" = "$runtime/libsimple_native_all.a" ]; [ "$candidate" = "$stage3/simple.exe" ];;
+        *) [ "$native_all" = "$runtime/libsimple_native_all.a" ]; [ "$candidate" = "$stage3/simple" ];;
+    esac
+done
+printf '%s\n' 'PASS: Windows root aliases, scoped TEMP/TMP, four Cargo branches, and resume target suffixes'

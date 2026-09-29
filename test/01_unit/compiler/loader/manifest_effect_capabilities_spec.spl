@@ -1,0 +1,54 @@
+# @req REQ-COMPILER-LOADER-MANIFEST-EFFECT-CAPABILITIES
+# @cover src/compiler/99.loader/module_resolver/manifest.spl
+"""Directory manifest effect validation preserves capability restrictions."""
+
+use std.spec
+use std.spec.step
+use compiler.loader.module_resolver.types.{Capability, directorymanifest_new}
+use compiler.loader.module_resolver.manifest.{Effect, AutoLeanMode, validate_function_effects}
+
+describe "manifest effect capabilities":
+    it "allows every effect in an unrestricted module":
+        step("Validate all capability and marker effects with no module restrictions")
+        val manifest = directorymanifest_new("unrestricted")
+        val effects = [Effect.Async, Effect.Pure, Effect.Io, Effect.Net, Effect.Fs,
+            Effect.Unsafe, Effect.Verify, Effect.Trusted, Effect.Ghost,
+            Effect.AutoLean(AutoLeanMode.Full)]
+        expect(manifest.validate_function_effects("all_effects", effects)).to_be_nil()
+
+    it "allows each capability effect only with its matching capability":
+        step("Exercise every matching and mismatching capability-effect pair")
+        val capabilities = [Capability.Pure, Capability.Io, Capability.Net, Capability.Fs, Capability.Unsafe]
+        val effects = [Effect.Pure, Effect.Io, Effect.Net, Effect.Fs, Effect.Unsafe]
+        val names = ["pure", "io", "net", "fs", "unsafe"]
+        for i in 0..capabilities.len():
+            var manifest = directorymanifest_new("restricted")
+            manifest.capabilities = [capabilities[i]]
+            for j in 0..effects.len():
+                val result = manifest.validate_function_effects("restricted_fn", [effects[j]])
+                if i == j:
+                    expect(result).to_be_nil()
+                else:
+                    expect(result ?? "missing rejection").to_equal("function 'restricted_fn' has @{names[j]} effect but module does not allow '{names[j]}' capability")
+
+    it "allows execution and verification markers in a restricted module":
+        step("Validate execution and every verification mode under a pure restriction")
+        var manifest = directorymanifest_new("pure_only")
+        manifest.capabilities = [Capability.Pure]
+        val effects = [Effect.Async, Effect.Verify, Effect.Trusted, Effect.Ghost,
+            Effect.AutoLean(AutoLeanMode.Full), Effect.AutoLean(AutoLeanMode.StructureOnly),
+            Effect.AutoLean(AutoLeanMode.Skip), Effect.AutoLean(AutoLeanMode.Determinism)]
+        expect(manifest.validate_function_effects("markers", effects)).to_be_nil()
+
+    it "checks a disallowed effect after allowed markers and effects":
+        step("Ensure earlier allowed effects do not hide a later network violation")
+        var manifest = directorymanifest_new("io_only")
+        manifest.capabilities = [Capability.Io]
+        val effects = [Effect.Async, Effect.Io, Effect.Verify, Effect.Net]
+        expect(manifest.validate_function_effects("fetch", effects) ?? "missing rejection").to_equal("function 'fetch' has @net effect but module does not allow 'net' capability")
+
+    it "accepts an empty effect list in a restricted module":
+        step("Validate a function without effect annotations")
+        var manifest = directorymanifest_new("pure_only")
+        manifest.capabilities = [Capability.Pure]
+        expect(manifest.validate_function_effects("empty", [])).to_be_nil()

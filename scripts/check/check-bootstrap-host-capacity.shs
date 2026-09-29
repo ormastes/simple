@@ -1,0 +1,61 @@
+#!/bin/sh
+# Capacity and continuation contracts; no bootstrap/compiler execution.
+set -eu
+root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)}
+. "$root/scripts/bootstrap/bootstrap-host-capacity.shs"
+strategy="$root/scripts/bootstrap/bootstrap-strategy.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-capacity-check.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+sysctl() { printf '%s\n' "$probe_value"; }
+mkdir "$work/bin"
+cat >"$work/bin/powershell.exe" <<'EOF'
+#!/bin/sh
+printf '%s\r\n' "$probe_value"
+EOF
+chmod +x "$work/bin/powershell.exe"
+PATH="$work/bin:$PATH"
+export PATH probe_value
+timeout() { shift; "$@"; }
+check_capacity() {
+    probe_value=$2
+    actual=$(bootstrap_host_memory_mib "$1" "$3")
+    [ "$actual" = "$4" ] || { echo "FAIL: $1 capacity $actual" >&2; exit 1; }
+}
+printf 'MemTotal: 33554432 kB\n' >"$work/meminfo"
+check_capacity Darwin 25769803776 "$work/missing" 24576
+check_capacity FreeBSD 8589934592 "$work/missing" 8192
+check_capacity MINGW64_NT 16777216 "$work/missing" 16384
+check_capacity MSYS_NT bad "$work/meminfo" 32768
+check_capacity Linux bad "$work/meminfo" 32768
+for probe_value in bad 1024; do
+    if bootstrap_host_memory_mib Darwin "$work/missing" >/dev/null; then
+        echo 'FAIL: invalid/sub-MiB capacity accepted' >&2; exit 1
+    fi
+done
+# Execute actual scheduler accounting, mocking only the host probe and ulimit.
+awk '/^memory_total=/{copy=1} /^runtime_graph_tmp=/{copy=0} copy' "$strategy" >"$work/accounting.sh"
+cat >"$work/run.sh" <<'EOF'
+set -eu
+unset SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_MIB SIMPLE_BOOTSTRAP_QUALIFICATION_MEMORY_MIB
+unset SIMPLE_BOOTSTRAP_QUALIFICATION_VIRTUAL_MEMORY_MIB SIMPLE_BOOTSTRAP_SCHEDULER_MEMORY_SAFETY_MIB
+unset SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB
+bootstrap_host_memory_mib() { return 1; }
+ulimit() { return 0; }
+cpu_total=10; qualification_cpu=1; critical_cpu=9
+case "$2" in explicit) SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB=8192;; invalid) SIMPLE_BOOTSTRAP_CRITICAL_MEMORY_MIB=bad;; esac
+. "$1"
+printf '%s %s %s %s %s\n' "$memory_total_known" "$memory_enforcement" "$schedule_mode" "$critical_cpu" "$critical_memory"
+EOF
+actual=$(sh "$work/run.sh" "$work/accounting.sh" unknown)
+[ "$actual" = '0 none serialized-resource-guard 10 2048' ]
+actual=$(sh "$work/run.sh" "$work/accounting.sh" explicit)
+[ "$actual" = '0 ulimit-v serialized-resource-guard 10 8192' ]
+if sh "$work/run.sh" "$work/accounting.sh" invalid >"$work/invalid.log" 2>&1; then
+    echo 'FAIL: invalid explicit compiler ceiling accepted' >&2; exit 1
+fi
+# Read and execute only the continuation argv assembly, preserving dependencies.
+awk '/^continuation_status=not-requested/{ready=1} ready && /set -- --strategy=/{copy=1} copy && /\[ "\$no_mcp"/{exit} copy' "$strategy" >"$work/continuation.sh"
+actual=$(strategy=normal output_arg=build/bootstrap receipt=receipt.env backend=llvm critical_cpu=10 sh -c '. "$1"; printf "%s\n" "$@"' sh "$work/continuation.sh")
+printf '%s\n' "$actual" | grep -Fx -- '--jobs=1' >/dev/null
+printf '%s\n' "$actual" | grep -Fx -- '--resume-stage4-from-admitted=build/bootstrap' >/dev/null
+printf '%s\n' 'PASS: host capacity, unknown/explicit ceiling, and admitted Stage4 jobs contracts'
