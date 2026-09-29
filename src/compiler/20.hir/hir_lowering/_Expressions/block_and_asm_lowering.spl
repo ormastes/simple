@@ -72,6 +72,34 @@ impl HirLowering:
                 self.strip_discarded_string_interps(b.stmts[stmt_idx])
             else:
                 b.stmts[stmt_idx]
+            if not self.hir_stmt_requires_multi_lowering(src_stmt):
+                # The seed can erase an enum payload when a singleton
+                # [HirStmt] is indexed. Keep the ordinary statement's fresh
+                # typed result; tuple destructuring still uses the list below.
+                val lowered_scalar: HirStmt = self.lower_hir_stmt(src_stmt)
+                if stmt_idx == stmt_count - 1:
+                    if rt_enum_discriminant(lowered_scalar.kind) == expr_stmt_disc:
+                        match lowered_scalar.kind:
+                            case HirStmtKind.Expr(expr):
+                                if rt_enum_discriminant(expr.kind) == return_expr_disc:
+                                    stmts = stmts.push(lowered_scalar)
+                                else:
+                                    block_has_value = true
+                                    if expr.has_type_:
+                                        block_value_expr = expr
+                                    else:
+                                        # An absent type is a placeholder, not
+                                        # a graph to deep-copy into HirBlock.
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: expr.span)
+                            case _:
+                                self.error("HIR expression statement payload is malformed", src_stmt.span)
+                                stmts = stmts.push(lowered_scalar)
+                    else:
+                        stmts = stmts.push(lowered_scalar)
+                else:
+                    stmts = stmts.push(lowered_scalar)
+                stmt_idx = stmt_idx + 1
+                continue
             val lowered_list = self.lower_hir_stmt_multi(src_stmt)
             val lowered_count = lowered_list.len()
             var li = 0
@@ -89,7 +117,10 @@ impl HirLowering:
                                     stmts = stmts.push(lowered)
                                 else:
                                     block_has_value = true
-                                    block_value_expr = expr
+                                    if expr.has_type_:
+                                        block_value_expr = expr
+                                    else:
+                                        block_value_expr = HirExpr(kind: expr.kind, has_type_: false, type_: nil, span: expr.span)
                             case _:
                                 stmts = stmts.push(lowered)
                     else:
