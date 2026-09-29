@@ -690,8 +690,12 @@ impl CompilerDriver:
                         closure_scan_sources.len(), closure_src.path,
                         0, 6, 0, 0, "running")
                 val closure_dir = _driver_entry_import_dirname(closure_src.path)
-                val (_, cached_closure_imports, _, _) = _driver_cached_entry_source_scan(closure_src.path)
+                val (_, cached_closure_imports, cached_closure_siblings, _) = _driver_cached_entry_source_scan(closure_src.path)
                 var closure_imports = cached_closure_imports
+                # The compiler-owned entry walk must admit the same finite
+                # sibling dependencies as the native CLI closure walk.
+                for sibling in cached_closure_siblings:
+                    closure_imports = closure_imports.push(sibling)
                 # Hidden compiler ABI dependencies are admitted from a typed
                 # parser result. The substring is only an allocation-saving
                 # prefilter; it never decides whether a declaration is HAL.
@@ -725,10 +729,17 @@ impl CompilerDriver:
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
                 for closure_mp in closure_imports:
-                    if closure_seen_mods.contains_key(closure_mp):
+                    # A relative sibling is scoped to its importing directory;
+                    # two facades can both have an unrelated `.owner` source.
+                    val closure_relative = closure_mp.starts_with(".")
+                    val closure_dependency_key = if closure_relative:
+                        closure_dir + "::" + closure_mp
+                    else:
+                        closure_mp
+                    if closure_seen_mods.contains_key(closure_dependency_key):
                         continue
-                    closure_seen_mods[closure_mp] = true
-                    if closure_loaded_mods.contains_key(closure_mp):
+                    closure_seen_mods[closure_dependency_key] = true
+                    if not closure_relative and closure_loaded_mods.contains_key(closure_mp):
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
                         # Traced anyway: this branch and the unresolved branch
@@ -739,7 +750,7 @@ impl CompilerDriver:
                             "phase1:load_sources:closure:already-loaded module={closure_mp} used_in={closure_src.path}")
                         continue
                     var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
-                    if closure_file == "":
+                    if closure_file == "" and not closure_relative:
                         for closure_source_root in closure_source_roots:
                             closure_file = _driver_resolve_entry_import(closure_mp, closure_source_root)
                             if closure_file != "":
@@ -788,7 +799,7 @@ impl CompilerDriver:
                         if not closure_queued_paths.contains_key(closure_physical_key):
                             closure_queued_paths[closure_physical_key] = true
                             closure_scan_sources.append(cs)
-                    if not closure_has_exact:
+                    if not closure_has_exact and not closure_relative:
                         # The path-derived module name differs from the import
                         # path (e.g. an entry-directory-relative import). Alias
                         # the file under the import path so
