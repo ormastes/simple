@@ -19,6 +19,15 @@ directory check stopped on existing parse errors in `90.tools/sffi_gen`, and
 single-file checks could not resolve the driver's module imports. A qualified
 current-source compiler check and paired performance cohort remain required.
 
+The post-merge current-source narrow CAS native fixture now passes publish,
+generation readback, load, and pin for zero and one dependencies with
+`SIMPLE_NO_STUB_FALLBACK=1`. See
+`doc/08_tracking/bug/target6_native_cas_batch_generation_corruption_2026-09-28.md`.
+The production full CLI and typed graph cutover are still unqualified.
+The post-merge strict full CLI build reached link after 2,485 source units
+compiled or reused, but 163 unresolved runtime symbols blocked the binary.
+See `doc/08_tracking/bug/target56_strict_full_cli_optional_symbol_link_2026-09-29.md`.
+
 **Parent plans:**
 
 - `doc/03_plan/compiler/macos_bootstrap_reverse_reference_harmonization_plan_2026-08-30.md`

@@ -135,6 +135,13 @@ live-request filter omits it before capsule projection. Exact owner retention,
 the Stage4 executable, and hello runtime/cohort proof remain pending. See
 `doc/09_report/compiler/target5_stage4_live_projection_linker_2026-09-29.md`.
 
+Post-merge strict full CLI attempt (2026-09-29): a cache-preserving
+pure-Simple Stage2 build compiled the full entry closure with zero source
+failures, then `mold` rejected 163 distinct unresolved runtime symbols across
+optional provider and core helper families. No full CLI binary or qualified
+size/startup/RSS result exists. See
+`doc/08_tracking/bug/target56_strict_full_cli_optional_symbol_link_2026-09-29.md`.
+
 ## Phase 4 — No-Unwind/No-RTTI Release-Small
 
 - Add `NoUnwindProofV1` and target-specific post-link scanners.
