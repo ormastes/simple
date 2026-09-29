@@ -23,3 +23,12 @@ cases reject before writing any routes: legacy core in the private root,
 private root under core, core under private root, and nesting through a symlink.
 Linux migration guard execution passed; these cases supplement the five
 routing cases above.
+
+## Literal home launch paths
+
+Launch `sh test/03_system/app/spipe/feature/spipe_home_routes_contract_test.shs --placeholder-only`.
+Two cases cover `{home}` prefixes with a space-containing user home and literal
+shell-looking characters in a workspace name. The wrapper expands the leading
+token without evaluating command substitution. SSpec includes both assertions;
+its runtime execution remains pending an approved self-hosted runtime. The two
+new shell cases passed on Linux (`placeholder_scenarios=2`).

@@ -6,8 +6,8 @@ description: "SPipe dev entrypoint: refine a feature/bug/TODO into acceptance cr
 
 ## SPipe home routing
 
-Reusable core lives at `~/.spipe` (`SPIPE_HOME`); private/local knowledge lives
-at `~/spipe` (`SPIPE_WORKSPACE`). `~/spipe/common` links to core and project
+Reusable core lives at `{home}/.spipe` (`SPIPE_HOME`); private/local knowledge lives
+at `{home}/spipe` (`SPIPE_WORKSPACE`). `{home}/spipe/common` links to core and project
 `.spipe/common` routes through it. Keep private wiki, credentials, mounts, and
 runtime state out of core. Preserve existing reversed layouts and pinned legacy
 submodules until explicit migration; never overwrite an occupied route.

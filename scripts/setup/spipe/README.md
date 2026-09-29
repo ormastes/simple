@@ -1,7 +1,7 @@
 # Legacy project-local `.spipe` overlay setup
 
-For new home installations use core `~/.spipe`, private/local `~/spipe`, and
-`~/spipe/common -> ~/.spipe`. Run `scripts/setup-spipe-local.shs` (or `.ps1`)
+For new home installations use core `{home}/.spipe`, private/local `{home}/spipe`, and
+`{home}/spipe/common -> {home}/.spipe`. Run `scripts/setup-spipe-local.shs` (or `.ps1`)
 from Simple after installing core. The scripts below retain the explicit legacy
 project-overlay workflow; they do not migrate or deploy the home layout.
 

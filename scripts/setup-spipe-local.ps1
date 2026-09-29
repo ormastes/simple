@@ -5,8 +5,17 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Root = (& git -C (Join-Path $PSScriptRoot "..") rev-parse --show-toplevel).Trim()
+function Expand-HomePrefix([string]$Value) {
+    if ($Value -eq '{home}') { return $HOME }
+    if ($Value.StartsWith('{home}/') -or $Value.StartsWith('{home}\')) {
+        return Join-Path $HOME $Value.Substring(7)
+    }
+    return $Value
+}
 $CommonHome = if ($env:SPIPE_HOME) { $env:SPIPE_HOME } else { Join-Path $HOME ".spipe" }
 $PrivateHome = if ($env:SPIPE_WORKSPACE) { $env:SPIPE_WORKSPACE } else { Join-Path $HOME "spipe" }
+$CommonHome = Expand-HomePrefix $CommonHome
+$PrivateHome = Expand-HomePrefix $PrivateHome
 $PrivateRoute = Join-Path $PrivateHome "common"
 $CommonRoute = Join-Path $Root ".spipe/common"
 $CommonPackage = Join-Path $CommonHome "package.json"
@@ -40,7 +49,16 @@ if ((Test-Path $CommonPackage) -and ((Get-Content -Raw $CommonPackage) -match '"
         }
         if ((Get-PhysicalPath $Route) -ne (Get-PhysicalPath $CommonHome)) { throw "$Route does not resolve to $CommonHome; preserve and migrate existing data explicitly" }
     }
-    & (Join-Path $CommonHome "scripts/setup-local-knowledge.ps1") -Mode project -Destination $Root -Organization $Organization -Project $Project -Yes:$Yes
+    $PreviousCore = $env:SPIPE_HOME
+    $PreviousWorkspace = $env:SPIPE_WORKSPACE
+    try {
+        $env:SPIPE_HOME = $CommonHome
+        $env:SPIPE_WORKSPACE = $PrivateHome
+        & (Join-Path $CommonHome "scripts/setup-local-knowledge.ps1") -Mode project -Destination $Root -Organization $Organization -Project $Project -Yes:$Yes
+    } finally {
+        $env:SPIPE_HOME = $PreviousCore
+        $env:SPIPE_WORKSPACE = $PreviousWorkspace
+    }
 } elseif ($Legacy) {
     & git -C $Root submodule update --init -- .spipe/spipe
     & (Join-Path $Root ".spipe/spipe/scripts/setup-local-knowledge.ps1") -Mode project -Destination $Root -Organization $Organization -Project $Project -Yes:$Yes
