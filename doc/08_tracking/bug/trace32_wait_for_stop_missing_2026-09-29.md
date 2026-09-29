@@ -60,3 +60,27 @@ Preserved files are `native-build.log`, `process-before-guard.txt`, and
 `compiler-state-before-guard.txt`. The temporary harness and exact invocation
 remain under the isolated checkout's ignored `build/trace32-review/`.
 There was no identical compile retry.
+
+## Release compatibility review (2026-09-29)
+
+The exact original backport imported `sleep_ms` from `app.io.time_ops`, whose
+release export list does not contain that name. Import the canonical
+`std.nogc_sync_mut.io.time_ops` owner instead.
+
+The app `process_run_timeout` Unix implementation rounds a positive subsecond
+budget up to one second and permits ten seconds of SIGTERM grace. That does
+not implement this polling method's millisecond deadline. The new
+`process_run_bounded_direct` app owner facade forwards to the existing bounded
+runtime capture without PATH preflight or process-governor acquisition outside
+the deadline. The polling command limits each output capture to 4096 bytes.
+The POSIX runtime owner uses a monotonic deadline and kills the owned process
+group on timeout; the Windows owner receives the same millisecond budget.
+
+The stalled transport assertion now requires a 200ms request to return within
+800ms, and a second fixture ignores SIGTERM. These tests have NOT been run
+with a qualifying self-hosted runtime: the installed release binary identifies
+as a Rust seed, and the available pure Stage2 capsule has native-build only.
+Source review and direct-env guard passed; dynamic compatibility, target
+imports, protected admission, and release qualification remain pending.
+The added compatibility fix changes the original exact-backport patch identity;
+its original preparation receipt cannot attest to this updated head.
