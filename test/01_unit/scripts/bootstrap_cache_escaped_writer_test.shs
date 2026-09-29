@@ -1,0 +1,107 @@
+#!/bin/sh
+# New writer-ownership refusal criterion; no compiler or prior contract rerun.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs"
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH="$repo/scripts/check/lib/portable-hardlink-lock.pl"
+parent=${BOOTSTRAP_CACHE_TEST_ROOT:-$repo/build/cache-policy-escaped-writer-tests}
+bootstrap_cache_new_path_validate "$parent" || exit 64
+mkdir -p "$parent"
+work=$(mktemp -d "$parent/escaped-writer.XXXXXX")
+case "$work" in "$parent"/escaped-writer.*) ;; *) exit 64 ;; esac
+fail() { echo "FAIL escaped writer: $*" >&2; exit 1; }
+finish() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  : > "$work/stop"
+  if [ -n "${supervisor_pid:-}" ]; then wait "$supervisor_pid" 2>/dev/null || true; fi
+  printf 'Retained owned writer fixture: %s\n' "$work"
+  exit "$status"
+}
+trap finish EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+sha=$(printf '%064d' 1)
+cache_root="$work/cache-root"
+lineage="$cache_root/stage3/$sha/bootstrap-main"
+cat > "$work/owner.shs" <<'OWNER'
+#!/bin/sh
+set -eu
+. "$1"
+BOOTSTRAP_CACHE_PROCESS_HELPER_PATH=$2
+bootstrap_cache_prepare "$3" "$4" stage3 "$5" "$5" bootstrap-main reuse
+printf 'completed object\n' > "$4/completed.o"
+: > "$6/owner.ready"
+exec sleep 30
+OWNER
+# A private supervisor models a contained launch authority: the wrapper and
+# execution worker have distinct native sessions. It owns and reaps both.
+cat > "$work/supervisor.pl" <<'SUPERVISOR'
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my ($work, @owner_args) = @ARGV;
+sub record_pid { my ($name, $pid)=@_; open my $f, '>', "$work/$name" or die $!; print {$f} "$pid\n"; close $f or die $!; }
+my $owner = fork(); defined $owner or die $!;
+if (!$owner) { defined setsid() or die $!; exec '/bin/sh', @owner_args; die $!; }
+record_pid('owner.pid', $owner);
+for (1..100) { last if -f "$work/owner.ready" || -f "$work/stop"; select undef,undef,undef,0.05; }
+unless (-f "$work/owner.ready" && !-f "$work/stop") {
+  kill 'TERM', $owner; waitpid($owner, 0); die 'owner did not acquire writer';
+}
+my $worker = fork();
+unless (defined $worker) { kill 'TERM', $owner; waitpid($owner, 0); die $!; }
+if (!$worker) {
+  defined setsid() or die $!;
+  record_pid('worker.pgid', getpgrp(0));
+  open my $ready, '>', "$work/worker.ready" or die $!; close $ready or die $!;
+  exec 'sleep', '30'; die $!;
+}
+record_pid('worker.pid', $worker);
+for (1..200) { last if -f "$work/kill-owner" || -f "$work/stop"; select undef,undef,undef,0.05; }
+# Only this supervisor signals its own unreaped children. Stored PIDs are
+# evidence, never signal targets for the shell or a post-reap cleanup.
+kill 'KILL', $owner;
+waitpid($owner, 0);
+for (1..200) { last if -f "$work/stop"; select undef,undef,undef,0.05; }
+kill 'TERM', $worker;
+waitpid($worker, 0);
+SUPERVISOR
+perl "$work/supervisor.pl" "$work" "$work/owner.shs" \
+  "$repo/scripts/bootstrap/bootstrap-cache-lineage.shs" "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" \
+  "$cache_root" "$lineage" "$sha" "$work" > "$work/supervisor.log" 2>&1 &
+supervisor_pid=$!
+poll=0
+while { [ ! -f "$work/worker.pid" ] || [ ! -f "$work/worker.ready" ]; } && [ "$poll" -lt 100 ]; do sleep 0.05; poll=$((poll+1)); done
+[ -f "$work/worker.pid" ] && [ -f "$work/worker.ready" ] || fail 'owned detached worker not started'
+worker_pid=$(cat "$work/worker.pid")
+nonce=$(cat "$lineage.writer/nonce")
+for field in pid nonce owner birth process.env; do
+  bootstrap_cache_hash_file "$lineage.writer/$field" >> "$work/before.sha256"
+done
+bootstrap_cache_hash_file "$lineage/completed.o" >> "$work/before.sha256"
+: > "$work/kill-owner"
+native_pid=$(sed -n 's/^pid=//p' "$lineage.writer/process.env")
+native_start=$(sed -n 's/^start_hex=//p' "$lineage.writer/process.env")
+native_pgid=$(sed -n 's/^pgid=//p' "$lineage.writer/process.env")
+[ "$(cat "$work/worker.pgid")" != "$native_pgid" ] || fail 'worker did not escape wrapper group'
+poll=0 state=unknown
+while [ "$poll" -lt 100 ]; do
+  state=$(perl "$BOOTSTRAP_CACHE_PROCESS_HELPER_PATH" claim-state "$native_pid" "$native_start" "$native_pgid")
+  [ "$state" != dead ] || break
+  sleep 0.05; poll=$((poll+1))
+done
+[ "$state" = dead ] || fail 'owned wrapper group was not confirmed absent'
+kill -0 "$worker_pid" 2>/dev/null || fail 'execution worker did not survive absent wrapper group'
+if bootstrap_cache_repair_idle_writer "$cache_root" "$lineage" "$nonce" > "$work/repair.log" 2>&1; then
+  fail 'wrapper-only record admitted repair while execution worker lived'
+fi
+rg_marker='execution ownership unproven'
+case "$(cat "$work/repair.log")" in *"$rg_marker"*) ;; *) fail 'missing actionable ownership refusal';; esac
+for field in pid nonce owner birth process.env; do
+  bootstrap_cache_hash_file "$lineage.writer/$field" >> "$work/after.sha256"
+done
+bootstrap_cache_hash_file "$lineage/completed.o" >> "$work/after.sha256"
+cmp -s "$work/before.sha256" "$work/after.sha256" || fail 'refusal altered lock or completed object'
+echo 'PASS escaped writer: absent wrapper group plus live detached execution refuses repair and preserves every writer record/object; no compiler execution'
